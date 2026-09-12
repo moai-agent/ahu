@@ -8,6 +8,98 @@
 
 mod common;
 
+#[test]
+fn doctor_shows_project_harness_readiness_without_executable_paths() {
+    let repo = common::TestRepo::new();
+    repo.init_config();
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = common::fake_harnesses(scratch.path(), &["claude", "codex", "agy"], |name| {
+        scratch.path().join(format!("{name}-probed"))
+    });
+    std::fs::write(bin.join("claude"), "#!/bin/sh\nprintf '2.1.269\\n'\n").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+        .arg("doctor")
+        .current_dir(repo.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env_remove("AHU_STATE_DIR")
+        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    let harness_lines: Vec<_> = text
+        .lines()
+        .filter(|line| line.starts_with("harness "))
+        .collect();
+    assert_eq!(harness_lines, ["harness      claude-code 2.1.269 — ready"]);
+    assert!(!text.contains("adapter available"), "{text}");
+    assert!(!text.contains(&bin.display().to_string()), "{text}");
+    assert!(!scratch.path().join("codex-probed").exists());
+    assert!(!scratch.path().join("agy-probed").exists());
+    assert!(text.contains("state        .ahu/state\n"), "{text}");
+}
+
+#[test]
+fn normal_harness_capabilities_are_not_warnings_but_failures_still_surface() {
+    let repo = common::TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = common::fake_harness(scratch.path(), &scratch.path().join("args"));
+    for args in [
+        vec!["doctor"],
+        vec![
+            "launch",
+            "@chris",
+            "--prompt",
+            "review",
+            "--dry-run",
+            "--output",
+            "json",
+        ],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+            .args(&args)
+            .current_dir(repo.path())
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("AHU_STATE_DIR", repo.state_path())
+            .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for text in [&stdout, &stderr] {
+            assert!(!text.contains(ahu::harness::RELIABILITY_WARNING), "{text}");
+            assert!(!text.contains("Reliability warning"), "{text}");
+        }
+        if args[0] == "doctor" {
+            assert!(
+                !output.status.success(),
+                "missing cmux must still fail doctor"
+            );
+            assert!(stdout.contains("cmux"), "{stdout}");
+            assert!(!stdout.contains("in-session model switching"), "{stdout}");
+        } else {
+            assert!(output.status.success(), "{stderr}");
+            let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(plan["enforcement"]["model_fixed_for_session"], false);
+            assert!(!plan["enforcement"]["gaps"].as_array().unwrap().is_empty());
+            assert!(
+                plan["warnings"].as_array().unwrap().iter().all(|warning| {
+                    warning.as_str().is_some_and(|text| !text.contains("model"))
+                })
+            );
+            assert!(!stderr.contains("in-session model switching"), "{stderr}");
+        }
+    }
+}
+
 use ahu::util::{display_safe, display_safe_block};
 use common::TestRepo;
 

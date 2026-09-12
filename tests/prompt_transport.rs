@@ -338,9 +338,9 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
         "command substitution inside the prompt was executed"
     );
 
-    // The reliability warning is shown to the person using the session.
+    // Legacy reliability warnings are not replayed in the session.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(harness::RELIABILITY_WARNING), "{stderr}");
+    assert!(!stderr.contains(harness::RELIABILITY_WARNING), "{stderr}");
 }
 
 #[test]
@@ -467,9 +467,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
         harness_executable: harness_path.to_path_buf(),
         materialize: Default::default(),
         launch_command: command.redacted(),
-        reliability_warning: enforcement
-            .needs_reliability_warning()
-            .then(|| harness::RELIABILITY_WARNING.to_string()),
+        reliability_warning: Some(harness::RELIABILITY_WARNING.to_string()),
         enforcement,
         cmux_group_id: None,
         cmux_workspace_id: None,
@@ -563,7 +561,6 @@ fn adapters_report_their_real_enforcement_limits() {
             !report.model_fixed_for_session,
             "{harness}: none of the three can hold a model for a whole session"
         );
-        assert!(report.needs_reliability_warning(), "{harness}");
         assert!(!report.gaps.is_empty(), "{harness} must name its gaps");
         assert!(
             !report.applied_controls.is_empty(),
@@ -650,14 +647,12 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
             );
         }
         let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+        assert!(!preview.contains(harness::RELIABILITY_WARNING), "{preview}");
         assert!(
-            preview.contains("not an enforced system prompt"),
-            "the preview must say it plainly: {preview}"
-        );
-        assert!(
-            preview.contains("no harness enforces this agent's identity"),
+            !preview.contains("no harness enforces this agent's identity"),
             "{preview}"
         );
+        assert!(preview.contains("ahu inventory"), "{preview}");
         // And it must still say where the instructions came from.
         assert!(
             preview.contains(".agents/ahu/instructions/vela.md"),

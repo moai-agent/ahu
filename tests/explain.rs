@@ -75,7 +75,8 @@ fn the_overview_embeds_the_diagrams_and_the_standing_warnings() {
         4,
         "all four diagrams are shown"
     );
-    assert!(text.contains(ahu::harness::RELIABILITY_WARNING));
+    assert!(!text.contains(ahu::harness::RELIABILITY_WARNING));
+    assert!(text.contains("normal harness capabilities"));
     assert!(text.contains(ahu::hooks::NON_PROJECT_HOOK_WARNING));
     assert!(text.contains(ahu::catalog::CATALOG_VERSION));
     assert!(text.contains(env!("CARGO_PKG_VERSION")));
@@ -160,7 +161,7 @@ fn the_markdown_render_is_a_real_markdown_document() {
     );
     // Warnings become blockquotes rather than `!!` gutters.
     assert!(
-        text.contains(&format!("> **{}**", ahu::harness::RELIABILITY_WARNING)),
+        text.contains(&format!("> **{}**", ahu::hooks::NON_PROJECT_HOOK_WARNING)),
         "{text}"
     );
     assert!(

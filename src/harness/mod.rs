@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::bail;
 use crate::util::Result;
 
-/// The prominent warning ahu shows when a harness cannot hold the configured
-/// identity for a whole session. The wording is fixed so it is recognisable.
+/// Legacy task-record wording. Retained for readers and compatibility tests;
+/// normal harness capabilities no longer produce reliability warnings.
 pub const RELIABILITY_WARNING: &str =
     "This harness is not reliable for producing consistent personified agent behavior.";
 
@@ -115,12 +115,6 @@ pub struct EnforcementReport {
     pub gaps: Vec<String>,
     /// Native controls the adapter did set.
     pub applied_controls: Vec<String>,
-}
-
-impl EnforcementReport {
-    pub fn needs_reliability_warning(&self) -> bool {
-        !self.model_fixed_for_session
-    }
 }
 
 pub trait Adapter {

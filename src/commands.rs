@@ -136,6 +136,7 @@ pub fn onboard_cmd(
     };
     let candidate = candidates.iter().find(|c| c.name == name).ok_or_else(|| {
         crate::util::Error::new(format!("no native definition named {name:?} was found."))
+            .with_kind(crate::util::ErrorKind::UnknownAgent)
     })?;
     if candidate.already_registered {
         console.say(&format!(
@@ -155,7 +156,7 @@ pub fn onboard_cmd(
     }
     let model = match model.or(candidate.native_model.as_deref()) {
         Some(model) if model != "inherit" && !model.is_empty() => model.to_string(),
-        _ => bail!(
+        _ => bail!(kind: crate::util::ErrorKind::Usage,
             "{name} does not declare a usable model, so ahu needs an explicit one.\n\
              Re-run with --model <exact identifier>. Catalog {} lists: {}.",
             catalog::CATALOG_VERSION,
@@ -188,6 +189,7 @@ pub fn onboard_cmd(
 pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
     let mut problems = 0;
     let mut warnings = 0;
+    let mut project_harnesses = std::collections::BTreeSet::new();
     match repo {
         Ok(repo) => {
             console.say(&format!(
@@ -210,13 +212,16 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
 
     if let Ok(repo) = repo {
         match config::load(&repo.root) {
-            Ok(Some(loaded)) => console.say(&format!(
-                "config       {} ({})\n  catalog    {}\n  harnesses  {}\n",
-                loaded.path.display(),
-                loaded.short_digest(),
-                loaded.config.catalog_version,
-                loaded.config.harness_preferences.join(", ")
-            ))?,
+            Ok(Some(loaded)) => {
+                project_harnesses.extend(loaded.config.harness_preferences.iter().cloned());
+                console.say(&format!(
+                    "config       {} ({})\n  catalog    {}\n  harnesses  {}\n",
+                    display_path(&loaded.path),
+                    loaded.short_digest(),
+                    display_safe(&loaded.config.catalog_version),
+                    display_safe(&loaded.config.harness_preferences.join(", "))
+                ))?;
+            }
             Ok(None) => console.say("config       not initialized; run `ahu init`\n")?,
             Err(e) => {
                 problems += 1;
@@ -229,48 +234,31 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
     }
 
     if let Ok(repo) = repo {
+        match agent::load_all(&repo.root) {
+            Ok(agents) => {
+                project_harnesses.extend(agents.iter().map(|agent| agent.manifest.harness.clone()));
+            }
+            Err(e) => {
+                problems += 1;
+                console.say(&format!(
+                    "agents       invalid: {}\n",
+                    display_safe_block(&e.to_string())
+                ))?;
+            }
+        }
+    }
+
+    if let Ok(repo) = repo
+        && project_harnesses.contains("claude-code")
+    {
         match hooks::collect(&repo.root, "claude-code") {
             Ok(found) => {
                 console.say(&format!(
-                    "hooks        {} visible in Claude Code's settings files, digest {}\n\
-                     \x20            ahu reads no other harness's hook configuration\n",
-                    found.hooks.len(),
-                    found.short_digest()
+                    "hooks        Claude Code: {} configured\n",
+                    found.hooks.len()
                 ))?;
                 for hook in &found.hooks {
-                    console.say(&format!(
-                        "  {:<12} {} [{}]\n",
-                        hook.scope.as_str(),
-                        hook.label(),
-                        hook.source_label()
-                    ))?;
-                }
-                let outside = found.outside_project_policy();
-                if !outside.is_empty() {
-                    // A hook outside project policy is a warning, not a blocker:
-                    // the launch will succeed, it just will not behave the same
-                    // for every teammate.
-                    warnings += 1;
-                    console.say(&format!(
-                        "  {} ({} of them)\n",
-                        style::stdout().paint(Role::Warning, hooks::NON_PROJECT_HOOK_WARNING),
-                        outside.len()
-                    ))?;
-                    for line in hooks::NON_PROJECT_HOOK_DETAIL {
-                        console.say(&format!("  {line}\n"))?;
-                    }
-                    for hook in &outside {
-                        console.say(&format!(
-                            "    {} — {}\n",
-                            hook.label(),
-                            hook.scope.why_not_project_policy()
-                        ))?;
-                    }
-                }
-                if found.wrapper_injected {
-                    console.say(
-                        "  cmux injects its own Claude Code hooks; ahu cannot enumerate them\n",
-                    )?;
+                    console.say(&format!("  {:<12} {}\n", hook.scope.as_str(), hook.label()))?;
                 }
                 for unreadable in &found.unreadable {
                     warnings += 1;
@@ -291,45 +279,24 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         }
     }
 
-    for harness in catalog::HARNESSES {
-        let prerequisite = selection::check_prerequisite(harness.id);
+    for harness in &project_harnesses {
+        let prerequisite = selection::check_prerequisite(harness);
+        let status = if !catalog::harness(harness).is_some_and(|entry| entry.adapter_available) {
+            problems += 1;
+            "unsupported by this ahu version".to_string()
+        } else if !prerequisite.satisfied() {
+            problems += 1;
+            "not installed".to_string()
+        } else if let Some(version) = &prerequisite.version {
+            let version = version.strip_prefix("codex-cli ").unwrap_or(version);
+            format!("{} — ready", display_safe(version))
+        } else {
+            "installed (version unavailable)".to_string()
+        };
         console.say(&format!(
-            "harness      {:<14} adapter {:<13} {}\n",
-            harness.id,
-            if harness.adapter_available {
-                "available"
-            } else {
-                "not in 0.1.1"
-            },
-            prerequisite
-                .found_at
-                .as_deref()
-                // Both are outside ahu's control: the path comes from PATH and
-                // the version is another program's stdout.
-                .map(|p| {
-                    format!(
-                        "{} {}",
-                        display_safe(p),
-                        display_safe(prerequisite.version.as_deref().unwrap_or(""))
-                    )
-                })
-                .unwrap_or_else(|| "not installed".to_string())
+            "harness      {} {status}\n",
+            display_safe(harness)
         ))?;
-        for note in &prerequisite.notes {
-            console.say(&format!("               note: {}\n", display_safe(note)))?;
-        }
-        if harness.adapter_available && !harness.enforces_model_for_session {
-            console.say(&format!(
-                "               {}\n",
-                style::stdout().paint(Role::Warning, harness::RELIABILITY_WARNING)
-            ))?;
-            for gap in harness.enforcement_gaps {
-                console.say(&format!(
-                    "               - {}\n",
-                    style::stdout().paint(Role::Gap, gap)
-                ))?;
-            }
-        }
     }
 
     match Cmux::discover() {
@@ -355,10 +322,13 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         }
     }
 
-    console.say(&format!(
-        "state        {}\n",
-        crate::state::root()?.display()
-    ))?;
+    let state_root = crate::state::root()?;
+    let state_display = repo
+        .as_ref()
+        .ok()
+        .and_then(|repo| state_root.strip_prefix(&repo.root).ok())
+        .unwrap_or(&state_root);
+    console.say(&format!("state        {}\n", display_path(state_display)))?;
     let summary = match (problems, warnings) {
         (0, 0) => "\nNo blocking problems found.\n".to_string(),
         (0, w) => format!(
@@ -422,12 +392,6 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         ))?;
         if let Some(workspace) = &record.cmux_workspace_id {
             console.say(&format!("  cmux      {}\n", display_safe(workspace)))?;
-        }
-        if record.reliability_warning.is_some() {
-            console.say(&format!(
-                "  warning   {}\n",
-                style::stdout().paint(Role::Warning, harness::RELIABILITY_WARNING)
-            ))?;
         }
         console.say("\n")?;
     }
@@ -913,12 +877,21 @@ fn submit(
     // Generated here, after the prompt has been read and after the plan is
     // built, so nothing in the prompt can have contained it.
     let code = confirmation_code();
-    console.say(&render_preview(
-        repo,
-        &plan,
-        prompt,
-        confirm.then_some(code.as_str()),
-    ))?;
+    if dry_run {
+        console.say(&render_preview(
+            repo,
+            &plan,
+            prompt,
+            confirm.then_some(code.as_str()),
+        ))?;
+    } else {
+        console.say(&render_launch_preview(
+            repo,
+            &plan,
+            prompt,
+            confirm.then_some(code.as_str()),
+        ))?;
+    }
 
     if dry_run {
         console.say("Dry run. No task or session was created.\n")?;
@@ -934,19 +907,74 @@ fn submit(
 
     let launched = launch::execute(repo, loaded, &plan, prompt, focus_new)?;
     console.say(&format!(
-        "\nLaunched {} — {}\n  task     {}\n  branch   {}\n  worktree {}\n  record   {}\n",
-        display_safe(&launched.record.agent_label()),
-        display_safe(&launched.record.title),
+        "\nStarted @{} in cmux.\n  task       {}\n  worktree   {}\n\nOpen session: ahu focus {}\nList tasks:   ahu tasks\n",
+        display_safe(&launched.record.identity.agent),
         display_safe(&launched.record.task_id),
-        display_safe(&launched.record.branch),
-        display_path(&launched.record.worktree),
-        display_path(&launched.task_dir),
+        display_path(launched.record.worktree.strip_prefix(&repo.root).unwrap_or(&launched.record.worktree)),
+        display_safe(&launched.record.task_id),
     ))?;
-    if let Some(workspace) = &launched.record.cmux_workspace_id {
-        console.say(&format!("  cmux     {workspace}\n"))?;
-    }
     console.say(&style::stdout().paint(Role::Warning, &render_launch_notes(&launched.notes)))?;
     Ok(0)
+}
+
+/// The normal launch view contains decisions and next actions. Full audit
+/// details remain available through dry-run previews, JSON, and inventory.
+pub fn render_launch_preview(
+    repo: &Repo,
+    plan: &launch::LaunchPlan,
+    prompt: &str,
+    code: Option<&str>,
+) -> String {
+    let mut out = format!(
+        "\nLaunch @{}\n  runtime    {} / {}\n  task       {}\n  worktree   {}\n",
+        display_safe(&plan.agent_label()),
+        display_safe(&plan.pair.harness),
+        display_safe(&plan.pair.model),
+        display_safe(&plan.title),
+        display_path(
+            plan.worktree
+                .strip_prefix(&repo.root)
+                .unwrap_or(&plan.worktree)
+        ),
+    );
+    out.push_str(&format!(
+        "  prompt     {} line(s)\n",
+        prompt.lines().count()
+    ));
+    out.push_str(&format!(
+        "  approvals {}\n",
+        match plan.permissions {
+            crate::agent::Permissions::Auto => "automatic tool approval (permissions = auto)",
+            crate::agent::Permissions::AcceptEdits =>
+                "file edits approved automatically (permissions = accept-edits)",
+            _ => "harness defaults",
+        }
+    ));
+    if plan.parent_dirty {
+        out.push_str(
+            "\nUncommitted source changes are not included. Agent configuration is copied as-is.\n",
+        );
+    }
+    for unreadable in &plan.hooks.unreadable {
+        out.push_str(&format!(
+            "\nCould not read settings: {}\n",
+            display_safe(unreadable)
+        ));
+    }
+    if !plan.hooks.hooks.is_empty() {
+        out.push_str(&format!(
+            "  hooks      {} configured; details: ahu inventory\n",
+            plan.hooks.hooks.len()
+        ));
+    }
+    if let Some(code) = code {
+        out.push_str("\nAbout to submit\n");
+        out.push_str(&format!(
+            "\nConfirmation code for this submission: {}\n",
+            display_safe(code)
+        ));
+    }
+    out
 }
 
 /// The launch summary's note lines.
@@ -988,15 +1016,7 @@ pub fn render_preview(
     out.push_str(
         "  delegation All assigned agents must launch through ahu in separate cmux sessions.\n",
     );
-    out.push_str(&format!(
-        "  guidance   ahu supplies its delegation contract and this agent's instructions as {}\n",
-        // Not "Claude Agent/Task/TeamCreate tools are denied": that was printed
-        // unconditionally, on Codex and Antigravity launches where no such flag
-        // was passed and no Claude was involved, twenty-five lines above the
-        // gaps list that contradicted it. ahu now denies no tool on any harness,
-        // and this line says what it does instead.
-        "prompt text. No harness denies its own delegation tools for this launch."
-    ));
+    out.push_str("  guidance   ahu supplies its delegation contract and this agent's instructions as prompt text.\n");
     out.push_str(&format!(
         "  agent      {}\n",
         style.paint(Role::Agent, &display_safe(&plan.agent_label()))
@@ -1156,25 +1176,7 @@ pub fn render_preview(
             style.paint(Role::Success, &display_safe(control))
         ));
     }
-    // Gaps print unconditionally. They used to appear only under the reliability
-    // warning, which made the single most important sentence about a launch --
-    // that nothing ahu supplies is enforced -- conditional on an unrelated flag.
-    for gap in &plan.enforcement.gaps {
-        out.push_str(&format!(
-            "  - {}\n",
-            style.paint(Role::Gap, &display_safe(gap))
-        ));
-    }
-    if let Some(warning) = plan.reliability_warning() {
-        out.push_str(&style.paint(
-            Role::Warning,
-            &format!("\nReliability warning\n  !! {}\n", display_safe(warning)),
-        ));
-        out.push_str(
-            "     ahu still pins the configured harness and model and never substitutes another.\n\
-             \x20    This limitation is recorded in the task metadata and the context inventory.\n",
-        );
-    }
+    out.push_str("  Detailed runtime capabilities: ahu inventory\n");
     out.push_str(&format!(
         "\nCommand to be run in the worktree (the prompt is one argument, never shell input):\n  {} {}\n",
         display_path(&plan.harness_executable),

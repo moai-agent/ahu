@@ -135,7 +135,11 @@ fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("permissions = auto"), "{stdout}");
-    assert!(stdout.contains("--permission-mode auto"), "{stdout}");
+    assert!(!stdout.contains("--permission-mode auto"), "{stdout}");
+    let preview = launch(&repo, &["--allow-widened-approvals", "--dry-run"]);
+    assert!(preview.status.success());
+    let details = String::from_utf8_lossy(&preview.stdout);
+    assert!(details.contains("--permission-mode auto"), "{details}");
 
     // It is a real option, parsed and rejected when repeated or unknown.
     assert!(matches!(

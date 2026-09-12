@@ -6,6 +6,67 @@ use std::process::{Command, Stdio};
 use common::TestRepo;
 
 #[test]
+fn invalid_setup_rankings_are_usage_errors() {
+    let mut failures = Vec::new();
+    for input in [
+        "bad\n", "0\n", "1,1\n", "1\nbad\n", "1\n0\n", "1\n1,1\n", "1\n,\n",
+    ] {
+        let mut reader = std::io::Cursor::new(input);
+        let mut output = Vec::new();
+        let mut console = ahu::launcher::Console {
+            input: &mut reader,
+            output: &mut output,
+            interactive: true,
+        };
+        let error = ahu::launcher::run_setup(&mut console).unwrap_err();
+        if error.kind() != ahu::util::ErrorKind::Usage {
+            failures.push(format!("{input:?}: {:?}: {error}", error.kind()));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn setup_and_registration_classify_actionable_errors() {
+    let repo = TestRepo::new();
+    repo.write(
+        ".claude/agents/fixture.md",
+        "---\nname: fixture\ndescription: fixture agent\nmodel: inherit\n---\nFixture instructions.\n",
+    );
+    let cases: &[(&[&str], i32, &str)] = &[
+        (
+            &["onboard", "--register", "absent"],
+            3,
+            "no native definition",
+        ),
+        (&["init"], 4, "no ahu configuration"),
+        (&["onboard", "--register", "fixture"], 2, "--model"),
+    ];
+    let mut failures = Vec::new();
+    for (args, expected, diagnostic) in cases {
+        let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+            .current_dir(repo.path())
+            .args(*args)
+            .env("NO_COLOR", "1")
+            .env("AHU_STATE_DIR", repo.state_path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(diagnostic), "{args:?}: {stderr}");
+        if output.status.code() != Some(*expected) {
+            failures.push(format!(
+                "{args:?}: expected {expected}, got {:?}",
+                output.status.code()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(!repo.path().join(".agents/ahu/config.toml").exists());
+    assert!(!repo.path().join(".agents/ahu/agents").exists());
+}
+
+#[test]
 fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() {
     let repo = TestRepo::new();
     repo.init_config();

@@ -23,6 +23,45 @@ fn launch(repo: &TestRepo, name: &str, dry_run: bool) -> std::process::Output {
 }
 
 #[test]
+fn actual_launch_uses_a_short_preview_while_dry_run_keeps_audit_details() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    let config = repo.read(".agents/ahu/config.toml").replace(
+        "review_on_first_load = true",
+        "review_on_first_load = false",
+    );
+    repo.write(".agents/ahu/config.toml", &config);
+    repo.add_agent("sable", "1.0.0", "claude-sonnet-5");
+    repo.write("assignment.txt", "Review the CLI\u{1b}[2J");
+    repo.commit("fixture");
+    let output = launch(&repo, "@sable", false);
+    // The fixture intentionally has no cmux, so this never creates a session.
+    assert!(!output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Launch @sable@1.0.0"), "{text}");
+    assert!(text.contains("claude-code / claude-sonnet-5"), "{text}");
+    assert!(text.contains("approvals harness defaults"), "{text}");
+    assert!(text.contains("worktree   .worktrees/"), "{text}");
+    assert!(!text.contains('\u{1b}'), "{text}");
+    for hidden in [
+        "file digest",
+        "instructions digest",
+        "cmux injects",
+        "Enforcement",
+        "Command to be run",
+        "prompt sha256",
+    ] {
+        assert!(!text.contains(hidden), "{hidden}: {text}");
+    }
+    assert!(text.lines().count() <= 12, "{text}");
+    let detailed = launch(&repo, "@sable", true);
+    assert!(detailed.status.success());
+    let text = String::from_utf8_lossy(&detailed.stdout);
+    assert!(text.contains("file digest"), "{text}");
+    assert!(text.contains("instructions digest"), "{text}");
+}
+
+#[test]
 fn launch_parser_requires_an_explicit_registered_identity_and_prompt_file() {
     for args in [
         vec!["launch"],
@@ -79,9 +118,9 @@ fn dry_run_resolves_the_named_agent_without_reading_confirmation_or_launching() 
     );
     assert!(text.contains("delegation contract"), "{text}");
     assert!(text.contains("fenced with the tag nonce"), "{text}");
-    // And the reason ahu skips agent selection is still stated as a gap.
+    // Routine harness capabilities belong in explicit inspection output.
     assert!(
-        text.contains("not bound to the file ahu reads and digests"),
+        text.contains("Detailed runtime capabilities: ahu inventory"),
         "{text}"
     );
     assert!(text.contains("Dry run"));

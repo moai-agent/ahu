@@ -229,7 +229,7 @@ fn the_preview_claims_no_tool_denial_on_any_harness() {
             );
         }
         assert!(
-            preview.contains("No harness denies its own delegation tools"),
+            preview.contains("instructions as prompt text"),
             "{harness}: {preview}"
         );
         for control in &plan.enforcement.applied_controls {

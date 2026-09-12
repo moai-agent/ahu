@@ -279,7 +279,7 @@ pub fn confirm_submit(console: &mut Console<'_>, code: &str) -> Result<bool> {
 /// personal profile. Cancellation writes nothing.
 pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
     if !console.interactive {
-        bail!(
+        bail!(kind: crate::util::ErrorKind::Prerequisite,
             "this repository has no ahu configuration yet, and ahu was not run interactively.\n\
              Initialization records the project-agreed harness and model order, so ahu will not \
              invent one. Run `ahu init` from a terminal.\n\
@@ -336,14 +336,16 @@ pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
         }
         let index: usize = token.parse().map_err(|_| {
             crate::util::Error::new(format!("{token:?} is not one of the numbers listed."))
+                .with_kind(crate::util::ErrorKind::Usage)
         })?;
         let harness = catalog::HARNESSES
             .get(index.wrapping_sub(1))
             .ok_or_else(|| {
                 crate::util::Error::new(format!("{index} is not one of the numbers listed."))
+                    .with_kind(crate::util::ErrorKind::Usage)
             })?;
         if harness_preferences.contains(&harness.id.to_string()) {
-            bail!("{} was listed twice.", harness.id);
+            bail!(kind: crate::util::ErrorKind::Usage, "{} was listed twice.", harness.id);
         }
         harness_preferences.push(harness.id.to_string());
     }
@@ -393,19 +395,21 @@ pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
                 }
                 let index: usize = token.parse().map_err(|_| {
                     crate::util::Error::new(format!("{token:?} is not one of the numbers listed."))
+                        .with_kind(crate::util::ErrorKind::Usage)
                 })?;
                 let model = models.get(index.wrapping_sub(1)).ok_or_else(|| {
                     crate::util::Error::new(format!("{index} is not one of the numbers listed."))
+                        .with_kind(crate::util::ErrorKind::Usage)
                 })?;
                 if chosen.contains(&model.model.to_string()) {
-                    bail!("{} was listed twice.", model.model);
+                    bail!(kind: crate::util::ErrorKind::Usage, "{} was listed twice.", model.model);
                 }
                 chosen.push(model.model.to_string());
             }
             chosen
         };
         if chosen.is_empty() {
-            bail!("no model was selected for {harness_id}.");
+            bail!(kind: crate::util::ErrorKind::Usage, "no model was selected for {harness_id}.");
         }
         model_rankings.insert(harness_id.clone(), chosen);
     }

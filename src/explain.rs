@@ -10,7 +10,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::catalog;
-use crate::harness::RELIABILITY_WARNING;
 use crate::hooks::{NON_PROJECT_HOOK_DETAIL, NON_PROJECT_HOOK_WARNING};
 use crate::util::{Error, Result};
 
@@ -362,16 +361,11 @@ pub fn document() -> Vec<Section> {
         Section {
             title: "Standing warnings",
             blocks: vec![
-                Block::Warning {
-                    headline: RELIABILITY_WARNING.to_string(),
-                    detail: vec![
-                        "Claude Code pins the model with --model at launch, but an interactive session"
-                            .to_string(),
-                        "can change it with /model and ahu has no supported control that prevents"
-                            .to_string(),
-                        "that. ahu still always requests the configured identity.".to_string(),
-                    ],
-                },
+                para(&[
+                    "ahu selects the configured harness and model at launch. During the session,",
+                    "the harness manages model changes and its other native behavior. These are",
+                    "normal harness capabilities, not launch problems.",
+                ]),
                 Block::Warning {
                     headline:
                         "Nothing ahu supplies to a session is enforced by the harness.".to_string(),

@@ -71,6 +71,19 @@ isolating tests. Reinstalling does not require granting access to the old store.
 
 ## Getting started
 
+Normal launches show a short task summary and commands to reopen the session.
+Use `ahu launch ... --dry-run` for a detailed preview or add `--output json`
+for a machine-readable plan. Digests and source provenance remain in these
+inspection views and task records.
+
+When launching from a restricted coding-agent session, the calling session
+needs permission to create Git branches and worktrees and reach cmux. In Codex,
+`workspace-write` protects `.git`; an on-request approval policy allows the
+agent to request approval for `ahu launch`. For example, start the coordinating
+session with `codex --sandbox workspace-write --ask-for-approval on-request`.
+Managed policies may still disallow that approval. `--allow-widened-approvals`
+controls the child agent only; it does not grant the parent session more access.
+
 Run `ahu` inside a Git repository, from a cmux terminal (`ahu doctor` checks that
 cmux, a harness, and the repository are all in order first):
 
@@ -485,13 +498,10 @@ a global deletion as a local one.
 
 These are real and deliberate; `ahu` reports them rather than papering over them.
 
-- **Claude Code cannot hold a model for a whole session.** `--model` pins the
-  model at launch, but an interactive session can change it with `/model`, and
-  `ahu` has no supported control that prevents that. Every Claude Code launch
-  therefore carries the warning *"This harness is not reliable for producing
-  consistent personified agent behavior"*, in the preview, in the session, and in
-  the task record. `ahu` still always requests the configured identity and never
-  substitutes another.
+- **The harness manages the running session.** Ahu selects the configured harness
+  and model at launch. Model switching and other native session behavior remain
+  under the harness's control and are not reported as reliability warnings.
+  Detailed capabilities remain available through `ahu inventory` and JSON plans.
 - **Per-agent skill and memory controls are reporting only.** Claude Code does not
   expose switches that disable one skill, or separate memory reading from memory
   writing, for a single agent from outside a session, so `ahu` does not offer

@@ -406,7 +406,7 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
         // The task record froze the identity that was launched.
         assert_eq!(launched.record.identity.model, "claude-opus-5");
         assert_eq!(launched.record.agent_label(), "chris@1.0.0");
-        assert!(launched.record.reliability_warning.is_some());
+        assert!(launched.record.reliability_warning.is_none());
 
         // The prompt is on disk as data, never on a command line.
         let stored = std::fs::read_to_string(launched.task_dir.join("prompt.txt")).unwrap();

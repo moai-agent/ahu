@@ -29,6 +29,60 @@ fn settings_with_hooks(event: &str, matcher: Option<&str>, command: &str) -> Str
 }
 
 #[test]
+fn doctor_only_summarizes_hooks_for_harnesses_used_by_the_project() {
+    for (claude_preference, claude_agent) in [(false, false), (true, false), (false, true)] {
+        let repo = TestRepo::new();
+        repo.init_config();
+        if !claude_preference {
+            let config = repo
+                .read(".agents/ahu/config.toml")
+                .replace("claude-code", "codex")
+                .replace("claude-opus-5", "gpt-6-astra")
+                .replace("claude-sonnet-5", "gpt-6-astra");
+            repo.write(".agents/ahu/config.toml", &config);
+        }
+        if claude_agent {
+            repo.add_agent("chris", "1.0.0", "claude-opus-5");
+        }
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let settings = home.path().join(".claude/settings.json");
+        let used = claude_preference || claude_agent;
+        // Even malformed unrelated settings must not affect doctor.
+        std::fs::write(
+            &settings,
+            if used {
+                settings_with_hooks("Stop", None, "notify-me")
+            } else {
+                "invalid unrelated settings".to_string()
+            },
+        )
+        .unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+            .arg("doctor")
+            .current_dir(repo.path())
+            .env("HOME", home.path())
+            .env("AHU_STATE_DIR", repo.state_path())
+            .env("AHU_CMUX_BIN", home.path().join("missing-cmux"))
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(!text.contains(hooks::NON_PROJECT_HOOK_WARNING), "{text}");
+        assert!(!text.contains("warning(s)"), "{text}");
+        if used {
+            assert!(
+                text.contains("hooks        Claude Code: 1 configured"),
+                "{text}"
+            );
+            assert!(text.contains("user         Stop → notify-me"), "{text}");
+        } else {
+            assert!(!text.contains("hooks        "), "{text}");
+            assert!(!text.contains("settings.json"), "{text}");
+        }
+    }
+}
+
+#[test]
 fn project_hooks_are_found_and_marked_as_travelling() {
     let repo = TestRepo::new();
     let home = tempfile::TempDir::new().unwrap();

@@ -203,6 +203,17 @@ impl Cmux {
             .map(str::to_string))
     }
 
+    pub fn current_workspace(&self) -> Result<Option<String>> {
+        if let Ok(id) = std::env::var("CMUX_WORKSPACE_ID") {
+            return Ok(Some(id));
+        }
+        let value = self.rpc("workspace.current", serde_json::json!({}))?;
+        Ok(value
+            .get("workspace_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string))
+    }
+
     /// Create a plain workspace in a group, used to restore a group's anchor.
     pub fn create_anchor_workspace(
         &self,

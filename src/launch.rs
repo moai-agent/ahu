@@ -11,7 +11,7 @@ use crate::bail;
 use crate::cmux::{self, Cmux};
 use crate::config::LoadedConfig;
 use crate::git::{self, Repo};
-use crate::harness::{self, EnforcementReport, LaunchCommand, LaunchRequest, RELIABILITY_WARNING};
+use crate::harness::{self, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::hooks::{self, HookInventory};
 use crate::selection::ResolvedPair;
 use crate::snapshot::{self, ConfigSnapshot};
@@ -89,14 +89,6 @@ impl LaunchPlan {
     pub fn non_project_hooks(&self) -> Vec<&crate::hooks::Hook> {
         self.hooks.outside_project_policy()
     }
-
-    pub fn reliability_warning(&self) -> Option<&'static str> {
-        if self.enforcement.needs_reliability_warning() {
-            Some(RELIABILITY_WARNING)
-        } else {
-            None
-        }
-    }
 }
 
 /// JSON schema 1: additive fields are compatible; changing/removing fields or
@@ -115,9 +107,6 @@ pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
     let mut argv = vec![plan.command.program.clone()];
     argv.extend(plan.command.redacted().args);
     let mut warnings = Vec::new();
-    if let Some(warning) = plan.reliability_warning() {
-        warnings.push(warning.to_string());
-    }
     if !plan.non_project_hooks().is_empty() {
         warnings.push(crate::hooks::NON_PROJECT_HOOK_WARNING.to_string());
     }
@@ -416,7 +405,8 @@ pub fn execute(
         prompt_digest: crate::util::digest_bytes(prompt.as_bytes()),
         harness_executable: plan.harness_executable.clone(),
         enforcement: plan.enforcement.clone(),
-        reliability_warning: plan.reliability_warning().map(str::to_string),
+        // Retain the field for compatibility with older records.
+        reliability_warning: None,
         cmux_group_id: None,
         cmux_workspace_id: None,
         cmux_window_id: None,
@@ -495,6 +485,39 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
     let mut mapping: GroupMapping = state::read_json(&path)?;
     let current_window = client.current_window().ok().flatten();
 
+    // A user may already be working in a repository group before ahu has any
+    // saved mapping. Prefer that group to creating a duplicate, even when an
+    // earlier ahu invocation saved a different group after losing its state.
+    let groups = client.list_groups(current_window.as_deref())?;
+    let current_workspace = client.current_workspace()?;
+    let workspaces = client.workspaces()?;
+    let candidates = repository_group_candidates(&groups, &repo.display_name(), |id| {
+        workspaces.get(id).is_some_and(|workspace| {
+            git::discover(Path::new(&workspace.directory))
+                .is_ok_and(|found| found.identity() == repo.identity())
+        })
+    });
+    let current_group = if candidates.iter().any(|group| {
+        current_workspace
+            .as_ref()
+            .is_some_and(|id| group.member_workspace_ids.contains(id))
+    }) {
+        recover_group(&candidates, current_workspace.as_deref())?
+    } else {
+        None
+    };
+    if let Some(group) = current_group
+        && mapping.group_id.as_deref() != Some(group.id.as_str())
+    {
+        mapping = GroupMapping {
+            group_id: Some(group.id.clone()),
+            window_id: current_window.clone(),
+            anchor_workspace_id: Some(group.anchor_workspace_id.clone()),
+        };
+        state::write_json(&path, &mapping)?;
+        return Ok(group.clone());
+    }
+
     if let Some(group_id) = mapping.group_id.clone() {
         let window: Option<String> = mapping.window_id.clone().or_else(|| current_window.clone());
         if let Some(group) = client.find_group(&group_id, window.as_deref())? {
@@ -524,11 +547,14 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
         }
         notes.push(format!(
             "the cmux group recorded for this repository ({group_id}) no longer exists; \
-             ahu created a new one."
+             ahu will find an existing group or create one."
         ));
     }
 
-    let group = client.create_group(&repo.display_name(), &repo.root)?;
+    let group = match recover_group(&candidates, None)? {
+        Some(group) => group.clone(),
+        None => client.create_group(&repo.display_name(), &repo.root)?,
+    };
     mapping = GroupMapping {
         group_id: Some(group.id.clone()),
         window_id: current_window,
@@ -536,6 +562,37 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
     };
     state::write_json(&path, &mapping)?;
     Ok(group)
+}
+
+fn repository_group_candidates<'a>(
+    groups: &'a [cmux::Group],
+    name: &str,
+    belongs: impl Fn(&str) -> bool,
+) -> Vec<&'a cmux::Group> {
+    groups
+        .iter()
+        .filter(|group| {
+            group.name == name && group.member_workspace_ids.iter().any(|id| belongs(id))
+        })
+        .collect()
+}
+
+fn recover_group<'a>(
+    groups: &[&'a cmux::Group],
+    current: Option<&str>,
+) -> Result<Option<&'a cmux::Group>> {
+    if let Some(group) = groups.iter().find(|group| {
+        current.is_some_and(|id| group.member_workspace_ids.iter().any(|member| member == id))
+    }) {
+        return Ok(Some(group));
+    }
+    match groups {
+        [group] => Ok(Some(group)),
+        [] => Ok(None),
+        _ => bail!(
+            "Multiple cmux groups match this repository. Run ahu from the group you want to use."
+        ),
+    }
 }
 
 fn restore_anchor(client: &Cmux, repo: &Repo, group: &cmux::Group) -> Result<String> {
@@ -742,13 +799,6 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         );
     }
 
-    if let Some(warning) = &record.reliability_warning {
-        eprintln!("\n!! {warning}");
-        for gap in &record.enforcement.gaps {
-            eprintln!("   - {gap}");
-        }
-        eprintln!();
-    }
     eprintln!(
         "ahu task {} — {} on {} / {}",
         record.task_id,
@@ -802,4 +852,42 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         record.branch
     );
     Ok(status)
+}
+
+#[cfg(test)]
+mod group_recovery_tests {
+    use super::*;
+    fn group(id: &str, member: &str) -> cmux::Group {
+        cmux::Group {
+            id: id.into(),
+            name: "ahu".into(),
+            anchor_workspace_id: member.into(),
+            member_workspace_ids: vec![member.into()],
+            is_collapsed: false,
+        }
+    }
+    #[test]
+    fn reuse_current_group_and_refuse_ambiguous_recovery() {
+        let groups = vec![
+            group("new", "task"),
+            group("original", "coordinator"),
+            group("unrelated", "other-repo"),
+        ];
+        let matches = repository_group_candidates(&groups, "ahu", |id| id != "other-repo");
+        assert_eq!(matches.len(), 2);
+        assert_eq!(
+            recover_group(&matches, Some("coordinator"))
+                .unwrap()
+                .unwrap()
+                .id,
+            "original"
+        );
+        assert!(recover_group(&matches, None).is_err());
+        assert_eq!(
+            recover_group(&matches[..1], None).unwrap().unwrap().id,
+            "new"
+        );
+        assert!(recover_group(&[], None).unwrap().is_none());
+        assert!(repository_group_candidates(&groups, "different", |_| true).is_empty());
+    }
 }
