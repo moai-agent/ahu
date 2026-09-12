@@ -1,0 +1,13 @@
+schema_version = 1
+name = "mend"
+version = "1.0.0"
+description = "Implements fixes for reviewed findings, with tests"
+harness = "claude-code"
+model = "claude-opus-5"
+
+# Opt-in: this agent edits code and runs the test suite unattended.
+permissions = "auto"
+
+[source]
+format = "claude-agent"
+path = ".claude/agents/mend.md"
