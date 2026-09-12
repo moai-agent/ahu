@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bail;
 use crate::harness::{EnforcementReport, LaunchCommand};
+use crate::hooks::HookInventory;
 use crate::snapshot::{ConfigSnapshot, MaterializeReport};
 use crate::state;
 use crate::util::{Error, Result};
@@ -84,6 +85,12 @@ pub struct TaskRecord {
     pub catalog_version: String,
     pub config_snapshot: ConfigSnapshot,
     pub config_snapshot_digest: String,
+    /// Hooks that were in effect at launch, at every scope ahu could read.
+    #[serde(default)]
+    pub hooks: HookInventory,
+    /// Digest over those hooks, so a change at any scope shows up as drift.
+    #[serde(default)]
+    pub hooks_digest: String,
     pub materialize: MaterializeReport,
     pub launch_command: LaunchCommand,
     pub enforcement: EnforcementReport,

@@ -10,6 +10,7 @@ use crate::config::{self, LoadedConfig};
 use crate::drift;
 use crate::git::{self, Repo};
 use crate::harness;
+use crate::hooks;
 use crate::hygiene;
 use crate::inventory;
 use crate::launch;
@@ -197,6 +198,58 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         }
     }
 
+    if let Ok(repo) = repo {
+        match hooks::collect(&repo.root) {
+            Ok(found) => {
+                console.say(&format!(
+                    "hooks        {} visible, digest {}\n",
+                    found.hooks.len(),
+                    found.short_digest()
+                ))?;
+                for hook in &found.hooks {
+                    console.say(&format!(
+                        "  {:<12} {} [{}]\n",
+                        hook.scope.as_str(),
+                        hook.label(),
+                        hook.source
+                    ))?;
+                }
+                let outside = found.outside_project_policy();
+                if !outside.is_empty() {
+                    problems += 1;
+                    console.say(&format!(
+                        "  {} ({} of them)\n",
+                        hooks::NON_PROJECT_HOOK_WARNING,
+                        outside.len()
+                    ))?;
+                    for line in hooks::NON_PROJECT_HOOK_DETAIL {
+                        console.say(&format!("  {line}\n"))?;
+                    }
+                    for hook in &outside {
+                        console.say(&format!(
+                            "    {} — {}\n",
+                            hook.label(),
+                            hook.scope.why_not_project_policy()
+                        ))?;
+                    }
+                }
+                if found.wrapper_injected {
+                    console.say(
+                        "  cmux injects its own Claude Code hooks; ahu cannot enumerate them\n",
+                    )?;
+                }
+                for unreadable in &found.unreadable {
+                    problems += 1;
+                    console.say(&format!("  unreadable {unreadable}\n"))?;
+                }
+            }
+            Err(e) => {
+                problems += 1;
+                console.say(&format!("hooks        could not be read: {e}\n"))?;
+            }
+        }
+    }
+
     for harness in catalog::HARNESSES {
         let prerequisite = selection::check_prerequisite(harness.id);
         console.say(&format!(
@@ -326,6 +379,7 @@ pub fn inventory_cmd(
     let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
     let adapter = harness::adapter_for(&pair.harness)?;
     let enforcement = adapter.enforcement(&pair.model);
+    let found_hooks = hooks::collect(&repo.root)?;
     let built = inventory::build(&inventory::Subject {
         repo_root: &repo.root,
         loaded_config: &loaded,
@@ -334,6 +388,7 @@ pub fn inventory_cmd(
         harness: &pair.harness,
         model: &pair.model,
         enforcement: &enforcement,
+        hooks: &found_hooks,
         prompt: None,
     })?;
     console.say(&inventory::render(&built))?;
@@ -353,6 +408,7 @@ pub fn hygiene_cmd(
     let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
     let adapter = harness::adapter_for(&pair.harness)?;
     let enforcement = adapter.enforcement(&pair.model);
+    let found_hooks = hooks::collect(&repo.root)?;
     let built = inventory::build(&inventory::Subject {
         repo_root: &repo.root,
         loaded_config: &loaded,
@@ -361,6 +417,7 @@ pub fn hygiene_cmd(
         harness: &pair.harness,
         model: &pair.model,
         enforcement: &enforcement,
+        hooks: &found_hooks,
         prompt: None,
     })?;
     let key = resolved
@@ -473,6 +530,7 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
             harness: &plan.pair.harness,
             model: &plan.pair.model,
             enforcement: &plan.enforcement,
+            hooks: &plan.hooks,
             prompt: Some(&prompt),
         })?;
         let review = hygiene::review(&key, &built, &plan.enforcement, &loaded, &review_state);
@@ -488,6 +546,7 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
         plan.agent.as_ref().map(|a| a.identity_digest()).as_deref(),
         &plan.snapshot.digest(),
         &loaded.digest,
+        &plan.hooks.digest(),
         &previous,
     ) {
         console.say("\n")?;
@@ -561,6 +620,11 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
         plan.snapshot.entries.len(),
         plan.snapshot.short_digest()
     ));
+    out.push_str(&format!(
+        "  hooks      {} visible, digest {}\n",
+        plan.hooks.hooks.len(),
+        plan.hooks.short_digest()
+    ));
     out.push_str(
         "\nThe task worktree starts at the base commit above and then receives this checkout's\n\
          complete agent configuration as it stands right now, including uncommitted and ignored\n\
@@ -578,6 +642,11 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
             plan.snapshot.skipped_directories.join(", ")
         ));
     }
+    out.push_str(&hooks::render_for_preview(
+        &plan.hooks,
+        plan.snapshot.executable_count(),
+    ));
+
     out.push_str("\nEnforcement\n");
     for control in &plan.enforcement.applied_controls {
         out.push_str(&format!("  + {control}\n"));

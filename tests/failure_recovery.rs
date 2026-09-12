@@ -203,6 +203,8 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
         catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
+        hooks: Default::default(),
+        hooks_digest: String::new(),
         materialize: Default::default(),
         launch_command: command,
         reliability_warning: None,
@@ -507,6 +509,8 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
         catalog_version: loaded.config.catalog_version.clone(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "2".repeat(64),
+        hooks: Default::default(),
+        hooks_digest: String::new(),
         materialize: Default::default(),
         launch_command: plan.command.clone(),
         reliability_warning: None,
@@ -523,6 +527,7 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
         Some(&agent.identity_digest()),
         &plan.snapshot.digest(),
         &loaded.digest,
+        &plan.hooks.digest(),
         &[(std::path::PathBuf::from("/tmp/prev"), previous)],
     )
     .expect("drift detected");

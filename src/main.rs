@@ -25,6 +25,18 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             println!("ahu {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
+        // `explain` is documentation. It reads nothing and needs no repository.
+        Command::Explain { mermaid_only } => {
+            print!(
+                "{}",
+                if mermaid_only {
+                    ahu::explain::mermaid_only()
+                } else {
+                    ahu::explain::overview()
+                }
+            );
+            Ok(0)
+        }
         // `run-task` is started by cmux inside the task worktree and works from
         // the task record alone, so it does not need repository discovery.
         Command::RunTask { task_dir } => commands::run_task(&task_dir),
@@ -60,9 +72,11 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 }
                 Command::Tasks => commands::tasks(console, &repo),
                 Command::Focus { task_id } => commands::focus(console, &repo, &task_id),
-                Command::Help | Command::Version | Command::Doctor | Command::RunTask { .. } => {
-                    unreachable!("handled above")
-                }
+                Command::Help
+                | Command::Version
+                | Command::Explain { .. }
+                | Command::Doctor
+                | Command::RunTask { .. } => unreachable!("handled above"),
             })
         }
     }

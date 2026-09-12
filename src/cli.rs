@@ -18,6 +18,7 @@ and submit it. Pasting never submits by itself.
 
 Commands:
   help                  Print this help message
+  explain               Architecture overview and Mermaid diagrams
   init                  Record this project's agreed harness and model order
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
@@ -31,6 +32,9 @@ Commands:
 Options:
   -h, --help            Print this help message
   -V, --version         Print the version
+
+explain options:
+  --mermaid             Print only the diagrams, as fenced Mermaid blocks
 
 onboard options:
   --register <name>     Register a previewed native definition
@@ -48,6 +52,9 @@ run-task options:
 pub enum Command {
     Help,
     Version,
+    Explain {
+        mermaid_only: bool,
+    },
     Interactive {
         focus: bool,
     },
@@ -93,6 +100,17 @@ where
         "-V" | "--version" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Version)
+        }
+        "explain" => {
+            let mermaid_only = match args.get(1).map(String::as_str) {
+                None => false,
+                Some("--mermaid") => {
+                    expect_no_more(&args[2..])?;
+                    true
+                }
+                Some(other) => bail!("unknown option {other:?} for `ahu explain`."),
+            };
+            Ok(Command::Explain { mermaid_only })
         }
         "init" => {
             expect_no_more(&args[1..])?;

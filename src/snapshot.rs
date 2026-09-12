@@ -55,6 +55,14 @@ pub struct SnapshotEntry {
     pub path: String,
     pub digest: String,
     pub bytes: u64,
+    /// Whether the file carries an executable bit.
+    ///
+    /// Hook scripts live in agent-configuration directories, so some of what a
+    /// task worktree inherits is code the harness will run. The mode is part of
+    /// the snapshot digest: a file becoming executable changes behaviour just as
+    /// much as an edit to its contents.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 /// The complete repository agent configuration at submission time.
@@ -74,6 +82,8 @@ impl ConfigSnapshot {
             buffer.push_str(&entry.path);
             buffer.push(' ');
             buffer.push_str(&entry.digest);
+            buffer.push(' ');
+            buffer.push_str(if entry.executable { "x" } else { "-" });
             buffer.push('\n');
         }
         digest_bytes(buffer.as_bytes())
@@ -81,6 +91,11 @@ impl ConfigSnapshot {
 
     pub fn short_digest(&self) -> String {
         self.digest()[..12].to_string()
+    }
+
+    /// How many inherited files are executable, for the launch preview.
+    pub fn executable_count(&self) -> usize {
+        self.entries.iter().filter(|entry| entry.executable).count()
     }
 
     pub fn by_path(&self) -> BTreeMap<&str, &SnapshotEntry> {
@@ -164,6 +179,7 @@ fn walk(root: &Path, dir: &Path, depth: usize, snapshot: &mut ConfigSnapshot) ->
                 path: to_relative_string(relative),
                 digest: digest_file(&path)?,
                 bytes: meta.len(),
+                executable: is_executable(&meta),
             });
         } else if meta.file_type().is_symlink() && is_config_path(relative) {
             // A configuration symlink is recorded as a gap rather than followed.
@@ -173,6 +189,17 @@ fn walk(root: &Path, dir: &Path, depth: usize, snapshot: &mut ConfigSnapshot) ->
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn to_relative_string(relative: &Path) -> String {
@@ -244,6 +271,12 @@ pub fn materialize(
         }
         let already = digest_file(&target).ok();
         if already.as_deref() == Some(current.as_str()) {
+            // Contents already match. The mode still might not: a hook script
+            // that gained or lost its executable bit behaves differently, so
+            // sync that before skipping the copy.
+            if sync_mode(&source, &target)? {
+                report.written.push(entry.path.clone());
+            }
             continue;
         }
         if let Some(parent) = target.parent() {
@@ -258,4 +291,27 @@ pub fn materialize(
         report.written.push(entry.path.clone());
     }
     Ok(report)
+}
+
+/// Copy `source`'s permission bits onto `target` when they differ.
+///
+/// Returns whether anything changed.
+#[cfg(unix)]
+fn sync_mode(source: &Path, target: &Path) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    let (Ok(from), Ok(to)) = (std::fs::metadata(source), std::fs::metadata(target)) else {
+        return Ok(false);
+    };
+    let wanted = from.permissions().mode() & 0o777;
+    if to.permissions().mode() & 0o777 == wanted {
+        return Ok(false);
+    }
+    std::fs::set_permissions(target, std::fs::Permissions::from_mode(wanted))
+        .map_err(|e| Error::new(format!("cannot set mode on {}: {e}", target.display())))?;
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn sync_mode(_source: &Path, _target: &Path) -> Result<bool> {
+    Ok(false)
 }

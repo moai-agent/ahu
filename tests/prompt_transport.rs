@@ -298,6 +298,8 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str) {
         catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
+        hooks: Default::default(),
+        hooks_digest: String::new(),
         materialize: Default::default(),
         launch_command: command,
         reliability_warning: enforcement

@@ -12,6 +12,7 @@ use crate::cmux::{self, Cmux};
 use crate::config::LoadedConfig;
 use crate::git::{self, Repo};
 use crate::harness::{self, EnforcementReport, LaunchCommand, LaunchRequest, RELIABILITY_WARNING};
+use crate::hooks::{self, HookInventory};
 use crate::selection::ResolvedPair;
 use crate::snapshot::{self, ConfigSnapshot};
 use crate::state::{self, LaunchLock};
@@ -41,6 +42,8 @@ pub struct LaunchPlan {
     pub pair: ResolvedPair,
     pub enforcement: EnforcementReport,
     pub snapshot: ConfigSnapshot,
+    /// Every hook ahu can see that will be in effect for this task.
+    pub hooks: HookInventory,
     pub base_commit: Option<String>,
     pub parent_dirty: bool,
     pub task_id: String,
@@ -57,6 +60,14 @@ impl LaunchPlan {
             Some(agent) => agent.label(),
             None => "auto".to_string(),
         }
+    }
+
+    /// Hooks in effect that are not shared project policy.
+    ///
+    /// These raise the same consistency warning as an unenforceable model: they
+    /// change behaviour and can differ for every teammate.
+    pub fn non_project_hooks(&self) -> Vec<&crate::hooks::Hook> {
+        self.hooks.outside_project_policy()
     }
 
     pub fn reliability_warning(&self) -> Option<&'static str> {
@@ -80,6 +91,7 @@ pub fn plan(
     }
     let adapter = harness::adapter_for(&pair.harness)?;
     let snapshot = snapshot::collect(&repo.root)?;
+    let found_hooks = hooks::collect(&repo.root)?;
     let base_commit = repo.head.clone();
     if base_commit.is_none() {
         bail!(
@@ -123,6 +135,7 @@ pub fn plan(
         pair,
         enforcement,
         snapshot,
+        hooks: found_hooks,
         base_commit,
         parent_dirty,
         task_id,
@@ -228,6 +241,8 @@ pub fn execute(
         catalog_version: plan.pair.catalog_version.clone(),
         config_snapshot_digest: plan.snapshot.digest(),
         config_snapshot: plan.snapshot.clone(),
+        hooks: plan.hooks.clone(),
+        hooks_digest: plan.hooks.digest(),
         materialize,
         launch_command: plan.command.clone(),
         enforcement: plan.enforcement.clone(),

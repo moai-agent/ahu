@@ -60,6 +60,39 @@ my-repository
   sam@0.4.0 — Review authentication tests       [exited]
 ```
 
+## How it works
+
+```mermaid
+flowchart TD
+    A["ahu (in a Git repo, inside cmux)"] --> B{".agents/ahu/config.toml?"}
+    B -- no --> C["First-run setup:<br/>project-agreed harness order,<br/>model order, catalog pin"]
+    C --> D
+    B -- yes --> D["Launcher"]
+
+    D --> E{"@agent typed?"}
+    E -- "@chris" --> F["Named identity<br/>manifest pins harness + model"]
+    E -- blank --> G["Automatic selection<br/>walk project rankings"]
+    F --> H["Show resolved harness + model<br/>BEFORE the prompt is typed"]
+    G --> H
+
+    H --> I["Prompt composer<br/>paste never submits"]
+    I --> J["Plan: snapshot config, detect drift,<br/>read hooks, build argv"]
+    J --> K["Submission preview<br/>identity, Git effects, hooks, warnings"]
+    K -- "no" --> L["Nothing created"]
+    K -- "yes" --> M["git worktree add<br/>branch ahu/&lt;agent&gt;/&lt;task-id&gt;"]
+
+    M --> N["Materialize parent agent config<br/>at native paths"]
+    N --> O["Write task record + prompt.txt"]
+    O --> P["cmux: find-or-create repository group"]
+    P --> Q["cmux: child workspace in that group"]
+    Q --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
+    R --> S["Re-derive argv, compare to record"]
+    S --> T["exec claude --model &lt;id&gt; --agent &lt;name&gt; -- &lt;prompt&gt;"]
+```
+
+Run `ahu explain` for the full architecture overview in your terminal, or
+`ahu explain --mermaid > docs/architecture.md` for the diagrams alone.
+
 ## Registering an agent
 
 `ahu` launches an agent only when `.agents/ahu/agents/<name>.toml` registers it.
@@ -111,6 +144,7 @@ pending behavior change for the next version bump.
 | `ahu tasks` | Tasks launched from this repository |
 | `ahu focus <task-id>` | Bring a task's cmux session to the front |
 | `ahu doctor` | Check repository, configuration, harness, and cmux |
+| `ahu explain` | Architecture overview and Mermaid diagrams (`--mermaid` for just the diagrams) |
 | `ahu help` | Usage |
 
 ## What a task gets
@@ -141,11 +175,71 @@ never puts a prompt into a shell command. The cmux startup command contains only
 `ahu`'s own executable path and task directory, both shell-quoted; the prompt is
 written to a file and handed to the harness as a single argument.
 
+## Hooks
+
+Hooks are shell commands the harness runs on its own lifecycle events. They are
+the most behaviour-determining thing in a repository — one can block a tool call,
+another can put arbitrary text into the model's context — and they often live in
+Git-ignored directories that were never reviewed.
+
+**ahu reports hooks and never writes them.** Adding or editing a hook on your
+behalf would be exactly the invisible behaviour modification ahu exists to
+prevent, and hooks are stronger than prose.
+
+`ahu inventory` and `ahu doctor` list every hook ahu can read, from
+`.claude/settings.json`, `.claude/settings.local.json`, `~/.claude/settings.json`,
+and managed settings, with its event, matcher, scope, and digest. The launch
+preview then says what each one means for the task:
+
+- **Hooks declared in the repository travel into the task worktree** and run
+  there, with their executable bit intact. The preview names them and counts how
+  many inherited configuration files are executable.
+- **Hooks outside project policy raise a warning.** A hook in
+  `settings.local.json` travels but is typically Git-ignored, so it may never have
+  been shared or reviewed. A hook in a home directory or machine policy does not
+  travel at all and can differ for every teammate. ahu prints the specific reason
+  per hook rather than one blanket claim.
+- **A hook change is drift.** The hook digest spans every scope ahu can read,
+  including ones the repository snapshot cannot see, so a teammate's personal hook
+  changing between two `chris@1.2.0` launches is reported rather than hidden under
+  the same version label.
+
+What ahu cannot see: hooks injected by the cmux Claude wrapper, and hooks
+contributed by plugins. Both are reported as gaps rather than omitted. A settings
+file that exists but cannot be parsed is reported as *unknown* hooks, never as
+*no* hooks.
+
 ## Context inventory and hygiene
 
+```mermaid
+flowchart LR
+    subgraph seen["ahu can read these"]
+        I["Agent identity<br/>name, version, harness, model,<br/>system prompt source"]
+        R["Repository instructions<br/>CLAUDE.md, AGENTS.md"]
+        K["Skills"]
+        M["MCP config"]
+        H["Hooks<br/>project / local / user / managed"]
+        T["Task prompt"]
+    end
+
+    subgraph unseen["ahu cannot read these"]
+        B["Harness built-in system prompt"]
+        W["cmux wrapper-injected hooks"]
+        PL["Plugin-contributed hooks"]
+        L["Which sources actually loaded"]
+        X["Retrieval, compaction, caches"]
+    end
+
+    seen --> S["Session"]
+    unseen --> S
+
+    style unseen fill:#fdf1e7,stroke:#b5651d
+```
+
 `ahu inventory` lists what can influence an agent: its fixed identity, the
-repository instructions, skills, memory sources, MCP configuration, personal
-configuration from your home directory, managed policy, and the task prompt.
+repository instructions, skills, hooks, memory sources, MCP configuration,
+personal configuration from your home directory, managed policy, and the task
+prompt.
 Sources are marked `loaded`, `available`, `disabled`, `opaque`, or `absent`, and
 the report ends with what `ahu` cannot see. It is never labelled complete —
 `available` means the harness can discover a source, not that its contents
@@ -175,7 +269,12 @@ These are real and deliberate; `ahu` reports them rather than papering over them
   those as per-agent operations and does not claim "memory off".
 - **The inventory is incomplete by construction.** Built-in harness instructions,
   which sources actually reached the model, in-session retrieval, and compaction
-  are not observable from outside a session.
+  are not observable from outside a session. Hooks injected by the cmux Claude
+  wrapper and hooks contributed by plugins cannot be enumerated either.
+- **ahu does not manage hooks.** It reports them, warns when they fall outside
+  project policy, and counts them as drift. It never adds, edits, removes, or
+  disables one, and it cannot stop an inherited repository hook from running in a
+  task worktree.
 - **Not every directory is scanned.** Configuration inside `node_modules`,
   `target`, `dist`, `build`, `vendor`, virtualenvs, and similar directories is
   neither inventoried nor inherited. Configuration symlinks are reported as gaps
@@ -212,3 +311,11 @@ directory with its own `AHU_STATE_DIR`.
 The suite does not start a real Claude Code session; the harness launch is
 verified against a stand-in executable, and the argument shape against the
 installed Claude Code CLI.
+
+`cargo test --test explain` guards the structure of the built-in diagrams. To
+check that they actually render, parse the emitted blocks with Mermaid itself:
+
+```sh
+cargo run -- explain --mermaid > /tmp/diagrams.md
+# then parse /tmp/diagrams.md with mermaid.parse() from the `mermaid` npm package
+```

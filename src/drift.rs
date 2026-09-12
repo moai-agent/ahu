@@ -23,6 +23,7 @@ pub fn detect(
     identity_digest: Option<&str>,
     snapshot_digest: &str,
     policy_digest: &str,
+    hooks_digest: &str,
     previous: &[(std::path::PathBuf, TaskRecord)],
 ) -> Option<Drift> {
     let last = previous
@@ -45,6 +46,16 @@ pub fn detect(
             "the repository agent configuration changed: {} -> {}",
             &record.config_snapshot_digest[..12],
             &snapshot_digest[..12]
+        ));
+    }
+    // The configuration snapshot already covers hooks declared inside the
+    // repository. This also catches user- and machine-scoped hooks, which never
+    // travel into a worktree and can change without any repository edit.
+    if !record.hooks_digest.is_empty() && record.hooks_digest != hooks_digest {
+        changes.push(format!(
+            "the hooks in effect changed: {} -> {}",
+            &record.hooks_digest[..12],
+            &hooks_digest[..12]
         ));
     }
     if record.policy_digest != policy_digest {

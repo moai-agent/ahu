@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::ResolvedAgent;
 use crate::config::LoadedConfig;
 use crate::harness::EnforcementReport;
+use crate::hooks::HookInventory;
 use crate::snapshot::ConfigSnapshot;
 use crate::util::{Result, digest_file};
 
@@ -58,6 +59,8 @@ pub enum Category {
     Skill,
     Memory,
     Mcp,
+    /// A shell command the harness runs on one of its lifecycle events.
+    Hook,
     /// The submitted task prompt.
     TaskPrompt,
     /// Anything the harness or provider injects that ahu cannot read.
@@ -74,6 +77,7 @@ impl Category {
             Category::Skill => "skill",
             Category::Memory => "memory",
             Category::Mcp => "mcp",
+            Category::Hook => "hook",
             Category::TaskPrompt => "task-prompt",
             Category::HarnessInjected => "harness-injected",
         }
@@ -130,6 +134,7 @@ pub struct Subject<'a> {
     pub harness: &'a str,
     pub model: &'a str,
     pub enforcement: &'a EnforcementReport,
+    pub hooks: &'a HookInventory,
     pub prompt: Option<&'a str>,
 }
 
@@ -143,6 +148,7 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
         harness,
         model,
         enforcement,
+        hooks,
         prompt,
     } = *subject;
     let mut inventory = Inventory::default();
@@ -247,7 +253,70 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
         });
     }
 
-    // 4. The task prompt.
+    // 4. Hooks. These are executable code and they run on the harness's own
+    // events, so they belong in the inventory beside instructions and skills.
+    for hook in &hooks.hooks {
+        inventory.items.push(Item {
+            category: Category::Hook,
+            name: hook.label(),
+            location: Some(hook.source.clone()),
+            scope: hook.scope.as_str().to_string(),
+            visibility: Visibility::Available,
+            digest: Some(hook.digest()[..12].to_string()),
+            shared: !matches!(hook.scope, crate::hooks::Scope::User),
+            notes: {
+                let mut notes = vec![format!("runs on {}", hook.event)];
+                if hook.scope.travels_into_worktree() {
+                    notes.push(
+                        "declared in this repository, so it is copied into the task worktree and runs there"
+                            .to_string(),
+                    );
+                } else {
+                    notes.push(
+                        "not copied into the task worktree; it applies from its native location"
+                            .to_string(),
+                    );
+                }
+                if !hook.scope.is_project_policy() {
+                    notes.push(format!(
+                        "not project policy: {}",
+                        hook.scope.why_not_project_policy()
+                    ));
+                }
+                notes
+            },
+        });
+    }
+    if hooks.wrapper_injected {
+        inventory.items.push(Item {
+            category: Category::Hook,
+            name: "cmux Claude wrapper hooks".to_string(),
+            location: None,
+            scope: "machine".to_string(),
+            visibility: Visibility::Opaque,
+            digest: None,
+            shared: true,
+            notes: vec![
+                "cmux injects Claude Code hooks through its own wrapper; ahu cannot enumerate them"
+                    .to_string(),
+            ],
+        });
+    }
+    for unreadable in &hooks.unreadable {
+        inventory.coverage_gaps.push(format!(
+            "{unreadable} exists but its hooks could not be read, so they are unknown rather than absent"
+        ));
+    }
+    if hooks.wrapper_injected {
+        inventory.coverage_gaps.push(
+            "hooks injected by the cmux Claude wrapper are not enumerable by ahu".to_string(),
+        );
+    }
+    inventory.coverage_gaps.push(
+        "hooks contributed by plugins are not enumerated; only settings files are read".to_string(),
+    );
+
+    // 5. The task prompt.
     if let Some(prompt) = prompt {
         inventory.items.push(Item {
             category: Category::TaskPrompt,
@@ -264,7 +333,7 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
         });
     }
 
-    // 5. What ahu cannot see.
+    // 6. What ahu cannot see.
     inventory.items.push(Item {
         category: Category::HarnessInjected,
         name: format!("{harness} built-in system instructions"),
@@ -371,6 +440,7 @@ pub fn render(inventory: &Inventory) -> String {
         (Category::Skill, "Skills"),
         (Category::Memory, "Memory"),
         (Category::Mcp, "MCP configuration"),
+        (Category::Hook, "Hooks (executable, run by the harness)"),
         (
             Category::PersonalInstructions,
             "Personal (not project policy)",
