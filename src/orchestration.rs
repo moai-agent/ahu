@@ -154,30 +154,57 @@ pub fn compose_prompt(
     }
 
     let mut out = String::new();
-    out.push_str(&open_tag("contract", nonce));
-    out.push('\n');
-    out.push_str(INSTRUCTIONS);
-    if !INSTRUCTIONS.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(&close_tag("contract", nonce));
-    out.push('\n');
-
+    fence(&mut out, "contract", nonce, INSTRUCTIONS);
     if let Some(instructions) = agent_instructions {
         out.push('\n');
-        out.push_str(&open_tag("agent", nonce));
-        out.push('\n');
-        out.push_str(instructions);
-        if !instructions.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&close_tag("agent", nonce));
-        out.push('\n');
+        fence(&mut out, "agent", nonce, instructions);
     }
-
     out.push('\n');
     out.push_str(task_prompt);
     Ok(out)
+}
+
+/// Append one fenced section, with the body reproduced byte for byte.
+///
+/// The layout is exactly
+///
+/// ```text
+/// <<<ahu-{section}-{nonce}>>>\n{body}<<</ahu-{section}-{nonce}>>>\n
+/// ```
+///
+/// so the fence body is *precisely* `body`: everything after the newline that
+/// ends the opening tag's line, up to the closing tag. Nothing is inserted,
+/// trimmed, or normalised.
+///
+/// That exactness is the point. `ResolvedAgent::instructions_digest` is the
+/// digest of the delivered instruction text, and a reader has to be able to take
+/// the bytes out of this fence and get that digest back. An earlier version
+/// appended a newline when the body did not end with one, which made the fence
+/// prettier and the digest a claim about *nearly* these bytes — exactly the kind
+/// of almost-true digest the two-digest split exists to remove. A body without a
+/// trailing newline therefore leaves the closing tag on the same line as the
+/// last word, which is unlovely and unambiguous.
+fn fence(out: &mut String, section: &str, nonce: &str, body: &str) {
+    out.push_str(&open_tag(section, nonce));
+    out.push('\n');
+    out.push_str(body);
+    out.push_str(&close_tag(section, nonce));
+    out.push('\n');
+}
+
+/// Extract a fenced section's body from a delivered prompt.
+///
+/// The inverse of [`fence`], so a caller checking a digest against what was
+/// delivered does not have to re-derive the layout rule and get it subtly wrong.
+pub fn fence_body<'a>(delivered: &'a str, section: &str, nonce: &str) -> Option<&'a str> {
+    let open = open_tag(section, nonce);
+    let close = close_tag(section, nonce);
+    let start = delivered.find(&open)? + open.len();
+    // The newline that terminates the opening tag's line is the delimiter, not
+    // part of the body.
+    let start = start + delivered[start..].strip_prefix('\n').map_or(0, |_| 1);
+    let end = delivered[start..].find(&close)? + start;
+    Some(&delivered[start..end])
 }
 
 /// Compose the delivered prompt and record what it took to build it.

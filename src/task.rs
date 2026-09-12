@@ -65,8 +65,19 @@ pub struct LaunchIdentity {
     /// Where the agent's instructions came from, repository-relative. ahu
     /// delivers them in the prompt; no harness flag selects them.
     pub instructions_source: Option<String>,
+    /// Digest of the complete file at `instructions_source`, frontmatter
+    /// included — the file as a reviewer would find it in the repository.
+    pub source_digest: Option<String>,
+    /// Digest of exactly the instruction text ahu delivered, which for a format
+    /// with frontmatter is the file with that frontmatter stripped.
+    ///
+    /// Schema 1 had this field holding the *whole-file* digest, so its name and
+    /// its value disagreed once ahu began delivering the stripped body. That is
+    /// why [`TASK_SCHEMA_VERSION`] is 2: an old record's `instructions_digest`
+    /// cannot be reinterpreted as this one, and `load` refuses it by version
+    /// rather than silently reading the wrong bytes under the right name.
     pub instructions_digest: Option<String>,
-    /// Digest binding manifest fields and native definition together.
+    /// Digest binding manifest fields and both file digests together.
     pub identity_digest: Option<String>,
     /// Why this pair, for automatic launches.
     pub selection_basis: Option<String>,
@@ -138,7 +149,12 @@ impl TaskRecord {
 
 const TASK_FILE: &str = "task.json";
 const PROMPT_FILE: &str = "prompt.txt";
-pub const TASK_SCHEMA_VERSION: u32 = 1;
+/// Schema 2 splits `LaunchIdentity`'s single instruction digest into
+/// `source_digest` (the whole file) and `instructions_digest` (the delivered
+/// text). A schema-1 record carries the whole-file digest under the *name*
+/// `instructions_digest`, so reading one as schema 2 would attribute file bytes
+/// to delivered bytes. `load` refuses it by version instead.
+pub const TASK_SCHEMA_VERSION: u32 = 2;
 
 /// A time-ordered, collision-resistant task identifier.
 ///
@@ -250,7 +266,11 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
     })?;
     if record.schema_version != TASK_SCHEMA_VERSION {
         bail!(
-            "{} was written by a different ahu schema version ({}).",
+            "{} was written by a different ahu schema version ({}); this ahu build reads \
+             {TASK_SCHEMA_VERSION}.\n\
+             ahu will not reinterpret it: schema 1 recorded the whole file's digest under the \
+             name instructions_digest, which now means the delivered instruction text, so the \
+             same field would be read as covering bytes it does not cover.",
             path.display(),
             record.schema_version
         );

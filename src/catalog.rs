@@ -58,6 +58,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
         enforcement_gaps: &[
             "the model is set at launch with --model, but an interactive session can change it with /model",
             "ahu cannot disable in-session model switching or provider-side routing",
+            "--agent <name> selects through Claude Code's own agent search, which resolves a name and is not bound to the file ahu reads and digests. ahu does not pass it, because it cannot check the binding it would be asserting",
         ],
     },
     HarnessEntry {
@@ -69,7 +70,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
         enforces_model_for_session: false,
         enforcement_gaps: &[
             "the model is set at launch with -m, but ahu cannot stop an interactive session changing it",
-            "Codex has no per-agent selection: there is no --agent flag and no instructions-file option. ahu delivers a named agent's instructions in the prompt, which is what it does on every harness, and which no harness enforces",
+            "Codex has no per-agent selection: no --agent flag and no instructions-file option, and -p/--profile layers model and sandbox config rather than instructions",
             "`codex agents` lists running sessions, not definitions, so .codex/agents/<name>.toml is not a launchable source for this CLI version",
         ],
     },
@@ -82,7 +83,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
         enforces_model_for_session: false,
         enforcement_gaps: &[
             "the model is set at launch with --model, but ahu cannot stop an interactive session changing it",
-            "--agent is accepted but not validated: a nonexistent agent name produced a normal reply instead of an error, and a workspace agent whose instructions were unmistakable did not change the response. ahu therefore does not pass it at all, and delivers the agent's instructions in the prompt instead",
+            "the CLI accepts --agent but does not validate it: a nonexistent agent name produced a normal reply instead of an error, and a workspace agent whose instructions were unmistakable did not change the response, so the harness never confirms an identity was applied. ahu does not pass it",
         ],
     },
 ];

@@ -27,6 +27,25 @@ fn short(digest: &str) -> &str {
     &digest[..end]
 }
 
+/// The three digests that describe a named agent, kept apart on purpose.
+///
+/// `identity` folds the manifest fields and both file digests together, so it
+/// catches everything. On its own it cannot say *what* changed, and "the agent's
+/// instructions or manifest changed" was as specific as drift could be. With the
+/// file digest and the delivered-text digest carried alongside it, drift can name
+/// which one moved — including the case a single digest could never express: a
+/// frontmatter-only edit, where the file changed and the text ahu delivers did
+/// not.
+#[derive(Debug, Clone, Copy)]
+pub struct AgentDigests<'a> {
+    /// `ResolvedAgent::identity_digest()`.
+    pub identity: &'a str,
+    /// Digest of the whole file at `source.path`, frontmatter included.
+    pub source: &'a str,
+    /// Digest of exactly the instruction text ahu delivers.
+    pub instructions: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Drift {
     pub agent_label: String,
@@ -39,7 +58,7 @@ pub struct Drift {
 /// agent at the same version.
 pub fn detect(
     agent_label: &str,
-    identity_digest: Option<&str>,
+    agent: Option<AgentDigests<'_>>,
     snapshot_digest: &str,
     policy_digest: &str,
     hooks_digest: &str,
@@ -51,14 +70,56 @@ pub fn detect(
     let record = &last.1;
     let mut changes = Vec::new();
 
-    if let (Some(now), Some(before)) = (identity_digest, record.identity.identity_digest.as_deref())
-        && now != before
+    if let (Some(now), Some(before)) = (
+        agent.map(|a| a.identity),
+        record.identity.identity_digest.as_deref(),
+    ) && now != before
     {
-        changes.push(format!(
-            "the agent's instructions or manifest changed: {} -> {}",
-            short(before),
-            short(now)
-        ));
+        // Name the digest that actually moved. A reader comparing a digest
+        // against a file needs to know which bytes it covers, and the two
+        // answers differ for a frontmatter-only edit.
+        let agent = agent.expect("the identity digest came from it");
+        let instructions_changed = matches!(
+            record.identity.instructions_digest.as_deref(),
+            Some(before) if before != agent.instructions
+        );
+        let source_changed = matches!(
+            record.identity.source_digest.as_deref(),
+            Some(before) if before != agent.source
+        );
+        if instructions_changed {
+            changes.push(format!(
+                "the instruction text ahu delivers changed: {} -> {} (digest of the delivered \
+                 text, after any frontmatter is stripped)",
+                short(record.identity.instructions_digest.as_deref().unwrap_or("")),
+                short(agent.instructions)
+            ));
+        }
+        if source_changed {
+            changes.push(format!(
+                "the agent's source file changed: {} -> {} (digest of the whole file, \
+                 frontmatter included){}",
+                short(record.identity.source_digest.as_deref().unwrap_or("")),
+                short(agent.source),
+                if instructions_changed {
+                    ""
+                } else {
+                    " -- the text ahu delivers is unchanged, so this is a frontmatter or \
+                     metadata edit"
+                }
+            ));
+        }
+        if !instructions_changed && !source_changed {
+            // Either the manifest moved, or the record predates one of the two
+            // fields. Say which digest this is rather than implying it names a
+            // file.
+            changes.push(format!(
+                "the agent's identity changed: {} -> {} (combined digest of the manifest's name, \
+                 version, harness and model with both file digests)",
+                short(before),
+                short(now)
+            ));
+        }
     }
     if record.config_snapshot_digest != snapshot_digest {
         changes.push(format!(

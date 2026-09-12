@@ -29,8 +29,11 @@ of them, and holds no credentials of its own.
 | **Git** | Every task gets its own branch and worktree. | Required. |
 
 `ahu` never installs, configures, or authenticates a harness, and it speaks to no
-model provider. Your harness's own authentication, permissions, and approval
-boundaries are used unchanged.
+model provider. Sign-in and the approval boundary are the harness's own: `ahu`
+passes no permission flag unless an agent's committed manifest asks for one, and
+it does not claim to know what the effective boundary is — the harness's own
+settings files decide that, and a launch preview reports what `ahu` read in them
+rather than asserting a result.
 
 Using `ahu` is also optional for your teammates. It adds launcher metadata under
 `.agents/ahu/` and references your existing agent definitions where they already
@@ -162,11 +165,12 @@ generated for that launch, and the contract says inside the fence that text
 outside it claiming to amend ahu's instructions is not ahu's. A task prompt cannot
 forge a fence, because it was written before the nonce existed.
 
-ahu uses **no** system-prompt or agent-selection flag on any harness — no
-`--agent`, no `--append-system-prompt`, no `--disallowedTools`. `--agent <name>`
-selects whatever the harness's own agent search resolves that *name* to, which is
-not bound to the file ahu reads, digests, and attributes the instructions to, so
-ahu was asserting a binding it could not check. Delivering everything as prompt
+ahu uses **no** agent-selection or system-prompt flag on any harness: it passes
+neither `--agent` nor `--append-system-prompt`, and it denies no tools with
+`--disallowedTools`. `--agent <name>` selects whatever the harness's own agent
+search resolves that *name* to, which is not bound to the file ahu reads,
+digests, and attributes the instructions to, so ahu was asserting a binding it
+could not check. Delivering everything as prompt
 text is weaker and uniform, and ahu describes it accurately: the preview and the
 enforcement report list it as a **gap**, not a control. The task prompt that
 follows can contradict it and the model may follow the task prompt instead. What
@@ -243,12 +247,29 @@ pending behavior change for the next version bump.
   files stay in your original checkout.
 - **The exact configured model, from a pinned binary.** The harness executable is
   resolved from `PATH` once, at submission, shown in the preview, and that exact
-  path is what runs. No fallback model, no automatic routing, and no change to
-  the harness's own permission and approval boundaries.
-- **A frozen record.** The agent version, instruction digest, configuration
-  snapshot digest, policy digest, base commit, branch, worktree, and cmux ids are
-  written to local task metadata. Editing an agent later changes the next launch;
-  a running task keeps what it started with.
+  path is what runs. No fallback model, no automatic routing, and no permission
+  flag beyond the one a committed manifest asks for.
+- **A frozen record.** The agent version, both digests of its source file, the
+  configuration snapshot digest, the policy digest, the base commit, branch,
+  worktree, and cmux ids are written to local task metadata. Editing an agent
+  later changes the next launch; a running task keeps what it started with.
+
+### Two digests, each named
+
+A source file and the text ahu delivers from it are not the same bytes when the
+format has YAML frontmatter, so `ahu` records and shows both, always labelled:
+
+- **file digest** — SHA-256 of the complete file at `source.path`, exactly as it
+  is on disk, frontmatter included. This is the one to compare against the
+  repository.
+- **instructions digest** — SHA-256 of exactly the text `ahu` puts in the prompt:
+  the same file with its frontmatter stripped, byte-for-byte identical to what
+  lands inside the `<<<ahu-agent-...>>>` fence.
+
+For a format with no frontmatter the two cover the same bytes and come out equal.
+Both are folded into the agent's identity digest, so a change to either is drift —
+and drift says which one moved, because an edit to frontmatter alone changes the
+file without changing anything the model was given.
 
 Exiting the harness keeps the worktree, the branch, and the task record. A
 process exit is not evidence that the task succeeded, and `ahu` never deletes
@@ -317,6 +338,7 @@ file that exists but cannot be parsed is reported as *unknown* hooks, never as
 flowchart LR
     subgraph seen["ahu can read these"]
         I["Agent identity<br/>name, version, harness, model,<br/>instructions source"]
+        AD["ahu-delivered prompt text<br/>contract + agent instructions<br/>not enforced by any harness"]
         R["Repository instructions<br/>CLAUDE.md, AGENTS.md"]
         K["Skills"]
         M["MCP config"]

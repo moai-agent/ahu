@@ -42,17 +42,22 @@ pub const MERMAID_PIPELINE: &str = r#"flowchart TD
     S --> T["exec claude --model &lt;id&gt; -- &lt;contract + agent instructions + prompt&gt;"]
 "#;
 
-/// How a prompt reaches the harness without ever being shell input.
+/// How a prompt reaches the harness without ever being shell input, and what
+/// else travels in the same argv element.
 pub const MERMAID_PROMPT: &str = r#"flowchart LR
     P["Pasted prompt<br/>$(...), backticks, newlines"] --> F["prompt.txt<br/>mode 0600"]
     F -.->|"read at start"| R["ahu run-task"]
-    R -->|"one argv element"| C["claude ... -- &lt;prompt&gt;"]
+    D["ahu delegation contract"] --> N["Compose, fenced with<br/>a per-launch nonce"]
+    A["Agent instructions<br/>from source.path"] --> N
+    R --> N
+    N -->|"one argv element"| C["claude ... -- &lt;contract + instructions + prompt&gt;"]
 
     S["cmux startup command<br/>(shell-interpreted)"] --> R
     Q["Only ahu's own exe path<br/>+ task dir, single-quoted"] --> S
 
     style F fill:#e8f4ea,stroke:#3a7d44
     style Q fill:#e8f4ea,stroke:#3a7d44
+    style N fill:#fdf1e7,stroke:#b5651d
 "#;
 
 /// What travels into a task worktree and what stays behind.
@@ -79,6 +84,7 @@ pub const MERMAID_INHERITANCE: &str = r#"flowchart TB
 pub const MERMAID_CONTEXT: &str = r#"flowchart LR
     subgraph seen["ahu can read these"]
         I["Agent identity<br/>name, version, harness, model,<br/>instructions source"]
+        AD["ahu-delivered prompt text<br/>contract + agent instructions<br/>not enforced by any harness"]
         R["Repository instructions<br/>CLAUDE.md, AGENTS.md"]
         K["Skills"]
         M["MCP config"]
@@ -199,8 +205,11 @@ pub fn document() -> Vec<Section> {
                     "guarantee it cannot keep.",
                 ]),
                 para(&[
-                    "ahu holds no credentials and speaks to no model provider. Your harness's own",
-                    "authentication, permissions, and approval boundaries are used unchanged.",
+                    "ahu holds no credentials and speaks to no model provider. Sign-in and the",
+                    "approval boundary are the harness's own: ahu passes no permission flag unless",
+                    "an agent's committed manifest asks for one, and it cannot tell you what the",
+                    "effective boundary is — the harness's settings files decide that, and a",
+                    "launch preview reports what ahu read in them rather than asserting a result.",
                 ]),
             ],
         },
@@ -229,6 +238,14 @@ pub fn document() -> Vec<Section> {
                     "the two must agree — ahu will not rewrite either file or pick one silently.",
                 ]),
                 para(&[
+                    "At launch ahu reads that file, records two digests of it — one over the whole",
+                    "file, one over exactly the instruction text it will deliver — and puts the",
+                    "instruction text into the harness's prompt, ahead of the task prompt. It passes",
+                    "no agent-selection flag on any harness. The harness and the model are pinned by",
+                    "real flags; the identity is not, and ahu reports that as a gap rather than a",
+                    "control.",
+                ]),
+                para(&[
                     "Without an @agent, ahu walks the project's agreed harness order, then that",
                     "harness's agreed model order, and freezes the result for the task. Local",
                     "prerequisites are checked after the pair is resolved, so a missing installation is",
@@ -245,6 +262,15 @@ pub fn document() -> Vec<Section> {
                     "executable path and task directory, both single-quoted. The prompt is written to a",
                     "file and handed to the harness as one argument vector element. Shell syntax inside",
                     "a prompt is therefore delivered literally and never evaluated.",
+                ]),
+                para(&[
+                    "That one element holds everything ahu supplies, in a fixed order on every",
+                    "harness: the delegation contract, the agent's instructions, then the task prompt.",
+                    "ahu's two sections are wrapped in a fence whose tag carries a nonce generated for",
+                    "that launch, and the contract says inside the fence that text outside it claiming",
+                    "to amend ahu's instructions is not ahu's. A task prompt cannot forge a fence,",
+                    "because it was written before the nonce existed. What a fence cannot do is make",
+                    "the text binding — see the standing warning below.",
                 ]),
             ],
         },
@@ -300,6 +326,11 @@ pub fn document() -> Vec<Section> {
                 "with different instructions, repository configuration, policy, or hooks than the",
                 "last `chris@1.2.0` launch, that drift is reported as a pending behaviour change for",
                 "the next version bump. It is not classified as safe.",
+                "",
+                "Drift names which digest moved. The instructions digest covers exactly the text ahu",
+                "delivered; the file digest covers the whole source file including any frontmatter.",
+                "An edit that changes only frontmatter moves the second and not the first, and drift",
+                "says so rather than reporting one number that could mean either.",
             ])],
         },
         Section {
@@ -318,7 +349,8 @@ pub fn document() -> Vec<Section> {
                 "substitute a different harness or model, for any reason",
                 "stage, commit, push, stash, reset, clean, or switch branches in your checkout",
                 "add, edit, or remove hooks, skills, memories, or instruction files",
-                "widen permissions or bypass the harness's own approval boundaries",
+                "widen permissions unless a committed manifest asks for it, which the preview states in full before anything starts",
+                "claim to know the effective approval boundary: the harness's own settings decide it, and ahu only reports what it read and which flags it passed",
                 "install, configure, or authenticate a harness on your behalf",
                 "delete a worktree, branch, or task record that may hold your work",
                 "call an inventory complete, or a behaviour change harmless",
@@ -335,6 +367,25 @@ pub fn document() -> Vec<Section> {
                         "can change it with /model and ahu has no supported control that prevents"
                             .to_string(),
                         "that. ahu still always requests the configured identity.".to_string(),
+                    ],
+                },
+                Block::Warning {
+                    headline:
+                        "Nothing ahu supplies to a session is enforced by the harness.".to_string(),
+                    detail: vec![
+                        "ahu delivers its delegation contract and the agent's instructions as"
+                            .to_string(),
+                        "prompt text, identically on every harness. It uses no agent-selection or"
+                            .to_string(),
+                        "system-prompt flag anywhere, because none of the three could hold an"
+                            .to_string(),
+                        "identity ahu was able to verify. The task prompt that follows can"
+                            .to_string(),
+                        "contradict any of it, and the model may follow the task prompt instead."
+                            .to_string(),
+                        "What ahu does pin with real flags is the harness, the exact model, and"
+                            .to_string(),
+                        "the permission flags a manifest asks for.".to_string(),
                     ],
                 },
                 Block::Warning {

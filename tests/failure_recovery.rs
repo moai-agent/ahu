@@ -201,6 +201,7 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
             instructions_source: None,
+            source_digest: None,
             instructions_digest: None,
             identity_digest: None,
             selection_basis: Some("test".to_string()),
@@ -566,6 +567,7 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
             instructions_source: Some(".claude/agents/chris.md".to_string()),
+            source_digest: Some("1".repeat(64)),
             instructions_digest: Some("1".repeat(64)),
             identity_digest: Some("1".repeat(64)),
             selection_basis: None,
@@ -592,7 +594,11 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
 
     let found = drift::detect(
         "chris@1.0.0",
-        Some(&agent.identity_digest()),
+        Some(ahu::drift::AgentDigests {
+            identity: &agent.identity_digest(),
+            source: &agent.source_digest,
+            instructions: &agent.instructions_digest,
+        }),
         &plan.snapshot.digest(),
         &loaded.digest,
         &plan.hooks.digest(),
@@ -600,8 +606,24 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
     )
     .expect("drift detected");
     let rendered = drift::render(&found);
+    // Drift names which digest moved, and what that digest covers. "the agent's
+    // instructions or manifest changed" could not distinguish an edit to the
+    // delivered text from an edit to frontmatter, and a reader comparing a
+    // digest against a file has to know which bytes it covers.
     assert!(
-        rendered.contains("instructions or manifest changed"),
+        rendered.contains("the instruction text ahu delivers changed"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("after any frontmatter is stripped"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("the agent's source file changed"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("the whole file, frontmatter included"),
         "{rendered}"
     );
     assert!(rendered.contains("bump the agent's version"), "{rendered}");
@@ -653,6 +675,7 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
             instructions_source: Some(".claude/agents/chris.md".to_string()),
+            source_digest: None,
             instructions_digest: None,
             identity_digest: None,
             selection_basis: None,
@@ -679,7 +702,11 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
 
     let found = drift::detect(
         "chris@1.0.0",
-        Some(&agent.identity_digest()),
+        Some(ahu::drift::AgentDigests {
+            identity: &agent.identity_digest(),
+            source: &agent.source_digest,
+            instructions: &agent.instructions_digest,
+        }),
         &plan.snapshot.digest(),
         &loaded.digest,
         &plan.hooks.digest(),
