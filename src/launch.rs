@@ -21,14 +21,9 @@ use crate::util::{Error, Result};
 
 use serde::{Deserialize, Serialize};
 
-/// The one thing ahu most needs a reader of a launch preview to understand.
-///
-/// ahu used to spend one channel per harness on this — `--agent` and
-/// `--append-system-prompt` for Claude Code, `--agent` for the Antigravity CLI,
-/// a bare prefix on the prompt for Codex — and could enforce none of them. It
-/// now delivers the same text the same way everywhere, which is weaker than a
-/// system prompt and much easier to describe truthfully. This is the description,
-/// and it is a **gap**, never an applied control.
+/// The launch preview discloses prompt delivery as an enforcement gap.
+/// Instructions are delivered uniformly, without system-prompt or agent-selection
+/// flags, and can be contradicted by the task prompt.
 pub const DELIVERY_IS_NOT_ENFORCEMENT: &str = "ahu delivers the agent's instructions and its delegation contract as prompt text on every \
      harness. This is not an enforced system prompt: the task prompt that follows can contradict \
      it, and the model may follow the task prompt instead. ahu does not use harness \
@@ -795,12 +790,8 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
             ))
             .with_kind(crate::util::ErrorKind::Prerequisite)
         })?;
-    // `which` builds this path as `<PATH entry>/<program>`, so comparing the
-    // file name to the program name can never fail — it was a tautology, not a
-    // check. What actually has to hold is that the binary is not something the
-    // repository put there: an absolute path, and outside both the repository
-    // and the task worktree. A harness resolved from inside the tree the agent
-    // is about to edit is exactly the case worth refusing.
+    // The resolved executable must be absolute and outside the repository and
+    // task worktree, including when reached through a symlink.
     if !executable.is_absolute() {
         bail!(
             "PATH resolved {} to the relative path {}, which would be taken from the task \

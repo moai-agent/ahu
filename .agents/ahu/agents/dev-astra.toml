@@ -1,11 +1,11 @@
 schema_version = 1
 name = "dev-astra"
-version = "1.0.0"
+version = "1.0.1"
 description = "Validates and remediates reported issues with regression coverage"
 harness = "codex"
 model = "gpt-6-astra"
 
-# Retain the project's existing opt-in to unattended tool use.
+# This agent requests unattended tool use through the harness adapter.
 permissions = "auto"
 
 [source]

@@ -41,8 +41,7 @@ pub struct ProjectConfig {
     pub schema_version: u32,
     /// Project-agreed harness order for launches without a named agent.
     pub harness_preferences: Vec<String>,
-    /// Always `project-ranked` in 0.1.1; the field exists so a future selection
-    /// mode is an explicit, reviewable configuration change.
+    /// The supported selection policy is `project-ranked`.
     pub model_selection: String,
     /// Pinned compatibility catalog revision.
     pub catalog_version: String,

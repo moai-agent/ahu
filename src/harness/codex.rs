@@ -16,27 +16,9 @@
 //! pins the harness and the exact model; its instructions are not enforceable
 //! here, and they are not enforceable on any other harness either.
 //!
-//! This adapter used to argue that ahu should therefore *not* put the agent's
-//! instructions in the prompt, because doing so "would be exactly the silent
-//! translation it forbids". The maintainer revisited that, and the reasoning it
-//! turned on no longer holds:
-//!
-//!   - it assumed some other harness had a real instruction channel to be
-//!     consistent with. None of the three does. Claude Code's `--agent <name>`
-//!     selects by *name* through the harness's own agent search, which is not
-//!     bound to the file ahu reads and digests, so ahu was asserting a binding
-//!     it could not check;
-//!   - "silent" was the load-bearing word, and delivery is not silent. ahu
-//!     names the source file and both its digests in the preview, fences its own
-//!     text with a per-launch nonce, and reports the whole arrangement as a
-//!     **gap** — see `crate::launch::DELIVERY_IS_NOT_ENFORCEMENT`.
-//!
-//! Unless the same system-prompt behaviour can be enforced on every harness, the
-//! honest position is that a task prompt can override ahu's text to some degree
-//! on all of them. ahu now says that once, applies it uniformly, and delivers
-//! everything the same way everywhere rather than being right about one harness
-//! and quiet about two. Codex is no longer the exception this paragraph
-//! described; it is the ordinary case.
+//! Instructions and the delegation contract travel in the prompt, attributed
+//! to the source file and delivered-text digest. This is reported as a gap in
+//! `crate::launch::DELIVERY_IS_NOT_ENFORCEMENT`, not as identity enforcement.
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::agent::Permissions;
@@ -111,8 +93,7 @@ impl Adapter for Codex {
 }
 
 /// State the approval flags this adapter passes, from the same value that
-/// decides them. See the note in the Claude Code adapter: a fixed string here
-/// contradicted the argv ahu was about to run.
+/// decides them, so the disclosure matches the requested argv.
 fn permission_control(permissions: Permissions) -> String {
     let tail = "ahu does not know the effective approval boundary, only which flags it \
                 passed. Codex's own settings decide it, including any this repository \

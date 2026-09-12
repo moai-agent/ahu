@@ -1,10 +1,11 @@
 //! The agent-configuration snapshot and how it is materialized into a task
 //! worktree.
 //!
-//! A task worktree inherits the *complete* parent agent configuration as it
+//! A task worktree inherits recognized parent agent configuration as it
 //! stands in the working tree at submission — additions, modifications, and
 //! deletions, committed or not, ignored or not. It does not inherit unrelated
-//! dirty source files, and it never reaches outside the repository.
+//! dirty source files. The scan is bounded by skip rules and a depth limit,
+//! and does not follow configuration symlinks outside the repository.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -30,7 +31,8 @@ const CONFIG_FILE_NAMES: &[&str] = &[
 ///
 /// This keeps the scan bounded on large checkouts. It is a documented
 /// limitation, not a claim of completeness: configuration buried inside one of
-/// these directories is not inherited, and the inventory says so.
+/// these directories is not snapshotted. Committed files still arrive through
+/// the base checkout; the inventory discloses this coverage gap.
 const SKIP_DIR_NAMES: &[&str] = &[
     ".git",
     // Task worktrees live in the repository. They are checkouts of it, so

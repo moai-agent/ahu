@@ -29,13 +29,9 @@ fn short(digest: &str) -> &str {
 
 /// The three digests that describe a named agent, kept apart on purpose.
 ///
-/// `identity` folds the manifest fields and both file digests together, so it
-/// catches everything. On its own it cannot say *what* changed, and "the agent's
-/// instructions or manifest changed" was as specific as drift could be. With the
-/// file digest and the delivered-text digest carried alongside it, drift can name
-/// which one moved — including the case a single digest could never express: a
-/// frontmatter-only edit, where the file changed and the text ahu delivers did
-/// not.
+/// `identity` folds manifest fields and both file digests together. Separate
+/// file and instruction digests identify frontmatter-only edits without
+/// implying that the delivered instruction text changed.
 #[derive(Debug, Clone, Copy)]
 pub struct AgentDigests<'a> {
     /// `ResolvedAgent::identity_digest()`.

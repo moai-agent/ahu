@@ -1,11 +1,11 @@
 schema_version = 1
 name = "defsec-astra"
-version = "1.0.0"
+version = "1.0.1"
 description = "Reviews and implements defensive programming and focused refactoring"
 harness = "codex"
 model = "gpt-6-astra"
 
-# Retain the project's existing opt-in to unattended tool use.
+# This agent requests unattended tool use through the harness adapter.
 permissions = "auto"
 
 [source]

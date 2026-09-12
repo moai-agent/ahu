@@ -400,10 +400,8 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
 
 /// The one sentence `ahu tasks` may print only when it really found nothing.
 ///
-/// Named so a test can assert on its absence: for five refused records, five
-/// worktrees and three live cmux sessions, this is not a reassurance, it is a
-/// false statement — and the surface that should have told the user where their
-/// leftover worktrees are is the one that denied they existed.
+/// Unreadable records still count as task directories; they must not produce
+/// a false claim that no tasks exist.
 pub const NO_TASKS: &str = "No ahu tasks have been launched from this repository.";
 
 /// `ahu tasks`
@@ -1265,7 +1263,7 @@ pub fn render_preview(
         display_safe(&plan.pair.catalog_version)
     ));
     if let Some(agent) = &plan.agent {
-        // This attribution is now checkable rather than asserted: ahu delivers
+        // Attribution covers the delivered bytes: ahu delivers
         // the instruction text it parsed out of exactly this file, so there is
         // no name for a harness to resolve somewhere else.
         //
@@ -1467,9 +1465,8 @@ pub fn with_stdio_output<T>(
 
 /// Every task directory `ahu tasks` accounts for, exposed for tests.
 ///
-/// Includes the ones whose records could not be read: they are still tasks that
-/// were launched, and a helper that silently omitted them would reproduce the
-/// bug this listing exists to fix.
+/// Includes unreadable records so callers can account for retained work even
+/// when a record cannot be trusted or interpreted.
 pub fn task_dirs(repo_identity: &str) -> Result<Vec<PathBuf>> {
     Ok(task::list(repo_identity)?.dirs())
 }

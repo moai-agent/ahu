@@ -3,7 +3,7 @@
 //! An adapter's job is to turn a frozen launch identity into an exact argument
 //! vector, and to state honestly what it can and cannot enforce. It may not
 //! translate an agent to another harness, drop native settings, or widen
-//! permissions.
+//! permissions beyond the manifest request.
 
 pub mod antigravity;
 pub mod claude_code;
@@ -15,7 +15,7 @@ use crate::bail;
 use crate::util::Result;
 
 /// Legacy task-record wording. Retained for readers and compatibility tests;
-/// normal harness capabilities no longer produce reliability warnings.
+/// normal harness capabilities do not produce reliability warnings.
 pub const RELIABILITY_WARNING: &str =
     "This harness is not reliable for producing consistent personified agent behavior.";
 
@@ -28,10 +28,8 @@ pub struct LaunchRequest<'a> {
     /// delegation contract, the resolved agent's fenced instructions, and the
     /// task prompt, composed by `crate::orchestration`.
     ///
-    /// There is no separate agent-selection or system-prompt channel. ahu used
-    /// to have one per harness and could enforce none of them, so adapters no
-    /// longer take an agent name at all: an adapter cannot select an identity
-    /// ahu has not read.
+    /// There is no separate agent-selection or system-prompt channel. Adapters
+    /// receive composed text, not a name to resolve through native agent search.
     pub prompt: &'a str,
     /// Working directory: the task worktree.
     pub cwd: &'a std::path::Path,

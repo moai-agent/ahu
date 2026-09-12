@@ -2,24 +2,11 @@
 //!
 //! # Why everything travels in the prompt
 //!
-//! ahu used to split its contribution across whatever channel each harness
-//! happened to offer: Claude Code got `--append-system-prompt` and `--agent`,
-//! the Antigravity CLI got `--agent`, and Codex — which has neither — got the
-//! contract concatenated onto the front of the task prompt. Three harnesses,
-//! three different guarantees, and the preview described all of them in Claude's
-//! terms.
-//!
-//! Only one of those channels was ever enforceable, and ahu could not check even
-//! that one: `--agent <name>` selects whatever the harness's own agent search
-//! resolves the *name* to, which need not be the file ahu read, digested, and
-//! attributed the instructions to.
-//!
-//! So ahu no longer uses harness system-prompt or agent-selection channels at
-//! all. Everything it supplies — its delegation contract and the resolved
-//! agent's instructions — is delivered as prompt text, in the same order, on
-//! every harness. That is weaker than a system prompt and ahu says so in the
-//! preview and in `EnforcementReport::gaps`. It is also honest, uniform, and
-//! checkable: what ahu digests is exactly what ahu delivers.
+//! Every harness receives the delegation contract, the resolved agent's
+//! instructions, and the task prompt in that order. ahu uses no system-prompt
+//! or agent-selection flags: a harness's lookup by name does not establish a
+//! binding to the file ahu read and digested. Prompt delivery is disclosed in
+//! the preview and `EnforcementReport::gaps`; it does not enforce authority.
 //!
 //! # Fences
 //!

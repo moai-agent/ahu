@@ -95,8 +95,8 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
         }
     }
 
-    // Definitions for harnesses ahu recognises but cannot launch yet. They are
-    // reported so onboarding tells the truth about what is in the repository.
+    // Additional native definitions are listed with registration blockers.
+    // This discovery path does not parse their metadata or offer registration.
     for (dir, pattern, format) in [
         (".codex/agents", "toml", SourceFormat::CodexAgent),
         (".agents/agents", "md", SourceFormat::AntigravityAgent),
@@ -138,7 +138,7 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
                 format,
                 native_model: None,
                 blockers: vec![format!(
-                    "ahu 0.1.1 has no validated adapter for harness {harness:?}, so this definition cannot be launched through ahu"
+                    "native onboarding for harness {harness:?} does not support registering this definition; use an explicit manifest with a supported instruction source"
                 )],
                 preserved_fields: Vec::new(),
                 description: String::new(),
@@ -151,14 +151,9 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
 
 /// Quote `value` as a TOML basic string.
 ///
-/// Rust's `{:?}` is not a TOML serializer. It escapes a non-printable character
-/// as `\u{XXXX}`, and TOML's escape is `\uXXXX` with exactly four hex digits —
-/// so `{:?}` on a `description` carrying a bidi override or a zero-width
-/// character produced a manifest that `agent::load_all` could not parse. One
-/// bad manifest fails the whole registry load by design, so a single crafted
-/// `description:` in a `.claude/agents/<name>.md` frontmatter could leave
-/// `ahu agents`, `ahu onboard`, and the interactive launcher's agent list
-/// broken until the file was found and deleted by hand.
+/// Rust debug escaping uses `\u{XXXX}`, while TOML requires fixed-width
+/// Unicode escapes. Use TOML-compatible escapes so control and bidi characters
+/// cannot break registration or change terminal presentation.
 fn toml_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');

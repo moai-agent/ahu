@@ -107,18 +107,14 @@ pub fn digest_bytes(bytes: &[u8]) -> String {
 
 /// Largest configuration file ahu will read into a digest.
 ///
-/// Agent configuration is prose, JSON, and small scripts. This is far above
-/// anything legitimate and far below a size that matters.
+/// Bounds hashing work for repository-controlled configuration files.
 pub const MAX_CONFIG_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Lowercase hex SHA-256 of a file's contents.
 ///
-/// Streamed rather than read whole, and capped. A repository can commit a file
-/// of any size at a configuration path, and this runs on every one of them —
-/// once in `snapshot::collect` and twice more per file in `materialize` — so
-/// `ahu`, `ahu inventory`, `ahu doctor` and every launch would each read it end
-/// to end. A committed multi-gigabyte `.claude/x` was enough to stall all of
-/// them before any preview was shown.
+/// Streamed and capped because snapshot collection and materialization hash
+/// repository-controlled files repeatedly; file size must not imply unbounded
+/// memory use or read time.
 pub fn digest_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
@@ -570,11 +566,8 @@ fn plain_inline(mut text: &str, depth: usize) -> String {
 
 /// Make a path safe to print to a terminal.
 ///
-/// `display_safe` is applied to every repository-derived *string* ahu prints,
-/// but `Path::display()` was used raw. Under today's threat model the checkout
-/// path is chosen by whoever ran `git clone`, not by the repository, so this is
-/// not exploitable from a clone alone — it is one refactor away from being so,
-/// and a renderer should not have two rules for the same job.
+/// Apply the same control-character escaping used for repository-derived
+/// strings to paths, including paths chosen by the invoking user.
 pub fn display_path(path: &Path) -> String {
     display_safe(&path.to_string_lossy())
 }

@@ -1,6 +1,6 @@
 //! ahu's local state directory.
 //!
-//! Everything here is operational state: task records, worktrees, the
+//! This module locates operational state: task records, task worktrees, the
 //! repository-to-cmux-group mapping, and hygiene review timestamps. None of it
 //! is policy. Policy lives in the repository, the same for every user.
 
@@ -387,8 +387,8 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Resul
 
 /// Create a directory tree that only its owner can enter.
 ///
-/// ahu's state holds task prompts, records, and worktrees. None of it has any
-/// reason to be readable by other accounts on the machine.
+/// Task state contains prompts and records and should be accessible only to
+/// the owning account. Worktree locations are managed separately.
 pub fn create_private_dir_all(dir: &Path) -> Result<()> {
     let state_root = root()?;
     if let Some(local_state) = dir.ancestors().find(|ancestor| {

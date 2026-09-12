@@ -23,7 +23,7 @@ text on every harness, fenced with a per-launch nonce. ahu passes no
 agent-selection or system-prompt flag anywhere, so none of it is enforced by the
 harness -- the preview says so as a gap on every launch. What ahu does pin with
 real flags is the harness, the exact model, and any permission widening a
-committed manifest asks for.
+manifest asks for.
 
 Commands:
   help                  Print this help message
@@ -36,7 +36,7 @@ Commands:
                         With --title alone, the description also uses that title.
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
-  inventory [@agent]    Show everything that can influence an agent's context
+  inventory [@agent]    Inspect visible context sources and coverage gaps
   hygiene [@agent]      Run the context hygiene review now
   tasks                 List tasks launched from this repository
   task <task-id> [--output json]

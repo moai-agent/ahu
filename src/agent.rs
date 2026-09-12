@@ -24,10 +24,11 @@ pub enum SourceFormat {
     /// Plain Markdown instructions explicitly selected by the project.
     #[serde(rename = "markdown")]
     Markdown,
-    /// `.codex/agents/<name>.toml`. Recognised, but not launchable in 0.1.1.
+    /// `.codex/agents/<name>.toml`. Explicit manifests deliver its text verbatim;
+    /// native TOML fields are not interpreted as instruction metadata.
     #[serde(rename = "codex-agent")]
     CodexAgent,
-    /// `.agents/agents/<name>/agent.md`. Recognised, not launchable in 0.1.1.
+    /// `.agents/agents/<name>/agent.md`, YAML frontmatter plus Markdown instructions.
     #[serde(rename = "antigravity-agent")]
     AntigravityAgent,
 }
@@ -45,16 +46,9 @@ impl SourceFormat {
     /// Whether a file of this format carries YAML frontmatter that is metadata
     /// rather than instruction text.
     ///
-    /// This is all a source format decides now. It used to also decide whether
-    /// ahu asked the harness for the agent by name, which was the unsound part:
-    /// `--agent <name>` selects whatever the harness's own search resolves that
-    /// name to, and nothing bound that to the file ahu read and digested. ahu no
-    /// longer uses any agent-selection flag, so a format's only job is saying
-    /// how to turn its file into instruction text.
-    ///
-    /// That is also why `ResolvedAgent` carries two digests: for a format with
-    /// frontmatter the file and the delivered text are different bytes, and one
-    /// number cannot honestly stand for both.
+    /// Formats determine how source bytes become instruction text. Frontmatter
+    /// is excluded from the delivered text, so `ResolvedAgent` records separate
+    /// file and instruction digests. No format selects an agent by harness name.
     pub fn has_frontmatter(self) -> bool {
         matches!(
             self,
@@ -92,9 +86,9 @@ pub enum Permissions {
     /// Pass nothing. The harness's own defaults and prompts apply.
     #[default]
     Prompt,
-    /// Approve file edits without asking; still prompt for other tools.
+    /// Request the adapter's edit-approval mode; native settings still apply.
     AcceptEdits,
-    /// Approve tool use without asking. The agent runs unattended.
+    /// Request the adapter's automatic approval mode; native settings still apply.
     Auto,
 }
 
@@ -116,12 +110,8 @@ impl Permissions {
     pub fn disclosure(self) -> &'static str {
         match self {
             Permissions::Prompt => {
-                // "the harness's own approval prompts apply" asserted a property
-                // of the session. ahu does not know that property: the effective
-                // boundary is set by the harness's own settings files, which this
-                // repository may carry into the task worktree and which ahu only
-                // reads, never controls. So say what ahu did, and point at the
-                // settings summary for what decides the rest.
+                // Native settings determine the effective boundary. Disclose
+                // the flags ahu passes without inferring the session policy.
                 "ahu passes no permission flag. The effective approval boundary is set by the \
                  harness's own settings, including any settings this repository carries into the \
                  task worktree — see the settings summary above"
@@ -182,10 +172,8 @@ pub struct ResolvedAgent {
     /// reason about, and the point of having two is that neither needs
     /// reasoning about.
     ///
-    /// Keeping only one value was the actual defect: `TaskRecord`'s field was
-    /// named `instructions_digest` and held the whole-file digest, so the name
-    /// and the value disagreed from the moment ahu started delivering the
-    /// stripped body.
+    /// Separate digests let readers compare the source file and the delivered
+    /// body without treating frontmatter as instruction text.
     pub instructions_digest: String,
     /// Instructions the harness receives, for the context inventory.
     pub instructions: String,
@@ -419,7 +407,7 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
     })?;
 
     // The instruction text is what ahu delivers in the prompt, so how a format
-    // is parsed is now also how it is delivered: frontmatter is metadata ahu
+    // is parsed determines how it is delivered: frontmatter is metadata ahu
     // reads (for the model-conflict check and the native-settings disclosure)
     // and does not put in front of the model, and the body is the instructions.
     let (instructions, native_model, native_settings) = if manifest.source.format.has_frontmatter()

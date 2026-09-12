@@ -1,26 +1,13 @@
 //! Harness hooks: shell commands the harness runs on its own lifecycle events.
 //!
-//! Hooks matter more than almost anything else ahu inventories. A `PreToolUse`
-//! hook can block a tool call; a `UserPromptSubmit` hook can put arbitrary text
-//! into the model's context. They are executable code, and they are frequently
-//! stored in directories that are ignored by Git and therefore never reviewed.
+//! ahu reports visible hooks with their scope, event, and digest. Hooks outside
+//! shared project policy raise a consistency warning because they can differ
+//! between teammates. Local repository settings travel with the snapshot; home
+//! and managed settings remain at their native locations.
 //!
-//! ahu's position on them follows the charter's existing rules rather than
-//! inventing a new one:
-//!
-//!   - **Report them.** Hooks are effective native settings, so they belong in
-//!     the context inventory with their scope, event, and digest.
-//!   - **Warn when they are not project policy.** A hook configured in a user's
-//!     home directory or by machine policy affects behaviour, does not travel
-//!     into a task worktree, and can differ for every teammate. That is exactly
-//!     the machine-specific influence the charter says must raise the same
-//!     consistency warning for everyone, not become a customization channel.
-//!   - **Do not write them.** ahu never adds, edits, or removes a hook. Doing so
-//!     by default would be the invisible behaviour modification the charter
-//!     forbids, and hooks are stronger than prose.
-//!
-//! Verified against the Claude Code settings schema referenced by the installed
-//! CLI's own settings file on 2026-09-12.
+//! ahu never adds, edits, removes, or disables hooks. Hook and approval-settings
+//! inspection covers Claude Code; other harnesses report unknown coverage.
+//! Hook commands are not serialized because they can contain credentials.
 
 use std::path::{Path, PathBuf};
 
@@ -196,10 +183,9 @@ fn truncate(value: &str, limit: usize) -> String {
 
 /// What a settings file says about the session's approval boundary.
 ///
-/// ahu used to read one key of these documents — `hooks` — and then print an
-/// Approvals block derived entirely from its own manifest, while itself copying
-/// the file that actually decides the boundary into the task worktree. This is
-/// the rest of the document, reported rather than discarded.
+/// Native settings can affect approvals independently of manifest flags, so
+/// the inventory reports their relevant declarations without inferring an
+/// effective boundary.
 ///
 /// Values are only ever repeated for keys whose values are policy. `env` is the
 /// exception: its values are routinely credentials, so only the names are kept.
@@ -275,9 +261,8 @@ impl SettingsFacts {
 
 /// An MCP server a repository asks the harness to start.
 ///
-/// An MCP server is a process the harness spawns, configured by a file ahu
-/// copies into the task worktree. The preview named the file's existence and
-/// nothing else.
+/// A repository MCP declaration is copied with configuration and reported as a
+/// potential subprocess source. Whether it runs depends on the selected harness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServer {
     pub source: String,
@@ -474,10 +459,8 @@ fn settings_files(repo_root: &Path, locations: &Locations) -> Vec<SettingsFile> 
 
 /// Whether ahu has an implementation of a harness's hook configuration.
 ///
-/// `settings_files` enumerates Claude Code's settings files and nothing else.
-/// Running it for a Codex or Antigravity launch and printing "none found"
-/// reported the result of looking in the wrong place under a heading whose only
-/// job is to tell the reader whether repository-supplied code will run.
+/// Only Claude Code settings are enumerated. Other harnesses need an explicit
+/// unknown-coverage report rather than a misleading empty inventory.
 pub fn hook_surface_is_implemented(harness_id: &str) -> bool {
     harness_id == "claude-code"
 }
@@ -503,8 +486,8 @@ pub fn collect_for(
         ..HookInventory::default()
     };
     // `.mcp.json` is read for every harness: it is repository configuration that
-    // travels into the task worktree either way, and the servers it declares are
-    // processes a harness starts.
+    // travels into the task worktree either way. Whether a declared server
+    // starts depends on the selected harness.
     collect_mcp_servers(repo_root, &mut inventory);
     if !hook_surface_is_implemented(harness_id) {
         inventory.unscanned_harness = Some(harness_id.to_string());
@@ -518,16 +501,9 @@ pub fn collect_for(
         relative,
     } in settings_files(repo_root, locations)
     {
-        // A repository can commit a symlink at `.claude`, or at the settings
-        // file itself. Reading through one takes hooks from outside the
-        // repository and labels them `project` — the single scope whose
-        // `why_not_project_policy` is "it is project policy", so
-        // `outside_project_policy` drops them and the non-project-hook warning
-        // is suppressed for hooks that are not project policy at all. The
-        // preview would also claim they travel into the task worktree, which is
-        // false: `materialize` deletes configuration symlinks from it.
-        // `snapshot::collect` already refuses to follow one; this makes the hook
-        // scan agree with it. Both errors pointed the permissive way.
+        // Resolve without following repository symlinks. Otherwise an external
+        // settings file could be mislabeled as shared project policy, hiding
+        // its warning and falsely claiming it travels into the task worktree.
         let path = match relative {
             Some(relative) => match crate::util::resolve_existing_within(repo_root, relative) {
                 Ok(Some(resolved)) => resolved,
@@ -574,10 +550,8 @@ pub fn collect_for(
 
 /// Read the repository's `.mcp.json`, naming the command of each server.
 ///
-/// `.mcp.json` is snapshotted and classified as MCP configuration in the
-/// inventory, but the preview never said that a repository-supplied MCP server
-/// is a process the harness will spawn. Read through the same no-follow resolver
-/// the hook scan uses, so a symlinked `.mcp.json` is refused rather than read.
+/// Use the same no-follow resolver as hook settings so repository symlinks
+/// cannot redirect the read.
 fn collect_mcp_servers(repo_root: &Path, inventory: &mut HookInventory) {
     const SOURCE: &str = ".mcp.json";
     let path = match crate::util::resolve_existing_within(repo_root, SOURCE) {
@@ -837,9 +811,8 @@ pub fn render_for_preview(inventory: &HookInventory, executable_config_files: us
 /// Render what the settings files and `.mcp.json` say about the approval
 /// boundary, for the launch preview's Approvals section.
 ///
-/// ahu passes permission flags, and it used to describe the approval boundary
-/// entirely in terms of those flags — while copying into the task worktree the
-/// files that actually decide it. This says what those files declare.
+/// Report native declarations alongside manifest-requested permission flags;
+/// neither alone establishes the effective approval boundary.
 pub fn render_settings_for_preview(inventory: &HookInventory) -> String {
     let mut out = String::new();
     let facts: Vec<&SettingsFacts> = inventory

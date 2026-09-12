@@ -71,11 +71,9 @@ pub struct LaunchIdentity {
     /// Digest of exactly the instruction text ahu delivered, which for a format
     /// with frontmatter is the file with that frontmatter stripped.
     ///
-    /// Schema 1 had this field holding the *whole-file* digest, so its name and
-    /// its value disagreed once ahu began delivering the stripped body. That is
-    /// why [`TASK_SCHEMA_VERSION`] is 2: an old record's `instructions_digest`
-    /// cannot be reinterpreted as this one, and `load` refuses it by version
-    /// rather than silently reading the wrong bytes under the right name.
+    /// This schema binds the digest to delivered text, not the whole source
+    /// file. `load` must refuse incompatible schema versions rather than
+    /// reinterpret a digest with a different byte scope.
     pub instructions_digest: Option<String>,
     /// Digest binding manifest fields and both file digests together.
     pub identity_digest: Option<String>,
@@ -265,12 +263,8 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
     // The schema version is read on its own, before the record is deserialized
     // into this build's struct.
     //
-    // Checking it afterwards made the careful message below unreachable for the
-    // case it was written for: schema 1 has no `delivery` field, so serde failed
-    // on `missing field \`delivery\`` and that is what the user saw. A version
-    // mismatch is the *reason* the fields do not line up, and reporting a
-    // symptom of it instead tells someone with five old tasks to go looking for
-    // a corrupt file.
+    // Check compatibility before deserialization: incompatible records may
+    // omit required fields, but the useful diagnostic is the schema mismatch.
     let version = serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|value| value.get("schema_version")?.as_u64());
@@ -341,16 +335,8 @@ pub struct UnreadableTask {
 /// Every task directory ahu found for a repository: the ones it could read, and
 /// the ones it could not.
 ///
-/// Both halves, deliberately. `list` used to return only the readable records
-/// and drop the rest, despite claiming to report them.
-/// Unreadable records were initially the exception.
-///
-/// The schema-2 bump made them the rule: every record written by an earlier ahu
-/// is refused, so a repository with five tasks, five worktrees, five branches
-/// and three live cmux sessions had `ahu tasks` print "No ahu tasks have been
-/// launched from this repository." An informational nit became a positive claim
-/// of absence that was false, and the only surface that could have told the user
-/// where their leftover worktrees were is the one that denied they existed.
+/// Unreadable records remain visible so inspection can report their task
+/// directories and recover worktree locations without trusting their contents.
 #[derive(Debug, Clone, Default)]
 pub struct TaskListing {
     /// Readable records, newest first.
@@ -397,8 +383,7 @@ pub fn list(repo_identity: &str) -> Result<TaskListing> {
         match load(&path) {
             Ok(record) => listing.records.push((path, record)),
             // Carried, not dropped. It must still not break the listing of the
-            // others, which is what the `continue` was for; the mistake was
-            // throwing the evidence away on the way past.
+            // others. Keep the refused directory visible for inspection.
             Err(e) => {
                 let task_id = path
                     .file_name()

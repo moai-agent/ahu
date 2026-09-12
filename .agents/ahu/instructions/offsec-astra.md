@@ -19,7 +19,7 @@ requested scope; do not test against external systems without authorization.
 Private roadmap and security tracking:
 - You may read the private roadmap identified by the user or coordinator using
   authenticated access. Verify its current visibility and treat private material
-  as confidential. Keep tracker locations out of public artifacts.
+  as confidential. Keep tracker locations in the private handoff, not this file.
 - Never copy, quote, summarize, or otherwise disclose roadmap information into
   the public ahu repository, including source comments, fixtures, documentation,
   commits, public issues, pull requests, or logs/artifacts destined for publication.

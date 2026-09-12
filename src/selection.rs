@@ -95,8 +95,8 @@ pub fn resolve_automatic(loaded: &LoadedConfig) -> Result<ResolvedPair> {
     );
 }
 
-/// The project's model order for a harness, falling back to the catalog order
-/// only when the project has ranked nothing for it.
+/// The project's explicit model order for a harness. Missing or empty rankings
+/// return no models; automatic selection does not fall back to catalog order.
 pub fn ranked_models(loaded: &LoadedConfig, harness_id: &str) -> Vec<String> {
     if let Some(ranked) = loaded.config.model_rankings.get(harness_id)
         && !ranked.is_empty()
@@ -118,11 +118,8 @@ pub fn check_prerequisite(harness_id: &str) -> Prerequisite {
         .to_string();
     let found_at = resolve_executable(&executable);
     let mut notes = Vec::new();
-    // Probe the resolved absolute path, never the bare program name. Running
-    // `Command::new("claude")` here repeated the operating system's own PATH
-    // lookup, which honours relative and repository-local entries that
-    // `resolve_executable` deliberately refuses -- so a planted binary ran
-    // before the user was shown anything to approve.
+    // Probe the resolved absolute path so version checks obey the same
+    // repository and relative-PATH exclusions as actual launches.
     let version = found_at.as_deref().and_then(probe_version);
     if let (Some(entry), Some(version)) = (entry, version.as_deref())
         && !entry.verified_versions.is_empty()

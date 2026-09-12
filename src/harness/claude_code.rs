@@ -11,13 +11,13 @@
 //!
 //! What it cannot enforce: an interactive Claude Code session can change model
 //! with `/model` after launch, and ahu has no supported control that disables
-//! that. The launch therefore carries the reliability warning.
+//! that. The enforcement report records this session-level limitation.
 //!
 //! This adapter deliberately passes **no** `--agent` and **no**
 //! `--append-system-prompt`. `--agent <name>` selects whatever Claude Code's own
 //! agent search resolves that name to, which is not necessarily the file ahu
-//! read and digested, so ahu was asserting a binding it could not check. The
-//! agent's instructions and ahu's delegation contract now travel in the prompt
+//! read and digested. The agent's instructions and ahu's delegation contract
+//! travel in the prompt
 //! on every harness instead — see `crate::orchestration`. That is not an
 //! enforced system prompt, and the enforcement report says so as a gap.
 
@@ -127,11 +127,8 @@ fn permission_control(permissions: Permissions) -> String {
 
 /// Ask the installed Claude Code for its version.
 ///
-/// Goes through `selection`, which resolves the program to an absolute path and
-/// refuses one inside a repository ahu has opened. Running
-/// `Command::new("claude")` here repeated the operating system's PATH lookup --
-/// including relative entries -- and executed a planted binary before the user
-/// was shown a preview to approve.
+/// Goes through `selection` so probes reject relative PATH entries and binaries
+/// inside a repository ahu has opened, just as launches do.
 fn installed_version() -> Option<String> {
     crate::selection::installed_version("claude")
 }

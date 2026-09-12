@@ -38,7 +38,7 @@ pub const MERMAID_PIPELINE: &str = r#"flowchart TD
     P --> Q["cmux: child workspace in that group"]
     Q --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
     R --> S["Re-derive argv, compare to record"]
-    S --> T["exec claude --model &lt;id&gt; -- &lt;contract + agent instructions + prompt&gt;"]
+    S --> T["exec configured harness<br/>model flags + one composed prompt argument"]
 "#;
 
 /// How a prompt reaches the harness without ever being shell input, and what
@@ -49,7 +49,7 @@ pub const MERMAID_PROMPT: &str = r#"flowchart LR
     D["ahu delegation contract"] --> N["Compose, fenced with<br/>a per-launch nonce"]
     A["Agent instructions<br/>from source.path"] --> N
     R --> N
-    N -->|"one argv element"| C["claude ... -- &lt;contract + instructions + prompt&gt;"]
+    N -->|"one argv element"| C["configured harness<br/>contract + instructions + prompt"]
 
     S["cmux startup command<br/>(shell-interpreted)"] --> R
     Q["Only ahu's own exe path<br/>+ task dir, single-quoted"] --> S
@@ -153,8 +153,7 @@ pub fn document() -> Vec<Section> {
                     "ahu is not an agent harness. It does not host a model, run an agent loop, own a",
                     "conversation, or provide tools. Claude Code, Codex, and the Antigravity CLI do",
                     "that. ahu decides which of them runs, with which model and instructions, in",
-                    "which worktree, and then reports honestly on everything that can influence the",
-                    "session it started.",
+                    "which worktree, and reports visible context sources and coverage gaps.",
                 ]),
                 para(&[
                     "An agent's harness, model, and instructions live in the repository, so changing",
@@ -188,25 +187,22 @@ pub fn document() -> Vec<Section> {
                 ]),
                 para(&[
                     "ahu creates the repository group and the per-task workspace through cmux, and",
-                    "0.1.1 has no mode that runs without it. The harness is what actually runs the",
+                    "task sessions require that connection. Help, previews, and local inspection do",
+                    "not. The harness is what actually runs the",
                     "agent; ahu never installs, configures, or authenticates one, and it does not",
                     "ship one. Sign-in is the harness's own, and ahu holds no API key for any of",
                     "them.",
                 ]),
                 para(&[
-                    "No harness enforces a named agent's identity for ahu. Codex has no",
-                    "per-agent selection at all; the Antigravity CLI accepts --agent without",
-                    "validating or visibly applying it; and Claude Code's --agent selects by",
-                    "name, which is not bound to the file ahu read and digested. So ahu uses",
-                    "none of them. An ahu agent pins the harness and the exact model, and its",
-                    "instructions travel in the prompt on all three, attributed to the file",
-                    "they were read from. ahu says that is what it is rather than implying a",
-                    "guarantee it cannot keep.",
+                    "ahu does not use an agent-selection or system-prompt flag. A native lookup",
+                    "by name does not bind the selection to the file ahu read and digested.",
+                    "Instructions travel in the prompt on all three harnesses, attributed to",
+                    "their source file and delivered-text digest; delivery is not enforcement.",
                 ]),
                 para(&[
                     "ahu holds no credentials and speaks to no model provider. Sign-in and the",
                     "approval boundary are the harness's own: ahu passes no permission flag unless",
-                    "an agent's committed manifest asks for one, and it cannot tell you what the",
+                    "an agent's manifest asks for one, and it cannot tell you what the",
                     "effective boundary is — the harness's settings files decide that, and a",
                     "launch preview reports what ahu read in them rather than asserting a result.",
                 ]),
@@ -233,8 +229,8 @@ pub fn document() -> Vec<Section> {
                     "anywhere else are onboarding candidates, never implicit registrations: a skill is",
                     "not an agent, and AGENTS.md is not an agent registry. A manifest names an explicit",
                     "harness, an exact model identifier (never an alias), and a semantic version, and",
-                    "points at a native definition in place. If that native file also declares a model,",
-                    "the two must agree — ahu will not rewrite either file or pick one silently.",
+                    "points at an instruction source in place. A nonempty parsed frontmatter model",
+                    "other than inherit must match; ahu does not rewrite either file.",
                 ]),
                 para(&[
                     "At launch ahu reads that file, records two digests of it — one over the whole",
@@ -245,8 +241,9 @@ pub fn document() -> Vec<Section> {
                     "control.",
                 ]),
                 para(&[
-                    "Without an @agent, ahu walks the project's agreed harness order, then that",
-                    "harness's agreed model order, and freezes the result for the task. Local",
+                    "Without an @agent, ahu walks the project's harness order, takes the first",
+                    "with an available adapter and nonempty project model ranking, and selects",
+                    "that ranking's first model. There is no catalog fallback or named identity. Local",
                     "prerequisites are checked after the pair is resolved, so a missing installation is",
                     "a diagnostic for that machine, never a different selection for that user.",
                 ]),
@@ -279,10 +276,12 @@ pub fn document() -> Vec<Section> {
                 Block::Mermaid(MERMAID_INHERITANCE),
                 para(&[
                     "Every task gets a unique id, a fresh branch `ahu/<agent>/<task-id>`, and a fresh",
-                    "worktree in an ahu-managed directory outside your source tree. The worktree starts",
-                    "at the base commit, then receives the invoking checkout's complete agent",
+                    "worktree under .worktrees/ in the primary checkout. The worktree starts",
+                    "at the invoking checkout's HEAD, then receives its recognized agent",
                     "configuration as it stands at submission — including uncommitted and Git-ignored",
-                    "files, with local deletions honoured. Unrelated dirty source files stay behind.",
+                    "files, with local deletions honoured. Scan skips and depth limits bound coverage;",
+                    "committed files under skipped paths still arrive through Git. Configuration",
+                    "symlinks are not followed. Unrelated dirty source files stay behind.",
                     "Nothing is staged, committed, stashed, or reset in your checkout, ever.",
                 ]),
             ],
@@ -303,17 +302,16 @@ pub fn document() -> Vec<Section> {
             title: "Hooks",
             blocks: vec![
                 para(&[
-                    "Hooks are shell commands the harness runs on its own lifecycle events. They are the",
-                    "most behaviour-determining thing in a repository: one can block a tool call, and",
-                    "another can put arbitrary text into the model's context. They are also often stored",
-                    "in Git-ignored directories and never reviewed.",
+                    "Hooks run on harness lifecycle events and can affect tool calls or context.",
+                    "ahu inventories Claude Code hook settings. Codex and Antigravity launches",
+                    "report unknown hook coverage; a missing scan is not evidence of no hooks.",
                 ]),
                 para(&[
-                    "ahu reports them and never writes them. Hooks declared in the repository travel",
-                    "into the task worktree with their executable bit intact and run there, which the",
-                    "launch preview states explicitly. Hooks configured outside the repository get the",
-                    "consistency warning below. Adding or editing hooks on your behalf would be exactly",
-                    "the invisible behaviour modification ahu exists to prevent.",
+                    "ahu reports hooks and never writes them. Recognized repository configuration",
+                    "travels into the task worktree with executable bits preserved; the harness",
+                    "decides whether and when hooks run. Local settings can travel without being",
+                    "shared policy. User and managed settings remain at their native locations.",
+                    "Hooks outside project policy raise the consistency warning below.",
                 ]),
             ],
         },
@@ -351,7 +349,7 @@ pub fn document() -> Vec<Section> {
                 "substitute a different harness or model, for any reason",
                 "stage, commit, push, stash, reset, clean, or switch branches in your checkout",
                 "add, edit, or remove hooks, skills, memories, or instruction files",
-                "widen permissions unless a committed manifest asks for it, which the preview states in full before anything starts",
+                "widen permissions unless a manifest asks for it, which the preview states in full before anything starts",
                 "claim to know the effective approval boundary: the harness's own settings decide it, and ahu only reports what it read and which flags it passed",
                 "install, configure, or authenticate a harness on your behalf",
                 "delete a worktree, branch, or task record that may hold your work",
@@ -368,15 +366,15 @@ pub fn document() -> Vec<Section> {
                 ]),
                 Block::Warning {
                     headline:
-                        "Nothing ahu supplies to a session is enforced by the harness.".to_string(),
+                        "ahu-supplied instructions are not enforced by the harness.".to_string(),
                     detail: vec![
                         "ahu delivers its delegation contract and the agent's instructions as"
                             .to_string(),
                         "prompt text, identically on every harness. It uses no agent-selection or"
                             .to_string(),
-                        "system-prompt flag anywhere, because none of the three could hold an"
+                        "system-prompt flag anywhere. A native agent lookup by name does not bind"
                             .to_string(),
-                        "identity ahu was able to verify. The task prompt that follows can"
+                        "to the source file ahu read. The task prompt that follows can"
                             .to_string(),
                         "contradict any of it, and the model may follow the task prompt instead."
                             .to_string(),
@@ -413,7 +411,7 @@ pub fn document() -> Vec<Section> {
                                 if harness.adapter_available {
                                     "available".to_string()
                                 } else {
-                                    "future work".to_string()
+                                    "unavailable".to_string()
                                 },
                                 if harness.verified_versions.is_empty() {
                                     "not verified".to_string()
@@ -638,9 +636,8 @@ fn strip_emphasis(line: &str) -> String {
 
 /// Where `ahu explain --open` writes the document.
 ///
-/// It goes in ahu's own state directory rather than the repository: it is
-/// generated documentation about the tool, not part of anyone's project, and ahu
-/// does not write into a user's checkout.
+/// The generated document goes in the current checkout's ignored state store
+/// (or `AHU_STATE_DIR`), not in tracked project documentation.
 pub fn document_path() -> Result<PathBuf> {
     Ok(crate::state::root()?.join("docs/architecture.md"))
 }
