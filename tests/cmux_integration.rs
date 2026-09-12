@@ -1,10 +1,27 @@
 //! Live cmux integration.
 //!
-//! These tests talk to a real cmux instance when one is reachable. Every test
-//! creates its own group and workspaces and removes exactly what it created,
-//! restoring the original focus; nothing pre-existing is touched. When cmux is
-//! not reachable the tests skip with a message rather than failing, so the suite
-//! still runs on a machine without it.
+//! **These tests are opt-in.** They are skipped unless `AHU_TEST_CMUX=1` is set.
+//!
+//! They drive a *real* cmux instance: each one creates a group and several
+//! workspaces, then removes exactly what it created. On a developer's machine
+//! cmux is essentially always reachable, so gating on reachability alone meant
+//! an ordinary `cargo test` opened and closed roughly eighteen workspaces in
+//! whoever's cmux window happened to be in front — churning the sidebar and
+//! taking the focus away from the person running the tests. Reachability is a
+//! statement about the machine; it is not consent to redecorate the user's
+//! session. So the gate is an explicit variable.
+//!
+//! Run them deliberately, and preferably one at a time so the workspace churn
+//! is ordered rather than interleaved:
+//!
+//! ```text
+//! AHU_TEST_CMUX=1 cargo test --test cmux_integration -- --test-threads=1
+//! ```
+//!
+//! Nothing here spends model tokens. `launch::execute` builds a workspace's
+//! startup command from `std::env::current_exe()`, which inside a test binary
+//! is that test binary, so the workspace runs a harmless no-op instead of a
+//! coding agent. The only harness subprocesses are `--version` probes.
 
 mod common;
 
@@ -18,19 +35,16 @@ struct TempGroup {
     group_id: String,
     anchor: String,
     created: Vec<String>,
-    original_focus: Option<String>,
 }
 
 impl TempGroup {
     fn new(client: Cmux, name: &str, cwd: &Path) -> Self {
-        let original_focus = current_workspace(&client);
         let group = client.create_group(name, cwd).expect("group created");
         TempGroup {
             client,
             group_id: group.id.clone(),
             anchor: group.anchor_workspace_id.clone(),
             created: Vec::new(),
-            original_focus,
         }
     }
 }
@@ -42,29 +56,46 @@ impl Drop for TempGroup {
         }
         // Closing the last member removes the group.
         let _ = self.client.close_workspace(&self.anchor);
-        if let Some(original) = &self.original_focus {
-            let _ = self.client.select_workspace(original);
-        }
+        // Deliberately no `select_workspace` here. The old teardown restored
+        // the focus it had captured on entry, which is itself a focus change:
+        // a test that never should have taken the focus "restored" it, and a
+        // suite of them produced a visible flicker per test. Creating every
+        // workspace unfocused and never selecting one leaves the focus where
+        // the user put it, which is the only correct amount of focus handling
+        // for a test.
     }
 }
 
-fn current_workspace(client: &Cmux) -> Option<String> {
-    client.current_window().ok().flatten()?;
-    std::env::var("CMUX_WORKSPACE_ID").ok()
-}
-
+/// The opt-in gate.
+///
+/// Returns `None`, and says why, unless `AHU_TEST_CMUX=1` is set *and* a cmux
+/// with group support is reachable. Reachability alone is not enough: see the
+/// module comment.
 fn client_or_skip() -> Option<Cmux> {
+    match std::env::var("AHU_TEST_CMUX").as_deref() {
+        Ok("1") => {}
+        _ => {
+            eprintln!(
+                "skipping live cmux test: set AHU_TEST_CMUX=1 to run it. \
+                 It creates and closes real cmux workspaces in your session."
+            );
+            return None;
+        }
+    }
+    // Past this point the run has opted in, so an unreachable cmux is a
+    // failure rather than a skip. A skipped test still reports `ok`; if opting
+    // in could also silently skip, a broken integration would stay green in
+    // exactly the run that was meant to check it.
     match Cmux::discover() {
         Ok(client) => match client.check_capabilities() {
             Ok(_) => Some(client),
-            Err(e) => {
-                eprintln!("skipping: cmux is reachable but lacks group support: {e}");
-                None
-            }
+            Err(e) => panic!(
+                "AHU_TEST_CMUX=1 was set, so this test must run, but the reachable cmux \
+                 lacks group support: {e}"
+            ),
         },
         Err(e) => {
-            eprintln!("skipping cmux integration test: {e}");
-            None
+            panic!("AHU_TEST_CMUX=1 was set, so this test must run, but cmux is not reachable: {e}")
         }
     }
 }
