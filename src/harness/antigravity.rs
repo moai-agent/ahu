@@ -72,7 +72,7 @@ impl Adapter for Antigravity {
             applied_controls: vec![
                 "--model pins the exact model for the session's first request".to_string(),
                 "--agent is passed so ahu always requests the configured identity, even though the harness does not confirm it was applied".to_string(),
-                "no --dangerously-skip-permissions, --mode, or --sandbox is passed, so the harness's own approval boundaries are unchanged".to_string(),
+                "ahu passes no --dangerously-skip-permissions, --mode, or --sandbox; whether the effective session keeps the harness's own approval boundaries also depends on any wrapper on PATH".to_string(),
                 "authentication is the harness's own OAuth sign-in; ahu holds no API key".to_string(),
             ],
         }

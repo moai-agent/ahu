@@ -67,7 +67,7 @@ impl Adapter for ClaudeCode {
             applied_controls: vec![
                 "--model pins the exact model for the session's first request".to_string(),
                 "--agent selects the native agent definition, preserving its own tool and permission settings".to_string(),
-                "no --dangerously-skip-permissions, --permission-mode, --allowedTools, or --add-dir is passed, so the harness's own approval boundaries are unchanged".to_string(),
+                "ahu passes no --dangerously-skip-permissions, --permission-mode, --allowedTools, or --add-dir; whether the effective session keeps the harness's own approval boundaries also depends on any wrapper on PATH".to_string(),
             ],
         }
     }

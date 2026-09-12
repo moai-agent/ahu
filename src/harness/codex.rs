@@ -63,7 +63,7 @@ impl Adapter for Codex {
             gaps: entry.enforcement_gaps.iter().map(|s| s.to_string()).collect(),
             applied_controls: vec![
                 "-m pins the exact model for the session's first request".to_string(),
-                "no --sandbox, --ask-for-approval, --approve-for-me, --dangerously-bypass-approvals-and-sandbox, or --dangerously-bypass-hook-trust is passed, so Codex's own sandbox and approval defaults are unchanged".to_string(),
+                "ahu passes no --sandbox, --ask-for-approval, --approve-for-me, --dangerously-bypass-approvals-and-sandbox, or --dangerously-bypass-hook-trust; whether the effective session keeps Codex's own defaults also depends on any wrapper on PATH".to_string(),
                 "repository guidance is discovered by Codex from the task worktree, which carries the parent's AGENTS.md unchanged".to_string(),
             ],
         }

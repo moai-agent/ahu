@@ -52,6 +52,8 @@ pub struct LaunchPlan {
     pub task_dir: PathBuf,
     pub title: String,
     pub command: LaunchCommand,
+    /// Agent name requested from the harness by its own selection flag, if any.
+    pub native_agent: Option<String>,
     /// Absolute path of the harness binary, resolved once at plan time.
     pub harness_executable: PathBuf,
 }
@@ -113,19 +115,20 @@ pub fn plan(
     let task_dir = state::task_dir(&repo_identity, &task_id)?;
     let title = crate::util::task_title_from_prompt(prompt);
 
+    // Only formats the harness can select by name are requested by name.
+    let native_agent = agent.as_ref().and_then(|a| {
+        a.manifest
+            .source
+            .format
+            .selects_native_agent()
+            .then(|| a.manifest.name.clone())
+    });
     let command = adapter.launch_command(&LaunchRequest {
         model: &pair.model,
-        native_agent: agent.as_ref().and_then(|a| {
-            if a.manifest.source.format == crate::agent::SourceFormat::ClaudeAgent {
-                Some(a.manifest.name.as_str())
-            } else {
-                None
-            }
-        }),
+        native_agent: native_agent.as_deref(),
         prompt,
         cwd: &worktree,
     })?;
-    let enforcement = adapter.enforcement(&pair.model);
     let harness_executable = crate::selection::resolve_executable(&command.program)
         .map(PathBuf::from)
         .ok_or_else(|| {
@@ -136,6 +139,11 @@ pub fn plan(
                 pair.harness, command.program
             ))
         })?;
+    let mut enforcement = adapter.enforcement(&pair.model);
+    // A wrapper between ahu and the harness can add flags ahu refuses to pass.
+    if let Some(note) = harness::wrapper_interposed(&harness_executable) {
+        enforcement.gaps.push(note);
+    }
 
     Ok(LaunchPlan {
         mode: if agent.is_some() {
@@ -156,6 +164,7 @@ pub fn plan(
         task_dir,
         title,
         command,
+        native_agent,
         harness_executable,
     })
 }
@@ -236,6 +245,7 @@ pub fn execute(
                 .map(|a| a.manifest.name.clone())
                 .unwrap_or_else(|| "auto".to_string()),
             agent_version: plan.agent.as_ref().map(|a| a.manifest.version.clone()),
+            native_agent: plan.native_agent.clone(),
             harness: plan.pair.harness.clone(),
             model: plan.pair.model.clone(),
             instructions_source: plan.agent.as_ref().map(|a| {
@@ -471,11 +481,7 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     let adapter = harness::adapter_for(&record.identity.harness)?;
     let rebuilt = adapter.launch_command(&LaunchRequest {
         model: &record.identity.model,
-        native_agent: if record.identity.mode == LaunchMode::Named {
-            Some(record.identity.agent.as_str())
-        } else {
-            None
-        },
+        native_agent: record.identity.native_agent.as_deref(),
         prompt: &prompt,
         cwd: &record.worktree,
     })?;

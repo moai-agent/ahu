@@ -42,6 +42,18 @@ impl SourceFormat {
         }
     }
 
+    /// Whether the harness selects an agent of this format by name at launch.
+    ///
+    /// Claude Code and the Antigravity CLI both take `--agent <name>`. Codex has
+    /// no per-agent selection, and plain Markdown is not a native definition, so
+    /// neither is requested by name.
+    pub fn selects_native_agent(self) -> bool {
+        matches!(
+            self,
+            SourceFormat::ClaudeAgent | SourceFormat::AntigravityAgent
+        )
+    }
+
     /// The harness that owns this native format, when one does.
     pub fn native_harness(self) -> Option<&'static str> {
         match self {

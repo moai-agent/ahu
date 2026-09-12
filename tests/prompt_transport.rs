@@ -299,6 +299,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str) {
             mode: LaunchMode::Named,
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),
+            native_agent: Some("chris".to_string()),
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
             instructions_source: Some(".claude/agents/chris.md".to_string()),
@@ -424,5 +425,76 @@ fn adapters_report_their_real_enforcement_limits() {
                 .any(|g| g.contains("instructions in the prompt")),
             "{harness} must tell the user where the instructions have to go"
         );
+    }
+}
+
+/// The launch and the integrity check must never disagree about whether the
+/// harness was asked for a named agent.
+///
+/// Codex has no per-agent selection, so a Codex-backed agent is launched
+/// without one. If the plan and `run_task` derived that independently they
+/// could differ, and the session would be refused for a mismatch that was
+/// ahu's own doing.
+#[test]
+fn the_native_agent_decision_is_recorded_not_re_derived() {
+    use ahu::agent::SourceFormat;
+
+    assert!(SourceFormat::ClaudeAgent.selects_native_agent());
+    assert!(SourceFormat::AntigravityAgent.selects_native_agent());
+    assert!(
+        !SourceFormat::CodexAgent.selects_native_agent(),
+        "Codex has no --agent flag"
+    );
+    assert!(!SourceFormat::Markdown.selects_native_agent());
+
+    // A rebuild that assumes "named launch means --agent" produces a different
+    // command for a harness that has no such flag.
+    let adapter = harness::adapter_for("codex").unwrap();
+    let without = adapter
+        .launch_command(&LaunchRequest {
+            model: "gpt-6-astra",
+            native_agent: None,
+            prompt: "p",
+            cwd: Path::new("/tmp"),
+        })
+        .unwrap();
+    assert!(!without.args.iter().any(|a| a == "--agent"));
+
+    // And for Antigravity, a named agent must be requested by name.
+    let antigravity = harness::adapter_for("antigravity").unwrap();
+    let with = antigravity
+        .launch_command(&LaunchRequest {
+            model: "gemini-3.1-pro-high",
+            native_agent: Some("vela"),
+            prompt: "p",
+            cwd: Path::new("/tmp"),
+        })
+        .unwrap();
+    let index = with.args.iter().position(|a| a == "--agent").unwrap();
+    assert_eq!(with.args[index + 1], "vela");
+}
+
+/// A wrapper between ahu and the harness can add flags ahu refuses to pass, so
+/// ahu must disclose it rather than claim the harness's defaults are intact.
+#[test]
+fn a_wrapper_on_the_path_is_disclosed_as_an_enforcement_gap() {
+    let shim =
+        Path::new("/var/folders/xx/T/cmux-cli-shims/00000000-0000-0000-0000-000000000000/codex");
+    let note = harness::wrapper_interposed(shim).expect("a cmux shim must be detected");
+    assert!(note.contains("cmux shim"), "{note}");
+    assert!(note.contains("cannot inspect"), "{note}");
+
+    // A real binary is not flagged.
+    assert!(harness::wrapper_interposed(Path::new("/usr/local/bin/codex")).is_none());
+
+    // No adapter may claim a wrapper leaves the harness's defaults untouched.
+    for harness_id in ["claude-code", "codex", "antigravity"] {
+        let report = harness::adapter_for(harness_id).unwrap().enforcement("m");
+        for control in &report.applied_controls {
+            assert!(
+                !control.contains("are unchanged"),
+                "{harness_id} must not claim defaults are unchanged: {control}"
+            );
+        }
     }
 }

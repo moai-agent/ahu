@@ -67,6 +67,37 @@ impl LaunchCommand {
     }
 }
 
+/// Detect whether the harness binary ahu resolved is really a wrapper.
+///
+/// cmux installs shim scripts on `PATH` that `exec` its own wrapper around the
+/// real harness, and those wrappers add flags of their own. Observed on cmux
+/// 0.64.22: the Codex wrapper enables `--dangerously-bypass-hook-trust`, a flag
+/// ahu deliberately never passes. ahu cannot see or control what a wrapper adds,
+/// so it says the wrapper is there instead of claiming the harness's own
+/// defaults are untouched.
+pub fn wrapper_interposed(executable: &std::path::Path) -> Option<String> {
+    let path = executable.to_string_lossy();
+    if path.contains("cmux-cli-shims") {
+        return Some(format!(
+            "the harness binary on PATH is a cmux shim ({path}), which execs cmux's own wrapper.              The wrapper may add flags ahu does not pass and cannot inspect"
+        ));
+    }
+    for variable in [
+        "CMUX_CLAUDE_WRAPPER_SHIM",
+        "CMUX_CODEX_WRAPPER_SHIM",
+        "CMUX_AGY_WRAPPER_SHIM",
+    ] {
+        if let Some(shim) = std::env::var_os(variable)
+            && shim.to_string_lossy() == path
+        {
+            return Some(format!(
+                "the harness binary on PATH is the cmux wrapper shim named by {variable}.                  The wrapper may add flags ahu does not pass and cannot inspect"
+            ));
+        }
+    }
+    None
+}
+
 /// What an adapter can actually guarantee about the session it starts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnforcementReport {

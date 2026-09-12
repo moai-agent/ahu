@@ -57,6 +57,12 @@ pub struct LaunchIdentity {
     pub agent: String,
     /// Semantic version of the named agent, absent for automatic launches.
     pub agent_version: Option<String>,
+    /// Agent name requested from the harness with its own selection flag.
+    ///
+    /// Recorded rather than re-derived so the launch and the integrity check can
+    /// never disagree about whether the harness was asked for a named agent.
+    #[serde(default)]
+    pub native_agent: Option<String>,
     pub harness: String,
     pub model: String,
     /// Where the system prompt came from, repository-relative.
