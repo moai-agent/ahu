@@ -454,3 +454,331 @@ fn hook_scope_reporting_is_unchanged_by_the_settings_scan() {
     assert!(found.settings[0].widens_approvals());
     assert_eq!(found.widening_settings().len(), 1);
 }
+
+// --- two digests, each named, each covering what it says it covers ---
+
+/// The invariant the whole split exists for: `instructions_digest` covers
+/// exactly the bytes that land inside the `<<<ahu-agent-...>>>` fence, and
+/// `source_digest` does not.
+///
+/// A single value could only ever be right about one of the two questions a
+/// reader has — "is this the file I reviewed?" and "is that what the model was
+/// given?" — and the task record had it named for the second while holding the
+/// first.
+#[test]
+fn the_instructions_digest_covers_exactly_the_delivered_fence_body() {
+    let repo = repo_on("claude-code", "claude-opus-5");
+    // A claude-agent source *with* frontmatter, so the two digests must differ.
+    repo.write(
+        ".claude/agents/sable.md",
+        "---\nname: sable\nmodel: claude-opus-5\ntools: Read, Edit\n---\n\nYou are sable. Never run shell commands.\n",
+    );
+    repo.write(
+        ".agents/ahu/agents/sable.toml",
+        "schema_version = 1\n\
+         name = \"sable\"\n\
+         version = \"1.0.0\"\n\
+         harness = \"claude-code\"\n\
+         model = \"claude-opus-5\"\n\
+         \n[source]\n\
+         format = \"claude-agent\"\n\
+         path = \".claude/agents/sable.md\"\n",
+    );
+    repo.commit("fixture");
+
+    let agent = agent::find(repo.path(), "sable").unwrap();
+    let on_disk = std::fs::read(&agent.source_path).unwrap();
+
+    // `source_digest` is the file, byte for byte, frontmatter included.
+    assert_eq!(agent.source_digest, ahu::util::digest_bytes(&on_disk));
+    // `instructions_digest` is the delivered text, and the two differ here.
+    assert_eq!(
+        agent.instructions_digest,
+        ahu::util::digest_bytes(agent.instructions.as_bytes())
+    );
+    assert_ne!(
+        agent.source_digest, agent.instructions_digest,
+        "a file with frontmatter must not have one digest standing for both"
+    );
+
+    // Now the part that matters: the delivered prompt's fence body.
+    let Some((discovered, plan)) = plan_for(&repo, "claude-code", "claude-opus-5") else {
+        panic!("the fixtures install a fake claude, so this must resolve");
+    };
+    let delivered = &plan.command.args[plan.command.prompt_arg.unwrap()];
+    let fence_body = ahu::orchestration::fence_body(delivered, "agent", &plan.delivery.nonce)
+        .expect("the agent fence is present");
+    // Byte for byte, with nothing inserted or trimmed: the digest has to be a
+    // claim about exactly these bytes, not nearly them.
+    assert_eq!(fence_body, agent.instructions);
+
+    assert_eq!(
+        ahu::util::digest_bytes(fence_body.as_bytes()),
+        agent.instructions_digest,
+        "instructions_digest must cover exactly the fence body:\n{fence_body:?}"
+    );
+    assert_ne!(
+        ahu::util::digest_bytes(fence_body.as_bytes()),
+        agent.source_digest,
+        "the file digest must not accidentally equal the fence body's"
+    );
+    assert!(
+        !fence_body.contains("tools: Read, Edit"),
+        "frontmatter is metadata, not delivered: {fence_body:?}"
+    );
+
+    // Both reach the record under their own names.
+    assert_eq!(
+        plan.agent.as_ref().unwrap().instructions_digest,
+        agent.instructions_digest
+    );
+
+    // And both are labelled where a reader sees them.
+    let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+    assert!(
+        preview.contains(&format!(
+            "file digest         {} (the whole file as it is on disk)",
+            &agent.source_digest[..12]
+        )),
+        "{preview}"
+    );
+    assert!(
+        preview.contains(&format!(
+            "instructions digest {}",
+            &agent.instructions_digest[..12]
+        )),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("YAML frontmatter read as metadata and not delivered"),
+        "{preview}"
+    );
+}
+
+/// A format with no frontmatter has nothing to strip, so the two digests cover
+/// the same bytes — computed the same way, not special-cased to be absent.
+#[test]
+fn a_frontmatterless_source_has_two_equal_digests_not_one_missing_one() {
+    let repo = repo_on("claude-code", "claude-opus-5");
+    repo.commit("fixture");
+    let agent = agent::find(repo.path(), "sable").unwrap();
+
+    assert!(!agent.manifest.source.format.has_frontmatter());
+    let on_disk = std::fs::read(&agent.source_path).unwrap();
+    assert_eq!(agent.source_digest, ahu::util::digest_bytes(&on_disk));
+    assert_eq!(
+        agent.instructions_digest, agent.source_digest,
+        "with nothing to strip the two must be equal, and both present"
+    );
+    assert!(!agent.instructions_digest.is_empty());
+
+    let Some((discovered, plan)) = plan_for(&repo, "claude-code", "claude-opus-5") else {
+        return;
+    };
+    let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+    // Equal is not the same as interchangeable: the preview still says which is
+    // which, and why they match here.
+    assert!(preview.contains("file digest"), "{preview}");
+    assert!(preview.contains("instructions digest"), "{preview}");
+    assert!(
+        preview.contains("this format has no frontmatter, so it is the whole file"),
+        "{preview}"
+    );
+}
+
+/// A change to either digest is drift, and drift says which one moved.
+///
+/// The frontmatter-only case is the one a single digest could never express:
+/// the file changed, and the text the model was given did not.
+#[test]
+fn a_frontmatter_only_edit_is_drift_and_is_named_as_a_file_change() {
+    let repo = repo_on("claude-code", "claude-opus-5");
+    repo.write(
+        ".claude/agents/sable.md",
+        "---\nname: sable\nmodel: claude-opus-5\ntools: Read\n---\n\nYou are sable.\n",
+    );
+    repo.write(
+        ".agents/ahu/agents/sable.toml",
+        "schema_version = 1\n\
+         name = \"sable\"\n\
+         version = \"1.0.0\"\n\
+         harness = \"claude-code\"\n\
+         model = \"claude-opus-5\"\n\
+         \n[source]\n\
+         format = \"claude-agent\"\n\
+         path = \".claude/agents/sable.md\"\n",
+    );
+    repo.commit("fixture");
+    let before = agent::find(repo.path(), "sable").unwrap();
+
+    // Edit only the frontmatter. The delivered body is untouched.
+    repo.write(
+        ".claude/agents/sable.md",
+        "---\nname: sable\nmodel: claude-opus-5\ntools: Read, Edit, Bash\n---\n\nYou are sable.\n",
+    );
+    let after = agent::find(repo.path(), "sable").unwrap();
+
+    assert_ne!(before.source_digest, after.source_digest);
+    assert_eq!(
+        before.instructions_digest, after.instructions_digest,
+        "the delivered text did not change"
+    );
+    assert_ne!(
+        before.identity_digest(),
+        after.identity_digest(),
+        "a change to either digest must still be drift"
+    );
+
+    let previous = record_for(&repo, &before);
+    let found = ahu::drift::detect(
+        "sable@1.0.0",
+        Some(ahu::drift::AgentDigests {
+            identity: &after.identity_digest(),
+            source: &after.source_digest,
+            instructions: &after.instructions_digest,
+        }),
+        &previous.config_snapshot_digest.clone(),
+        &previous.policy_digest.clone(),
+        &previous.hooks_digest.clone(),
+        &[(std::path::PathBuf::from("/nonexistent"), previous)],
+    )
+    .expect("a frontmatter edit is still drift");
+    let rendered = ahu::drift::render(&found);
+
+    assert!(
+        rendered.contains("the agent's source file changed"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("the text ahu delivers is unchanged"),
+        "the distinction is the whole point: {rendered}"
+    );
+    assert!(
+        !rendered.contains("the instruction text ahu delivers changed"),
+        "{rendered}"
+    );
+}
+
+/// A minimal previous-launch record for `drift::detect`.
+fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::TaskRecord {
+    let discovered = git::discover(repo.path()).unwrap();
+    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
+    let (delivered, delivery) =
+        ahu::orchestration::deliver(Some(&agent.instructions), "earlier").unwrap();
+    let command = adapter
+        .launch_command(&ahu::harness::LaunchRequest {
+            model: "claude-opus-5",
+            prompt: &delivered,
+            cwd: &discovered.root,
+            permissions: Default::default(),
+        })
+        .unwrap();
+    ahu::task::TaskRecord {
+        schema_version: ahu::task::TASK_SCHEMA_VERSION,
+        task_id: "prev0003".to_string(),
+        title: "earlier".to_string(),
+        created_at: "2026-09-01T00:00:00Z".to_string(),
+        repo_identity: discovered.identity(),
+        repo_root: discovered.root.clone(),
+        branch: "ahu/sable/prev0003".to_string(),
+        worktree: discovered.root.clone(),
+        base_commit: discovered.head.clone(),
+        identity: ahu::task::LaunchIdentity {
+            mode: ahu::task::LaunchMode::Named,
+            agent: "sable".to_string(),
+            agent_version: Some("1.0.0".to_string()),
+            permissions: Default::default(),
+            harness: "claude-code".to_string(),
+            model: "claude-opus-5".to_string(),
+            instructions_source: Some(".claude/agents/sable.md".to_string()),
+            source_digest: Some(agent.source_digest.clone()),
+            instructions_digest: Some(agent.instructions_digest.clone()),
+            identity_digest: Some(agent.identity_digest()),
+            selection_basis: None,
+        },
+        policy_digest: "0".repeat(64),
+        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
+        config_snapshot: Default::default(),
+        config_snapshot_digest: "0".repeat(64),
+        hooks: Default::default(),
+        hooks_digest: String::new(),
+        materialize: Default::default(),
+        launch_command: command.redacted(),
+        delivery,
+        prompt_digest: ahu::util::digest_bytes(b"earlier"),
+        harness_executable: std::path::PathBuf::from("/usr/local/bin/claude"),
+        reliability_warning: None,
+        enforcement: adapter
+            .enforcement("claude-opus-5", Default::default())
+            .unwrap(),
+        cmux_group_id: None,
+        cmux_workspace_id: None,
+        cmux_window_id: None,
+        state: ahu::task::TaskState::Exited,
+    }
+}
+
+/// The inventory names both digests too — it is the other place a reader is
+/// handed one and has to know what it covers.
+#[test]
+fn the_inventory_labels_both_digests() {
+    let repo = repo_on("claude-code", "claude-opus-5");
+    repo.write(
+        ".claude/agents/sable.md",
+        "---\nname: sable\nmodel: claude-opus-5\n---\n\nYou are sable.\n",
+    );
+    repo.write(
+        ".agents/ahu/agents/sable.toml",
+        "schema_version = 1\n\
+         name = \"sable\"\n\
+         version = \"1.0.0\"\n\
+         harness = \"claude-code\"\n\
+         model = \"claude-opus-5\"\n\
+         \n[source]\n\
+         format = \"claude-agent\"\n\
+         path = \".claude/agents/sable.md\"\n",
+    );
+    repo.commit("fixture");
+
+    let loaded = config::load(repo.path()).unwrap().unwrap();
+    let found = agent::find(repo.path(), "sable").unwrap();
+    let taken = ahu::snapshot::collect(repo.path()).unwrap();
+    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
+    let enforcement = adapter
+        .enforcement("claude-opus-5", Default::default())
+        .unwrap();
+    let home = tempfile::TempDir::new().unwrap();
+    let hooks = hooks::collect_for(repo.path(), "claude-code", &locations(home.path())).unwrap();
+    let built = ahu::inventory::build(&ahu::inventory::Subject {
+        repo_root: repo.path(),
+        loaded_config: &loaded,
+        snapshot: &taken,
+        agent: Some(&found),
+        harness: "claude-code",
+        model: "claude-opus-5",
+        enforcement: &enforcement,
+        hooks: &hooks,
+        prompt: None,
+    })
+    .unwrap();
+    let rendered = ahu::inventory::render(&built);
+
+    assert!(
+        rendered.contains(&format!(
+            "file digest {} covers the whole file",
+            &found.source_digest[..12]
+        )),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "instructions digest {} covers exactly the text ahu delivers",
+            &found.instructions_digest[..12]
+        )),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("with its YAML frontmatter stripped"),
+        "{rendered}"
+    );
+}

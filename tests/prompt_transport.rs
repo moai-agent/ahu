@@ -333,6 +333,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
             instructions_source: Some(".claude/agents/chris.md".to_string()),
+            source_digest: Some("0".repeat(64)),
             instructions_digest: Some("0".repeat(64)),
             identity_digest: Some("0".repeat(64)),
             selection_basis: None,

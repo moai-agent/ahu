@@ -13,12 +13,16 @@
 //! no provider: a `modelProvider` in the CLI's settings that demands an API key
 //! is a local configuration problem ahu reports rather than works around.
 //!
-//! What it cannot enforce: **`--agent` is not validated by the CLI.** A probe
-//! with a nonexistent agent name returned a normal assistant reply instead of
-//! an error, so ahu could not tell from the harness whether the named
-//! definition was actually loaded. This adapter therefore no longer passes
-//! `--agent` at all: the agent's instructions travel in the prompt, identically
-//! to every other harness — see `crate::orchestration`.
+//! What it cannot enforce: **an agent identity.** The CLI has an `--agent
+//! <name>` flag, but a probe with a nonexistent name returned a normal
+//! assistant reply instead of an error, and a workspace agent whose
+//! instructions were unmistakable did not change the response — so ahu could
+//! never tell from the harness whether the named definition had been loaded.
+//! Passing the flag amounted to requesting an identity and reporting it as
+//! applied. This adapter therefore does not pass it at all. The agent's
+//! instructions travel in the prompt instead, identically to every other
+//! harness — see `crate::orchestration` — which is weaker than a system prompt
+//! and, unlike the flag, exactly what ahu says it is.
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::agent::Permissions;

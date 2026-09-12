@@ -51,6 +51,10 @@ impl SourceFormat {
     /// name to, and nothing bound that to the file ahu read and digested. ahu no
     /// longer uses any agent-selection flag, so a format's only job is saying
     /// how to turn its file into instruction text.
+    ///
+    /// That is also why `ResolvedAgent` carries two digests: for a format with
+    /// frontmatter the file and the delivered text are different bytes, and one
+    /// number cannot honestly stand for both.
     pub fn has_frontmatter(self) -> bool {
         matches!(
             self,
@@ -159,8 +163,31 @@ pub struct ResolvedAgent {
     pub manifest_digest: String,
     /// Absolute path to the native definition inside the repository.
     pub source_path: PathBuf,
+    /// SHA-256 of the complete file at `source.path`, bytes exactly as they are
+    /// on disk — frontmatter included.
+    ///
+    /// This is what a reviewer compares against the repository, and what
+    /// identifies the file as a file. It is **not** what ahu puts in front of
+    /// the model.
     pub source_digest: String,
-    /// Instructions the harness will load, for the context inventory.
+    /// SHA-256 of exactly the text ahu delivers, byte for byte.
+    ///
+    /// That is `instructions` below: the file with its YAML frontmatter
+    /// stripped, when the format has any. It is identical to the bytes that land
+    /// inside the `<<<ahu-agent-...>>>` fence in the delivered prompt.
+    ///
+    /// For a format with no frontmatter this covers the same bytes as
+    /// `source_digest`, and it is computed the same way rather than being left
+    /// absent — a digest that is sometimes missing is a digest a reader has to
+    /// reason about, and the point of having two is that neither needs
+    /// reasoning about.
+    ///
+    /// Keeping only one value was the actual defect: `TaskRecord`'s field was
+    /// named `instructions_digest` and held the whole-file digest, so the name
+    /// and the value disagreed from the moment ahu started delivering the
+    /// stripped body.
+    pub instructions_digest: String,
+    /// Instructions the harness receives, for the context inventory.
     pub instructions: String,
     /// Model the native file declares, when it declares one.
     pub native_model: Option<String>,
@@ -175,15 +202,22 @@ impl ResolvedAgent {
     }
 
     /// Digest binding the manifest and the native definition together.
+    ///
+    /// Both file digests are mixed in. The file digest alone would miss nothing
+    /// today — stripping is deterministic, so a changed body implies a changed
+    /// file — but the delivered digest is the one that describes what reached
+    /// the model, and drift should not depend on that implication holding if the
+    /// parse ever changes. A change to either is drift.
     pub fn identity_digest(&self) -> String {
         digest_bytes(
             format!(
-                "{}\n{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}\n{}",
                 self.manifest.name,
                 self.manifest.version,
                 self.manifest.harness,
                 self.manifest.model,
-                self.source_digest
+                self.source_digest,
+                self.instructions_digest
             )
             .as_bytes(),
         )
@@ -392,6 +426,10 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
     } else {
         (source_text.clone(), None, BTreeMap::new())
     };
+    // Computed the same way as `source_digest`, over the bytes ahu will actually
+    // deliver. For a frontmatter-less format the two cover identical bytes and
+    // come out equal, which is the correct answer rather than a special case.
+    let instructions_digest = digest_bytes(instructions.as_bytes());
 
     if let Some(native) = native_model.as_deref()
         && native != manifest.model
@@ -413,6 +451,7 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
         manifest_digest,
         source_path,
         source_digest,
+        instructions_digest,
         instructions,
         native_model,
         native_settings,

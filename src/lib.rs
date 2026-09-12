@@ -3,8 +3,12 @@
 //! ahu launches repository-defined agents in isolated Git worktrees and
 //! organises their interactive sessions in cmux. Its contract, in one place:
 //!
-//!   - a named agent's harness, model, and system prompt come from the
-//!     repository and are used exactly as configured, or the launch fails;
+//!   - a named agent's harness, model, and instructions come from the
+//!     repository and are used exactly as configured, or the launch fails. The
+//!     harness and model are pinned by real flags; the instructions are
+//!     delivered as prompt text, because no harness offers ahu an instruction
+//!     channel it can verify, and ahu reports that as a gap rather than as
+//!     enforcement;
 //!   - one policy per project, with no personal profiles or per-machine
 //!     fallbacks that change what gets selected;
 //!   - the harness owns its own conventions for skills, memory, and settings,

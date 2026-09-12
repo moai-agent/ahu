@@ -14,14 +14,24 @@ Usage: ahu [COMMAND]
 
 Running `ahu` with no command opens the interactive launcher: pick an agent with
 `@name` (or leave it blank for the project's automatic selection), paste a task,
-and submit it. Pasting never submits by itself.
+and submit it. Pasting never submits by itself: the preview ends with a
+confirmation code generated after your prompt was read, and only that code
+submits, so no pasted text can answer for you.
+
+An agent's instructions and ahu's delegation contract are delivered as prompt
+text on every harness, fenced with a per-launch nonce. ahu passes no
+agent-selection or system-prompt flag anywhere, so none of it is enforced by the
+harness -- the preview says so as a gap on every launch. What ahu does pin with
+real flags is the harness, the exact model, and any permission widening a
+committed manifest asks for.
 
 Commands:
   help                  Print this help message
   explain               Architecture overview and Mermaid diagrams
   init                  Record this project's agreed harness and model order
   launch @name --prompt-file <path> [--dry-run]
-                        Assign work in a separate cmux session (no confirmation)
+                        Assign work in a separate cmux session. Reads no
+                        confirmation, so approval widening needs an explicit flag
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
   inventory [@agent]    Show everything that can influence an agent's context

@@ -309,6 +309,7 @@ fn a_task_record_without_a_prompt_digest_does_not_load_at_all() {
             "harness": "claude-code",
             "model": "claude-opus-5",
             "instructions_source": null,
+            "source_digest": null,
             "instructions_digest": null,
             "identity_digest": null,
             "selection_basis": null,
@@ -490,6 +491,7 @@ fn write_record(
             harness: "claude-code".to_string(),
             model: "claude-sonnet-5".to_string(),
             instructions_source: Some(".claude/agents/sable.md".to_string()),
+            source_digest: Some("0".repeat(64)),
             instructions_digest: Some("0".repeat(64)),
             identity_digest: Some("0".repeat(64)),
             selection_basis: None,
@@ -514,4 +516,89 @@ fn write_record(
     };
     tamper(&mut record);
     ahu::task::save(task_dir, &record, prompt).unwrap();
+}
+
+// --- schema 2: an old record is refused, never reinterpreted ---
+
+/// Schema 1 wrote the *whole file's* digest into a field named
+/// `instructions_digest`. Schema 2 gives that name to the delivered text and
+/// puts the file digest in `source_digest`. Reading a schema-1 record as schema
+/// 2 would therefore attribute file bytes to delivered bytes under the right
+/// name, which is worse than failing.
+#[test]
+fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
+    assert_eq!(
+        ahu::task::TASK_SCHEMA_VERSION,
+        2,
+        "the digest split is a schema change and must be versioned as one"
+    );
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let task_dir = temp.path().join("task");
+    std::fs::create_dir_all(&task_dir).unwrap();
+
+    // A schema-1 record: no `source_digest`, and `instructions_digest` holding
+    // what schema 2 would call the file digest.
+    let record = serde_json::json!({
+        "schema_version": 1,
+        "task_id": "old0001",
+        "title": "t",
+        "created_at": "2026-09-01T00:00:00Z",
+        "repo_identity": "r",
+        "repo_root": "/nonexistent",
+        "branch": "ahu/sable/old0001",
+        "worktree": "/nonexistent",
+        "base_commit": null,
+        "identity": {
+            "mode": "named",
+            "agent": "sable",
+            "agent_version": "1.0.0",
+            "permissions": "prompt",
+            "harness": "claude-code",
+            "model": "claude-opus-5",
+            "instructions_source": ".claude/agents/sable.md",
+            "instructions_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "identity_digest": null,
+            "selection_basis": null,
+        },
+        "policy_digest": "0",
+        "catalog_version": ahu::catalog::CATALOG_VERSION,
+        "config_snapshot": {"entries": [], "skipped_directories": []},
+        "config_snapshot_digest": "0",
+        "materialize": {"written": [], "removed": [], "concurrently_modified": []},
+        "launch_command": {"program": "claude", "args": []},
+        "delivery": {"nonce": "0", "agent_instructions": null, "digest": "0"},
+        "prompt_digest": "0",
+        "enforcement": {
+            "harness": "claude-code",
+            "harness_version": null,
+            "model_fixed_for_session": false,
+            "gaps": [],
+            "applied_controls": [],
+        },
+        "reliability_warning": null,
+        "cmux_group_id": null,
+        "cmux_workspace_id": null,
+        "cmux_window_id": null,
+        "state": "exited",
+    });
+    std::fs::write(
+        task_dir.join("task.json"),
+        serde_json::to_string_pretty(&record).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(task_dir.join("prompt.txt"), "earlier").unwrap();
+
+    let error = ahu::task::load(&task_dir).unwrap_err().to_string();
+    assert!(error.contains("schema version (1)"), "{error}");
+    assert!(error.contains("will not reinterpret it"), "{error}");
+    assert!(
+        error.contains("instructions_digest"),
+        "the message must name the field whose meaning moved: {error}"
+    );
+
+    // `task::list` skips a record it cannot read rather than breaking the
+    // listing of the others, so an old task disappears from `ahu tasks` instead
+    // of appearing with a digest that means something else.
+    assert!(ahu::task::list("no-such-repo-identity").unwrap().is_empty());
 }

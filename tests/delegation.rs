@@ -55,14 +55,35 @@ fn dry_run_resolves_the_named_agent_without_reading_confirmation_or_launching() 
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("sable@1.0.0"), "{text}");
     assert!(text.contains("claude-sonnet-5"));
-    // The design change removed every agent-selection and tool-denial flag; the
-    // preview must show what is actually passed, and say what the redacted
-    // prompt slot holds.
-    assert!(!text.contains("--disallowedTools"), "{text}");
-    assert!(!text.contains("--agent"), "{text}");
-    assert!(!text.contains("--append-system-prompt"), "{text}");
+    // The design change removed every agent-selection and tool-denial flag, so
+    // none of them may appear in the command ahu says it will run.
+    //
+    // Scoped to that one line on purpose: the Enforcement gaps name `--agent`
+    // in order to explain why ahu does not pass it, and a preview that can no
+    // longer mention a flag cannot explain its own reasoning about one.
+    let command_line = text
+        .lines()
+        .skip_while(|l| !l.starts_with("Command to be run in the worktree"))
+        .nth(1)
+        .expect("the preview shows the command");
+    for forbidden in ["--disallowedTools", "--agent", "--append-system-prompt"] {
+        assert!(
+            !command_line.contains(forbidden),
+            "{forbidden} must not be passed: {command_line}"
+        );
+    }
+    assert!(command_line.contains("--model"), "{command_line}");
+    assert!(
+        command_line.contains(ahu::harness::REDACTED_PROMPT),
+        "{command_line}"
+    );
     assert!(text.contains("delegation contract"), "{text}");
     assert!(text.contains("fenced with the tag nonce"), "{text}");
+    // And the reason ahu skips agent selection is still stated as a gap.
+    assert!(
+        text.contains("not bound to the file ahu reads and digests"),
+        "{text}"
+    );
     assert!(text.contains("Dry run"));
     assert!(!text.contains(HOSTILE_PROMPT));
     assert_eq!(common::git(repo.path(), &["branch", "--list", "ahu/*"]), "");
@@ -142,15 +163,19 @@ fn every_harness_receives_the_same_nonce_fenced_contract_and_agent_instructions(
         assert!(at(&agent_open) < at(&agent_close), "{harness}");
         assert!(at(&agent_close) < at(HOSTILE_PROMPT), "{harness}");
 
-        // Each fence holds exactly what it claims to, and nothing else.
-        let contract_body = &slot[at(&contract_open) + contract_open.len()..at(&contract_close)];
+        // Each fence holds exactly what it claims to, byte for byte, with
+        // nothing inserted or trimmed on the way in. A digest of a fence body is
+        // only useful if the body is reproducible from its source.
         assert_eq!(
-            contract_body.trim(),
-            ahu::orchestration::INSTRUCTIONS.trim(),
+            ahu::orchestration::fence_body(slot, "contract", &delivery.nonce),
+            Some(ahu::orchestration::INSTRUCTIONS),
             "{harness}"
         );
-        let agent_body = &slot[at(&agent_open) + agent_open.len()..at(&agent_close)];
-        assert_eq!(agent_body.trim(), AGENT_INSTRUCTIONS, "{harness}");
+        assert_eq!(
+            ahu::orchestration::fence_body(slot, "agent", &delivery.nonce),
+            Some(AGENT_INSTRUCTIONS),
+            "{harness}"
+        );
 
         // Exactly one fence of each kind: a second pair would make "outside the
         // fence" ambiguous.

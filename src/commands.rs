@@ -679,9 +679,17 @@ fn submit(
 
     // Drift against the last launch of this same agent at this same version.
     let previous = task::list(&identity)?;
+    let agent_identity = plan.agent.as_ref().map(|a| a.identity_digest());
     if let Some(found) = drift::detect(
         &key,
-        plan.agent.as_ref().map(|a| a.identity_digest()).as_deref(),
+        plan.agent
+            .as_ref()
+            .zip(agent_identity.as_deref())
+            .map(|(a, identity)| drift::AgentDigests {
+                identity,
+                source: &a.source_digest,
+                instructions: &a.instructions_digest,
+            }),
         &plan.snapshot.digest(),
         &loaded.digest,
         &plan.hooks.digest(),
@@ -792,8 +800,13 @@ pub fn render_preview(
         // This attribution is now checkable rather than asserted: ahu delivers
         // the instruction text it parsed out of exactly this file, so there is
         // no name for a harness to resolve somewhere else.
+        //
+        // Two digests, each labelled. One value could only ever be right about
+        // one of the two questions a reader has — "is this the file I reviewed?"
+        // and "is that what the model was given?" — and a reader must never have
+        // to work out which one a bare digest answers.
         out.push_str(&format!(
-            "  agent src  {} ({})\n",
+            "  agent src  {}\n",
             display_safe(
                 &agent
                     .source_path
@@ -801,14 +814,18 @@ pub fn render_preview(
                     .unwrap_or(&agent.source_path)
                     .to_string_lossy()
             ),
+        ));
+        out.push_str(&format!(
+            "             file digest         {} (the whole file as it is on disk)\n",
             &agent.source_digest[..12]
         ));
         out.push_str(&format!(
-            "             the digest covers the whole file; ahu delivers its {} in the prompt\n",
+            "             instructions digest {} ({})\n",
+            &agent.instructions_digest[..12],
             if agent.manifest.source.format.has_frontmatter() {
-                "body, having read the YAML frontmatter as metadata only,"
+                "the body ahu delivers, YAML frontmatter read as metadata and not delivered"
             } else {
-                "contents"
+                "the text ahu delivers; this format has no frontmatter, so it is the whole file"
             }
         ));
     }

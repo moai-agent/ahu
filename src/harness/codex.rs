@@ -12,10 +12,31 @@
 //! What it cannot enforce: **Codex has no per-agent selection.** There is no
 //! `--agent` flag and no instructions-file option; `codex agents` browses
 //! running sessions, not definitions, and `-p/--profile` layers model and
-//! sandbox config rather than instructions. So a named ahu agent backed by
-//! Codex pins the harness and the exact model, but its system prompt is not
-//! enforceable. ahu says so rather than quietly pasting the instructions into
-//! the prompt, which would be exactly the silent translation it forbids.
+//! sandbox config rather than instructions. A named ahu agent backed by Codex
+//! pins the harness and the exact model; its instructions are not enforceable
+//! here, and they are not enforceable on any other harness either.
+//!
+//! This adapter used to argue that ahu should therefore *not* put the agent's
+//! instructions in the prompt, because doing so "would be exactly the silent
+//! translation it forbids". The maintainer revisited that, and the reasoning it
+//! turned on no longer holds:
+//!
+//!   - it assumed some other harness had a real instruction channel to be
+//!     consistent with. None of the three does. Claude Code's `--agent <name>`
+//!     selects by *name* through the harness's own agent search, which is not
+//!     bound to the file ahu reads and digests, so ahu was asserting a binding
+//!     it could not check;
+//!   - "silent" was the load-bearing word, and delivery is not silent. ahu
+//!     names the source file and both its digests in the preview, fences its own
+//!     text with a per-launch nonce, and reports the whole arrangement as a
+//!     **gap** — see `crate::launch::DELIVERY_IS_NOT_ENFORCEMENT`.
+//!
+//! Unless the same system-prompt behaviour can be enforced on every harness, the
+//! honest position is that a task prompt can override ahu's text to some degree
+//! on all of them. ahu now says that once, applies it uniformly, and delivers
+//! everything the same way everywhere rather than being right about one harness
+//! and quiet about two. Codex is no longer the exception this paragraph
+//! described; it is the ordinary case.
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::agent::Permissions;

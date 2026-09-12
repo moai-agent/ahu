@@ -318,7 +318,8 @@ pub fn execute(
                     .to_string_lossy()
                     .to_string()
             }),
-            instructions_digest: plan.agent.as_ref().map(|a| a.source_digest.clone()),
+            source_digest: plan.agent.as_ref().map(|a| a.source_digest.clone()),
+            instructions_digest: plan.agent.as_ref().map(|a| a.instructions_digest.clone()),
             identity_digest: plan.agent.as_ref().map(|a| a.identity_digest()),
             selection_basis: if plan.mode == LaunchMode::Automatic {
                 Some(plan.pair.basis.clone())

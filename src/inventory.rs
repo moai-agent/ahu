@@ -48,7 +48,9 @@ impl Visibility {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Category {
-    /// Fixed identity: name, harness, model, system prompt source.
+    /// Fixed identity: name, harness, model, and the file the agent's
+    /// instructions were read from. ahu delivers those instructions in the
+    /// prompt; nothing selects them through the harness.
     Identity,
     /// Repository guidance, not an optional skill or memory.
     RepositoryInstructions,
@@ -179,11 +181,25 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
             ];
             if let Some(agent) = agent {
                 // Not "system prompt": ahu delivers these bytes in the prompt on
-                // every harness, and the digest is over the file it read.
+                // every harness. Both digests are named, because they answer
+                // different questions and only one of them describes what the
+                // model was given.
                 notes.push(format!(
-                    "instructions delivered in the prompt, read from {} ({})",
-                    relative(repo_root, &agent.source_path),
+                    "instructions delivered in the prompt, read from {}",
+                    relative(repo_root, &agent.source_path)
+                ));
+                notes.push(format!(
+                    "file digest {} covers the whole file at that path, frontmatter included",
                     &agent.source_digest[..12]
+                ));
+                notes.push(format!(
+                    "instructions digest {} covers exactly the text ahu delivers{}",
+                    &agent.instructions_digest[..12],
+                    if agent.manifest.source.format.has_frontmatter() {
+                        ", which is that file with its YAML frontmatter stripped"
+                    } else {
+                        "; this format has no frontmatter, so the two cover the same bytes"
+                    }
                 ));
                 if !agent.native_settings.is_empty() {
                     notes.push(format!(
