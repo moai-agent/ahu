@@ -178,16 +178,19 @@ impl ResolvedAgent {
     }
 }
 
-fn agents_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join(AGENTS_RELATIVE_DIR)
-}
-
 /// Load every registered agent, keyed by name.
 ///
 /// A single malformed manifest fails the whole load: ahu must not present a
 /// partial agent list as if it were the project's registry.
 pub fn load_all(repo_root: &Path) -> Result<Vec<ResolvedAgent>> {
-    let dir = agents_dir(repo_root);
+    // The registry directory is resolved component by component, and each
+    // manifest is checked before it is opened. `register` and `unregister`
+    // already refuse to act through a symlinked `.agents/ahu/agents`; reading
+    // needs the same refusal, because a symlinked manifest hands ahu a file
+    // outside the repository whose contents the parse error quotes back.
+    let Some(dir) = crate::util::resolve_existing_within(repo_root, AGENTS_RELATIVE_DIR)? else {
+        return Ok(Vec::new());
+    };
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -197,9 +200,20 @@ pub fn load_all(repo_root: &Path) -> Result<Vec<ResolvedAgent>> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-            paths.push(path);
+        if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+            continue;
         }
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| Error::new(format!("cannot inspect {}: {e}", path.display())))?;
+        if meta.file_type().is_symlink() {
+            let shown = path
+                .strip_prefix(repo_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+            return Err(crate::util::symlink_refusal(&path, &shown));
+        }
+        paths.push(path);
     }
     paths.sort();
     let mut agents = Vec::new();

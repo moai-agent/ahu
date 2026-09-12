@@ -586,7 +586,9 @@ fn the_disclosure_does_not_claim_skipped_configuration_is_absent() {
     let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
     let taken = snapshot::collect(repo.path()).unwrap();
     let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let enforcement = adapter.enforcement("claude-opus-5").unwrap();
+    let enforcement = adapter
+        .enforcement("claude-opus-5", Default::default())
+        .unwrap();
     let found = ahu::hooks::collect(repo.path()).unwrap();
     let built = ahu::inventory::build(&ahu::inventory::Subject {
         repo_root: repo.path(),

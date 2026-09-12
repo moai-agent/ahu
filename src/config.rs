@@ -81,7 +81,13 @@ pub fn config_path(repo_root: &Path) -> PathBuf {
 /// enter first-run initialization. Malformed configuration is an error: ahu
 /// never resets or overwrites a file it could not understand.
 pub fn load(repo_root: &Path) -> Result<Option<LoadedConfig>> {
-    let path = config_path(repo_root);
+    // Resolved component by component rather than joined: a repository can
+    // commit a symlink at `.agents`, `.agents/ahu`, or `config.toml` itself, and
+    // reading through one would let it hand ahu any file the user can read —
+    // whose contents the parse error below then quotes back.
+    let Some(path) = crate::util::resolve_existing_within(repo_root, CONFIG_RELATIVE_PATH)? else {
+        return Ok(None);
+    };
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

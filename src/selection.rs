@@ -155,6 +155,20 @@ pub fn resolve_executable(executable: &str) -> Option<String> {
 fn which(executable: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
+        // A `PATH` entry that is empty or relative resolves against the current
+        // working directory, which for `ahu run-task` is the task worktree — a
+        // checkout of the repository. `PATH=/usr/bin:` is enough: the empty
+        // trailing entry makes `dir` empty, `dir.join("claude")` is the bare
+        // relative name `claude`, and a `claude` committed at the top of the
+        // repository is what gets executed. The name check in `run_task` cannot
+        // catch it, because the file name of `claude` is `claude`.
+        //
+        // ahu resolves a harness to run it, so it only ever accepts an absolute
+        // path. A relative `PATH` entry is skipped rather than treated as the
+        // shell would treat it.
+        if !dir.is_absolute() {
+            continue;
+        }
         let candidate = dir.join(executable);
         if is_executable(&candidate) {
             return Some(candidate.to_string_lossy().to_string());

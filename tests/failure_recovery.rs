@@ -181,7 +181,9 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
             permissions: Default::default(),
         })
         .unwrap();
-    let enforcement = adapter.enforcement("claude-opus-5").unwrap();
+    let enforcement = adapter
+        .enforcement("claude-opus-5", Default::default())
+        .unwrap();
     let record = ahu::task::TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: "gone0001".to_string(),
@@ -643,7 +645,7 @@ fn adapter_enforcement_reports_a_missing_catalog_entry_instead_of_panicking() {
     for harness_id in ["claude-code", "codex", "antigravity"] {
         let adapter = ahu::harness::adapter_for(harness_id).unwrap();
         let report: ahu::util::Result<ahu::harness::EnforcementReport> =
-            adapter.enforcement("claude-opus-5");
+            adapter.enforcement("claude-opus-5", Default::default());
         assert_eq!(
             report.expect("the shipped catalog has it").harness,
             harness_id

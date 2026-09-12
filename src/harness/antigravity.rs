@@ -75,7 +75,7 @@ impl Adapter for Antigravity {
         })
     }
 
-    fn enforcement(&self, _model: &str) -> Result<EnforcementReport> {
+    fn enforcement(&self, _model: &str, permissions: Permissions) -> Result<EnforcementReport> {
         let entry = crate::catalog::harness("antigravity").ok_or_else(|| {
             crate::util::Error::new(
                 "the compatibility catalog has no entry for harness \"antigravity\", so ahu cannot \
@@ -91,9 +91,33 @@ impl Adapter for Antigravity {
             applied_controls: vec![
                 "--model pins the exact model for the session's first request".to_string(),
                 "--agent is passed so ahu always requests the configured identity, even though the harness does not confirm it was applied".to_string(),
-                "ahu passes no --dangerously-skip-permissions, --mode, or --sandbox; whether the effective session keeps the harness's own approval boundaries also depends on any wrapper on PATH".to_string(),
+                permission_control(permissions),
                 "authentication is the harness's own OAuth sign-in; ahu holds no API key".to_string(),
             ],
         })
+    }
+}
+
+/// State the permission flags this adapter passes, from the same value that
+/// decides them. See the note in the Claude Code adapter: a fixed string here
+/// denied passing `--dangerously-skip-permissions` on the very launches that
+/// pass it.
+fn permission_control(permissions: Permissions) -> String {
+    let tail = "whether the effective session keeps the harness's own approval boundaries \
+                also depends on any wrapper on PATH";
+    match permissions {
+        Permissions::Prompt => {
+            format!("ahu passes no --dangerously-skip-permissions, --mode, or --sandbox; {tail}")
+        }
+        Permissions::AcceptEdits => format!(
+            "ahu passes --mode accept-edits because this agent's manifest declares \
+             permissions = accept-edits; it passes no --dangerously-skip-permissions or \
+             --sandbox; {tail}"
+        ),
+        Permissions::Auto => format!(
+            "ahu passes --dangerously-skip-permissions because this agent's manifest declares \
+             permissions = auto, which auto-approves every tool request; it passes no --mode or \
+             --sandbox; {tail}"
+        ),
     }
 }

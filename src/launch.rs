@@ -148,7 +148,7 @@ pub fn plan(
                 pair.harness, command.program
             ))
         })?;
-    let mut enforcement = adapter.enforcement(&pair.model)?;
+    let mut enforcement = adapter.enforcement(&pair.model, permissions)?;
     // A wrapper between ahu and the harness can add flags ahu refuses to pass.
     if let Some(note) = harness::wrapper_interposed(&harness_executable) {
         enforcement.gaps.push(note);
@@ -542,13 +542,34 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
                 rebuilt.program, record.task_id
             ))
         })?;
-    if executable.file_name().and_then(|n| n.to_str()) != Some(rebuilt.program.as_str()) {
+    // `which` builds this path as `<PATH entry>/<program>`, so comparing the
+    // file name to the program name can never fail — it was a tautology, not a
+    // check. What actually has to hold is that the binary is not something the
+    // repository put there: an absolute path, and outside both the repository
+    // and the task worktree. A harness resolved from inside the tree the agent
+    // is about to edit is exactly the case worth refusing.
+    if !executable.is_absolute() {
         bail!(
-            "PATH resolved {} to {}, which is not {}. ahu will not run it.",
+            "PATH resolved {} to the relative path {}, which would be taken from the task \
+             worktree. ahu will not run it.",
             rebuilt.program,
-            executable.display(),
-            rebuilt.program
+            executable.display()
         );
+    }
+    if let Ok(resolved) = executable.canonicalize() {
+        for enclosing in [discovered.root.as_path(), record.worktree.as_path()] {
+            if let Ok(enclosing) = enclosing.canonicalize()
+                && resolved.starts_with(&enclosing)
+            {
+                bail!(
+                    "PATH resolved {} to {}, which is inside {}. ahu will not run a harness \
+                     binary that comes from the repository it is about to work on.",
+                    rebuilt.program,
+                    resolved.display(),
+                    enclosing.display()
+                );
+            }
+        }
     }
     if !record.harness_executable.as_os_str().is_empty() && record.harness_executable != executable
     {

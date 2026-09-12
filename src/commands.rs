@@ -18,7 +18,7 @@ use crate::launcher::{self, Console};
 use crate::onboard;
 use crate::selection::{self, ResolvedPair};
 use crate::task;
-use crate::util::{Result, display_safe};
+use crate::util::{Result, display_safe, display_safe_block};
 
 /// Locate the repository ahu was invoked from.
 ///
@@ -135,9 +135,19 @@ pub fn onboard_cmd(
     })?;
     if candidate.already_registered {
         console.say(&format!(
-            "{name} is already registered; nothing was changed.\n"
+            "{} is already registered; nothing was changed.\n",
+            display_safe(name)
         ))?;
         return Ok(0);
+    }
+    // Refuse before printing anything else about it. `register` checks these
+    // too, but it runs after the proposal has already been shown.
+    if !candidate.blockers.is_empty() {
+        bail!(
+            "cannot register {:?}: {}",
+            display_safe(name),
+            display_safe(&candidate.blockers.join("; "))
+        );
     }
     let model = match model.or(candidate.native_model.as_deref()) {
         Some(model) if model != "inherit" && !model.is_empty() => model.to_string(),
@@ -153,7 +163,10 @@ pub fn onboard_cmd(
         ),
     };
     console.say("The following file will be created. Nothing else is touched:\n\n")?;
-    console.say(&format!(".agents/ahu/agents/{name}.toml\n\n"))?;
+    console.say(&format!(
+        ".agents/ahu/agents/{}.toml\n\n",
+        display_safe(name)
+    ))?;
     console.say(&onboard::proposed_manifest(candidate, &model, version))?;
     if !launcher::confirm(console, "\nCreate it? [y/N]: ")? {
         console.say("Cancelled. Nothing was written.\n")?;
@@ -177,13 +190,17 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                 "repository   {}\n  identity   {}\n  group name {}\n  HEAD       {}\n",
                 repo.root.display(),
                 repo.identity(),
-                repo.display_name(),
-                repo.head.as_deref().unwrap_or("(no commits)")
+                // Derived from a directory name, which ahu does not choose.
+                display_safe(&repo.display_name()),
+                display_safe(repo.head.as_deref().unwrap_or("(no commits)"))
             ))?;
         }
         Err(e) => {
             problems += 1;
-            console.say(&format!("repository   unavailable: {e}\n"))?;
+            console.say(&format!(
+                "repository   unavailable: {}\n",
+                display_safe_block(&e.to_string())
+            ))?;
         }
     }
 
@@ -199,7 +216,10 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             Ok(None) => console.say("config       not initialized; run `ahu init`\n")?,
             Err(e) => {
                 problems += 1;
-                console.say(&format!("config       invalid: {e}\n"))?;
+                console.say(&format!(
+                    "config       invalid: {}\n",
+                    display_safe_block(&e.to_string())
+                ))?;
             }
         }
     }
@@ -254,7 +274,10 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             }
             Err(e) => {
                 problems += 1;
-                console.say(&format!("hooks        could not be read: {e}\n"))?;
+                console.say(&format!(
+                    "hooks        could not be read: {}\n",
+                    display_safe_block(&e.to_string())
+                ))?;
             }
         }
     }
@@ -272,11 +295,19 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             prerequisite
                 .found_at
                 .as_deref()
-                .map(|p| format!("{p} {}", prerequisite.version.as_deref().unwrap_or("")))
+                // Both are outside ahu's control: the path comes from PATH and
+                // the version is another program's stdout.
+                .map(|p| {
+                    format!(
+                        "{} {}",
+                        display_safe(p),
+                        display_safe(prerequisite.version.as_deref().unwrap_or(""))
+                    )
+                })
                 .unwrap_or_else(|| "not installed".to_string())
         ))?;
         for note in &prerequisite.notes {
-            console.say(&format!("               note: {note}\n"))?;
+            console.say(&format!("               note: {}\n", display_safe(note)))?;
         }
         if harness.adapter_available && !harness.enforces_model_for_session {
             console.say(&format!(
@@ -296,13 +327,19 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                 Ok(_) => console.say("  groups     supported\n")?,
                 Err(e) => {
                     problems += 1;
-                    console.say(&format!("  groups     {e}\n"))?;
+                    console.say(&format!(
+                        "  groups     {}\n",
+                        display_safe_block(&e.to_string())
+                    ))?;
                 }
             }
         }
         Err(e) => {
             problems += 1;
-            console.say(&format!("cmux         {e}\n"))?;
+            console.say(&format!(
+                "cmux         {}\n",
+                display_safe_block(&e.to_string())
+            ))?;
         }
     }
 
@@ -332,20 +369,23 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         return Ok(0);
     }
     for (dir, record) in &records {
+        // Every field here comes out of task.json, which was built from the
+        // prompt and from repository configuration. `tasks` is as much a
+        // disclosure surface as the launch preview, so it escapes the same way.
         console.say(&format!(
             "{} [{}] {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n",
-            record.task_id,
+            display_safe(&record.task_id),
             record.state.as_str(),
-            record.title,
-            record.agent_label(),
-            record.identity.harness,
-            record.identity.model,
-            record.branch,
+            display_safe(&record.title),
+            display_safe(&record.agent_label()),
+            display_safe(&record.identity.harness),
+            display_safe(&record.identity.model),
+            display_safe(&record.branch),
             record.worktree.display(),
             dir.display(),
         ))?;
         if let Some(workspace) = &record.cmux_workspace_id {
-            console.say(&format!("  cmux      {workspace}\n"))?;
+            console.say(&format!("  cmux      {}\n", display_safe(workspace)))?;
         }
         if record.reliability_warning.is_some() {
             console.say(&format!("  warning   {}\n", harness::RELIABILITY_WARNING))?;
@@ -373,8 +413,8 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
     client.select_workspace(workspace)?;
     console.say(&format!(
         "Focused {} — {}\n  worktree {}\n",
-        record.agent_label(),
-        record.title,
+        display_safe(&record.agent_label()),
+        display_safe(&record.title),
         record.worktree.display()
     ))?;
     Ok(0)
@@ -392,7 +432,13 @@ pub fn inventory_cmd(
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
     let adapter = harness::adapter_for(&pair.harness)?;
-    let enforcement = adapter.enforcement(&pair.model)?;
+    // Same permissions the launch would use, so this report describes the same
+    // flags a launch of this identity would actually pass.
+    let permissions = resolved
+        .as_ref()
+        .map(|a| a.manifest.permissions)
+        .unwrap_or_default();
+    let enforcement = adapter.enforcement(&pair.model, permissions)?;
     let found_hooks = hooks::collect(&repo.root)?;
     let built = inventory::build(&inventory::Subject {
         repo_root: &repo.root,
@@ -421,7 +467,13 @@ pub fn hygiene_cmd(
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
     let adapter = harness::adapter_for(&pair.harness)?;
-    let enforcement = adapter.enforcement(&pair.model)?;
+    // Same permissions the launch would use, so this report describes the same
+    // flags a launch of this identity would actually pass.
+    let permissions = resolved
+        .as_ref()
+        .map(|a| a.manifest.permissions)
+        .unwrap_or_default();
+    let enforcement = adapter.enforcement(&pair.model, permissions)?;
     let found_hooks = hooks::collect(&repo.root)?;
     let built = inventory::build(&inventory::Subject {
         repo_root: &repo.root,
@@ -579,10 +631,10 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
     let launched = launch::execute(repo, &loaded, &plan, &prompt, focus_new)?;
     console.say(&format!(
         "\nLaunched {} — {}\n  task     {}\n  branch   {}\n  worktree {}\n  record   {}\n",
-        launched.record.agent_label(),
-        launched.record.title,
-        launched.record.task_id,
-        launched.record.branch,
+        display_safe(&launched.record.agent_label()),
+        display_safe(&launched.record.title),
+        display_safe(&launched.record.task_id),
+        display_safe(&launched.record.branch),
         launched.record.worktree.display(),
         launched.task_dir.display(),
     ))?;
@@ -687,6 +739,17 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
             "Agent configuration found directly inside them, carried in by the checkout and not\n\
              inventoried: {}\n",
             display_safe(&plan.snapshot.unscanned_config.join(", "))
+        ));
+    }
+    if !plan.snapshot.symlinks.is_empty() {
+        // `collect` never follows one and `materialize` deletes any the base
+        // commit put in the worktree, so this configuration is neither
+        // inherited nor counted in `config N file(s)` above. Saying nothing
+        // left the reader to infer it from a number that silently excluded it.
+        out.push_str(&format!(
+            "Configuration symlinks, not followed and not inherited; ahu also removes them from\n\
+             the task worktree: {}\n",
+            display_safe(&plan.snapshot.symlinks.join(", "))
         ));
     }
     out.push_str(&hooks::render_for_preview(

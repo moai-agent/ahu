@@ -125,11 +125,21 @@ pub trait Adapter {
     fn launch_command(&self, request: &LaunchRequest<'_>) -> Result<LaunchCommand>;
     /// Report what this adapter can enforce on this machine.
     ///
+    /// Takes the launch's `permissions` because the report describes the flags
+    /// this adapter actually passes, and those depend on it. A report built
+    /// without it can only assert a fixed list, which is how the Enforcement
+    /// block came to claim ahu passes no `--permission-mode` on a launch that
+    /// passes exactly that.
+    ///
     /// Fallible because the report is built from the compatibility catalog. The
     /// entry is there in every shipped build, but a catalog edit that does not
     /// update an adapter must surface as an error the caller can print, not as
     /// a panic inside a harness adapter.
-    fn enforcement(&self, model: &str) -> Result<EnforcementReport>;
+    fn enforcement(
+        &self,
+        model: &str,
+        permissions: crate::agent::Permissions,
+    ) -> Result<EnforcementReport>;
 }
 
 pub fn adapter_for(harness_id: &str) -> Result<Box<dyn Adapter>> {

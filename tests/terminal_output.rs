@@ -123,3 +123,75 @@ fn a_hostile_file_name_in_an_error_cannot_repaint_the_terminal() {
     );
     assert!(stderr.contains("\\x1b[2J"), "{stderr:?}");
 }
+
+/// `ahu doctor` is a renderer like any other.
+///
+/// It catches errors and prints them inline, so it does not pass through
+/// `main`'s `display_safe_block`. A repository-chosen `catalog_version` reaching
+/// the terminal raw lets a checkout clear the screen in one of the two commands
+/// the README names as the way to list hooks — erasing the hook disclosure
+/// printed moments later in the same report.
+#[test]
+fn doctor_cannot_be_used_to_repaint_the_terminal() {
+    let repo = TestRepo::new();
+    repo.write(
+        ".agents/ahu/config.toml",
+        "schema_version = 1\n\
+         harness_preferences = [\"claude-code\"]\n\
+         model_selection = \"project-ranked\"\n\
+         catalog_version = \"2026-09-12\u{1b}[2J\u{1b}[Hahu doctor: no problems found.\"\n\
+         \n[model_rankings]\n\
+         \"claude-code\" = [\"claude-opus-5\"]\n",
+    );
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+        .arg("doctor")
+        .current_dir(repo.path())
+        .env("AHU_STATE_DIR", repo.state_path())
+        .output()
+        .expect("ahu runs");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains('\u{1b}'),
+        "a raw escape reached the terminal from doctor: {combined:?}"
+    );
+    assert!(combined.contains("\\x1b[2J"), "{combined:?}");
+}
+
+/// The task title is the one prompt-derived string that never passes through a
+/// renderer: it becomes the cmux workspace name via `new-workspace --name`.
+///
+/// Filtering `char::is_control` alone left every character in `INVISIBLE`
+/// intact, so a title could render in the sidebar as something other than what
+/// it is.
+#[test]
+fn a_task_title_carries_no_character_that_reorders_or_hides_text() {
+    for hostile in INVISIBLE {
+        let title = ahu::util::task_title_from_prompt(&format!("fix the {hostile} parser"));
+        assert!(
+            !title.contains(*hostile),
+            "U+{:04X} survived into a task title: {title:?}",
+            *hostile as u32
+        );
+    }
+    let title = ahu::util::task_title_from_prompt("fix \u{1b}[2J the parser");
+    assert!(!title.contains('\u{1b}'), "{title:?}");
+
+    // The length bound still holds: hostile characters are replaced before the
+    // title is truncated, not escaped into something longer.
+    let long = ahu::util::task_title_from_prompt(&format!("{}x", "a\u{202e}".repeat(200)));
+    assert!(long.chars().count() <= 60, "{}", long.chars().count());
+}
+
+/// `ahu tasks` prints straight out of `task.json`, whose title came from the
+/// prompt and whose branch and agent label came from repository configuration.
+#[test]
+fn tasks_output_escapes_what_it_prints() {
+    let rendered = ahu::commands::render_launch_notes(&["x\u{202e}y".to_string()]);
+    assert!(!rendered.contains('\u{202e}'), "{rendered:?}");
+}

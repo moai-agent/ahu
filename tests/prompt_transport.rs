@@ -291,7 +291,9 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
             permissions: Default::default(),
         })
         .unwrap();
-    let enforcement = adapter.enforcement("claude-opus-5").unwrap();
+    let enforcement = adapter
+        .enforcement("claude-opus-5", Default::default())
+        .unwrap();
     let record = TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: "testtask0001".to_string(),
@@ -412,7 +414,7 @@ fn adapters_report_their_real_enforcement_limits() {
     ] {
         let report = harness::adapter_for(harness)
             .unwrap()
-            .enforcement(model)
+            .enforcement(model, Default::default())
             .unwrap();
         assert_eq!(report.harness, harness);
         assert!(
@@ -431,7 +433,7 @@ fn adapters_report_their_real_enforcement_limits() {
     for harness in ["codex", "antigravity"] {
         let report = harness::adapter_for(harness)
             .unwrap()
-            .enforcement("x")
+            .enforcement("x", Default::default())
             .unwrap();
         assert!(
             report
@@ -508,7 +510,7 @@ fn a_wrapper_on_the_path_is_disclosed_as_an_enforcement_gap() {
     for harness_id in ["claude-code", "codex", "antigravity"] {
         let report = harness::adapter_for(harness_id)
             .unwrap()
-            .enforcement("m")
+            .enforcement("m", Default::default())
             .unwrap();
         for control in &report.applied_controls {
             assert!(
@@ -623,4 +625,79 @@ fn approval_widening_is_opt_in_and_harness_native() {
     assert!(Permissions::AcceptEdits.widens_defaults());
     assert!(Permissions::Auto.widens_defaults());
     assert!(Permissions::Auto.disclosure().contains("unattended"));
+}
+
+/// The Enforcement block must never deny passing a flag the launch passes.
+///
+/// Regression test for a contradiction in the submission preview: `enforcement`
+/// returned a fixed `applied_controls` list asserting "ahu passes no
+/// --permission-mode, ..." while `launch_command` pushed exactly that flag for
+/// an agent whose manifest declared `permissions = accept-edits` or `auto`. The
+/// Approvals block disclosed the widening three lines above, so the preview
+/// simultaneously stated and denied the same fact — and every reviewer agent in
+/// this repository is declared `permissions = "auto"`, so it was the common
+/// case, not a corner.
+///
+/// The check is structural rather than a string match on today's wording: for
+/// every adapter and every permission level, parse each "passes no A, B, or C"
+/// clause out of the controls and assert none of those flags appears in the
+/// argument vector the same adapter just built.
+#[test]
+fn no_enforcement_control_denies_a_flag_the_launch_actually_passes() {
+    use ahu::agent::Permissions;
+
+    for (harness, model) in [
+        ("claude-code", "claude-opus-5"),
+        ("codex", "gpt-6-astra"),
+        ("antigravity", "gemini-3.1-pro-high"),
+    ] {
+        for permissions in [
+            Permissions::Prompt,
+            Permissions::AcceptEdits,
+            Permissions::Auto,
+        ] {
+            let adapter = harness::adapter_for(harness).unwrap();
+            let command = adapter
+                .launch_command(&LaunchRequest {
+                    model,
+                    native_agent: None,
+                    prompt: "do the thing",
+                    cwd: Path::new("/tmp/ahu-fixture-worktree"),
+                    permissions,
+                })
+                .unwrap();
+            let report = adapter.enforcement(model, permissions).unwrap();
+
+            for control in &report.applied_controls {
+                for denied in denied_flags(control) {
+                    assert!(
+                        !command.args.contains(&denied),
+                        "{harness} with permissions = {}: the Enforcement block says \
+                         \"passes no {denied}\" but the launch command is {:?}\n  control: {control}",
+                        permissions.as_str(),
+                        command.args,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Pull the flags out of every "passes no A, B, or C" clause in a control line.
+fn denied_flags(control: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = control;
+    while let Some(at) = rest.find("passes no ") {
+        let clause = &rest[at + "passes no ".len()..];
+        // A clause runs to the end of the sentence.
+        let clause = clause.split(';').next().unwrap_or(clause);
+        for token in clause.split([',', ' ']) {
+            let token = token.trim().trim_end_matches(['.', ';']);
+            if token.starts_with("--") {
+                found.push(token.to_string());
+            }
+        }
+        rest = &rest[at + "passes no ".len()..];
+    }
+    found
 }
