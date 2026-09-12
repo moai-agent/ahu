@@ -1091,11 +1091,12 @@ pub fn render_launch_preview(
     prompt: &str,
     code: Option<&str>,
 ) -> String {
+    let style = style::stdout();
     let mut out = format!(
         "\nLaunch @{}\n  runtime    {} / {}\n  task       {}\n  worktree   {}\n",
-        display_safe(&plan.agent_label()),
-        display_safe(&plan.pair.harness),
-        display_safe(&plan.pair.model),
+        style.paint(Role::Agent, &display_safe(&plan.agent_label())),
+        style.paint(Role::Runtime, &display_safe(&plan.pair.harness)),
+        style.paint(Role::Runtime, &display_safe(&plan.pair.model)),
         display_safe(&plan.title),
         display_path(
             plan.worktree
@@ -1109,22 +1110,32 @@ pub fn render_launch_preview(
     ));
     out.push_str(&format!(
         "  approvals {}\n",
-        match plan.permissions {
-            crate::agent::Permissions::Auto => "automatic tool approval (permissions = auto)",
-            crate::agent::Permissions::AcceptEdits =>
-                "file edits approved automatically (permissions = accept-edits)",
-            _ => "harness defaults",
-        }
+        style.paint(
+            if plan.permissions.widens_defaults() {
+                Role::Warning
+            } else {
+                Role::Heading
+            },
+            match plan.permissions {
+                crate::agent::Permissions::Auto => "automatic tool approval (permissions = auto)",
+                crate::agent::Permissions::AcceptEdits =>
+                    "file edits approved automatically (permissions = accept-edits)",
+                _ => "harness defaults",
+            }
+        )
     ));
     if plan.parent_dirty {
-        out.push_str(
-            "\nUncommitted source changes are not included. Agent configuration is copied as-is.\n",
-        );
+        out.push_str(&style.paint(Role::Drift,
+            "\nCheckout changes\nUncommitted source changes are not included. Agent configuration is copied as-is.\n",
+        ));
     }
     for unreadable in &plan.hooks.unreadable {
-        out.push_str(&format!(
-            "\nCould not read settings: {}\n",
-            display_safe(unreadable)
+        out.push_str(&style.paint(
+            Role::Warning,
+            &format!(
+                "\n!! Could not read settings: {}\n",
+                display_safe(unreadable)
+            ),
         ));
     }
     if !plan.hooks.hooks.is_empty() {
@@ -1133,11 +1144,45 @@ pub fn render_launch_preview(
             plan.hooks.hooks.len()
         ));
     }
+    if !plan.enforcement.gaps.is_empty() {
+        out.push_str(&style.paint(
+            Role::Gap,
+            &format!(
+                "  gaps       {} capability limit(s); details: ahu inventory\n",
+                plan.enforcement.gaps.len()
+            ),
+        ));
+    }
+    if !plan.non_project_hooks().is_empty() {
+        out.push_str(&style.paint(
+            Role::Warning,
+            &format!("\n!! {}\n", hooks::NON_PROJECT_HOOK_WARNING),
+        ));
+    }
     if let Some(code) = code {
-        out.push_str("\nAbout to submit\n");
-        out.push_str(&format!(
-            "\nConfirmation code for this submission: {}\n",
-            display_safe(code)
+        out.push_str(&style.paint(Role::Heading, "\nAbout to submit\n"));
+        out.push_str(&style.paint(
+            Role::Heading,
+            &format!(
+                "\nConfirmation code for this submission: {}\n",
+                display_safe(code)
+            ),
+        ));
+    }
+    out
+}
+
+fn render_enforcement_gaps(plan: &launch::LaunchPlan) -> String {
+    let style = style::stdout();
+    let mut out = String::new();
+    if !plan.enforcement.gaps.is_empty() {
+        out.push_str(&style.paint(Role::Gap, "\nEnforcement gaps\n"));
+        out.push_str(&style.paint(
+            Role::Gap,
+            &format!(
+                "  ! {} capability limit(s); details: ahu inventory\n",
+                plan.enforcement.gaps.len()
+            ),
         ));
     }
     out
@@ -1342,6 +1387,7 @@ pub fn render_preview(
             style.paint(Role::Success, &display_safe(control))
         ));
     }
+    out.push_str(&render_enforcement_gaps(plan));
     out.push_str("  Detailed runtime capabilities: ahu inventory\n");
     out.push_str(&format!(
         "\nCommand to be run in the worktree (the prompt is one argument, never shell input):\n  {} {}\n",

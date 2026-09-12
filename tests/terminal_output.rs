@@ -377,6 +377,10 @@ fn redirected_commands_match_explicit_plain_output() {
         &["inventory", "@fixture"],
         &["hygiene", "@fixture"],
         &["tasks"],
+        &["task", "missing"],
+        &["task", "missing", "--output", "json"],
+        &["diff", "missing"],
+        &["codex"],
         &["doctor"],
         &["focus", "missing"],
         &["launch", "@missing", "--prompt", "fixture", "--dry-run"],
@@ -499,5 +503,211 @@ fn bad_color_options_are_usage_errors() {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2));
+    }
+}
+
+#[test]
+fn preview_output_fixture() {
+    let Ok(path) = std::env::var("AHU_TEST_PREVIEW_OUTPUT") else {
+        return;
+    };
+    let color = match std::env::var("AHU_TEST_PREVIEW_COLOR").unwrap().as_str() {
+        "always" => ahu::style::ColorChoice::Always,
+        "auto" => ahu::style::ColorChoice::Auto,
+        "never" => ahu::style::ColorChoice::Never,
+        _ => panic!("invalid fixture color"),
+    };
+    ahu::style::configure(Some(color));
+    let root = std::path::PathBuf::from(std::env::var_os("AHU_TEST_PREVIEW_REPO").unwrap());
+    let repo = ahu::git::discover(&root).unwrap();
+    let loaded = ahu::config::load(&root).unwrap().unwrap();
+    let agent = ahu::agent::find(&root, "fixture").unwrap();
+    let pair = ahu::selection::ResolvedPair {
+        harness: "codex".into(),
+        model: "gpt-6-astra".into(),
+        basis: "named agent".into(),
+        policy_digest: loaded.digest.clone(),
+        catalog_version: loaded.config.catalog_version.clone(),
+    };
+    let prompt = "  synthetic prompt body  \nsecond line";
+    let mut plan = ahu::launch::plan(&repo, Some(agent), pair, prompt).unwrap();
+    // Mutate the resolved plan to exercise every free-text preview field,
+    // including identities rejected earlier by manifest validation.
+    let hostile = |field: &str| {
+        format!(
+            "BEGIN_{field}\x1b[0m\x1b[2J\r\nForged section\t{}END_{field}",
+            INVISIBLE.iter().collect::<String>()
+        )
+    };
+    let agent = plan.agent.as_mut().unwrap();
+    agent.manifest.name = hostile("agent");
+    agent.manifest.version = hostile("version");
+    agent.source_path = root.join(hostile("source"));
+    plan.pair.harness = hostile("harness");
+    plan.pair.model = hostile("model");
+    plan.pair.basis = hostile("basis");
+    plan.pair.catalog_version = hostile("catalog");
+    plan.title = hostile("title");
+    plan.branch = hostile("branch");
+    plan.worktree = root.join(hostile("worktree"));
+    plan.base_commit = Some(hostile("base"));
+    plan.snapshot.skipped_directories = vec![hostile("skipped")];
+    plan.snapshot.unscanned_config = vec![hostile("unscanned")];
+    plan.snapshot.symlinks = vec![hostile("symlink")];
+    plan.hooks.unreadable = vec![hostile("unreadable")];
+    plan.hooks.unscanned_harness = Some(hostile("hook_harness"));
+    plan.hooks.hooks.push(ahu::hooks::Hook {
+        event: hostile("event"),
+        matcher: None,
+        kind: "command".into(),
+        command: Some("fixture-hook".into()),
+        command_digest: "0".repeat(64),
+        scope: ahu::hooks::Scope::ProjectLocal,
+        source: hostile("hook_source"),
+    });
+    plan.enforcement.applied_controls = vec![hostile("control")];
+    plan.enforcement.gaps = vec![hostile("gap")];
+    plan.harness_executable = root.join(hostile("executable"));
+    plan.command.args = vec![hostile("argument"), prompt.into()];
+    plan.command.prompt_arg = Some(1);
+    plan.delivery.nonce = "synthetic-delivery-nonce".into();
+    plan.parent_dirty = true;
+    plan.permissions = ahu::agent::Permissions::Auto;
+    let compact = std::env::var("AHU_TEST_PREVIEW_KIND").unwrap() == "compact";
+    let render = if compact {
+        ahu::commands::render_launch_preview
+    } else {
+        ahu::commands::render_preview
+    };
+    let mut text = render(&repo, &plan, prompt, Some("a1b2c3"));
+    assert!(!render(&repo, &plan, prompt, None).contains("Confirmation code"));
+    assert!(
+        !text.contains(prompt),
+        "the preview must not echo or restyle the prompt body"
+    );
+    let mut input = std::io::Cursor::new(b"a1b2c3\n");
+    let mut question = Vec::new();
+    assert!(
+        ahu::launcher::confirm_submit(
+            &mut ahu::launcher::Console {
+                input: &mut input,
+                output: &mut question,
+                interactive: true,
+            },
+            "a1b2c3"
+        )
+        .unwrap()
+    );
+    text.push_str(&String::from_utf8(question).unwrap());
+    for field in [
+        "agent",
+        "version",
+        "harness",
+        "model",
+        "title",
+        "worktree",
+        "unreadable",
+    ]
+    .into_iter()
+    .chain(
+        (!compact)
+            .then_some([
+                "source",
+                "basis",
+                "catalog",
+                "branch",
+                "base",
+                "skipped",
+                "unscanned",
+                "symlink",
+                "hook_harness",
+                "event",
+                "hook_source",
+                "control",
+                "executable",
+                "argument",
+            ])
+            .into_iter()
+            .flatten(),
+    ) {
+        let start = text.find(&format!("BEGIN_{field}")).unwrap();
+        let end_marker = format!("END_{field}");
+        let end = start + text[start..].find(&end_marker).unwrap() + end_marker.len();
+        assert_eq!(&text[start..end], display_safe(&hostile(field)), "{field}");
+        assert!(!text[start..end].contains('\x1b'), "{field}");
+    }
+    assert!(!text.contains("\nForged section"));
+    for ch in INVISIBLE {
+        assert!(!text.contains(*ch));
+    }
+    std::fs::write(path, text).unwrap();
+}
+
+#[test]
+fn previews_contain_hostile_fields_and_preserve_plain_structure() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent_on("fixture", "1.0.0", "codex", "gpt-6-astra");
+    repo.commit("fixture");
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = common::fake_harnesses(scratch.path(), &["codex"], |_| scratch.path().join("args"));
+    for kind in ["compact", "detailed"] {
+        let run = |color: &str| {
+            let rendered = tempfile::NamedTempFile::new().unwrap();
+            let stdout = tempfile::NamedTempFile::new().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "preview_output_fixture", "--nocapture"])
+                .env("AHU_TEST_PREVIEW_OUTPUT", rendered.path())
+                .env("AHU_TEST_PREVIEW_COLOR", color)
+                .env("AHU_TEST_PREVIEW_KIND", kind)
+                .env("AHU_TEST_PREVIEW_REPO", repo.path())
+                .env("AHU_STATE_DIR", repo.state_path())
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("TERM", "xterm-256color")
+                .env_remove("NO_COLOR")
+                .stdout(stdout.reopen().unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                std::fs::read_to_string(stdout.path()).unwrap(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::fs::read(rendered.path()).unwrap()
+        };
+        let plain = run("never");
+        assert_eq!(run("auto"), plain, "{kind}");
+        assert!(!plain.contains(&0x1b));
+        let plain = String::from_utf8(plain).unwrap();
+        for label in [
+            "approvals",
+            "Checkout changes",
+            "1 capability limit(s); details: ahu inventory",
+            "Confirmation code for this submission: a1b2c3",
+        ] {
+            assert!(
+                plain.to_lowercase().contains(&label.to_lowercase()),
+                "{kind}: {label}"
+            );
+        }
+        assert!(plain.contains(if kind == "compact" {
+            "  gaps       "
+        } else {
+            "Enforcement gaps\n  ! "
+        }));
+        assert!(plain.contains(ahu::hooks::NON_PROJECT_HOOK_WARNING));
+        assert!(plain.find("BEGIN_harness").unwrap() < plain.find("Confirmation code").unwrap());
+        assert!(plain.find("BEGIN_model").unwrap() < plain.find("Confirmation code").unwrap());
+        assert!(plain.ends_with(
+            "\nTo submit, type the confirmation code a1b2c3 shown above (anything else cancels): "
+        ));
+        let colored = String::from_utf8(run("always")).unwrap();
+        for sgr in ["1;36", "36", "33", "35", "1;33", "1"] {
+            assert!(
+                colored.contains(&format!("\x1b[{sgr}m")),
+                "{kind}: missing style {sgr}"
+            );
+        }
     }
 }
