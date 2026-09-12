@@ -1,0 +1,13 @@
+schema_version = 1
+name = "offsec-astra"
+version = "1.0.0"
+description = "Identifies and validates security issues with concrete evidence"
+harness = "codex"
+model = "gpt-6-astra"
+
+# Retain the project's existing opt-in to unattended tool use.
+permissions = "auto"
+
+[source]
+format = "markdown"
+path = ".agents/ahu/instructions/offsec-astra.md"

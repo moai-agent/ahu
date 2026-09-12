@@ -1,0 +1,13 @@
+schema_version = 1
+name = "dev-astra"
+version = "1.0.0"
+description = "Validates and remediates reported issues with regression coverage"
+harness = "codex"
+model = "gpt-6-astra"
+
+# Retain the project's existing opt-in to unattended tool use.
+permissions = "auto"
+
+[source]
+format = "markdown"
+path = ".agents/ahu/instructions/dev-astra.md"

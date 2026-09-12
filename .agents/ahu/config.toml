@@ -2,14 +2,12 @@
 # One policy for every ahu user in this project. Share it by committing it;
 # ahu never stages, commits, or pushes this file for you.
 schema_version = 1
-harness_preferences = ["claude-code", "codex", "antigravity"]
+harness_preferences = ["codex"]
 model_selection = "project-ranked"
 catalog_version = "2026-09-12"
 
 [model_rankings]
-"antigravity" = ["gemini-3.1-pro-high", "gemini-3.1-pro-low", "gemini-3.8-flash-high"]
-"claude-code" = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
-"codex" = ["gpt-6-astra", "gpt-5.5"]
+"codex" = ["gpt-6-astra"]
 
 [context_hygiene]
 review_on_first_load = true

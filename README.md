@@ -135,8 +135,8 @@ cmux workspace, with its own task record, branch, and worktree.
 
 ```sh
 ahu agents
-ahu launch @sable --prompt-file /absolute/path/to/security-review.txt --dry-run
-ahu launch @sable --prompt-file /absolute/path/to/security-review.txt
+ahu launch @offsec-astra --prompt-file /absolute/path/to/security-review.txt --dry-run
+ahu launch @offsec-astra --prompt-file /absolute/path/to/security-review.txt
 ```
 
 `launch` requires an existing project configuration and a registered agent. It
@@ -180,6 +180,25 @@ flags an agent's manifest asks for.
 This is not a process sandbox either: shell tools can still start processes, and
 no adapter denies a harness's own delegation tools. Existing running sessions do
 not acquire any of this; launch a new task with the rebuilt ahu executable.
+
+## This repository's agents
+
+This project registers three agents, all using Codex with the exact model
+`gpt-6-astra`. Automatic project selection also uses only that harness/model.
+
+| Agent | Specialization |
+| --- | --- |
+| `@offsec-astra` | Identifies security issues and reports concrete evidence; leaves source unchanged. |
+| `@defsec-astra` | Reviews defensive programming and implements focused hardening or refactoring when requested. |
+| `@dev-astra` | Validates reported issues and implements fixes with regression coverage. |
+
+Their versioned manifests live in `.agents/ahu/agents/` and their instructions
+in `.agents/ahu/instructions/`. They retain unattended tool permissions and
+require explicit user permission for remote pushes. ahu delivers these
+instructions as prompt text; they are not an enforced system-prompt boundary.
+All three may read the private roadmap and file security findings there. Private
+roadmap information must never be copied into this public repository. Security
+handoffs belong in verified private tracker records, not local ignored reports.
 
 ## Registering an agent
 
