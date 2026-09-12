@@ -522,42 +522,43 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         );
     }
 
-    // Exec the binary resolved at submission rather than consulting PATH again
-    // here, so the workspace shell's environment cannot change which harness
-    // runs. The file name must still be the harness the adapter names.
-    let executable = if record.harness_executable.as_os_str().is_empty() {
-        std::path::PathBuf::from(&rebuilt.program)
-    } else {
-        record.harness_executable.clone()
-    };
+    // Resolve the harness here rather than executing a path taken from the
+    // record. A record is an ordinary file; trusting a binary path out of it
+    // would let anyone who can write ahu's state directory choose what runs.
+    // Resolving by name and checking the name is what the adapter asked for
+    // removes that surface instead of trying to validate it.
+    //
+    // The path is deliberately not pinned across sessions: cmux installs a
+    // per-surface shim directory, so the absolute path of `claude` differs
+    // between the shell that submitted the task and the workspace shell that
+    // runs it. The plan-time resolution is recorded for disclosure, and the
+    // preview says the workspace may resolve a different wrapper.
+    let executable = crate::selection::resolve_executable(&rebuilt.program)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            Error::new(format!(
+                "{} is not on PATH in this workspace, so task {} cannot start.\n\
+                 ahu will not fall back to a different harness.",
+                rebuilt.program, record.task_id
+            ))
+        })?;
     if executable.file_name().and_then(|n| n.to_str()) != Some(rebuilt.program.as_str()) {
         bail!(
-            "task {} records harness binary {}, which is not {}. ahu will not run it.",
-            record.task_id,
+            "PATH resolved {} to {}, which is not {}. ahu will not run it.",
+            rebuilt.program,
             executable.display(),
             rebuilt.program
         );
     }
-    // A matching basename is not enough: /tmp/evil/claude would pass it. The
-    // recorded path must still be the one PATH resolves to, so a record that
-    // names some other binary is refused rather than executed.
-    match crate::selection::resolve_executable(&rebuilt.program) {
-        Some(resolved) if std::path::Path::new(&resolved) == executable => {}
-        Some(resolved) => bail!(
-            "task {} records harness binary {}, but {} now resolves to {}.\n\
-             ahu will not run a binary other than the one it resolved at submission. \
-             Launch the task again to pick up the current one.",
-            record.task_id,
-            executable.display(),
+    if !record.harness_executable.as_os_str().is_empty() && record.harness_executable != executable
+    {
+        eprintln!(
+            "ahu: this workspace resolves {} to {}, not the {} seen at submission. \
+             That is normal under cmux, which installs a per-surface wrapper.",
             rebuilt.program,
-            resolved
-        ),
-        None => bail!(
-            "task {} records harness binary {}, but {} is no longer on PATH.",
-            record.task_id,
             executable.display(),
-            rebuilt.program
-        ),
+            record.harness_executable.display()
+        );
     }
 
     if let Some(warning) = &record.reliability_warning {

@@ -714,7 +714,9 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
             .join(" ")
     ));
     out.push_str(
-        "The harness binary is resolved from PATH once, here, and that exact path is what runs.\n",
+        "The harness is resolved from PATH by name in the task workspace, and its name is checked\n\
+         against the adapter's. The path above is what PATH resolves to here; under cmux the\n\
+         workspace may resolve a different per-surface wrapper of the same harness.\n",
     );
     out
 }
