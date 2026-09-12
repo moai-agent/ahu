@@ -17,6 +17,7 @@
 //! that. The launch therefore carries the reliability warning.
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
+use crate::agent::Permissions;
 use crate::bail;
 use crate::util::Result;
 
@@ -38,6 +39,19 @@ impl Adapter for ClaudeCode {
             );
         }
         let mut args = vec!["--model".to_string(), request.model.to_string()];
+        // Verified against `claude --help`: --permission-mode takes
+        // acceptEdits | auto | bypassPermissions | manual | dontAsk | plan.
+        match request.permissions {
+            Permissions::Prompt => {}
+            Permissions::AcceptEdits => {
+                args.push("--permission-mode".to_string());
+                args.push("acceptEdits".to_string());
+            }
+            Permissions::Auto => {
+                args.push("--permission-mode".to_string());
+                args.push("auto".to_string());
+            }
+        }
         if let Some(agent) = request.native_agent {
             if agent.starts_with('-') {
                 bail!("agent name {agent:?} would be read as an option by the Claude Code CLI.");

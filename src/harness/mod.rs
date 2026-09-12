@@ -31,6 +31,8 @@ pub struct LaunchRequest<'a> {
     pub prompt: &'a str,
     /// Working directory: the task worktree.
     pub cwd: &'a std::path::Path,
+    /// Approval widening the agent explicitly asked for, if any.
+    pub permissions: crate::agent::Permissions,
 }
 
 /// A launch reduced to an executable plus an argument vector.

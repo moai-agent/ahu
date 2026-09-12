@@ -54,6 +54,8 @@ pub struct LaunchPlan {
     pub command: LaunchCommand,
     /// Agent name requested from the harness by its own selection flag, if any.
     pub native_agent: Option<String>,
+    /// Approval widening this launch was configured with.
+    pub permissions: crate::agent::Permissions,
     /// Absolute path of the harness binary, resolved once at plan time.
     pub harness_executable: PathBuf,
 }
@@ -104,6 +106,8 @@ pub fn plan(
         );
     }
     let parent_dirty = git::is_dirty(repo)?;
+    // Refuse early if `.worktrees` is a symlink, before anything is created.
+    state::ensure_worktrees_root(&repo.root)?;
     let task_id = task::new_task_id();
     let agent_segment = match &agent {
         Some(agent) => agent.manifest.name.clone(),
@@ -123,11 +127,16 @@ pub fn plan(
             .selects_native_agent()
             .then(|| a.manifest.name.clone())
     });
+    let permissions = agent
+        .as_ref()
+        .map(|a| a.manifest.permissions)
+        .unwrap_or_default();
     let command = adapter.launch_command(&LaunchRequest {
         model: &pair.model,
         native_agent: native_agent.as_deref(),
         prompt,
         cwd: &worktree,
+        permissions,
     })?;
     let harness_executable = crate::selection::resolve_executable(&command.program)
         .map(PathBuf::from)
@@ -165,6 +174,7 @@ pub fn plan(
         title,
         command,
         native_agent,
+        permissions,
         harness_executable,
     })
 }
@@ -246,6 +256,7 @@ pub fn execute(
                 .unwrap_or_else(|| "auto".to_string()),
             agent_version: plan.agent.as_ref().map(|a| a.manifest.version.clone()),
             native_agent: plan.native_agent.clone(),
+            permissions: plan.permissions,
             harness: plan.pair.harness.clone(),
             model: plan.pair.model.clone(),
             instructions_source: plan.agent.as_ref().map(|a| {
@@ -462,10 +473,27 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     }
 
     // The working directory is part of the launch identity: the harness
-    // discovers instructions, skills, hooks, and MCP configuration from it. It
-    // is re-derived from the repository identity and task id rather than trusted
-    // as written, so an edited record cannot redirect the session.
-    let expected_worktree = state::worktree_dir(&record.repo_root, &record.task_id)?;
+    // discovers instructions, skills, hooks, and MCP configuration from it.
+    //
+    // Re-deriving it from `record.repo_root` alone would be circular, since that
+    // is a field of the same record. So the repository is opened and its identity
+    // recomputed from the Git common directory, and the record's own
+    // `repo_identity` has to match before its `repo_root` is used for anything.
+    let discovered = git::discover(&record.repo_root)?;
+    if discovered.identity() != record.repo_identity {
+        bail!(
+            "task {} records repository identity {} but {} is repository {}. \
+             ahu will not start a session against a different repository than the one it prepared.",
+            record.task_id,
+            record.repo_identity,
+            record.repo_root.display(),
+            discovered.identity()
+        );
+    }
+    let expected_worktree = state::worktree_dir(&discovered.root, &record.task_id)?;
+    // `.worktrees` could have been replaced by a symlink between submission and
+    // this shell starting.
+    state::verify_worktree_inside_repo(&discovered.root, &record.worktree)?;
     if record.worktree != expected_worktree {
         bail!(
             "task {} records a working directory that is not the one ahu would create for it.\n\
@@ -484,6 +512,7 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         native_agent: record.identity.native_agent.as_deref(),
         prompt: &prompt,
         cwd: &record.worktree,
+        permissions: record.identity.permissions,
     })?;
     if rebuilt.redacted() != record.launch_command {
         bail!(
@@ -508,6 +537,27 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
             executable.display(),
             rebuilt.program
         );
+    }
+    // A matching basename is not enough: /tmp/evil/claude would pass it. The
+    // recorded path must still be the one PATH resolves to, so a record that
+    // names some other binary is refused rather than executed.
+    match crate::selection::resolve_executable(&rebuilt.program) {
+        Some(resolved) if std::path::Path::new(&resolved) == executable => {}
+        Some(resolved) => bail!(
+            "task {} records harness binary {}, but {} now resolves to {}.\n\
+             ahu will not run a binary other than the one it resolved at submission. \
+             Launch the task again to pick up the current one.",
+            record.task_id,
+            executable.display(),
+            rebuilt.program,
+            resolved
+        ),
+        None => bail!(
+            "task {} records harness binary {}, but {} is no longer on PATH.",
+            record.task_id,
+            executable.display(),
+            rebuilt.program
+        ),
     }
 
     if let Some(warning) = &record.reliability_warning {

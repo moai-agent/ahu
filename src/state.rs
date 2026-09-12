@@ -66,16 +66,83 @@ pub fn worktree_dir(repo_root: &Path, task_id: &str) -> Result<PathBuf> {
 }
 
 /// Create `.worktrees/` and make it ignore itself.
+///
+/// `.worktrees` sits inside the repository, so a repository can commit a symlink
+/// at that path. Following it would put the task checkout, the harness's working
+/// directory, and every configuration file ahu copies wherever the repository
+/// chose — `~/.claude/skills`, say, which would install a machine-wide skill.
+/// So the path is required to be a real directory, and a symlink is refused.
 pub fn ensure_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
     let root = worktrees_root(repo_root);
-    std::fs::create_dir_all(&root)
-        .map_err(|e| Error::new(format!("cannot create {}: {e}", root.display())))?;
+    match std::fs::symlink_metadata(&root) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let points_to = std::fs::read_link(&root)
+                .map(|t| t.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "an unreadable target".to_string());
+            bail!(
+                "refusing to use {} because it is a symlink pointing at {points_to}.\n\
+                 Task worktrees must live inside the repository. A symlink here would send this \
+                 task's checkout, its working directory, and every configuration file ahu copies \
+                 to a path the repository chose, so nothing was created.\n\
+                 Inspect that path in the repository before launching again.",
+                root.display()
+            );
+        }
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => bail!(
+            "{} exists and is not a directory, so ahu cannot put task worktrees there.",
+            root.display()
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&root)
+                .map_err(|e| Error::new(format!("cannot create {}: {e}", root.display())))?;
+        }
+        Err(e) => bail!("cannot inspect {}: {e}", root.display()),
+    }
     let ignore = root.join(".gitignore");
+    if let Ok(meta) = std::fs::symlink_metadata(&ignore)
+        && meta.file_type().is_symlink()
+    {
+        bail!(
+            "refusing to write {} because it is a symlink.",
+            ignore.display()
+        );
+    }
     if !ignore.exists() {
         std::fs::write(&ignore, WORKTREES_GITIGNORE)
             .map_err(|e| Error::new(format!("cannot create {}: {e}", ignore.display())))?;
     }
     Ok(root)
+}
+
+/// Confirm a prepared task worktree really sits inside the repository.
+///
+/// Checked again at exec time, because `.worktrees` could have been replaced
+/// between submission and the workspace shell starting.
+pub fn verify_worktree_inside_repo(repo_root: &Path, worktree: &Path) -> Result<()> {
+    let root = worktrees_root(repo_root);
+    if let Ok(meta) = std::fs::symlink_metadata(&root)
+        && meta.file_type().is_symlink()
+    {
+        bail!(
+            "{} is a symlink, so ahu cannot confirm this task's worktree is inside the repository.",
+            root.display()
+        );
+    }
+    let canonical_repo = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let canonical_worktree = worktree
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.to_path_buf());
+    if !canonical_worktree.starts_with(&canonical_repo) {
+        bail!(
+            "task worktree {} resolves outside its repository ({}). ahu will not start a session there.",
+            canonical_worktree.display(),
+            canonical_repo.display()
+        );
+    }
+    Ok(())
 }
 
 /// Path of the lock that serialises find-or-create of a repository's cmux group
@@ -181,6 +248,13 @@ pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let body = serde_json::to_vec_pretty(value)
         .map_err(|e| Error::new(format!("cannot serialize state: {e}")))?;
     std::fs::write(&temp, &body)?;
+    // Owner-only here, so no caller has to remember. State records carry task
+    // titles, hook labels, and repository paths.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
+    }
     std::fs::rename(&temp, path)
         .map_err(|e| Error::new(format!("cannot write {}: {e}", path.display())))?;
     Ok(())

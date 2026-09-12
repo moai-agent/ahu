@@ -63,6 +63,9 @@ pub struct LaunchIdentity {
     /// never disagree about whether the harness was asked for a named agent.
     #[serde(default)]
     pub native_agent: Option<String>,
+    /// Approval widening this launch was configured with.
+    #[serde(default)]
+    pub permissions: crate::agent::Permissions,
     pub harness: String,
     pub model: String,
     /// Where the system prompt came from, repository-relative.

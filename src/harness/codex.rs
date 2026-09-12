@@ -18,6 +18,7 @@
 //! the prompt, which would be exactly the silent translation it forbids.
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
+use crate::agent::Permissions;
 use crate::bail;
 use crate::util::Result;
 
@@ -40,13 +41,25 @@ impl Adapter for Codex {
         }
         // `--` closes the option list so a prompt starting with `-` is still a
         // prompt, and the prompt itself stays a single argv element.
-        let args = vec![
-            "-m".to_string(),
-            request.model.to_string(),
-            "--".to_string(),
-            request.prompt.to_string(),
-        ];
-        let prompt_arg = Some(args.len() - 1);
+        let mut args = vec!["-m".to_string(), request.model.to_string()];
+        // Verified against `codex --help`: --approve-for-me routes approvals
+        // through automatic review in the workspace-write sandbox, and
+        // `--ask-for-approval never` stops Codex asking at all.
+        match request.permissions {
+            Permissions::Prompt => {}
+            Permissions::AcceptEdits => {
+                args.push("--approve-for-me".to_string());
+            }
+            Permissions::Auto => {
+                args.push("--ask-for-approval".to_string());
+                args.push("never".to_string());
+                args.push("--sandbox".to_string());
+                args.push("workspace-write".to_string());
+            }
+        }
+        args.push("--".to_string());
+        let prompt_arg = Some(args.len());
+        args.push(request.prompt.to_string());
         Ok(LaunchCommand {
             program: "codex".to_string(),
             args,

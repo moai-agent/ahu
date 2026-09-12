@@ -22,6 +22,7 @@
 //! before launching and records that the harness does not confirm it.
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
+use crate::agent::Permissions;
 use crate::bail;
 use crate::util::Result;
 
@@ -43,6 +44,18 @@ impl Adapter for Antigravity {
             );
         }
         let mut args = vec!["--model".to_string(), request.model.to_string()];
+        // Verified against `agy --help`: --mode takes accept-edits | plan, and
+        // --dangerously-skip-permissions auto-approves every tool request.
+        match request.permissions {
+            Permissions::Prompt => {}
+            Permissions::AcceptEdits => {
+                args.push("--mode".to_string());
+                args.push("accept-edits".to_string());
+            }
+            Permissions::Auto => {
+                args.push("--dangerously-skip-permissions".to_string());
+            }
+        }
         if let Some(agent) = request.native_agent {
             if agent.starts_with('-') {
                 bail!("agent name {agent:?} would be read as an option by the Antigravity CLI.");

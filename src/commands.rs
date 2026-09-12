@@ -83,15 +83,17 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
     for agent in &agents {
         console.say(&format!(
             "@{} {}\n  harness  {}\n  model    {}\n  source   {} [{}]\n  identity {}\n",
-            agent.manifest.name,
-            agent.manifest.version,
-            agent.manifest.harness,
-            agent.manifest.model,
-            agent
-                .source_path
-                .strip_prefix(&repo.root)
-                .unwrap_or(&agent.source_path)
-                .display(),
+            display_safe(&agent.manifest.name),
+            display_safe(&agent.manifest.version),
+            display_safe(&agent.manifest.harness),
+            display_safe(&agent.manifest.model),
+            display_safe(
+                &agent
+                    .source_path
+                    .strip_prefix(&repo.root)
+                    .unwrap_or(&agent.source_path)
+                    .to_string_lossy()
+            ),
             agent.manifest.source.format.as_str(),
             &agent.identity_digest()[..12],
         ))?;
@@ -499,13 +501,15 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
     // submission preview, so the provider is never a surprise.
     console.say(&format!(
         "\nResolved for this task:\n  agent   {}\n  harness {}\n  model   {}\n  because {}\n",
-        resolved
-            .as_ref()
-            .map(|a| a.label())
-            .unwrap_or_else(|| "auto (no named agent)".to_string()),
-        pair.harness,
-        pair.model,
-        pair.basis
+        display_safe(
+            &resolved
+                .as_ref()
+                .map(|a| a.label())
+                .unwrap_or_else(|| "auto (no named agent)".to_string())
+        ),
+        display_safe(&pair.harness),
+        display_safe(&pair.model),
+        display_safe(&pair.basis)
     ))?;
     let prerequisite = selection::check_prerequisite(&pair.harness);
     if !prerequisite.satisfied() {
@@ -595,10 +599,16 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
 pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> String {
     let mut out = String::new();
     out.push_str("\nAbout to submit\n===============\n");
-    out.push_str(&format!("  agent      {}\n", plan.agent_label()));
+    out.push_str(&format!(
+        "  agent      {}\n",
+        display_safe(&plan.agent_label())
+    ));
     out.push_str(&format!("  harness    {}\n", plan.pair.harness));
     out.push_str(&format!("  model      {}\n", plan.pair.model));
-    out.push_str(&format!("  because    {}\n", plan.pair.basis));
+    out.push_str(&format!(
+        "  because    {}\n",
+        display_safe(&plan.pair.basis)
+    ));
     out.push_str(&format!(
         "  policy     {} · catalog {}\n",
         &plan.pair.policy_digest[..12],
@@ -607,21 +617,23 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
     if let Some(agent) = &plan.agent {
         out.push_str(&format!(
             "  prompt src {} ({})\n",
-            agent
-                .source_path
-                .strip_prefix(&repo.root)
-                .unwrap_or(&agent.source_path)
-                .display(),
+            display_safe(
+                &agent
+                    .source_path
+                    .strip_prefix(&repo.root)
+                    .unwrap_or(&agent.source_path)
+                    .to_string_lossy()
+            ),
             &agent.source_digest[..12]
         ));
     }
-    out.push_str(&format!("  title      {}\n", plan.title));
+    out.push_str(&format!("  title      {}\n", display_safe(&plan.title)));
     out.push_str(&format!(
         "  prompt     {} line(s), {} character(s)\n",
         prompt.lines().count(),
         prompt.chars().count()
     ));
-    out.push_str(&format!("  branch     {}\n", plan.branch));
+    out.push_str(&format!("  branch     {}\n", display_safe(&plan.branch)));
     out.push_str(&format!("  worktree   {}\n", plan.worktree.display()));
     out.push_str(&format!(
         "  base       {}\n",
@@ -658,6 +670,23 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
         &plan.hooks,
         plan.snapshot.executable_count(),
     ));
+
+    // A widened approval boundary is the most consequential thing in a launch,
+    // so it is stated before the enforcement list, not buried in it.
+    if plan.permissions.widens_defaults() {
+        out.push_str(&format!(
+            "\nApprovals\n  !! This agent runs with permissions = {}.\n     {}\n     \
+             ahu passes the harness's own flag for this because the agent's manifest asks for it. \
+             It is a committed, reviewable field, not an ahu default.\n",
+            plan.permissions.as_str(),
+            plan.permissions.disclosure()
+        ));
+    } else {
+        out.push_str(&format!(
+            "\nApprovals\n  {} \n",
+            plan.permissions.disclosure()
+        ));
+    }
 
     out.push_str("\nEnforcement\n");
     for control in &plan.enforcement.applied_controls {

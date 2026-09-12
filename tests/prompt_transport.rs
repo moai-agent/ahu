@@ -24,6 +24,7 @@ fn the_prompt_is_a_single_argument_reproduced_byte_for_byte() {
             native_agent: Some("chris"),
             prompt: HOSTILE_PROMPT,
             cwd: Path::new("/tmp"),
+            permissions: Default::default(),
         })
         .unwrap();
     assert_eq!(command.program, "claude");
@@ -58,6 +59,7 @@ fn a_prompt_that_looks_like_an_option_is_still_a_prompt() {
             native_agent: None,
             prompt: "--dangerously-skip-permissions",
             cwd: Path::new("/tmp"),
+            permissions: Default::default(),
         })
         .unwrap();
     let separator = command.args.iter().position(|a| a == "--").unwrap();
@@ -153,9 +155,10 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
     let temp = tempfile::TempDir::new().unwrap();
     // `run_task` re-derives the working directory from the repository identity
     // and task id, so the fixture must use the path ahu would actually create.
-    // `run_task` re-derives the worktree from the record's repo_root and task id.
-    let worktree = std::fs::canonicalize(repo.path())
+    // `run_task` re-derives the worktree from the repository it verifies.
+    let worktree = ahu::git::discover(repo.path())
         .unwrap()
+        .root
         .join(".worktrees/testtask0001");
     std::fs::create_dir_all(&worktree).unwrap();
     let recorder = temp.path().join("argv.txt");
@@ -167,7 +170,7 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
     );
 
     let task_dir = temp.path().join("task");
-    write_task_record(&task_dir, &worktree, &prompt);
+    write_task_record(&task_dir, &worktree, &prompt, &bin.join("claude"));
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
         .args(["run-task", "--task-dir", &task_dir.to_string_lossy()])
@@ -209,15 +212,16 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
 fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
     let repo = TestRepo::new();
     let temp = tempfile::TempDir::new().unwrap();
-    // `run_task` re-derives the worktree from the record's repo_root and task id.
-    let worktree = std::fs::canonicalize(repo.path())
+    // `run_task` re-derives the worktree from the repository it verifies.
+    let worktree = ahu::git::discover(repo.path())
         .unwrap()
+        .root
         .join(".worktrees/testtask0001");
     std::fs::create_dir_all(&worktree).unwrap();
     let recorder = temp.path().join("argv.txt");
     let bin = fake_harness(temp.path(), &recorder);
     let task_dir = temp.path().join("task");
-    write_task_record(&task_dir, &worktree, "do the thing");
+    write_task_record(&task_dir, &worktree, "do the thing", &bin.join("claude"));
 
     // Tamper with the frozen command, leaving the identity fields alone.
     let raw = std::fs::read_to_string(task_dir.join("task.json")).unwrap();
@@ -267,7 +271,13 @@ fn write_argv_recorder(dir: &Path, record: &Path) -> PathBuf {
 }
 
 /// Build the same record `launch::execute` writes, without needing cmux.
-fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str) {
+fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_path: &Path) {
+    // `run_task` recomputes the repository identity from the Git common
+    // directory and refuses a record that names a different one, so the fixture
+    // has to use the real values.
+    let repo_root = worktree.parent().and_then(|p| p.parent()).unwrap();
+    let discovered = ahu::git::discover(repo_root).expect("fixture repo");
+    let repo_identity = discovered.identity();
     use ahu::harness::LaunchRequest;
     use ahu::task::{LaunchIdentity, LaunchMode, TaskRecord, TaskState};
 
@@ -278,6 +288,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str) {
             native_agent: Some("chris"),
             prompt,
             cwd: worktree,
+            permissions: Default::default(),
         })
         .unwrap();
     let enforcement = adapter.enforcement("claude-opus-5");
@@ -286,12 +297,8 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str) {
         task_id: "testtask0001".to_string(),
         title: "fixture".to_string(),
         created_at: ahu::task::now_rfc3339(),
-        repo_identity: "testrepo".to_string(),
-        repo_root: worktree
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap()
-            .to_path_buf(),
+        repo_identity: repo_identity.clone(),
+        repo_root: discovered.root.clone(),
         branch: "ahu/chris/testtask0001".to_string(),
         worktree: worktree.to_path_buf(),
         base_commit: Some("0".repeat(40)),
@@ -300,6 +307,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str) {
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),
             native_agent: Some("chris".to_string()),
+            permissions: Default::default(),
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
             instructions_source: Some(".claude/agents/chris.md".to_string()),
@@ -314,7 +322,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str) {
         hooks: Default::default(),
         hooks_digest: String::new(),
         prompt_digest: ahu::util::digest_bytes(prompt.as_bytes()),
-        harness_executable: std::path::PathBuf::from("claude"),
+        harness_executable: harness_path.to_path_buf(),
         materialize: Default::default(),
         launch_command: command.redacted(),
         reliability_warning: enforcement
@@ -345,6 +353,7 @@ fn every_adapter_delivers_the_prompt_literally_and_widens_no_permissions() {
                 native_agent: Some("chris"),
                 prompt: HOSTILE_PROMPT,
                 cwd: Path::new("/tmp"),
+                permissions: Default::default(),
             })
             .unwrap_or_else(|e| panic!("{harness}: {e}"));
 
@@ -456,6 +465,7 @@ fn the_native_agent_decision_is_recorded_not_re_derived() {
             native_agent: None,
             prompt: "p",
             cwd: Path::new("/tmp"),
+            permissions: Default::default(),
         })
         .unwrap();
     assert!(!without.args.iter().any(|a| a == "--agent"));
@@ -468,6 +478,7 @@ fn the_native_agent_decision_is_recorded_not_re_derived() {
             native_agent: Some("vela"),
             prompt: "p",
             cwd: Path::new("/tmp"),
+            permissions: Default::default(),
         })
         .unwrap();
     let index = with.args.iter().position(|a| a == "--agent").unwrap();
@@ -497,4 +508,110 @@ fn a_wrapper_on_the_path_is_disclosed_as_an_enforcement_gap() {
             );
         }
     }
+}
+
+/// Widening a harness's approval boundary is opt-in, per agent, and mapped onto
+/// each harness's own native flag. Absent configuration passes nothing at all.
+#[test]
+fn approval_widening_is_opt_in_and_harness_native() {
+    use ahu::agent::Permissions;
+
+    // Default: ahu adds no permission flag anywhere.
+    for harness_id in ["claude-code", "codex", "antigravity"] {
+        let command = harness::adapter_for(harness_id)
+            .unwrap()
+            .launch_command(&LaunchRequest {
+                model: match harness_id {
+                    "codex" => "gpt-6-astra",
+                    "antigravity" => "gemini-3.1-pro-high",
+                    _ => "claude-opus-5",
+                },
+                native_agent: None,
+                prompt: "p",
+                cwd: Path::new("/tmp"),
+                permissions: Permissions::default(),
+            })
+            .unwrap();
+        for flag in [
+            "--permission-mode",
+            "--dangerously-skip-permissions",
+            "--approve-for-me",
+            "--ask-for-approval",
+            "--sandbox",
+            "--mode",
+        ] {
+            assert!(
+                !command.args.iter().any(|a| a == flag),
+                "{harness_id} must pass no permission flag by default, found {flag}"
+            );
+        }
+    }
+
+    // Opt-in maps to the flag each harness actually documents.
+    for (harness_id, model, mode, expected) in [
+        (
+            "claude-code",
+            "claude-opus-5",
+            Permissions::Auto,
+            vec!["--permission-mode", "auto"],
+        ),
+        (
+            "claude-code",
+            "claude-opus-5",
+            Permissions::AcceptEdits,
+            vec!["--permission-mode", "acceptEdits"],
+        ),
+        (
+            "antigravity",
+            "gemini-3.1-pro-high",
+            Permissions::Auto,
+            vec!["--dangerously-skip-permissions"],
+        ),
+        (
+            "antigravity",
+            "gemini-3.1-pro-high",
+            Permissions::AcceptEdits,
+            vec!["--mode", "accept-edits"],
+        ),
+        (
+            "codex",
+            "gpt-6-astra",
+            Permissions::Auto,
+            vec!["--ask-for-approval", "never"],
+        ),
+        (
+            "codex",
+            "gpt-6-astra",
+            Permissions::AcceptEdits,
+            vec!["--approve-for-me"],
+        ),
+    ] {
+        let command = harness::adapter_for(harness_id)
+            .unwrap()
+            .launch_command(&LaunchRequest {
+                model,
+                native_agent: None,
+                prompt: HOSTILE_PROMPT,
+                cwd: Path::new("/tmp"),
+                permissions: mode,
+            })
+            .unwrap();
+        for flag in &expected {
+            assert!(
+                command.args.iter().any(|a| a == flag),
+                "{harness_id}/{} should pass {flag}: {:?}",
+                mode.as_str(),
+                command.args
+            );
+        }
+        // The prompt is still exactly one literal element after all of that.
+        let index = command.prompt_arg.unwrap();
+        assert_eq!(command.args[index], HOSTILE_PROMPT, "{harness_id}");
+    }
+
+    // Every mode explains itself, and only the widening ones say so.
+    assert!(!Permissions::Prompt.widens_defaults());
+    assert!(Permissions::AcceptEdits.widens_defaults());
+    assert!(Permissions::Auto.widens_defaults());
+    assert!(Permissions::Auto.disclosure().contains("unattended"));
 }

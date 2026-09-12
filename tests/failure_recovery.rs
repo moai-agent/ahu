@@ -178,6 +178,7 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
             native_agent: None,
             prompt: "p",
             cwd: &record_source,
+            permissions: Default::default(),
         })
         .unwrap();
     let enforcement = adapter.enforcement("claude-opus-5");
@@ -196,6 +197,7 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
             agent: "auto".to_string(),
             agent_version: None,
             native_agent: None,
+            permissions: Default::default(),
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
             instructions_source: None,
@@ -505,6 +507,7 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),
             native_agent: Some("chris".to_string()),
+            permissions: Default::default(),
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
             instructions_source: Some(".claude/agents/chris.md".to_string()),

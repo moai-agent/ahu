@@ -72,6 +72,55 @@ pub struct AgentSource {
     pub path: String,
 }
 
+/// How much the agent may do without stopping to ask.
+///
+/// ahu never widens a harness's approval boundary on its own. This is opt-in,
+/// per agent, declared in the manifest, and therefore reviewable in Git like any
+/// other identity field — and the launch preview states it in full before
+/// anything starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Permissions {
+    /// Pass nothing. The harness's own defaults and prompts apply.
+    #[default]
+    Prompt,
+    /// Approve file edits without asking; still prompt for other tools.
+    AcceptEdits,
+    /// Approve tool use without asking. The agent runs unattended.
+    Auto,
+}
+
+impl Permissions {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Permissions::Prompt => "prompt",
+            Permissions::AcceptEdits => "accept-edits",
+            Permissions::Auto => "auto",
+        }
+    }
+
+    /// Whether this widens the harness's own default.
+    pub fn widens_defaults(self) -> bool {
+        !matches!(self, Permissions::Prompt)
+    }
+
+    /// What the user is agreeing to, spelled out for the launch preview.
+    pub fn disclosure(self) -> &'static str {
+        match self {
+            Permissions::Prompt => {
+                "the harness's own approval prompts apply; ahu passes no permission flag"
+            }
+            Permissions::AcceptEdits => {
+                "file edits are approved automatically; other tools still prompt"
+            }
+            Permissions::Auto => {
+                "tool use is approved automatically and the agent runs unattended, \
+                 including commands it chooses to run in the task worktree"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentManifest {
     pub schema_version: u32,
@@ -84,6 +133,9 @@ pub struct AgentManifest {
     pub harness: String,
     /// Exact model identifier. No aliases, no `inherit`.
     pub model: String,
+    /// Opt-in approval widening. Absent means the harness's own defaults.
+    #[serde(default)]
+    pub permissions: Permissions,
     pub source: AgentSource,
 }
 

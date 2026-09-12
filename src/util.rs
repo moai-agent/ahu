@@ -99,15 +99,18 @@ pub fn is_safe_name(name: &str) -> bool {
 /// A semantic version, restricted to the `MAJOR.MINOR.PATCH` core plus optional
 /// pre-release and build metadata. ahu requires one on every named agent.
 pub fn is_semver(value: &str) -> bool {
-    // `1.2.3-rc.1+build.5` -> the `1.2.3` core. Pre-release precedes build
-    // metadata, so strip build first.
-    let core = value
-        .split('+')
-        .next()
-        .unwrap_or_default()
-        .split('-')
-        .next()
-        .unwrap_or_default();
+    // `1.2.3-rc.1+build.5`. Validating only the dotted core would let arbitrary
+    // bytes — including ESC — ride along in the pre-release or build metadata,
+    // and the version is printed as part of `name@version`.
+    let (without_build, build) = match value.split_once('+') {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (value, None),
+    };
+    let (core, pre_release) = match without_build.split_once('-') {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (without_build, None),
+    };
+
     let mut count = 0;
     for part in core.split('.') {
         count += 1;
@@ -121,17 +124,38 @@ pub fn is_semver(value: &str) -> bool {
             return false;
         }
     }
-    count == 3
+    if count != 3 {
+        return false;
+    }
+
+    // Pre-release and build are dot-separated identifiers of ASCII
+    // alphanumerics and hyphens. Nothing else, and never empty.
+    for section in [pre_release, build].into_iter().flatten() {
+        if section.is_empty() {
+            return false;
+        }
+        for identifier in section.split('.') {
+            if identifier.is_empty()
+                || !identifier
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Make a string safe to print to a terminal.
 ///
 /// Repository content reaches ahu's output in many places: hook commands, agent
-/// descriptions, native frontmatter keys, and file names. Any of those may carry
-/// ANSI escape sequences, and ahu's output is a security surface — the launch
-/// preview is the only thing standing between a repository's hooks and a session
-/// that runs them. A control sequence that scrolls up and repaints those lines
-/// would let a repository hide its own disclosure.
+/// descriptions and versions, native frontmatter keys, and file names. Any of
+/// those may carry ANSI escape sequences, and ahu's output is a security
+/// surface — the launch preview is the only thing standing between a
+/// repository's hooks and a session that runs them. A control sequence that
+/// scrolls up and repaints those lines would let a repository hide its own
+/// disclosure.
 ///
 /// Every control character, including the C1 range, is rendered as a visible
 /// `\xNN` escape. This is applied at the render boundary only, so digests and
