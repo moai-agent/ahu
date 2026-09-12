@@ -496,7 +496,7 @@ fn hooks_are_not_read_through_a_symlinked_claude_directory() {
     .unwrap();
     std::os::unix::fs::symlink(&outside, repo.path().join(".claude")).unwrap();
 
-    let found = ahu::hooks::collect(repo.path()).expect("collect succeeds");
+    let found = ahu::hooks::collect(repo.path(), "claude-code").expect("collect succeeds");
     assert!(
         !found
             .hooks

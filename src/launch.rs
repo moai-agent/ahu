@@ -21,6 +21,19 @@ use crate::util::{Error, Result};
 
 use serde::{Deserialize, Serialize};
 
+/// The one thing ahu most needs a reader of a launch preview to understand.
+///
+/// ahu used to spend one channel per harness on this — `--agent` and
+/// `--append-system-prompt` for Claude Code, `--agent` for the Antigravity CLI,
+/// a bare prefix on the prompt for Codex — and could enforce none of them. It
+/// now delivers the same text the same way everywhere, which is weaker than a
+/// system prompt and much easier to describe truthfully. This is the description,
+/// and it is a **gap**, never an applied control.
+pub const DELIVERY_IS_NOT_ENFORCEMENT: &str = "ahu delivers the agent's instructions and its delegation contract as prompt text on every \
+     harness. This is not an enforced system prompt: the task prompt that follows can contradict \
+     it, and the model may follow the task prompt instead. ahu does not use harness \
+     agent-selection or system-prompt flags, so no harness enforces this agent's identity.";
+
 /// Where a repository's cmux group lives. Stored by object id, not by title, so
 /// renaming the group in cmux does not orphan the mapping.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,8 +65,9 @@ pub struct LaunchPlan {
     pub task_dir: PathBuf,
     pub title: String,
     pub command: LaunchCommand,
-    /// Agent name requested from the harness by its own selection flag, if any.
-    pub native_agent: Option<String>,
+    /// What ahu put in the harness's prompt slot, frozen so `run_task` can
+    /// rebuild it byte for byte and refuse anything else.
+    pub delivery: crate::orchestration::Delivery,
     /// Approval widening this launch was configured with.
     pub permissions: crate::agent::Permissions,
     /// Absolute path of the harness binary, resolved once at plan time.
@@ -97,7 +111,11 @@ pub fn plan(
     }
     let adapter = harness::adapter_for(&pair.harness)?;
     let snapshot = snapshot::collect(&repo.root)?;
-    let found_hooks = hooks::collect(&repo.root)?;
+    // Scanning for hooks is harness-specific: `hooks::collect` knows Claude
+    // Code's settings files and nothing else, so it is told which harness this
+    // launch is for and reports a coverage gap rather than "none found" when it
+    // has no implementation for it.
+    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
     let base_commit = repo.head.clone();
     if base_commit.is_none() {
         bail!(
@@ -119,26 +137,22 @@ pub fn plan(
     let task_dir = state::task_dir(&repo_identity, &task_id)?;
     let title = crate::util::task_title_from_prompt(prompt);
 
-    // Only formats the harness can select by name are requested by name.
-    let native_agent = agent.as_ref().and_then(|a| {
-        a.manifest
-            .source
-            .format
-            .selects_native_agent()
-            .then(|| a.manifest.name.clone())
-    });
     let permissions = agent
         .as_ref()
         .map(|a| a.manifest.permissions)
         .unwrap_or_default();
+    // Everything ahu supplies is composed here, once, for every harness: the
+    // fenced delegation contract, then the resolved agent's fenced instructions,
+    // then the task prompt. Adapters receive the finished text and have no say
+    // in its construction, so a per-harness difference cannot reappear.
+    let (delivered, delivery) =
+        crate::orchestration::deliver(agent.as_ref().map(|a| a.instructions.as_str()), prompt)?;
     let command = adapter.launch_command(&LaunchRequest {
         model: &pair.model,
-        native_agent: native_agent.as_deref(),
-        prompt,
+        prompt: &delivered,
         cwd: &worktree,
         permissions,
     })?;
-    let command = crate::orchestration::configure(command)?;
     let harness_executable = crate::selection::resolve_executable(&command.program)
         .map(PathBuf::from)
         .ok_or_else(|| {
@@ -150,16 +164,44 @@ pub fn plan(
             ))
         })?;
     let mut enforcement = adapter.enforcement(&pair.model, permissions)?;
+    // An *applied control* is something ahu did, stated without implying more.
+    // Delivering text is something ahu did; the model heeding it is not, and the
+    // gap below says so in the same block.
     enforcement.applied_controls.push(format!(
-        "ahu delegation instructions v1 (digest {}) supplied to every task",
-        crate::util::digest_bytes(crate::orchestration::INSTRUCTIONS.as_bytes())
+        "the ahu delegation contract v1 (digest {}) is delivered as prompt text, fenced with this \
+         launch's nonce {}",
+        &crate::util::digest_bytes(crate::orchestration::INSTRUCTIONS.as_bytes())[..12],
+        delivery.nonce
     ));
-    if pair.harness == "claude-code" {
-        enforcement.applied_controls.push(
-            "--disallowedTools Agent,Task,TeamCreate prevents native Claude delegation".to_string(),
-        );
+    enforcement
+        .gaps
+        .push(DELIVERY_IS_NOT_ENFORCEMENT.to_string());
+    enforcement.gaps.push(
+        "Delegation guidance cannot prevent a harness from launching other processes through \
+         shell tools, and no adapter denies a harness's own delegation tools."
+            .to_string(),
+    );
+    if let Some(harness) = &found_hooks.unscanned_harness {
+        enforcement.gaps.push(format!(
+            "ahu does not read {harness}'s hook or lifecycle configuration, so hooks for this \
+             launch are unknown rather than absent."
+        ));
     }
-    enforcement.gaps.push("Delegation guidance cannot prevent a harness from launching other processes through shell tools; non-Claude adapters have no native delegation-tool denial.".to_string());
+    for facts in found_hooks.widening_settings() {
+        enforcement.gaps.push(format!(
+            "{} declares approval settings ahu does not set and cannot override; the effective \
+             boundary of this session is whatever the harness reads from it, not the flags ahu \
+             passes.",
+            crate::util::display_safe(&facts.source)
+        ));
+    }
+    if !found_hooks.mcp_servers.is_empty() {
+        enforcement.gaps.push(format!(
+            "{} MCP server(s) declared by this repository are processes the harness may start; \
+             ahu neither launches nor sandboxes them.",
+            found_hooks.mcp_servers.len()
+        ));
+    }
     // A wrapper between ahu and the harness can add flags ahu refuses to pass.
     if let Some(note) = harness::wrapper_interposed(&harness_executable) {
         enforcement.gaps.push(note);
@@ -184,7 +226,7 @@ pub fn plan(
         task_dir,
         title,
         command,
-        native_agent,
+        delivery,
         permissions,
         harness_executable,
     })
@@ -266,7 +308,6 @@ pub fn execute(
                 .map(|a| a.manifest.name.clone())
                 .unwrap_or_else(|| "auto".to_string()),
             agent_version: plan.agent.as_ref().map(|a| a.manifest.version.clone()),
-            native_agent: plan.native_agent.clone(),
             permissions: plan.permissions,
             harness: plan.pair.harness.clone(),
             model: plan.pair.model.clone(),
@@ -294,6 +335,7 @@ pub fn execute(
         materialize,
         // The prompt lives only in prompt.txt, which is owner-only.
         launch_command: plan.command.redacted(),
+        delivery: plan.delivery.clone(),
         prompt_digest: crate::util::digest_bytes(prompt.as_bytes()),
         harness_executable: plan.harness_executable.clone(),
         enforcement: plan.enforcement.clone(),
@@ -474,14 +516,30 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     // rebuild the argument vector from the record's identity and compare the
     // redacted form. Together these cover the whole command without the record
     // holding a second copy of the prompt.
+    // An absent integrity value is a refusal, not a skip. `prompt_digest` used
+    // to be checked only `if !record.prompt_digest.is_empty()`, so a `task.json`
+    // that simply omitted the key turned the check off — defeating it by
+    // deleting a field rather than by forging a digest.
+    if record.prompt_digest.is_empty() {
+        bail!(
+            "task {} has no recorded prompt digest, so ahu cannot vouch for its prompt file. \
+             Re-submit the task.",
+            record.task_id
+        );
+    }
     let prompt_digest = crate::util::digest_bytes(prompt.as_bytes());
-    if !record.prompt_digest.is_empty() && prompt_digest != record.prompt_digest {
+    if prompt_digest != record.prompt_digest {
         bail!(
             "the prompt file for task {} does not match the digest recorded at submission. \
              ahu will not start a session with a prompt it cannot vouch for.",
             record.task_id
         );
     }
+    // The redacted-command comparison below cannot see any of this: the
+    // contract, the agent's instructions and the prompt all live in the one argv
+    // element that redaction replaces. `redeliver` rebuilds that element from
+    // the frozen delivery and refuses if its digest has moved.
+    let delivered = crate::orchestration::redeliver(&record.delivery, &prompt)?;
 
     // The working directory is part of the launch identity: the harness
     // discovers instructions, skills, hooks, and MCP configuration from it.
@@ -520,12 +578,10 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     let adapter = harness::adapter_for(&record.identity.harness)?;
     let rebuilt = adapter.launch_command(&LaunchRequest {
         model: &record.identity.model,
-        native_agent: record.identity.native_agent.as_deref(),
-        prompt: &prompt,
+        prompt: &delivered,
         cwd: &record.worktree,
         permissions: record.identity.permissions,
     })?;
-    let rebuilt = crate::orchestration::configure(rebuilt)?;
     if rebuilt.redacted() != record.launch_command {
         bail!(
             "the recorded launch command for task {} does not match what its configuration \

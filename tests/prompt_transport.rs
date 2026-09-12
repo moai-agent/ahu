@@ -21,7 +21,6 @@ fn the_prompt_is_a_single_argument_reproduced_byte_for_byte() {
     let command = adapter
         .launch_command(&LaunchRequest {
             model: "claude-opus-5",
-            native_agent: Some("chris"),
             prompt: HOSTILE_PROMPT,
             cwd: Path::new("/tmp"),
             permissions: Default::default(),
@@ -33,8 +32,6 @@ fn the_prompt_is_a_single_argument_reproduced_byte_for_byte() {
         vec![
             "--model".to_string(),
             "claude-opus-5".to_string(),
-            "--agent".to_string(),
-            "chris".to_string(),
             "--".to_string(),
             HOSTILE_PROMPT.to_string(),
         ]
@@ -56,7 +53,6 @@ fn a_prompt_that_looks_like_an_option_is_still_a_prompt() {
     let command = adapter
         .launch_command(&LaunchRequest {
             model: "claude-opus-5",
-            native_agent: None,
             prompt: "--dangerously-skip-permissions",
             cwd: Path::new("/tmp"),
             permissions: Default::default(),
@@ -191,16 +187,34 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
 
     let recorded = std::fs::read_to_string(&recorder).expect("the harness ran");
     let args: Vec<&str> = recorded.lines().collect();
+    // ahu pins the model with a real flag, and passes nothing else before `--`.
     assert_eq!(args[0], "--model");
     assert_eq!(args[1], "claude-opus-5");
-    assert_eq!(args[2], "--agent");
-    assert_eq!(args[3], "chris");
-    assert_eq!(args[4], "--append-system-prompt");
-    assert!(recorded.contains(ahu::orchestration::INSTRUCTIONS));
-    assert!(recorded.contains("--disallowedTools\nAgent,Task,TeamCreate\n--\n"));
-    let separator = args.iter().position(|a| *a == "--").unwrap();
-    // The fake harness records one argument per line, so compare line by line.
-    assert_eq!(args[separator + 1..].join("\n"), prompt);
+    assert_eq!(args[2], "--");
+    let separator = 2;
+    // Everything ahu supplies is inside the single prompt argument now. The fake
+    // harness records one argument per line, so compare the whole tail.
+    let delivered = args[separator + 1..].join("\n");
+    assert!(
+        delivered.contains(ahu::orchestration::INSTRUCTIONS.trim()),
+        "{delivered}"
+    );
+    assert!(
+        delivered.contains("You are chris."),
+        "the agent's instructions travel in the prompt"
+    );
+    assert!(
+        !delivered.contains("tools: Read, Edit"),
+        "frontmatter is metadata ahu reads, not instructions it delivers: {delivered}"
+    );
+    assert!(
+        delivered.ends_with(&prompt),
+        "the task prompt is last and unmodified"
+    );
+    // ahu's sections are fenced and the task prompt is outside the fence.
+    let record = ahu::task::load(&task_dir).unwrap();
+    let close = ahu::orchestration::close_tag("agent", &record.delivery.nonce);
+    assert!(delivered.find(&close).unwrap() < delivered.find(&prompt).unwrap());
     assert!(
         !canary.exists(),
         "command substitution inside the prompt was executed"
@@ -227,15 +241,16 @@ fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
     write_task_record(&task_dir, &worktree, "do the thing", &bin.join("claude"));
 
     // Tamper with the frozen command, leaving the identity fields alone.
+    // Only the frozen argv, leaving every identity field alone: the point is
+    // that the recorded command is checked against what the identity produces,
+    // not that the two copies of the model string agree with each other.
     let raw = std::fs::read_to_string(task_dir.join("task.json")).unwrap();
-    std::fs::write(
-        task_dir.join("task.json"),
-        raw.replace(
-            "\"claude-opus-5\",\n      \"--agent\"",
-            "\"claude-haiku-4-5\",\n      \"--agent\"",
-        ),
-    )
-    .unwrap();
+    let tampered = raw.replace(
+        "\"claude-opus-5\",\n      \"--\"",
+        "\"claude-haiku-4-5\",\n      \"--\"",
+    );
+    assert_ne!(tampered, raw, "the fixture must actually be changed");
+    std::fs::write(task_dir.join("task.json"), tampered).unwrap();
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
         .args(["run-task", "--task-dir", &task_dir.to_string_lossy()])
@@ -285,16 +300,18 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
     use ahu::task::{LaunchIdentity, LaunchMode, TaskRecord, TaskState};
 
     let adapter = ahu::harness::adapter_for("claude-code").unwrap();
+    // The fixture composes the delivered prompt exactly as `launch::plan` does,
+    // because `run_task` rebuilds it from the frozen delivery and compares.
+    let (delivered, delivery) =
+        ahu::orchestration::deliver(Some("You are chris.\n"), prompt).unwrap();
     let command = adapter
         .launch_command(&LaunchRequest {
             model: "claude-opus-5",
-            native_agent: Some("chris"),
-            prompt,
+            prompt: &delivered,
             cwd: worktree,
             permissions: Default::default(),
         })
         .unwrap();
-    let command = ahu::orchestration::configure(command).unwrap();
     let enforcement = adapter
         .enforcement("claude-opus-5", Default::default())
         .unwrap();
@@ -312,7 +329,6 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
             mode: LaunchMode::Named,
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),
-            native_agent: Some("chris".to_string()),
             permissions: Default::default(),
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
@@ -327,6 +343,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
         hooks_digest: String::new(),
+        delivery,
         prompt_digest: ahu::util::digest_bytes(prompt.as_bytes()),
         harness_executable: harness_path.to_path_buf(),
         materialize: Default::default(),
@@ -347,16 +364,15 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
 /// not widen the harness's own permission or sandbox defaults.
 #[test]
 fn every_adapter_delivers_the_prompt_literally_and_widens_no_permissions() {
-    for (harness, model, expect_agent_flag) in [
-        ("claude-code", "claude-opus-5", true),
-        ("codex", "gpt-6-astra", false),
-        ("antigravity", "gemini-3.1-pro-high", true),
+    for (harness, model) in [
+        ("claude-code", "claude-opus-5"),
+        ("codex", "gpt-6-astra"),
+        ("antigravity", "gemini-3.1-pro-high"),
     ] {
         let adapter = harness::adapter_for(harness).unwrap();
         let command = adapter
             .launch_command(&LaunchRequest {
                 model,
-                native_agent: Some("chris"),
                 prompt: HOSTILE_PROMPT,
                 cwd: Path::new("/tmp"),
                 permissions: Default::default(),
@@ -379,14 +395,17 @@ fn every_adapter_delivers_the_prompt_literally_and_widens_no_permissions() {
         );
         // The exact model is pinned.
         assert!(command.args.iter().any(|a| a == model), "{harness}");
-        // Agent selection is requested where the harness has the concept.
-        assert_eq!(
-            command.args.iter().any(|a| a == "--agent"),
-            expect_agent_flag,
-            "{harness} agent flag"
+        // No adapter selects an identity by name any more: a name is not bound
+        // to the file ahu read, digested, and attributed the instructions to.
+        assert!(
+            !command.args.iter().any(|a| a == "--agent"),
+            "{harness} must not select an agent by name"
         );
         // No adapter may widen permissions, sandboxing, or approvals.
         for forbidden in [
+            "--agent",
+            "--append-system-prompt",
+            "--disallowedTools",
             "--dangerously-skip-permissions",
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
@@ -433,68 +452,165 @@ fn adapters_report_their_real_enforcement_limits() {
         );
     }
 
-    // The two harnesses without working per-agent selection must say so.
-    for harness in ["codex", "antigravity"] {
+    // No adapter may claim to select or enforce an agent identity.
+    for harness in ["claude-code", "codex", "antigravity"] {
         let report = harness::adapter_for(harness)
             .unwrap()
             .enforcement("x", Default::default())
             .unwrap();
+        for control in &report.applied_controls {
+            assert!(
+                !control.contains("--agent"),
+                "{harness} must not list agent selection as an applied control: {control}"
+            );
+        }
+    }
+}
+
+/// The one sentence a reader of a launch preview most needs, and it is a gap.
+///
+/// It has to be in `gaps` rather than `applied_controls`, and it has to appear
+/// for every harness, because the whole point of the uniform-delivery change is
+/// that no harness is different here.
+#[test]
+fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
+    use common::TestRepo;
+
+    for (harness, model) in [
+        ("claude-code", "claude-opus-5"),
+        ("codex", "gpt-6-astra"),
+        ("antigravity", "gemini-3.1-pro-high"),
+    ] {
+        let repo = TestRepo::new();
+        repo.write(
+            ".agents/ahu/config.toml",
+            &format!(
+                "schema_version = 1\n\
+                 harness_preferences = [{harness:?}]\n\
+                 model_selection = \"project-ranked\"\n\
+                 catalog_version = {:?}\n\
+                 \n[model_rankings]\n\
+                 {harness:?} = [{model:?}]\n\
+                 \n[context_hygiene]\n\
+                 review_on_first_load = false\n\
+                 review_interval_days = 7\n",
+                ahu::catalog::CATALOG_VERSION
+            ),
+        );
+        repo.add_agent_on("vela", "1.0.0", harness, model);
+        repo.commit("fixture");
+
+        let discovered = ahu::git::discover(repo.path()).unwrap();
+        let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
+        let agent = ahu::agent::find(repo.path(), "vela").unwrap();
+        let pair = ahu::selection::ResolvedPair {
+            harness: harness.to_string(),
+            model: model.to_string(),
+            basis: "named agent".to_string(),
+            policy_digest: loaded.digest.clone(),
+            catalog_version: loaded.config.catalog_version.clone(),
+        };
+        let Ok(plan) = ahu::launch::plan(&discovered, Some(agent), pair, "review it") else {
+            // The harness is not installed on this machine; `plan` resolves the
+            // executable. Nothing to assert, and nothing to skip silently: the
+            // claude-code case always runs, because the fixtures install a fake.
+            continue;
+        };
+
         assert!(
-            report
+            plan.enforcement
                 .gaps
-                .iter()
-                .any(|g| g.contains("instructions in the prompt")),
-            "{harness} must tell the user where the instructions have to go"
+                .contains(&ahu::launch::DELIVERY_IS_NOT_ENFORCEMENT.to_string()),
+            "{harness} must report prompt delivery as a gap: {:?}",
+            plan.enforcement.gaps
+        );
+        for control in &plan.enforcement.applied_controls {
+            assert!(
+                !control.contains("not an enforced system prompt"),
+                "{harness} must not dress the gap up as a control: {control}"
+            );
+        }
+        let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+        assert!(
+            preview.contains("not an enforced system prompt"),
+            "the preview must say it plainly: {preview}"
+        );
+        assert!(
+            preview.contains("no harness enforces this agent's identity"),
+            "{preview}"
+        );
+        // And it must still say where the instructions came from.
+        assert!(
+            preview.contains(".agents/ahu/instructions/vela.md"),
+            "the attribution must survive: {preview}"
         );
     }
 }
 
-/// The launch and the integrity check must never disagree about whether the
-/// harness was asked for a named agent.
+/// A source format decides how a file is parsed, and nothing else.
 ///
-/// Codex has no per-agent selection, so a Codex-backed agent is launched
-/// without one. If the plan and `run_task` derived that independently they
-/// could differ, and the session would be refused for a mismatch that was
-/// ahu's own doing.
+/// It used to also decide whether ahu asked the harness for the agent by name.
+/// That was the unsound part: `--agent <name>` resolves through the harness's own
+/// agent search, which is not bound to the file ahu read and digested, so ahu
+/// asserted a binding it could not check. No adapter takes an agent name now, so
+/// there is nothing left for a format to select.
 #[test]
-fn the_native_agent_decision_is_recorded_not_re_derived() {
+fn a_source_format_only_decides_how_its_file_is_parsed() {
     use ahu::agent::SourceFormat;
 
-    assert!(SourceFormat::ClaudeAgent.selects_native_agent());
-    assert!(SourceFormat::AntigravityAgent.selects_native_agent());
-    assert!(
-        !SourceFormat::CodexAgent.selects_native_agent(),
-        "Codex has no --agent flag"
+    assert!(SourceFormat::ClaudeAgent.has_frontmatter());
+    assert!(SourceFormat::AntigravityAgent.has_frontmatter());
+    assert!(!SourceFormat::Markdown.has_frontmatter());
+
+    // The parse is what ahu delivers: frontmatter is metadata, the body is the
+    // instruction text.
+    let repo = TestRepo::new();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.write(
+        ".agents/ahu/instructions/plain.md",
+        "---\nnot: frontmatter\n---\nplain body\n",
     );
-    assert!(!SourceFormat::Markdown.selects_native_agent());
+    repo.write(
+        ".agents/ahu/agents/plain.toml",
+        "schema_version = 1\nname = \"plain\"\nversion = \"1.0.0\"\n\
+         harness = \"claude-code\"\nmodel = \"claude-opus-5\"\n\
+         \n[source]\nformat = \"markdown\"\npath = \".agents/ahu/instructions/plain.md\"\n",
+    );
+    repo.commit("fixture");
 
-    // A rebuild that assumes "named launch means --agent" produces a different
-    // command for a harness that has no such flag.
-    let adapter = harness::adapter_for("codex").unwrap();
-    let without = adapter
-        .launch_command(&LaunchRequest {
-            model: "gpt-6-astra",
-            native_agent: None,
-            prompt: "p",
-            cwd: Path::new("/tmp"),
-            permissions: Default::default(),
-        })
-        .unwrap();
-    assert!(!without.args.iter().any(|a| a == "--agent"));
+    let claude_agent = ahu::agent::find(repo.path(), "chris").unwrap();
+    assert_eq!(claude_agent.instructions.trim(), "You are chris.");
+    assert!(!claude_agent.instructions.contains("tools: Read, Edit"));
+    assert_eq!(
+        claude_agent
+            .native_settings
+            .get("tools")
+            .map(String::as_str),
+        Some("Read, Edit"),
+        "frontmatter is still read, just not delivered"
+    );
 
-    // And for Antigravity, a named agent must be requested by name.
-    let antigravity = harness::adapter_for("antigravity").unwrap();
-    let with = antigravity
-        .launch_command(&LaunchRequest {
-            model: "gemini-3.1-pro-high",
-            native_agent: Some("vela"),
-            prompt: "p",
-            cwd: Path::new("/tmp"),
-            permissions: Default::default(),
-        })
-        .unwrap();
-    let index = with.args.iter().position(|a| a == "--agent").unwrap();
-    assert_eq!(with.args[index + 1], "vela");
+    // Plain Markdown is used as-is, frontmatter-looking text and all.
+    let markdown = ahu::agent::find(repo.path(), "plain").unwrap();
+    assert!(markdown.instructions.contains("not: frontmatter"));
+
+    // And no adapter has anywhere to put a name even if one were derived.
+    for harness_id in ["claude-code", "codex", "antigravity"] {
+        let command = harness::adapter_for(harness_id)
+            .unwrap()
+            .launch_command(&LaunchRequest {
+                model: match harness_id {
+                    "codex" => "gpt-6-astra",
+                    "antigravity" => "gemini-3.1-pro-high",
+                    _ => "claude-opus-5",
+                },
+                prompt: "p",
+                cwd: Path::new("/tmp"),
+                permissions: Default::default(),
+            })
+            .unwrap();
+        assert!(!command.args.iter().any(|a| a == "--agent"), "{harness_id}");
+    }
 }
 
 /// A wrapper between ahu and the harness can add flags ahu refuses to pass, so
@@ -541,7 +657,6 @@ fn approval_widening_is_opt_in_and_harness_native() {
                     "antigravity" => "gemini-3.1-pro-high",
                     _ => "claude-opus-5",
                 },
-                native_agent: None,
                 prompt: "p",
                 cwd: Path::new("/tmp"),
                 permissions: Permissions::default(),
@@ -605,7 +720,6 @@ fn approval_widening_is_opt_in_and_harness_native() {
             .unwrap()
             .launch_command(&LaunchRequest {
                 model,
-                native_agent: None,
                 prompt: HOSTILE_PROMPT,
                 cwd: Path::new("/tmp"),
                 permissions: mode,
@@ -664,7 +778,6 @@ fn no_enforcement_control_denies_a_flag_the_launch_actually_passes() {
             let command = adapter
                 .launch_command(&LaunchRequest {
                     model,
-                    native_agent: None,
                     prompt: "do the thing",
                     cwd: Path::new("/tmp/ahu-fixture-worktree"),
                     permissions,

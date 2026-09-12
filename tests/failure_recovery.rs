@@ -175,7 +175,6 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
     let command = adapter
         .launch_command(&ahu::harness::LaunchRequest {
             model: "claude-opus-5",
-            native_agent: None,
             prompt: "p",
             cwd: &record_source,
             permissions: Default::default(),
@@ -198,7 +197,6 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
             mode: ahu::task::LaunchMode::Automatic,
             agent: "auto".to_string(),
             agent_version: None,
-            native_agent: None,
             permissions: Default::default(),
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
@@ -213,6 +211,7 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
         hooks_digest: String::new(),
+        delivery: ahu::orchestration::deliver(None, "prompt").unwrap().1,
         prompt_digest: String::new(),
         harness_executable: std::path::PathBuf::from("claude"),
         materialize: Default::default(),
@@ -268,6 +267,61 @@ fn pasting_a_multiline_prompt_does_not_submit_it() {
     assert!(task::list(&identity).unwrap().is_empty());
     let branches = common::git(repo.path(), &["branch", "--list", "ahu/*"]);
     assert!(branches.is_empty(), "{branches}");
+}
+
+/// The whole interactive flow, with the paste that used to confirm itself.
+///
+/// `read_prompt` stops at the `.` line and leaves the rest of the buffer for the
+/// submit reader, so `yes` on the next line answered a question the person never
+/// saw. The preview now carries a code generated after the prompt was read, and
+/// only that code submits.
+#[test]
+fn a_pasted_confirmation_no_longer_submits_through_the_interactive_flow() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let discovered = git::discover(repo.path()).unwrap();
+
+    // One paste: the selector, the task, the sentinel, and every answer that
+    // used to work.
+    let script = "@chris\nPlease review\n.\nyes\ny\nsubmit\n";
+    let (code, text) = with_state(&repo, || {
+        scripted(script, |console| {
+            commands::interactive(console, &discovered, false)
+        })
+    });
+
+    assert_eq!(code, 1, "pasted text submitted a task: {text}");
+    assert!(
+        text.contains("No worktree, branch, or session was created"),
+        "{text}"
+    );
+    assert!(task::list(&discovered.identity()).unwrap().is_empty());
+    assert!(common::git(repo.path(), &["branch", "--list", "ahu/*"]).is_empty());
+
+    // The preview did offer a code, and it is one `confirm_submit` accepts —
+    // so the person reading the preview is not locked out.
+    let marker = "Confirmation code for this submission: ";
+    let at = text.find(marker).expect("a code is offered");
+    let printed: String = text[at + marker.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
+    assert_eq!(printed.len(), 6, "{text}");
+    assert!(
+        !script.contains(&printed),
+        "the paste cannot have contained it"
+    );
+
+    let mut input = Cursor::new(format!("{printed}\n").into_bytes());
+    let mut written: Vec<u8> = Vec::new();
+    let mut console = Console {
+        input: &mut input,
+        output: &mut written,
+        interactive: true,
+    };
+    assert!(ahu::launcher::confirm_submit(&mut console, &printed).unwrap());
 }
 
 #[test]
@@ -508,7 +562,6 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
             mode: ahu::task::LaunchMode::Named,
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),
-            native_agent: Some("chris".to_string()),
             permissions: Default::default(),
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
@@ -523,6 +576,7 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
         config_snapshot_digest: "2".repeat(64),
         hooks: Default::default(),
         hooks_digest: String::new(),
+        delivery: ahu::orchestration::deliver(None, "prompt").unwrap().1,
         prompt_digest: String::new(),
         harness_executable: std::path::PathBuf::from("claude"),
         materialize: Default::default(),
@@ -595,7 +649,6 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
             mode: ahu::task::LaunchMode::Named,
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),
-            native_agent: Some("chris".to_string()),
             permissions: Default::default(),
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
@@ -611,6 +664,7 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
         config_snapshot_digest: "ab".to_string(),
         hooks: Default::default(),
         hooks_digest: "c".to_string(),
+        delivery: ahu::orchestration::deliver(None, "prompt").unwrap().1,
         prompt_digest: String::new(),
         harness_executable: std::path::PathBuf::from("claude"),
         materialize: Default::default(),

@@ -193,7 +193,7 @@ pub fn render(review: &Review, trigger: Trigger, loaded: &LoadedConfig) -> Strin
     out.push_str(&format!(
         "Project cadence: every {} day(s), set by context_hygiene.review_interval_days in {}.\n\n",
         loaded.config.context_hygiene.review_interval_days,
-        loaded.path.display()
+        crate::util::display_path(&loaded.path)
     ));
 
     if review.suggestions.is_empty() {

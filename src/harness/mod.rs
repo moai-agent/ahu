@@ -24,10 +24,14 @@ pub const RELIABILITY_WARNING: &str =
 pub struct LaunchRequest<'a> {
     /// Exact model identifier from the agent manifest or the frozen policy.
     pub model: &'a str,
-    /// Native agent name to select in the harness, when the launch is named and
-    /// the harness has a native concept for it.
-    pub native_agent: Option<&'a str>,
-    /// The task prompt, delivered as data. Never interpolated into a shell.
+    /// Everything the harness receives in its prompt slot: ahu's fenced
+    /// delegation contract, the resolved agent's fenced instructions, and the
+    /// task prompt, composed by `crate::orchestration`.
+    ///
+    /// There is no separate agent-selection or system-prompt channel. ahu used
+    /// to have one per harness and could enforce none of them, so adapters no
+    /// longer take an agent name at all: an adapter cannot select an identity
+    /// ahu has not read.
     pub prompt: &'a str,
     /// Working directory: the task worktree.
     pub cwd: &'a std::path::Path,

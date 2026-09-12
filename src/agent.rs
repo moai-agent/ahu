@@ -42,12 +42,16 @@ impl SourceFormat {
         }
     }
 
-    /// Whether the harness selects an agent of this format by name at launch.
+    /// Whether a file of this format carries YAML frontmatter that is metadata
+    /// rather than instruction text.
     ///
-    /// Claude Code and the Antigravity CLI both take `--agent <name>`. Codex has
-    /// no per-agent selection, and plain Markdown is not a native definition, so
-    /// neither is requested by name.
-    pub fn selects_native_agent(self) -> bool {
+    /// This is all a source format decides now. It used to also decide whether
+    /// ahu asked the harness for the agent by name, which was the unsound part:
+    /// `--agent <name>` selects whatever the harness's own search resolves that
+    /// name to, and nothing bound that to the file ahu read and digested. ahu no
+    /// longer uses any agent-selection flag, so a format's only job is saying
+    /// how to turn its file into instruction text.
+    pub fn has_frontmatter(self) -> bool {
         matches!(
             self,
             SourceFormat::ClaudeAgent | SourceFormat::AntigravityAgent
@@ -108,7 +112,15 @@ impl Permissions {
     pub fn disclosure(self) -> &'static str {
         match self {
             Permissions::Prompt => {
-                "the harness's own approval prompts apply; ahu passes no permission flag"
+                // "the harness's own approval prompts apply" asserted a property
+                // of the session. ahu does not know that property: the effective
+                // boundary is set by the harness's own settings files, which this
+                // repository may carry into the task worktree and which ahu only
+                // reads, never controls. So say what ahu did, and point at the
+                // settings summary for what decides the rest.
+                "ahu passes no permission flag. The effective approval boundary is set by the \
+                 harness's own settings, including any settings this repository carries into the \
+                 task worktree — see the settings summary above"
             }
             Permissions::AcceptEdits => {
                 "file edits are approved automatically; other tools still prompt"
@@ -370,12 +382,15 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
         ))
     })?;
 
-    let (instructions, native_model, native_settings) = match manifest.source.format {
-        SourceFormat::ClaudeAgent => parse_claude_agent(&source_text),
-        SourceFormat::Markdown => (source_text.clone(), None, BTreeMap::new()),
-        SourceFormat::CodexAgent | SourceFormat::AntigravityAgent => {
-            (source_text.clone(), None, BTreeMap::new())
-        }
+    // The instruction text is what ahu delivers in the prompt, so how a format
+    // is parsed is now also how it is delivered: frontmatter is metadata ahu
+    // reads (for the model-conflict check and the native-settings disclosure)
+    // and does not put in front of the model, and the body is the instructions.
+    let (instructions, native_model, native_settings) = if manifest.source.format.has_frontmatter()
+    {
+        parse_frontmatter(&source_text)
+    } else {
+        (source_text.clone(), None, BTreeMap::new())
     };
 
     if let Some(native) = native_model.as_deref()
@@ -465,11 +480,11 @@ pub fn resolve_source_path(
     Ok(canonical)
 }
 
-/// Split a Claude Code agent file into its YAML frontmatter and Markdown body.
+/// Split an agent file into its YAML frontmatter and Markdown body.
 ///
 /// ahu reads the frontmatter to detect a model conflict and to report the native
 /// settings it is preserving. It never rewrites the file.
-fn parse_claude_agent(text: &str) -> (String, Option<String>, BTreeMap<String, String>) {
+fn parse_frontmatter(text: &str) -> (String, Option<String>, BTreeMap<String, String>) {
     let mut settings = BTreeMap::new();
     let Some(rest) = text
         .strip_prefix("---\n")

@@ -103,6 +103,12 @@ pub fn discover(start: &Path) -> Result<Repo> {
     } else {
         None
     };
+    // Every harness invocation in this process -- launches, the `run-task` exec,
+    // and the `--version` probes that run before any preview is printed -- must
+    // refuse a binary that comes from a repository ahu has opened. The probes
+    // have no repository to check against at their call site, so the exclusion
+    // is registered here, at the one place a repository enters the process.
+    crate::selection::exclude_root(&root);
     Ok(Repo {
         root,
         common_dir,

@@ -93,18 +93,26 @@ pub const MAX_CONFIG_BYTES: u64 = 64 * 1024 * 1024;
 /// to end. A committed multi-gigabyte `.claude/x` was enough to stall all of
 /// them before any preview was shown.
 pub fn digest_file(path: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-
     let mut file = std::fs::File::open(path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
+    digest_reader(&mut file, path)
+}
+
+/// Digest whatever an already-open handle yields, with the same size cap.
+///
+/// Separate from [`digest_file`] so a caller that has to prove the bytes it
+/// hashed are the bytes it copied can do both from one descriptor, rather than
+/// opening the path twice and hoping it still names the same file.
+pub fn digest_reader(reader: &mut impl std::io::Read, shown: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     let mut total: u64 = 0;
     loop {
-        let read = file
+        let read = reader
             .read(&mut buffer)
-            .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
+            .map_err(|e| Error::new(format!("cannot read {}: {e}", shown.display())))?;
         if read == 0 {
             break;
         }
@@ -114,7 +122,7 @@ pub fn digest_file(path: &Path) -> Result<String> {
                 "{} is larger than the {} MiB ahu will read for a configuration file.\n\
                  ahu digests every agent-configuration file it inventories, so it will not read \
                  an unbounded one. Move this file out of an agent-configuration path.",
-                path.display(),
+                shown.display(),
                 MAX_CONFIG_BYTES / (1024 * 1024)
             )));
         }
@@ -440,4 +448,15 @@ pub fn task_title_from_prompt(prompt: &str) -> String {
         let truncated: String = cleaned.chars().take(LIMIT - 1).collect();
         format!("{}…", truncated.trim_end())
     }
+}
+
+/// Make a path safe to print to a terminal.
+///
+/// `display_safe` is applied to every repository-derived *string* ahu prints,
+/// but `Path::display()` was used raw. Under today's threat model the checkout
+/// path is chosen by whoever ran `git clone`, not by the repository, so this is
+/// not exploitable from a clone alone — it is one refactor away from being so,
+/// and a renderer should not have two rules for the same job.
+pub fn display_path(path: &Path) -> String {
+    display_safe(&path.to_string_lossy())
 }

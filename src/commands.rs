@@ -18,7 +18,7 @@ use crate::launcher::{self, Console};
 use crate::onboard;
 use crate::selection::{self, ResolvedPair};
 use crate::task;
-use crate::util::{Result, display_safe, display_safe_block};
+use crate::util::{Result, display_path, display_safe, display_safe_block};
 
 /// Locate the repository ahu was invoked from.
 ///
@@ -188,7 +188,7 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         Ok(repo) => {
             console.say(&format!(
                 "repository   {}\n  identity   {}\n  group name {}\n  HEAD       {}\n",
-                repo.root.display(),
+                display_path(&repo.root),
                 repo.identity(),
                 // Derived from a directory name, which ahu does not choose.
                 display_safe(&repo.display_name()),
@@ -225,10 +225,11 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
     }
 
     if let Ok(repo) = repo {
-        match hooks::collect(&repo.root) {
+        match hooks::collect(&repo.root, "claude-code") {
             Ok(found) => {
                 console.say(&format!(
-                    "hooks        {} visible, digest {}\n",
+                    "hooks        {} visible in Claude Code's settings files, digest {}\n\
+                     \x20            ahu reads no other harness's hook configuration\n",
                     found.hooks.len(),
                     found.short_digest()
                 ))?;
@@ -381,8 +382,8 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
             display_safe(&record.identity.harness),
             display_safe(&record.identity.model),
             display_safe(&record.branch),
-            record.worktree.display(),
-            dir.display(),
+            display_path(&record.worktree),
+            display_path(dir),
         ))?;
         if let Some(workspace) = &record.cmux_workspace_id {
             console.say(&format!("  cmux      {}\n", display_safe(workspace)))?;
@@ -415,7 +416,7 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
         "Focused {} — {}\n  worktree {}\n",
         display_safe(&record.agent_label()),
         display_safe(&record.title),
-        record.worktree.display()
+        display_path(&record.worktree)
     ))?;
     Ok(0)
 }
@@ -439,7 +440,7 @@ pub fn inventory_cmd(
         .map(|a| a.manifest.permissions)
         .unwrap_or_default();
     let enforcement = adapter.enforcement(&pair.model, permissions)?;
-    let found_hooks = hooks::collect(&repo.root)?;
+    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
     let built = inventory::build(&inventory::Subject {
         repo_root: &repo.root,
         loaded_config: &loaded,
@@ -474,7 +475,7 @@ pub fn hygiene_cmd(
         .map(|a| a.manifest.permissions)
         .unwrap_or_default();
     let enforcement = adapter.enforcement(&pair.model, permissions)?;
-    let found_hooks = hooks::collect(&repo.root)?;
+    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
     let built = inventory::build(&inventory::Subject {
         repo_root: &repo.root,
         loaded_config: &loaded,
@@ -540,7 +541,7 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
     console.say(&format!(
         "ahu {} — {}\n  policy {} · catalog {}\n\n",
         env!("CARGO_PKG_VERSION"),
-        repo.root.display(),
+        display_path(&repo.root),
         loaded.short_digest(),
         loaded.config.catalog_version
     ))?;
@@ -588,12 +589,19 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
 }
 
 /// Assign work without an interactive composer; the command itself requests launch.
+///
+/// This path has no human at a terminal — the preview goes to a pipe read by
+/// another agent — so the interactive confirmation cannot be the gate on
+/// approval widening. `--allow-widened-approvals` is that gate instead: it makes
+/// the widening appear verbatim in the command line the delegating harness shows
+/// its own user before running it, and it is recorded on the task.
 pub fn launch_cmd(
     console: &mut Console<'_>,
     repo: &Repo,
     agent: &str,
     prompt_file: &Path,
     dry_run: bool,
+    allow_widened_approvals: bool,
 ) -> Result<i32> {
     let loaded = config::load(&repo.root)?.ok_or_else(|| {
         crate::util::Error::new(
@@ -601,6 +609,24 @@ pub fn launch_cmd(
         )
     })?;
     let (resolved, pair) = resolve_identity(repo, &loaded, Some(agent))?;
+    let permissions = resolved
+        .as_ref()
+        .map(|a| a.manifest.permissions)
+        .unwrap_or_default();
+    if permissions.widens_defaults() && !allow_widened_approvals {
+        bail!(
+            "@{} runs with permissions = {}, which widens the harness's own approval boundary:\n  \
+             {}\n\
+             `ahu launch` starts a session with no interactive confirmation, so it will not widen \
+             approvals on your behalf.\n\
+             Re-run with --allow-widened-approvals if that is what you intend. Passing it puts \
+             the widening in the command line your own harness shows you before it runs, and \
+             records it on the task.",
+            display_safe(agent),
+            permissions.as_str(),
+            permissions.disclosure()
+        );
+    }
     let prompt = std::fs::read_to_string(prompt_file).map_err(|e| {
         crate::util::Error::new(format!(
             "cannot read prompt file {}: {e}",
@@ -665,13 +691,21 @@ fn submit(
         console.say(&drift::render(&found))?;
     }
 
-    console.say(&render_preview(repo, &plan, prompt))?;
+    // Generated here, after the prompt has been read and after the plan is
+    // built, so nothing in the prompt can have contained it.
+    let code = confirmation_code();
+    console.say(&render_preview(
+        repo,
+        &plan,
+        prompt,
+        confirm.then_some(code.as_str()),
+    ))?;
 
     if dry_run {
         console.say("Dry run. No task or session was created.\n")?;
         return Ok(0);
     }
-    if confirm && !launcher::confirm_submit(console)? {
+    if confirm && !launcher::confirm_submit(console, &code)? {
         console.say("Cancelled. No worktree, branch, or session was created.\n")?;
         return Ok(1);
     }
@@ -683,8 +717,8 @@ fn submit(
         display_safe(&launched.record.title),
         display_safe(&launched.record.task_id),
         display_safe(&launched.record.branch),
-        launched.record.worktree.display(),
-        launched.task_dir.display(),
+        display_path(&launched.record.worktree),
+        display_path(&launched.task_dir),
     ))?;
     if let Some(workspace) = &launched.record.cmux_workspace_id {
         console.say(&format!("  cmux     {workspace}\n"))?;
@@ -707,14 +741,38 @@ pub fn render_launch_notes(notes: &[String]) -> String {
     out
 }
 
+/// A short confirmation code for one submission.
+///
+/// Six hex characters: enough that a prompt written before the launch cannot
+/// contain it, short enough to retype.
+fn confirmation_code() -> String {
+    crate::orchestration::new_nonce()[..6].to_string()
+}
+
 /// The submission preview: identity, Git effects, and every warning.
-pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> String {
+///
+/// `confirmation_code` is `Some` only when a confirmation will actually be asked
+/// for, so the preview never shows a code nothing will read.
+pub fn render_preview(
+    repo: &Repo,
+    plan: &launch::LaunchPlan,
+    prompt: &str,
+    confirmation_code: Option<&str>,
+) -> String {
     let mut out = String::new();
     out.push_str("\nAbout to submit\n===============\n");
     out.push_str(
         "  delegation All assigned agents must launch through ahu in separate cmux sessions.\n",
     );
-    out.push_str("  guidance   ahu supplies delegation instructions; Claude Agent/Task/TeamCreate tools are denied.\n");
+    out.push_str(&format!(
+        "  guidance   ahu supplies its delegation contract and this agent's instructions as {}\n",
+        // Not "Claude Agent/Task/TeamCreate tools are denied": that was printed
+        // unconditionally, on Codex and Antigravity launches where no such flag
+        // was passed and no Claude was involved, twenty-five lines above the
+        // gaps list that contradicted it. ahu now denies no tool on any harness,
+        // and this line says what it does instead.
+        "prompt text. No harness denies its own delegation tools for this launch."
+    ));
     out.push_str(&format!(
         "  agent      {}\n",
         display_safe(&plan.agent_label())
@@ -731,8 +789,11 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
         plan.pair.catalog_version
     ));
     if let Some(agent) = &plan.agent {
+        // This attribution is now checkable rather than asserted: ahu delivers
+        // the instruction text it parsed out of exactly this file, so there is
+        // no name for a harness to resolve somewhere else.
         out.push_str(&format!(
-            "  prompt src {} ({})\n",
+            "  agent src  {} ({})\n",
             display_safe(
                 &agent
                     .source_path
@@ -742,6 +803,14 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
             ),
             &agent.source_digest[..12]
         ));
+        out.push_str(&format!(
+            "             the digest covers the whole file; ahu delivers its {} in the prompt\n",
+            if agent.manifest.source.format.has_frontmatter() {
+                "body, having read the YAML frontmatter as metadata only,"
+            } else {
+                "contents"
+            }
+        ));
     }
     out.push_str(&format!("  title      {}\n", display_safe(&plan.title)));
     out.push_str(&format!(
@@ -750,7 +819,7 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
         prompt.chars().count()
     ));
     out.push_str(&format!("  branch     {}\n", display_safe(&plan.branch)));
-    out.push_str(&format!("  worktree   {}\n", plan.worktree.display()));
+    out.push_str(&format!("  worktree   {}\n", display_path(&plan.worktree)));
     out.push_str(&format!(
         "  base       {}\n",
         plan.base_commit.as_deref().unwrap_or("(none)")
@@ -821,47 +890,62 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
         ));
     } else {
         out.push_str(&format!(
-            "\nApprovals\n  {} \n",
-            plan.permissions.disclosure()
+            "\nApprovals\n  {}\n",
+            display_safe(plan.permissions.disclosure())
         ));
     }
+    // The flags ahu passes are not the approval boundary. The harness's own
+    // settings files are, and this repository carries some of them into the task
+    // worktree, so they are printed here rather than left to the file count.
+    out.push_str(&hooks::render_settings_for_preview(&plan.hooks));
 
     out.push_str("\nEnforcement\n");
     for control in &plan.enforcement.applied_controls {
-        out.push_str(&format!("  + {control}\n"));
+        out.push_str(&format!("  + {}\n", display_safe(control)));
+    }
+    // Gaps print unconditionally. They used to appear only under the reliability
+    // warning, which made the single most important sentence about a launch --
+    // that nothing ahu supplies is enforced -- conditional on an unrelated flag.
+    for gap in &plan.enforcement.gaps {
+        out.push_str(&format!("  - {}\n", display_safe(gap)));
     }
     if let Some(warning) = plan.reliability_warning() {
         out.push_str(&format!("\n  !! {warning}\n"));
-        for gap in &plan.enforcement.gaps {
-            out.push_str(&format!("     - {gap}\n"));
-        }
         out.push_str(
-            "     ahu still requests the configured identity and never substitutes another.\n\
+            "     ahu still pins the configured harness and model and never substitutes another.\n\
              \x20    This limitation is recorded in the task metadata and the context inventory.\n",
         );
     }
     out.push_str(&format!(
         "\nCommand to be run in the worktree (the prompt is one argument, never shell input):\n  {} {}\n",
-        plan.harness_executable.display(),
+        display_path(&plan.harness_executable),
         plan.command
             .redacted()
             .args
             .iter()
-            .map(|a| {
-                if a == crate::orchestration::INSTRUCTIONS {
-                    "<ahu delegation contract v1>".to_string()
-                } else {
-                    display_safe(a)
-                }
-            })
+            .map(|a| display_safe(a))
             .collect::<Vec<_>>()
             .join(" ")
     ));
+    out.push_str(&format!(
+        "The redacted slot above holds {}.\n",
+        crate::orchestration::delivery_summary(
+            &plan.delivery.nonce,
+            plan.delivery.agent_instructions.is_some()
+        )
+    ));
     out.push_str(
-        "The harness is resolved from PATH by name in the task workspace, and its name is checked\n\
-         against the adapter's. The path above is what PATH resolves to here; under cmux the\n\
-         workspace may resolve a different per-surface wrapper of the same harness.\n",
+        "The harness is resolved from PATH by name in the task workspace, and only from an\n\
+         absolute PATH entry outside this repository. The path above is what PATH resolves to\n\
+         here; under cmux the workspace may resolve a different per-surface wrapper of the same\n\
+         harness.\n",
     );
+    if let Some(code) = confirmation_code {
+        out.push_str(&format!(
+            "\nConfirmation code for this submission: {code}\n\
+             It was generated after your prompt was read, so no pasted text can have supplied it.\n",
+        ));
+    }
     out
 }
 

@@ -93,8 +93,10 @@ impl Adapter for Codex {
 /// decides them. See the note in the Claude Code adapter: a fixed string here
 /// contradicted the argv ahu was about to run.
 fn permission_control(permissions: Permissions) -> String {
-    let tail = "whether the effective session keeps Codex's own defaults also depends on any \
-                wrapper on PATH";
+    let tail = "ahu does not know the effective approval boundary, only which flags it \
+                passed. Codex's own settings decide it, including any this repository \
+                carries into the task worktree, and a wrapper on PATH can change what Codex's \
+                own defaults end up being";
     match permissions {
         Permissions::Prompt => format!(
             "ahu passes no --sandbox, --ask-for-approval, --approve-for-me, \
@@ -117,13 +119,9 @@ fn permission_control(permissions: Permissions) -> String {
 }
 
 /// Ask a harness binary for its version, for the enforcement report.
+///
+/// Resolution and the repository exclusion live in `selection`, so a diagnostic
+/// probe cannot run a binary a launch would refuse.
 pub(crate) fn installed_version(program: &str) -> Option<String> {
-    let output = std::process::Command::new(program)
-        .arg("--version")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    crate::selection::installed_version(program)
 }

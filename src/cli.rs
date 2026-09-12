@@ -49,6 +49,13 @@ onboard options:
 launcher options:
   --no-focus            Do not switch to the new session after launching
 
+launch options:
+  --dry-run             Show the preview and create nothing
+  --allow-widened-approvals
+                        Required to launch an agent whose manifest declares
+                        permissions = auto or accept-edits. `ahu launch` reads no
+                        confirmation, so widening is opt-in on the command line
+
 run-task options:
   --task-dir <path>     Directory holding the prepared task record";
 
@@ -80,6 +87,10 @@ pub enum Command {
         agent: String,
         prompt_file: PathBuf,
         dry_run: bool,
+        /// Opt in to launching an agent whose manifest widens the harness's own
+        /// approval boundary. Required on this path because it has no
+        /// interactive confirmation.
+        allow_widened_approvals: bool,
     },
     Agents,
     Onboard {
@@ -270,6 +281,7 @@ fn parse_launch(rest: &[String]) -> Result<Command> {
     }
     let mut prompt_file = None;
     let mut dry_run = false;
+    let mut allow_widened_approvals = false;
     let mut index = 1;
     while index < rest.len() {
         match rest[index].as_str() {
@@ -277,6 +289,9 @@ fn parse_launch(rest: &[String]) -> Result<Command> {
                 prompt_file = Some(PathBuf::from(value_for("--prompt-file", rest, &mut index)?));
             }
             "--dry-run" if !dry_run => dry_run = true,
+            "--allow-widened-approvals" if !allow_widened_approvals => {
+                allow_widened_approvals = true;
+            }
             other => bail!("unknown or repeated option {other:?} for ahu launch."),
         }
         index += 1;
@@ -287,5 +302,6 @@ fn parse_launch(rest: &[String]) -> Result<Command> {
         agent: agent.to_string(),
         prompt_file,
         dry_run,
+        allow_widened_approvals,
     })
 }

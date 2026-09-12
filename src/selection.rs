@@ -6,7 +6,7 @@
 //! selection. Changing what a project selects requires changing the project's
 //! configuration, not the machine it runs on.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -116,16 +116,14 @@ pub fn check_prerequisite(harness_id: &str) -> Prerequisite {
         .map(|e| e.executable)
         .unwrap_or(harness_id)
         .to_string();
-    let found_at = which(&executable);
+    let found_at = resolve_executable(&executable);
     let mut notes = Vec::new();
-    let version = found_at.as_ref().and_then(|_| {
-        std::process::Command::new(&executable)
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    });
+    // Probe the resolved absolute path, never the bare program name. Running
+    // `Command::new("claude")` here repeated the operating system's own PATH
+    // lookup, which honours relative and repository-local entries that
+    // `resolve_executable` deliberately refuses -- so a planted binary ran
+    // before the user was shown anything to approve.
+    let version = found_at.as_deref().and_then(probe_version);
     if let (Some(entry), Some(version)) = (entry, version.as_deref())
         && !entry.verified_versions.is_empty()
         && !version.contains(entry.verified_versions)
@@ -143,16 +141,85 @@ pub fn check_prerequisite(harness_id: &str) -> Prerequisite {
     }
 }
 
+/// Repositories a harness binary must never be resolved from.
+///
+/// A harness resolved from inside the tree an agent is about to edit is exactly
+/// the case worth refusing, and the refusal has to apply to *every* invocation,
+/// including the `--version` probes that run before a preview is printed. Those
+/// probes have no repository argument to check against -- `enforcement()` is
+/// called from the adapters, which know nothing about the checkout -- so the
+/// exclusion lives here, registered once by [`crate::git::discover`] for every
+/// repository ahu opens in this process.
+static EXCLUDED_ROOTS: std::sync::LazyLock<std::sync::RwLock<Vec<PathBuf>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
+
+/// Refuse to resolve any harness executable from inside `root`.
+///
+/// Idempotent, and it stores the canonical path so a later comparison is not
+/// defeated by a symlinked PATH entry.
+pub fn exclude_root(root: &Path) {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let Ok(mut roots) = EXCLUDED_ROOTS.write() else {
+        return;
+    };
+    if !roots.contains(&canonical) {
+        roots.push(canonical);
+    }
+}
+
+/// Whether `candidate` lies inside a registered excluded root.
+pub fn is_excluded(candidate: &Path) -> bool {
+    let resolved = candidate
+        .canonicalize()
+        .unwrap_or_else(|_| candidate.to_path_buf());
+    let Ok(roots) = EXCLUDED_ROOTS.read() else {
+        // A poisoned lock must not silently turn the exclusion off.
+        return true;
+    };
+    roots.iter().any(|root| resolved.starts_with(root))
+}
+
 /// Resolve an executable through `PATH`, returning its absolute path.
 ///
-/// ahu resolves the harness binary once, at submission, and records the result.
-/// The launch then execs that exact path instead of consulting `PATH` again in
-/// the task workspace's shell.
+/// This is the only place ahu turns a harness program name into something it
+/// will run, and every harness invocation goes through it -- launches, the
+/// `run-task` exec, and the `--version` probes alike. It refuses relative `PATH`
+/// entries and any candidate inside a repository ahu has opened.
 pub fn resolve_executable(executable: &str) -> Option<String> {
     which(executable)
 }
 
+/// Ask a resolved harness binary for its version.
+///
+/// Takes an already-resolved absolute path, so a caller cannot accidentally
+/// re-run the PATH lookup this module exists to constrain.
+pub fn probe_version(resolved: &str) -> Option<String> {
+    let path = Path::new(resolved);
+    if !path.is_absolute() || is_excluded(path) {
+        return None;
+    }
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Resolve `program` and ask it for its version, for an enforcement report.
+pub fn installed_version(program: &str) -> Option<String> {
+    probe_version(&resolve_executable(program)?)
+}
+
 fn which(executable: &str) -> Option<String> {
+    // A program name carrying a path separator is not a PATH lookup at all; it
+    // would be resolved against the current directory, which for `ahu run-task`
+    // is the task worktree.
+    if executable.is_empty() || executable.contains('/') || executable.contains('\\') {
+        return None;
+    }
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         // A `PATH` entry that is empty or relative resolves against the current
@@ -170,9 +237,16 @@ fn which(executable: &str) -> Option<String> {
             continue;
         }
         let candidate = dir.join(executable);
-        if is_executable(&candidate) {
-            return Some(candidate.to_string_lossy().to_string());
+        if !is_executable(&candidate) {
+            continue;
         }
+        // A PATH entry can be an absolute path *into* the checkout, or hold a
+        // symlink pointing into it. Both are refused here rather than only at
+        // exec time, so a probe cannot run what a launch would reject.
+        if is_excluded(&candidate) {
+            continue;
+        }
+        return Some(candidate.to_string_lossy().to_string());
     }
     None
 }

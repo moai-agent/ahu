@@ -589,7 +589,7 @@ fn the_disclosure_does_not_claim_skipped_configuration_is_absent() {
     let enforcement = adapter
         .enforcement("claude-opus-5", Default::default())
         .unwrap();
-    let found = ahu::hooks::collect(repo.path()).unwrap();
+    let found = ahu::hooks::collect(repo.path(), "claude-code").unwrap();
     let built = ahu::inventory::build(&ahu::inventory::Subject {
         repo_root: repo.path(),
         loaded_config: &loaded,
@@ -690,4 +690,199 @@ fn a_worktree_path_is_never_read_as_a_git_option() {
     git::remove_worktree(&discovered, hostile, "ahu/test/hyphen")
         .expect("removal must treat it as a path too");
     assert!(!repo.path().join("-weird-worktree").exists());
+}
+
+/// A source directory swapped for a symlink after collection must not be copied
+/// through.
+///
+/// `materialize` checked only the final component with `symlink_metadata`, and
+/// that call follows symlinks in ancestor directories. So replacing `.claude`
+/// with a symlink between the preview and the copy — the window in which the
+/// user is reading the preview — passed the check for `.claude/settings.json`
+/// and copied an external file into the task worktree. `safe_target` protects
+/// the destination; this is about the source.
+#[test]
+fn an_ancestor_directory_swapped_for_a_symlink_is_refused_not_followed() {
+    let repo = TestRepo::new();
+    repo.write(".claude/settings.json", "{\"benign\": true}\n");
+    repo.commit("fixture");
+
+    // Collected while everything is a real file in a real directory.
+    let taken = ahu::snapshot::collect(repo.path()).unwrap();
+    assert!(
+        taken
+            .entries
+            .iter()
+            .any(|e| e.path == ".claude/settings.json"),
+        "the fixture must be collected as a regular file"
+    );
+
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let worktree = repo.state_path().join("wt");
+    ahu::git::add_worktree(
+        &discovered,
+        &worktree,
+        "ahu/test/ancestor",
+        discovered.head.as_deref().unwrap(),
+    )
+    .unwrap();
+
+    // Now the ancestor is replaced, with a matching file name behind it.
+    let outside = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        outside.path().join("settings.json"),
+        "SYNTHETIC_EXTERNAL_SECRET\n",
+    )
+    .unwrap();
+    std::fs::rename(
+        repo.path().join(".claude"),
+        repo.path().join(".claude-real"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(outside.path(), repo.path().join(".claude")).unwrap();
+
+    let report = ahu::snapshot::materialize(repo.path(), &taken, &worktree).unwrap();
+
+    let landed = worktree.join(".claude/settings.json");
+    let contents = std::fs::read_to_string(&landed).unwrap_or_default();
+    assert!(
+        !contents.contains("SYNTHETIC_EXTERNAL_SECRET"),
+        "an external file was copied in through a swapped ancestor: {contents:?}"
+    );
+    assert!(
+        report
+            .refused_sources
+            .contains(&".claude/settings.json".to_string()),
+        "the refusal must be disclosed, not silent: {report:?}"
+    );
+    assert!(
+        report
+            .concurrently_modified
+            .contains(&".claude/settings.json".to_string()),
+        "{report:?}"
+    );
+}
+
+/// The leaf case still holds: this is the regression the ancestor case escaped.
+#[test]
+fn a_leaf_swapped_for_a_symlink_is_still_refused() {
+    let repo = TestRepo::new();
+    repo.write(".claude/settings.json", "{\"benign\": true}\n");
+    repo.commit("fixture");
+    let taken = ahu::snapshot::collect(repo.path()).unwrap();
+
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let worktree = repo.state_path().join("wt-leaf");
+    ahu::git::add_worktree(
+        &discovered,
+        &worktree,
+        "ahu/test/leaf",
+        discovered.head.as_deref().unwrap(),
+    )
+    .unwrap();
+
+    let outside = tempfile::TempDir::new().unwrap();
+    let external = outside.path().join("elsewhere.json");
+    std::fs::write(&external, "SYNTHETIC_EXTERNAL_SECRET\n").unwrap();
+    std::fs::remove_file(repo.path().join(".claude/settings.json")).unwrap();
+    std::os::unix::fs::symlink(&external, repo.path().join(".claude/settings.json")).unwrap();
+
+    let report = ahu::snapshot::materialize(repo.path(), &taken, &worktree).unwrap();
+    let contents =
+        std::fs::read_to_string(worktree.join(".claude/settings.json")).unwrap_or_default();
+    assert!(
+        !contents.contains("SYNTHETIC_EXTERNAL_SECRET"),
+        "{contents:?}"
+    );
+    assert!(
+        report
+            .refused_sources
+            .contains(&".claude/settings.json".to_string()),
+        "{report:?}"
+    );
+}
+
+/// A source deleted between collection and the copy is a concurrent change, not
+/// a refusal — the distinction matters because only one of them is an attempt.
+#[test]
+fn a_source_deleted_after_collection_is_reported_as_concurrently_modified() {
+    let repo = TestRepo::new();
+    repo.write(".claude/settings.json", "{\"benign\": true}\n");
+    repo.commit("fixture");
+    let taken = ahu::snapshot::collect(repo.path()).unwrap();
+
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let worktree = repo.state_path().join("wt-gone");
+    ahu::git::add_worktree(
+        &discovered,
+        &worktree,
+        "ahu/test/gone",
+        discovered.head.as_deref().unwrap(),
+    )
+    .unwrap();
+
+    std::fs::remove_file(repo.path().join(".claude/settings.json")).unwrap();
+    let report = ahu::snapshot::materialize(repo.path(), &taken, &worktree).unwrap();
+    assert!(
+        report
+            .concurrently_modified
+            .contains(&".claude/settings.json".to_string()),
+        "{report:?}"
+    );
+    assert!(report.refused_sources.is_empty(), "{report:?}");
+}
+
+/// The bytes ahu digests must be the bytes it copies.
+///
+/// `materialize` used to open the source path twice: once for the digest, once
+/// for `std::fs::copy`. It now hashes and copies from one descriptor, so the
+/// content that reaches the worktree is the content whose digest was compared.
+#[test]
+fn the_copied_bytes_are_the_digested_bytes() {
+    let repo = TestRepo::new();
+    let script = repo.write(".claude/hooks/guard.sh", "#!/bin/sh\nexit 0\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    repo.commit("fixture");
+    let taken = ahu::snapshot::collect(repo.path()).unwrap();
+
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let worktree = repo.state_path().join("wt-bytes");
+    ahu::git::add_worktree(
+        &discovered,
+        &worktree,
+        "ahu/test/bytes",
+        discovered.head.as_deref().unwrap(),
+    )
+    .unwrap();
+
+    // Change the contents after collection: the copy takes the new bytes, and
+    // says so, rather than copying one version and reporting another's digest.
+    repo.write(".claude/hooks/guard.sh", "#!/bin/sh\nexit 3\n");
+    let report = ahu::snapshot::materialize(repo.path(), &taken, &worktree).unwrap();
+    assert!(
+        report
+            .concurrently_modified
+            .contains(&".claude/hooks/guard.sh".to_string()),
+        "{report:?}"
+    );
+    let copied = worktree.join(".claude/hooks/guard.sh");
+    assert_eq!(
+        std::fs::read_to_string(&copied).unwrap(),
+        "#!/bin/sh\nexit 3\n"
+    );
+    assert_eq!(
+        ahu::util::digest_file(&copied).unwrap(),
+        ahu::util::digest_file(&repo.path().join(".claude/hooks/guard.sh")).unwrap(),
+        "the worktree must hold exactly what was read"
+    );
+    // And the mode came across with it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(std::fs::metadata(&copied).unwrap().permissions().mode() & 0o111 != 0);
+    }
 }

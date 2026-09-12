@@ -127,15 +127,7 @@ impl Hook {
     /// command for drift purposes.
     pub fn label(&self) -> String {
         let target = match &self.command {
-            Some(command) => {
-                let program = command.split_whitespace().next().unwrap_or_default();
-                let rendered = display_safe(&truncate(program, 48));
-                if command.split_whitespace().nth(1).is_some() {
-                    format!("{rendered} …")
-                } else {
-                    rendered
-                }
-            }
+            Some(command) => program_label(command),
             None => format!("<{} hook>", display_safe(&self.kind)),
         };
         let event = display_safe(&self.event);
@@ -167,6 +159,32 @@ impl Hook {
     }
 }
 
+/// Name the program a hook command runs, without printing a credential.
+///
+/// The first whitespace-separated word is a program name only when the command
+/// does not open with shell assignments. `API_TOKEN=secret checker` puts the
+/// credential in exactly that position, and truncating it to 48 characters is
+/// not redaction. Quoting makes the following words unsafe to guess at too — in
+/// `API_TOKEN="a b" checker` the second word is still part of the value — so ahu
+/// stops trying to identify a program the moment it sees an assignment and
+/// leaves the command to its digest.
+fn program_label(command: &str) -> String {
+    let mut words = command.split_whitespace();
+    let Some(first) = words.next() else {
+        return "<empty command>".to_string();
+    };
+    if first.contains('=') {
+        return "<command opens with an inline environment assignment; identified by digest only>"
+            .to_string();
+    }
+    let rendered = display_safe(&truncate(first, 48));
+    if words.next().is_some() {
+        format!("{rendered} …")
+    } else {
+        rendered
+    }
+}
+
 fn truncate(value: &str, limit: usize) -> String {
     let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= limit {
@@ -176,16 +194,121 @@ fn truncate(value: &str, limit: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
+/// What a settings file says about the session's approval boundary.
+///
+/// ahu used to read one key of these documents — `hooks` — and then print an
+/// Approvals block derived entirely from its own manifest, while itself copying
+/// the file that actually decides the boundary into the task worktree. This is
+/// the rest of the document, reported rather than discarded.
+///
+/// Values are only ever repeated for keys whose values are policy. `env` is the
+/// exception: its values are routinely credentials, so only the names are kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsFacts {
+    /// Settings file this came from, labelled as the hook scan labels it.
+    pub source: String,
+    pub scope: Scope,
+    /// `permissions.defaultMode`, e.g. `bypassPermissions`.
+    pub default_mode: Option<String>,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub ask: Vec<String>,
+    pub additional_directories: Vec<String>,
+    pub enabled_plugins: Vec<String>,
+    pub enable_all_project_mcp_servers: Option<bool>,
+    pub enabled_mcpjson_servers: Vec<String>,
+    /// Names only. A settings `env` block routinely holds API tokens.
+    pub env_names: Vec<String>,
+    /// Top-level keys ahu does not interpret, named rather than silently
+    /// dropped — the same treatment the hook scan already gives a shape it
+    /// cannot walk.
+    pub uninterpreted_keys: Vec<String>,
+}
+
+impl SettingsFacts {
+    fn new(source: &str, scope: Scope) -> Self {
+        SettingsFacts {
+            source: source.to_string(),
+            scope,
+            default_mode: None,
+            allow: Vec::new(),
+            deny: Vec::new(),
+            ask: Vec::new(),
+            additional_directories: Vec::new(),
+            enabled_plugins: Vec::new(),
+            enable_all_project_mcp_servers: None,
+            enabled_mcpjson_servers: Vec::new(),
+            env_names: Vec::new(),
+            uninterpreted_keys: Vec::new(),
+        }
+    }
+
+    /// Whether this file says anything about the approval boundary at all.
+    pub fn is_empty(&self) -> bool {
+        self.default_mode.is_none()
+            && self.allow.is_empty()
+            && self.deny.is_empty()
+            && self.ask.is_empty()
+            && self.additional_directories.is_empty()
+            && self.enabled_plugins.is_empty()
+            && self.enable_all_project_mcp_servers.is_none()
+            && self.enabled_mcpjson_servers.is_empty()
+            && self.env_names.is_empty()
+            && self.uninterpreted_keys.is_empty()
+    }
+
+    /// Whether this file widens what the harness would otherwise ask about.
+    ///
+    /// Deliberately generous: anything that pre-approves tools, adds a directory
+    /// the session may reach, or removes a trust prompt counts.
+    pub fn widens_approvals(&self) -> bool {
+        matches!(
+            self.default_mode.as_deref(),
+            Some("bypassPermissions") | Some("acceptEdits") | Some("auto") | Some("dontAsk")
+        ) || !self.allow.is_empty()
+            || !self.additional_directories.is_empty()
+            || self.enable_all_project_mcp_servers == Some(true)
+            || !self.enabled_mcpjson_servers.is_empty()
+            || !self.enabled_plugins.is_empty()
+    }
+}
+
+/// An MCP server a repository asks the harness to start.
+///
+/// An MCP server is a process the harness spawns, configured by a file ahu
+/// copies into the task worktree. The preview named the file's existence and
+/// nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServer {
+    pub source: String,
+    pub name: String,
+    /// The command as declared, including its arguments. This is a process the
+    /// session will start, so it is shown whole rather than reduced to a program
+    /// name — unlike a hook label, an MCP `command` is not a place credentials
+    /// conventionally live, and the reader needs to see `sh -c curl … | sh`.
+    pub command: String,
+}
+
 /// Every hook ahu could find, plus an honest account of what it could not.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookInventory {
     pub hooks: Vec<Hook>,
+    /// What the settings files say beyond their `hooks` key.
+    #[serde(default)]
+    pub settings: Vec<SettingsFacts>,
+    /// MCP servers declared by the repository's `.mcp.json`.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServer>,
     /// Settings files that exist but could not be parsed. Their hooks are
     /// unknown, which is reported rather than treated as "none".
     pub unreadable: Vec<String>,
     /// Settings files ahu looked for and did not find. Used to say which scopes
     /// were actually checked.
     pub checked: Vec<String>,
+    /// Set when ahu has no implementation of this launch's harness hook surface,
+    /// so "none found" would be a false negative rather than a result.
+    #[serde(default)]
+    pub unscanned_harness: Option<String>,
     /// True when ahu is running under a cmux terminal, whose Claude wrapper
     /// injects hooks of its own that ahu cannot enumerate.
     pub wrapper_injected: bool,
@@ -213,12 +336,25 @@ impl HookInventory {
             .collect()
     }
 
+    /// Settings files whose approval keys widen what the harness would ask about.
+    pub fn widening_settings(&self) -> Vec<&SettingsFacts> {
+        self.settings
+            .iter()
+            .filter(|facts| facts.widens_approvals())
+            .collect()
+    }
+
     /// Digest over every hook ahu can see, at every scope.
     ///
     /// The configuration snapshot digest already covers hooks declared inside
     /// the repository. This one also covers user and managed scopes, so a task
     /// launched after a teammate's personal hook changed is reported as drifted
     /// rather than presented as the same effective inputs.
+    ///
+    /// The settings and MCP facts are in it for the same reason: a change to
+    /// `permissions.defaultMode` in a user's own settings file changes the
+    /// session's approval boundary without touching anything in the repository
+    /// snapshot, and a launch after that change is not the same launch.
     pub fn digest(&self) -> String {
         let mut buffer = String::new();
         let mut digests: Vec<String> = self.hooks.iter().map(|hook| hook.digest()).collect();
@@ -226,6 +362,25 @@ impl HookInventory {
         for digest in digests {
             buffer.push_str(&digest);
             buffer.push('\n');
+        }
+        let mut facts: Vec<String> = self
+            .settings
+            .iter()
+            .map(|f| digest_bytes(format!("{f:?}").as_bytes()))
+            .chain(
+                self.mcp_servers
+                    .iter()
+                    .map(|m| digest_bytes(format!("{m:?}").as_bytes())),
+            )
+            .collect();
+        facts.sort();
+        for digest in facts {
+            buffer.push_str(&digest);
+            buffer.push('\n');
+        }
+        if let Some(harness) = &self.unscanned_harness {
+            buffer.push_str(harness);
+            buffer.push_str("-unscanned\n");
         }
         if self.wrapper_injected {
             buffer.push_str("cmux-wrapper\n");
@@ -317,17 +472,44 @@ fn settings_files(repo_root: &Path, locations: &Locations) -> Vec<SettingsFile> 
     found
 }
 
-/// Read every hook ahu can see for a Claude Code launch from `repo_root`.
-pub fn collect(repo_root: &Path) -> Result<HookInventory> {
-    collect_in(repo_root, &Locations::detect())
+/// Whether ahu has an implementation of a harness's hook configuration.
+///
+/// `settings_files` enumerates Claude Code's settings files and nothing else.
+/// Running it for a Codex or Antigravity launch and printing "none found"
+/// reported the result of looking in the wrong place under a heading whose only
+/// job is to tell the reader whether repository-supplied code will run.
+pub fn hook_surface_is_implemented(harness_id: &str) -> bool {
+    harness_id == "claude-code"
 }
 
-/// Read hooks using explicit machine locations.
+/// Read every hook ahu can see for a launch of `harness_id` from `repo_root`.
+pub fn collect(repo_root: &Path, harness_id: &str) -> Result<HookInventory> {
+    collect_for(repo_root, harness_id, &Locations::detect())
+}
+
+/// Read hooks for a Claude Code launch, using explicit machine locations.
 pub fn collect_in(repo_root: &Path, locations: &Locations) -> Result<HookInventory> {
+    collect_for(repo_root, "claude-code", locations)
+}
+
+/// Read hooks and settings using explicit machine locations.
+pub fn collect_for(
+    repo_root: &Path,
+    harness_id: &str,
+    locations: &Locations,
+) -> Result<HookInventory> {
     let mut inventory = HookInventory {
         wrapper_injected: locations.cmux_wrapper,
         ..HookInventory::default()
     };
+    // `.mcp.json` is read for every harness: it is repository configuration that
+    // travels into the task worktree either way, and the servers it declares are
+    // processes a harness starts.
+    collect_mcp_servers(repo_root, &mut inventory);
+    if !hook_surface_is_implemented(harness_id) {
+        inventory.unscanned_harness = Some(harness_id.to_string());
+        return Ok(inventory);
+    }
 
     for SettingsFile {
         scope,
@@ -374,6 +556,10 @@ pub fn collect_in(repo_root: &Path, locations: &Locations) -> Result<HookInvento
             inventory.unreadable.push(display);
             continue;
         };
+        let facts = parse_settings(&value, scope, &display);
+        if !facts.is_empty() {
+            inventory.settings.push(facts);
+        }
         match parse_hooks(&value, scope, &display) {
             Some(hooks) => inventory.hooks.extend(hooks),
             None => inventory.unreadable.push(display),
@@ -384,6 +570,129 @@ pub fn collect_in(repo_root: &Path, locations: &Locations) -> Result<HookInvento
         .hooks
         .sort_by(|a, b| (a.scope, &a.event, &a.matcher).cmp(&(b.scope, &b.event, &b.matcher)));
     Ok(inventory)
+}
+
+/// Read the repository's `.mcp.json`, naming the command of each server.
+///
+/// `.mcp.json` is snapshotted and classified as MCP configuration in the
+/// inventory, but the preview never said that a repository-supplied MCP server
+/// is a process the harness will spawn. Read through the same no-follow resolver
+/// the hook scan uses, so a symlinked `.mcp.json` is refused rather than read.
+fn collect_mcp_servers(repo_root: &Path, inventory: &mut HookInventory) {
+    const SOURCE: &str = ".mcp.json";
+    let path = match crate::util::resolve_existing_within(repo_root, SOURCE) {
+        Ok(Some(path)) => path,
+        Ok(None) => return,
+        Err(_) => {
+            inventory.unreadable.push(format!(
+                "{SOURCE} (not read: it or one of its parent directories is a symlink, so its \
+                 MCP servers are not this repository's)"
+            ));
+            return;
+        }
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        inventory.unreadable.push(SOURCE.to_string());
+        return;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        inventory.unreadable.push(SOURCE.to_string());
+        return;
+    };
+    let Some(servers) = value.get("mcpServers") else {
+        return;
+    };
+    let Some(servers) = servers.as_object() else {
+        inventory.unreadable.push(format!(
+            "{SOURCE} (its mcpServers key is not a shape ahu understands, so its servers are \
+             unknown rather than absent)"
+        ));
+        return;
+    };
+    for (name, server) in servers {
+        let command = server
+            .get("command")
+            .and_then(|c| c.as_str())
+            .unwrap_or("(no command declared)");
+        let args = server
+            .get("args")
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().unwrap_or("(non-string)").to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        inventory.mcp_servers.push(McpServer {
+            source: SOURCE.to_string(),
+            name: name.clone(),
+            command: if args.is_empty() {
+                command.to_string()
+            } else {
+                format!("{command} {args}")
+            },
+        });
+    }
+}
+
+/// Top-level settings keys ahu interprets. Anything else is named as unknown.
+const INTERPRETED_KEYS: &[&str] = &[
+    "hooks",
+    "permissions",
+    "enabledPlugins",
+    "enableAllProjectMcpServers",
+    "enabledMcpjsonServers",
+    "env",
+];
+
+/// Pull the approval-relevant keys out of one settings document.
+fn parse_settings(value: &serde_json::Value, scope: Scope, source: &str) -> SettingsFacts {
+    let mut facts = SettingsFacts::new(source, scope);
+    let Some(object) = value.as_object() else {
+        return facts;
+    };
+    for key in object.keys() {
+        if !INTERPRETED_KEYS.contains(&key.as_str()) {
+            facts.uninterpreted_keys.push(key.clone());
+        }
+    }
+    if let Some(permissions) = object.get("permissions") {
+        facts.default_mode = permissions
+            .get("defaultMode")
+            .and_then(|m| m.as_str())
+            .map(str::to_string);
+        facts.allow = string_list(permissions.get("allow"));
+        facts.deny = string_list(permissions.get("deny"));
+        facts.ask = string_list(permissions.get("ask"));
+        facts.additional_directories = string_list(permissions.get("additionalDirectories"));
+    }
+    facts.enabled_plugins = string_list(object.get("enabledPlugins"));
+    facts.enable_all_project_mcp_servers = object
+        .get("enableAllProjectMcpServers")
+        .and_then(|v| v.as_bool());
+    facts.enabled_mcpjson_servers = string_list(object.get("enabledMcpjsonServers"));
+    // Names only: a settings `env` block is a common place for an API token, and
+    // an inventory must not leak a credential to describe a setting.
+    if let Some(env) = object.get("env").and_then(|e| e.as_object()) {
+        facts.env_names = env.keys().cloned().collect();
+    }
+    facts
+}
+
+fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| match item.as_str() {
+                    Some(text) => text.to_string(),
+                    None => item.to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Pull hook commands out of one settings document.
@@ -452,7 +761,19 @@ pub const NON_PROJECT_HOOK_DETAIL: &[&str] = &[
 pub fn render_for_preview(inventory: &HookInventory, executable_config_files: usize) -> String {
     let mut out = String::new();
     out.push_str("\nHooks\n");
-    if inventory.is_empty() && !inventory.wrapper_injected {
+    if let Some(harness) = &inventory.unscanned_harness {
+        // "none found" would be the result of looking in Claude Code's settings
+        // files for a launch of a harness that does not read them. Unknown is
+        // not absent, and this heading's whole job is to tell the reader whether
+        // repository-supplied code will run in the session.
+        out.push_str(&format!(
+            "  !! ahu does not read {}'s hook or lifecycle configuration.\n     \
+             Hooks for this launch are unknown, not absent. The harness's own configuration\n     \
+             directories are carried into the task worktree by the checkout and by ahu's\n     \
+             configuration snapshot, and whatever they declare will apply there.\n",
+            display_safe(harness)
+        ));
+    } else if inventory.is_empty() && !inventory.wrapper_injected {
         out.push_str("  none found in the settings files ahu can read\n");
     }
 
@@ -510,5 +831,105 @@ pub fn render_for_preview(inventory: &HookInventory, executable_config_files: us
             display_safe(unreadable)
         ));
     }
+    out
+}
+
+/// Render what the settings files and `.mcp.json` say about the approval
+/// boundary, for the launch preview's Approvals section.
+///
+/// ahu passes permission flags, and it used to describe the approval boundary
+/// entirely in terms of those flags — while copying into the task worktree the
+/// files that actually decide it. This says what those files declare.
+pub fn render_settings_for_preview(inventory: &HookInventory) -> String {
+    let mut out = String::new();
+    let facts: Vec<&SettingsFacts> = inventory
+        .settings
+        .iter()
+        .filter(|f| !f.is_empty())
+        .collect();
+    if facts.is_empty() && inventory.mcp_servers.is_empty() {
+        if inventory.unscanned_harness.is_some() {
+            out.push_str(
+                "  ahu did not read this harness's settings; what it allows, denies, or\n  \
+                 pre-approves is unknown to ahu, not known to be empty.\n",
+            );
+        } else {
+            out.push_str(
+                "  the settings files ahu read declare no permission, plugin, MCP, or env keys\n",
+            );
+        }
+        return out;
+    }
+
+    for fact in facts {
+        let marker = if fact.widens_approvals() { "!!" } else { "  " };
+        out.push_str(&format!(
+            "  {marker} {} [{}]\n",
+            display_safe(&fact.source),
+            fact.scope.as_str()
+        ));
+        if let Some(mode) = &fact.default_mode {
+            out.push_str(&format!(
+                "       permissions.defaultMode {}\n",
+                display_safe(mode)
+            ));
+        }
+        for (label, values) in [
+            ("permissions.allow", &fact.allow),
+            ("permissions.deny", &fact.deny),
+            ("permissions.ask", &fact.ask),
+            (
+                "permissions.additionalDirectories",
+                &fact.additional_directories,
+            ),
+            ("enabledPlugins", &fact.enabled_plugins),
+            ("enabledMcpjsonServers", &fact.enabled_mcpjson_servers),
+        ] {
+            if !values.is_empty() {
+                out.push_str(&format!(
+                    "       {label} {}\n",
+                    display_safe(&values.join(", "))
+                ));
+            }
+        }
+        if let Some(enabled) = fact.enable_all_project_mcp_servers {
+            out.push_str(&format!("       enableAllProjectMcpServers {enabled}\n"));
+        }
+        if !fact.env_names.is_empty() {
+            out.push_str(&format!(
+                "       env sets {} variable(s): {} (values not shown)\n",
+                fact.env_names.len(),
+                display_safe(&fact.env_names.join(", "))
+            ));
+        }
+        if !fact.uninterpreted_keys.is_empty() {
+            out.push_str(&format!(
+                "       keys ahu does not interpret, so their effect is unknown: {}\n",
+                display_safe(&fact.uninterpreted_keys.join(", "))
+            ));
+        }
+        if fact.scope.travels_into_worktree() {
+            out.push_str("       this file travels into the task worktree and applies there\n");
+        }
+    }
+
+    if !inventory.mcp_servers.is_empty() {
+        out.push_str(&format!(
+            "  !! {} MCP server(s) declared by this repository. Each is a process the harness\n     \
+             starts, with this session's privileges:\n",
+            inventory.mcp_servers.len()
+        ));
+        for server in &inventory.mcp_servers {
+            out.push_str(&format!(
+                "       {} → {}\n",
+                display_safe(&server.name),
+                display_safe(&server.command)
+            ));
+        }
+    }
+    out.push_str(
+        "  ahu reads these files; it does not set, override, or remove any of them, and it\n  \
+         cannot tell you which keys the installed harness honours from a project settings file.\n",
+    );
     out
 }
