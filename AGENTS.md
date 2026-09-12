@@ -50,3 +50,16 @@ task, without asking for separate permission or leaving it for the user.
 
 Issue comments and closure do not authorize a Git push. The final response must
 state which associated issues were closed and which remain open, with reasons.
+
+## Repository privacy boundary
+
+Do not store execution traces anywhere in this repository, including ignored paths.
+Do not put private tracker-derived content in public files without user confirmation
+of the exact material and destination. This includes tracker locations, IDs,
+references, issue titles and bodies, and private project metadata. The issue-type
+vocabulary in discover-requirements is explicitly authorized for public skill and
+agent documentation; that authorization does not extend to tracker content.
+Verify both project and linked issue repository visibility before tracker writes.
+Keep discovery records, skill evolution proposals, and rejected evolution records
+private, never in repository logs or docs/skill-evolution. Setup of a skill does
+not authorize conducting a discovery session or creating live discovery records.

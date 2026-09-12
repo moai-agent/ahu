@@ -113,6 +113,7 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
             .into_iter()
             .collect(),
         context_hygiene: config::ContextHygiene::default(),
+        knowledge: config::Knowledge::default(),
     };
     let path = config::write_new(repo.path(), &new_config).expect("first write");
     assert!(path.exists());
@@ -143,6 +144,19 @@ fn rendered_config_round_trips() {
         context_hygiene: config::ContextHygiene {
             review_on_first_load: true,
             review_interval_days: 3,
+        },
+        // A non-default knowledge section so the round trip proves it is
+        // rendered, not silently dropped back to the default. The non-ASCII
+        // paths are the reason the bundles are rendered as TOML rather than
+        // with `{:?}`: Rust's escapes for these are not TOML's, so a config
+        // rendered with them would load once and then fail to parse.
+        knowledge: config::Knowledge {
+            bundles: vec![
+                "docs/knowledge".to_string(),
+                "docs/non\u{a0}breaking".to_string(),
+                "docs/combin\u{301}ing".to_string(),
+            ],
+            fail_on_warnings: true,
         },
     };
     config::write_new(repo.path(), &original).unwrap();

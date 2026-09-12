@@ -2,3 +2,10 @@
 /.worktrees/
 /security-reviews/
 /fixes/
+
+# Keep the repository skill copy visible even with a global .claude/ ignore.
+!/.claude/
+/.claude/*
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/discover-requirements/

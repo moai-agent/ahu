@@ -38,6 +38,9 @@ Commands:
   onboard               Preview native agent definitions that could be registered
   inventory [@agent]    Inspect visible context sources and coverage gaps
   hygiene [@agent]      Run the context hygiene review now
+  knowledge lint [--output json]
+                        Check the OKF bundles named in [knowledge] with okf.
+                        Reads only; nothing is fetched, indexed, or rewritten
   tasks                 List tasks launched from this repository
   task <task-id> [--output json]
                         Inspect a task's recorded session state and locations
@@ -66,6 +69,12 @@ onboard options:
   --remove <name>       Remove one ahu registration (native files are untouched)
   --model <id>          Exact model identifier for a registration
   --agent-version <v>   Semantic version for a new registration (default 0.1.0)
+
+knowledge lint options:
+  --output json         Emit a versioned JSON report on stdout, diagnostics on
+                        stderr. Bundles come from [knowledge] in the project
+                        configuration; knowledge.fail_on_warnings decides whether
+                        warnings fail the check. Errors always do.
 
 launcher options:
   --no-focus            Do not switch to the new session after launching
@@ -137,6 +146,9 @@ pub enum Command {
     },
     Hygiene {
         agent: Option<String>,
+    },
+    KnowledgeLint {
+        output_json: bool,
     },
     Tasks,
     Task {
@@ -295,6 +307,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         "hygiene" => Ok(Command::Hygiene {
             agent: optional_agent(&args[1..])?,
         }),
+        "knowledge" => parse_knowledge(&args[1..]),
         "launch" => parse_launch(&args[1..], stdin_available),
         "onboard" => parse_onboard(&args[1..]),
         "run-task" => parse_run_task(&args[1..]),
@@ -323,6 +336,32 @@ fn optional_agent(rest: &[String]) -> Result<Option<String>> {
         bail!("`@` on its own is not an agent name.");
     }
     Ok(Some(name.to_string()))
+}
+
+/// `knowledge` takes a subcommand so later knowledge operations do not have to
+/// change the shape of this one.
+fn parse_knowledge(rest: &[String]) -> Result<Command> {
+    match rest.first().map(String::as_str) {
+        None => bail!("`ahu knowledge` needs a subcommand; the only one is `lint`."),
+        Some("lint") => {}
+        Some(other) => bail!("unknown subcommand {other:?} for `ahu knowledge`; expected `lint`."),
+    }
+    let mut output_json = false;
+    let mut index = 1;
+    while index < rest.len() {
+        match rest[index].as_str() {
+            "--output" if !output_json => {
+                let value = value_for("--output", rest, &mut index)?;
+                if value != "json" {
+                    bail!("unsupported --output {value:?}; expected json.");
+                }
+                output_json = true;
+            }
+            other => bail!("unknown or repeated option {other:?} for `ahu knowledge lint`."),
+        }
+        index += 1;
+    }
+    Ok(Command::KnowledgeLint { output_json })
 }
 
 fn parse_onboard(rest: &[String]) -> Result<Command> {

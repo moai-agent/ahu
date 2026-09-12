@@ -104,6 +104,14 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 )
             })
         }
+        // The JSON report is the contract on stdout, so the readable findings
+        // go to stderr when it is asked for, exactly as `launch --output json`.
+        Command::KnowledgeLint { output_json } => {
+            let repo = commands::repo_from_cwd()?;
+            commands::with_stdio_output(output_json, |console| {
+                commands::knowledge_lint(console, &repo, output_json)
+            })
+        }
         // `doctor` reports on a missing repository rather than failing on one.
         Command::Doctor => {
             let repo = commands::repo_from_cwd();
@@ -147,6 +155,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Doctor
                 | Command::Codex
                 | Command::Launch { .. }
+                | Command::KnowledgeLint { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })
         }

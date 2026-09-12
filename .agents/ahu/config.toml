@@ -12,3 +12,7 @@ catalog_version = "2026-09-12"
 [context_hygiene]
 review_on_first_load = true
 review_interval_days = 7
+
+[knowledge]
+bundles = ["docs/knowledge"]
+fail_on_warnings = false

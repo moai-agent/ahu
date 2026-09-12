@@ -29,6 +29,7 @@ pub mod harness;
 pub mod hooks;
 pub mod hygiene;
 pub mod inventory;
+pub mod knowledge;
 pub mod launch;
 pub mod launcher;
 pub mod onboard;

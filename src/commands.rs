@@ -13,6 +13,7 @@ use crate::harness;
 use crate::hooks;
 use crate::hygiene;
 use crate::inventory;
+use crate::knowledge;
 use crate::launch;
 use crate::launcher::{self, Console};
 use crate::onboard;
@@ -808,6 +809,31 @@ pub fn hygiene_cmd(
     ))?;
     hygiene::record_review(&identity, &key)?;
     Ok(0)
+}
+
+/// `ahu knowledge lint [--output json]`
+///
+/// A check, so its exit status is the result: 0 when the bundles pass under the
+/// project's policy, 5 when they do not. Nothing in a bundle is written to,
+/// and no cmux session or harness is involved.
+pub fn knowledge_lint(console: &mut Console<'_>, repo: &Repo, json: bool) -> Result<i32> {
+    let loaded = config::load(&repo.root)?.ok_or_else(|| {
+        crate::util::Error::new(
+            "project configuration is missing; run `ahu init` before checking knowledge bundles.",
+        )
+        .with_kind(crate::util::ErrorKind::Prerequisite)
+    })?;
+    let report = knowledge::lint(&repo.root, &loaded)?;
+    if json {
+        println!("{}", knowledge::render_json(&report)?);
+    }
+    console.say(&knowledge::render(&report))?;
+    if report.passed() {
+        return Ok(0);
+    }
+    Err(crate::util::Error::new(
+        "knowledge lint found problems; see the findings above.",
+    ))
 }
 
 /// `ahu run-task --task-dir <dir>` — the fixed entrypoint cmux starts.

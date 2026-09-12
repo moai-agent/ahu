@@ -53,6 +53,26 @@ was inspected. Report actual checks, limitations, changed files, and delivery st
 Keep private roadmap contents, plans, private references, finding-to-fix mappings,
 credentials, and identifying machine details out of public files, commits, and
 artifacts, including ignored reports. Derive public claims from public code and
-observable behavior. Verify destination visibility before tracker writes. Keep
-private handoffs in the private tracker or user conversation; do not publish a
-fallback if private tracking is unavailable.
+observable behavior. Do not copy private tracker-derived content into public files
+without user confirmation of the exact material and destination. Obtain tracker
+location at runtime and verify both project and linked issue repository visibility
+before writes. Keep private handoffs in the private tracker or user conversation;
+do not publish a fallback if private tracking is unavailable. Do not store execution
+traces anywhere in this repository, even in ignored paths. Keep raw evidence,
+discovery records, evolution proposals, and rejection memory private, never in
+repository logs or docs/skill-evolution.
+
+Own authored repository skill prose, including the canonical
+.agents/skills/discover-requirements/SKILL.md and its identical repo-local
+.claude/skills/discover-requirements/SKILL.md copy. Use discover-requirements for
+ambiguous requirements or explicit discovery; proceed directly on specified tasks.
+Keep dev-opus focused on code and tests; receive its authored-prose handoffs.
+After skill edits, run python3 scripts/check-skills.py to verify that canonical and
+Claude skill copies, including metadata, match byte-for-byte. Propose skill evolution
+separately for coordinator review and independent evaluation before promotion;
+never let a discovery run mutate its own skill.
+
+Maintain docs/knowledge as an OKF v0.2 bundle of current-code concepts grounded in
+public source and tests. Keep ordinary README and reference guides outside it.
+Run installed okf validate docs/knowledge and okf lint docs/knowledge after edits;
+report actual diagnostics and distinguish format validation from claim verification.

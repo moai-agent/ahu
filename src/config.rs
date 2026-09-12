@@ -36,6 +36,23 @@ impl Default for ContextHygiene {
     }
 }
 
+/// Project-agreed knowledge bundles and the policy `ahu knowledge lint` applies
+/// to them.
+///
+/// Optional and additive: a configuration written before this section existed
+/// loads with no bundles, which makes `ahu knowledge lint` report that nothing
+/// is configured rather than silently pass.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Knowledge {
+    /// Repository-relative directories holding OKF bundles, best-known first.
+    #[serde(default)]
+    pub bundles: Vec<String>,
+    /// Whether lint warnings fail the check. Errors always fail it.
+    #[serde(default)]
+    pub fail_on_warnings: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectConfig {
     pub schema_version: u32,
@@ -50,6 +67,8 @@ pub struct ProjectConfig {
     pub model_rankings: std::collections::BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub context_hygiene: ContextHygiene,
+    #[serde(default)]
+    pub knowledge: Knowledge,
 }
 
 /// A loaded config plus the identity of the exact bytes it came from.
@@ -187,6 +206,16 @@ fn validate(config: &ProjectConfig, path: &Path) -> Result<()> {
             }
         }
     }
+    let mut seen_bundles = std::collections::BTreeSet::new();
+    for bundle in &config.knowledge.bundles {
+        validate_bundle_path(bundle, path)?;
+        if !seen_bundles.insert(bundle.clone()) {
+            bail!(
+                "{}: knowledge.bundles lists {bundle:?} twice.",
+                path.display()
+            );
+        }
+    }
     if config.context_hygiene.review_interval_days == 0 {
         bail!(
             "{}: context_hygiene.review_interval_days must be at least 1.",
@@ -195,6 +224,57 @@ fn validate(config: &ProjectConfig, path: &Path) -> Result<()> {
     }
     catalog::require_version(&config.catalog_version)?;
     Ok(())
+}
+
+/// A knowledge bundle path must name a plain location inside the checkout.
+///
+/// The value reaches a third-party validator as a directory argument, so it is
+/// checked here rather than normalized: an absolute path, a `..` component, or
+/// an empty segment would point that validator — and ahu's own tree scan — at
+/// something other than a directory of this repository. Display-hostile
+/// characters are refused too, because the path is printed back in findings.
+fn validate_bundle_path(bundle: &str, path: &Path) -> Result<()> {
+    let reject = |reason: &str| -> Error {
+        Error::new(format!(
+            "{}: knowledge.bundles entry {bundle:?} {reason}.\n\
+             Each bundle is a repository-relative directory such as \"docs/knowledge\".",
+            path.display()
+        ))
+    };
+    if bundle.is_empty() {
+        return Err(reject("is empty"));
+    }
+    if bundle.starts_with('/') {
+        return Err(reject("is absolute"));
+    }
+    if bundle.contains('\\') {
+        return Err(reject("contains a backslash"));
+    }
+    if bundle.chars().any(crate::util::is_display_hostile_char) {
+        return Err(reject("contains a control or direction-changing character"));
+    }
+    for segment in bundle.split('/') {
+        if segment.is_empty() {
+            return Err(reject("has an empty path segment"));
+        }
+        if segment == "." || segment == ".." {
+            return Err(reject("has a \".\" or \"..\" segment"));
+        }
+    }
+    Ok(())
+}
+
+/// Quote a string as TOML.
+///
+/// Rust's `{:?}` is close enough to TOML for the catalog-constrained values
+/// elsewhere in this file, which are ASCII by construction. It is not close
+/// enough for a bundle path, which the project writes and which may hold any
+/// character the validation accepts: Rust escapes a non-ASCII character in the
+/// `\u{...}` form, which TOML does not accept, so rendering a configuration
+/// that loaded could produce one that no longer parses. The TOML serializer is
+/// the only thing that knows TOML's own rules.
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.to_string()).to_string()
 }
 
 /// Render a config to the exact TOML ahu writes during initialization.
@@ -235,6 +315,22 @@ pub fn render(config: &ProjectConfig) -> String {
     out.push_str(&format!(
         "review_interval_days = {}\n",
         config.context_hygiene.review_interval_days
+    ));
+    out.push_str("\n[knowledge]\n");
+    out.push_str("# Repository-relative OKF bundle directories for `ahu knowledge lint`.\n");
+    out.push_str(&format!(
+        "bundles = [{}]\n",
+        config
+            .knowledge
+            .bundles
+            .iter()
+            .map(|b| toml_string(b))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    out.push_str(&format!(
+        "fail_on_warnings = {}\n",
+        config.knowledge.fail_on_warnings
     ));
     out
 }

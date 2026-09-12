@@ -59,6 +59,60 @@ Commands return these exit codes:
 | `4` | Missing prerequisite, such as Git repository, harness, or cmux. |
 | `5` | Run failure, including invalid persisted configuration. |
 
+## Knowledge checks
+
+`ahu knowledge lint` runs installed `okf validate` followed by `okf lint` for
+each configured bundle, combining and deduplicating their findings. It requires
+Git, valid project configuration, and `okf` on PATH outside the repository;
+it does not need cmux or a provider session. The check reads bundles without
+fetching content, generating indexes, or rewriting files.
+
+Add the optional section to `.agents/ahu/config.toml`, preserving existing policy:
+
+```toml
+[knowledge]
+bundles = ["docs/knowledge"]
+fail_on_warnings = false
+```
+
+Paths are repository-relative directories. Absolute paths, empty segments,
+`.` and `..` segments, backslashes, and control or direction-changing characters
+are rejected. Bundle paths and contents must not be symlinks; contents must be
+regular files or directories. Omitting the section defaults to no bundles and
+`fail_on_warnings = false`.
+
+```sh
+ahu knowledge lint
+ahu knowledge lint --output json
+```
+
+Errors fail the check. Warnings fail it only when `fail_on_warnings` is true.
+A passing check exits `0`; missing prerequisites, including no configured bundles
+or missing `okf`, exit `4`. Invalid configuration, unusable bundle paths, validator
+failures, and findings that fail the configured policy exit `5`. Each configured
+bundle must contain at least one concept Markdown file: an empty directory, a
+directory containing only non-Markdown files, or one containing only `index.md`
+and/or `log.md` fails with exit `5`.
+
+With `--output json`, stdout contains the completed report and stderr carries
+human-readable diagnostics. Its `schema_version` is `1`; fields include `command`,
+`okf`, `fail_on_warnings`, total `errors` and `warnings`, `passed`, and `bundles`.
+Each bundle has its configured `path`, counts, and `findings`; findings carry
+`severity`, `rule`, `concept_id`, and `message`. A failure before report completion
+can produce diagnostics without a JSON report.
+
+The validator integration uses the OKF 0.5 JSON report contract; the standalone
+bundle checks have been validated with `okf` 0.5.0. To check the bundle directly:
+
+```sh
+okf validate docs/knowledge
+okf lint docs/knowledge
+```
+
+The maintained bundle is [docs/knowledge](knowledge/index.md). README and this
+reference remain outside it. Format checks do not establish that source claims
+are correct or that a human has reviewed them.
+
 ## Sidebar text
 
 `--title` and `--summary` set plain display metadata without changing the

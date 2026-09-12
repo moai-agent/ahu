@@ -91,6 +91,14 @@ with an available adapter and a nonempty project model ranking, and selects that
 ranking's first model. Local prerequisites are checked afterward. A missing
 harness produces an error, never a different selection or catalog fallback.
 
+## Requirements discovery
+
+Use [discover-requirements](.agents/skills/discover-requirements/SKILL.md) when a
+request needs clearer outcomes, scope, or acceptance criteria. Ask to use
+`discover-requirements` with your idea; it gathers facts and proposes choices in
+your preferred channel, keeping discovery records private. Specified tasks proceed
+without a mandatory interview. Repository copies are provided for Codex and Claude.
+
 ## What travels with a task
 
 Each task starts at the invoking checkout's HEAD on `ahu/<agent>/<task-id>`, in
@@ -115,6 +123,7 @@ require explicit user permission.
 | `ahu onboard` | Read-only preview of native definitions available for registration |
 | `ahu inventory [@agent]` | Inspect context sources, settings, and coverage gaps |
 | `ahu hygiene [@agent]` | Propose context cleanup without changing files |
+| `ahu knowledge lint` | Validate and lint configured OKF bundles with installed `okf` |
 | `ahu explain` | Built-in architecture overview |
 | `ahu explain --open` | Open the overview in cmux's Markdown viewer |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
@@ -125,10 +134,17 @@ contracts, prompt transport, hooks, state, and delegation boundaries.
 ## Development
 
 ```sh
+python3 scripts/check-skills.py
+ahu knowledge lint
 cargo fmt --check
 cargo clippy --all-targets --locked --offline -- -D warnings
 cargo test --locked --offline
 ```
+
+The [current-code knowledge bundle](docs/knowledge/index.md) uses OKF v0.2.
+Skill maintenance checks compare repository copies byte-for-byte; they do not
+install or sync skills globally. See [knowledge checks](docs/reference.md#knowledge-checks)
+for project configuration and machine-readable results.
 
 Tests use temporary repositories and stand-in harness executables. Live cmux
 tests are opt-in through `AHU_TEST_CMUX=1`; ordinary test runs do not open cmux

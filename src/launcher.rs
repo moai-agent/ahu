@@ -439,6 +439,9 @@ pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
             review_on_first_load: true,
             review_interval_days: interval,
         },
+        // Setup asks nothing about knowledge bundles: a new project has none to
+        // name yet, and an empty list makes `ahu knowledge lint` say so.
+        knowledge: crate::config::Knowledge::default(),
     };
 
     console.say("\nConfiguration to be written to .agents/ahu/config.toml:\n\n")?;
