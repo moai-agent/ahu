@@ -158,14 +158,19 @@ pub fn is_semver(value: &str) -> bool {
 /// disclosure.
 ///
 /// Every control character, including the C1 range, is rendered as a visible
-/// `\xNN` escape. This is applied at the render boundary only, so digests and
-/// stored records keep the true bytes.
+/// escape, and so is every character that reorders or hides text without being
+/// a control character: the bidirectional overrides and isolates that Trojan
+/// Source uses, the zero-width and joiner family, and the Unicode line and
+/// paragraph separators. `char::is_control` is Unicode category `Cc` only, so
+/// none of those are covered by it.
+///
+/// This is applied at the render boundary only, so digests and stored records
+/// keep the true bytes.
 pub fn display_safe(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
-        let code = ch as u32;
-        if ch.is_control() || (0x80..=0x9f).contains(&code) {
-            out.push_str(&format!("\\x{code:02x}"));
+        if is_display_hostile(ch) {
+            push_escape(&mut out, ch);
         } else {
             out.push(ch);
         }
@@ -173,18 +178,56 @@ pub fn display_safe(value: &str) -> String {
     out
 }
 
+/// Whether a character must never reach the terminal as itself.
+///
+/// Two groups, for two different reasons. Control characters (including C1)
+/// move the cursor, clear the screen, or change colour. The rest are invisible
+/// or direction-changing: on a bidi-aware terminal U+202E makes a hook's
+/// displayed program name render as something other than what it is, and the
+/// zero-width family lets two different strings look identical.
+fn is_display_hostile(ch: char) -> bool {
+    let code = ch as u32;
+    ch.is_control()
+        || (0x80..=0x9f).contains(&code)
+        || matches!(
+            code,
+            0x00ad                  // soft hyphen
+            | 0x061c                // arabic letter mark
+            | 0x200b..=0x200f       // zero width space .. right-to-left mark
+            | 0x2028 | 0x2029       // line and paragraph separator
+            | 0x202a..=0x202e       // bidi embedding and override
+            | 0x2060..=0x2064       // word joiner and invisible operators
+            | 0x2066..=0x2069       // bidi isolates
+            | 0xfeff // zero width no-break space
+        )
+}
+
+/// Render one hostile character visibly.
+///
+/// `\xNN` cannot name anything above 0xFF without being ambiguous, so wider
+/// characters use the `\u{...}` form Rust itself uses.
+fn push_escape(out: &mut String, ch: char) {
+    let code = ch as u32;
+    if code <= 0xff {
+        out.push_str(&format!("\\x{code:02x}"));
+    } else {
+        out.push_str(&format!("\\u{{{code:04x}}}"));
+    }
+}
+
 /// Like [`display_safe`], but keeps newlines.
 ///
 /// For multi-line output such as an error message, where the line structure is
-/// meaningful but every other control character is not.
+/// meaningful but every other control character is not. U+2028 and U+2029 are
+/// still escaped: they are not the newline this keeps, and a terminal that
+/// treats them as one would break a line the caller did not break.
 pub fn display_safe_block(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
-        let code = ch as u32;
         if ch == '\n' {
             out.push(ch);
-        } else if ch.is_control() || (0x80..=0x9f).contains(&code) {
-            out.push_str(&format!("\\x{code:02x}"));
+        } else if is_display_hostile(ch) {
+            push_escape(&mut out, ch);
         } else {
             out.push(ch);
         }

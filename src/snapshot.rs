@@ -50,6 +50,16 @@ const SKIP_DIR_NAMES: &[&str] = &[
     "__pycache__",
 ];
 
+/// The one skipped directory that is not disclosed as a coverage gap.
+///
+/// Every other entry in `SKIP_DIR_NAMES` can hold committed files, which the
+/// base checkout carries into the task worktree whether or not the scan looked
+/// at them — that is exactly what the disclosure is for. `.git` cannot: Git
+/// does not track anything inside it, and no harness reads configuration from
+/// it. Listing it on every launch would be noise in the one place ahu needs the
+/// reader to actually read.
+const NEVER_DISCLOSED: &[&str] = &[".git"];
+
 const MAX_DEPTH: usize = 12;
 
 /// One configuration file in the snapshot.
@@ -73,9 +83,24 @@ pub struct SnapshotEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ConfigSnapshot {
     pub entries: Vec<SnapshotEntry>,
-    /// Directories the scan deliberately did not descend into, so the inventory
+    /// Directories the scan did not descend into — for any reason, whether the
+    /// name is on the skip list or the depth cap was reached — so the inventory
     /// can disclose the gap instead of implying the snapshot is exhaustive.
+    ///
+    /// A skipped directory is not a directory whose contents stay behind. The
+    /// task worktree is a checkout of the base commit, so everything committed
+    /// under one of these paths is physically present in it. What the gap
+    /// describes is a failure to *inventory*, not a failure to inherit.
     pub skipped_directories: Vec<String>,
+    /// Agent configuration found directly inside a skipped directory by a
+    /// one-level probe, so a planted `vendor/CLAUDE.md` is at least named.
+    ///
+    /// This is deliberately shallow: it stats the known configuration names in
+    /// each skipped directory and goes no further, which keeps the scan bounded
+    /// on large checkouts. Configuration buried deeper inside a skipped
+    /// directory is still covered only by `skipped_directories`.
+    #[serde(default)]
+    pub unscanned_config: Vec<String>,
     /// Configuration paths that are symlinks. Never followed, never entries,
     /// and tracked separately so reconciliation can remove them from a task
     /// worktree instead of leaving them to be discovered by the harness.
@@ -137,15 +162,14 @@ pub fn collect(root: &Path) -> Result<ConfigSnapshot> {
     snapshot.entries.sort_by(|a, b| a.path.cmp(&b.path));
     snapshot.skipped_directories.sort();
     snapshot.skipped_directories.dedup();
+    snapshot.unscanned_config.sort();
+    snapshot.unscanned_config.dedup();
     snapshot.symlinks.sort();
     snapshot.symlinks.dedup();
     Ok(snapshot)
 }
 
 fn walk(root: &Path, dir: &Path, depth: usize, snapshot: &mut ConfigSnapshot) -> Result<()> {
-    if depth > MAX_DEPTH {
-        return Ok(());
-    }
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -173,12 +197,13 @@ fn walk(root: &Path, dir: &Path, depth: usize, snapshot: &mut ConfigSnapshot) ->
             Err(_) => continue,
         };
         if meta.is_dir() {
-            if SKIP_DIR_NAMES.iter().any(|d| *d == name) {
-                if is_config_path(relative) || CONFIG_DIR_NAMES.iter().any(|d| *d == name) {
-                    snapshot
-                        .skipped_directories
-                        .push(to_relative_string(relative));
-                }
+            // Every directory the scan does not enter is disclosed, whichever
+            // reason stopped it. Recording only the ones that are themselves
+            // configuration paths would leave `vendor/CLAUDE.md` and anything
+            // past the depth cap invisible in the inventory while the checkout
+            // still carried them into the task worktree.
+            if SKIP_DIR_NAMES.iter().any(|d| *d == name) || depth + 1 > MAX_DEPTH {
+                record_unscanned(&path, relative, snapshot);
                 continue;
             }
             walk(root, &path, depth + 1, snapshot)?;
@@ -199,6 +224,47 @@ fn walk(root: &Path, dir: &Path, depth: usize, snapshot: &mut ConfigSnapshot) ->
         }
     }
     Ok(())
+}
+
+/// Disclose a directory the scan did not enter, and name any configuration
+/// sitting directly inside it.
+///
+/// The probe is a fixed number of `symlink_metadata` calls per skipped
+/// directory, so it costs nothing on a large checkout and still catches the
+/// obvious plant: a `CLAUDE.md` at the top of `vendor/`, which Claude Code
+/// loads on demand when it works on files in that subtree.
+fn record_unscanned(dir: &Path, relative: &Path, snapshot: &mut ConfigSnapshot) {
+    let shown = to_relative_string(relative);
+    if shown.is_empty() {
+        return;
+    }
+    let name = relative
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string());
+    if let Some(name) = &name
+        && NEVER_DISCLOSED.contains(&name.as_str())
+    {
+        return;
+    }
+    snapshot.skipped_directories.push(shown.clone());
+    for candidate in CONFIG_FILE_NAMES {
+        if let Ok(meta) = std::fs::symlink_metadata(dir.join(candidate))
+            && meta.is_file()
+        {
+            snapshot
+                .unscanned_config
+                .push(format!("{shown}/{candidate}"));
+        }
+    }
+    for candidate in CONFIG_DIR_NAMES {
+        if let Ok(meta) = std::fs::symlink_metadata(dir.join(candidate))
+            && meta.is_dir()
+        {
+            snapshot
+                .unscanned_config
+                .push(format!("{shown}/{candidate}"));
+        }
+    }
 }
 
 #[cfg(unix)]

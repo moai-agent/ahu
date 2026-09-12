@@ -67,9 +67,15 @@ impl Adapter for Codex {
         })
     }
 
-    fn enforcement(&self, _model: &str) -> EnforcementReport {
-        let entry = crate::catalog::harness("codex").expect("codex is in the catalog");
-        EnforcementReport {
+    fn enforcement(&self, _model: &str) -> Result<EnforcementReport> {
+        let entry = crate::catalog::harness("codex").ok_or_else(|| {
+            crate::util::Error::new(
+                "the compatibility catalog has no entry for harness \"codex\", so ahu cannot \
+                 state what this adapter enforces. This is an ahu build problem, not a \
+                 repository one.",
+            )
+        })?;
+        Ok(EnforcementReport {
             harness: "codex".to_string(),
             harness_version: installed_version("codex"),
             model_fixed_for_session: entry.enforces_model_for_session,
@@ -79,7 +85,7 @@ impl Adapter for Codex {
                 "ahu passes no --sandbox, --ask-for-approval, --approve-for-me, --dangerously-bypass-approvals-and-sandbox, or --dangerously-bypass-hook-trust; whether the effective session keeps Codex's own defaults also depends on any wrapper on PATH".to_string(),
                 "repository guidance is discovered by Codex from the task worktree, which carries the parent's AGENTS.md unchanged".to_string(),
             ],
-        }
+        })
     }
 }
 

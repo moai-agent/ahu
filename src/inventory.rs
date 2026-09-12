@@ -218,8 +218,17 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
         });
     }
     for skipped in &snapshot.skipped_directories {
+        // The task worktree is a checkout of the base commit, so anything
+        // committed under a skipped path arrives in it regardless. The gap is
+        // in the inventory, not in the inheritance, and saying otherwise would
+        // tell the reader the opposite of the truth.
         inventory.coverage_gaps.push(format!(
-            "configuration under {skipped} was not scanned, so it is neither inventoried nor inherited"
+            "configuration under {skipped} was not scanned, so it is not inventoried; committed files under it are still present in the task worktree"
+        ));
+    }
+    for found in &snapshot.unscanned_config {
+        inventory.coverage_gaps.push(format!(
+            "{found} sits inside a directory the scan does not enter: it is not inventoried, but the checkout carries it into the task worktree"
         ));
     }
 

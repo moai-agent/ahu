@@ -100,19 +100,65 @@ pub fn ensure_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
         Err(e) => bail!("cannot inspect {}: {e}", root.display()),
     }
     let ignore = root.join(".gitignore");
-    if let Ok(meta) = std::fs::symlink_metadata(&ignore)
-        && meta.file_type().is_symlink()
-    {
-        bail!(
+    // `.worktrees/.gitignore` is an ordinary path inside the repository, so a
+    // repository can commit one. Checking only that *a* file is there would let
+    // a committed `# nothing ignored here` stand in for the real one, and then
+    // task checkouts show up in the parent's `git status`, can be swept into a
+    // `git add -A`, and stop being protected from `git clean -xdf`. So the
+    // contents are verified, not just the existence.
+    match std::fs::symlink_metadata(&ignore) {
+        Ok(meta) if meta.file_type().is_symlink() => bail!(
             "refusing to write {} because it is a symlink.",
             ignore.display()
-        );
-    }
-    if !ignore.exists() {
-        std::fs::write(&ignore, WORKTREES_GITIGNORE)
-            .map_err(|e| Error::new(format!("cannot create {}: {e}", ignore.display())))?;
+        ),
+        Ok(meta) if meta.is_dir() => bail!(
+            "{} is a directory, so ahu cannot make {} ignore itself.",
+            ignore.display(),
+            root.display()
+        ),
+        Ok(_) => {
+            let found = std::fs::read_to_string(&ignore)
+                .map_err(|e| Error::new(format!("cannot read {}: {e}", ignore.display())))?;
+            if !ignores_everything(&found) {
+                bail!(
+                    "{} exists but does not ignore everything under {}.\n\
+                     ahu relies on that directory ignoring itself so task checkouts never appear \
+                     in git status and cannot be committed by accident. This file is in the \
+                     repository, so it may have been committed deliberately.\n\
+                     Inspect it, then either delete it so ahu can write its own or give it a bare \
+                     `*` line with no negations.",
+                    ignore.display(),
+                    root.display()
+                );
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(&ignore, WORKTREES_GITIGNORE)
+                .map_err(|e| Error::new(format!("cannot create {}: {e}", ignore.display())))?;
+        }
+        Err(e) => bail!("cannot inspect {}: {e}", ignore.display()),
     }
     Ok(root)
+}
+
+/// Whether a `.gitignore` body really ignores every entry beside it.
+///
+/// A bare `*` line is what does the ignoring; a later negation (`!keep-me`)
+/// takes entries back out, which is exactly the hole this is looking for.
+fn ignores_everything(body: &str) -> bool {
+    let mut ignores_all = false;
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line == "*" {
+            ignores_all = true;
+        } else if line.starts_with('!') {
+            return false;
+        }
+    }
+    ignores_all
 }
 
 /// Confirm a prepared task worktree really sits inside the repository.
@@ -129,12 +175,28 @@ pub fn verify_worktree_inside_repo(repo_root: &Path, worktree: &Path) -> Result<
             root.display()
         );
     }
-    let canonical_repo = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-    let canonical_worktree = worktree
-        .canonicalize()
-        .unwrap_or_else(|_| worktree.to_path_buf());
+    // Both paths have to resolve. `Path::starts_with` compares components
+    // literally, so an unresolved `<repo>/.worktrees/../../elsewhere` would pass
+    // a prefix test while naming a directory outside the repository. Falling
+    // back to the unresolved path on a canonicalize failure would turn this
+    // check into exactly that prefix test, so a path that cannot be resolved is
+    // refused instead. Nothing legitimate reaches here unresolvable: the
+    // worktree has been created and materialized into by the time it is checked.
+    let canonical_repo = repo_root.canonicalize().map_err(|e| {
+        Error::new(format!(
+            "cannot resolve the repository root {}: {e}. \
+             ahu will not start a session it cannot place inside a repository.",
+            repo_root.display()
+        ))
+    })?;
+    let canonical_worktree = worktree.canonicalize().map_err(|e| {
+        Error::new(format!(
+            "cannot resolve the task worktree {}: {e}. \
+             ahu will not start a session in a directory it cannot confirm is inside {}.",
+            worktree.display(),
+            repo_root.display()
+        ))
+    })?;
     if !canonical_worktree.starts_with(&canonical_repo) {
         bail!(
             "task worktree {} resolves outside its repository ({}). ahu will not start a session there.",

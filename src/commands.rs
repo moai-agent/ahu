@@ -392,7 +392,7 @@ pub fn inventory_cmd(
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
     let adapter = harness::adapter_for(&pair.harness)?;
-    let enforcement = adapter.enforcement(&pair.model);
+    let enforcement = adapter.enforcement(&pair.model)?;
     let found_hooks = hooks::collect(&repo.root)?;
     let built = inventory::build(&inventory::Subject {
         repo_root: &repo.root,
@@ -421,7 +421,7 @@ pub fn hygiene_cmd(
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
     let adapter = harness::adapter_for(&pair.harness)?;
-    let enforcement = adapter.enforcement(&pair.model);
+    let enforcement = adapter.enforcement(&pair.model)?;
     let found_hooks = hooks::collect(&repo.root)?;
     let built = inventory::build(&inventory::Subject {
         repo_root: &repo.root,
@@ -589,10 +589,22 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
     if let Some(workspace) = &launched.record.cmux_workspace_id {
         console.say(&format!("  cmux     {workspace}\n"))?;
     }
-    for note in &launched.notes {
-        console.say(&format!("  note     {note}\n"))?;
-    }
+    console.say(&render_launch_notes(&launched.notes))?;
     Ok(0)
+}
+
+/// The launch summary's note lines.
+///
+/// Notes carry repository-relative configuration paths verbatim — a
+/// concurrently modified file is named in one — so they are escaped like every
+/// other repository-derived string ahu prints, not trusted because they were
+/// assembled by ahu's own code.
+pub fn render_launch_notes(notes: &[String]) -> String {
+    let mut out = String::new();
+    for note in notes {
+        out.push_str(&format!("  note     {}\n", display_safe(note)));
+    }
+    out
 }
 
 /// The submission preview: identity, Git effects, and every warning.
@@ -661,9 +673,20 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
         );
     }
     if !plan.snapshot.skipped_directories.is_empty() {
+        // Not "not inherited": the worktree is a checkout of the base commit,
+        // so committed files under these paths are in it either way. What the
+        // scan skipped is the inventory, not the inheritance.
         out.push_str(&format!(
-            "Not scanned, so not inherited: {}\n",
+            "Not scanned, so not inventoried; committed files under these paths are still present\n\
+             in the task worktree: {}\n",
             display_safe(&plan.snapshot.skipped_directories.join(", "))
+        ));
+    }
+    if !plan.snapshot.unscanned_config.is_empty() {
+        out.push_str(&format!(
+            "Agent configuration found directly inside them, carried in by the checkout and not\n\
+             inventoried: {}\n",
+            display_safe(&plan.snapshot.unscanned_config.join(", "))
         ));
     }
     out.push_str(&hooks::render_for_preview(

@@ -75,9 +75,15 @@ impl Adapter for Antigravity {
         })
     }
 
-    fn enforcement(&self, _model: &str) -> EnforcementReport {
-        let entry = crate::catalog::harness("antigravity").expect("antigravity is in the catalog");
-        EnforcementReport {
+    fn enforcement(&self, _model: &str) -> Result<EnforcementReport> {
+        let entry = crate::catalog::harness("antigravity").ok_or_else(|| {
+            crate::util::Error::new(
+                "the compatibility catalog has no entry for harness \"antigravity\", so ahu cannot \
+                 state what this adapter enforces. This is an ahu build problem, not a \
+                 repository one.",
+            )
+        })?;
+        Ok(EnforcementReport {
             harness: "antigravity".to_string(),
             harness_version: super::codex::installed_version("agy"),
             model_fixed_for_session: entry.enforces_model_for_session,
@@ -88,6 +94,6 @@ impl Adapter for Antigravity {
                 "ahu passes no --dangerously-skip-permissions, --mode, or --sandbox; whether the effective session keeps the harness's own approval boundaries also depends on any wrapper on PATH".to_string(),
                 "authentication is the harness's own OAuth sign-in; ahu holds no API key".to_string(),
             ],
-        }
+        })
     }
 }

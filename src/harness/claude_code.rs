@@ -71,9 +71,15 @@ impl Adapter for ClaudeCode {
         })
     }
 
-    fn enforcement(&self, _model: &str) -> EnforcementReport {
-        let entry = crate::catalog::harness("claude-code").expect("claude-code is in the catalog");
-        EnforcementReport {
+    fn enforcement(&self, _model: &str) -> Result<EnforcementReport> {
+        let entry = crate::catalog::harness("claude-code").ok_or_else(|| {
+            crate::util::Error::new(
+                "the compatibility catalog has no entry for harness \"claude-code\", so ahu cannot \
+                 state what this adapter enforces. This is an ahu build problem, not a \
+                 repository one.",
+            )
+        })?;
+        Ok(EnforcementReport {
             harness: "claude-code".to_string(),
             harness_version: installed_version(),
             model_fixed_for_session: entry.enforces_model_for_session,
@@ -83,7 +89,7 @@ impl Adapter for ClaudeCode {
                 "--agent selects the native agent definition, preserving its own tool and permission settings".to_string(),
                 "ahu passes no --dangerously-skip-permissions, --permission-mode, --allowedTools, or --add-dir; whether the effective session keeps the harness's own approval boundaries also depends on any wrapper on PATH".to_string(),
             ],
-        }
+        })
     }
 }
 

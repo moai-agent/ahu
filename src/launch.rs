@@ -148,7 +148,7 @@ pub fn plan(
                 pair.harness, command.program
             ))
         })?;
-    let mut enforcement = adapter.enforcement(&pair.model);
+    let mut enforcement = adapter.enforcement(&pair.model)?;
     // A wrapper between ahu and the harness can add flags ahu refuses to pass.
     if let Some(note) = harness::wrapper_interposed(&harness_executable) {
         enforcement.gaps.push(note);

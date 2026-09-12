@@ -298,7 +298,7 @@ fn the_inventory_lists_hooks_as_their_own_category_with_scope() {
     let agent = ahu::agent::find(repo.path(), "chris").unwrap();
     let taken = snapshot::collect(repo.path()).unwrap();
     let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let enforcement = adapter.enforcement("claude-opus-5");
+    let enforcement = adapter.enforcement("claude-opus-5").unwrap();
     let home = tempfile::TempDir::new().unwrap();
     let found = hooks::collect_in(repo.path(), &locations(home.path(), true)).unwrap();
 

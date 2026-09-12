@@ -291,7 +291,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
             permissions: Default::default(),
         })
         .unwrap();
-    let enforcement = adapter.enforcement("claude-opus-5");
+    let enforcement = adapter.enforcement("claude-opus-5").unwrap();
     let record = TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: "testtask0001".to_string(),
@@ -410,7 +410,10 @@ fn adapters_report_their_real_enforcement_limits() {
         ("codex", "gpt-6-astra"),
         ("antigravity", "gemini-3.1-pro-high"),
     ] {
-        let report = harness::adapter_for(harness).unwrap().enforcement(model);
+        let report = harness::adapter_for(harness)
+            .unwrap()
+            .enforcement(model)
+            .unwrap();
         assert_eq!(report.harness, harness);
         assert!(
             !report.model_fixed_for_session,
@@ -426,7 +429,10 @@ fn adapters_report_their_real_enforcement_limits() {
 
     // The two harnesses without working per-agent selection must say so.
     for harness in ["codex", "antigravity"] {
-        let report = harness::adapter_for(harness).unwrap().enforcement("x");
+        let report = harness::adapter_for(harness)
+            .unwrap()
+            .enforcement("x")
+            .unwrap();
         assert!(
             report
                 .gaps
@@ -500,7 +506,10 @@ fn a_wrapper_on_the_path_is_disclosed_as_an_enforcement_gap() {
 
     // No adapter may claim a wrapper leaves the harness's defaults untouched.
     for harness_id in ["claude-code", "codex", "antigravity"] {
-        let report = harness::adapter_for(harness_id).unwrap().enforcement("m");
+        let report = harness::adapter_for(harness_id)
+            .unwrap()
+            .enforcement("m")
+            .unwrap();
         for control in &report.applied_controls {
             assert!(
                 !control.contains("are unchanged"),

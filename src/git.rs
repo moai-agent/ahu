@@ -122,9 +122,12 @@ pub fn add_worktree(repo: &Repo, path: &Path, branch: &str, base: &str) -> Resul
         std::fs::create_dir_all(parent)?;
     }
     let path_str = path.to_string_lossy().to_string();
+    // `--` closes the option list: a path is a path even when something has
+    // arranged for it to begin with a hyphen. `base` stays after it, which is
+    // where `git worktree add` expects the commit-ish.
     let out = run(
         &repo.root,
-        &["worktree", "add", "-b", branch, &path_str, base],
+        &["worktree", "add", "-b", branch, "--", &path_str, base],
     )?;
     if !out.status.success() {
         bail!(
@@ -143,7 +146,7 @@ pub fn add_worktree(repo: &Repo, path: &Path, branch: &str, base: &str) -> Resul
 /// worktree holding changes is preserved and reported instead.
 pub fn remove_worktree(repo: &Repo, path: &Path, branch: &str) -> Result<()> {
     let path_str = path.to_string_lossy().to_string();
-    let out = run(&repo.root, &["worktree", "remove", &path_str])?;
+    let out = run(&repo.root, &["worktree", "remove", "--", &path_str])?;
     if !out.status.success() {
         bail!(
             "could not remove worktree {}: {}",

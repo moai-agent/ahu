@@ -492,3 +492,200 @@ fn a_source_swapped_for_a_symlink_after_collection_is_not_copied() {
         );
     }
 }
+
+// --- Disclosure of what the scan did not look at -----------------------------
+//
+// The worktree is created by `git worktree add <base>`, so every *committed*
+// file is physically present in it whether or not the snapshot scanned it. A
+// directory the scan refuses to descend into is therefore not a directory whose
+// contents stay behind; it is a directory whose contents arrive unannounced.
+// The inventory has to say so for every skipped directory, not just the ones
+// that happen to be configuration paths themselves.
+
+#[test]
+fn every_skipped_directory_is_recorded_not_just_configuration_ones() {
+    let repo = TestRepo::new();
+    repo.write("vendor/CLAUDE.md", "planted guidance\n");
+    repo.write("build/AGENTS.md", "planted guidance\n");
+    repo.write("node_modules/some-pkg/.claude/settings.json", "{}\n");
+
+    let taken = snapshot::collect(repo.path()).unwrap();
+
+    assert!(
+        !taken.entries.iter().any(|e| e.path.contains("vendor")),
+        "the scan should still not descend into vendor"
+    );
+    for expected in ["vendor", "build", "node_modules"] {
+        assert!(
+            taken.skipped_directories.iter().any(|d| d == expected),
+            "{expected} was skipped without being recorded: {:?}",
+            taken.skipped_directories
+        );
+    }
+}
+
+#[test]
+fn configuration_directly_inside_a_skipped_directory_is_named() {
+    let repo = TestRepo::new();
+    repo.write("vendor/CLAUDE.md", "planted guidance\n");
+    repo.write("node_modules/.claude/settings.json", "{}\n");
+
+    let taken = snapshot::collect(repo.path()).unwrap();
+
+    assert!(
+        taken
+            .unscanned_config
+            .iter()
+            .any(|p| p == "vendor/CLAUDE.md"),
+        "a planted CLAUDE.md under a skipped directory must be named: {:?}",
+        taken.unscanned_config
+    );
+    assert!(
+        taken
+            .unscanned_config
+            .iter()
+            .any(|p| p == "node_modules/.claude"),
+        "a configuration directory under a skipped directory must be named: {:?}",
+        taken.unscanned_config
+    );
+}
+
+#[test]
+fn a_directory_past_the_depth_cap_is_disclosed_rather_than_dropped() {
+    let repo = TestRepo::new();
+    // Deeper than the scan's depth cap, so the walk stops before reading it.
+    let deep = "d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14";
+    repo.write(&format!("{deep}/CLAUDE.md"), "planted guidance\n");
+
+    let taken = snapshot::collect(repo.path()).unwrap();
+
+    assert!(
+        !taken.entries.iter().any(|e| e.path.contains("/d13/")),
+        "the scan should still stop at the depth cap"
+    );
+    assert!(
+        taken
+            .skipped_directories
+            .iter()
+            .any(|d| d.starts_with("d1/d2/")),
+        "the depth cut-off recorded nothing: {:?}",
+        taken.skipped_directories
+    );
+}
+
+/// Committed content under a skipped path *is* inherited — it arrives with the
+/// checkout rather than with the configuration copy. Saying "not inherited"
+/// tells the reader the opposite of the truth.
+#[test]
+fn the_disclosure_does_not_claim_skipped_configuration_is_absent() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.write("vendor/CLAUDE.md", "planted guidance\n");
+    repo.commit("fixture");
+
+    let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
+    let taken = snapshot::collect(repo.path()).unwrap();
+    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
+    let enforcement = adapter.enforcement("claude-opus-5").unwrap();
+    let found = ahu::hooks::collect(repo.path()).unwrap();
+    let built = ahu::inventory::build(&ahu::inventory::Subject {
+        repo_root: repo.path(),
+        loaded_config: &loaded,
+        snapshot: &taken,
+        agent: None,
+        harness: "claude-code",
+        model: "claude-opus-5",
+        enforcement: &enforcement,
+        hooks: &found,
+        prompt: None,
+    })
+    .unwrap();
+
+    let gaps = built.coverage_gaps.join("\n");
+    assert!(gaps.contains("vendor"), "{gaps}");
+    assert!(
+        !gaps.contains("nor inherited"),
+        "the inventory claims skipped configuration is not inherited: {gaps}"
+    );
+    assert!(
+        gaps.contains("still present in the task worktree"),
+        "the inventory must say committed files under a skipped path are present: {gaps}"
+    );
+}
+
+// --- `.worktrees` must really ignore itself ----------------------------------
+
+#[test]
+fn a_committed_worktrees_gitignore_that_ignores_nothing_is_refused() {
+    let repo = TestRepo::new();
+    repo.write(".worktrees/.gitignore", "# nothing ignored here\n");
+    repo.commit("hostile gitignore");
+
+    let error = ahu::state::ensure_worktrees_root(repo.path())
+        .expect_err("a .gitignore that ignores nothing must be refused");
+    let message = error.to_string();
+    assert!(message.contains(".worktrees"), "{message}");
+    assert!(message.contains(".gitignore"), "{message}");
+}
+
+#[test]
+fn the_gitignore_ahu_writes_itself_is_accepted_on_every_later_launch() {
+    let repo = TestRepo::new();
+    ahu::state::ensure_worktrees_root(repo.path()).expect("first call writes it");
+    ahu::state::ensure_worktrees_root(repo.path()).expect("second call accepts it");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join(".worktrees/.gitignore")).unwrap(),
+        ahu::state::WORKTREES_GITIGNORE
+    );
+}
+
+// --- Containment is not allowed to degrade into a textual prefix test --------
+
+#[test]
+fn a_worktree_path_that_cannot_be_resolved_is_refused() {
+    let repo = TestRepo::new();
+    let discovered = git::discover(repo.path()).unwrap();
+    // Textually inside the repository, actually outside it, and nonexistent —
+    // so `canonicalize` fails and there is nothing to compare components of.
+    let escaping = discovered.root.join(".worktrees/../../outside-the-repo");
+
+    let error = ahu::state::verify_worktree_inside_repo(&discovered.root, &escaping)
+        .expect_err("an unresolvable worktree path must be refused");
+    assert!(
+        error.to_string().contains("outside-the-repo") || error.to_string().contains("cannot"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_prepared_worktree_inside_the_repository_still_verifies() {
+    let repo = TestRepo::new();
+    let discovered = git::discover(repo.path()).unwrap();
+    let worktree = ahu::state::worktree_dir(&discovered.root, "task0001").unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+    ahu::state::verify_worktree_inside_repo(&discovered.root, &worktree)
+        .expect("a real worktree inside the repository verifies");
+}
+
+// --- Positional arguments to git stay positional -----------------------------
+
+#[test]
+fn a_worktree_path_is_never_read_as_a_git_option() {
+    let repo = TestRepo::new();
+    let discovered = git::discover(repo.path()).unwrap();
+    let base = discovered.head.clone().expect("the fixture has a commit");
+    // A leading hyphen is the whole point: without a `--` delimiter git reads
+    // this as a bundle of short options instead of a path.
+    let hostile = std::path::Path::new("-weird-worktree");
+
+    git::add_worktree(&discovered, hostile, "ahu/test/hyphen", &base)
+        .expect("a hyphen-leading path must be treated as a path");
+    assert!(
+        repo.path().join("-weird-worktree").is_dir(),
+        "the worktree was not created where the path said"
+    );
+
+    git::remove_worktree(&discovered, hostile, "ahu/test/hyphen")
+        .expect("removal must treat it as a path too");
+    assert!(!repo.path().join("-weird-worktree").exists());
+}

@@ -9,6 +9,24 @@
 use crate::task::TaskRecord;
 use crate::util::display_safe;
 
+/// The first 12 characters of a digest, for a message.
+///
+/// Digests here come out of `task.json`, which is an ordinary file: a partial
+/// write or a hand edit can leave one shorter than 12 characters. Slicing it
+/// blind would panic in the middle of the interactive flow, so every truncation
+/// goes through this.
+fn short(digest: &str) -> &str {
+    // By characters, not bytes: a hand-edited record is not guaranteed to be
+    // hex, and slicing across a UTF-8 boundary panics just as readily.
+    let end = digest
+        .char_indices()
+        .map(|(index, ch)| index + ch.len_utf8())
+        .take(12)
+        .last()
+        .unwrap_or(0);
+    &digest[..end]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Drift {
     pub agent_label: String,
@@ -38,15 +56,15 @@ pub fn detect(
     {
         changes.push(format!(
             "the agent's instructions or manifest changed: {} -> {}",
-            &before[..12.min(before.len())],
-            &now[..12.min(now.len())]
+            short(before),
+            short(now)
         ));
     }
     if record.config_snapshot_digest != snapshot_digest {
         changes.push(format!(
             "the repository agent configuration changed: {} -> {}",
-            &record.config_snapshot_digest[..12],
-            &snapshot_digest[..12]
+            short(&record.config_snapshot_digest),
+            short(snapshot_digest)
         ));
     }
     // The configuration snapshot already covers hooks declared inside the
@@ -55,15 +73,15 @@ pub fn detect(
     if !record.hooks_digest.is_empty() && record.hooks_digest != hooks_digest {
         changes.push(format!(
             "the hooks in effect changed: {} -> {}",
-            &record.hooks_digest[..12],
-            &hooks_digest[..12]
+            short(&record.hooks_digest),
+            short(hooks_digest)
         ));
     }
     if record.policy_digest != policy_digest {
         changes.push(format!(
             "the project policy changed: {} -> {}",
-            &record.policy_digest[..12],
-            &policy_digest[..12]
+            short(&record.policy_digest),
+            short(policy_digest)
         ));
     }
     if changes.is_empty() {

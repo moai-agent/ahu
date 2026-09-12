@@ -181,7 +181,7 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
             permissions: Default::default(),
         })
         .unwrap();
-    let enforcement = adapter.enforcement("claude-opus-5");
+    let enforcement = adapter.enforcement("claude-opus-5").unwrap();
     let record = ahu::task::TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: "gone0001".to_string(),
@@ -550,4 +550,103 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
     );
     assert!(rendered.contains("bump the agent's version"), "{rendered}");
     assert!(rendered.contains("harmless patch"), "{rendered}");
+}
+
+/// `task.json` is an ordinary file in ahu's state directory. A truncated or
+/// hand-edited one is a corrupt record, not an attack — and a corrupt record
+/// must produce a message, not a panic in the middle of the interactive flow.
+#[test]
+fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
+    use ahu::drift;
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let discovered = git::discover(repo.path()).unwrap();
+    let loaded = config::load(repo.path()).unwrap().unwrap();
+    let agent = ahu::agent::find(repo.path(), "chris").unwrap();
+    let plan = launch::plan(
+        &discovered,
+        Some(agent.clone()),
+        selection::ResolvedPair {
+            harness: "claude-code".to_string(),
+            model: "claude-opus-5".to_string(),
+            basis: "named".to_string(),
+            policy_digest: loaded.digest.clone(),
+            catalog_version: loaded.config.catalog_version.clone(),
+        },
+        "prompt",
+    )
+    .unwrap();
+
+    let previous = ahu::task::TaskRecord {
+        schema_version: ahu::task::TASK_SCHEMA_VERSION,
+        task_id: "prev0002".to_string(),
+        title: "earlier".to_string(),
+        created_at: "2026-09-01T00:00:00Z".to_string(),
+        repo_identity: discovered.identity(),
+        repo_root: discovered.root.clone(),
+        branch: "ahu/chris/prev0002".to_string(),
+        worktree: discovered.root.clone(),
+        base_commit: discovered.head.clone(),
+        identity: ahu::task::LaunchIdentity {
+            mode: ahu::task::LaunchMode::Named,
+            agent: "chris".to_string(),
+            agent_version: Some("1.0.0".to_string()),
+            native_agent: Some("chris".to_string()),
+            permissions: Default::default(),
+            harness: "claude-code".to_string(),
+            model: "claude-opus-5".to_string(),
+            instructions_source: Some(".claude/agents/chris.md".to_string()),
+            instructions_digest: None,
+            identity_digest: None,
+            selection_basis: None,
+        },
+        // Every digest below was cut short by a partial write or an edit.
+        policy_digest: "abc".to_string(),
+        catalog_version: loaded.config.catalog_version.clone(),
+        config_snapshot: Default::default(),
+        config_snapshot_digest: "ab".to_string(),
+        hooks: Default::default(),
+        hooks_digest: "c".to_string(),
+        prompt_digest: String::new(),
+        harness_executable: std::path::PathBuf::from("claude"),
+        materialize: Default::default(),
+        launch_command: plan.command.clone(),
+        reliability_warning: None,
+        enforcement: plan.enforcement.clone(),
+        cmux_group_id: None,
+        cmux_workspace_id: None,
+        cmux_window_id: None,
+        state: ahu::task::TaskState::Exited,
+    };
+
+    let found = drift::detect(
+        "chris@1.0.0",
+        Some(&agent.identity_digest()),
+        &plan.snapshot.digest(),
+        &loaded.digest,
+        &plan.hooks.digest(),
+        &[(std::path::PathBuf::from("/nonexistent/prev"), previous)],
+    )
+    .expect("drift is detected against the corrupt record");
+    let rendered = drift::render(&found);
+    assert!(rendered.contains("configuration changed"), "{rendered}");
+    assert!(rendered.contains("hooks in effect changed"), "{rendered}");
+    assert!(rendered.contains("project policy changed"), "{rendered}");
+}
+
+/// A catalog lookup that a refactor could break must surface as an error the
+/// caller can report, not as a panic inside a harness adapter.
+#[test]
+fn adapter_enforcement_reports_a_missing_catalog_entry_instead_of_panicking() {
+    for harness_id in ["claude-code", "codex", "antigravity"] {
+        let adapter = ahu::harness::adapter_for(harness_id).unwrap();
+        let report: ahu::util::Result<ahu::harness::EnforcementReport> =
+            adapter.enforcement("claude-opus-5");
+        assert_eq!(
+            report.expect("the shipped catalog has it").harness,
+            harness_id
+        );
+    }
 }

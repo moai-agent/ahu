@@ -124,7 +124,12 @@ pub trait Adapter {
     /// Build the exact command for a launch.
     fn launch_command(&self, request: &LaunchRequest<'_>) -> Result<LaunchCommand>;
     /// Report what this adapter can enforce on this machine.
-    fn enforcement(&self, model: &str) -> EnforcementReport;
+    ///
+    /// Fallible because the report is built from the compatibility catalog. The
+    /// entry is there in every shipped build, but a catalog edit that does not
+    /// update an adapter must surface as an error the caller can print, not as
+    /// a panic inside a harness adapter.
+    fn enforcement(&self, model: &str) -> Result<EnforcementReport>;
 }
 
 pub fn adapter_for(harness_id: &str) -> Result<Box<dyn Adapter>> {
