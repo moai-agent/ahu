@@ -8,11 +8,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::agent::{self, SourceFormat};
+use crate::agent::{self, AgentManifest, SourceFormat};
 use crate::bail;
 use crate::catalog;
 use crate::config::AGENTS_RELATIVE_DIR;
-use crate::util::{Error, Result, display_safe, is_safe_name};
+use crate::util::{Error, Result, display_safe, is_safe_name, resolve_within};
 
 /// A native agent definition ahu found. Finding it is not registering it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,16 +184,14 @@ pub fn register(
             candidate.blockers.join("; ")
         );
     }
-    let dir = repo_root.join(AGENTS_RELATIVE_DIR);
-    if dir.exists() && !dir.is_dir() {
-        bail!(
-            "{} exists but is not a directory; ahu will not take ownership of it.",
-            dir.display()
-        );
-    }
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| Error::new(format!("cannot create {}: {e}", dir.display())))?;
-    let path = dir.join(format!("{}.toml", candidate.name));
+    // Resolved component by component: a repository can commit a symlink at
+    // `.agents`, `.agents/ahu`, or `.agents/ahu/agents`, and following one would
+    // let it choose where ahu creates files.
+    let path = resolve_within(
+        repo_root,
+        &format!("{AGENTS_RELATIVE_DIR}/{}.toml", candidate.name),
+        true,
+    )?;
     let body = proposed_manifest(candidate, model, version);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -226,11 +224,26 @@ pub fn unregister(repo_root: &Path, name: &str) -> Result<PathBuf> {
             "{name:?} is not a valid ahu agent name, so it cannot name a registration to remove."
         );
     }
-    let path = repo_root
-        .join(AGENTS_RELATIVE_DIR)
-        .join(format!("{name}.toml"));
+    // Same reasoning as `register`, and more important here: this deletes.
+    // A symlinked `agents` directory would otherwise let `--remove config`
+    // unlink an arbitrary `config.toml` outside the repository.
+    let path = resolve_within(
+        repo_root,
+        &format!("{AGENTS_RELATIVE_DIR}/{name}.toml"),
+        false,
+    )?;
     if !path.is_file() {
         bail!("{} is not a registered ahu agent.", name);
+    }
+    // Only ahu's own manifests are removable, so a same-named unrelated file
+    // cannot be deleted through this command.
+    let body = std::fs::read_to_string(&path)
+        .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
+    if toml::from_str::<AgentManifest>(&body).is_err() {
+        bail!(
+            "{} is not an ahu agent manifest, so ahu will not delete it.",
+            path.display()
+        );
     }
     std::fs::remove_file(&path)
         .map_err(|e| Error::new(format!("cannot remove {}: {e}", path.display())))?;

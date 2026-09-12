@@ -239,16 +239,9 @@ pub fn render(config: &ProjectConfig) -> String {
 /// The file is created exclusively: a concurrent `ahu init` that got there first
 /// keeps its result and this call reports the collision instead of overwriting.
 pub fn write_new(repo_root: &Path, config: &ProjectConfig) -> Result<PathBuf> {
-    let dir = repo_root.join(CONFIG_DIR);
-    if dir.exists() && !dir.is_dir() {
-        bail!(
-            "{} exists but is not a directory, so ahu cannot take ownership of it.",
-            dir.display()
-        );
-    }
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| Error::new(format!("cannot create {}: {e}", dir.display())))?;
-    let path = config_path(repo_root);
+    // Component-by-component, so a symlinked `.agents` or `.agents/ahu` cannot
+    // redirect where the project's configuration is created.
+    let path = crate::util::resolve_within(repo_root, CONFIG_RELATIVE_PATH, true)?;
     let body = render(config);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);

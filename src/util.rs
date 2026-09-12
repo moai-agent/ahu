@@ -1,7 +1,7 @@
 //! Small shared helpers: the crate error type, shell quoting, and digests.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Every fallible operation in ahu returns this. The message is written for the
 /// person running `ahu`, so it must say what went wrong and what to do next.
@@ -171,6 +171,99 @@ pub fn display_safe(value: &str) -> String {
         }
     }
     out
+}
+
+/// Like [`display_safe`], but keeps newlines.
+///
+/// For multi-line output such as an error message, where the line structure is
+/// meaningful but every other control character is not.
+pub fn display_safe_block(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        let code = ch as u32;
+        if ch == '\n' {
+            out.push(ch);
+        } else if ch.is_control() || (0x80..=0x9f).contains(&code) {
+            out.push_str(&format!("\\x{code:02x}"));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Resolve `relative` under `root`, refusing to traverse a symlink.
+///
+/// Every path ahu writes to, deletes, or creates inside a repository goes
+/// through this. A repository can commit a symlink at any path it likes — at
+/// `.agents/ahu/agents`, at `.claude`, at `.worktrees` — and following one lets
+/// the repository choose where ahu's filesystem operations land. Checking only
+/// the final component is not enough: the escape is usually a parent.
+///
+/// `create_missing_dirs` creates intermediate directories as real directories
+/// when they are absent; otherwise a missing component is simply reported back
+/// through the returned path, which the caller may or may not require to exist.
+pub fn resolve_within(root: &Path, relative: &str, create_missing_dirs: bool) -> Result<PathBuf> {
+    let parts: Vec<&str> = relative.split('/').filter(|p| !p.is_empty()).collect();
+    let Some((last, directories)) = parts.split_last() else {
+        return Err(Error::new(format!("empty path under {}", root.display())));
+    };
+    if parts.iter().any(|p| *p == ".." || *p == ".") {
+        return Err(Error::new(format!(
+            "{relative} is not a plain path under {}",
+            root.display()
+        )));
+    }
+    let mut current = root.to_path_buf();
+    for directory in directories {
+        current.push(directory);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(symlink_refusal(&current, relative));
+            }
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(Error::new(format!(
+                    "{} exists and is not a directory.",
+                    current.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !create_missing_dirs {
+                    return Err(Error::new(format!("{} does not exist.", current.display())));
+                }
+                std::fs::create_dir(&current)
+                    .map_err(|e| Error::new(format!("cannot create {}: {e}", current.display())))?;
+            }
+            Err(e) => {
+                return Err(Error::new(format!(
+                    "cannot inspect {}: {e}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    current.push(last);
+    if let Ok(meta) = std::fs::symlink_metadata(&current)
+        && meta.file_type().is_symlink()
+    {
+        return Err(symlink_refusal(&current, relative));
+    }
+    Ok(current)
+}
+
+/// The message shown when ahu refuses to act through a symlink.
+pub fn symlink_refusal(found_at: &Path, relative: &str) -> Error {
+    let points_to = std::fs::read_link(found_at)
+        .map(|t| t.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "an unreadable target".to_string());
+    Error::new(format!(
+        "refusing to act through a symlink.\n\
+         {} is a symlink pointing at {points_to}, and ahu was about to use it for {relative}.\n\
+         Following it would let this repository choose where ahu reads, writes, or deletes, so \
+         nothing was done. Inspect that path in the repository before trying again.",
+        found_at.display()
+    ))
 }
 
 /// Collapse a prompt into a short single-line task title.

@@ -8,7 +8,11 @@ fn main() -> ExitCode {
     match run(args) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(error) => {
-            eprintln!("ahu: {error}");
+            // Error text carries repository-controlled values: file names,
+            // symlink targets, configuration values. Escape sequences in them
+            // must not reach the terminal raw just because this is the error
+            // path rather than a renderer.
+            eprintln!("ahu: {}", ahu::util::display_safe_block(&error.to_string()));
             ExitCode::from(2)
         }
     }

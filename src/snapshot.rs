@@ -76,6 +76,11 @@ pub struct ConfigSnapshot {
     /// Directories the scan deliberately did not descend into, so the inventory
     /// can disclose the gap instead of implying the snapshot is exhaustive.
     pub skipped_directories: Vec<String>,
+    /// Configuration paths that are symlinks. Never followed, never entries,
+    /// and tracked separately so reconciliation can remove them from a task
+    /// worktree instead of leaving them to be discovered by the harness.
+    #[serde(default)]
+    pub symlinks: Vec<String>,
 }
 
 impl ConfigSnapshot {
@@ -132,6 +137,8 @@ pub fn collect(root: &Path) -> Result<ConfigSnapshot> {
     snapshot.entries.sort_by(|a, b| a.path.cmp(&b.path));
     snapshot.skipped_directories.sort();
     snapshot.skipped_directories.dedup();
+    snapshot.symlinks.sort();
+    snapshot.symlinks.dedup();
     Ok(snapshot)
 }
 
@@ -186,10 +193,9 @@ fn walk(root: &Path, dir: &Path, depth: usize, snapshot: &mut ConfigSnapshot) ->
                 executable: is_executable(&meta),
             });
         } else if meta.file_type().is_symlink() && is_config_path(relative) {
-            // A configuration symlink is recorded as a gap rather than followed.
-            snapshot
-                .skipped_directories
-                .push(format!("{} (symlink)", to_relative_string(relative)));
+            // A configuration symlink is never followed. It is recorded so it
+            // can be disclosed and, in a task worktree, removed.
+            snapshot.symlinks.push(to_relative_string(relative));
         }
     }
     Ok(())
@@ -227,11 +233,17 @@ pub struct MaterializeReport {
     pub removed: Vec<String>,
     /// Paths that changed in the parent between the snapshot and the copy.
     pub concurrently_modified: Vec<String>,
+    /// Configuration symlinks removed from the task worktree.
+    #[serde(default)]
+    pub removed_symlinks: Vec<String>,
+    /// Sources that became symlinks after collection and were not copied.
+    #[serde(default)]
+    pub refused_sources: Vec<String>,
 }
 
 impl MaterializeReport {
     pub fn is_empty(&self) -> bool {
-        self.written.is_empty() && self.removed.is_empty()
+        self.written.is_empty() && self.removed.is_empty() && self.removed_symlinks.is_empty()
     }
 }
 
@@ -261,6 +273,16 @@ pub fn materialize(
     // `collect` never descends through a symlink, so these are all real files
     // genuinely inside the worktree.
     let existing = collect(worktree_root)?;
+    // A configuration symlink in the worktree can only have come from the base
+    // commit. ahu never follows one, so it must not leave one behind either: the
+    // harness would discover whatever it points at, including hook settings the
+    // parent-side preview reported as absent.
+    for link in &existing.symlinks {
+        let target = worktree_root.join(link);
+        std::fs::remove_file(&target)
+            .map_err(|e| Error::new(format!("cannot remove symlink {}: {e}", target.display())))?;
+        report.removed_symlinks.push(link.clone());
+    }
     for entry in &existing.entries {
         if !wanted.contains_key(entry.path.as_str()) {
             let target = worktree_root.join(&entry.path);
@@ -273,6 +295,22 @@ pub fn materialize(
     for entry in &snapshot.entries {
         let source = parent_root.join(&entry.path);
         let target = safe_target(worktree_root, &entry.path)?;
+        // `collect` recorded this path as a regular file. If it is a symlink
+        // now, it was swapped between collection and copying -- the window in
+        // which the user is reading the submission preview -- and following it
+        // would read a file outside the repository into the task worktree.
+        match std::fs::symlink_metadata(&source) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                report.concurrently_modified.push(entry.path.clone());
+                report.refused_sources.push(entry.path.clone());
+                continue;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                report.concurrently_modified.push(entry.path.clone());
+                continue;
+            }
+        }
         let current = match digest_file(&source) {
             Ok(digest) => digest,
             Err(_) => {
@@ -308,55 +346,8 @@ pub fn materialize(
 
 /// Resolve `relative` inside `worktree_root`, refusing to traverse or write
 /// through a symlink, and creating missing parent directories.
-///
-/// Returns the path to write to. Every component is verified to be a real
-/// directory, so neither the copy nor the later `set_permissions` can escape.
 fn safe_target(worktree_root: &Path, relative: &str) -> Result<PathBuf> {
-    let parts: Vec<&str> = relative.split('/').filter(|p| !p.is_empty()).collect();
-    let Some((file, directories)) = parts.split_last() else {
-        bail!("empty configuration path in the snapshot");
-    };
-    let mut current = worktree_root.to_path_buf();
-    for directory in directories {
-        current.push(directory);
-        match std::fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(symlink_refusal(&current, relative));
-            }
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => bail!(
-                "cannot prepare the task worktree: {} exists and is not a directory.",
-                current.display()
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current)
-                    .map_err(|e| Error::new(format!("cannot create {}: {e}", current.display())))?;
-            }
-            Err(e) => bail!("cannot inspect {}: {e}", current.display()),
-        }
-    }
-    current.push(file);
-    if let Ok(meta) = std::fs::symlink_metadata(&current)
-        && meta.file_type().is_symlink()
-    {
-        return Err(symlink_refusal(&current, relative));
-    }
-    Ok(current)
-}
-
-fn symlink_refusal(found_at: &Path, relative: &str) -> Error {
-    let points_to = std::fs::read_link(found_at)
-        .map(|t| t.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "an unreadable target".to_string());
-    Error::new(format!(
-        "refusing to write agent configuration through a symlink.\n\
-         {} is a symlink pointing at {points_to}, and ahu was about to write {relative} through it.\n\
-         A symlink at a configuration path in a fresh worktree comes from the base commit. \
-         Following it would let this repository direct ahu's writes outside the worktree, so the \
-         launch was stopped and nothing was written.\n\
-         Inspect that path in the repository before launching again.",
-        found_at.display()
-    ))
+    crate::util::resolve_within(worktree_root, relative, true)
 }
 
 /// Copy `source`'s permission bits onto `target` when they differ.

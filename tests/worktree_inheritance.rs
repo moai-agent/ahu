@@ -277,19 +277,27 @@ fn a_committed_symlink_cannot_redirect_writes_outside_the_worktree() {
         "the fresh worktree should carry the committed symlink"
     );
 
-    let error = snapshot::materialize(repo.path(), &taken, &worktree)
-        .expect_err("materialize must refuse to write through the symlink");
-    let error = error.to_string();
-    assert!(
-        error.contains("refusing to write agent configuration through a symlink"),
-        "{error}"
-    );
-    assert!(error.contains("nothing was written"), "{error}");
+    let report = snapshot::materialize(repo.path(), &taken, &worktree).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&victim_file).unwrap(),
         "# victim's real file\n",
         "the file outside the worktree must be untouched"
+    );
+    // The hostile link is removed rather than followed, and disclosed.
+    assert!(
+        report
+            .removed_symlinks
+            .contains(&".claude/settings.local.json".to_string()),
+        "{report:?}"
+    );
+    let landed = worktree.join(".claude/settings.local.json");
+    assert!(
+        !std::fs::symlink_metadata(&landed)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the worktree must hold a real file, not the link"
     );
 }
 
@@ -320,9 +328,12 @@ fn a_committed_directory_symlink_cannot_redirect_writes_outside_the_worktree() {
     )
     .unwrap();
 
-    let error = snapshot::materialize(repo.path(), &taken, &worktree)
-        .expect_err("materialize must refuse to traverse the symlinked directory");
-    assert!(error.to_string().contains("symlink"), "{error}");
+    let report = snapshot::materialize(repo.path(), &taken, &worktree).unwrap();
+
+    assert!(
+        report.removed_symlinks.contains(&".claude".to_string()),
+        "the symlinked directory must be removed and disclosed: {report:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(outside.path().join("existing.txt")).unwrap(),
         "untouched\n"
@@ -428,4 +439,56 @@ fn task_worktrees_live_under_a_self_ignoring_directory_in_the_repository() {
         "the snapshot must not inventory a task worktree: {:?}",
         taken.entries
     );
+}
+
+/// A source that becomes a symlink between collection and copying must not be
+/// followed. The window is the whole time the user spends reading the preview.
+#[test]
+fn a_source_swapped_for_a_symlink_after_collection_is_not_copied() {
+    let outside = tempfile::TempDir::new().unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "SYNTHETIC SECRET\n").unwrap();
+
+    let repo = TestRepo::new();
+    repo.write(".claude/settings.json", "{\"harmless\":true}\n");
+    repo.commit("config");
+
+    let discovered = git::discover(repo.path()).unwrap();
+    let taken = snapshot::collect(&discovered.root).unwrap();
+    let worktree = repo.state_path().join("wt");
+    git::add_worktree(
+        &discovered,
+        &worktree,
+        "ahu/test/sourceswap",
+        discovered.head.as_deref().unwrap(),
+    )
+    .unwrap();
+
+    // The attacker swaps the collected regular file for a link to a secret.
+    let source = discovered.root.join(".claude/settings.json");
+    std::fs::remove_file(&source).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&secret, &source).unwrap();
+
+    let report = snapshot::materialize(&discovered.root, &taken, &worktree).unwrap();
+
+    assert!(
+        report
+            .refused_sources
+            .contains(&".claude/settings.json".to_string()),
+        "the swap must be refused and disclosed: {report:?}"
+    );
+    assert!(
+        report
+            .concurrently_modified
+            .contains(&".claude/settings.json".to_string()),
+        "{report:?}"
+    );
+    let landed = worktree.join(".claude/settings.json");
+    if let Ok(contents) = std::fs::read_to_string(&landed) {
+        assert!(
+            !contents.contains("SYNTHETIC SECRET"),
+            "a file outside the repository must never be read into the worktree"
+        );
+    }
 }
