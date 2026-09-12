@@ -4,9 +4,6 @@
 //! own `--help` output.
 //!
 //! Native conventions this adapter defers to:
-//!   - agent definitions live at `.claude/agents/<name>.md` and are selected
-//!     with `--agent <name>`; ahu does not inline their body into a system
-//!     prompt, so the frontmatter's tool and permission settings keep applying;
 //!   - `CLAUDE.md`, skills under `.claude/skills/`, and settings under
 //!     `.claude/` are discovered by Claude Code itself from the working
 //!     directory, which is the task worktree;
@@ -15,6 +12,14 @@
 //! What it cannot enforce: an interactive Claude Code session can change model
 //! with `/model` after launch, and ahu has no supported control that disables
 //! that. The launch therefore carries the reliability warning.
+//!
+//! This adapter deliberately passes **no** `--agent` and **no**
+//! `--append-system-prompt`. `--agent <name>` selects whatever Claude Code's own
+//! agent search resolves that name to, which is not necessarily the file ahu
+//! read and digested, so ahu was asserting a binding it could not check. The
+//! agent's instructions and ahu's delegation contract now travel in the prompt
+//! on every harness instead — see `crate::orchestration`. That is not an
+//! enforced system prompt, and the enforcement report says so as a gap.
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::agent::Permissions;
@@ -52,13 +57,6 @@ impl Adapter for ClaudeCode {
                 args.push("auto".to_string());
             }
         }
-        if let Some(agent) = request.native_agent {
-            if agent.starts_with('-') {
-                bail!("agent name {agent:?} would be read as an option by the Claude Code CLI.");
-            }
-            args.push("--agent".to_string());
-            args.push(agent.to_string());
-        }
         // `--` closes the option list so a prompt starting with `-` is still a
         // prompt, and the prompt itself stays a single argv element.
         args.push("--".to_string());
@@ -83,10 +81,13 @@ impl Adapter for ClaudeCode {
             harness: "claude-code".to_string(),
             harness_version: installed_version(),
             model_fixed_for_session: entry.enforces_model_for_session,
-            gaps: entry.enforcement_gaps.iter().map(|s| s.to_string()).collect(),
+            gaps: entry
+                .enforcement_gaps
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             applied_controls: vec![
                 "--model pins the exact model for the session's first request".to_string(),
-                "--agent selects the native agent definition, preserving its own tool and permission settings".to_string(),
                 permission_control(permissions),
             ],
         })
@@ -102,8 +103,10 @@ impl Adapter for ClaudeCode {
 /// Enforcement block in direct contradiction with the Approvals block and the
 /// argv dump printed beside it.
 fn permission_control(permissions: Permissions) -> String {
-    let tail = "whether the effective session keeps the harness's own approval boundaries \
-                also depends on any wrapper on PATH";
+    let tail = "ahu does not know the effective approval boundary, only which flags it \
+                passed. The harness's own settings decide it, including any this repository \
+                carries into the task worktree, and a wrapper on PATH can change what the harness's \
+                own approval boundaries end up being";
     match permissions {
         Permissions::Prompt => format!(
             "ahu passes no --dangerously-skip-permissions, --permission-mode, --allowedTools, \
@@ -122,13 +125,13 @@ fn permission_control(permissions: Permissions) -> String {
     }
 }
 
+/// Ask the installed Claude Code for its version.
+///
+/// Goes through `selection`, which resolves the program to an absolute path and
+/// refuses one inside a repository ahu has opened. Running
+/// `Command::new("claude")` here repeated the operating system's PATH lookup --
+/// including relative entries -- and executed a planted binary before the user
+/// was shown a preview to approve.
 fn installed_version() -> Option<String> {
-    let output = std::process::Command::new("claude")
-        .arg("--version")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    crate::selection::installed_version("claude")
 }

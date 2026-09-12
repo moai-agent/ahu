@@ -4,8 +4,6 @@
 //! installed CLI's own help, `agy models`, and live probes.
 //!
 //! Native conventions this adapter defers to:
-//!   - workspace agents live at `.agents/agents/<name>/agent.md` and are
-//!     selected with `--agent <name>`;
 //!   - the model is selected with `--model <exact identifier>`, and the
 //!     identifiers come from `agy models` rather than from ahu's guesswork;
 //!   - `-i/--prompt-interactive` runs the submitted prompt and then keeps the
@@ -17,9 +15,10 @@
 //!
 //! What it cannot enforce: **`--agent` is not validated by the CLI.** A probe
 //! with a nonexistent agent name returned a normal assistant reply instead of
-//! an error, so ahu cannot tell from the harness whether the named definition
-//! was actually loaded. ahu verifies the definition exists in the repository
-//! before launching and records that the harness does not confirm it.
+//! an error, so ahu could not tell from the harness whether the named
+//! definition was actually loaded. This adapter therefore no longer passes
+//! `--agent` at all: the agent's instructions travel in the prompt, identically
+//! to every other harness — see `crate::orchestration`.
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::agent::Permissions;
@@ -56,13 +55,6 @@ impl Adapter for Antigravity {
                 args.push("--dangerously-skip-permissions".to_string());
             }
         }
-        if let Some(agent) = request.native_agent {
-            if agent.starts_with('-') {
-                bail!("agent name {agent:?} would be read as an option by the Antigravity CLI.");
-            }
-            args.push("--agent".to_string());
-            args.push(agent.to_string());
-        }
         // `--prompt-interactive` runs the prompt and keeps the session alive.
         // The prompt is its value, so it stays one argv element.
         args.push("--prompt-interactive".to_string());
@@ -87,12 +79,16 @@ impl Adapter for Antigravity {
             harness: "antigravity".to_string(),
             harness_version: super::codex::installed_version("agy"),
             model_fixed_for_session: entry.enforces_model_for_session,
-            gaps: entry.enforcement_gaps.iter().map(|s| s.to_string()).collect(),
+            gaps: entry
+                .enforcement_gaps
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             applied_controls: vec![
                 "--model pins the exact model for the session's first request".to_string(),
-                "--agent is passed so ahu always requests the configured identity, even though the harness does not confirm it was applied".to_string(),
                 permission_control(permissions),
-                "authentication is the harness's own OAuth sign-in; ahu holds no API key".to_string(),
+                "authentication is the harness's own OAuth sign-in; ahu holds no API key"
+                    .to_string(),
             ],
         })
     }
@@ -103,8 +99,10 @@ impl Adapter for Antigravity {
 /// denied passing `--dangerously-skip-permissions` on the very launches that
 /// pass it.
 fn permission_control(permissions: Permissions) -> String {
-    let tail = "whether the effective session keeps the harness's own approval boundaries \
-                also depends on any wrapper on PATH";
+    let tail = "ahu does not know the effective approval boundary, only which flags it \
+                passed. The harness's own settings decide it, including any this repository \
+                carries into the task worktree, and a wrapper on PATH can change what the harness's \
+                own approval boundaries end up being";
     match permissions {
         Permissions::Prompt => {
             format!("ahu passes no --dangerously-skip-permissions, --mode, or --sandbox; {tail}")

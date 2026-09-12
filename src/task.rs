@@ -57,18 +57,13 @@ pub struct LaunchIdentity {
     pub agent: String,
     /// Semantic version of the named agent, absent for automatic launches.
     pub agent_version: Option<String>,
-    /// Agent name requested from the harness with its own selection flag.
-    ///
-    /// Recorded rather than re-derived so the launch and the integrity check can
-    /// never disagree about whether the harness was asked for a named agent.
-    #[serde(default)]
-    pub native_agent: Option<String>,
     /// Approval widening this launch was configured with.
     #[serde(default)]
     pub permissions: crate::agent::Permissions,
     pub harness: String,
     pub model: String,
-    /// Where the system prompt came from, repository-relative.
+    /// Where the agent's instructions came from, repository-relative. ahu
+    /// delivers them in the prompt; no harness flag selects them.
     pub instructions_source: Option<String>,
     pub instructions_digest: Option<String>,
     /// Digest binding manifest fields and native definition together.
@@ -104,9 +99,18 @@ pub struct TaskRecord {
     /// The launch command with the prompt redacted. The prompt itself lives only
     /// in `prompt.txt`, which is written owner-only.
     pub launch_command: LaunchCommand,
+    /// What ahu put in the harness's prompt slot.
+    ///
+    /// The redacted command cannot cover any of it -- the contract, the agent's
+    /// instructions and the prompt are all inside the one argv element redaction
+    /// replaces -- so this carries its own digest and `run_task` checks it.
+    pub delivery: crate::orchestration::Delivery,
     /// Digest of the submitted prompt, so the prompt file can be verified
     /// without a second copy of its contents existing.
-    #[serde(default)]
+    ///
+    /// Deliberately not `#[serde(default)]`: an absent integrity value must be a
+    /// load failure with a clear message, not a record that loads with its
+    /// verification quietly disabled.
     pub prompt_digest: String,
     /// Absolute path of the harness binary as resolved at submission.
     ///

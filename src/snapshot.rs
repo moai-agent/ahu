@@ -359,28 +359,33 @@ pub fn materialize(
     }
 
     for entry in &snapshot.entries {
-        let source = parent_root.join(&entry.path);
         let target = safe_target(worktree_root, &entry.path)?;
-        // `collect` recorded this path as a regular file. If it is a symlink
-        // now, it was swapped between collection and copying -- the window in
-        // which the user is reading the submission preview -- and following it
-        // would read a file outside the repository into the task worktree.
-        match std::fs::symlink_metadata(&source) {
-            Ok(meta) if meta.file_type().is_symlink() => {
+        // `collect` recorded this path as a regular file. Checking only that
+        // leaf with `symlink_metadata` follows symlinks in its *ancestors*, so
+        // replacing `.claude` with a symlink after collection -- the window in
+        // which the user is reading the submission preview -- passed the check
+        // for `.claude/settings.json` and copied an external file into the task
+        // worktree. `open_source` resolves every component without following
+        // one and hands back the descriptor it validated.
+        let mut source = match open_source(parent_root, &entry.path) {
+            Ok(Some(source)) => source,
+            Ok(None) => {
+                // Deleted in the parent between snapshot and copy.
+                report.concurrently_modified.push(entry.path.clone());
+                continue;
+            }
+            Err(_) => {
                 report.concurrently_modified.push(entry.path.clone());
                 report.refused_sources.push(entry.path.clone());
                 continue;
             }
-            Ok(_) => {}
-            Err(_) => {
-                report.concurrently_modified.push(entry.path.clone());
-                continue;
-            }
-        }
-        let current = match digest_file(&source) {
+        };
+        let shown = Path::new(&entry.path);
+        // Hash from the open descriptor, not from the path, so the bytes that
+        // are digested are provably the bytes that get copied.
+        let current = match crate::util::digest_reader(&mut source.file, shown) {
             Ok(digest) => digest,
             Err(_) => {
-                // Deleted in the parent between snapshot and copy.
                 report.concurrently_modified.push(entry.path.clone());
                 continue;
             }
@@ -394,20 +399,97 @@ pub fn materialize(
             // that gained or lost its executable bit behaves differently, so
             // sync that before skipping the copy. `target` is known not to be a
             // symlink, so this cannot chmod anything outside the worktree.
-            if sync_mode(&source, &target)? {
+            if sync_mode(source.mode, &target)? {
                 report.written.push(entry.path.clone());
             }
             continue;
         }
-        std::fs::copy(&source, &target).map_err(|e| {
+        copy_from(&mut source.file, &target).map_err(|e| {
             Error::new(format!(
                 "cannot copy {} into the task worktree: {e}",
                 entry.path
             ))
         })?;
+        sync_mode(source.mode, &target)?;
         report.written.push(entry.path.clone());
     }
     Ok(report)
+}
+
+/// A configuration source opened for reading, plus the mode it really has.
+struct OpenSource {
+    file: std::fs::File,
+    mode: u32,
+}
+
+/// Open a configuration file under `root`, refusing every symlink on the way.
+///
+/// `Ok(None)` means it is gone; `Err` means something on the path is now a
+/// symlink, or the leaf is no longer the regular file that was collected.
+///
+/// The leaf is checked twice on purpose: `resolve_existing_within` walks the
+/// ancestors and the leaf with `symlink_metadata`, and then the opened
+/// descriptor's device and inode are compared against what that `lstat` saw. A
+/// symlink swapped in between the two calls therefore does not survive -- the
+/// descriptor would name a different inode.
+fn open_source(root: &Path, relative: &str) -> Result<Option<OpenSource>> {
+    let Some(path) = crate::util::resolve_existing_within(root, relative)? else {
+        return Ok(None);
+    };
+    let before = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => bail!("cannot inspect {relative}: {e}"),
+    };
+    if !before.is_file() {
+        bail!("{relative} is no longer a regular file.");
+    }
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => bail!("cannot open {relative}: {e}"),
+    };
+    let after = file
+        .metadata()
+        .map_err(|e| Error::new(format!("cannot inspect the opened {relative}: {e}")))?;
+    if !same_file(&before, &after) {
+        bail!("{relative} was replaced while ahu was copying it.");
+    }
+    Ok(Some(OpenSource {
+        mode: mode_of(&after),
+        file,
+    }))
+}
+
+#[cfg(unix)]
+fn same_file(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    before.dev() == after.dev() && before.ino() == after.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    before.file_type().is_file() && after.file_type().is_file()
+}
+
+#[cfg(unix)]
+fn mode_of(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn mode_of(_meta: &std::fs::Metadata) -> u32 {
+    0o644
+}
+
+/// Write the rest of an already-digested descriptor to `target`.
+fn copy_from(source: &mut std::fs::File, target: &Path) -> std::io::Result<()> {
+    use std::io::Seek;
+    source.seek(std::io::SeekFrom::Start(0))?;
+    let mut out = std::fs::File::create(target)?;
+    std::io::copy(source, &mut out)?;
+    Ok(())
 }
 
 /// Resolve `relative` inside `worktree_root`, refusing to traverse or write
@@ -416,16 +498,19 @@ fn safe_target(worktree_root: &Path, relative: &str) -> Result<PathBuf> {
     crate::util::resolve_within(worktree_root, relative, true)
 }
 
-/// Copy `source`'s permission bits onto `target` when they differ.
+/// Put the source's permission bits onto `target` when they differ.
+///
+/// Takes the mode read from the *opened* source descriptor rather than a second
+/// `stat` of the source path, so it cannot pick up a mode from a file that
+/// replaced the one that was copied.
 ///
 /// Returns whether anything changed.
 #[cfg(unix)]
-fn sync_mode(source: &Path, target: &Path) -> Result<bool> {
+fn sync_mode(wanted: u32, target: &Path) -> Result<bool> {
     use std::os::unix::fs::PermissionsExt;
-    let (Ok(from), Ok(to)) = (std::fs::metadata(source), std::fs::metadata(target)) else {
+    let Ok(to) = std::fs::metadata(target) else {
         return Ok(false);
     };
-    let wanted = from.permissions().mode() & 0o777;
     if to.permissions().mode() & 0o777 == wanted {
         return Ok(false);
     }
@@ -435,6 +520,6 @@ fn sync_mode(source: &Path, target: &Path) -> Result<bool> {
 }
 
 #[cfg(not(unix))]
-fn sync_mode(_source: &Path, _target: &Path) -> Result<bool> {
+fn sync_mode(_wanted: u32, _target: &Path) -> Result<bool> {
     Ok(false)
 }

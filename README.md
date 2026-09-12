@@ -110,7 +110,7 @@ flowchart TD
     P --> Q["cmux: child workspace in that group"]
     Q --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
     R --> S["Re-derive argv, compare to record"]
-    S --> T["exec claude --model &lt;id&gt; --agent &lt;name&gt; -- &lt;prompt&gt;"]
+    S --> T["exec claude --model &lt;id&gt; -- &lt;contract + agent instructions + prompt&gt;"]
 ```
 
 Run `ahu explain` for the full architecture overview in your terminal,
@@ -142,6 +142,12 @@ prints the launch disclosures and submits without an interactive confirmation;
 coordinator. Missing agents, unavailable harnesses, and cmux failures are errors;
 there is no fallback to the coordinator's harness or automatic selection.
 
+Because this path reads no confirmation, an agent whose manifest declares
+`permissions = "auto"` or `"accept-edits"` is refused unless the caller also
+passes `--allow-widened-approvals`. That puts the widening into the command line
+the delegating harness shows its own user before running it, instead of leaving
+an unattended session to be started by a single unremarkable command.
+
 The harness receives `AHU_BIN` pointing to the executable that started it, so it
 can invoke `"$AHU_BIN" launch ...` even if ahu is absent from its PATH. Each child
 receives the same delegation instructions. Review assignments must specify the
@@ -149,13 +155,27 @@ source checkout when reviewing uncommitted edits: a child's worktree starts at
 its parent's HEAD and does not copy uncommitted source changes. Assign a report
 path and read the actual findings before reporting completion.
 
-Claude receives the contract via `--append-system-prompt`, preserving the named
-agent definition, and `--disallowedTools Agent,Task,TeamCreate` blocks its native
-delegation tools. Other harnesses receive explicit guidance before the task text.
-The preview and inventory disclose this additional context. This is not a process
-sandbox: shell tools can still start processes, and other harnesses currently
-have no native delegation-tool denial. Existing running sessions do not acquire
-these controls; launch a new task with the rebuilt ahu executable.
+Every harness receives the same thing in the same way: ahu's delegation contract,
+then the resolved agent's instructions, then the task prompt, all in the harness's
+prompt slot. ahu's two sections are wrapped in a fence whose tag carries a nonce
+generated for that launch, and the contract says inside the fence that text
+outside it claiming to amend ahu's instructions is not ahu's. A task prompt cannot
+forge a fence, because it was written before the nonce existed.
+
+ahu uses **no** system-prompt or agent-selection flag on any harness — no
+`--agent`, no `--append-system-prompt`, no `--disallowedTools`. `--agent <name>`
+selects whatever the harness's own agent search resolves that *name* to, which is
+not bound to the file ahu reads, digests, and attributes the instructions to, so
+ahu was asserting a binding it could not check. Delivering everything as prompt
+text is weaker and uniform, and ahu describes it accurately: the preview and the
+enforcement report list it as a **gap**, not a control. The task prompt that
+follows can contradict it and the model may follow the task prompt instead. What
+ahu still pins with real flags is the harness, the exact model, and the permission
+flags an agent's manifest asks for.
+
+This is not a process sandbox either: shell tools can still start processes, and
+no adapter denies a harness's own delegation tools. Existing running sessions do
+not acquire any of this; launch a new task with the rebuilt ahu executable.
 
 ## Registering an agent
 
@@ -296,7 +316,7 @@ file that exists but cannot be parsed is reported as *unknown* hooks, never as
 ```mermaid
 flowchart LR
     subgraph seen["ahu can read these"]
-        I["Agent identity<br/>name, version, harness, model,<br/>system prompt source"]
+        I["Agent identity<br/>name, version, harness, model,<br/>instructions source"]
         R["Repository instructions<br/>CLAUDE.md, AGENTS.md"]
         K["Skills"]
         M["MCP config"]

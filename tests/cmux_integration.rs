@@ -681,29 +681,16 @@ fn two_agents_keep_their_own_harness_model_and_workspace_in_one_group() {
             let claude: Vec<String> = claude_raw.lines().map(str::to_string).collect();
             let codex: Vec<String> = codex_raw.lines().map(str::to_string).collect();
 
+            // The real point of this test: each harness binary got its own
+            // agent's model, and neither got the other's.
             assert!(
                 claude.windows(2).any(|p| p == ["--model", "claude-opus-5"]),
-                "{claude:?}"
-            );
-            assert!(
-                claude.windows(2).any(|p| p == ["--agent", "chris"]),
                 "{claude:?}"
             );
             assert!(
                 !claude.iter().any(|a| a == "gpt-6-astra"),
                 "the codex model must never reach the claude binary: {claude:?}"
             );
-            assert!(
-                claude
-                    .windows(2)
-                    .any(|p| p == ["--disallowedTools", "Agent,Task,TeamCreate"]),
-                "native delegation must be denied: {claude:?}"
-            );
-            assert!(
-                claude_raw.contains(ahu::orchestration::INSTRUCTIONS),
-                "the delegation contract must reach the session: {claude_raw}"
-            );
-
             assert!(
                 codex.windows(2).any(|p| p == ["-m", "gpt-6-astra"]),
                 "{codex:?}"
@@ -712,10 +699,50 @@ fn two_agents_keep_their_own_harness_model_and_workspace_in_one_group() {
                 !codex.iter().any(|a| a == "claude-opus-5"),
                 "the claude model must never reach the codex binary: {codex:?}"
             );
-            assert!(
-                codex_raw.contains(ahu::orchestration::INSTRUCTIONS),
-                "the delegation contract must reach the session: {codex_raw}"
-            );
+
+            // Delivery is now identical on both: no agent-selection or
+            // system-prompt flag anywhere, and the contract, the agent's
+            // instructions and the task prompt all arrive as fenced prompt text.
+            for (label, argv, raw, plan, instructions) in [
+                ("claude", &claude, &claude_raw, chris_plan, "You are chris."),
+                (
+                    "codex",
+                    &codex,
+                    &codex_raw,
+                    dana_plan,
+                    "You are dana. Fixture instructions.",
+                ),
+            ] {
+                for forbidden in ["--agent", "--append-system-prompt", "--disallowedTools"] {
+                    assert!(
+                        !argv.iter().any(|a| a == forbidden),
+                        "{label} must not receive {forbidden}: {argv:?}"
+                    );
+                }
+                assert!(
+                    raw.contains(ahu::orchestration::INSTRUCTIONS.trim()),
+                    "the delegation contract must reach the {label} session: {raw}"
+                );
+                assert!(
+                    raw.contains(instructions),
+                    "the agent's own instructions must reach the {label} session: {raw}"
+                );
+                let nonce = &plan.delivery.nonce;
+                let agent_close = ahu::orchestration::close_tag("agent", nonce);
+                assert!(
+                    raw.contains(&ahu::orchestration::open_tag("contract", nonce))
+                        && raw.contains(&agent_close),
+                    "{label} must receive ahu's sections inside this launch's fence: {raw}"
+                );
+                // The task prompt sits outside the fence, after it.
+                let prompt_at = raw.find("Review the launcher").expect("the prompt arrived");
+                assert!(
+                    raw.find(&agent_close).unwrap() < prompt_at,
+                    "{label}: ahu's fence must close before the task prompt begins"
+                );
+            }
+            // And the two launches did not share a fence tag.
+            assert_ne!(chris_plan.delivery.nonce, dana_plan.delivery.nonce);
         }))
     });
     cleanup();

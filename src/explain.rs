@@ -39,7 +39,7 @@ pub const MERMAID_PIPELINE: &str = r#"flowchart TD
     P --> Q["cmux: child workspace in that group"]
     Q --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
     R --> S["Re-derive argv, compare to record"]
-    S --> T["exec claude --model &lt;id&gt; --agent &lt;name&gt; -- &lt;prompt&gt;"]
+    S --> T["exec claude --model &lt;id&gt; -- &lt;contract + agent instructions + prompt&gt;"]
 "#;
 
 /// How a prompt reaches the harness without ever being shell input.
@@ -78,7 +78,7 @@ pub const MERMAID_INHERITANCE: &str = r#"flowchart TB
 /// Where context comes from, and how much of it ahu can actually see.
 pub const MERMAID_CONTEXT: &str = r#"flowchart LR
     subgraph seen["ahu can read these"]
-        I["Agent identity<br/>name, version, harness, model,<br/>system prompt source"]
+        I["Agent identity<br/>name, version, harness, model,<br/>instructions source"]
         R["Repository instructions<br/>CLAUDE.md, AGENTS.md"]
         K["Skills"]
         M["MCP config"]
@@ -165,10 +165,12 @@ pub fn document() -> Vec<Section> {
                 "sub-agent features. Inside an ahu task, they mean only registered ahu",
                 "agents, each using its configured harness and model in a separate cmux",
                 "workspace. Use ahu launch @name --prompt-file /path/to/task.txt.",
-                "Every ahu launch supplies this delegation contract. Claude receives it",
-                "as appended system guidance with Agent, Task, and TeamCreate denied.",
-                "Other harnesses receive guidance in the prompt; ahu cannot technically",
-                "prevent them or shell tools from starting other processes.",
+                "Every ahu launch supplies this delegation contract, identically on every",
+                "harness: as prompt text, inside a fence tagged with a per-launch nonce,",
+                "ahead of the agent's instructions and then the task prompt. ahu uses no",
+                "system-prompt or agent-selection flag anywhere, so none of it is enforced;",
+                "the task prompt that follows can contradict it, and ahu cannot prevent a",
+                "harness or its shell tools from starting other processes.",
             ])],
         },
         Section {
@@ -187,11 +189,14 @@ pub fn document() -> Vec<Section> {
                     "them.",
                 ]),
                 para(&[
-                    "Only Claude Code can actually apply a named agent's system prompt. Codex has",
-                    "no per-agent selection at all, and the Antigravity CLI accepts --agent without",
-                    "validating or visibly applying it. For those two, an ahu agent pins the harness",
-                    "and the exact model, the task prompt carries the instructions, and ahu shows",
-                    "the reliability warning rather than implying a guarantee it cannot keep.",
+                    "No harness enforces a named agent's identity for ahu. Codex has no",
+                    "per-agent selection at all; the Antigravity CLI accepts --agent without",
+                    "validating or visibly applying it; and Claude Code's --agent selects by",
+                    "name, which is not bound to the file ahu read and digested. So ahu uses",
+                    "none of them. An ahu agent pins the harness and the exact model, and its",
+                    "instructions travel in the prompt on all three, attributed to the file",
+                    "they were read from. ahu says that is what it is rather than implying a",
+                    "guarantee it cannot keep.",
                 ]),
                 para(&[
                     "ahu holds no credentials and speaks to no model provider. Your harness's own",
@@ -379,9 +384,11 @@ pub fn document() -> Vec<Section> {
 /// The load-bearing principles, one entry per rule, already wrapped.
 const FOUR_RULES: &[&[&str]] = &[
     &[
-        "Fixed identity. A named agent's harness, model, and system prompt are used",
+        "Fixed identity. A named agent's harness, model, and instructions are used",
         "as configured. No fallback model, no availability-based substitution, no",
         "task-driven prompt rewriting. Invalid configuration fails before a task starts.",
+        "The harness and model are pinned by flags; the instructions are delivered as",
+        "prompt text, which ahu reports as a gap rather than as enforcement.",
     ],
     &[
         "One project policy. Rankings, cadence, and the pinned catalog are the same",

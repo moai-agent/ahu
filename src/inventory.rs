@@ -178,8 +178,10 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
                 format!("policy {}", &loaded_config.digest[..12]),
             ];
             if let Some(agent) = agent {
+                // Not "system prompt": ahu delivers these bytes in the prompt on
+                // every harness, and the digest is over the file it read.
                 notes.push(format!(
-                    "system prompt from {} ({})",
+                    "instructions delivered in the prompt, read from {} ({})",
                     relative(repo_root, &agent.source_path),
                     &agent.source_digest[..12]
                 ));
@@ -196,7 +198,9 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
                 }
             } else {
                 notes.push(
-                    "no named agent: the harness's own default system prompt applies".to_string(),
+                    "no named agent: the harness's own default system prompt applies, and ahu \
+                     delivers only its delegation contract"
+                        .to_string(),
                 );
             }
             notes
@@ -208,10 +212,24 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
         name: "ahu delegation contract v1".to_string(),
         location: None,
         scope: "ahu launcher".to_string(),
+        // `available`, not `loaded`: ahu puts the bytes in the prompt, which is
+        // the strongest thing it can say. Whether the model treats them as
+        // instructions is not observable from outside the session, and no
+        // harness flag makes them binding.
         visibility: Visibility::Available,
-        digest: Some(crate::util::digest_bytes(crate::orchestration::INSTRUCTIONS.as_bytes())[..12].to_string()),
+        digest: Some(
+            crate::util::digest_bytes(crate::orchestration::INSTRUCTIONS.as_bytes())[..12]
+                .to_string(),
+        ),
         shared: true,
-        notes: vec!["Supplied on launch: separate cmux sessions through ahu launch for every assignment; Claude native delegation tools denied. Other harnesses receive guidance in the task prompt.".to_string()],
+        notes: vec![
+            "delivered as prompt text on every harness, inside a fence tagged with a per-launch \
+             nonce, before the agent's instructions and the task prompt"
+                .to_string(),
+            "not an enforced system prompt: ahu passes no agent-selection or system-prompt flag \
+             on any harness, and the task prompt that follows can contradict it"
+                .to_string(),
+        ],
     });
 
     // 2. Repository configuration actually carried into the task worktree.

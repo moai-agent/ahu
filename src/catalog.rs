@@ -69,7 +69,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
         enforces_model_for_session: false,
         enforcement_gaps: &[
             "the model is set at launch with -m, but ahu cannot stop an interactive session changing it",
-            "Codex has no per-agent selection: there is no --agent flag and no instructions-file option, so a named agent's system prompt is NOT delivered by ahu. Put the task's instructions in the prompt",
+            "Codex has no per-agent selection: there is no --agent flag and no instructions-file option. ahu delivers a named agent's instructions in the prompt, which is what it does on every harness, and which no harness enforces",
             "`codex agents` lists running sessions, not definitions, so .codex/agents/<name>.toml is not a launchable source for this CLI version",
         ],
     },
@@ -82,8 +82,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
         enforces_model_for_session: false,
         enforcement_gaps: &[
             "the model is set at launch with --model, but ahu cannot stop an interactive session changing it",
-            "--agent is accepted but not validated: a nonexistent agent name produced a normal reply instead of an error, and a workspace agent whose instructions were unmistakable did not change the response. ahu requests the agent but cannot confirm the harness loaded it, so treat the system prompt as NOT enforced and put the task's instructions in the prompt",
-            "ahu verifies the agent definition exists in the repository; the harness does not confirm it",
+            "--agent is accepted but not validated: a nonexistent agent name produced a normal reply instead of an error, and a workspace agent whose instructions were unmistakable did not change the response. ahu therefore does not pass it at all, and delivers the agent's instructions in the prompt instead",
         ],
     },
 ];

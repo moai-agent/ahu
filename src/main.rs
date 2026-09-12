@@ -78,7 +78,15 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                     agent,
                     prompt_file,
                     dry_run,
-                } => commands::launch_cmd(console, &repo, &agent, &prompt_file, dry_run),
+                    allow_widened_approvals,
+                } => commands::launch_cmd(
+                    console,
+                    &repo,
+                    &agent,
+                    &prompt_file,
+                    dry_run,
+                    allow_widened_approvals,
+                ),
                 Command::Init => commands::init(console, &repo),
                 Command::Agents => commands::agents(console, &repo),
                 Command::Onboard {

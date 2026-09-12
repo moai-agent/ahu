@@ -155,9 +155,31 @@ pub fn confirm(console: &mut Console<'_>, question: &str) -> Result<bool> {
     ))
 }
 
-/// Ask the final submit question.
-pub fn confirm_submit(console: &mut Console<'_>) -> Result<bool> {
-    confirm(console, "\nSubmit this task? [y/N]: ")
+/// Ask the final submit question, using a code the prompt could not contain.
+///
+/// A yes/no question is answerable by text that was already in the input buffer.
+/// The composer ends on a line containing only `.`, so a single pasted block
+///
+/// ```text
+/// Please review
+/// .
+/// yes
+/// ```
+///
+/// ended the prompt *and* left `yes` queued for this reader — the preview
+/// printed, and the launch proceeded with no action by the person at the
+/// keyboard after they saw it. That contradicts ahu's own "Pasting does not
+/// submit" claim, and a different text sentinel would be just as forgeable.
+///
+/// `code` is generated after the prompt has been read, so no text in the prompt
+/// can supply it: whatever was pasted was written before the code existed. The
+/// confirmation is therefore an event only someone reading this preview can
+/// produce.
+pub fn confirm_submit(console: &mut Console<'_>, code: &str) -> Result<bool> {
+    let answer = console.ask(&format!(
+        "\nTo submit, type the confirmation code {code} shown above (anything else cancels): "
+    ))?;
+    Ok(answer.as_deref().map(str::trim) == Some(code))
 }
 
 /// First-run repository initialization.
