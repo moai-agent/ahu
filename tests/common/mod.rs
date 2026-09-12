@@ -128,6 +128,33 @@ impl TestRepo {
         );
     }
 
+    /// A registered agent pinned to an arbitrary harness and model.
+    ///
+    /// `add_agent` always writes `harness = "claude-code"`. A launch test that
+    /// has to prove two agents keep *different* configured harnesses needs a
+    /// second manifest that names another one, with an instructions file the
+    /// non-Claude source format accepts.
+    pub fn add_agent_on(&self, name: &str, version: &str, harness: &str, model: &str) {
+        self.write(
+            &format!(".agents/ahu/instructions/{name}.md"),
+            &format!("You are {name}. Fixture instructions.\n"),
+        );
+        self.write(
+            &format!(".agents/ahu/agents/{name}.toml"),
+            &format!(
+                "schema_version = 1\n\
+                 name = \"{name}\"\n\
+                 version = \"{version}\"\n\
+                 description = \"fixture agent\"\n\
+                 harness = \"{harness}\"\n\
+                 model = \"{model}\"\n\
+                 \n[source]\n\
+                 format = \"markdown\"\n\
+                 path = \".agents/ahu/instructions/{name}.md\"\n"
+            ),
+        );
+    }
+
     pub fn state_path(&self) -> &Path {
         self.state.path()
     }
@@ -136,25 +163,42 @@ impl TestRepo {
 /// Install a fake `claude` executable that records its argv and stdin-free
 /// environment, so a test can assert exactly what the harness received.
 pub fn fake_harness(dir: &Path, record: &Path) -> PathBuf {
+    fake_harnesses(dir, &["claude"], |_| record.to_path_buf())
+}
+
+/// Install a fake executable per harness name, each recording its own argv.
+///
+/// `record_for` chooses the file a given harness writes to, so a test that
+/// launches two agents on two harnesses can tell the two argv dumps apart —
+/// which is the only way to prove each one ran under its *own* harness rather
+/// than both under whichever binary PATH happened to resolve first.
+pub fn fake_harnesses(
+    dir: &Path,
+    programs: &[&str],
+    record_for: impl Fn(&str) -> PathBuf,
+) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).expect("create bin dir");
-    let script = bin.join("claude");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\n\
-             : > '{record}'\n\
-             for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> '{record}'; done\n\
-             exit 0\n",
-            record = record.display()
-        ),
-    )
-    .expect("write fake harness");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod fake harness");
+    for program in programs {
+        let record = record_for(program);
+        let script = bin.join(program);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 : > '{record}'\n\
+                 for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> '{record}'; done\n\
+                 exit 0\n",
+                record = record.display()
+            ),
+        )
+        .expect("write fake harness");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake harness");
+        }
     }
     bin
 }

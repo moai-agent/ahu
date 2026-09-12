@@ -528,3 +528,198 @@ fn repeated_launches_reuse_one_repository_group_with_distinct_tasks() {
         std::panic::resume_unwind(panic);
     }
 }
+
+/// Two agents, two harnesses, one repository.
+///
+/// The launcher's whole promise is that a named agent runs under *its own*
+/// configured harness and model in *its own* cmux workspace. Nothing above
+/// proves that: every earlier launch in this file uses one agent on one
+/// harness, so a coordinator that quietly ran both assignments under whichever
+/// binary PATH resolved first would pass the suite unchanged.
+///
+/// This test launches two differently-configured agents, then runs each
+/// prepared task against a fake executable per harness. Each fake records its
+/// own argv to its own file, so the recorded argv is direct evidence of which
+/// binary actually ran, with which model and which agent name.
+#[test]
+fn two_agents_keep_their_own_harness_model_and_workspace_in_one_group() {
+    let Some(client) = client_or_skip() else {
+        return;
+    };
+    let repo = common::TestRepo::new();
+    repo.write(
+        ".agents/ahu/config.toml",
+        &format!(
+            "schema_version = 1\n\
+             harness_preferences = [\"claude-code\", \"codex\"]\n\
+             model_selection = \"project-ranked\"\n\
+             catalog_version = \"{}\"\n\
+             \n[model_rankings]\n\
+             \"claude-code\" = [\"claude-opus-5\"]\n\
+             \"codex\" = [\"gpt-6-astra\"]\n\
+             \n[context_hygiene]\n\
+             review_on_first_load = false\n\
+             review_interval_days = 7\n",
+            ahu::catalog::CATALOG_VERSION
+        ),
+    );
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.add_agent_on("dana", "2.0.0", "codex", "gpt-6-astra");
+    repo.commit("fixture");
+
+    let records = repo.state_path().join("argv");
+    std::fs::create_dir_all(&records).unwrap();
+    let bin = common::fake_harnesses(repo.state_path(), &["claude", "codex"], |program| {
+        records.join(program)
+    });
+
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
+
+    let mut launched = Vec::new();
+    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let original_path = std::env::var("PATH").unwrap();
+    // SAFETY: the guard makes this the only test mutating these variables.
+    unsafe {
+        std::env::set_var("AHU_STATE_DIR", repo.state_path());
+        std::env::set_var("PATH", format!("{}:{original_path}", bin.display()));
+    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for (name, prompt) in [
+            ("chris", "Review the launcher"),
+            ("dana", "Review the launcher independently"),
+        ] {
+            let agent = ahu::agent::find(&discovered.root, name).unwrap();
+            let pair = ahu::selection::ResolvedPair {
+                harness: agent.manifest.harness.clone(),
+                model: agent.manifest.model.clone(),
+                basis: "named agent".to_string(),
+                policy_digest: loaded.digest.clone(),
+                catalog_version: loaded.config.catalog_version.clone(),
+            };
+            let plan = ahu::launch::plan(&discovered, Some(agent), pair, prompt).unwrap();
+            let result = ahu::launch::execute(&discovered, &loaded, &plan, prompt, false)
+                .expect("launch succeeds");
+            // Run the prepared task so a real executable, resolved by name from
+            // PATH, records what it was actually given.
+            ahu::launch::run_task(&result.task_dir).expect("prepared task runs");
+            launched.push((plan, result));
+        }
+    }));
+    // SAFETY: still under the guard.
+    unsafe { std::env::set_var("PATH", &original_path) };
+    drop(guard);
+
+    let cleanup = || {
+        for (plan, result) in &launched {
+            if let Some(workspace) = &result.record.cmux_workspace_id {
+                let _ = client.close_workspace(workspace);
+            }
+            let _ = ahu::git::remove_worktree(&discovered, &plan.worktree, &plan.branch);
+        }
+        if let Some((_, first)) = launched.first()
+            && let Some(group_id) = &first.record.cmux_group_id
+            && let Ok(Some(group)) = client.find_group(group_id, None)
+        {
+            let _ = client.close_workspace(&group.anchor_workspace_id);
+        }
+    };
+
+    let assertions = outcome.and_then(|()| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_eq!(launched.len(), 2);
+            let (chris_plan, chris) = &launched[0];
+            let (dana_plan, dana) = &launched[1];
+
+            // Each task record froze its own agent's configured identity.
+            assert_eq!(chris.record.identity.harness, "claude-code");
+            assert_eq!(chris.record.identity.model, "claude-opus-5");
+            assert_eq!(chris.record.agent_label(), "chris@1.0.0");
+            assert_eq!(dana.record.identity.harness, "codex");
+            assert_eq!(dana.record.identity.model, "gpt-6-astra");
+            assert_eq!(dana.record.agent_label(), "dana@2.0.0");
+
+            // Separate worktrees, branches, and cmux workspaces.
+            assert_ne!(chris_plan.worktree, dana_plan.worktree);
+            assert_ne!(chris_plan.branch, dana_plan.branch);
+            let chris_ws = chris.record.cmux_workspace_id.clone().unwrap();
+            let dana_ws = dana.record.cmux_workspace_id.clone().unwrap();
+            assert_ne!(
+                chris_ws, dana_ws,
+                "two assignments must not share one cmux workspace"
+            );
+
+            // One repository group holding both, each rooted in its own worktree.
+            let group_id = chris.record.cmux_group_id.clone().unwrap();
+            assert_eq!(group_id, dana.record.cmux_group_id.clone().unwrap());
+            let group = client
+                .find_group(&group_id, None)
+                .unwrap()
+                .expect("group exists");
+            for workspace in [&chris_ws, &dana_ws] {
+                assert!(group.member_workspace_ids.contains(workspace));
+                assert_ne!(&group.anchor_workspace_id, workspace);
+            }
+            let listed = client.workspaces().unwrap();
+            assert_eq!(
+                Path::new(&listed.get(&chris_ws).expect("listed").directory),
+                chris_plan.worktree.as_path()
+            );
+            assert_eq!(
+                Path::new(&listed.get(&dana_ws).expect("listed").directory),
+                dana_plan.worktree.as_path()
+            );
+
+            // Each harness binary ran, and each received its own agent's model.
+            // Separate record files, so neither can stand in for the other.
+            // The fakes record one argument per line, so a multi-line argument
+            // spans several lines: match the contract against the whole dump.
+            let claude_raw = std::fs::read_to_string(records.join("claude"))
+                .expect("the claude-code agent ran the claude binary");
+            let codex_raw = std::fs::read_to_string(records.join("codex"))
+                .expect("the codex agent ran the codex binary");
+            let claude: Vec<String> = claude_raw.lines().map(str::to_string).collect();
+            let codex: Vec<String> = codex_raw.lines().map(str::to_string).collect();
+
+            assert!(
+                claude.windows(2).any(|p| p == ["--model", "claude-opus-5"]),
+                "{claude:?}"
+            );
+            assert!(
+                claude.windows(2).any(|p| p == ["--agent", "chris"]),
+                "{claude:?}"
+            );
+            assert!(
+                !claude.iter().any(|a| a == "gpt-6-astra"),
+                "the codex model must never reach the claude binary: {claude:?}"
+            );
+            assert!(
+                claude
+                    .windows(2)
+                    .any(|p| p == ["--disallowedTools", "Agent,Task,TeamCreate"]),
+                "native delegation must be denied: {claude:?}"
+            );
+            assert!(
+                claude_raw.contains(ahu::orchestration::INSTRUCTIONS),
+                "the delegation contract must reach the session: {claude_raw}"
+            );
+
+            assert!(
+                codex.windows(2).any(|p| p == ["-m", "gpt-6-astra"]),
+                "{codex:?}"
+            );
+            assert!(
+                !codex.iter().any(|a| a == "claude-opus-5"),
+                "the claude model must never reach the codex binary: {codex:?}"
+            );
+            assert!(
+                codex_raw.contains(ahu::orchestration::INSTRUCTIONS),
+                "the delegation contract must reach the session: {codex_raw}"
+            );
+        }))
+    });
+    cleanup();
+    if let Err(panic) = assertions {
+        std::panic::resume_unwind(panic);
+    }
+}
