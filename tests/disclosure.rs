@@ -677,6 +677,7 @@ fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: "prev0003".to_string(),
         title: "earlier".to_string(),
+        summary: String::new(),
         created_at: "2026-09-01T00:00:00Z".to_string(),
         repo_identity: discovered.identity(),
         repo_root: discovered.root.clone(),

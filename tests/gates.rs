@@ -481,6 +481,7 @@ fn write_record(
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: worktree.file_name().unwrap().to_string_lossy().to_string(),
         title: "fixture".to_string(),
+        summary: String::new(),
         created_at: ahu::task::now_rfc3339(),
         repo_identity: discovered.identity(),
         repo_root: discovered.root.clone(),

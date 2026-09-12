@@ -21,6 +21,7 @@ fn record(repo: &TestRepo, id: &str) -> std::path::PathBuf {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: id.to_string(),
         title: "private prompt title".to_string(),
+        summary: String::new(),
         created_at: ahu::task::now_rfc3339(),
         repo_identity: discovered.identity(),
         repo_root: record_source.clone(),
@@ -193,4 +194,20 @@ fn diff_refuses_foreign_checkouts_and_option_like_bases() {
         std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
         assert_eq!(run(&repo, &["diff", "abc1"]).status.code(), Some(5));
     }
+}
+
+#[test]
+fn old_records_without_summary_remain_readable_and_new_summaries_round_trip() {
+    let repo = TestRepo::new();
+    let dir = record(&repo, "old1");
+    let path = dir.join("task.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("summary");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let mut loaded = ahu::task::load(&dir).unwrap();
+    assert!(loaded.summary.is_empty());
+    loaded.summary = "Useful summary".into();
+    ahu::task::save(&dir, &loaded, "secret prompt").unwrap();
+    assert_eq!(ahu::task::load(&dir).unwrap().summary, "Useful summary");
 }

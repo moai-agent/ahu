@@ -47,6 +47,13 @@ fn mapping_path(repo: &Repo) -> Result<PathBuf> {
     Ok(state::coordination_dir(repo)?.join("cmux.json"))
 }
 
+/// Optional sidebar text, independent of the assignment delivered to the harness.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DisplayMetadata {
+    pub title: Option<String>,
+    pub summary: Option<String>,
+}
+
 /// What a launch is going to do, shown before anything is created.
 #[derive(Debug, Clone)]
 pub struct LaunchPlan {
@@ -64,6 +71,7 @@ pub struct LaunchPlan {
     pub worktree: PathBuf,
     pub task_dir: PathBuf,
     pub title: String,
+    pub summary: String,
     pub command: LaunchCommand,
     /// What ahu put in the harness's prompt slot, frozen so `run_task` can
     /// rebuild it byte for byte and refuse anything else.
@@ -75,6 +83,26 @@ pub struct LaunchPlan {
 }
 
 impl LaunchPlan {
+    pub fn apply_display(&mut self, display: &DisplayMetadata) -> Result<()> {
+        for (flag, value) in [("--title", &display.title), ("--summary", &display.summary)] {
+            if let Some(value) = value
+                && crate::util::sidebar_text(value, 160).is_empty()
+            {
+                bail!(kind: crate::util::ErrorKind::Usage, "{flag} needs visible display text.");
+            }
+        }
+        if let Some(title) = &display.title {
+            self.title = crate::util::task_title_from_prompt(title);
+            // A supplied title also prevents the fallback description from
+            // exposing the beginning of a long operational assignment.
+            self.summary = crate::util::sidebar_text(title, 160);
+        }
+        if let Some(summary) = &display.summary {
+            self.summary = crate::util::sidebar_text(summary, 160);
+        }
+        Ok(())
+    }
+
     pub fn agent_label(&self) -> String {
         match &self.agent {
             Some(agent) => agent.label(),
@@ -143,6 +171,8 @@ pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "schema_version": 1,
         "agent": agent,
+        "title": plan.title,
+        "summary": plan.summary,
         "harness": plan.pair.harness,
         "model": plan.pair.model,
         "selection_basis": plan.pair.basis,
@@ -288,6 +318,7 @@ pub fn plan(
         branch,
         worktree,
         task_dir,
+        summary: crate::util::sidebar_text(prompt, 160),
         title,
         command,
         delivery,
@@ -359,6 +390,7 @@ pub fn execute(
         schema_version: task::TASK_SCHEMA_VERSION,
         task_id: plan.task_id.clone(),
         title: plan.title.clone(),
+        summary: plan.summary.clone(),
         created_at: task::now_rfc3339(),
         repo_identity: repo_identity.clone(),
         repo_root: repo.root.clone(),
@@ -438,6 +470,7 @@ pub fn execute(
         &group.id,
         window.as_deref(),
         &title,
+        &plan.summary,
         &plan.worktree,
         &startup,
         focus,
@@ -460,7 +493,10 @@ pub fn execute(
             "the cmux session started but its task record could not be updated: {e}"
         ));
     }
-    if let Err(e) = cmux_client.set_status(&created.workspace_id, TaskState::Starting.as_str()) {
+    if let Err(e) = cmux_client.set_status(
+        &created.workspace_id,
+        &cmux::workspace_identity(&record.identity.agent, &record.identity.model),
+    ) {
         notes.push(format!("could not set the sidebar status: {e}"));
     }
     if let Err(e) = cmux_client.expand_group(&group.id) {
@@ -815,7 +851,10 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     let session_state = state::ensure_checkout_state(&record.worktree)?;
     let _ = task::set_state(task_dir, TaskState::Running);
     if let (Ok(client), Some(workspace)) = (Cmux::discover(), record.cmux_workspace_id.as_deref()) {
-        let _ = client.set_status(workspace, TaskState::Running.as_str());
+        let _ = client.set_status(
+            workspace,
+            &cmux::workspace_identity(&record.identity.agent, &record.identity.model),
+        );
     }
 
     let status = std::process::Command::new(&executable)
@@ -841,9 +880,6 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         TaskState::Failed
     };
     let _ = task::set_state(task_dir, final_state);
-    if let (Ok(client), Some(workspace)) = (Cmux::discover(), record.cmux_workspace_id.as_deref()) {
-        let _ = client.set_status(workspace, final_state.as_str());
-    }
     eprintln!(
         "\nahu: the harness exited ({}). The worktree {} and its branch {} are kept.\n\
          Exiting does not mean the task succeeded, and ahu does not delete either for you.",

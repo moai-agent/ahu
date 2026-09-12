@@ -121,9 +121,35 @@ exists in cmux, and opens a new session there running the configured harness.
 
 ```text
 my-repository
-  chris@1.2.0 — Implement settings validation   [running]
-  sam@0.4.0 — Review authentication tests       [exited]
+  Implement settings validation   [chris · model-a]
+    Validate settings and explain invalid values
+  Review authentication tests     [sam · model-b]
+    Check coverage and report findings
 ```
+
+For assignments with operational boilerplate, supply sidebar text separately:
+
+```sh
+ahu launch @chris --prompt-file /absolute/path/to/task.txt \
+  --title "Settings validation" \
+  --summary "Validate settings and explain invalid values"
+```
+
+Titles use up to 60 characters and descriptions up to 160, with common Markdown
+formatting converted to plain text. Without these options, AHU derives the text
+from the assignment. With `--title` alone, the description uses that title too;
+use both options to keep assignment boilerplate out of both display fields.
+Display metadata does not change the assignment delivered to the agent.
+
+The identity pill shows agent and model. Process state, full runtime identity,
+branch, and paths remain available through `ahu task <id> --output json` and
+local task records. A process exit does not establish task completion.
+
+cmux may also display native directory/branch rows and unread notification bodies.
+Notification previews, directory/branch visibility, descriptions, and title
+wrapping are cmux app preferences. AHU does not silently change those settings
+or rewrite harness completion notifications; Markdown in a notification body
+is a separate presentation surface.
 
 ## How it works
 

@@ -437,6 +437,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: "testtask0001".to_string(),
         title: "fixture".to_string(),
+        summary: String::new(),
         created_at: ahu::task::now_rfc3339(),
         repo_identity: repo_identity.clone(),
         repo_root: discovered.root.clone(),

@@ -455,26 +455,117 @@ pub fn symlink_refusal(found_at: &Path, relative: &str) -> Error {
 /// only `char::is_control` left the bidi overrides and the zero-width family
 /// intact, so a title could render as something other than what it is.
 pub fn task_title_from_prompt(prompt: &str) -> String {
-    let first = prompt
+    prompt
         .lines()
-        .map(str::trim)
+        .map(|line| sidebar_text(line, 60))
         .find(|line| !line.is_empty())
-        .unwrap_or("");
-    let cleaned: String = first
+        .unwrap_or_else(|| "untitled task".to_string())
+}
+
+/// Convert common assignment Markdown to a single, bounded plain-text label.
+/// This is deliberately a display convenience, not a Markdown renderer or a
+/// confidentiality filter. Callers should supply explicit metadata for long
+/// assignments containing instructions that do not belong in the sidebar.
+pub fn sidebar_text(text: &str, limit: usize) -> String {
+    let mut plain = String::new();
+    for line in text.lines() {
+        let mut line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            continue;
+        }
+        line = line.trim_start_matches('>').trim_start();
+        let heading = line.trim_start_matches('#');
+        if heading.starts_with(' ') {
+            line = heading.trim_start();
+        }
+        for marker in ["- [ ] ", "- [x] ", "- [X] ", "- ", "* ", "+ "] {
+            if let Some(rest) = line.strip_prefix(marker) {
+                line = rest;
+                break;
+            }
+        }
+        if let Some((number, rest)) = line.split_once(". ")
+            && !number.is_empty()
+            && number.bytes().all(|b| b.is_ascii_digit())
+        {
+            line = rest;
+        }
+        plain.push_str(&plain_inline(line, 0));
+        plain.push(' ');
+    }
+    let safe: String = plain
         .chars()
         .map(|c| if is_display_hostile(c) { ' ' } else { c })
         .collect();
-    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.is_empty() {
-        return "untitled task".to_string();
-    }
-    const LIMIT: usize = 60;
-    if cleaned.chars().count() <= LIMIT {
-        cleaned
+    let safe = safe.split_whitespace().collect::<Vec<_>>().join(" ");
+    if safe.chars().count() <= limit {
+        safe
+    } else if limit == 0 {
+        String::new()
     } else {
-        let truncated: String = cleaned.chars().take(LIMIT - 1).collect();
-        format!("{}…", truncated.trim_end())
+        format!(
+            "{}…",
+            safe.chars().take(limit - 1).collect::<String>().trim_end()
+        )
     }
+}
+
+fn plain_inline(mut text: &str, depth: usize) -> String {
+    // Bound recursion for deeply nested markup in arbitrary assignments.
+    if depth >= 8 {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    while !text.is_empty() {
+        // Keep link labels, omitting destinations (including balanced parens).
+        let link = text.strip_prefix("![").or_else(|| text.strip_prefix('['));
+        if let Some(link) = link
+            && let Some((label, destination)) = link.split_once("](")
+        {
+            let mut parentheses = 1;
+            let end = destination.char_indices().find_map(|(i, c)| {
+                if c == '(' {
+                    parentheses += 1;
+                }
+                if c == ')' {
+                    parentheses -= 1;
+                }
+                (parentheses == 0).then_some(i)
+            });
+            if let Some(end) = end {
+                out.push_str(&plain_inline(label, depth + 1));
+                text = &destination[end + 1..];
+                continue;
+            }
+        }
+        let mut matched = false;
+        for marker in ["**", "__", "~~", "`", "*", "_"] {
+            // Underscores within identifiers and stars within expressions are
+            // ordinary text. Only remove paired markup at a word boundary.
+            if !out.chars().last().is_some_and(|c| c.is_alphanumeric())
+                && let Some(rest) = text.strip_prefix(marker)
+                && let Some(end) = rest.find(marker)
+                && end > 0
+                && !rest[..end].starts_with(char::is_whitespace)
+                && !rest[..end].ends_with(char::is_whitespace)
+            {
+                if marker == "`" {
+                    out.push_str(&rest[..end]);
+                } else {
+                    out.push_str(&plain_inline(&rest[..end], depth + 1));
+                }
+                text = &rest[end + marker.len()..];
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            let c = text.chars().next().expect("nonempty input");
+            out.push(c);
+            text = &text[c.len_utf8()..];
+        }
+    }
+    out
 }
 
 /// Make a path safe to print to a terminal.
@@ -486,4 +577,26 @@ pub fn task_title_from_prompt(prompt: &str) -> String {
 /// and a renderer should not have two rules for the same job.
 pub fn display_path(path: &Path) -> String {
     display_safe(&path.to_string_lossy())
+}
+
+#[cfg(test)]
+mod sidebar_tests {
+    use super::*;
+
+    #[test]
+    fn link_delimiters_do_not_reset_the_inline_recursion_budget() {
+        // At the boundary, the link's label must remain uninterpreted. A
+        // delimiter counter shadowing depth incorrectly unwraps the emphasis.
+        assert_eq!(
+            plain_inline("[**leaf**](https://example.invalid/a(b))", 7),
+            "**leaf**"
+        );
+        let mut nested = "**leaf**".to_string();
+        for _ in 0..256 {
+            nested = format!("[{nested}](https://example.invalid/a(b))");
+        }
+        assert_eq!(plain_inline(&nested, 8), nested);
+        let label = sidebar_text(&nested, 60);
+        assert!(label.chars().count() <= 60);
+    }
 }

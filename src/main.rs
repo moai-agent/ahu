@@ -87,6 +87,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             output_json,
             dry_run,
             allow_widened_approvals,
+            display,
         } => {
             let repo = commands::repo_from_cwd()?;
             let prompt = prompt.read(&mut std::io::stdin(), std::io::stdin().is_terminal())?;
@@ -99,6 +100,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                     output_json,
                     dry_run,
                     allow_widened_approvals,
+                    &display,
                 )
             })
         }

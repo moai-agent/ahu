@@ -32,6 +32,8 @@ Commands:
   launch @name [--prompt <text> | --prompt-file <path>] [--dry-run]
                         Assign work in a separate cmux session. Reads no
                         confirmation, so approval widening needs an explicit flag
+                        --title <text> and --summary <text> set plain sidebar text.
+                        With --title alone, the description also uses that title.
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
   inventory [@agent]    Show everything that can influence an agent's context
@@ -115,6 +117,7 @@ pub enum Command {
     Launch {
         agent: String,
         prompt: PromptSource,
+        display: crate::launch::DisplayMetadata,
         output_json: bool,
         dry_run: bool,
         /// Opt in to launching an agent whose manifest widens the harness's own
@@ -394,6 +397,7 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     {
         bail!("invalid agent name {agent:?}.");
     }
+    let mut display = crate::launch::DisplayMetadata::default();
     let mut prompt_file = None;
     let mut prompt_inline = None;
     let mut output_json = false;
@@ -402,6 +406,12 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     let mut index = 1;
     while index < rest.len() {
         match rest[index].as_str() {
+            "--title" if display.title.is_none() => {
+                display.title = Some(value_for("--title", rest, &mut index)?);
+            }
+            "--summary" if display.summary.is_none() => {
+                display.summary = Some(value_for("--summary", rest, &mut index)?);
+            }
             "--prompt-file" if prompt_file.is_none() => {
                 prompt_file = Some(PathBuf::from(value_for("--prompt-file", rest, &mut index)?));
             }
@@ -438,6 +448,7 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     Ok(Command::Launch {
         agent: agent.to_string(),
         prompt,
+        display,
         output_json,
         dry_run,
         allow_widened_approvals,
@@ -479,6 +490,8 @@ pub fn extract_color(
             let takes_value = matches!(
                 arg.as_str(),
                 "--prompt"
+                    | "--title"
+                    | "--summary"
                     | "--prompt-file"
                     | "--output"
                     | "--register"

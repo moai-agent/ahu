@@ -908,7 +908,17 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
     };
 
     submit(
-        console, repo, &loaded, resolved, pair, &prompt, true, false, focus_new, false,
+        console,
+        repo,
+        &loaded,
+        resolved,
+        pair,
+        &prompt,
+        true,
+        false,
+        focus_new,
+        false,
+        &launch::DisplayMetadata::default(),
     )
 }
 
@@ -919,6 +929,7 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
 /// approval widening. `--allow-widened-approvals` is that gate instead: it makes
 /// the widening appear verbatim in the command line the delegating harness shows
 /// its own user before running it, and it is recorded on the task.
+#[allow(clippy::too_many_arguments)]
 pub fn launch_cmd(
     console: &mut Console<'_>,
     repo: &Repo,
@@ -927,6 +938,7 @@ pub fn launch_cmd(
     output_json: bool,
     dry_run: bool,
     allow_widened_approvals: bool,
+    display: &launch::DisplayMetadata,
 ) -> Result<i32> {
     let loaded = config::load(&repo.root)?.ok_or_else(|| {
         crate::util::Error::new(
@@ -964,6 +976,7 @@ pub fn launch_cmd(
         dry_run,
         false,
         output_json,
+        display,
     )
 }
 
@@ -979,8 +992,10 @@ fn submit(
     dry_run: bool,
     focus_new: bool,
     output_json: bool,
+    display: &launch::DisplayMetadata,
 ) -> Result<i32> {
-    let plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
+    let mut plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
+    plan.apply_display(display)?;
 
     // First-load and overdue context hygiene review, before submission.
     let identity = repo.identity();

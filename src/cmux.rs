@@ -42,6 +42,8 @@ pub struct Group {
 pub struct WorkspaceInfo {
     pub directory: String,
     pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -284,11 +286,13 @@ impl Cmux {
     /// `startup_command` is shell-interpreted. Callers must pass a command built
     /// by [`startup_command`], which contains only ahu-owned, shell-quoted
     /// paths — never a task prompt.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_task_workspace(
         &self,
         group_id: &str,
         window_id: Option<&str>,
         title: &str,
+        summary: &str,
         cwd: &Path,
         startup_command: &str,
         focus: bool,
@@ -310,6 +314,8 @@ impl Cmux {
             "new-workspace",
             "--name",
             title,
+            "--description",
+            summary,
             "--cwd",
             &cwd_string,
             "--command",
@@ -463,6 +469,10 @@ impl Cmux {
                                 .get("custom_title")
                                 .and_then(|v| v.as_str())
                                 .map(str::to_string),
+                            description: item
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
                         },
                     );
                 }
@@ -526,7 +536,94 @@ pub fn startup_command(ahu_executable: &Path, task_dir: &Path) -> String {
     )
 }
 
-/// The cmux title for a task row: agent, version, and a short task title.
-pub fn workspace_title(agent_label: &str, task_title: &str) -> String {
-    format!("{agent_label} — {task_title}")
+/// Task text gets the entire title budget; identity lives in its own pill.
+pub fn workspace_title(_agent_label: &str, task_title: &str) -> String {
+    crate::util::task_title_from_prompt(task_title)
+}
+
+pub fn workspace_identity(agent: &str, model: &str) -> String {
+    format!(
+        "{} · {}",
+        crate::util::sidebar_text(agent, 32),
+        crate::util::sidebar_text(model, 48)
+    )
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+
+    #[test]
+    fn title_budget_belongs_to_the_task() {
+        assert_eq!(
+            workspace_title("agent@1.2.3", "## **Fix parser**"),
+            "Fix parser"
+        );
+        let title = workspace_title(&"agent".repeat(100), &"界🦀".repeat(100));
+        assert_eq!(title.chars().count(), 60);
+        assert!(title.ends_with('…'));
+        assert!(!title.contains("agent"));
+        assert_eq!(workspace_identity("sable", "model-a"), "sable · model-a");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmux_receives_description_as_one_literal_argument_and_identity_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("cmux");
+        let log = temp.path().join("argv");
+        let marker = temp.path().join("created");
+        std::fs::write(&executable, format!(r#"#!/bin/sh
+case "$1" in
+rpc)
+  if [ -f {marker} ]; then members='["anchor","task"]'; else members='["anchor"]'; fi
+  printf '{{"groups":[{{"id":"group","anchor_workspace_id":"anchor","member_workspace_ids":%s}}]}}\n' "$members"
+  ;;
+new-workspace)
+  printf '%s\n' "$@" > {log}
+  touch {marker}
+  ;;
+set-status)
+  printf '%s\n' "$@" >> {log}
+  ;;
+esac
+"#, marker = shell_single_quote(&marker.to_string_lossy()), log = shell_single_quote(&log.to_string_lossy()))).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let client = Cmux {
+            executable: executable.to_string_lossy().into_owned(),
+            socket_path: None,
+        };
+        let summary = "Useful text; $(false) 'quoted' --color=always";
+        let created = client
+            .create_task_workspace(
+                "group",
+                Some("window"),
+                "Fix parser",
+                summary,
+                temp.path(),
+                "true",
+                false,
+            )
+            .unwrap();
+        client
+            .set_status(
+                &created.workspace_id,
+                &workspace_identity("sable", "model-a"),
+            )
+            .unwrap();
+        let text = std::fs::read_to_string(log).unwrap();
+        let args: Vec<_> = text.lines().collect();
+        assert!(args.windows(2).any(|args| args == ["--name", "Fix parser"]));
+        assert!(
+            args.windows(2)
+                .any(|args| args == ["--description", summary])
+        );
+        assert!(
+            args.windows(3)
+                .any(|args| args == ["set-status", "ahu.task", "sable · model-a"])
+        );
+        assert!(!args.contains(&"running"));
+        assert!(!args.contains(&"starting"));
+    }
 }

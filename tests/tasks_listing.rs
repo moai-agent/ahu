@@ -95,6 +95,7 @@ fn write_current(tasks_dir: &Path, repo: &TestRepo, task_id: &str) -> PathBuf {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: task_id.to_string(),
         title: "a current task".to_string(),
+        summary: String::new(),
         created_at: "2026-09-12T00:00:00Z".to_string(),
         repo_identity: discovered.identity(),
         repo_root: discovered.root.clone(),

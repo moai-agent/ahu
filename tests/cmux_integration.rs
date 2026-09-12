@@ -119,6 +119,7 @@ fn a_repository_group_holds_one_child_workspace_per_task() {
                 &group.group_id,
                 None,
                 &cmux::workspace_title(agent, title),
+                "Synthetic summary",
                 temp.path(),
                 "true",
                 false,
@@ -147,14 +148,13 @@ fn a_repository_group_holds_one_child_workspace_per_task() {
         );
     }
 
-    // Task state is published as a namespaced sidebar status.
+    // Agent identity is published as a namespaced sidebar status.
     group
         .client
-        .set_status(&group.created[0], "running")
+        .set_status(&group.created[0], "chris · model-a")
         .expect("status set");
 
-    // Every task row names its agent, version, and task so the expanded group
-    // identifies the session at a glance.
+    // Task text owns the title; identity has a separate pill.
     let listed = group.client.workspaces().unwrap();
     let titles: Vec<String> = group
         .created
@@ -169,11 +169,11 @@ fn a_repository_group_holds_one_child_workspace_per_task() {
     assert_eq!(
         titles,
         vec![
-            "chris@1.0.0 — First task".to_string(),
-            "chris@1.0.0 — Second task".to_string(),
-            "auto — Third task".to_string(),
+            "First task".to_string(),
+            "Second task".to_string(),
+            "Third task".to_string(),
         ],
-        "task rows must identify the agent and task"
+        "task titles must put the task first"
     );
 
     group.client.expand_group(&group.group_id).expect("expand");
@@ -199,6 +199,7 @@ fn a_closed_anchor_is_replaced_so_no_task_is_hidden_under_the_header() {
             &group.group_id,
             None,
             &cmux::workspace_title("chris@1.0.0", "Only task"),
+            "Synthetic summary",
             temp.path(),
             "true",
             false,
@@ -257,6 +258,7 @@ fn the_startup_command_reaches_ahu_intact_through_a_real_cmux_shell() {
             &group.group_id,
             None,
             &cmux::workspace_title("chris@1.0.0", "Transport check"),
+            "Synthetic summary",
             temp.path(),
             &startup,
             false,
@@ -412,7 +414,7 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
         let stored = std::fs::read_to_string(launched.task_dir.join("prompt.txt")).unwrap();
         assert_eq!(stored, prompt);
 
-        // One child row under the repository group, titled by agent and task.
+        // One child row with task-first title and plain description.
         let group = client
             .find_group(&group_id, None)
             .unwrap()
@@ -421,10 +423,9 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
         assert_ne!(group.anchor_workspace_id, workspace);
         let listed = client.workspaces().unwrap();
         let info = listed.get(&workspace).expect("workspace is listed");
-        assert_eq!(
-            info.title.as_deref(),
-            Some("chris@1.0.0 — Implement settings validation")
-        );
+        assert_eq!(info.title.as_deref(), Some("Implement settings validation"));
+        assert_eq!(info.description.as_deref(), Some(plan.summary.as_str()));
+        assert_eq!(launched.record.summary, plan.summary);
         assert_eq!(Path::new(&info.directory), plan.worktree.as_path());
     }));
     cleanup();

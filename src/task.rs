@@ -89,6 +89,9 @@ pub struct TaskRecord {
     pub schema_version: u32,
     pub task_id: String,
     pub title: String,
+    /// Plain sidebar description; absent in older records.
+    #[serde(default)]
+    pub summary: String,
     pub created_at: String,
     pub repo_identity: String,
     pub repo_root: PathBuf,
