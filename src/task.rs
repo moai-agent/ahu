@@ -258,19 +258,44 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
     let path = dir.join(TASK_FILE);
     let bytes = std::fs::read(&path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
+
+    // The schema version is read on its own, before the record is deserialized
+    // into this build's struct.
+    //
+    // Checking it afterwards made the careful message below unreachable for the
+    // case it was written for: schema 1 has no `delivery` field, so serde failed
+    // on `missing field \`delivery\`` and that is what the user saw. A version
+    // mismatch is the *reason* the fields do not line up, and reporting a
+    // symptom of it instead tells someone with five old tasks to go looking for
+    // a corrupt file.
+    let version = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| value.get("schema_version")?.as_u64());
+    if let Some(version) = version
+        && version != u64::from(TASK_SCHEMA_VERSION)
+    {
+        bail!(
+            "{} was written by a different ahu schema version ({version}); this ahu build reads \
+             {TASK_SCHEMA_VERSION}.\n\
+             ahu will not reinterpret it: schema 1 recorded the whole file's digest under the \
+             name instructions_digest, which now means the delivered instruction text, so the \
+             same field would be read as covering bytes it does not cover.",
+            path.display()
+        );
+    }
+
     let record: TaskRecord = serde_json::from_slice(&bytes).map_err(|e| {
         Error::new(format!(
             "{} is not a valid ahu task record: {e}",
             path.display()
         ))
     })?;
+    // A record whose `schema_version` could not be read as a number at all --
+    // absent, or not an integer -- still must not be accepted on the strength of
+    // the struct happening to deserialize.
     if record.schema_version != TASK_SCHEMA_VERSION {
         bail!(
-            "{} was written by a different ahu schema version ({}); this ahu build reads \
-             {TASK_SCHEMA_VERSION}.\n\
-             ahu will not reinterpret it: schema 1 recorded the whole file's digest under the \
-             name instructions_digest, which now means the delivered instruction text, so the \
-             same field would be read as covering bytes it does not cover.",
+            "{} declares ahu schema version {}; this ahu build reads {TASK_SCHEMA_VERSION}.",
             path.display(),
             record.schema_version
         );
@@ -294,27 +319,99 @@ pub fn set_state(dir: &Path, new_state: TaskState) -> Result<()> {
     set_owner_only(&dir.join(TASK_FILE))
 }
 
-/// Every task recorded for a repository, newest first.
-pub fn list(repo_identity: &str) -> Result<Vec<(PathBuf, TaskRecord)>> {
+/// A task directory whose record ahu could not read.
+///
+/// Everything here comes from the directory itself, never from the file ahu
+/// refused: reading fields out of a record whose schema ahu does not understand
+/// is the exact reinterpretation [`TASK_SCHEMA_VERSION`] exists to prevent. The
+/// directory name is the task id ahu chose when it created the task, so it is
+/// safe to use and enough to find the leftovers on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableTask {
+    pub dir: PathBuf,
+    /// The directory name, which is the task id.
+    pub task_id: String,
+    /// Why [`load`] refused it, in full.
+    pub reason: String,
+}
+
+/// Every task directory ahu found for a repository: the ones it could read, and
+/// the ones it could not.
+///
+/// Both halves, deliberately. `list` used to return only the readable records
+/// and drop the rest, despite claiming to report them.
+/// Unreadable records were initially the exception.
+///
+/// The schema-2 bump made them the rule: every record written by an earlier ahu
+/// is refused, so a repository with five tasks, five worktrees, five branches
+/// and three live cmux sessions had `ahu tasks` print "No ahu tasks have been
+/// launched from this repository." An informational nit became a positive claim
+/// of absence that was false, and the only surface that could have told the user
+/// where their leftover worktrees were is the one that denied they existed.
+#[derive(Debug, Clone, Default)]
+pub struct TaskListing {
+    /// Readable records, newest first.
+    pub records: Vec<(PathBuf, TaskRecord)>,
+    /// Directories ahu could not read, by task id.
+    pub unreadable: Vec<UnreadableTask>,
+}
+
+impl TaskListing {
+    /// Whether this repository has no task directories at all.
+    ///
+    /// Not "no readable records": a caller asking this is usually about to tell
+    /// the user that nothing was ever launched here, and that must only be said
+    /// when ahu actually found nothing.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty() && self.unreadable.is_empty()
+    }
+
+    /// Every task directory, readable or not.
+    pub fn dirs(&self) -> Vec<PathBuf> {
+        self.records
+            .iter()
+            .map(|(dir, _)| dir.clone())
+            .chain(self.unreadable.iter().map(|u| u.dir.clone()))
+            .collect()
+    }
+}
+
+/// Every task recorded for a repository: readable records newest first, plus
+/// every directory whose record could not be read.
+pub fn list(repo_identity: &str) -> Result<TaskListing> {
     let dir = state::tasks_dir(repo_identity)?;
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(TaskListing::default()),
         Err(e) => bail!("cannot read {}: {e}", dir.display()),
     };
-    let mut found = Vec::new();
+    let mut listing = TaskListing::default();
     for entry in entries {
         let path = entry?.path();
         if !path.is_dir() {
             continue;
         }
         match load(&path) {
-            Ok(record) => found.push((path, record)),
-            // A record ahu cannot read is reported by `ahu tasks`, not silently
-            // dropped, but it must not break the listing of the others.
-            Err(_) => continue,
+            Ok(record) => listing.records.push((path, record)),
+            // Carried, not dropped. It must still not break the listing of the
+            // others, which is what the `continue` was for; the mistake was
+            // throwing the evidence away on the way past.
+            Err(e) => {
+                let task_id = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string_lossy().to_string());
+                listing.unreadable.push(UnreadableTask {
+                    dir: path,
+                    task_id,
+                    reason: e.to_string(),
+                });
+            }
         }
     }
-    found.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
-    Ok(found)
+    listing
+        .records
+        .sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+    listing.unreadable.sort_by(|a, b| b.task_id.cmp(&a.task_id));
+    Ok(listing)
 }

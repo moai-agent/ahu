@@ -362,14 +362,22 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
     if problems == 0 { Ok(0) } else { Ok(1) }
 }
 
+/// The one sentence `ahu tasks` may print only when it really found nothing.
+///
+/// Named so a test can assert on its absence: for five refused records, five
+/// worktrees and three live cmux sessions, this is not a reassurance, it is a
+/// false statement — and the surface that should have told the user where their
+/// leftover worktrees are is the one that denied they existed.
+pub const NO_TASKS: &str = "No ahu tasks have been launched from this repository.";
+
 /// `ahu tasks`
 pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
-    let records = launch::reconcile(&repo.identity())?;
-    if records.is_empty() {
-        console.say("No ahu tasks have been launched from this repository.\n")?;
+    let listing = launch::reconcile(&repo.identity())?;
+    if listing.is_empty() {
+        console.say(&format!("{NO_TASKS}\n"))?;
         return Ok(0);
     }
-    for (dir, record) in &records {
+    for (dir, record) in &listing.records {
         // Every field here comes out of task.json, which was built from the
         // prompt and from repository configuration. `tasks` is as much a
         // disclosure surface as the launch preview, so it escapes the same way.
@@ -393,20 +401,158 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         }
         console.say("\n")?;
     }
-    console.say(
-        "`exited` means the harness process ended. It is not a claim that the task succeeded.\n\
-         Worktrees and branches are kept until you remove them yourself.\n",
-    )?;
+    console.say(&render_unreadable_tasks(repo, &listing.unreadable))?;
+    if !listing.records.is_empty() {
+        // This footer explains the `exited` state in the listing above. With no
+        // readable records there is no such listing for it to explain.
+        console.say(
+            "\n`exited` means the harness process ended. It is not a claim that the task \
+             succeeded.\n",
+        )?;
+    }
+    console.say("Worktrees and branches are kept until you remove them yourself.\n")?;
     Ok(0)
+}
+
+/// Report the task directories ahu could not read.
+///
+/// The user's actual problem with an unreadable record is a leftover worktree
+/// and branch they can no longer enumerate through ahu, so this recovers what it
+/// can — the task id is the directory name, the worktree path is derived from
+/// it, and the branch is looked up in Git — and says plainly when it cannot.
+///
+/// Nothing is read out of the refused file. Reinterpreting a record whose schema
+/// ahu does not understand is exactly what the schema check exists to prevent,
+/// and it would be a strange fix for a disclosure bug to introduce one.
+pub fn render_unreadable_tasks(repo: &Repo, unreadable: &[task::UnreadableTask]) -> String {
+    if unreadable.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "\n!! {} task record(s) in this repository could not be read.\n\
+         \x20  They are not listed above, and they are not gone: each one had a worktree and a\n\
+         \x20  branch, and ahu does not delete either.\n",
+        unreadable.len()
+    ));
+
+    // Grouped by reason. On a real machine every old record fails for the same
+    // reason, and repeating a four-line explanation once per task buries the
+    // task ids -- which are the part the reader needs -- in its own boilerplate.
+    let mut groups: Vec<(String, Vec<&task::UnreadableTask>)> = Vec::new();
+    for found in unreadable {
+        let reason = strip_record_path(&found.reason, &found.dir);
+        match groups.iter_mut().find(|(seen, _)| *seen == reason) {
+            Some((_, members)) => members.push(found),
+            None => groups.push((reason, vec![found])),
+        }
+    }
+
+    let mut any_unrecovered = false;
+    for (reason, members) in &groups {
+        out.push_str(&format!(
+            "\n   {}\n",
+            display_safe_block(reason).replace('\n', "\n   ")
+        ));
+        for found in members {
+            out.push_str(&format!(
+                "\n     {} [unreadable]\n",
+                display_safe(&found.task_id)
+            ));
+            out.push_str(&format!("       record    {}\n", display_path(&found.dir)));
+
+            // The directory name is the task id ahu chose, so the worktree path
+            // is recoverable without touching the record.
+            match crate::state::worktree_dir(&repo.root, &found.task_id) {
+                Ok(worktree) if worktree.is_dir() => {
+                    out.push_str(&format!("       worktree  {}\n", display_path(&worktree)));
+                }
+                Ok(worktree) => {
+                    out.push_str(&format!(
+                        "       worktree  {} (no longer on disk)\n",
+                        display_path(&worktree)
+                    ));
+                }
+                Err(_) => {
+                    any_unrecovered = true;
+                    out.push_str("       worktree  could not be derived from the task id\n");
+                }
+            }
+            match git::branches_matching(repo, &format!("ahu/*/{}", found.task_id)) {
+                Ok(branches) if !branches.is_empty() => {
+                    out.push_str(&format!(
+                        "       branch    {}\n",
+                        display_safe(&branches.join(", "))
+                    ));
+                }
+                _ => {
+                    any_unrecovered = true;
+                    out.push_str("       branch    none found for this task id\n");
+                }
+            }
+        }
+    }
+
+    out.push_str(
+        "\n   ahu will not rewrite or migrate a record it cannot read: these files are the\n\
+         \x20  audit trail of what actually ran. Re-submit the work as a new task rather than\n\
+         \x20  trying to resume one of these.\n",
+    );
+    if any_unrecovered {
+        out.push_str(
+            "   For anything ahu could not recover above, `git worktree list` and the\n\
+             \x20  .worktrees/ directory in this repository are the authoritative listing.\n",
+        );
+    }
+    out
+}
+
+/// Drop the leading `<record path>: ` or `<record path> ` a loader message
+/// starts with, since the path is printed on its own line beside it.
+fn strip_record_path(reason: &str, dir: &Path) -> String {
+    let record = dir.join("task.json");
+    let prefix = record.to_string_lossy().to_string();
+    reason
+        .strip_prefix(&prefix)
+        .map(|rest| rest.trim_start_matches([':', ' ']).to_string())
+        .unwrap_or_else(|| reason.to_string())
 }
 
 /// `ahu focus <task-id>`
 pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i32> {
-    let records = task::list(&repo.identity())?;
-    let (_, record) = records
+    let listing = task::list(&repo.identity())?;
+    let found = listing
+        .records
         .iter()
-        .find(|(_, r)| r.task_id == task_id || r.task_id.starts_with(task_id))
-        .ok_or_else(|| crate::util::Error::new(format!("no task matching {task_id:?}.")))?;
+        .find(|(_, r)| r.task_id == task_id || r.task_id.starts_with(task_id));
+    let Some((_, record)) = found else {
+        // "no task matching" would be a claim that nothing here is that task.
+        // If a directory with that id exists and ahu simply could not read its
+        // record, saying so is the difference between a user looking for a
+        // typo and a user looking at a leftover worktree.
+        let unreadable: Vec<&task::UnreadableTask> = listing
+            .unreadable
+            .iter()
+            .filter(|u| u.task_id == task_id || u.task_id.starts_with(task_id))
+            .collect();
+        if let Some(blocked) = unreadable.first() {
+            bail!(
+                "task {} exists but ahu cannot read its record, so it cannot find its cmux \
+                 session.\n{}\nThe record is at {}. Run `ahu tasks` for its worktree and branch.",
+                display_safe(&blocked.task_id),
+                display_safe_block(&blocked.reason),
+                display_path(&blocked.dir)
+            );
+        }
+        if listing.unreadable.is_empty() {
+            bail!("no task matching {task_id:?}.");
+        }
+        bail!(
+            "no readable task matching {task_id:?}. {} other task record(s) in this repository \
+             could not be read either; run `ahu tasks` to see them.",
+            listing.unreadable.len()
+        );
+    };
     let Some(workspace) = record.cmux_workspace_id.as_deref() else {
         bail!("task {} has no recorded cmux session.", record.task_id);
     };
@@ -679,6 +825,17 @@ fn submit(
 
     // Drift against the last launch of this same agent at this same version.
     let previous = task::list(&identity)?;
+    // Drift can only compare against records it can read. Saying nothing when
+    // some are unreadable would make "no drift reported" mean two different
+    // things — nothing changed, or ahu could not look — and only one of those
+    // is a reason to go ahead.
+    if !previous.unreadable.is_empty() {
+        console.say(&format!(
+            "\n!! {} earlier task record(s) for this repository could not be read, so drift was \n\
+             \x20  not compared against them. `ahu tasks` lists them.\n",
+            previous.unreadable.len()
+        ))?;
+    }
     let agent_identity = plan.agent.as_ref().map(|a| a.identity_digest());
     if let Some(found) = drift::detect(
         &key,
@@ -693,7 +850,7 @@ fn submit(
         &plan.snapshot.digest(),
         &loaded.digest,
         &plan.hooks.digest(),
-        &previous,
+        &previous.records,
     ) {
         console.say("\n")?;
         console.say(&drift::render(&found))?;
@@ -976,10 +1133,11 @@ pub fn with_stdio<T>(f: impl FnOnce(&mut Console<'_>) -> Result<T>) -> Result<T>
     f(&mut console)
 }
 
-/// Paths used by `ahu tasks` output, exposed for tests.
+/// Every task directory `ahu tasks` accounts for, exposed for tests.
+///
+/// Includes the ones whose records could not be read: they are still tasks that
+/// were launched, and a helper that silently omitted them would reproduce the
+/// bug this listing exists to fix.
 pub fn task_dirs(repo_identity: &str) -> Result<Vec<PathBuf>> {
-    Ok(task::list(repo_identity)?
-        .into_iter()
-        .map(|(dir, _)| dir)
-        .collect())
+    Ok(task::list(repo_identity)?.dirs())
 }

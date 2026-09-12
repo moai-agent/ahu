@@ -475,13 +475,17 @@ fn restore_anchor(client: &Cmux, repo: &Repo, group: &cmux::Group) -> Result<Str
 
 /// Reconcile recorded tasks against cmux, so sessions closed outside ahu do not
 /// linger as "running" forever.
-pub fn reconcile(repo_identity: &str) -> Result<Vec<(PathBuf, TaskRecord)>> {
+///
+/// Returns the whole listing, unreadable directories included. Reconciliation
+/// can only touch records it can read, and a caller that is about to tell the
+/// user what exists needs to know about the ones it could not.
+pub fn reconcile(repo_identity: &str) -> Result<task::TaskListing> {
     let mut tasks = task::list(repo_identity)?;
     let Ok(client) = Cmux::discover() else {
         return Ok(tasks);
     };
     let live = client.workspaces()?;
-    for (dir, record) in tasks.iter_mut() {
+    for (dir, record) in tasks.records.iter_mut() {
         let Some(workspace_id) = record.cmux_workspace_id.as_deref() else {
             continue;
         };
@@ -489,6 +493,11 @@ pub fn reconcile(repo_identity: &str) -> Result<Vec<(PathBuf, TaskRecord)>> {
             && matches!(record.state, TaskState::Starting | TaskState::Running)
         {
             record.state = TaskState::Exited;
+            // Best effort, and deliberately not fatal: reconciliation is a
+            // status refresh, and a state directory that has gone read-only
+            // must not stop `ahu tasks` listing what exists. The value returned
+            // to the caller is the true one either way — cmux is the authority
+            // on whether the workspace is still there, not this file.
             let _ = state::write_json(&dir.join("task.json"), record);
         }
     }
@@ -502,7 +511,17 @@ pub fn reconcile(repo_identity: &str) -> Result<Vec<(PathBuf, TaskRecord)>> {
 /// and handed to the harness as one argument, so shell syntax in the prompt is
 /// never interpreted.
 pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
-    let record = task::load(task_dir)?;
+    // A refused record is read here inside a live cmux pane, where the user has
+    // no other context, so the error says what to do next rather than only what
+    // went wrong.
+    let record = task::load(task_dir).map_err(|e| {
+        Error::new(format!(
+            "{e}\n\
+             This task's worktree and branch are untouched; ahu never deletes either. \
+             Run `ahu tasks` in the repository to see them, and re-submit the work as a new \
+             task rather than trying to resume this one."
+        ))
+    })?;
     let prompt = task::load_prompt(task_dir)?;
 
     if !record.worktree.is_dir() {
