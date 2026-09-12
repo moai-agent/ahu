@@ -34,7 +34,9 @@ Options:
   -V, --version         Print the version
 
 explain options:
+  --markdown            Print the overview as a Markdown document
   --mermaid             Print only the diagrams, as fenced Mermaid blocks
+  --open                Render it in cmux's Markdown viewer, diagrams and all
 
 onboard options:
   --register <name>     Register a previewed native definition
@@ -48,12 +50,25 @@ launcher options:
 run-task options:
   --task-dir <path>     Directory holding the prepared task record";
 
+/// How `ahu explain` should present itself.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ExplainFormat {
+    /// Plain text for a terminal.
+    Terminal,
+    /// The same document as Markdown, on stdout.
+    Markdown,
+    /// Only the diagrams, as fenced Mermaid blocks.
+    Mermaid,
+    /// Written to ahu's state directory and opened in cmux's Markdown viewer.
+    OpenInCmux,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Help,
     Version,
     Explain {
-        mermaid_only: bool,
+        format: ExplainFormat,
     },
     Interactive {
         focus: bool,
@@ -102,15 +117,17 @@ where
             Ok(Command::Version)
         }
         "explain" => {
-            let mermaid_only = match args.get(1).map(String::as_str) {
-                None => false,
-                Some("--mermaid") => {
-                    expect_no_more(&args[2..])?;
-                    true
-                }
+            let format = match args.get(1).map(String::as_str) {
+                None => ExplainFormat::Terminal,
+                Some("--markdown") => ExplainFormat::Markdown,
+                Some("--mermaid") => ExplainFormat::Mermaid,
+                Some("--open") => ExplainFormat::OpenInCmux,
                 Some(other) => bail!("unknown option {other:?} for `ahu explain`."),
             };
-            Ok(Command::Explain { mermaid_only })
+            if format != ExplainFormat::Terminal {
+                expect_no_more(&args[2..])?;
+            }
+            Ok(Command::Explain { format })
         }
         "init" => {
             expect_no_more(&args[1..])?;

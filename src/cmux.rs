@@ -384,6 +384,23 @@ impl Cmux {
         }
     }
 
+    /// Open a Markdown file in cmux's own Markdown viewer.
+    ///
+    /// The bundled viewer renders ```` ```mermaid ```` fences as diagrams and
+    /// watches the file, so a regenerated document updates in place. Verified
+    /// against cmux 0.64.22.
+    pub fn open_markdown(&self, path: &Path, focus: bool) -> Result<String> {
+        let value = self.rpc(
+            "markdown.open",
+            serde_json::json!({ "path": path.to_string_lossy(), "focus": focus }),
+        )?;
+        value
+            .get("surface_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| Error::new("cmux markdown.open returned no `surface_id`"))
+    }
+
     pub fn select_workspace(&self, workspace_id: &str) -> Result<()> {
         self.rpc(
             "workspace.select",

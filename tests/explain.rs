@@ -98,10 +98,109 @@ fn the_overview_states_the_load_bearing_invariants() {
 
 #[test]
 fn every_harness_in_the_catalog_is_listed_with_its_status() {
-    let text = explain::overview();
-    for harness in ahu::catalog::HARNESSES {
-        assert!(text.contains(harness.id), "{} missing", harness.id);
+    for text in [explain::overview(), explain::markdown()] {
+        for harness in ahu::catalog::HARNESSES {
+            assert!(text.contains(harness.id), "{} missing", harness.id);
+        }
+        assert!(text.contains("2.1.269"), "the verified version is shown");
+        assert!(
+            text.contains("future work"),
+            "unsupported harnesses are labelled"
+        );
     }
-    assert!(text.contains("verified against 2.1.269"));
-    assert!(text.contains("future work"));
+}
+
+#[test]
+fn the_overview_says_ahu_is_not_a_harness_and_names_what_it_needs() {
+    for text in [explain::overview(), explain::markdown()] {
+        assert!(text.contains("ahu is not an agent harness"), "{text}");
+        assert!(
+            text.contains("cross-harness configuration management"),
+            "{text}"
+        );
+        // The hard dependencies have to be stated, not implied.
+        assert!(text.contains("cmux"), "cmux is required");
+        assert!(
+            text.contains("A supported harness"),
+            "the harness dependency must be named: {text}"
+        );
+        assert!(
+            text.contains("installed and authenticated by you"),
+            "who installs it must be explicit: {text}"
+        );
+        assert!(
+            text.contains("never installs, configures, or authenticates one"),
+            "{text}"
+        );
+        assert!(text.contains("holds no credentials"), "{text}");
+        assert!(
+            text.contains("install, configure, or authenticate a harness"),
+            "the will-not list must cover this"
+        );
+    }
+}
+
+#[test]
+fn the_markdown_render_is_a_real_markdown_document() {
+    let text = explain::markdown();
+    assert!(text.starts_with("# ahu "), "{}", &text[..40]);
+    assert_eq!(
+        mermaid_blocks(&text).len(),
+        4,
+        "diagrams survive the render"
+    );
+    // Headings, not underlined terminal titles.
+    assert!(text.contains("\n## Launch pipeline\n"), "{text}");
+    assert!(
+        !text.contains("\n-----"),
+        "no terminal underlines leaked in"
+    );
+    // Warnings become blockquotes rather than `!!` gutters.
+    assert!(
+        text.contains(&format!("> **{}**", ahu::harness::RELIABILITY_WARNING)),
+        "{text}"
+    );
+    assert!(
+        !text.contains("  !! "),
+        "terminal warning gutters leaked in"
+    );
+    // The catalog becomes a table.
+    assert!(
+        text.contains("| harness | ahu adapter | verified against |"),
+        "{text}"
+    );
+    assert!(text.contains("| --- | --- | --- |"), "{text}");
+}
+
+#[test]
+fn the_terminal_render_carries_no_markdown_syntax() {
+    let text = explain::overview();
+    assert!(
+        !text.contains("**"),
+        "bold markers should be stripped for a terminal"
+    );
+    assert!(
+        !text.contains("| --- |"),
+        "no markdown tables in terminal output"
+    );
+    assert!(text.contains("  !! "), "warnings use a terminal gutter");
+}
+
+#[test]
+fn both_renders_are_built_from_the_same_document() {
+    // Every section title appears in both, so the two can never drift.
+    let terminal = explain::overview();
+    let markdown = explain::markdown();
+    for section in explain::document() {
+        assert!(
+            terminal.contains(section.title),
+            "terminal missing {}",
+            section.title
+        );
+        assert!(
+            markdown.contains(section.title),
+            "markdown missing {}",
+            section.title
+        );
+    }
 }

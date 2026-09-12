@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use ahu::cli::{self, Command};
+use ahu::cli::{self, Command, ExplainFormat};
 use ahu::commands;
 
 fn main() -> ExitCode {
@@ -25,18 +25,39 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             println!("ahu {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
-        // `explain` is documentation. It reads nothing and needs no repository.
-        Command::Explain { mermaid_only } => {
-            print!(
-                "{}",
-                if mermaid_only {
-                    ahu::explain::mermaid_only()
-                } else {
-                    ahu::explain::overview()
+        // `explain` is documentation. It reads no repository and no configuration.
+        Command::Explain { format } => match format {
+            ExplainFormat::Terminal => {
+                print!("{}", ahu::explain::overview());
+                Ok(0)
+            }
+            ExplainFormat::Markdown => {
+                print!("{}", ahu::explain::markdown());
+                Ok(0)
+            }
+            ExplainFormat::Mermaid => {
+                print!("{}", ahu::explain::mermaid_only());
+                Ok(0)
+            }
+            ExplainFormat::OpenInCmux => {
+                // The document is written either way, so a machine without cmux
+                // still ends up with something it can open.
+                let path = ahu::explain::write_document()?;
+                println!("Wrote {}", path.display());
+                match ahu::explain::open_in_cmux(&path, true) {
+                    Ok(surface) => {
+                        println!("Opened in cmux's Markdown viewer (surface {surface}).");
+                        println!("Diagrams render there; the file also renders on GitHub.");
+                        Ok(0)
+                    }
+                    Err(e) => {
+                        eprintln!("ahu: could not open it in cmux: {e}");
+                        eprintln!("The document is still at the path above.");
+                        Ok(1)
+                    }
                 }
-            );
-            Ok(0)
-        }
+            }
+        },
         // `run-task` is started by cmux inside the task worktree and works from
         // the task record alone, so it does not need repository discovery.
         Command::RunTask { task_dir } => commands::run_task(&task_dir),

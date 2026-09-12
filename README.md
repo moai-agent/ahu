@@ -1,20 +1,42 @@
 # ahu
 
-`ahu` launches repository-defined agents in isolated Git worktrees and organises
-their interactive sessions in [cmux](https://cmux.com).
+`ahu` is cross-harness configuration management for agent sessions, built for
+[cmux](https://cmux.com). It launches agents that a repository defines into
+isolated Git worktrees and organises their sessions as rows under a repository
+group in cmux.
+
+**`ahu` is not an agent harness.** It does not host a model, run an agent loop,
+own a conversation, or provide tools. [Claude Code](https://code.claude.com),
+[Codex](https://learn.chatgpt.com), and the
+[Antigravity CLI](https://antigravity.google) do that. `ahu` decides *which* of
+them runs, with which model and instructions, in which worktree — and then
+reports honestly on everything that can influence the session it started.
 
 An agent's harness, model, and instructions live in the repository, so changing
 how an agent behaves is a reviewable change like any other. A launch uses exactly
 that configuration or fails; it never quietly substitutes a different harness or
 model.
 
-Using `ahu` is optional. It adds launcher metadata under `.agents/ahu/` and
-references your existing agent definitions where they already are. A teammate who
-never installs `ahu` keeps using the repository's harness setup unchanged, and
-the fixed harness/model guarantees below apply only to `ahu`-launched sessions.
+## Requirements
 
-**Version 0.1.1 supports Claude Code.** Codex and Antigravity CLI definitions are
-recognised and reported, but cannot be launched yet.
+`ahu` orchestrates tools you already have. It ships none of them, installs none
+of them, and holds no credentials of its own.
+
+| You need | Why | Status in 0.1.1 |
+| --- | --- | --- |
+| **cmux** | Every task session is a cmux workspace under a per-repository group. `ahu` has no mode that runs without it. | Required. Verified against 0.64.22 (102) `[ddd4a01bc]`. |
+| **A supported harness**, installed and authenticated by you | The harness is what actually runs the agent. | **Claude Code** (verified against 2.1.269). Codex and Antigravity CLI are detected and reported, but cannot be launched yet. |
+| **Git** | Every task gets its own branch and worktree. | Required. |
+
+`ahu` never installs, configures, or authenticates a harness, and it speaks to no
+model provider. Your harness's own authentication, permissions, and approval
+boundaries are used unchanged.
+
+Using `ahu` is also optional for your teammates. It adds launcher metadata under
+`.agents/ahu/` and references your existing agent definitions where they already
+are. Someone who never installs `ahu` keeps using the repository's harness setup
+unchanged, and the fixed harness/model guarantees below apply only to
+`ahu`-launched sessions.
 
 ## Install
 
@@ -29,7 +51,8 @@ shell startup files.
 
 ## Getting started
 
-Run `ahu` inside a Git repository, from a cmux terminal:
+Run `ahu` inside a Git repository, from a cmux terminal (`ahu doctor` checks that
+cmux, a harness, and the repository are all in order first):
 
 ```sh
 ahu
@@ -90,8 +113,10 @@ flowchart TD
     S --> T["exec claude --model &lt;id&gt; --agent &lt;name&gt; -- &lt;prompt&gt;"]
 ```
 
-Run `ahu explain` for the full architecture overview in your terminal, or
-`ahu explain --mermaid > docs/architecture.md` for the diagrams alone.
+Run `ahu explain` for the full architecture overview in your terminal,
+`ahu explain --open` to render it — diagrams and all — in cmux's own Markdown
+viewer, or `ahu explain --markdown > docs/architecture.md` to keep it as a file.
+`--mermaid` emits just the diagrams.
 
 ## Registering an agent
 
@@ -144,7 +169,7 @@ pending behavior change for the next version bump.
 | `ahu tasks` | Tasks launched from this repository |
 | `ahu focus <task-id>` | Bring a task's cmux session to the front |
 | `ahu doctor` | Check repository, configuration, harness, and cmux |
-| `ahu explain` | Architecture overview and Mermaid diagrams (`--mermaid` for just the diagrams) |
+| `ahu explain` | Architecture overview and diagrams (`--markdown`, `--mermaid`, `--open`) |
 | `ahu help` | Usage |
 
 ## What a task gets
@@ -282,9 +307,12 @@ These are real and deliberate; `ahu` reports them rather than papering over them
 - **No release or evaluation automation.** Version bumps, change summaries, and
   benchmarks are yours to manage. `ahu` records drift and digests; it does not
   classify a change as safe.
-- **cmux is required**, and `ahu` must be able to reach it. Running outside a cmux
-  terminal is not supported yet. Resuming a terminated harness session is not
-  supported; `ahu focus` brings an existing one to the front.
+- **cmux is required**, and `ahu` must be able to reach it. There is no headless
+  or one-shot mode, and running outside a cmux terminal is not supported yet.
+  Resuming a terminated harness session is not supported; `ahu focus` brings an
+  existing one to the front.
+- **`ahu` is not a harness and will not become your agent runtime.** If your
+  harness cannot do something, `ahu` reports that rather than working around it.
 - **One harness.** Codex and Antigravity definitions are detected and reported as
   unlaunchable rather than translated.
 
@@ -316,6 +344,6 @@ installed Claude Code CLI.
 check that they actually render, parse the emitted blocks with Mermaid itself:
 
 ```sh
-cargo run -- explain --mermaid > /tmp/diagrams.md
+cargo run -- explain --mermaid > /tmp/diagrams.md   # or --markdown
 # then parse /tmp/diagrams.md with mermaid.parse() from the `mermaid` npm package
 ```
