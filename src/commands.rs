@@ -530,29 +530,73 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
         return Ok(1);
     };
 
-    let plan = launch::plan(repo, resolved.clone(), pair.clone(), &prompt)?;
+    submit(
+        console, repo, &loaded, resolved, pair, &prompt, true, false, focus_new,
+    )
+}
+
+/// Assign work without an interactive composer; the command itself requests launch.
+pub fn launch_cmd(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    agent: &str,
+    prompt_file: &Path,
+    dry_run: bool,
+) -> Result<i32> {
+    let loaded = config::load(&repo.root)?.ok_or_else(|| {
+        crate::util::Error::new(
+            "project configuration is missing; run ahu init before assigning work.",
+        )
+    })?;
+    let (resolved, pair) = resolve_identity(repo, &loaded, Some(agent))?;
+    let prompt = std::fs::read_to_string(prompt_file).map_err(|e| {
+        crate::util::Error::new(format!(
+            "cannot read prompt file {}: {e}",
+            prompt_file.display()
+        ))
+    })?;
+    submit(
+        console, repo, &loaded, resolved, pair, &prompt, false, dry_run, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    loaded: &LoadedConfig,
+    resolved: Option<ResolvedAgent>,
+    pair: ResolvedPair,
+    prompt: &str,
+    confirm: bool,
+    dry_run: bool,
+    focus_new: bool,
+) -> Result<i32> {
+    let plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
 
     // First-load and overdue context hygiene review, before submission.
     let identity = repo.identity();
     let key = plan.agent_label();
     let review_state = hygiene::load_state(&identity)?;
-    let trigger = hygiene::due(&loaded, &review_state, &key);
+    let trigger = hygiene::due(loaded, &review_state, &key);
     if trigger != hygiene::Trigger::NotDue {
         let built = inventory::build(&inventory::Subject {
             repo_root: &repo.root,
-            loaded_config: &loaded,
+            loaded_config: loaded,
             snapshot: &plan.snapshot,
             agent: plan.agent.as_ref(),
             harness: &plan.pair.harness,
             model: &plan.pair.model,
             enforcement: &plan.enforcement,
             hooks: &plan.hooks,
-            prompt: Some(&prompt),
+            prompt: Some(prompt),
         })?;
-        let review = hygiene::review(&key, &built, &plan.enforcement, &loaded, &review_state);
+        let review = hygiene::review(&key, &built, &plan.enforcement, loaded, &review_state);
         console.say("\n")?;
-        console.say(&hygiene::render(&review, trigger, &loaded))?;
-        hygiene::record_review(&identity, &key)?;
+        console.say(&hygiene::render(&review, trigger, loaded))?;
+        if !dry_run {
+            hygiene::record_review(&identity, &key)?;
+        }
     }
 
     // Drift against the last launch of this same agent at this same version.
@@ -569,14 +613,18 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
         console.say(&drift::render(&found))?;
     }
 
-    console.say(&render_preview(repo, &plan, &prompt))?;
+    console.say(&render_preview(repo, &plan, prompt))?;
 
-    if !launcher::confirm_submit(console)? {
+    if dry_run {
+        console.say("Dry run. No task or session was created.\n")?;
+        return Ok(0);
+    }
+    if confirm && !launcher::confirm_submit(console)? {
         console.say("Cancelled. No worktree, branch, or session was created.\n")?;
         return Ok(1);
     }
 
-    let launched = launch::execute(repo, &loaded, &plan, &prompt, focus_new)?;
+    let launched = launch::execute(repo, loaded, &plan, prompt, focus_new)?;
     console.say(&format!(
         "\nLaunched {} — {}\n  task     {}\n  branch   {}\n  worktree {}\n  record   {}\n",
         launched.record.agent_label(),
@@ -611,6 +659,10 @@ pub fn render_launch_notes(notes: &[String]) -> String {
 pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> String {
     let mut out = String::new();
     out.push_str("\nAbout to submit\n===============\n");
+    out.push_str(
+        "  delegation All assigned agents must launch through ahu in separate cmux sessions.\n",
+    );
+    out.push_str("  guidance   ahu supplies delegation instructions; Claude Agent/Task/TeamCreate tools are denied.\n");
     out.push_str(&format!(
         "  agent      {}\n",
         display_safe(&plan.agent_label())
@@ -732,7 +784,13 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
             .redacted()
             .args
             .iter()
-            .map(|a| display_safe(a))
+            .map(|a| {
+                if a == crate::orchestration::INSTRUCTIONS {
+                    "<ahu delegation contract v1>".to_string()
+                } else {
+                    display_safe(a)
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ")
     ));

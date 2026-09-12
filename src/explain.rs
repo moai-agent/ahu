@@ -159,6 +159,19 @@ pub fn document() -> Vec<Section> {
             ],
         },
         Section {
+            title: "Delegation follows the entrypoint",
+            blocks: vec![para(&[
+                "Outside ahu, sub-agents and fan out use the current harness's native",
+                "sub-agent features. Inside an ahu task, they mean only registered ahu",
+                "agents, each using its configured harness and model in a separate cmux",
+                "workspace. Use ahu launch @name --prompt-file /path/to/task.txt.",
+                "Every ahu launch supplies this delegation contract. Claude receives it",
+                "as appended system guidance with Agent, Task, and TeamCreate denied.",
+                "Other harnesses receive guidance in the prompt; ahu cannot technically",
+                "prevent them or shell tools from starting other processes.",
+            ])],
+        },
+        Section {
             title: "What ahu needs",
             blocks: vec![
                 bullets(&[

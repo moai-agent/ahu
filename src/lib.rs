@@ -28,6 +28,7 @@ pub mod inventory;
 pub mod launch;
 pub mod launcher;
 pub mod onboard;
+pub mod orchestration;
 pub mod selection;
 pub mod snapshot;
 pub mod state;

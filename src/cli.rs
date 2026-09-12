@@ -20,6 +20,8 @@ Commands:
   help                  Print this help message
   explain               Architecture overview and Mermaid diagrams
   init                  Record this project's agreed harness and model order
+  launch @name --prompt-file <path> [--dry-run]
+                        Assign work in a separate cmux session (no confirmation)
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
   inventory [@agent]    Show everything that can influence an agent's context
@@ -74,6 +76,11 @@ pub enum Command {
         focus: bool,
     },
     Init,
+    Launch {
+        agent: String,
+        prompt_file: PathBuf,
+        dry_run: bool,
+    },
     Agents,
     Onboard {
         register: Option<String>,
@@ -159,6 +166,7 @@ where
         "hygiene" => Ok(Command::Hygiene {
             agent: optional_agent(&args[1..])?,
         }),
+        "launch" => parse_launch(&args[1..]),
         "onboard" => parse_onboard(&args[1..]),
         "run-task" => parse_run_task(&args[1..]),
         "--no-focus" => {
@@ -245,4 +253,39 @@ fn value_for(flag: &str, rest: &[String], index: &mut usize) -> Result<String> {
     rest.get(*index)
         .cloned()
         .ok_or_else(|| crate::util::Error::new(format!("{flag} needs a value.")))
+}
+
+fn parse_launch(rest: &[String]) -> Result<Command> {
+    let name = rest
+        .first()
+        .ok_or_else(|| crate::util::Error::new("ahu launch needs @agent --prompt-file <path>."))?;
+    let agent = name.strip_prefix('@').unwrap_or(name);
+    if agent.is_empty()
+        || !agent
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        || agent.starts_with('-')
+    {
+        bail!("invalid agent name {agent:?}.");
+    }
+    let mut prompt_file = None;
+    let mut dry_run = false;
+    let mut index = 1;
+    while index < rest.len() {
+        match rest[index].as_str() {
+            "--prompt-file" if prompt_file.is_none() => {
+                prompt_file = Some(PathBuf::from(value_for("--prompt-file", rest, &mut index)?));
+            }
+            "--dry-run" if !dry_run => dry_run = true,
+            other => bail!("unknown or repeated option {other:?} for ahu launch."),
+        }
+        index += 1;
+    }
+    let prompt_file = prompt_file
+        .ok_or_else(|| crate::util::Error::new("ahu launch needs --prompt-file <path>."))?;
+    Ok(Command::Launch {
+        agent: agent.to_string(),
+        prompt_file,
+        dry_run,
+    })
 }

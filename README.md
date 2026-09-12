@@ -118,6 +118,45 @@ Run `ahu explain` for the full architecture overview in your terminal,
 viewer, or `ahu explain --markdown > docs/architecture.md` to keep it as a file.
 `--mermaid` emits just the diagrams.
 
+## Delegating work
+
+Delegation follows the entrypoint. In a normal harness session, requests for
+sub-agents or fan out use that harness's native sub-agent features and stay
+inside that harness. In an **ahu task prompt**, those requests mean **only
+registered ahu agents**, with their configured harnesses, models, and cmux
+workspaces. ahu's launch controls apply only to ahu-launched sessions.
+
+Every ahu-launched session receives instructions to delegate through ahu. Each
+assignment starts its registered agent's harness and exact model in a separate
+cmux workspace, with its own task record, branch, and worktree.
+
+```sh
+ahu agents
+ahu launch @sable --prompt-file /absolute/path/to/security-review.txt --dry-run
+ahu launch @sable --prompt-file /absolute/path/to/security-review.txt
+```
+
+`launch` requires an existing project configuration and a registered agent. It
+prints the launch disclosures and submits without an interactive confirmation;
+`--dry-run` previews without creating a task or session. It keeps focus on the
+coordinator. Missing agents, unavailable harnesses, and cmux failures are errors;
+there is no fallback to the coordinator's harness or automatic selection.
+
+The harness receives `AHU_BIN` pointing to the executable that started it, so it
+can invoke `"$AHU_BIN" launch ...` even if ahu is absent from its PATH. Each child
+receives the same delegation instructions. Review assignments must specify the
+source checkout when reviewing uncommitted edits: a child's worktree starts at
+its parent's HEAD and does not copy uncommitted source changes. Assign a report
+path and read the actual findings before reporting completion.
+
+Claude receives the contract via `--append-system-prompt`, preserving the named
+agent definition, and `--disallowedTools Agent,Task,TeamCreate` blocks its native
+delegation tools. Other harnesses receive explicit guidance before the task text.
+The preview and inventory disclose this additional context. This is not a process
+sandbox: shell tools can still start processes, and other harnesses currently
+have no native delegation-tool denial. Existing running sessions do not acquire
+these controls; launch a new task with the rebuilt ahu executable.
+
 ## Registering an agent
 
 `ahu` launches an agent only when `.agents/ahu/agents/<name>.toml` registers it.

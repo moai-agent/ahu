@@ -138,6 +138,7 @@ pub fn plan(
         cwd: &worktree,
         permissions,
     })?;
+    let command = crate::orchestration::configure(command)?;
     let harness_executable = crate::selection::resolve_executable(&command.program)
         .map(PathBuf::from)
         .ok_or_else(|| {
@@ -149,6 +150,16 @@ pub fn plan(
             ))
         })?;
     let mut enforcement = adapter.enforcement(&pair.model)?;
+    enforcement.applied_controls.push(format!(
+        "ahu delegation instructions v1 (digest {}) supplied to every task",
+        crate::util::digest_bytes(crate::orchestration::INSTRUCTIONS.as_bytes())
+    ));
+    if pair.harness == "claude-code" {
+        enforcement.applied_controls.push(
+            "--disallowedTools Agent,Task,TeamCreate prevents native Claude delegation".to_string(),
+        );
+    }
+    enforcement.gaps.push("Delegation guidance cannot prevent a harness from launching other processes through shell tools; non-Claude adapters have no native delegation-tool denial.".to_string());
     // A wrapper between ahu and the harness can add flags ahu refuses to pass.
     if let Some(note) = harness::wrapper_interposed(&harness_executable) {
         enforcement.gaps.push(note);
@@ -514,6 +525,7 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         cwd: &record.worktree,
         permissions: record.identity.permissions,
     })?;
+    let rebuilt = crate::orchestration::configure(rebuilt)?;
     if rebuilt.redacted() != record.launch_command {
         bail!(
             "the recorded launch command for task {} does not match what its configuration \
@@ -586,6 +598,7 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
 
     let status = std::process::Command::new(&executable)
         .args(&rebuilt.args)
+        .env("AHU_BIN", std::env::current_exe()?)
         .current_dir(&record.worktree)
         .status()
         .map_err(|e| {

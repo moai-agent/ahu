@@ -203,6 +203,17 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
         },
     });
 
+    inventory.items.push(Item {
+        category: Category::Identity,
+        name: "ahu delegation contract v1".to_string(),
+        location: None,
+        scope: "ahu launcher".to_string(),
+        visibility: Visibility::Available,
+        digest: Some(crate::util::digest_bytes(crate::orchestration::INSTRUCTIONS.as_bytes())[..12].to_string()),
+        shared: true,
+        notes: vec!["Supplied on launch: separate cmux sessions through ahu launch for every assignment; Claude native delegation tools denied. Other harnesses receive guidance in the task prompt.".to_string()],
+    });
+
     // 2. Repository configuration actually carried into the task worktree.
     for entry in &snapshot.entries {
         let category = classify(&entry.path);

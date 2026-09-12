@@ -195,9 +195,12 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
     assert_eq!(args[1], "claude-opus-5");
     assert_eq!(args[2], "--agent");
     assert_eq!(args[3], "chris");
-    assert_eq!(args[4], "--");
+    assert_eq!(args[4], "--append-system-prompt");
+    assert!(recorded.contains(ahu::orchestration::INSTRUCTIONS));
+    assert!(recorded.contains("--disallowedTools\nAgent,Task,TeamCreate\n--\n"));
+    let separator = args.iter().position(|a| *a == "--").unwrap();
     // The fake harness records one argument per line, so compare line by line.
-    assert_eq!(args[5..].join("\n"), prompt);
+    assert_eq!(args[separator + 1..].join("\n"), prompt);
     assert!(
         !canary.exists(),
         "command substitution inside the prompt was executed"
@@ -291,6 +294,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
             permissions: Default::default(),
         })
         .unwrap();
+    let command = ahu::orchestration::configure(command).unwrap();
     let enforcement = adapter.enforcement("claude-opus-5").unwrap();
     let record = TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
