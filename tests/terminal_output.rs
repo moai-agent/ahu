@@ -415,6 +415,79 @@ fn redirected_commands_match_explicit_plain_output() {
 }
 
 #[test]
+fn composer_output_fixture() {
+    let Ok(path) = std::env::var("AHU_TEST_COMPOSER_OUTPUT") else {
+        return;
+    };
+    let choice = match std::env::var("AHU_TEST_COMPOSER_COLOR").unwrap().as_str() {
+        "never" => ahu::style::ColorChoice::Never,
+        "auto" => ahu::style::ColorChoice::Auto,
+        "always" => ahu::style::ColorChoice::Always,
+        _ => panic!("invalid fixture color"),
+    };
+    ahu::style::configure(Some(choice));
+    let input = std::env::var("AHU_TEST_COMPOSER_INPUT").unwrap();
+    let mut reader = std::io::Cursor::new(input.as_bytes());
+    let mut output = Vec::new();
+    let mut console = ahu::launcher::Console {
+        input: &mut reader,
+        output: &mut output,
+        interactive: true,
+    };
+    let prompt = ahu::launcher::read_prompt(&mut console).unwrap();
+    assert_eq!(
+        prompt.as_deref(),
+        (!input.starts_with(".cancel")).then_some("  fixture  \nsecond")
+    );
+    std::fs::write(path, output).unwrap();
+}
+
+#[test]
+fn redirected_composer_matches_explicit_plain_output() {
+    // Separate processes exercise the real stdout detection and isolate the
+    // process-wide style policy. The test runner's output is kept separate from
+    // the Console bytes so its timing cannot affect the comparison.
+    for input in [
+        "  fixture  \nsecond\n.\nyes\n",
+        ".cancel\n",
+        "  fixture  \nsecond\n",
+    ] {
+        let run = |color: &str| {
+            let rendered = tempfile::NamedTempFile::new().unwrap();
+            let stdout = tempfile::NamedTempFile::new().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "composer_output_fixture"])
+                .env("AHU_TEST_COMPOSER_OUTPUT", rendered.path())
+                .env("AHU_TEST_COMPOSER_COLOR", color)
+                .env("AHU_TEST_COMPOSER_INPUT", input)
+                .env("TERM", "xterm-256color")
+                .env_remove("NO_COLOR")
+                .stdout(stdout.reopen().unwrap())
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "{}",
+                std::fs::read_to_string(stdout.path()).unwrap()
+            );
+            std::fs::read(rendered.path()).unwrap()
+        };
+        let plain = run("never");
+        assert_eq!(run("auto"), plain);
+        assert_eq!(
+            String::from_utf8(plain).unwrap(),
+            concat!(
+                "\nTask prompt. Paste or type as many lines as you like.\n",
+                "Pasting does not submit. A separate confirmation follows the preview.\n",
+                "  Finish: type `.` alone on a line, or end input.\n",
+                "  Cancel: type `.cancel` alone on a line to abandon it.\n\n",
+            )
+        );
+        assert!(run("always").contains(&0x1b));
+    }
+}
+
+#[test]
 fn bad_color_options_are_usage_errors() {
     for args in [
         vec!["--color=invalid"],

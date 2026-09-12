@@ -37,8 +37,13 @@ Commands:
   inventory [@agent]    Show everything that can influence an agent's context
   hygiene [@agent]      Run the context hygiene review now
   tasks                 List tasks launched from this repository
+  task <task-id> [--output json]
+                        Inspect a task's recorded session state and locations
+  diff <task-id>         Review tracked changes since launch; list untracked files
   focus <task-id>       Bring a task's cmux session to the front
   doctor                Check repository, configuration, harness, and cmux
+  codex                 Open Codex here with workspace-write sandboxing and
+                        on-request approvals (uses Codex's configured model)
   run-task              Internal: run a prepared task (used by cmux)
 
 Options:
@@ -131,10 +136,18 @@ pub enum Command {
         agent: Option<String>,
     },
     Tasks,
+    Task {
+        task_id: String,
+        output_json: bool,
+    },
+    Diff {
+        task_id: String,
+    },
     Focus {
         task_id: String,
     },
     Doctor,
+    Codex,
     RunTask {
         task_dir: PathBuf,
     },
@@ -239,6 +252,31 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         "doctor" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Doctor)
+        }
+        "codex" => {
+            expect_no_more(&args[1..])?;
+            Ok(Command::Codex)
+        }
+        "task" | "diff" => {
+            let task_id = args
+                .get(1)
+                .filter(|id| !id.is_empty() && !id.starts_with('-'))
+                .cloned()
+                .ok_or_else(|| {
+                    crate::util::Error::new(format!("`ahu {first}` needs a task id."))
+                })?;
+            let output_json = first == "task"
+                && args.get(2).map(String::as_str) == Some("--output")
+                && args.get(3).map(String::as_str) == Some("json");
+            expect_no_more(&args[if output_json { 4 } else { 2 }..])?;
+            if first == "task" {
+                Ok(Command::Task {
+                    task_id,
+                    output_json,
+                })
+            } else {
+                Ok(Command::Diff { task_id })
+            }
         }
         "focus" => {
             let task_id = args

@@ -77,6 +77,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         // `run-task` is started by cmux inside the task worktree and works from
         // the task record alone, so it does not need repository discovery.
         Command::RunTask { task_dir } => commands::run_task(&task_dir),
+        Command::Codex => {
+            let repo = commands::repo_from_cwd()?;
+            commands::codex(&repo)
+        }
         Command::Launch {
             agent,
             prompt,
@@ -129,11 +133,17 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                     commands::hygiene_cmd(console, &repo, agent.as_deref())
                 }
                 Command::Tasks => commands::tasks(console, &repo),
+                Command::Task {
+                    task_id,
+                    output_json,
+                } => commands::task_cmd(console, &repo, &task_id, output_json),
+                Command::Diff { task_id } => commands::diff_cmd(console, &repo, &task_id),
                 Command::Focus { task_id } => commands::focus(console, &repo, &task_id),
                 Command::Help
                 | Command::Version
                 | Command::Explain { .. }
                 | Command::Doctor
+                | Command::Codex
                 | Command::Launch { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })

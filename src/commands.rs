@@ -31,6 +31,45 @@ pub fn repo_from_cwd() -> Result<Repo> {
     git::discover(&cwd).map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))
 }
 
+/// Open a coordinating session in the invoking terminal. Repository discovery
+/// registers executable exclusions before resolving Codex, just as for agents.
+pub fn codex(repo: &Repo) -> Result<i32> {
+    let executable = selection::resolve_executable("codex").ok_or_else(|| {
+        crate::util::Error::new(
+            "Codex is not installed or is not available on PATH outside the repository.",
+        )
+        .with_kind(crate::util::ErrorKind::Prerequisite)
+    })?;
+    let state = crate::state::ensure_checkout_state(&repo.root)?;
+    let mut command = std::process::Command::new(executable);
+    command
+        .args([
+            "--sandbox",
+            "workspace-write",
+            "--ask-for-approval",
+            "on-request",
+        ])
+        .env("AHU_BIN", std::env::current_exe()?)
+        .env("AHU_STATE_DIR", state);
+    // Inherit the terminal and cwd. Replacing ahu gives Codex terminal signals
+    // directly and preserves its exit status, including signal termination.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(crate::util::Error::new(format!(
+            "cannot start Codex: {}",
+            command.exec()
+        )))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command
+            .status()
+            .map_err(|e| crate::util::Error::new(format!("cannot start Codex: {e}")))?;
+        Ok(status.code().unwrap_or(5))
+    }
+}
+
 /// Load configuration, or run first-run setup, or explain why it cannot.
 fn config_or_setup(repo: &Repo, console: &mut Console<'_>) -> Result<Option<LoadedConfig>> {
     if let Some(loaded) = config::load(&repo.root)? {
@@ -379,7 +418,7 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         // prompt and from repository configuration. `tasks` is as much a
         // disclosure surface as the launch preview, so it escapes the same way.
         console.say(&format!(
-            "{} [{}] {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n",
+            "{} [session {}] {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n",
             display_safe(&record.task_id),
             record.state.as_str(),
             display_safe(&record.title),
@@ -403,7 +442,8 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         // This footer explains the `exited` state in the listing above. With no
         // readable records there is no such listing for it to explain.
         console.say(
-            "\n`exited` means the harness process ended. It is not a claim that the task \
+            "\nSession state does not indicate whether the agent is working or awaiting input.\n\
+             `exited` means the harness process ended. It is not a claim that the task \
              succeeded.\n",
         )?;
     }
@@ -513,6 +553,132 @@ fn strip_record_path(reason: &str, dir: &Path) -> String {
         .strip_prefix(&prefix)
         .map(|rest| rest.trim_start_matches([':', ' ']).to_string())
         .unwrap_or_else(|| reason.to_string())
+}
+
+/// Resolve exact IDs before unique prefixes, including unreadable candidates.
+fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
+    if id.is_empty() {
+        bail!(kind: crate::util::ErrorKind::Usage, "a task id must not be empty.");
+    }
+    // Inspection needs no live cmux connection and does not rewrite records.
+    let listing = task::list(&repo.identity())?;
+    let exact = listing.records.iter().any(|(_, r)| r.task_id == id)
+        || listing.unreadable.iter().any(|r| r.task_id == id);
+    let matches = |candidate: &str| candidate == id || (!exact && candidate.starts_with(id));
+    let records: Vec<_> = listing
+        .records
+        .into_iter()
+        .filter(|(_, r)| matches(&r.task_id))
+        .collect();
+    let unreadable: Vec<_> = listing
+        .unreadable
+        .into_iter()
+        .filter(|r| matches(&r.task_id))
+        .collect();
+    if records.len() + unreadable.len() > 1 {
+        bail!(kind: crate::util::ErrorKind::Usage, "ambiguous task prefix {id:?}; use a full task id from `ahu tasks`.");
+    }
+    if let Some(record) = unreadable.first() {
+        bail!(
+            "task {} has an unreadable record at {}: {}",
+            record.task_id,
+            record.dir.display(),
+            record.reason
+        );
+    }
+    records.into_iter().next().ok_or_else(|| {
+        crate::util::Error::new(format!("no task matching {id:?}."))
+            .with_kind(crate::util::ErrorKind::Usage)
+    })
+}
+
+/// A small, versioned inspection contract; never expose the full launch record.
+pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) -> Result<i32> {
+    let (dir, record) = inspect_task(repo, id)?;
+    if json {
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "task_id": record.task_id,
+            "agent": record.agent_label(),
+            "harness": record.identity.harness,
+            "model": record.identity.model,
+            "branch": record.branch,
+            "base_commit": record.base_commit,
+            "worktree": record.worktree,
+            "worktree_exists": record.worktree.is_dir(),
+            "record_path": dir.join("task.json"),
+            "cmux_workspace_id": record.cmux_workspace_id,
+            "cmux_window_id": record.cmux_window_id,
+            "session_state": record.state.as_str(),
+            "state_source": "record",
+            "completion_verified": false,
+        });
+        console.say(&format!("{}\n", serde_json::to_string(&value)?))?;
+    } else {
+        console.say(&format!(
+            "{} [session {}]\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  base      {}\n  worktree  {}\n  exists    {}\n  record    {}\n  cmux      {}\n\nState is recorded, not a live activity check. Task completion is not verified.\n",
+            display_safe(&record.task_id), record.state.as_str(), display_safe(&record.agent_label()),
+            display_safe(&record.identity.harness), display_safe(&record.identity.model),
+            display_safe(&record.branch), display_safe(record.base_commit.as_deref().unwrap_or("unknown")),
+            display_path(&record.worktree), record.worktree.is_dir(), display_path(&dir.join("task.json")),
+            display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none")),
+        ))?;
+    }
+    Ok(0)
+}
+
+/// Compare the task checkout to its launch base without staging or running diff helpers.
+pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32> {
+    use std::io::IsTerminal;
+    let (_, record) = inspect_task(repo, id)?;
+    let task_repo = git::discover(&record.worktree)?;
+    if task_repo.identity() != repo.identity()
+        || task_repo.root.canonicalize()? != record.worktree.canonicalize()?
+    {
+        bail!("task worktree does not belong to this repository or is not a checkout root.");
+    }
+    let base = record
+        .base_commit
+        .as_deref()
+        .filter(|base| matches!(base.len(), 40 | 64) && base.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| crate::util::Error::new("task has no valid launch base commit."))?;
+    let run = |args: &[&str]| -> Result<Vec<u8>> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&record.worktree)
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "cannot inspect task diff: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(output.stdout)
+    };
+    let patch = run(&[
+        "--no-pager",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--binary",
+        base,
+        "--",
+    ])?;
+    let untracked = run(&["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for path in untracked.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        eprintln!(
+            "Untracked (not included in diff): {}",
+            display_safe(&String::from_utf8_lossy(path))
+        );
+    }
+    if std::io::stdout().is_terminal() {
+        console.say(&display_safe_block(&String::from_utf8_lossy(&patch)))?;
+    } else {
+        // Redirected output stays a byte-exact patch, including non-UTF-8 data.
+        console.output.write_all(&patch)?;
+    }
+    Ok(0)
 }
 
 /// `ahu focus <task-id>`

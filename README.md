@@ -84,6 +84,14 @@ session with `codex --sandbox workspace-write --ask-for-approval on-request`.
 Managed policies may still disallow that approval. `--allow-widened-approvals`
 controls the child agent only; it does not grant the parent session more access.
 
+Run `ahu codex` from a Git checkout to open that coordinating session in your
+current terminal. It runs `codex --sandbox workspace-write --ask-for-approval
+on-request`, inherits your current directory, and uses Codex's configured model.
+It needs no ahu project configuration or cmux connection and creates no task
+worktree. Its ahu state stays in the checkout's ignored `.ahu/state/` directory.
+Start it from your terminal: a process launched inside an existing sandbox still
+inherits that outer sandbox's restrictions.
+
 Run `ahu` inside a Git repository, from a cmux terminal (`ahu doctor` checks that
 cmux, a harness, and the repository are all in order first):
 
@@ -348,12 +356,42 @@ pending behavior change for the next version bump.
 | `ahu inventory [@agent]` | Everything that can influence an agent's context |
 | `ahu hygiene [@agent]` | Run the context hygiene review now |
 | `ahu tasks` | Tasks launched from this repository |
+| `ahu task <task-id> [--output json]` | Recorded session state and task locations; works without cmux |
+| `ahu diff <task-id>` | Tracked changes since the launch base, with untracked paths listed on stderr |
 | `ahu focus <task-id>` | Bring a task's cmux session to the front |
 | `ahu doctor` | Check repository, configuration, harness, and cmux |
 | `ahu explain` | Architecture overview and diagrams (`--markdown`, `--mermaid`, `--open`) |
 | `ahu help` | Usage |
 
 ## What a task gets
+
+Inspect and review a task from the checkout that launched it:
+
+```sh
+ahu task <task-id> --output json
+ahu diff <task-id>
+```
+
+Both commands accept a full task ID or an unambiguous prefix. Inspection reads
+the saved record without contacting cmux or updating it. JSON schema version 1
+includes `task_id`, `agent`, `harness`, `model`, `branch`, `base_commit`,
+`worktree`, `worktree_exists`, `record_path`, `cmux_workspace_id`, and
+`cmux_window_id`. `session_state` is the recorded `starting`, `running`,
+`exited`, or `failed` state; `state_source` is `record` and
+`completion_verified` is always `false`. Missing optional values are JSON null.
+JSON remains unstyled even with `--color=always` and omits prompt text and titles.
+Consumers should tolerate additional fields and check `schema_version`.
+
+The task list labels states as `session running`, `session exited`, and so on.
+A running session may be awaiting input; a process exit does not verify success.
+
+`ahu diff` compares the launch base to the current task worktree, including
+committed, staged, and unstaged tracked changes, including inherited agent
+configuration. Untracked files are listed on stderr and are not included in the
+patch; ignored files are omitted. Git external diff helpers and text conversion
+are disabled. Terminal output escapes control characters; redirected stdout
+preserves the patch bytes. The command fails if the checkout is missing or belongs
+to another repository. Neither command stages, commits, or applies changes.
 
 - **A fresh branch and worktree.** `ahu/<agent>/<task-id>`, based on the HEAD of
   the checkout you launched from, in a directory `ahu` manages outside your
