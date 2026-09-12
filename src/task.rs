@@ -92,7 +92,19 @@ pub struct TaskRecord {
     #[serde(default)]
     pub hooks_digest: String,
     pub materialize: MaterializeReport,
+    /// The launch command with the prompt redacted. The prompt itself lives only
+    /// in `prompt.txt`, which is written owner-only.
     pub launch_command: LaunchCommand,
+    /// Digest of the submitted prompt, so the prompt file can be verified
+    /// without a second copy of its contents existing.
+    #[serde(default)]
+    pub prompt_digest: String,
+    /// Absolute path of the harness binary as resolved at submission.
+    ///
+    /// Recorded so the exec does not consult `PATH` a second time, and so the
+    /// preview can show exactly which binary will run.
+    #[serde(default)]
+    pub harness_executable: PathBuf,
     pub enforcement: EnforcementReport,
     pub reliability_warning: Option<String>,
     pub cmux_group_id: Option<String>,
@@ -169,14 +181,39 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Create a directory that only its owner can read.
+fn create_private_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn set_owner_only(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// Write a task record and its prompt.
 ///
 /// The prompt is written as its own file with owner-only permissions and is
 /// never placed on a command line. `ahu run-task` reads it back and passes it to
 /// the harness as a single argument vector element.
 pub fn save(dir: &Path, record: &TaskRecord, prompt: &str) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
+    create_private_dir(dir)?;
     state::write_json(&dir.join(TASK_FILE), record)?;
+    // The record names the agent, the repository, and the task title. It is not
+    // as sensitive as the prompt, but it has no reason to be world-readable.
+    set_owner_only(&dir.join(TASK_FILE))?;
     let prompt_path = dir.join(PROMPT_FILE);
     std::fs::write(&prompt_path, prompt.as_bytes())
         .map_err(|e| Error::new(format!("cannot write {}: {e}", prompt_path.display())))?;
@@ -220,7 +257,8 @@ pub fn load_prompt(dir: &Path) -> Result<String> {
 pub fn set_state(dir: &Path, new_state: TaskState) -> Result<()> {
     let mut record = load(dir)?;
     record.state = new_state;
-    state::write_json(&dir.join(TASK_FILE), &record)
+    state::write_json(&dir.join(TASK_FILE), &record)?;
+    set_owner_only(&dir.join(TASK_FILE))
 }
 
 /// Every task recorded for a repository, newest first.

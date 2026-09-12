@@ -151,7 +151,11 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
     repo.commit("fixture");
 
     let temp = tempfile::TempDir::new().unwrap();
-    let worktree = temp.path().join("worktree");
+    // `run_task` re-derives the working directory from the repository identity
+    // and task id, so the fixture must use the path ahu would actually create.
+    let worktree = repo
+        .state_path()
+        .join("repos/testrepo/worktrees/testtask0001");
     std::fs::create_dir_all(&worktree).unwrap();
     let recorder = temp.path().join("argv.txt");
     let bin = fake_harness(temp.path(), &recorder);
@@ -204,7 +208,9 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
 fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
     let repo = TestRepo::new();
     let temp = tempfile::TempDir::new().unwrap();
-    let worktree = temp.path().join("worktree");
+    let worktree = repo
+        .state_path()
+        .join("repos/testrepo/worktrees/testtask0001");
     std::fs::create_dir_all(&worktree).unwrap();
     let recorder = temp.path().join("argv.txt");
     let bin = fake_harness(temp.path(), &recorder);
@@ -300,8 +306,10 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str) {
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
         hooks_digest: String::new(),
+        prompt_digest: ahu::util::digest_bytes(prompt.as_bytes()),
+        harness_executable: std::path::PathBuf::from("claude"),
         materialize: Default::default(),
-        launch_command: command,
+        launch_command: command.redacted(),
         reliability_warning: enforcement
             .needs_reliability_warning()
             .then(|| harness::RELIABILITY_WARNING.to_string()),

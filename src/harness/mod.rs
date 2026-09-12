@@ -39,6 +39,30 @@ pub struct LaunchRequest<'a> {
 pub struct LaunchCommand {
     pub program: String,
     pub args: Vec<String>,
+    /// Index in `args` holding the task prompt, when one is passed there.
+    ///
+    /// Task records store the command with this element replaced, so a prompt is
+    /// never written to a second file with weaker permissions than the one ahu
+    /// deliberately protects.
+    #[serde(default)]
+    pub prompt_arg: Option<usize>,
+}
+
+/// Placeholder standing in for the prompt in a stored command.
+pub const REDACTED_PROMPT: &str = "<prompt: see prompt.txt>";
+
+impl LaunchCommand {
+    /// The command with the prompt replaced by a placeholder, for storage and
+    /// for display.
+    pub fn redacted(&self) -> LaunchCommand {
+        let mut copy = self.clone();
+        if let Some(index) = copy.prompt_arg
+            && let Some(slot) = copy.args.get_mut(index)
+        {
+            *slot = REDACTED_PROMPT.to_string();
+        }
+        copy
+    }
 }
 
 /// What an adapter can actually guarantee about the session it starts.

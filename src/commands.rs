@@ -18,7 +18,7 @@ use crate::launcher::{self, Console};
 use crate::onboard;
 use crate::selection::{self, ResolvedPair};
 use crate::task;
-use crate::util::Result;
+use crate::util::{Result, display_safe};
 
 /// Locate the repository ahu was invoked from.
 ///
@@ -96,7 +96,10 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
             &agent.identity_digest()[..12],
         ))?;
         if !agent.manifest.description.is_empty() {
-            console.say(&format!("  {}\n", agent.manifest.description))?;
+            console.say(&format!(
+                "  {}\n",
+                display_safe(&agent.manifest.description)
+            ))?;
         }
         console.say("\n")?;
     }
@@ -211,7 +214,7 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                         "  {:<12} {} [{}]\n",
                         hook.scope.as_str(),
                         hook.label(),
-                        hook.source
+                        hook.source_label()
                     ))?;
                 }
                 let outside = found.outside_project_policy();
@@ -240,7 +243,7 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                 }
                 for unreadable in &found.unreadable {
                     problems += 1;
-                    console.say(&format!("  unreadable {unreadable}\n"))?;
+                    console.say(&format!("  unreadable {}\n", display_safe(unreadable)))?;
                 }
             }
             Err(e) => {
@@ -639,7 +642,7 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
     if !plan.snapshot.skipped_directories.is_empty() {
         out.push_str(&format!(
             "Not scanned, so not inherited: {}\n",
-            plan.snapshot.skipped_directories.join(", ")
+            display_safe(&plan.snapshot.skipped_directories.join(", "))
         ));
     }
     out.push_str(&hooks::render_for_preview(
@@ -663,18 +666,18 @@ pub fn render_preview(repo: &Repo, plan: &launch::LaunchPlan, prompt: &str) -> S
     }
     out.push_str(&format!(
         "\nCommand to be run in the worktree (the prompt is one argument, never shell input):\n  {} {}\n",
-        plan.command.program,
+        plan.harness_executable.display(),
         plan.command
+            .redacted()
             .args
             .iter()
-            .map(|a| if a.len() > 40 {
-                format!("<prompt: {} chars>", a.chars().count())
-            } else {
-                a.clone()
-            })
+            .map(|a| display_safe(a))
             .collect::<Vec<_>>()
             .join(" ")
     ));
+    out.push_str(
+        "The harness binary is resolved from PATH once, here, and that exact path is what runs.\n",
+    );
     out
 }
 

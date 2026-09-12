@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::util::{Result, digest_bytes};
+use crate::util::{Result, digest_bytes, display_safe};
 
 /// Where a hook is configured, which decides whether it is project policy and
 /// whether it travels into a task worktree.
@@ -103,7 +103,15 @@ pub struct Hook {
     /// `command` for a shell hook; anything else is recorded as declared.
     pub kind: String,
     /// The shell command, when this is a command hook.
+    ///
+    /// Never serialized: hook commands routinely embed credentials, and task
+    /// records are ordinary files. `command_digest` identifies the command for
+    /// drift detection without storing it.
+    #[serde(skip)]
     pub command: Option<String>,
+    /// Digest of the command, which is what gets persisted and compared.
+    #[serde(default)]
+    pub command_digest: String,
     pub scope: Scope,
     /// Settings file the hook is declared in, repository-relative when inside
     /// the repository and absolute otherwise.
@@ -112,17 +120,36 @@ pub struct Hook {
 
 impl Hook {
     /// A short, stable label for terminal output.
+    ///
+    /// Only the command's program is shown, not its arguments: hook commands
+    /// routinely carry tokens in their arguments, and an inventory must not leak
+    /// a credential merely to describe a hook. The digest identifies the whole
+    /// command for drift purposes.
     pub fn label(&self) -> String {
         let target = match &self.command {
-            Some(command) => truncate(command, 60),
-            None => format!("<{} hook>", self.kind),
+            Some(command) => {
+                let program = command.split_whitespace().next().unwrap_or_default();
+                let rendered = display_safe(&truncate(program, 48));
+                if command.split_whitespace().nth(1).is_some() {
+                    format!("{rendered} …")
+                } else {
+                    rendered
+                }
+            }
+            None => format!("<{} hook>", display_safe(&self.kind)),
         };
+        let event = display_safe(&self.event);
         match &self.matcher {
             Some(matcher) if !matcher.is_empty() => {
-                format!("{}:{matcher} → {target}", self.event)
+                format!("{event}:{} → {target}", display_safe(matcher))
             }
-            _ => format!("{} → {target}", self.event),
+            _ => format!("{event} → {target}"),
         }
+    }
+
+    /// The settings file this hook came from, safe to print.
+    pub fn source_label(&self) -> String {
+        display_safe(&self.source)
     }
 
     pub fn digest(&self) -> String {
@@ -133,7 +160,7 @@ impl Hook {
                 self.event,
                 self.matcher.as_deref().unwrap_or(""),
                 self.kind,
-                self.command.as_deref().unwrap_or("")
+                self.command_digest
             )
             .as_bytes(),
         )
@@ -336,13 +363,15 @@ fn parse_hooks(value: &serde_json::Value, scope: Scope, source: &str) -> Option<
                     .and_then(|t| t.as_str())
                     .unwrap_or("unknown")
                     .to_string();
+                let body = command
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string);
                 found.push(Hook {
                     event: event.clone(),
                     matcher: matcher.clone(),
-                    command: command
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .map(str::to_string),
+                    command_digest: digest_bytes(body.as_deref().unwrap_or("").as_bytes()),
+                    command: body,
                     kind,
                     scope,
                     source: source.to_string(),
@@ -385,7 +414,7 @@ pub fn render_for_preview(inventory: &HookInventory, executable_config_files: us
                 "     {} [{}] {}\n",
                 hook.label(),
                 hook.scope.as_str(),
-                hook.source
+                hook.source_label()
             ));
         }
     }
@@ -407,7 +436,7 @@ pub fn render_for_preview(inventory: &HookInventory, executable_config_files: us
                 "     - {} [{}] {}\n",
                 hook.label(),
                 hook.scope.as_str(),
-                hook.source
+                hook.source_label()
             ));
             out.push_str(&format!("       {}\n", hook.scope.why_not_project_policy()));
         }
@@ -424,7 +453,8 @@ pub fn render_for_preview(inventory: &HookInventory, executable_config_files: us
     }
     for unreadable in &inventory.unreadable {
         out.push_str(&format!(
-            "\n  !! {unreadable} exists but ahu could not read its hooks; treat them as unknown.\n"
+            "\n  !! {} exists but ahu could not read its hooks; treat them as unknown.\n",
+            display_safe(unreadable)
         ));
     }
     out

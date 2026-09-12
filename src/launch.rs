@@ -52,6 +52,8 @@ pub struct LaunchPlan {
     pub task_dir: PathBuf,
     pub title: String,
     pub command: LaunchCommand,
+    /// Absolute path of the harness binary, resolved once at plan time.
+    pub harness_executable: PathBuf,
 }
 
 impl LaunchPlan {
@@ -124,6 +126,16 @@ pub fn plan(
         cwd: &worktree,
     })?;
     let enforcement = adapter.enforcement(&pair.model);
+    let harness_executable = crate::selection::resolve_executable(&command.program)
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            Error::new(format!(
+                "{} is not installed on this machine ({} was not found on PATH).\n\
+                 This is a diagnostic for your machine, not a reason to select a different \
+                 harness: the project's policy is the same for everyone.",
+                pair.harness, command.program
+            ))
+        })?;
 
     Ok(LaunchPlan {
         mode: if agent.is_some() {
@@ -144,6 +156,7 @@ pub fn plan(
         task_dir,
         title,
         command,
+        harness_executable,
     })
 }
 
@@ -244,7 +257,10 @@ pub fn execute(
         hooks: plan.hooks.clone(),
         hooks_digest: plan.hooks.digest(),
         materialize,
-        launch_command: plan.command.clone(),
+        // The prompt lives only in prompt.txt, which is owner-only.
+        launch_command: plan.command.redacted(),
+        prompt_digest: crate::util::digest_bytes(prompt.as_bytes()),
+        harness_executable: plan.harness_executable.clone(),
         enforcement: plan.enforcement.clone(),
         reliability_warning: plan.reliability_warning().map(str::to_string),
         cmux_group_id: None,
@@ -419,10 +435,36 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         );
     }
 
-    // Rebuild the argument vector from the frozen record rather than trusting
-    // the stored one, and confirm the two agree. A mismatch means the record was
-    // edited after submission, and a running session must keep its launch
-    // configuration.
+    // Verify the prompt file against the digest frozen at submission, then
+    // rebuild the argument vector from the record's identity and compare the
+    // redacted form. Together these cover the whole command without the record
+    // holding a second copy of the prompt.
+    let prompt_digest = crate::util::digest_bytes(prompt.as_bytes());
+    if !record.prompt_digest.is_empty() && prompt_digest != record.prompt_digest {
+        bail!(
+            "the prompt file for task {} does not match the digest recorded at submission. \
+             ahu will not start a session with a prompt it cannot vouch for.",
+            record.task_id
+        );
+    }
+
+    // The working directory is part of the launch identity: the harness
+    // discovers instructions, skills, hooks, and MCP configuration from it. It
+    // is re-derived from the repository identity and task id rather than trusted
+    // as written, so an edited record cannot redirect the session.
+    let expected_worktree = state::worktree_dir(&record.repo_identity, &record.task_id)?;
+    if record.worktree != expected_worktree {
+        bail!(
+            "task {} records a working directory that is not the one ahu would create for it.\n\
+             expected {}\n\
+             found    {}\n\
+             ahu will not start a session in a directory it did not prepare.",
+            record.task_id,
+            expected_worktree.display(),
+            record.worktree.display()
+        );
+    }
+
     let adapter = harness::adapter_for(&record.identity.harness)?;
     let rebuilt = adapter.launch_command(&LaunchRequest {
         model: &record.identity.model,
@@ -434,11 +476,28 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         prompt: &prompt,
         cwd: &record.worktree,
     })?;
-    if rebuilt != record.launch_command {
+    if rebuilt.redacted() != record.launch_command {
         bail!(
             "the recorded launch command for task {} does not match what its configuration \
              produces now. ahu will not start a session under a changed identity.",
             record.task_id
+        );
+    }
+
+    // Exec the binary resolved at submission rather than consulting PATH again
+    // here, so the workspace shell's environment cannot change which harness
+    // runs. The file name must still be the harness the adapter names.
+    let executable = if record.harness_executable.as_os_str().is_empty() {
+        std::path::PathBuf::from(&rebuilt.program)
+    } else {
+        record.harness_executable.clone()
+    };
+    if executable.file_name().and_then(|n| n.to_str()) != Some(rebuilt.program.as_str()) {
+        bail!(
+            "task {} records harness binary {}, which is not {}. ahu will not run it.",
+            record.task_id,
+            executable.display(),
+            rebuilt.program
         );
     }
 
@@ -465,14 +524,14 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         let _ = client.set_status(workspace, TaskState::Running.as_str());
     }
 
-    let status = std::process::Command::new(&record.launch_command.program)
-        .args(&record.launch_command.args)
+    let status = std::process::Command::new(&executable)
+        .args(&rebuilt.args)
         .current_dir(&record.worktree)
         .status()
         .map_err(|e| {
             Error::new(format!(
                 "cannot start {}: {e}\nThe worktree and task record are preserved at {} and {}.",
-                record.launch_command.program,
+                executable.display(),
                 record.worktree.display(),
                 task_dir.display()
             ))

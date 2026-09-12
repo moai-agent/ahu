@@ -14,7 +14,7 @@ use crate::config::LoadedConfig;
 use crate::harness::EnforcementReport;
 use crate::hooks::HookInventory;
 use crate::snapshot::ConfigSnapshot;
-use crate::util::{Result, digest_file};
+use crate::util::{Result, digest_file, display_safe};
 
 /// How much ahu actually knows about one source.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -456,29 +456,31 @@ pub fn render(inventory: &Inventory) -> String {
         }
         out.push_str(&format!("{heading}\n"));
         for item in items {
+            // Names, locations, and notes carry repository-derived text such as
+            // file names, hook labels, and native settings keys.
             out.push_str(&format!(
                 "  [{}] {}{}\n",
                 item.visibility.as_str(),
-                item.name,
+                display_safe(&item.name),
                 item.digest
                     .as_ref()
-                    .map(|d| format!(" ({d})"))
+                    .map(|d| format!(" ({})", display_safe(d)))
                     .unwrap_or_default()
             ));
             if let Some(location) = &item.location
                 && location != &item.name
             {
-                out.push_str(&format!("      at {location}\n"));
+                out.push_str(&format!("      at {}\n", display_safe(location)));
             }
             for note in &item.notes {
-                out.push_str(&format!("      {note}\n"));
+                out.push_str(&format!("      {}\n", display_safe(note)));
             }
         }
         out.push('\n');
     }
     out.push_str("What ahu cannot see\n");
     for gap in &inventory.coverage_gaps {
-        out.push_str(&format!("  - {gap}\n"));
+        out.push_str(&format!("  - {}\n", display_safe(gap)));
     }
     out.push_str(
         "\nThis inventory is not complete. `available` means a source is discoverable by the\n\

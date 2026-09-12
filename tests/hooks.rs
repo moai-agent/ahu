@@ -357,6 +357,7 @@ fn the_preview_warns_about_hooks_that_are_not_project_policy() {
         event: "PreToolUse".to_string(),
         matcher: Some("Bash".to_string()),
         kind: "command".to_string(),
+        command_digest: String::new(),
         command: Some("./.claude/hooks/guard.sh".to_string()),
         scope: Scope::Project,
         source: ".claude/settings.json".to_string(),
@@ -365,6 +366,7 @@ fn the_preview_warns_about_hooks_that_are_not_project_policy() {
         event: "UserPromptSubmit".to_string(),
         matcher: None,
         kind: "command".to_string(),
+        command_digest: String::new(),
         command: Some("inject-my-context".to_string()),
         scope: Scope::User,
         source: "/home/someone/.claude/settings.json".to_string(),
@@ -373,6 +375,7 @@ fn the_preview_warns_about_hooks_that_are_not_project_policy() {
         event: "PostToolUse".to_string(),
         matcher: None,
         kind: "command".to_string(),
+        command_digest: String::new(),
         command: Some("local-only-audit".to_string()),
         scope: Scope::ProjectLocal,
         source: ".claude/settings.local.json".to_string(),
@@ -389,7 +392,10 @@ fn the_preview_warns_about_hooks_that_are_not_project_policy() {
         "{text}"
     );
     assert!(text.contains(hooks::NON_PROJECT_HOOK_WARNING), "{text}");
-    assert!(text.contains("inject-my-context"), "{text}");
+    assert!(
+        text.contains("inject-my-context"),
+        "the hook's program is still identifiable: {text}"
+    );
     assert!(
         text.contains("cmux injects its own Claude Code hooks"),
         "{text}"
@@ -434,4 +440,69 @@ fn is_executable(path: &PathBuf) -> bool {
         let _ = path;
         true
     }
+}
+
+/// A repository must not be able to paint over ahu's own disclosure.
+#[test]
+fn control_characters_from_repository_content_never_reach_the_terminal_raw() {
+    const ESC: char = '\u{1b}';
+    let mut found = HookInventory::default();
+    found.hooks.push(ahu::hooks::Hook {
+        event: format!("PreToolUse{ESC}[2J"),
+        matcher: Some(format!("Bash{ESC}[4A")),
+        kind: "command".to_string(),
+        command_digest: String::new(),
+        command: Some(format!(
+            "{ESC}[4A{ESC}[2K  none found in the settings files"
+        )),
+        scope: Scope::Project,
+        source: format!(".claude/settings{ESC}[2K.json"),
+    });
+
+    let text = hooks::render_for_preview(&found, 0);
+    assert!(
+        !text.contains(ESC),
+        "no raw escape may survive into ahu's output: {text:?}"
+    );
+    assert!(
+        text.contains("\\x1b"),
+        "escapes are shown, not dropped: {text}"
+    );
+}
+
+/// Hook arguments routinely carry credentials; only the program is shown.
+#[test]
+fn hook_arguments_are_not_printed_or_persisted() {
+    let repo = TestRepo::new();
+    let home = tempfile::TempDir::new().unwrap();
+    repo.write(
+        ".claude/settings.json",
+        &settings_with_hooks(
+            "Stop",
+            None,
+            "curl -H \"Authorization: Bearer sk-secret-TOKEN-abcdef\" https://example.invalid",
+        ),
+    );
+
+    let found = hooks::collect_in(repo.path(), &locations(home.path(), false)).unwrap();
+    let rendered = hooks::render_for_preview(&found, 0);
+    assert!(
+        !rendered.contains("sk-secret-TOKEN-abcdef"),
+        "a token in a hook argument must not be printed: {rendered}"
+    );
+    assert!(
+        rendered.contains("curl"),
+        "the program is still identifiable: {rendered}"
+    );
+
+    // Nor may it be written into the task record.
+    let serialized = serde_json::to_string(&found).unwrap();
+    assert!(
+        !serialized.contains("sk-secret-TOKEN-abcdef"),
+        "a token must not be persisted in a task record: {serialized}"
+    );
+    assert!(
+        !found.hooks[0].command_digest.is_empty(),
+        "the digest still identifies the command for drift"
+    );
 }

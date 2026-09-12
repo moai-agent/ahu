@@ -143,6 +143,15 @@ pub fn check_prerequisite(harness_id: &str) -> Prerequisite {
     }
 }
 
+/// Resolve an executable through `PATH`, returning its absolute path.
+///
+/// ahu resolves the harness binary once, at submission, and records the result.
+/// The launch then execs that exact path instead of consulting `PATH` again in
+/// the task workspace's shell.
+pub fn resolve_executable(executable: &str) -> Option<String> {
+    which(executable)
+}
+
 fn which(executable: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {

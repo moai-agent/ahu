@@ -15,7 +15,7 @@ use crate::harness::EnforcementReport;
 use crate::inventory::{Category, Inventory};
 use crate::state;
 use crate::task::format_rfc3339;
-use crate::util::Result;
+use crate::util::{Result, display_safe};
 
 /// Operational record of when a review last ran. Timestamps are state, not
 /// policy: they never change what the project's cadence is.
@@ -188,7 +188,7 @@ pub fn render(review: &Review, trigger: Trigger, loaded: &LoadedConfig) -> Strin
     };
     out.push_str(&format!(
         "Context hygiene review for {} ({reason})\n",
-        review.agent_key
+        display_safe(&review.agent_key)
     ));
     out.push_str(&format!(
         "Project cadence: every {} day(s), set by context_hygiene.review_interval_days in {}.\n\n",
@@ -205,16 +205,20 @@ pub fn render(review: &Review, trigger: Trigger, loaded: &LoadedConfig) -> Strin
     } else {
         out.push_str("Sources that may influence this agent:\n");
         for suggestion in &review.suggestions {
+            // `what` and `location` are repository-derived paths and labels.
             out.push_str(&format!(
                 "  - {} [{}{}]\n",
-                suggestion.what,
+                display_safe(&suggestion.what),
                 suggestion.scope,
                 if suggestion.shared { ", shared" } else { "" }
             ));
             if let Some(location) = &suggestion.location {
-                out.push_str(&format!("      at {location}\n"));
+                out.push_str(&format!("      at {}\n", display_safe(location)));
             }
-            out.push_str(&format!("      {}\n", suggestion.supported_action));
+            out.push_str(&format!(
+                "      {}\n",
+                display_safe(&suggestion.supported_action)
+            ));
         }
         out.push('\n');
         out.push_str(

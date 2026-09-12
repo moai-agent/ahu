@@ -182,8 +182,10 @@ pending behavior change for the next version bump.
   copied in at its native path, including uncommitted and Git-ignored files, and
   configuration you have deleted locally stays deleted. Unrelated dirty source
   files stay in your original checkout.
-- **The exact configured model.** No fallback model, no automatic routing, and no
-  change to the harness's own permission and approval boundaries.
+- **The exact configured model, from a pinned binary.** The harness executable is
+  resolved from `PATH` once, at submission, shown in the preview, and that exact
+  path is what runs. No fallback model, no automatic routing, and no change to
+  the harness's own permission and approval boundaries.
 - **A frozen record.** The agent version, instruction digest, configuration
   snapshot digest, policy digest, base commit, branch, worktree, and cmux ids are
   written to local task metadata. Editing an agent later changes the next launch;
@@ -198,7 +200,19 @@ your work for you.
 A task prompt can contain anything — `$(...)`, backticks, pipes, newlines. `ahu`
 never puts a prompt into a shell command. The cmux startup command contains only
 `ahu`'s own executable path and task directory, both shell-quoted; the prompt is
-written to a file and handed to the harness as a single argument.
+written to a file and handed to the harness as a single argument. That file is
+the only copy: it is written owner-only, and the task record stores a digest and
+a placeholder rather than the prompt text.
+
+Repository content is also treated as untrusted on the way *out*. Hook commands,
+agent descriptions, native frontmatter keys, and file names are all rendered with
+control characters escaped, so a repository cannot use terminal escape sequences
+to repaint or erase the disclosures in the launch preview.
+
+Configuration is materialized into a task worktree without following symlinks.
+A symlink at a configuration path in a fresh worktree can only come from the base
+commit, and following it would let a repository direct `ahu`'s writes anywhere on
+the filesystem, so the launch stops and names the path instead.
 
 ## Hooks
 
@@ -210,6 +224,10 @@ Git-ignored directories that were never reviewed.
 **ahu reports hooks and never writes them.** Adding or editing a hook on your
 behalf would be exactly the invisible behaviour modification ahu exists to
 prevent, and hooks are stronger than prose.
+
+Only a hook's program is shown, never its arguments, and only its digest is
+stored in the task record — hook commands routinely carry tokens, and an
+inventory must not leak a credential merely to describe a hook.
 
 `ahu inventory` and `ahu doctor` list every hook ahu can read, from
 `.claude/settings.json`, `.claude/settings.local.json`, `~/.claude/settings.json`,

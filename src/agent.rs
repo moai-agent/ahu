@@ -381,7 +381,10 @@ pub fn resolve_source_path(
             manifest_path.display()
         );
     }
-    Ok(joined)
+    // Return the path that was actually validated. Returning the pre-canonical
+    // join would re-resolve symlinks at read time, leaving a window in which the
+    // file read is not the file that was checked.
+    Ok(canonical)
 }
 
 /// Split a Claude Code agent file into its YAML frontmatter and Markdown body.

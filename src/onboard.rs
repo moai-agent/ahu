@@ -12,7 +12,7 @@ use crate::agent::{self, SourceFormat};
 use crate::bail;
 use crate::catalog;
 use crate::config::AGENTS_RELATIVE_DIR;
-use crate::util::{Error, Result, is_safe_name};
+use crate::util::{Error, Result, display_safe, is_safe_name};
 
 /// A native agent definition ahu found. Finding it is not registering it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +218,14 @@ pub fn register(
 /// This deletes the manifest and nothing else: the native definition, the
 /// repository's skills, existing sessions, and task worktrees are untouched.
 pub fn unregister(repo_root: &Path, name: &str) -> Result<PathBuf> {
+    // `register` constrains names through the candidate checks; this path takes
+    // a name straight from the command line, so it is validated here too rather
+    // than being joined into a path unchecked.
+    if !is_safe_name(name) {
+        bail!(
+            "{name:?} is not a valid ahu agent name, so it cannot name a registration to remove."
+        );
+    }
     let path = repo_root
         .join(AGENTS_RELATIVE_DIR)
         .join(format!("{name}.toml"));
@@ -288,24 +296,26 @@ pub fn render(candidates: &[Candidate], repo_root: &Path) -> String {
         } else {
             "cannot be registered"
         };
+        // `native_model`, `preserved_fields`, and `path` are all taken verbatim
+        // from repository files, so they are sanitized before display.
         out.push_str(&format!(
             "  {} [{}] {}\n",
-            candidate.name,
+            display_safe(&candidate.name),
             candidate.format.as_str(),
             status
         ));
-        out.push_str(&format!("      at {}\n", candidate.path));
+        out.push_str(&format!("      at {}\n", display_safe(&candidate.path)));
         if let Some(model) = &candidate.native_model {
-            out.push_str(&format!("      declares model {model}\n"));
+            out.push_str(&format!("      declares model {}\n", display_safe(model)));
         }
         if !candidate.preserved_fields.is_empty() {
             out.push_str(&format!(
                 "      native fields left in place: {}\n",
-                candidate.preserved_fields.join(", ")
+                display_safe(&candidate.preserved_fields.join(", "))
             ));
         }
         for blocker in &candidate.blockers {
-            out.push_str(&format!("      blocked: {blocker}\n"));
+            out.push_str(&format!("      blocked: {}\n", display_safe(blocker)));
         }
     }
     out.push_str(

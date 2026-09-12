@@ -124,6 +124,31 @@ pub fn is_semver(value: &str) -> bool {
     count == 3
 }
 
+/// Make a string safe to print to a terminal.
+///
+/// Repository content reaches ahu's output in many places: hook commands, agent
+/// descriptions, native frontmatter keys, and file names. Any of those may carry
+/// ANSI escape sequences, and ahu's output is a security surface — the launch
+/// preview is the only thing standing between a repository's hooks and a session
+/// that runs them. A control sequence that scrolls up and repaints those lines
+/// would let a repository hide its own disclosure.
+///
+/// Every control character, including the C1 range, is rendered as a visible
+/// `\xNN` escape. This is applied at the render boundary only, so digests and
+/// stored records keep the true bytes.
+pub fn display_safe(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        let code = ch as u32;
+        if ch.is_control() || (0x80..=0x9f).contains(&code) {
+            out.push_str(&format!("\\x{code:02x}"));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Collapse a prompt into a short single-line task title.
 ///
 /// Only the first nonempty line is used and it is truncated, so a pasted prompt

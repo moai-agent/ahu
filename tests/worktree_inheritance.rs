@@ -222,3 +222,168 @@ fn a_repository_with_no_agent_configuration_produces_an_empty_snapshot() {
     assert!(taken.entries.is_empty());
     assert_eq!(taken.digest().len(), 64);
 }
+
+/// A repository must never be able to direct ahu's writes outside the worktree.
+///
+/// The full chain, using only real Git operations: an attacker commits a symlink
+/// at a configuration path, the victim clones it, any tool rewrites that path
+/// with the ordinary atomic temp-file-plus-rename pattern (which replaces the
+/// symlink with a real file in the working tree while HEAD keeps the symlink),
+/// and the victim launches a task.
+#[test]
+fn a_committed_symlink_cannot_redirect_writes_outside_the_worktree() {
+    let outside = tempfile::TempDir::new().unwrap();
+    let victim_file = outside.path().join("zshrc");
+    std::fs::write(&victim_file, "# victim's real file\n").unwrap();
+
+    let repo = TestRepo::new();
+    std::fs::create_dir_all(repo.path().join(".claude")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        &victim_file,
+        repo.path().join(".claude/settings.local.json"),
+    )
+    .unwrap();
+    repo.commit("attacker: symlinked configuration path");
+
+    // A tool rewrites the path atomically, replacing the symlink in the working
+    // tree. HEAD still holds the symlink, so the fresh worktree will have one.
+    let settings = repo.path().join(".claude/settings.local.json");
+    let temp = repo.path().join(".claude/settings.local.json.tmp");
+    std::fs::write(&temp, "{\"permissions\":{}}\n").unwrap();
+    std::fs::rename(&temp, &settings).unwrap();
+    assert!(
+        !std::fs::symlink_metadata(&settings)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let discovered = git::discover(repo.path()).unwrap();
+    let taken = snapshot::collect(repo.path()).unwrap();
+    let worktree = repo.state_path().join("wt");
+    git::add_worktree(
+        &discovered,
+        &worktree,
+        "ahu/test/symlink",
+        discovered.head.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert!(
+        std::fs::symlink_metadata(worktree.join(".claude/settings.local.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the fresh worktree should carry the committed symlink"
+    );
+
+    let error = snapshot::materialize(repo.path(), &taken, &worktree)
+        .expect_err("materialize must refuse to write through the symlink");
+    let error = error.to_string();
+    assert!(
+        error.contains("refusing to write agent configuration through a symlink"),
+        "{error}"
+    );
+    assert!(error.contains("nothing was written"), "{error}");
+
+    assert_eq!(
+        std::fs::read_to_string(&victim_file).unwrap(),
+        "# victim's real file\n",
+        "the file outside the worktree must be untouched"
+    );
+}
+
+/// The same protection for a symlinked *directory*, which would otherwise let a
+/// repository redirect every write under it.
+#[test]
+fn a_committed_directory_symlink_cannot_redirect_writes_outside_the_worktree() {
+    let outside = tempfile::TempDir::new().unwrap();
+    std::fs::write(outside.path().join("existing.txt"), "untouched\n").unwrap();
+
+    let repo = TestRepo::new();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), repo.path().join(".claude")).unwrap();
+    repo.commit("attacker: .claude is a symlink to a directory outside the repository");
+
+    // The victim replaces it with a real directory locally without committing.
+    std::fs::remove_file(repo.path().join(".claude")).unwrap();
+    repo.write(".claude/settings.json", "{\"victim\":\"local\"}\n");
+
+    let discovered = git::discover(repo.path()).unwrap();
+    let taken = snapshot::collect(repo.path()).unwrap();
+    let worktree = repo.state_path().join("wt");
+    git::add_worktree(
+        &discovered,
+        &worktree,
+        "ahu/test/dirsymlink",
+        discovered.head.as_deref().unwrap(),
+    )
+    .unwrap();
+
+    let error = snapshot::materialize(repo.path(), &taken, &worktree)
+        .expect_err("materialize must refuse to traverse the symlinked directory");
+    assert!(error.to_string().contains("symlink"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("existing.txt")).unwrap(),
+        "untouched\n"
+    );
+    assert!(
+        !outside.path().join("settings.json").exists(),
+        "no file may be created outside the worktree"
+    );
+}
+
+/// The mode-sync path must not be able to chmod outside the worktree either.
+#[test]
+fn a_committed_symlink_cannot_redirect_a_mode_only_change() {
+    let outside = tempfile::TempDir::new().unwrap();
+    let victim_file = outside.path().join("target.txt");
+    std::fs::write(&victim_file, "identical content\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&victim_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let repo = TestRepo::new();
+    std::fs::create_dir_all(repo.path().join(".claude")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&victim_file, repo.path().join(".claude/settings.json")).unwrap();
+    repo.commit("attacker: symlinked configuration path");
+
+    // Same bytes, different mode: the copy is skipped and only sync_mode runs.
+    std::fs::remove_file(repo.path().join(".claude/settings.json")).unwrap();
+    repo.write(".claude/settings.json", "identical content\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            repo.path().join(".claude/settings.json"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+    }
+
+    let discovered = git::discover(repo.path()).unwrap();
+    let taken = snapshot::collect(repo.path()).unwrap();
+    let worktree = repo.state_path().join("wt");
+    git::add_worktree(
+        &discovered,
+        &worktree,
+        "ahu/test/mode-symlink",
+        discovered.head.as_deref().unwrap(),
+    )
+    .unwrap();
+
+    let _ = snapshot::materialize(repo.path(), &taken, &worktree);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&victim_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the outside file's mode must be untouched");
+    }
+}

@@ -236,6 +236,15 @@ impl MaterializeReport {
 /// The worktree starts at the base commit, so it already holds the committed
 /// configuration. This reconciles it with the parent *working tree*: writing
 /// added and modified files, and removing configuration the parent has deleted.
+///
+/// # Symlinks
+///
+/// Every write is confined to the worktree. `collect` already refuses to read
+/// through a symlink; this refuses to write through one. A symlink at a
+/// configuration path inside a freshly created worktree can only have come from
+/// the base commit, and following it would let a repository direct ahu's writes
+/// anywhere on the filesystem — so it aborts the launch and names the path
+/// rather than silently replacing it.
 pub fn materialize(
     parent_root: &Path,
     snapshot: &ConfigSnapshot,
@@ -245,6 +254,8 @@ pub fn materialize(
     let wanted = snapshot.by_path();
 
     // Remove configuration the worktree has at HEAD but the parent no longer has.
+    // `collect` never descends through a symlink, so these are all real files
+    // genuinely inside the worktree.
     let existing = collect(worktree_root)?;
     for entry in &existing.entries {
         if !wanted.contains_key(entry.path.as_str()) {
@@ -257,7 +268,7 @@ pub fn materialize(
 
     for entry in &snapshot.entries {
         let source = parent_root.join(&entry.path);
-        let target = worktree_root.join(&entry.path);
+        let target = safe_target(worktree_root, &entry.path)?;
         let current = match digest_file(&source) {
             Ok(digest) => digest,
             Err(_) => {
@@ -273,14 +284,12 @@ pub fn materialize(
         if already.as_deref() == Some(current.as_str()) {
             // Contents already match. The mode still might not: a hook script
             // that gained or lost its executable bit behaves differently, so
-            // sync that before skipping the copy.
+            // sync that before skipping the copy. `target` is known not to be a
+            // symlink, so this cannot chmod anything outside the worktree.
             if sync_mode(&source, &target)? {
                 report.written.push(entry.path.clone());
             }
             continue;
-        }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
         }
         std::fs::copy(&source, &target).map_err(|e| {
             Error::new(format!(
@@ -291,6 +300,59 @@ pub fn materialize(
         report.written.push(entry.path.clone());
     }
     Ok(report)
+}
+
+/// Resolve `relative` inside `worktree_root`, refusing to traverse or write
+/// through a symlink, and creating missing parent directories.
+///
+/// Returns the path to write to. Every component is verified to be a real
+/// directory, so neither the copy nor the later `set_permissions` can escape.
+fn safe_target(worktree_root: &Path, relative: &str) -> Result<PathBuf> {
+    let parts: Vec<&str> = relative.split('/').filter(|p| !p.is_empty()).collect();
+    let Some((file, directories)) = parts.split_last() else {
+        bail!("empty configuration path in the snapshot");
+    };
+    let mut current = worktree_root.to_path_buf();
+    for directory in directories {
+        current.push(directory);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(symlink_refusal(&current, relative));
+            }
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => bail!(
+                "cannot prepare the task worktree: {} exists and is not a directory.",
+                current.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)
+                    .map_err(|e| Error::new(format!("cannot create {}: {e}", current.display())))?;
+            }
+            Err(e) => bail!("cannot inspect {}: {e}", current.display()),
+        }
+    }
+    current.push(file);
+    if let Ok(meta) = std::fs::symlink_metadata(&current)
+        && meta.file_type().is_symlink()
+    {
+        return Err(symlink_refusal(&current, relative));
+    }
+    Ok(current)
+}
+
+fn symlink_refusal(found_at: &Path, relative: &str) -> Error {
+    let points_to = std::fs::read_link(found_at)
+        .map(|t| t.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "an unreadable target".to_string());
+    Error::new(format!(
+        "refusing to write agent configuration through a symlink.\n\
+         {} is a symlink pointing at {points_to}, and ahu was about to write {relative} through it.\n\
+         A symlink at a configuration path in a fresh worktree comes from the base commit. \
+         Following it would let this repository direct ahu's writes outside the worktree, so the \
+         launch was stopped and nothing was written.\n\
+         Inspect that path in the repository before launching again.",
+        found_at.display()
+    ))
 }
 
 /// Copy `source`'s permission bits onto `target` when they differ.

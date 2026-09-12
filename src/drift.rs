@@ -7,6 +7,7 @@
 //! a pending bundle for the next version bump.
 
 use crate::task::TaskRecord;
+use crate::util::display_safe;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Drift {
@@ -80,10 +81,12 @@ pub fn render(drift: &Drift) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "Drift since the last {} launch (task {}, {})\n",
-        drift.agent_label, drift.previous_task_id, drift.previous_launched_at
+        display_safe(&drift.agent_label),
+        display_safe(&drift.previous_task_id),
+        display_safe(&drift.previous_launched_at)
     ));
     for change in &drift.changes {
-        out.push_str(&format!("  - {change}\n"));
+        out.push_str(&format!("  - {}\n", display_safe(change)));
     }
     out.push_str(
         "\nThe version label has not changed, but the effective inputs have. Any of these\n\

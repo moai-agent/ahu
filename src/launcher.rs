@@ -13,7 +13,7 @@ use crate::bail;
 use crate::catalog;
 use crate::config::{ContextHygiene, ProjectConfig};
 use crate::selection;
-use crate::util::Result;
+use crate::util::{Result, display_safe};
 
 /// Terminal input and output, injectable so the flow is testable.
 pub struct Console<'a> {
@@ -81,13 +81,17 @@ pub fn read_selector(
         for agent in agents {
             console.say(&format!(
                 "  @{:<16} {} on {} / {}\n",
-                agent.manifest.name,
-                agent.manifest.version,
-                agent.manifest.harness,
-                agent.manifest.model
+                display_safe(&agent.manifest.name),
+                display_safe(&agent.manifest.version),
+                display_safe(&agent.manifest.harness),
+                display_safe(&agent.manifest.model)
             ))?;
             if !agent.manifest.description.is_empty() {
-                console.say(&format!("   {:>17} {}\n", "", agent.manifest.description))?;
+                console.say(&format!(
+                    "   {:>17} {}\n",
+                    "",
+                    display_safe(&agent.manifest.description)
+                ))?;
             }
         }
         console.say("\n")?;

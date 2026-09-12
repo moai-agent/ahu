@@ -48,10 +48,12 @@ impl Adapter for ClaudeCode {
         // `--` closes the option list so a prompt starting with `-` is still a
         // prompt, and the prompt itself stays a single argv element.
         args.push("--".to_string());
+        let prompt_arg = Some(args.len());
         args.push(request.prompt.to_string());
         Ok(LaunchCommand {
             program: "claude".to_string(),
             args,
+            prompt_arg,
         })
     }
 

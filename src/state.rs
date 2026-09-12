@@ -116,10 +116,30 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Resul
     }
 }
 
+/// Create a directory tree that only its owner can enter.
+///
+/// ahu's state holds task prompts, records, and worktrees. None of it has any
+/// reason to be readable by other accounts on the machine.
+pub fn create_private_dir_all(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut current = PathBuf::new();
+        for component in dir.components() {
+            current.push(component);
+            if current.starts_with(root()?) && current.is_dir() {
+                let _ = std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Write a JSON state file atomically, so a crash cannot leave a half file.
 pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        create_private_dir_all(parent)?;
     }
     let temp = path.with_extension(format!("tmp{}", std::process::id()));
     let body = serde_json::to_vec_pretty(value)
