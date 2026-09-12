@@ -13,6 +13,7 @@ use crate::bail;
 use crate::catalog;
 use crate::config::{ContextHygiene, ProjectConfig};
 use crate::selection;
+use crate::style::{self, Role};
 use crate::util::{Result, display_safe};
 
 /// Terminal input and output, injectable so the flow is testable.
@@ -77,38 +78,110 @@ pub fn read_selector(
              Run `ahu onboard` to see native definitions that could be registered.\n\n",
         )?;
     } else {
-        console.say("Agents in this repository:\n")?;
-        for agent in agents {
-            console.say(&format!(
-                "  @{:<16} {} on {} / {}\n",
-                display_safe(&agent.manifest.name),
-                display_safe(&agent.manifest.version),
-                display_safe(&agent.manifest.harness),
-                display_safe(&agent.manifest.model)
-            ))?;
-            if !agent.manifest.description.is_empty() {
-                console.say(&format!(
-                    "   {:>17} {}\n",
-                    "",
-                    display_safe(&agent.manifest.description)
-                ))?;
-            }
+        console.say(&style::stdout().paint(Role::Heading, "Agents in this repository:\n"))?;
+        console.say(&render_agent_choices(agents))?;
+        console.say("Use @name for an agent whose name is numeric.\n\n")?;
+    }
+    loop {
+        let answer =
+            console.ask("Agent number, @name, or name; blank for automatic selection: ")?;
+        let Some(answer) = answer else {
+            return Ok(None);
+        };
+        let trimmed = answer.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
         }
-        console.say("\n")?;
+        if trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+            if let Ok(index) = trimmed.parse::<usize>()
+                && let Some(agent) = index.checked_sub(1).and_then(|i| agents.get(i))
+            {
+                return Ok(Some(agent.manifest.name.clone()));
+            }
+            let message = if agents.is_empty() {
+                "No numbered agents are registered; leave blank for automatic selection.\n"
+                    .to_string()
+            } else {
+                format!("Choose an agent number in the range 1–{}.\n", agents.len())
+            };
+            console.say(&style::stdout().paint(Role::Warning, &message))?;
+            continue;
+        }
+        let name = trimmed.strip_prefix('@').unwrap_or(trimmed);
+        if agents.iter().any(|agent| agent.manifest.name == name) {
+            return Ok(Some(name.to_string()));
+        }
+        let names = agents
+            .iter()
+            .map(|agent| format!("@{}", display_safe(&agent.manifest.name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        console.say(&style::stdout().paint(
+            Role::Warning,
+            &format!(
+                "Unknown agent. Valid agents: {}. Leave blank for automatic selection.\n",
+                if names.is_empty() {
+                    "none registered"
+                } else {
+                    &names
+                }
+            ),
+        ))?;
     }
-    let answer = console.ask("Agent (e.g. @chris), or blank for automatic selection: ")?;
-    let Some(answer) = answer else {
-        return Ok(None);
-    };
-    let trimmed = answer.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
+}
+
+/// Render only the supplied registered agents, with positions matching selection.
+pub fn render_agent_choices(agents: &[ResolvedAgent]) -> String {
+    let style = style::stdout();
+    let mut out = String::new();
+    for (index, agent) in agents.iter().enumerate() {
+        out.push_str(&format!(
+            "  {}. {} {}\n",
+            index + 1,
+            style.paint(
+                Role::Agent,
+                &format!("@{}", display_safe(&agent.manifest.name))
+            ),
+            style.paint(Role::Hint, &display_safe(&agent.manifest.version))
+        ));
+        out.push_str(&format!(
+            "     {}\n",
+            style.paint(
+                Role::Runtime,
+                &format!(
+                    "{} / {}",
+                    display_safe(&agent.manifest.harness),
+                    display_safe(&agent.manifest.model)
+                )
+            )
+        ));
+        if !agent.manifest.description.is_empty() {
+            let description = truncate_description(&display_safe(&agent.manifest.description), 75);
+            out.push_str(&format!("     {}\n", style.paint(Role::Hint, &description)));
+        }
     }
-    let name = trimmed.strip_prefix('@').unwrap_or(trimmed);
-    if name.is_empty() {
-        bail!("`@` on its own is not an agent name.");
+    out
+}
+
+fn truncate_description(text: &str, columns: usize) -> String {
+    // Non-ASCII glyphs may occupy two columns. Budget conservatively so a
+    // description stays within the line without terminal cursor queries.
+    let width = |c: char| if c.is_ascii() { 1 } else { 2 };
+    if text.chars().map(width).sum::<usize>() <= columns {
+        return text.to_string();
     }
-    Ok(Some(name.to_string()))
+    let mut used = 0;
+    let mut out = String::new();
+    for character in text.chars() {
+        let next = width(character);
+        if used + next > columns.saturating_sub(3) {
+            break;
+        }
+        out.push(character);
+        used += next;
+    }
+    out.push_str("...");
+    out
 }
 
 /// Read a multiline prompt.
@@ -117,11 +190,25 @@ pub fn read_selector(
 /// only ends when the user types the sentinel on a line of its own or sends end
 /// of input.
 pub fn read_prompt(console: &mut Console<'_>) -> Result<Option<String>> {
+    let style = style::stdout();
+    console.say(&style.paint(
+        Role::Heading,
+        "\nTask prompt. Paste or type as many lines as you like.\n",
+    ))?;
+    console.say(&style.paint(
+        Role::Hint,
+        "Pasting does not submit. A separate confirmation follows the preview.\n",
+    ))?;
     console.say(&format!(
-        "\nTask prompt. Paste or type as many lines as you like.\n\
-         Pasting does not submit. Finish with a line containing only `{SUBMIT_SENTINEL}`, \
-         or end input.\n\
-         Type `{SUBMIT_SENTINEL}cancel` on its own line to abandon it.\n\n"
+        "  {}\n  {}\n\n",
+        style.paint(
+            Role::Runtime,
+            &format!("Finish: type `{SUBMIT_SENTINEL}` alone on a line, or end input.")
+        ),
+        style.paint(
+            Role::Warning,
+            "Cancel: type `.cancel` alone on a line to abandon it."
+        )
     ))?;
     let mut lines: Vec<String> = Vec::new();
     while let Some(line) = console.read_line()? {
@@ -176,8 +263,12 @@ pub fn confirm(console: &mut Console<'_>, question: &str) -> Result<bool> {
 /// confirmation is therefore an event only someone reading this preview can
 /// produce.
 pub fn confirm_submit(console: &mut Console<'_>, code: &str) -> Result<bool> {
-    let answer = console.ask(&format!(
-        "\nTo submit, type the confirmation code {code} shown above (anything else cancels): "
+    let answer = console.ask(&style::stdout().paint(
+        Role::Heading,
+        &format!(
+            "\nTo submit, type the confirmation code {} shown above (anything else cancels): ",
+            display_safe(code)
+        ),
     ))?;
     Ok(answer.as_deref().map(str::trim) == Some(code))
 }

@@ -77,6 +77,104 @@ fn a_prompt_that_looks_like_an_option_is_still_a_prompt() {
 }
 
 #[test]
+fn file_inline_and_stdin_prompts_reach_the_argv_boundary_byte_for_byte() {
+    use ahu::cli::{Command, parse_with_stdin};
+    use std::io::Cursor;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("assignment.txt");
+    let prompt = format!("\n{HOSTILE_PROMPT}\r\nUnicode: λ 🗿\n\n");
+    std::fs::write(&path, &prompt).unwrap();
+    let cases = [
+        (
+            vec![
+                "launch",
+                "@reviewer",
+                "--prompt-file",
+                path.to_str().unwrap(),
+            ],
+            "unused stdin",
+        ),
+        (
+            vec!["launch", "@reviewer", "--prompt", prompt.as_str()],
+            "unused stdin",
+        ),
+        (vec!["launch", "@reviewer"], prompt.as_str()),
+    ];
+    for (args, stdin) in cases {
+        let Command::Launch { prompt: source, .. } = parse_with_stdin(args, true).unwrap() else {
+            panic!("expected launch");
+        };
+        let text = source
+            .read(&mut Cursor::new(stdin.as_bytes()), false)
+            .unwrap();
+        assert_eq!(text.as_bytes(), prompt.as_bytes());
+        let (delivered, _) =
+            ahu::orchestration::deliver(Some("Fixture instructions."), &text).unwrap();
+        for (harness, model) in [
+            ("claude-code", "claude-opus-5"),
+            ("codex", "gpt-6-astra"),
+            ("antigravity", "gemini-3.1-pro-high"),
+        ] {
+            let command = harness::adapter_for(harness)
+                .unwrap()
+                .launch_command(&LaunchRequest {
+                    model,
+                    prompt: &delivered,
+                    cwd: temp.path(),
+                    permissions: Default::default(),
+                })
+                .unwrap();
+            let index = command.prompt_arg.unwrap();
+            assert_eq!(command.args[index], delivered);
+            assert!(command.args[index].ends_with(&prompt));
+            assert_eq!(
+                command
+                    .args
+                    .iter()
+                    .filter(|arg| arg.contains(&prompt))
+                    .count(),
+                1
+            );
+            assert!(!command.redacted().args[index].contains(&prompt));
+        }
+    }
+}
+
+#[test]
+fn prompt_sources_reject_empty_or_invalid_text_without_interpreting_it() {
+    use ahu::cli::PromptSource;
+    use std::io::Cursor;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("empty.txt");
+    std::fs::write(&path, " \r\n\t").unwrap();
+    for source in [
+        PromptSource::File(path.clone()),
+        PromptSource::Inline(" \n".into()),
+        PromptSource::Stdin,
+    ] {
+        assert!(source.read(&mut Cursor::new(b" \n"), false).is_err());
+    }
+    std::fs::write(&path, [0xff]).unwrap();
+    assert!(
+        PromptSource::File(path)
+            .read(&mut Cursor::new(b""), false)
+            .is_err()
+    );
+    assert!(
+        PromptSource::Stdin
+            .read(&mut Cursor::new([0xff]), false)
+            .is_err()
+    );
+    assert!(
+        PromptSource::Stdin
+            .read(&mut Cursor::new(b"valid"), true)
+            .is_err()
+    );
+}
+
+#[test]
 fn shell_quoting_survives_every_metacharacter() {
     for value in [
         "plain",

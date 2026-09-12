@@ -3,18 +3,42 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Every fallible operation in ahu returns this. The message is written for the
-/// person running `ahu`, so it must say what went wrong and what to do next.
+/// Stable exit categories for command failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ErrorKind {
+    Usage = 2,
+    UnknownAgent = 3,
+    Prerequisite = 4,
+    RunFailure = 5,
+}
+
 #[derive(Debug)]
+/// A failure category and an actionable message for the person running ahu.
 pub struct Error {
+    kind: ErrorKind,
     message: String,
 }
 
 impl Error {
+    /// Runtime validation, persistence, and subprocess failures default to run failure.
+    /// User input and unavailable prerequisites are classified at their boundaries.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            kind: ErrorKind::RunFailure,
         }
+    }
+}
+
+impl Error {
+    pub fn with_kind(mut self, kind: ErrorKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
     }
 }
 
@@ -43,6 +67,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Build an [`Error`] with `format!` syntax.
 #[macro_export]
 macro_rules! bail {
+    (kind: $kind:expr, $($arg:tt)*) => {
+        return Err($crate::util::Error::new(format!($($arg)*)).with_kind($kind))
+    };
     ($($arg:tt)*) => {
         return Err($crate::util::Error::new(format!($($arg)*)))
     };

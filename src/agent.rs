@@ -294,17 +294,19 @@ pub fn find(repo_root: &Path, name: &str) -> Result<ResolvedAgent> {
         .map(|a| format!("@{}", a.manifest.name))
         .collect::<Vec<_>>();
     if known.is_empty() {
-        bail!(
+        return Err(Error::new(format!(
             "no agent named {name:?} is registered, and this project has no ahu agents yet.\n\
              Register one under {}, or submit without an @agent to use automatic selection.",
             AGENTS_RELATIVE_DIR
-        );
+        ))
+        .with_kind(crate::util::ErrorKind::UnknownAgent));
     }
-    bail!(
+    Err(Error::new(format!(
         "no agent named {name:?} is registered. Available: {}.\n\
          ahu never substitutes another agent or an automatic selection for a named one.",
         known.join(", ")
-    );
+    ))
+    .with_kind(crate::util::ErrorKind::UnknownAgent))
 }
 
 fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {

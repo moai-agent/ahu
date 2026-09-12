@@ -99,6 +99,80 @@ impl LaunchPlan {
     }
 }
 
+/// JSON schema 1: additive fields are compatible; changing/removing fields or
+/// their meaning requires a schema_version bump. Values bypass display_safe:
+/// JSON escaping preserves exact metadata and digest inputs without terminal controls.
+pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
+    let agent = plan.agent.as_ref().map(|agent| {
+        serde_json::json!({
+            "name": agent.manifest.name,
+            "version": agent.manifest.version,
+            "description": agent.manifest.description,
+            "source_path": agent.source_path,
+            "identity_digest": agent.identity_digest(),
+        })
+    });
+    let mut argv = vec![plan.command.program.clone()];
+    argv.extend(plan.command.redacted().args);
+    let mut warnings = Vec::new();
+    if let Some(warning) = plan.reliability_warning() {
+        warnings.push(warning.to_string());
+    }
+    if !plan.non_project_hooks().is_empty() {
+        warnings.push(crate::hooks::NON_PROJECT_HOOK_WARNING.to_string());
+    }
+    if plan.permissions.widens_defaults() {
+        warnings.push(plan.permissions.disclosure().to_string());
+    }
+    if plan.parent_dirty {
+        warnings.push("This checkout has uncommitted changes; unrelated source changes are not copied into the task worktree.".to_string());
+    }
+    warnings.extend(
+        plan.hooks
+            .unreadable
+            .iter()
+            .map(|path| format!("Hook configuration could not be read: {path}")),
+    );
+    if !plan.snapshot.skipped_directories.is_empty() {
+        warnings.push(format!(
+            "Directories not scanned or inventoried: {}",
+            plan.snapshot.skipped_directories.join(", ")
+        ));
+    }
+    if !plan.snapshot.unscanned_config.is_empty() {
+        warnings.push(format!(
+            "Configuration carried by the checkout but not inventoried: {}",
+            plan.snapshot.unscanned_config.join(", ")
+        ));
+    }
+    if !plan.snapshot.symlinks.is_empty() {
+        warnings.push(format!(
+            "Configuration symlinks not followed or inherited: {}",
+            plan.snapshot.symlinks.join(", ")
+        ));
+    }
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "agent": agent,
+        "harness": plan.pair.harness,
+        "model": plan.pair.model,
+        "selection_basis": plan.pair.basis,
+        "policy_digest": plan.pair.policy_digest,
+        "catalog_version": plan.pair.catalog_version,
+        "permissions": plan.permissions.as_str(),
+        "argv": argv,
+        "prompt_digest": crate::util::digest_bytes(prompt.as_bytes()),
+        "prompt_bytes": prompt.len(),
+        "enforcement": {
+            "model_fixed_for_session": plan.enforcement.model_fixed_for_session,
+            "gaps": plan.enforcement.gaps,
+            "applied_controls": plan.enforcement.applied_controls,
+        },
+        "warnings": warnings,
+        "executed": false,
+    }))?)
+}
+
 /// Build a plan without creating anything.
 pub fn plan(
     repo: &Repo,
@@ -107,7 +181,7 @@ pub fn plan(
     prompt: &str,
 ) -> Result<LaunchPlan> {
     if prompt.trim().is_empty() {
-        bail!("the task prompt is empty; nothing was launched.");
+        bail!(kind: crate::util::ErrorKind::Usage, "the task prompt is empty; nothing was launched.");
     }
     let adapter = harness::adapter_for(&pair.harness)?;
     let snapshot = snapshot::collect(&repo.root)?;
@@ -118,7 +192,7 @@ pub fn plan(
     let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
     let base_commit = repo.head.clone();
     if base_commit.is_none() {
-        bail!(
+        bail!(kind: crate::util::ErrorKind::Prerequisite,
             "this repository has no commits yet, so ahu cannot base a task worktree on its HEAD.\n\
              Make an initial commit first."
         );
@@ -162,6 +236,7 @@ pub fn plan(
                  harness: the project's policy is the same for everyone.",
                 pair.harness, command.program
             ))
+            .with_kind(crate::util::ErrorKind::Prerequisite)
         })?;
     let mut enforcement = adapter.enforcement(&pair.model, permissions)?;
     // An *applied control* is something ahu did, stated without implying more.
@@ -255,7 +330,8 @@ pub fn execute(
 
     // cmux must be reachable before a worktree is created, so an unavailable
     // cmux never leaves a worktree behind.
-    let cmux_client = Cmux::discover()?;
+    let cmux_client =
+        Cmux::discover().map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
     cmux_client.check_capabilities()?;
 
     if git::branch_exists(repo, &plan.branch)? {
@@ -629,6 +705,7 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
                  ahu will not fall back to a different harness.",
                 rebuilt.program, record.task_id
             ))
+            .with_kind(crate::util::ErrorKind::Prerequisite)
         })?;
     // `which` builds this path as `<PATH entry>/<program>`, so comparing the
     // file name to the program name can never fail — it was a tautology, not a

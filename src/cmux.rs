@@ -73,7 +73,8 @@ impl Cmux {
             executable,
             socket_path,
         };
-        cmux.ping()?;
+        cmux.ping()
+            .map_err(|error| error.with_kind(crate::util::ErrorKind::Prerequisite))?;
         Ok(cmux)
     }
 
@@ -151,11 +152,11 @@ impl Cmux {
             .filter(|needed| !advertised.iter().any(|a| a == needed))
             .collect();
         if !missing.is_empty() {
-            bail!(
+            return Err(Error::new(format!(
                 "this cmux build does not advertise: {}.\n\
                  ahu needs native workspace groups to give every task a visible row under its repository.",
                 missing.join(", ")
-            );
+            )).with_kind(crate::util::ErrorKind::Prerequisite));
         }
         Ok(advertised)
     }

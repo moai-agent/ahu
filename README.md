@@ -70,12 +70,13 @@ do, and `ahu` never stages, commits, or pushes it for you.
 
 After that, `ahu` opens the launcher:
 
-1. Optionally type `@chris` to select a named agent. Leave it blank to use the
-   project's automatic selection.
+1. Select an agent by its displayed number, `@name`, or bare name. Leave it blank
+   to use the project's automatic selection. An invalid selection prompts again.
 2. `ahu` shows the resolved harness and model, and why, before you type anything.
 3. Paste or type your task. Pasting never submits — finish with a line containing
    only `.`.
-4. Review the submission preview and confirm.
+4. Review the submission preview and type its confirmation code to submit.
+   Type `.cancel` on its own line in the composer to abandon the prompt.
 
 `ahu` then creates a fresh branch and worktree, ensures this repository's group
 exists in cmux, and opens a new session there running the configured harness.
@@ -180,6 +181,74 @@ flags an agent's manifest asks for.
 This is not a process sandbox either: shell tools can still start processes, and
 no adapter denies a harness's own delegation tools. Existing running sessions do
 not acquire any of this; launch a new task with the rebuilt ahu executable.
+
+## Scriptable launch previews
+
+A launch prompt can come from an inline argument, a UTF-8 file, or piped stdin:
+
+```sh
+ahu launch @offsec-astra --prompt 'Review the subprocess argument handling.' --dry-run --allow-widened-approvals
+ahu launch @offsec-astra --prompt-file assignment.txt --dry-run --allow-widened-approvals
+printf '%s\n' 'Review the subprocess argument handling.' | ahu launch @offsec-astra --dry-run --allow-widened-approvals
+ahu launch @offsec-astra --prompt 'Review the subprocess argument handling.' --dry-run --allow-widened-approvals --output json
+```
+
+`--prompt` and `--prompt-file` are mutually exclusive. An explicit source takes
+precedence over stdin, which is read only when neither flag is given and stdin
+is not a terminal. Empty or whitespace-only prompts are rejected. Accepted
+prompt text retains its original bytes, including leading and trailing newlines.
+
+`--dry-run --output json` writes one JSON object to stdout and human-readable
+preview information to stderr. Previewing requires Git, valid project settings,
+and the selected harness, but no cmux session. It launches no task. Actual
+execution still requires cmux. Manifests that widen approvals require the
+explicit `--allow-widened-approvals` flag for both previews and execution, as in
+the examples above. JSON output is supported only with
+`--dry-run`.
+
+The JSON object has `schema_version: 1` and these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `agent` | Name, version, description, resolved source path, and full identity digest. |
+| `harness`, `model`, `selection_basis` | The exact selected pair and why it was selected. |
+| `policy_digest`, `catalog_version` | The configuration and compatibility catalog used. |
+| `permissions` | The manifest's approval mode. |
+| `argv` | Command and arguments, with the delivered prompt redacted. |
+| `prompt_digest`, `prompt_bytes` | SHA-256 and UTF-8 byte length of the original task prompt. |
+| `enforcement` | Model enforcement status, gaps, and applied controls. |
+| `warnings` | Reliability, hook, and approval disclosures. |
+| `executed` | Always `false` for a preview. |
+
+JSON strings preserve the actual metadata through JSON escaping; terminal
+display escaping is not applied to them. Consumers should check the schema
+version and tolerate additional fields. Removing a field or changing its
+meaning requires a schema version bump.
+
+Commands return these exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success. |
+| `1` | Cancelled by the user. |
+| `2` | Invalid command usage. |
+| `3` | Unknown or unregistered agent. |
+| `4` | Missing prerequisite, such as Git repository, harness, or cmux. |
+| `5` | Run failure, including invalid persisted configuration. |
+
+## Terminal styling
+
+Use `--color=auto`, `--color=always`, or `--color=never` with any command.
+`always` and `never` override environment detection. Under `auto` (the default),
+styling is disabled when `NO_COLOR` is set to any value, `TERM=dumb`, or stdout
+is not a terminal. Redirected output is therefore plain by default. JSON stdout
+never contains styling, even with `--color=always`.
+
+Agent identity, harness/model, warnings, enforcement gaps, drift, and hints have
+distinct styles. Labels and layout retain their meaning with color disabled.
+Repository-controlled strings are escaped before styling so they cannot inject
+terminal controls. The composer remains line-oriented: color does not change
+the `.` sentinel, `.cancel`, or the confirmation code required for submission.
 
 ## This repository's agents
 

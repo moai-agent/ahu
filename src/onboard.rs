@@ -265,9 +265,10 @@ pub fn unregister(repo_root: &Path, name: &str) -> Result<PathBuf> {
     // a name straight from the command line, so it is validated here too rather
     // than being joined into a path unchecked.
     if !is_safe_name(name) {
-        bail!(
+        return Err(Error::new(format!(
             "{name:?} is not a valid ahu agent name, so it cannot name a registration to remove."
-        );
+        ))
+        .with_kind(crate::util::ErrorKind::Usage));
     }
     // Same reasoning as `register`, and more important here: this deletes.
     // A symlinked `agents` directory would otherwise let `--remove config`
@@ -278,7 +279,10 @@ pub fn unregister(repo_root: &Path, name: &str) -> Result<PathBuf> {
         false,
     )?;
     if !path.is_file() {
-        bail!("{} is not a registered ahu agent.", name);
+        return Err(
+            Error::new(format!("{} is not a registered ahu agent.", name))
+                .with_kind(crate::util::ErrorKind::UnknownAgent),
+        );
     }
     // Only ahu's own manifests are removable, so a same-named unrelated file
     // cannot be deleted through this command.

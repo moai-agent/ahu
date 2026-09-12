@@ -291,3 +291,152 @@ fn an_automatic_launch_delivers_the_contract_and_nothing_else_of_ahus() {
     assert!(delivered.contains(&ahu::orchestration::open_tag("contract", &delivery.nonce)));
     assert!(delivered.ends_with("do the thing"));
 }
+
+#[test]
+fn inline_and_piped_prompts_produce_clean_json_without_cmux() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("sable", "1.0.0", "claude-sonnet-5");
+    let description = "fixture \u{1b}[31m literal metadata";
+    let manifest_path = ".agents/ahu/agents/sable.toml";
+    repo.write(
+        manifest_path,
+        &repo.read(manifest_path).replace(
+            "description = \"fixture agent\"",
+            "description = \"fixture \\u001b[31m literal metadata\"",
+        ),
+    );
+    repo.write("assignment.txt", HOSTILE_PROMPT);
+    repo.commit("fixture");
+    let bin = common::fake_harness(repo.state_path(), &repo.state_path().join("argv"));
+    let preview = launch(&repo, "@sable", true);
+    assert!(preview.status.success());
+    for source in ["inline", "stdin", "file"] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ahu"));
+        command
+            .current_dir(repo.path())
+            .args([
+                "--color=always",
+                "launch",
+                "@sable",
+                "--dry-run",
+                "--output",
+                "json",
+            ])
+            .env("AHU_STATE_DIR", repo.state_path())
+            .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::piped());
+        match source {
+            "inline" => {
+                command.args(["--prompt", HOSTILE_PROMPT]);
+            }
+            "file" => {
+                command
+                    .arg("--prompt-file")
+                    .arg(repo.path().join("assignment.txt"));
+            }
+            _ => {}
+        }
+        let mut child = command.spawn().unwrap();
+        if source == "stdin" {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(HOSTILE_PROMPT.as_bytes())
+                .unwrap();
+        } else {
+            drop(child.stdin.take());
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["agent"]["name"], "sable");
+        assert_eq!(json["agent"]["version"], "1.0.0");
+        assert_eq!(json["agent"]["description"], description);
+        assert!(!output.stdout.contains(&0x1b));
+        assert_eq!(
+            json["agent"]["identity_digest"],
+            ahu::agent::find(repo.path(), "sable")
+                .unwrap()
+                .identity_digest()
+        );
+        assert_eq!(json["harness"], "claude-code");
+        assert_eq!(json["model"], "claude-sonnet-5");
+        assert_eq!(
+            json["prompt_digest"],
+            ahu::util::digest_bytes(HOSTILE_PROMPT.as_bytes())
+        );
+        assert_eq!(json["prompt_bytes"], HOSTILE_PROMPT.len());
+        assert_eq!(json["executed"], false);
+        assert!(!json["enforcement"]["gaps"].as_array().unwrap().is_empty());
+        assert!(
+            json["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|arg| arg == ahu::harness::REDACTED_PROMPT)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(HOSTILE_PROMPT));
+        let plain = String::from_utf8_lossy(&preview.stdout);
+        assert!(plain.contains(json["prompt_digest"].as_str().unwrap()));
+        assert!(plain.contains(&json["policy_digest"].as_str().unwrap()[..12]));
+        let diagnostics = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostics.contains("About to submit"));
+        assert!(diagnostics.contains("Enforcement"));
+        assert!(diagnostics.contains("hygiene"));
+    }
+    assert_eq!(common::git(repo.path(), &["branch", "--list", "ahu/*"]), "");
+}
+
+#[test]
+fn launch_prompt_conflicts_and_terminal_stdin_are_usage_errors() {
+    use ahu::cli::PromptSource;
+    for args in [
+        vec![
+            "launch",
+            "@sable",
+            "--prompt",
+            "hello",
+            "--prompt-file",
+            "file",
+        ],
+        vec![
+            "launch",
+            "@sable",
+            "--prompt-file",
+            "file",
+            "--prompt",
+            "hello",
+        ],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("--prompt") && error.contains("--prompt-file"));
+    }
+    let error = PromptSource::Stdin
+        .read(&mut std::io::Cursor::new(b"do work"), true)
+        .unwrap_err();
+    assert_eq!(error.kind(), ahu::util::ErrorKind::Usage);
+    assert!(error.to_string().contains("terminal"));
+    assert!(
+        ahu::cli::parse(["launch", "@sable", "--prompt", "hello", "--output", "json"]).is_err()
+    );
+}

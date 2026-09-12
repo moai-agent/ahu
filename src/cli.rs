@@ -29,7 +29,7 @@ Commands:
   help                  Print this help message
   explain               Architecture overview and Mermaid diagrams
   init                  Record this project's agreed harness and model order
-  launch @name --prompt-file <path> [--dry-run]
+  launch @name [--prompt <text> | --prompt-file <path>] [--dry-run]
                         Assign work in a separate cmux session. Reads no
                         confirmation, so approval widening needs an explicit flag
   agents                List the agents registered for this repository
@@ -44,6 +44,10 @@ Commands:
 Options:
   -h, --help            Print this help message
   -V, --version         Print the version
+  --color <choice>      auto, always, or never (also --color=<choice>).
+                        Always/never override NO_COLOR. Auto honors any
+                        NO_COLOR value and requires stdout to be a
+                        terminal and TERM to differ from dumb.
 
 explain options:
   --markdown            Print the overview as a Markdown document
@@ -60,11 +64,21 @@ launcher options:
   --no-focus            Do not switch to the new session after launching
 
 launch options:
+  --prompt <text>       Use an inline prompt (conflicts with --prompt-file)
+  --prompt-file <path>  Read a UTF-8 prompt file
+                        With neither option, read non-terminal stdin to EOF.
+                        Explicit sources take precedence over unread stdin.
+  --output json        Emit a versioned JSON plan; requires --dry-run.
+                        JSON goes to stdout, diagnostics to stderr.
   --dry-run             Show the preview and create nothing
   --allow-widened-approvals
                         Required to launch an agent whose manifest declares
                         permissions = auto or accept-edits. `ahu launch` reads no
                         confirmation, so widening is opt-in on the command line
+
+Exit codes:
+  0 success; 1 cancelled; 2 usage error; 3 unknown agent;
+  4 missing prerequisite; 5 run failure.
 
 run-task options:
   --task-dir <path>     Directory holding the prepared task record";
@@ -95,7 +109,8 @@ pub enum Command {
     Init,
     Launch {
         agent: String,
-        prompt_file: PathBuf,
+        prompt: PromptSource,
+        output_json: bool,
         dry_run: bool,
         /// Opt in to launching an agent whose manifest widens the harness's own
         /// approval boundary. Required on this path because it has no
@@ -125,13 +140,65 @@ pub enum Command {
     },
 }
 
+/// The explicit source wins over stdin; stdin is only a fallback.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PromptSource {
+    File(PathBuf),
+    Inline(String),
+    Stdin,
+}
+
+impl PromptSource {
+    pub fn read(&self, input: &mut impl std::io::Read, stdin_is_terminal: bool) -> Result<String> {
+        let prompt = match self {
+            Self::File(path) => std::fs::read_to_string(path).map_err(|error| {
+                crate::util::Error::new(format!(
+                    "cannot read prompt file {}: {error}",
+                    path.display()
+                ))
+            })?,
+            Self::Inline(text) => text.clone(),
+            Self::Stdin => {
+                if stdin_is_terminal {
+                    return Err(crate::util::Error::new(
+                        "ahu launch needs --prompt or --prompt-file when stdin is a terminal.",
+                    )
+                    .with_kind(crate::util::ErrorKind::Usage));
+                }
+                let mut text = String::new();
+                input.read_to_string(&mut text)?;
+                text
+            }
+        };
+        if prompt.trim().is_empty() {
+            return Err(
+                crate::util::Error::new("the task prompt is empty; nothing was launched.")
+                    .with_kind(crate::util::ErrorKind::Usage),
+            );
+        }
+        Ok(prompt)
+    }
+}
+
 /// Parse `args`, which excludes the executable name.
 pub fn parse<I, S>(args: I) -> Result<Command>
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+    parse_with_stdin(args, false)
+}
+
+pub fn parse_with_stdin<I, S>(args: I, stdin_available: bool) -> Result<Command>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    parse_inner(args.into_iter().map(Into::into).collect(), stdin_available)
+        .map_err(|e| e.with_kind(crate::util::ErrorKind::Usage))
+}
+
+fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
     let Some(first) = args.first().map(String::as_str) else {
         return Ok(Command::Interactive { focus: true });
     };
@@ -187,7 +254,7 @@ where
         "hygiene" => Ok(Command::Hygiene {
             agent: optional_agent(&args[1..])?,
         }),
-        "launch" => parse_launch(&args[1..]),
+        "launch" => parse_launch(&args[1..], stdin_available),
         "onboard" => parse_onboard(&args[1..]),
         "run-task" => parse_run_task(&args[1..]),
         "--no-focus" => {
@@ -276,7 +343,7 @@ fn value_for(flag: &str, rest: &[String], index: &mut usize) -> Result<String> {
         .ok_or_else(|| crate::util::Error::new(format!("{flag} needs a value.")))
 }
 
-fn parse_launch(rest: &[String]) -> Result<Command> {
+fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     let name = rest
         .first()
         .ok_or_else(|| crate::util::Error::new("ahu launch needs @agent --prompt-file <path>."))?;
@@ -290,6 +357,8 @@ fn parse_launch(rest: &[String]) -> Result<Command> {
         bail!("invalid agent name {agent:?}.");
     }
     let mut prompt_file = None;
+    let mut prompt_inline = None;
+    let mut output_json = false;
     let mut dry_run = false;
     let mut allow_widened_approvals = false;
     let mut index = 1;
@@ -297,6 +366,16 @@ fn parse_launch(rest: &[String]) -> Result<Command> {
         match rest[index].as_str() {
             "--prompt-file" if prompt_file.is_none() => {
                 prompt_file = Some(PathBuf::from(value_for("--prompt-file", rest, &mut index)?));
+            }
+            "--prompt" if prompt_inline.is_none() => {
+                prompt_inline = Some(value_for("--prompt", rest, &mut index)?);
+            }
+            "--output" if !output_json => {
+                let value = value_for("--output", rest, &mut index)?;
+                if value != "json" {
+                    bail!("unsupported --output {value:?}; expected json.");
+                }
+                output_json = true;
             }
             "--dry-run" if !dry_run => dry_run = true,
             "--allow-widened-approvals" if !allow_widened_approvals => {
@@ -306,12 +385,125 @@ fn parse_launch(rest: &[String]) -> Result<Command> {
         }
         index += 1;
     }
-    let prompt_file = prompt_file
-        .ok_or_else(|| crate::util::Error::new("ahu launch needs --prompt-file <path>."))?;
+    let prompt = match (prompt_file, prompt_inline) {
+        (Some(_), Some(_)) => {
+            bail!("--prompt and --prompt-file conflict; supply exactly one prompt source.")
+        }
+        (Some(path), None) => PromptSource::File(path),
+        (None, Some(text)) => PromptSource::Inline(text),
+        (None, None) if stdin_available => PromptSource::Stdin,
+        (None, None) => bail!("ahu launch needs --prompt, --prompt-file, or piped stdin."),
+    };
+    if output_json && !dry_run {
+        bail!("--output json requires --dry-run.");
+    }
     Ok(Command::Launch {
         agent: agent.to_string(),
-        prompt_file,
+        prompt,
+        output_json,
         dry_run,
         allow_widened_approvals,
     })
+}
+
+/// Remove global color options while leaving command option values intact.
+/// Keeping value-taking options together prevents an inline prompt that happens
+/// to say `--color=always` from being interpreted as application configuration.
+pub fn extract_color(
+    args: Vec<String>,
+) -> Result<(Vec<String>, Option<crate::style::ColorChoice>)> {
+    use crate::style::ColorChoice;
+    let mut remaining = Vec::new();
+    let mut choice = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let value = if arg == "--color" {
+            Some(args.next().ok_or_else(|| {
+                crate::util::Error::new("--color needs auto, always, or never.")
+                    .with_kind(crate::util::ErrorKind::Usage)
+            })?)
+        } else {
+            arg.strip_prefix("--color=").map(str::to_string)
+        };
+        if let Some(value) = value {
+            if choice.is_some() {
+                bail!(kind: crate::util::ErrorKind::Usage, "--color may only be supplied once.");
+            }
+            choice = Some(match value.as_str() {
+                "auto" => ColorChoice::Auto,
+                "always" => ColorChoice::Always,
+                "never" => ColorChoice::Never,
+                _ => {
+                    bail!(kind: crate::util::ErrorKind::Usage, "invalid --color {value:?}; expected auto, always, or never.")
+                }
+            });
+        } else {
+            let takes_value = matches!(
+                arg.as_str(),
+                "--prompt"
+                    | "--prompt-file"
+                    | "--output"
+                    | "--register"
+                    | "--remove"
+                    | "--model"
+                    | "--agent-version"
+                    | "--task-dir"
+            );
+            remaining.push(arg);
+            if takes_value && let Some(value) = args.next() {
+                remaining.push(value);
+            }
+        }
+    }
+    Ok((remaining, choice))
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::*;
+
+    #[test]
+    fn color_is_global_and_command_values_stay_literal() {
+        for flag in ["--color=auto", "--color=always", "--color=never"] {
+            let (args, choice) = extract_color(vec!["agents".into(), flag.into()]).unwrap();
+            assert_eq!(args, ["agents"]);
+            assert!(choice.is_some());
+        }
+        let (args, choice) = extract_color(vec![
+            "--color".into(),
+            "never".into(),
+            "launch".into(),
+            "@fixture".into(),
+            "--prompt".into(),
+            "--color=always".into(),
+        ])
+        .unwrap();
+        assert_eq!(choice, Some(crate::style::ColorChoice::Never));
+        assert_eq!(args, ["launch", "@fixture", "--prompt", "--color=always"]);
+        for args in [
+            vec!["--color"],
+            vec!["--color="],
+            vec!["--color=invalid"],
+            vec!["--color=always", "--color=never"],
+        ] {
+            assert!(extract_color(args.into_iter().map(str::to_string).collect()).is_err());
+        }
+    }
+    #[test]
+    fn color_tokens_used_as_prompt_and_path_values_are_not_flags() {
+        for option in ["--prompt", "--prompt-file"] {
+            for value in ["--color", "--color=always"] {
+                let (args, choice) = extract_color(vec![
+                    "launch".into(),
+                    "@fixture".into(),
+                    option.into(),
+                    value.into(),
+                    "--color=never".into(),
+                ])
+                .unwrap();
+                assert_eq!(choice, Some(crate::style::ColorChoice::Never));
+                assert_eq!(args, ["launch", "@fixture", option, value]);
+            }
+        }
+    }
 }

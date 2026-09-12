@@ -17,6 +17,7 @@ use crate::launch;
 use crate::launcher::{self, Console};
 use crate::onboard;
 use crate::selection::{self, ResolvedPair};
+use crate::style::{self, Role};
 use crate::task;
 use crate::util::{Result, display_path, display_safe, display_safe_block};
 
@@ -27,16 +28,17 @@ use crate::util::{Result, display_path, display_safe, display_safe_block};
 /// test without changing the current directory.
 pub fn repo_from_cwd() -> Result<Repo> {
     let cwd = std::env::current_dir()?;
-    git::discover(&cwd)
+    git::discover(&cwd).map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))
 }
 
 /// Load configuration, or run first-run setup, or explain why it cannot.
-fn config_or_setup(repo: &Repo, console: &mut Console<'_>) -> Result<LoadedConfig> {
+fn config_or_setup(repo: &Repo, console: &mut Console<'_>) -> Result<Option<LoadedConfig>> {
     if let Some(loaded) = config::load(&repo.root)? {
-        return Ok(loaded);
+        return Ok(Some(loaded));
     }
     let Some(new_config) = launcher::run_setup(console)? else {
-        bail!("setup was cancelled; nothing was written.");
+        console.say("Cancelled. Nothing was written.\n")?;
+        return Ok(None);
     };
     let path = config::write_new(&repo.root, &new_config)?;
     console.say(&format!("\nWrote {}\n", path.display()))?;
@@ -44,7 +46,7 @@ fn config_or_setup(repo: &Repo, console: &mut Console<'_>) -> Result<LoadedConfi
         "The configuration is in effect now; it does not need to be committed to be used.\n\
          Run `ahu onboard` to see native agent definitions you could register.\n\n",
     )?;
-    config::load(&repo.root)?.ok_or_else(|| {
+    config::load(&repo.root)?.map(Some).ok_or_else(|| {
         crate::util::Error::new("configuration disappeared immediately after it was written")
     })
 }
@@ -71,22 +73,24 @@ pub fn init(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
 
 /// `ahu agents`
 pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
+    let style = crate::style::stdout();
     let agents = agent::load_all(&repo.root)?;
     if agents.is_empty() {
-        console.say(
+        console.say(&style.paint(
+            Role::Hint,
             "No ahu agents are registered.\n\
              Only .agents/ahu/agents/*.toml makes an agent launchable through ahu; native\n\
              definitions elsewhere are onboarding candidates. Run `ahu onboard` to see them.\n",
-        )?;
+        ))?;
         return Ok(0);
     }
     for agent in &agents {
         console.say(&format!(
             "@{} {}\n  harness  {}\n  model    {}\n  source   {} [{}]\n  identity {}\n",
-            display_safe(&agent.manifest.name),
-            display_safe(&agent.manifest.version),
-            display_safe(&agent.manifest.harness),
-            display_safe(&agent.manifest.model),
+            style.paint(Role::Agent, &display_safe(&agent.manifest.name)),
+            style.paint(Role::Hint, &display_safe(&agent.manifest.version)),
+            style.paint(Role::Runtime, &display_safe(&agent.manifest.harness)),
+            style.paint(Role::Runtime, &display_safe(&agent.manifest.model)),
             display_safe(
                 &agent
                     .source_path
@@ -100,7 +104,7 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         if !agent.manifest.description.is_empty() {
             console.say(&format!(
                 "  {}\n",
-                display_safe(&agent.manifest.description)
+                style.paint(Role::Hint, &display_safe(&agent.manifest.description))
             ))?;
         }
         console.say("\n")?;
@@ -249,7 +253,7 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                     warnings += 1;
                     console.say(&format!(
                         "  {} ({} of them)\n",
-                        hooks::NON_PROJECT_HOOK_WARNING,
+                        style::stdout().paint(Role::Warning, hooks::NON_PROJECT_HOOK_WARNING),
                         outside.len()
                     ))?;
                     for line in hooks::NON_PROJECT_HOOK_DETAIL {
@@ -270,7 +274,11 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                 }
                 for unreadable in &found.unreadable {
                     warnings += 1;
-                    console.say(&format!("  unreadable {}\n", display_safe(unreadable)))?;
+                    console.say(&format!(
+                        "  {} {}\n",
+                        style::stdout().paint(Role::Warning, "unreadable"),
+                        display_safe(unreadable)
+                    ))?;
                 }
             }
             Err(e) => {
@@ -313,10 +321,13 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         if harness.adapter_available && !harness.enforces_model_for_session {
             console.say(&format!(
                 "               {}\n",
-                harness::RELIABILITY_WARNING
+                style::stdout().paint(Role::Warning, harness::RELIABILITY_WARNING)
             ))?;
             for gap in harness.enforcement_gaps {
-                console.say(&format!("               - {gap}\n"))?;
+                console.say(&format!(
+                    "               - {}\n",
+                    style::stdout().paint(Role::Gap, gap)
+                ))?;
             }
         }
     }
@@ -358,8 +369,24 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             "\n{p} problem(s) would block a launch, and {w} warning(s) affect behaviour without stopping one.\n"
         ),
     };
-    console.say(&summary)?;
-    if problems == 0 { Ok(0) } else { Ok(1) }
+    console.say(&style::stdout().paint(
+        if problems > 0 {
+            Role::Error
+        } else if warnings > 0 {
+            Role::Warning
+        } else {
+            Role::Success
+        },
+        &summary,
+    ))?;
+    if problems == 0 {
+        Ok(0)
+    } else {
+        Err(
+            crate::util::Error::new("doctor found blocking problems; see the diagnostic report.")
+                .with_kind(crate::util::ErrorKind::Prerequisite),
+        )
+    }
 }
 
 /// The one sentence `ahu tasks` may print only when it really found nothing.
@@ -386,9 +413,9 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
             display_safe(&record.task_id),
             record.state.as_str(),
             display_safe(&record.title),
-            display_safe(&record.agent_label()),
-            display_safe(&record.identity.harness),
-            display_safe(&record.identity.model),
+            style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
+            style::stdout().paint(Role::Runtime, &display_safe(&record.identity.harness)),
+            style::stdout().paint(Role::Runtime, &display_safe(&record.identity.model)),
             display_safe(&record.branch),
             display_path(&record.worktree),
             display_path(dir),
@@ -397,11 +424,17 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
             console.say(&format!("  cmux      {}\n", display_safe(workspace)))?;
         }
         if record.reliability_warning.is_some() {
-            console.say(&format!("  warning   {}\n", harness::RELIABILITY_WARNING))?;
+            console.say(&format!(
+                "  warning   {}\n",
+                style::stdout().paint(Role::Warning, harness::RELIABILITY_WARNING)
+            ))?;
         }
         console.say("\n")?;
     }
-    console.say(&render_unreadable_tasks(repo, &listing.unreadable))?;
+    console.say(&style::stdout().paint(
+        Role::Warning,
+        &render_unreadable_tasks(repo, &listing.unreadable),
+    ))?;
     if !listing.records.is_empty() {
         // This footer explains the `exited` state in the listing above. With no
         // readable records there is no such listing for it to explain.
@@ -545,7 +578,7 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
             );
         }
         if listing.unreadable.is_empty() {
-            bail!("no task matching {task_id:?}.");
+            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.");
         }
         bail!(
             "no readable task matching {task_id:?}. {} other task record(s) in this repository \
@@ -560,7 +593,7 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
     client.select_workspace(workspace)?;
     console.say(&format!(
         "Focused {} — {}\n  worktree {}\n",
-        display_safe(&record.agent_label()),
+        style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
         display_safe(&record.title),
         display_path(&record.worktree)
     ))?;
@@ -574,7 +607,7 @@ pub fn inventory_cmd(
     agent_name: Option<&str>,
 ) -> Result<i32> {
     let Some(loaded) = config::load(&repo.root)? else {
-        bail!("this repository is not initialized. Run `ahu init` first.");
+        bail!(kind: crate::util::ErrorKind::Prerequisite, "this repository is not initialized. Run `ahu init` first.");
     };
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
@@ -609,7 +642,7 @@ pub fn hygiene_cmd(
     agent_name: Option<&str>,
 ) -> Result<i32> {
     let Some(loaded) = config::load(&repo.root)? else {
-        bail!("this repository is not initialized. Run `ahu init` first.");
+        bail!(kind: crate::util::ErrorKind::Prerequisite, "this repository is not initialized. Run `ahu init` first.");
     };
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
@@ -652,7 +685,13 @@ pub fn hygiene_cmd(
 /// `ahu run-task --task-dir <dir>` — the fixed entrypoint cmux starts.
 pub fn run_task(task_dir: &Path) -> Result<i32> {
     let status = launch::run_task(task_dir)?;
-    Ok(status.code().unwrap_or(1))
+    if status.success() {
+        Ok(0)
+    } else {
+        Err(crate::util::Error::new(format!(
+            "the harness exited unsuccessfully ({status})."
+        )))
+    }
 }
 
 /// Resolve a launch identity from an optional `@name`.
@@ -682,7 +721,9 @@ fn resolve_identity(
 
 /// The default `ahu` flow: setup if needed, then select, compose, preview, submit.
 pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> Result<i32> {
-    let loaded = config_or_setup(repo, console)?;
+    let Some(loaded) = config_or_setup(repo, console)? else {
+        return Ok(1);
+    };
 
     console.say(&format!(
         "ahu {} — {}\n  policy {} · catalog {}\n\n",
@@ -700,19 +741,22 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
     // submission preview, so the provider is never a surprise.
     console.say(&format!(
         "\nResolved for this task:\n  agent   {}\n  harness {}\n  model   {}\n  because {}\n",
-        display_safe(
-            &resolved
-                .as_ref()
-                .map(|a| a.label())
-                .unwrap_or_else(|| "auto (no named agent)".to_string())
+        style::stdout().paint(
+            Role::Agent,
+            &display_safe(
+                &resolved
+                    .as_ref()
+                    .map(|a| a.label())
+                    .unwrap_or_else(|| "auto (no named agent)".to_string())
+            )
         ),
-        display_safe(&pair.harness),
-        display_safe(&pair.model),
+        style::stdout().paint(Role::Runtime, &display_safe(&pair.harness)),
+        style::stdout().paint(Role::Runtime, &display_safe(&pair.model)),
         display_safe(&pair.basis)
     ))?;
     let prerequisite = selection::check_prerequisite(&pair.harness);
     if !prerequisite.satisfied() {
-        bail!(
+        bail!(kind: crate::util::ErrorKind::Prerequisite,
             "{} is not installed on this machine ({} not found on PATH).\n\
              This is a diagnostic for your machine, not a reason to select a different \
              harness: the project's policy is the same for everyone.",
@@ -721,7 +765,11 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
         );
     }
     for note in &prerequisite.notes {
-        console.say(&format!("  note    {note}\n"))?;
+        console.say(&format!(
+            "  {}    {}\n",
+            style::stdout().paint(Role::Hint, "note"),
+            display_safe(note)
+        ))?;
     }
 
     let Some(prompt) = launcher::read_prompt(console)? else {
@@ -730,7 +778,7 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
     };
 
     submit(
-        console, repo, &loaded, resolved, pair, &prompt, true, false, focus_new,
+        console, repo, &loaded, resolved, pair, &prompt, true, false, focus_new, false,
     )
 }
 
@@ -745,7 +793,8 @@ pub fn launch_cmd(
     console: &mut Console<'_>,
     repo: &Repo,
     agent: &str,
-    prompt_file: &Path,
+    prompt: &str,
+    output_json: bool,
     dry_run: bool,
     allow_widened_approvals: bool,
 ) -> Result<i32> {
@@ -753,6 +802,7 @@ pub fn launch_cmd(
         crate::util::Error::new(
             "project configuration is missing; run ahu init before assigning work.",
         )
+        .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
     let (resolved, pair) = resolve_identity(repo, &loaded, Some(agent))?;
     let permissions = resolved
@@ -760,7 +810,7 @@ pub fn launch_cmd(
         .map(|a| a.manifest.permissions)
         .unwrap_or_default();
     if permissions.widens_defaults() && !allow_widened_approvals {
-        bail!(
+        bail!(kind: crate::util::ErrorKind::Usage,
             "@{} runs with permissions = {}, which widens the harness's own approval boundary:\n  \
              {}\n\
              `ahu launch` starts a session with no interactive confirmation, so it will not widen \
@@ -773,14 +823,17 @@ pub fn launch_cmd(
             permissions.disclosure()
         );
     }
-    let prompt = std::fs::read_to_string(prompt_file).map_err(|e| {
-        crate::util::Error::new(format!(
-            "cannot read prompt file {}: {e}",
-            prompt_file.display()
-        ))
-    })?;
     submit(
-        console, repo, &loaded, resolved, pair, &prompt, false, dry_run, false,
+        console,
+        repo,
+        &loaded,
+        resolved,
+        pair,
+        prompt,
+        false,
+        dry_run,
+        false,
+        output_json,
     )
 }
 
@@ -795,6 +848,7 @@ fn submit(
     confirm: bool,
     dry_run: bool,
     focus_new: bool,
+    output_json: bool,
 ) -> Result<i32> {
     let plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
 
@@ -853,7 +907,7 @@ fn submit(
         &previous.records,
     ) {
         console.say("\n")?;
-        console.say(&drift::render(&found))?;
+        console.say(&style::stdout().paint(Role::Drift, &drift::render(&found)))?;
     }
 
     // Generated here, after the prompt has been read and after the plan is
@@ -868,6 +922,9 @@ fn submit(
 
     if dry_run {
         console.say("Dry run. No task or session was created.\n")?;
+        if output_json {
+            println!("{}", launch::render_json(&plan, prompt)?);
+        }
         return Ok(0);
     }
     if confirm && !launcher::confirm_submit(console, &code)? {
@@ -888,7 +945,7 @@ fn submit(
     if let Some(workspace) = &launched.record.cmux_workspace_id {
         console.say(&format!("  cmux     {workspace}\n"))?;
     }
-    console.say(&render_launch_notes(&launched.notes))?;
+    console.say(&style::stdout().paint(Role::Warning, &render_launch_notes(&launched.notes)))?;
     Ok(0)
 }
 
@@ -924,8 +981,10 @@ pub fn render_preview(
     prompt: &str,
     confirmation_code: Option<&str>,
 ) -> String {
+    let style = style::stdout();
     let mut out = String::new();
-    out.push_str("\nAbout to submit\n===============\n");
+    out.push_str(&style.paint(Role::Heading, "\nAbout to submit\n===============\n"));
+    out.push_str(&style.paint(Role::Heading, "\nIdentity and runtime\n"));
     out.push_str(
         "  delegation All assigned agents must launch through ahu in separate cmux sessions.\n",
     );
@@ -940,10 +999,16 @@ pub fn render_preview(
     ));
     out.push_str(&format!(
         "  agent      {}\n",
-        display_safe(&plan.agent_label())
+        style.paint(Role::Agent, &display_safe(&plan.agent_label()))
     ));
-    out.push_str(&format!("  harness    {}\n", plan.pair.harness));
-    out.push_str(&format!("  model      {}\n", plan.pair.model));
+    out.push_str(&format!(
+        "  harness    {}\n",
+        style.paint(Role::Runtime, &display_safe(&plan.pair.harness))
+    ));
+    out.push_str(&format!(
+        "  model      {}\n",
+        style.paint(Role::Runtime, &display_safe(&plan.pair.model))
+    ));
     out.push_str(&format!(
         "  because    {}\n",
         display_safe(&plan.pair.basis)
@@ -951,7 +1016,7 @@ pub fn render_preview(
     out.push_str(&format!(
         "  policy     {} · catalog {}\n",
         &plan.pair.policy_digest[..12],
-        plan.pair.catalog_version
+        display_safe(&plan.pair.catalog_version)
     ));
     if let Some(agent) = &plan.agent {
         // This attribution is now checkable rather than asserted: ahu delivers
@@ -986,17 +1051,23 @@ pub fn render_preview(
             }
         ));
     }
+    out.push_str(&style.paint(Role::Heading, "\nTask and Git effects\n"));
     out.push_str(&format!("  title      {}\n", display_safe(&plan.title)));
     out.push_str(&format!(
         "  prompt     {} line(s), {} character(s)\n",
         prompt.lines().count(),
         prompt.chars().count()
     ));
+    out.push_str(&format!(
+        "  prompt bytes {}\n  prompt sha256 {}\n",
+        prompt.len(),
+        crate::util::digest_bytes(prompt.as_bytes())
+    ));
     out.push_str(&format!("  branch     {}\n", display_safe(&plan.branch)));
     out.push_str(&format!("  worktree   {}\n", display_path(&plan.worktree)));
     out.push_str(&format!(
         "  base       {}\n",
-        plan.base_commit.as_deref().unwrap_or("(none)")
+        display_safe(plan.base_commit.as_deref().unwrap_or("(none)"))
     ));
     out.push_str(&format!(
         "  config     {} file(s), snapshot {}\n",
@@ -1014,6 +1085,7 @@ pub fn render_preview(
          files, at their native paths.\n",
     );
     if plan.parent_dirty {
+        out.push_str(&style.paint(Role::Drift, "\nCheckout changes\n"));
         out.push_str(
             "This checkout has uncommitted changes. Unrelated source changes stay here; they are\n\
              not copied into the task worktree. Nothing is staged, committed, or stashed.\n",
@@ -1055,16 +1127,20 @@ pub fn render_preview(
     // A widened approval boundary is the most consequential thing in a launch,
     // so it is stated before the enforcement list, not buried in it.
     if plan.permissions.widens_defaults() {
-        out.push_str(&format!(
-            "\nApprovals\n  !! This agent runs with permissions = {}.\n     {}\n     \
+        out.push_str(&style.paint(
+            Role::Warning,
+            &format!(
+                "\nApprovals\n  !! This agent runs with permissions = {}.\n     {}\n     \
              ahu passes the harness's own flag for this because the agent's manifest asks for it. \
              It is a committed, reviewable field, not an ahu default.\n",
-            plan.permissions.as_str(),
-            plan.permissions.disclosure()
+                plan.permissions.as_str(),
+                display_safe(plan.permissions.disclosure())
+            ),
         ));
     } else {
         out.push_str(&format!(
-            "\nApprovals\n  {}\n",
+            "\n{}\n  {}\n",
+            style.paint(Role::Heading, "Approvals"),
             display_safe(plan.permissions.disclosure())
         ));
     }
@@ -1073,18 +1149,27 @@ pub fn render_preview(
     // worktree, so they are printed here rather than left to the file count.
     out.push_str(&hooks::render_settings_for_preview(&plan.hooks));
 
-    out.push_str("\nEnforcement\n");
+    out.push_str(&style.paint(Role::Heading, "\nEnforcement\n"));
     for control in &plan.enforcement.applied_controls {
-        out.push_str(&format!("  + {}\n", display_safe(control)));
+        out.push_str(&format!(
+            "  + {}\n",
+            style.paint(Role::Success, &display_safe(control))
+        ));
     }
     // Gaps print unconditionally. They used to appear only under the reliability
     // warning, which made the single most important sentence about a launch --
     // that nothing ahu supplies is enforced -- conditional on an unrelated flag.
     for gap in &plan.enforcement.gaps {
-        out.push_str(&format!("  - {}\n", display_safe(gap)));
+        out.push_str(&format!(
+            "  - {}\n",
+            style.paint(Role::Gap, &display_safe(gap))
+        ));
     }
     if let Some(warning) = plan.reliability_warning() {
-        out.push_str(&format!("\n  !! {warning}\n"));
+        out.push_str(&style.paint(
+            Role::Warning,
+            &format!("\nReliability warning\n  !! {}\n", display_safe(warning)),
+        ));
         out.push_str(
             "     ahu still pins the configured harness and model and never substitutes another.\n\
              \x20    This limitation is recorded in the task metadata and the context inventory.\n",
@@ -1115,21 +1200,39 @@ pub fn render_preview(
          harness.\n",
     );
     if let Some(code) = confirmation_code {
-        out.push_str(&format!(
-            "\nConfirmation code for this submission: {code}\n\
-             It was generated after your prompt was read, so no pasted text can have supplied it.\n",
+        out.push_str(&style.paint(
+            Role::Heading,
+            &format!(
+                "\nConfirmation code for this submission: {}\n",
+                display_safe(code)
+            ),
         ));
+        out.push_str("It was generated after your prompt was read, so no pasted text can have supplied it.\n");
     }
     out
 }
 
 /// Wire the standard streams into a console.
 pub fn with_stdio<T>(f: impl FnOnce(&mut Console<'_>) -> Result<T>) -> Result<T> {
+    with_stdio_output(false, f)
+}
+
+pub fn with_stdio_output<T>(
+    diagnostics_to_stderr: bool,
+    f: impl FnOnce(&mut Console<'_>) -> Result<T>,
+) -> Result<T> {
     let stdin = std::io::stdin();
     let mut locked = stdin.lock();
     let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
     let mut out = stdout.lock();
-    let mut console = launcher::stdio_console(&mut locked, &mut out);
+    let mut err = stderr.lock();
+    let writer: &mut dyn std::io::Write = if diagnostics_to_stderr {
+        &mut err
+    } else {
+        &mut out
+    };
+    let mut console = launcher::stdio_console(&mut locked, writer);
     f(&mut console)
 }
 

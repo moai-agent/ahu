@@ -485,6 +485,8 @@ fn relative(root: &Path, path: &Path) -> String {
 
 /// Render the inventory for a terminal.
 pub fn render(inventory: &Inventory) -> String {
+    use crate::style::{self, Role};
+    let style = style::stdout();
     let mut out = String::new();
     out.push_str("Context inventory\n");
     out.push_str("=================\n\n");
@@ -532,9 +534,12 @@ pub fn render(inventory: &Inventory) -> String {
         }
         out.push('\n');
     }
-    out.push_str("What ahu cannot see\n");
+    out.push_str(&style.paint(Role::Gap, "What ahu cannot see\n"));
     for gap in &inventory.coverage_gaps {
-        out.push_str(&format!("  - {}\n", display_safe(gap)));
+        out.push_str(&format!(
+            "  - {}\n",
+            style.paint(Role::Gap, &display_safe(gap))
+        ));
     }
     out.push_str(
         "\nThis inventory is not complete. `available` means a source is discoverable by the\n\

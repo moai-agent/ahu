@@ -195,3 +195,144 @@ fn tasks_output_escapes_what_it_prints() {
     let rendered = ahu::commands::render_launch_notes(&["x\u{202e}y".to_string()]);
     assert!(!rendered.contains('\u{202e}'), "{rendered:?}");
 }
+
+/// Styling belongs outside repository-derived spans, including text that was
+/// neutralized before it reached the style helper.
+#[test]
+fn forced_styling_contains_hostile_descriptions() {
+    let repo = TestRepo::new();
+    repo.add_agent_on("fixture", "1.0.0", "codex", "gpt-6-astra");
+    let hostile = format!("BEGIN{}\x1b[2JEND", INVISIBLE.iter().collect::<String>());
+    let mut manifest: toml::Value =
+        toml::from_str(&repo.read(".agents/ahu/agents/fixture.toml")).unwrap();
+    manifest["description"] = toml::Value::String(hostile.clone());
+    repo.write(
+        ".agents/ahu/agents/fixture.toml",
+        &toml::to_string(&manifest).unwrap(),
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+        .args(["agents", "--color=always"])
+        .current_dir(repo.path())
+        .env("NO_COLOR", "")
+        .env("TERM", "dumb")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains('\x1b'),
+        "explicit always must override environment"
+    );
+    let start = text.find("BEGIN").unwrap();
+    let end = text[start..].find("END").unwrap() + start + 3;
+    assert_eq!(&text[start..end], display_safe(&hostile));
+    assert!(!text[start..end].contains('\x1b'));
+    for hostile in INVISIBLE {
+        assert!(!text.contains(*hostile));
+    }
+}
+
+#[test]
+fn forced_styling_keeps_invalid_identity_fields_safe_in_errors() {
+    for field in ["name", "version", "harness", "model"] {
+        let repo = TestRepo::new();
+        repo.add_agent_on("fixture", "1.0.0", "codex", "gpt-6-astra");
+        let mut manifest: toml::Value =
+            toml::from_str(&repo.read(".agents/ahu/agents/fixture.toml")).unwrap();
+        manifest[field] = toml::Value::String("BEGIN\x1b[2J\u{202e}END".into());
+        repo.write(
+            ".agents/ahu/agents/fixture.toml",
+            &toml::to_string(&manifest).unwrap(),
+        );
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+            .args(["--color=always", "agents"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let text = String::from_utf8(output.stderr).unwrap();
+        let start = text.find("BEGIN").unwrap();
+        let end = text[start..].find("END").unwrap() + start + 3;
+        assert!(!text[start..end].contains('\x1b'), "{field}: {text:?}");
+        assert!(!text.contains('\u{202e}'), "{field}: {text:?}");
+        assert!(
+            text.contains("[2J"),
+            "hostile value remains visible: {text:?}"
+        );
+    }
+}
+
+#[test]
+fn redirected_commands_match_explicit_plain_output() {
+    use std::process::{Command, Stdio};
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent_on("fixture", "1.0.0", "codex", "gpt-6-astra");
+    repo.commit("fixture configuration");
+    // Invalid launch/focus/runner targets exercise their errors without creating
+    // sessions or worktrees; the read-only command paths exercise their output.
+    let cases: &[&[&str]] = &[
+        &[],
+        &["help"],
+        &["--version"],
+        &["explain"],
+        &["explain", "--markdown"],
+        &["explain", "--mermaid"],
+        &["explain", "--open"],
+        &["init"],
+        &["agents"],
+        &["onboard"],
+        &["inventory", "@fixture"],
+        &["hygiene", "@fixture"],
+        &["tasks"],
+        &["doctor"],
+        &["focus", "missing"],
+        &["launch", "@missing", "--prompt", "fixture", "--dry-run"],
+        &["run-task", "--task-dir", "missing"],
+    ];
+    for args in cases {
+        let run = |color: &str| {
+            std::fs::remove_dir_all(repo.state_path()).unwrap();
+            std::fs::create_dir(repo.state_path()).unwrap();
+            let out = tempfile::NamedTempFile::new().unwrap();
+            let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+                .arg(color)
+                .args(*args)
+                .current_dir(repo.path())
+                .env("AHU_STATE_DIR", repo.state_path())
+                .env("AHU_CMUX_BIN", repo.state_path().join("absent-cmux"))
+                .env("PATH", "/usr/bin:/bin")
+                .env("TERM", "xterm-256color")
+                .env_remove("NO_COLOR")
+                .stdin(Stdio::null())
+                .stdout(out.reopen().unwrap())
+                .output()
+                .unwrap();
+            (
+                output.status.code(),
+                std::fs::read(out.path()).unwrap(),
+                output.stderr,
+            )
+        };
+        let plain = run("--color=never");
+        let auto = run("--color=auto");
+        assert_eq!(auto, plain, "command {args:?}");
+        assert!(!auto.1.contains(&0x1b), "command {args:?}");
+        assert!(!auto.2.contains(&0x1b), "command {args:?}");
+    }
+}
+
+#[test]
+fn bad_color_options_are_usage_errors() {
+    for args in [
+        vec!["--color=invalid"],
+        vec!["--color"],
+        vec!["--color=always", "--color=never"],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+    }
+}

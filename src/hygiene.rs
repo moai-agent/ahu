@@ -232,9 +232,14 @@ pub fn render(review: &Review, trigger: Trigger, loaded: &LoadedConfig) -> Strin
         out.push_str(&format!("  - {control}\n"));
     }
     if !review.unsupported_controls.is_empty() {
-        out.push_str("\nWhat this harness does not let ahu do per agent:\n");
+        let style = crate::style::stdout();
+        let role = crate::style::Role::Gap;
+        out.push_str(&style.paint(role, "\nWhat this harness does not let ahu do per agent:\n"));
         for control in &review.unsupported_controls {
-            out.push_str(&format!("  - {control}\n"));
+            out.push_str(&format!(
+                "  - {}\n",
+                style.paint(role, &display_safe(control))
+            ));
         }
     }
     out.push_str(

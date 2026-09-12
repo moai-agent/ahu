@@ -36,5 +36,6 @@ pub mod orchestration;
 pub mod selection;
 pub mod snapshot;
 pub mod state;
+pub mod style;
 pub mod task;
 pub mod util;

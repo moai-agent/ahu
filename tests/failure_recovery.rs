@@ -733,3 +733,138 @@ fn adapter_enforcement_reports_a_missing_catalog_entry_instead_of_panicking() {
         );
     }
 }
+
+#[test]
+fn selector_positions_follow_the_displayed_registered_agents() {
+    let repo = TestRepo::new();
+    repo.add_agent("zeta", "1.0.0", "claude-opus-5");
+    repo.add_agent("alpha", "1.0.0", "claude-opus-5");
+    let agents = ahu::agent::load_all(repo.path()).unwrap();
+    for (index, agent) in agents.iter().enumerate() {
+        for input in [
+            format!("{}\n", index + 1),
+            format!("@{}\n", agent.manifest.name),
+            format!("{}\n", agent.manifest.name),
+        ] {
+            let (_, text) = scripted(&input, |console| {
+                let selected = ahu::launcher::read_selector(console, &agents)?;
+                assert_eq!(selected.as_deref(), Some(agent.manifest.name.as_str()));
+                Ok(0)
+            });
+            assert!(
+                text.contains(&format!("{}. @{}", index + 1, agent.manifest.name)),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn selector_recovers_from_invalid_positions_and_names() {
+    let repo = TestRepo::new();
+    repo.add_agent("alpha", "1.0.0", "claude-opus-5");
+    let agents = ahu::agent::load_all(repo.path()).unwrap();
+    let (code, text) = scripted(
+        "0\n2\n99999999999999999999999999999999999\nmissing\n@\n1\n",
+        |console| {
+            assert_eq!(
+                ahu::launcher::read_selector(console, &agents)?.as_deref(),
+                Some("alpha")
+            );
+            Ok(0)
+        },
+    );
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(text.matches("range 1–1").count(), 3, "{text}");
+    assert_eq!(text.matches("Valid agents: @alpha").count(), 2, "{text}");
+    for input in ["\n", ""] {
+        scripted(input, |console| {
+            assert_eq!(ahu::launcher::read_selector(console, &agents)?, None);
+            Ok(0)
+        });
+    }
+}
+
+#[test]
+fn selector_does_not_promote_native_onboarding_candidates() {
+    let repo = TestRepo::new();
+    repo.add_agent("alpha", "1.0.0", "claude-opus-5");
+    repo.write(".claude/agents/candidate.md", "---\nname: candidate\ndescription: Native candidate\nmodel: claude-opus-5\n---\nInstructions.\n");
+    let agents = ahu::agent::load_all(repo.path()).unwrap();
+    assert_eq!(agents.len(), 1);
+    let (code, text) = scripted("candidate\n2\n1\n", |console| {
+        assert_eq!(
+            ahu::launcher::read_selector(console, &agents)?.as_deref(),
+            Some("alpha")
+        );
+        Ok(0)
+    });
+    assert_eq!(code, 0, "{text}");
+    assert!(!text.contains("@candidate"), "{text}");
+    assert!(text.contains("Unknown agent"), "{text}");
+    assert!(text.contains("range 1–1"), "{text}");
+    let (_, text) = scripted("1\ncandidate\n\n", |console| {
+        assert_eq!(ahu::launcher::read_selector(console, &[])?, None);
+        Ok(0)
+    });
+    assert!(text.contains("ahu onboard"), "{text}");
+}
+
+#[test]
+fn selector_escapes_repository_fields_and_bounds_descriptions() {
+    let repo = TestRepo::new();
+    repo.add_agent("alpha", "1.0.0", "claude-opus-5");
+    let mut agents = ahu::agent::load_all(repo.path()).unwrap();
+    agents[0].manifest.name = "bad\x1b[31m\u{202e}\u{200b}\nname".to_string();
+    agents[0].manifest.description = format!("hostile\x1b[31m\u{202e}\u{200b} {}", "x".repeat(200));
+    let text = ahu::launcher::render_agent_choices(&agents);
+    assert!(!text.contains('\x1b'), "{text}");
+    assert!(!text.contains('\u{202e}'), "{text}");
+    assert!(!text.contains('\u{200b}'), "{text}");
+    assert_eq!(text.lines().count(), 3, "{text}");
+    assert!(
+        text.contains(&ahu::util::display_safe(&agents[0].manifest.name)),
+        "{text}"
+    );
+    assert_eq!(text.lines().last().unwrap().len(), 80, "{text}");
+    assert!(text.lines().last().unwrap().ends_with("..."), "{text}");
+}
+
+#[test]
+fn selector_numeric_names_use_an_explicit_at_prefix() {
+    let repo = TestRepo::new();
+    repo.add_agent("2", "1.0.0", "claude-opus-5");
+    repo.add_agent("alpha", "1.0.0", "claude-opus-5");
+    let agents = ahu::agent::load_all(repo.path()).unwrap();
+    for (input, expected) in [("2\n", "alpha"), ("@2\n", "2")] {
+        let (code, text) = scripted(input, |console| {
+            assert_eq!(
+                ahu::launcher::read_selector(console, &agents)?.as_deref(),
+                Some(expected)
+            );
+            Ok(0)
+        });
+        assert_eq!(code, 0, "{text}");
+        assert!(
+            text.contains("Use @name for an agent whose name is numeric"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn selector_truncates_wide_descriptions_on_character_boundaries() {
+    let repo = TestRepo::new();
+    repo.add_agent("alpha", "1.0.0", "claude-opus-5");
+    let mut agents = ahu::agent::load_all(repo.path()).unwrap();
+    agents[0].manifest.description = "界".repeat(100);
+    let text = ahu::launcher::render_agent_choices(&agents);
+    let line = text.lines().last().unwrap();
+    assert_eq!(line, format!("     {}...", "界".repeat(36)));
+    assert_eq!(
+        line.chars()
+            .map(|c| if c.is_ascii() { 1 } else { 2 })
+            .sum::<usize>(),
+        80
+    );
+}
