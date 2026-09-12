@@ -366,3 +366,204 @@ fn semantic_version_validation_accepts_and_rejects_the_expected_forms() {
         assert!(!util::is_semver(bad), "{bad} should be invalid");
     }
 }
+
+/// A repository must not be able to choose which file ahu opens.
+///
+/// Every *write* inside a repository goes through `util::resolve_within`, which
+/// refuses a symlinked component. The read side did not, so a committed
+/// `.agents/ahu/agents/<name>.toml` symlink pointed anywhere made
+/// `agent::load_all` open that file — and `toml`'s parse error quotes the
+/// offending source line verbatim, so the contents were printed. `load_all`
+/// runs on plain `ahu` before any prompt is typed, and on `ahu agents`.
+#[test]
+fn a_symlinked_manifest_is_refused_rather_than_read_through() {
+    let repo = TestRepo::new();
+    repo.init_config();
+
+    let secret = repo.path().join("outside-the-repo.txt");
+    std::fs::write(&secret, "SYNTHETIC_TOKEN = \"not-a-real-credential\"\n").unwrap();
+    std::fs::create_dir_all(repo.path().join(".agents/ahu/agents")).unwrap();
+    std::os::unix::fs::symlink(&secret, repo.path().join(".agents/ahu/agents/leak.toml")).unwrap();
+
+    let error = agent::load_all(repo.path()).expect_err("a symlinked manifest must be refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("refusing to act through a symlink"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("SYNTHETIC_TOKEN"),
+        "the target's contents leaked into the error: {message}"
+    );
+}
+
+/// The same rule for the project configuration itself.
+#[test]
+fn a_symlinked_config_is_refused_rather_than_read_through() {
+    let repo = TestRepo::new();
+    let secret = repo.path().join("outside-the-repo.txt");
+    std::fs::write(&secret, "SYNTHETIC_TOKEN = \"not-a-real-credential\"\n").unwrap();
+    std::fs::create_dir_all(repo.path().join(".agents/ahu")).unwrap();
+    std::os::unix::fs::symlink(&secret, repo.path().join(".agents/ahu/config.toml")).unwrap();
+
+    let error = config::load(repo.path()).expect_err("a symlinked config must be refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("refusing to act through a symlink"),
+        "{message}"
+    );
+    assert!(!message.contains("SYNTHETIC_TOKEN"), "{message}");
+}
+
+/// A symlinked `.agents` directory redirects the whole registry, not one file.
+#[test]
+fn a_symlinked_agents_directory_is_refused() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    let elsewhere = repo.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("x.toml"), "SYNTHETIC = 1\n").unwrap();
+
+    // Replace `.agents/ahu/agents` with a link to a directory ahu never vetted.
+    let agents = repo.path().join(".agents/ahu/agents");
+    std::fs::create_dir_all(agents.parent().unwrap()).unwrap();
+    let _ = std::fs::remove_dir_all(&agents);
+    std::os::unix::fs::symlink(&elsewhere, &agents).unwrap();
+
+    let error = agent::load_all(repo.path()).expect_err("a symlinked registry must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("refusing to act through a symlink"),
+        "{error}"
+    );
+}
+
+/// ahu resolves a harness in order to execute it, so a `PATH` entry that is
+/// empty or relative must not be honoured.
+///
+/// `PATH=/usr/bin:` has an empty trailing entry. Treated the way a shell treats
+/// it, `claude` resolves against the current working directory — which for
+/// `ahu run-task` is the task worktree, a checkout of the repository. The name
+/// check in `run_task` cannot catch that, because the file name of the bare
+/// relative path `claude` is exactly `claude`.
+#[test]
+fn a_relative_path_entry_never_resolves_a_harness() {
+    let repo = TestRepo::new();
+    let planted = repo.path().join("claude");
+    std::fs::write(&planted, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Resolution reads the process environment, so drive it through a child
+    // process rather than mutating this test binary's own PATH.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+        .arg("doctor")
+        .current_dir(repo.path())
+        .env("AHU_STATE_DIR", repo.state_path())
+        .env("PATH", format!("{}:", std::env::var("PATH").unwrap()))
+        .output()
+        .expect("ahu runs");
+    let combined = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // `doctor` prints the resolved path for each harness. Whatever it found, it
+    // must not be the repository's own file.
+    assert!(
+        !combined.contains(&format!("{}/claude", repo.path().display()))
+            && !combined.contains(" claude "),
+        "a harness was resolved from the repository: {combined}"
+    );
+}
+
+/// Hooks must not be read through a symlinked `.claude`.
+///
+/// `Scope::Project` is the one scope whose `why_not_project_policy` is "it is
+/// project policy", so `outside_project_policy` excludes it and the
+/// non-project-hook warning is suppressed. Reading through a symlink labelled
+/// hooks from outside the repository as project policy, and the preview also
+/// claimed they travel into the task worktree — which is false, because
+/// `materialize` deletes configuration symlinks from it. Both errors pointed
+/// the permissive way.
+#[test]
+fn hooks_are_not_read_through_a_symlinked_claude_directory() {
+    let repo = TestRepo::new();
+    let outside = repo.path().join("outside-claude");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(
+        outside.join("settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/bin/synthetic-marker"}]}]}}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&outside, repo.path().join(".claude")).unwrap();
+
+    let found = ahu::hooks::collect(repo.path()).expect("collect succeeds");
+    assert!(
+        !found
+            .hooks
+            .iter()
+            .any(|h| h.command.as_deref() == Some("/usr/bin/synthetic-marker")),
+        "a hook was read through a symlinked .claude: {:?}",
+        found.hooks
+    );
+    assert!(
+        found.unreadable.iter().any(|u| u.contains("symlink")),
+        "the refusal must be disclosed, not silent: {:?}",
+        found.unreadable
+    );
+}
+
+/// A proposed manifest must be parseable by the loader that will read it back.
+///
+/// `proposed_manifest` built its TOML with Rust's `{:?}`, which escapes a
+/// non-printable character as `\u{XXXX}`; TOML's escape is `\uXXXX`. So a
+/// `description:` in a native definition's frontmatter carrying a bidi
+/// override, an ESC, or a zero-width character made `onboard --register` write
+/// a manifest `agent::load_all` could not parse — and one unparseable manifest
+/// fails the entire registry load, so `ahu agents`, `ahu onboard` and the
+/// launcher's agent list all stayed broken until the file was deleted by hand.
+#[test]
+fn a_proposed_manifest_round_trips_through_the_loader() {
+    let repo = TestRepo::new();
+    repo.init_config();
+
+    for hostile in [
+        "plain description",
+        "bidi \u{202e}override",
+        "escape \u{1b}[2J here",
+        "zero \u{200b} width",
+        "quotes \" and \\ backslash",
+        "newline \n inside",
+    ] {
+        repo.write(
+            ".claude/agents/probe.md",
+            &format!(
+                "---\nname: probe\ndescription: {hostile}\nmodel: claude-opus-5\n---\n\nBody.\n"
+            ),
+        );
+        let candidates = ahu::onboard::preview(repo.path()).expect("preview");
+        let candidate = candidates
+            .iter()
+            .find(|c| c.name == "probe")
+            .expect("probe is a candidate");
+
+        let body = ahu::onboard::proposed_manifest(candidate, "claude-opus-5", "0.1.0");
+        let parsed: Result<toml::Value, _> = toml::from_str(&body);
+        assert!(
+            parsed.is_ok(),
+            "proposed manifest is not valid TOML for description {hostile:?}:\n{body}\n{:?}",
+            parsed.err().map(|e| e.to_string())
+        );
+
+        // And it must survive the real loader, not just a generic TOML parse.
+        let written = repo.path().join(".agents/ahu/agents/probe.toml");
+        std::fs::create_dir_all(written.parent().unwrap()).unwrap();
+        std::fs::write(&written, &body).unwrap();
+        let loaded = agent::load_all(repo.path());
+        assert!(
+            loaded.is_ok(),
+            "the registry no longer loads after registering description {hostile:?}: {:?}",
+            loaded.err().map(|e| e.to_string())
+        );
+        std::fs::remove_file(&written).unwrap();
+    }
+}

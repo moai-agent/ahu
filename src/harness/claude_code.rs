@@ -71,7 +71,7 @@ impl Adapter for ClaudeCode {
         })
     }
 
-    fn enforcement(&self, _model: &str) -> Result<EnforcementReport> {
+    fn enforcement(&self, _model: &str, permissions: Permissions) -> Result<EnforcementReport> {
         let entry = crate::catalog::harness("claude-code").ok_or_else(|| {
             crate::util::Error::new(
                 "the compatibility catalog has no entry for harness \"claude-code\", so ahu cannot \
@@ -87,9 +87,38 @@ impl Adapter for ClaudeCode {
             applied_controls: vec![
                 "--model pins the exact model for the session's first request".to_string(),
                 "--agent selects the native agent definition, preserving its own tool and permission settings".to_string(),
-                "ahu passes no --dangerously-skip-permissions, --permission-mode, --allowedTools, or --add-dir; whether the effective session keeps the harness's own approval boundaries also depends on any wrapper on PATH".to_string(),
+                permission_control(permissions),
             ],
         })
+    }
+}
+
+/// State the permission flags this adapter passes, from the same value that
+/// decides them.
+///
+/// Derived rather than fixed so it cannot drift out of step with
+/// `launch_command`. The fixed version of this string asserted "ahu passes no
+/// --permission-mode" on launches that passed exactly that flag, which put the
+/// Enforcement block in direct contradiction with the Approvals block and the
+/// argv dump printed beside it.
+fn permission_control(permissions: Permissions) -> String {
+    let tail = "whether the effective session keeps the harness's own approval boundaries \
+                also depends on any wrapper on PATH";
+    match permissions {
+        Permissions::Prompt => format!(
+            "ahu passes no --dangerously-skip-permissions, --permission-mode, --allowedTools, \
+             or --add-dir; {tail}"
+        ),
+        Permissions::AcceptEdits => format!(
+            "ahu passes --permission-mode acceptEdits because this agent's manifest declares \
+             permissions = accept-edits; it passes no --dangerously-skip-permissions, \
+             --allowedTools, or --add-dir; {tail}"
+        ),
+        Permissions::Auto => format!(
+            "ahu passes --permission-mode auto because this agent's manifest declares \
+             permissions = auto; it passes no --dangerously-skip-permissions, --allowedTools, \
+             or --add-dir; {tail}"
+        ),
     }
 }
 

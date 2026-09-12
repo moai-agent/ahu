@@ -78,11 +78,49 @@ pub fn digest_bytes(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Largest configuration file ahu will read into a digest.
+///
+/// Agent configuration is prose, JSON, and small scripts. This is far above
+/// anything legitimate and far below a size that matters.
+pub const MAX_CONFIG_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Lowercase hex SHA-256 of a file's contents.
+///
+/// Streamed rather than read whole, and capped. A repository can commit a file
+/// of any size at a configuration path, and this runs on every one of them —
+/// once in `snapshot::collect` and twice more per file in `materialize` — so
+/// `ahu`, `ahu inventory`, `ahu doctor` and every launch would each read it end
+/// to end. A committed multi-gigabyte `.claude/x` was enough to stall all of
+/// them before any preview was shown.
 pub fn digest_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
-    Ok(digest_bytes(&bytes))
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
+        if read == 0 {
+            break;
+        }
+        total += read as u64;
+        if total > MAX_CONFIG_BYTES {
+            return Err(Error::new(format!(
+                "{} is larger than the {} MiB ahu will read for a configuration file.\n\
+                 ahu digests every agent-configuration file it inventories, so it will not read \
+                 an unbounded one. Move this file out of an agent-configuration path.",
+                path.display(),
+                MAX_CONFIG_BYTES / (1024 * 1024)
+            )));
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Names used for agents, branches, and cmux titles must be safe in all three.
@@ -185,6 +223,10 @@ pub fn display_safe(value: &str) -> String {
 /// or direction-changing: on a bidi-aware terminal U+202E makes a hook's
 /// displayed program name render as something other than what it is, and the
 /// zero-width family lets two different strings look identical.
+pub(crate) fn is_display_hostile_char(ch: char) -> bool {
+    is_display_hostile(ch)
+}
+
 fn is_display_hostile(ch: char) -> bool {
     let code = ch as u32;
     ch.is_control()
@@ -295,6 +337,62 @@ pub fn resolve_within(root: &Path, relative: &str, create_missing_dirs: bool) ->
     Ok(current)
 }
 
+/// Resolve `relative` under `root` for *reading*, refusing to traverse a symlink.
+///
+/// [`resolve_within`] guards every path ahu writes to. Reads need the same
+/// guard for the same reason — a repository can commit a symlink at
+/// `.agents/ahu/config.toml` or `.agents/ahu/agents/x.toml`, and reading
+/// through one lets the repository choose which file ahu opens and then quotes
+/// back in a parse error. That is an arbitrary-file read with the contents
+/// disclosed, from nothing more than checking out a repository.
+///
+/// Reads differ from writes in one way: a component that does not exist is the
+/// ordinary "not configured yet" case, not a failure. So absence is reported as
+/// `Ok(None)` and only a symlink, or a non-directory where a directory must be,
+/// is an error.
+///
+/// A symlink swapped in between this call and the open is still possible. The
+/// committed-symlink case — the one a repository controls — is closed here;
+/// winning that race additionally requires write access to the checkout while
+/// ahu is running.
+pub fn resolve_existing_within(root: &Path, relative: &str) -> Result<Option<PathBuf>> {
+    let parts: Vec<&str> = relative.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return Err(Error::new(format!("empty path under {}", root.display())));
+    }
+    if parts.iter().any(|p| *p == ".." || *p == ".") {
+        return Err(Error::new(format!(
+            "{relative} is not a plain path under {}",
+            root.display()
+        )));
+    }
+    let mut current = root.to_path_buf();
+    for (index, part) in parts.iter().enumerate() {
+        current.push(part);
+        let last = index + 1 == parts.len();
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(symlink_refusal(&current, relative));
+            }
+            Ok(meta) if last || meta.is_dir() => {}
+            Ok(_) => {
+                return Err(Error::new(format!(
+                    "{} exists and is not a directory.",
+                    current.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(Error::new(format!(
+                    "cannot inspect {}: {e}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    Ok(Some(current))
+}
+
 /// The message shown when ahu refuses to act through a symlink.
 pub fn symlink_refusal(found_at: &Path, relative: &str) -> Error {
     let points_to = std::fs::read_link(found_at)
@@ -313,6 +411,14 @@ pub fn symlink_refusal(found_at: &Path, relative: &str) -> Error {
 ///
 /// Only the first nonempty line is used and it is truncated, so a pasted prompt
 /// never lands in a terminal title in full.
+///
+/// Every character [`display_safe`] would escape is replaced here instead, and
+/// before truncation so the length bound still holds. This title is the one
+/// repository- and prompt-derived string that does *not* reach the terminal
+/// through a renderer: it becomes the cmux workspace name, passed to
+/// `cmux new-workspace --name`, and cmux paints it in the sidebar. Filtering
+/// only `char::is_control` left the bidi overrides and the zero-width family
+/// intact, so a title could render as something other than what it is.
 pub fn task_title_from_prompt(prompt: &str) -> String {
     let first = prompt
         .lines()
@@ -321,7 +427,7 @@ pub fn task_title_from_prompt(prompt: &str) -> String {
         .unwrap_or("");
     let cleaned: String = first
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if is_display_hostile(c) { ' ' } else { c })
         .collect();
     let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     if cleaned.is_empty() {

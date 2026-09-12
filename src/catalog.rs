@@ -194,10 +194,14 @@ pub fn models_for(harness_id: &str) -> Vec<&'static ModelEntry> {
 /// shared project decision.
 pub fn require_version(pinned: &str) -> Result<()> {
     if pinned != CATALOG_VERSION {
+        // `{pinned:?}` rather than `{pinned}`: this value is chosen by the
+        // repository, and every renderer that prints it should escape it. The
+        // callers do, but a message that carries repository bytes verbatim is
+        // one refactor away from reaching a terminal that does not.
         bail!(
-            "this project pins compatibility catalog {pinned}, but this ahu build ships {CATALOG_VERSION}.\n\
+            "this project pins compatibility catalog {pinned:?}, but this ahu build ships {CATALOG_VERSION}.\n\
              Selection behaviour differs between catalogs, so ahu will not substitute one for the other.\n\
-             Install the ahu release carrying catalog {pinned}, or agree a project change to catalog {CATALOG_VERSION} \
+             Install the ahu release carrying catalog {pinned:?}, or agree a project change to catalog {CATALOG_VERSION} \
              by editing `catalog_version` in .agents/ahu/config.toml."
         );
     }

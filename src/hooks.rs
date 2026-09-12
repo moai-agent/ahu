@@ -268,28 +268,51 @@ impl Locations {
     }
 }
 
+/// One settings file ahu will try to read hooks from.
+struct SettingsFile {
+    scope: Scope,
+    path: PathBuf,
+    display: String,
+    /// Repository-root-relative path, for the scopes that live in the
+    /// repository. `None` for files in a home directory or machine policy,
+    /// which are the user's own and are not resolved against the repository.
+    relative: Option<&'static str>,
+}
+
 /// Settings files ahu reads hooks from, in the harness's own precedence order.
-fn settings_files(repo_root: &Path, locations: &Locations) -> Vec<(Scope, PathBuf, String)> {
+fn settings_files(repo_root: &Path, locations: &Locations) -> Vec<SettingsFile> {
     let mut found = vec![
-        (
-            Scope::Project,
-            repo_root.join(".claude/settings.json"),
-            ".claude/settings.json".to_string(),
-        ),
-        (
-            Scope::ProjectLocal,
-            repo_root.join(".claude/settings.local.json"),
-            ".claude/settings.local.json".to_string(),
-        ),
+        SettingsFile {
+            scope: Scope::Project,
+            path: repo_root.join(".claude/settings.json"),
+            display: ".claude/settings.json".to_string(),
+            relative: Some(".claude/settings.json"),
+        },
+        SettingsFile {
+            scope: Scope::ProjectLocal,
+            path: repo_root.join(".claude/settings.local.json"),
+            display: ".claude/settings.local.json".to_string(),
+            relative: Some(".claude/settings.local.json"),
+        },
     ];
     if let Some(home) = &locations.home {
         let path = home.join(".claude/settings.json");
         let display = path.to_string_lossy().to_string();
-        found.push((Scope::User, path, display));
+        found.push(SettingsFile {
+            scope: Scope::User,
+            path,
+            display,
+            relative: None,
+        });
     }
     if let Some(managed) = &locations.managed {
         let display = managed.to_string_lossy().to_string();
-        found.push((Scope::Managed, managed.clone(), display));
+        found.push(SettingsFile {
+            scope: Scope::Managed,
+            path: managed.clone(),
+            display,
+            relative: None,
+        });
     }
     found
 }
@@ -306,7 +329,37 @@ pub fn collect_in(repo_root: &Path, locations: &Locations) -> Result<HookInvento
         ..HookInventory::default()
     };
 
-    for (scope, path, display) in settings_files(repo_root, locations) {
+    for SettingsFile {
+        scope,
+        path,
+        display,
+        relative,
+    } in settings_files(repo_root, locations)
+    {
+        // A repository can commit a symlink at `.claude`, or at the settings
+        // file itself. Reading through one takes hooks from outside the
+        // repository and labels them `project` — the single scope whose
+        // `why_not_project_policy` is "it is project policy", so
+        // `outside_project_policy` drops them and the non-project-hook warning
+        // is suppressed for hooks that are not project policy at all. The
+        // preview would also claim they travel into the task worktree, which is
+        // false: `materialize` deletes configuration symlinks from it.
+        // `snapshot::collect` already refuses to follow one; this makes the hook
+        // scan agree with it. Both errors pointed the permissive way.
+        let path = match relative {
+            Some(relative) => match crate::util::resolve_existing_within(repo_root, relative) {
+                Ok(Some(resolved)) => resolved,
+                Ok(None) => continue,
+                Err(_) => {
+                    inventory.unreadable.push(format!(
+                        "{display} (not read: it or one of its parent directories is a symlink, \
+                         so its hooks are not this repository's)"
+                    ));
+                    continue;
+                }
+            },
+            None => path,
+        };
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,

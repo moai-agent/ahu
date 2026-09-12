@@ -149,24 +149,69 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
     Ok(candidates)
 }
 
+/// Quote `value` as a TOML basic string.
+///
+/// Rust's `{:?}` is not a TOML serializer. It escapes a non-printable character
+/// as `\u{XXXX}`, and TOML's escape is `\uXXXX` with exactly four hex digits —
+/// so `{:?}` on a `description` carrying a bidi override or a zero-width
+/// character produced a manifest that `agent::load_all` could not parse. One
+/// bad manifest fails the whole registry load by design, so a single crafted
+/// `description:` in a `.claude/agents/<name>.md` frontmatter could leave
+/// `ahu agents`, `ahu onboard`, and the interactive launcher's agent list
+/// broken until the file was found and deleted by hand.
+fn toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            // TOML forbids raw control characters in a basic string, and the
+            // characters that reorder text have no business in a manifest field
+            // either. Both take TOML's own escape, not Rust's.
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c if crate::util::is_display_hostile_char(c) => {
+                let code = c as u32;
+                if code <= 0xffff {
+                    out.push_str(&format!("\\u{code:04X}"));
+                } else {
+                    out.push_str(&format!("\\U{code:08X}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// The exact manifest ahu proposes for a candidate.
 pub fn proposed_manifest(candidate: &Candidate, model: &str, version: &str) -> String {
     format!(
         "schema_version = 1\n\
-         name = {:?}\n\
-         version = {version:?}\n\
-         description = {:?}\n\
-         harness = {:?}\n\
-         model = {model:?}\n\
+         name = {}\n\
+         version = {}\n\
+         description = {}\n\
+         harness = {}\n\
+         model = {}\n\
          \n\
          [source]\n\
-         format = {:?}\n\
-         path = {:?}\n",
-        candidate.name,
-        candidate.description,
-        candidate.format.native_harness().unwrap_or("claude-code"),
-        candidate.format.as_str(),
-        candidate.path,
+         format = {}\n\
+         path = {}\n",
+        toml_string(&candidate.name),
+        toml_string(version),
+        toml_string(&candidate.description),
+        toml_string(candidate.format.native_harness().unwrap_or("claude-code")),
+        toml_string(model),
+        toml_string(candidate.format.as_str()),
+        toml_string(&candidate.path),
     )
 }
 

@@ -67,7 +67,7 @@ impl Adapter for Codex {
         })
     }
 
-    fn enforcement(&self, _model: &str) -> Result<EnforcementReport> {
+    fn enforcement(&self, _model: &str, permissions: Permissions) -> Result<EnforcementReport> {
         let entry = crate::catalog::harness("codex").ok_or_else(|| {
             crate::util::Error::new(
                 "the compatibility catalog has no entry for harness \"codex\", so ahu cannot \
@@ -82,10 +82,37 @@ impl Adapter for Codex {
             gaps: entry.enforcement_gaps.iter().map(|s| s.to_string()).collect(),
             applied_controls: vec![
                 "-m pins the exact model for the session's first request".to_string(),
-                "ahu passes no --sandbox, --ask-for-approval, --approve-for-me, --dangerously-bypass-approvals-and-sandbox, or --dangerously-bypass-hook-trust; whether the effective session keeps Codex's own defaults also depends on any wrapper on PATH".to_string(),
+                permission_control(permissions),
                 "repository guidance is discovered by Codex from the task worktree, which carries the parent's AGENTS.md unchanged".to_string(),
             ],
         })
+    }
+}
+
+/// State the approval flags this adapter passes, from the same value that
+/// decides them. See the note in the Claude Code adapter: a fixed string here
+/// contradicted the argv ahu was about to run.
+fn permission_control(permissions: Permissions) -> String {
+    let tail = "whether the effective session keeps Codex's own defaults also depends on any \
+                wrapper on PATH";
+    match permissions {
+        Permissions::Prompt => format!(
+            "ahu passes no --sandbox, --ask-for-approval, --approve-for-me, \
+             --dangerously-bypass-approvals-and-sandbox, or --dangerously-bypass-hook-trust; \
+             {tail}"
+        ),
+        Permissions::AcceptEdits => format!(
+            "ahu passes --approve-for-me because this agent's manifest declares \
+             permissions = accept-edits; it passes no --sandbox, --ask-for-approval, \
+             --dangerously-bypass-approvals-and-sandbox, or --dangerously-bypass-hook-trust; \
+             {tail}"
+        ),
+        Permissions::Auto => format!(
+            "ahu passes --ask-for-approval never and --sandbox workspace-write because this \
+             agent's manifest declares permissions = auto; it passes no --approve-for-me, \
+             --dangerously-bypass-approvals-and-sandbox, or --dangerously-bypass-hook-trust; \
+             {tail}"
+        ),
     }
 }
 
