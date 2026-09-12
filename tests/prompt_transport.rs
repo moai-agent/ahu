@@ -257,6 +257,20 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
     std::fs::create_dir_all(&worktree).unwrap();
     let recorder = temp.path().join("argv.txt");
     let bin = fake_harness(temp.path(), &recorder);
+    let state_capture = temp.path().join("session-state.txt");
+    let script = bin.join("claude");
+    let original = std::fs::read_to_string(&script).unwrap();
+    std::fs::write(
+        &script,
+        original.replace(
+            "exit 0",
+            &format!(
+                "printf '%s' \"$AHU_STATE_DIR\" > {}\nexit 0",
+                shell_single_quote(&state_capture.to_string_lossy())
+            ),
+        ),
+    )
+    .unwrap();
     let canary = temp.path().join("ahu-pwned");
     let prompt = format!(
         "{HOSTILE_PROMPT}\nalso $(touch {canary}) and `touch {canary}`",
@@ -283,6 +297,12 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    assert_eq!(
+        std::fs::read_to_string(&state_capture).unwrap(),
+        worktree.join(".ahu/state").to_string_lossy()
+    );
+    assert!(worktree.join(".ahu/.gitignore").is_file());
+    assert!(!worktree.join(".worktrees").exists());
     let recorded = std::fs::read_to_string(&recorder).expect("the harness ran");
     let args: Vec<&str> = recorded.lines().collect();
     // ahu pins the model with a real flag, and passes nothing else before `--`.

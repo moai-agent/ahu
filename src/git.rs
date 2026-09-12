@@ -24,6 +24,18 @@ pub struct Repo {
 }
 
 impl Repo {
+    /// All ahu task checkouts are siblings under the primary checkout, even
+    /// when the launch originates in a linked worktree.
+    pub fn primary_root(&self) -> Result<PathBuf> {
+        let listing = run_ok(&self.root, &["worktree", "list", "--porcelain", "-z"])?;
+        let path = listing
+            .split('\0')
+            .next()
+            .and_then(|line| line.strip_prefix("worktree "))
+            .ok_or_else(|| Error::new("Git did not report a primary checkout"))?;
+        Ok(PathBuf::from(path))
+    }
+
     /// A stable per-repository identifier shared by all of its worktrees.
     ///
     /// Launching from two different worktrees of one repository must land in a

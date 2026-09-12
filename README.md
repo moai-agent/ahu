@@ -52,6 +52,23 @@ cargo install --git https://github.com/moai-agent/ahu --locked
 Installing `ahu` does not modify any repository, install a harness, or change
 shell startup files.
 
+Ahu stores its operational state in `.ahu/state/` inside the checkout
+where you run it. `.ahu/.gitignore` keeps the whole `.ahu/` directory out of Git. Each linked
+worktree has its own state store; an agent session receives `AHU_STATE_DIR`
+pointing inside the worktree it edits. Launch records remain in the launching
+checkout's store, so run `ahu tasks` and `ahu focus` there to manage its launches.
+The shared launch lock and cmux group mapping live in the primary checkout's
+`.ahu/state/` so sibling sessions still coordinate as one repository.
+All task checkouts are siblings under the primary checkout’s `.worktrees/`,
+even when an agent launches another agent. No nested `.worktrees/` is created.
+This controls ahu state; each harness still manages its own configuration and
+credentials.
+
+The default does not use `HOME` or `XDG_STATE_HOME`. Old records in
+`~/.local/state/ahu` are not read, moved, or deleted automatically. An explicit
+`AHU_STATE_DIR` override remains available for inspecting an older store or
+isolating tests. Reinstalling does not require granting access to the old store.
+
 ## Getting started
 
 Run `ahu` inside a Git repository, from a cmux terminal (`ahu doctor` checks that

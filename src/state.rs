@@ -9,25 +9,102 @@ use std::path::{Path, PathBuf};
 use crate::bail;
 use crate::util::{Error, Result};
 
-/// Root of ahu's local state, overridable with `AHU_STATE_DIR` so tests and
-/// sandboxes never touch a developer's real state.
+/// Root of ahu's local state inside the current checkout. Linked worktrees
+/// have their own `.ahu/state` rather than writing to the parent.
+/// `AHU_STATE_DIR` remains an explicit override for isolated tests and tools.
 pub fn root() -> Result<PathBuf> {
     if let Some(explicit) = std::env::var_os("AHU_STATE_DIR") {
         return Ok(PathBuf::from(explicit));
     }
-    if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
-        return Ok(PathBuf::from(xdg).join("ahu"));
+    default_root(&std::env::current_dir()?)
+}
+
+fn default_root(start: &Path) -> Result<PathBuf> {
+    let repo = crate::git::discover(start)?;
+    checkout_root(&repo.root)
+}
+
+pub fn checkout_root(checkout: &Path) -> Result<PathBuf> {
+    let local = checkout.join(".ahu");
+    let root = local.join("state");
+    // Read-only commands must not create state or follow repository-supplied
+    // links that redirect the default store outside the checkout.
+    for path in [&local, &root] {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                bail!(
+                    "refusing ahu state path {}: expected a real directory, not a symlink or file",
+                    path.display()
+                );
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(state_io_error("inspect directory", path, e)),
+        }
     }
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        Error::new(
-            "cannot locate ahu's state directory: neither AHU_STATE_DIR, XDG_STATE_HOME, nor HOME is set.",
-        )
-    })?;
-    Ok(PathBuf::from(home).join(".local/state/ahu"))
+    Ok(root)
+}
+
+/// Create session state inside its checkout, ignored without editing tracked
+/// repository policy. Never follow a repository-provided state/ignore symlink.
+pub fn ensure_checkout_state(checkout: &Path) -> Result<PathBuf> {
+    let root = checkout_root(checkout)?;
+    let local = root.parent().expect("state has local directory");
+    std::fs::create_dir_all(&root).map_err(|e| state_io_error("create directory", &root, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(local, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| state_io_error("set private permissions", &root, e))?;
+    }
+    let ignore = local.join(".gitignore");
+    match std::fs::symlink_metadata(&ignore) {
+        Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => {
+            bail!(
+                "refusing ahu state ignore path {}: expected a regular file",
+                ignore.display()
+            );
+        }
+        Ok(_) => {
+            let content = std::fs::read_to_string(&ignore)
+                .map_err(|e| state_io_error("read ignore file", &ignore, e))?;
+            if !ignores_everything(&content) {
+                bail!(
+                    "{} must ignore all state files with a bare * and no negations",
+                    ignore.display()
+                );
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&ignore)
+                .map_err(|e| state_io_error("create ignore file", &ignore, e))?;
+            file.write_all(b"# Local ahu session state. Never commit.\n*\n")
+                .map_err(|e| state_io_error("write ignore file", &ignore, e))?;
+        }
+        Err(e) => return Err(state_io_error("inspect ignore file", &ignore, e)),
+    }
+    Ok(root)
 }
 
 pub fn repo_dir(repo_identity: &str) -> Result<PathBuf> {
     Ok(root()?.join("repos").join(repo_identity))
+}
+
+/// The group mapping and launch lock coordinate sibling worktrees, so they
+/// belong to the primary checkout. Per-session data stays in its own checkout.
+pub fn coordination_dir(repo: &crate::git::Repo) -> Result<PathBuf> {
+    let current = root()?;
+    let shared = if current == checkout_root(&repo.root)? {
+        checkout_root(&repo.primary_root()?)?
+    } else {
+        // Preserve explicit isolated stores used by embedding tools and tests.
+        current
+    };
+    Ok(shared.join("repos").join(repo.identity()))
 }
 
 pub fn tasks_dir(repo_identity: &str) -> Result<PathBuf> {
@@ -40,14 +117,16 @@ pub fn task_dir(repo_identity: &str, task_id: &str) -> Result<PathBuf> {
 
 /// Directory holding a repository's task worktrees.
 ///
-/// Task worktrees live beside the code they are based on, under `.worktrees/`
-/// in the repository itself, rather than off in ahu's state directory. That
+/// Task worktrees live under `.worktrees/` in the primary checkout, including
+/// when launched from another task. That
 /// keeps a task's checkout discoverable from the repository it belongs to.
 ///
 /// The directory ignores itself (see [`WORKTREES_GITIGNORE`]), so it never
 /// appears in `git status` and cannot be committed by accident.
-pub fn worktrees_root(repo_root: &Path) -> PathBuf {
-    repo_root.join(WORKTREES_DIR)
+pub fn worktrees_root(repo_root: &Path) -> Result<PathBuf> {
+    Ok(crate::git::discover(repo_root)?
+        .primary_root()?
+        .join(WORKTREES_DIR))
 }
 
 /// Name of the in-repository directory holding task worktrees.
@@ -62,7 +141,7 @@ pub const WORKTREES_GITIGNORE: &str =
 
 /// Path of one task's worktree, inside its repository.
 pub fn worktree_dir(repo_root: &Path, task_id: &str) -> Result<PathBuf> {
-    Ok(worktrees_root(repo_root).join(task_id))
+    Ok(worktrees_root(repo_root)?.join(task_id))
 }
 
 /// Create `.worktrees/` and make it ignore itself.
@@ -73,7 +152,7 @@ pub fn worktree_dir(repo_root: &Path, task_id: &str) -> Result<PathBuf> {
 /// chose — `~/.claude/skills`, say, which would install a machine-wide skill.
 /// So the path is required to be a real directory, and a symlink is refused.
 pub fn ensure_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
-    let root = worktrees_root(repo_root);
+    let root = worktrees_root(repo_root)?;
     match std::fs::symlink_metadata(&root) {
         Ok(meta) if meta.file_type().is_symlink() => {
             let points_to = std::fs::read_link(&root)
@@ -166,7 +245,7 @@ fn ignores_everything(body: &str) -> bool {
 /// Checked again at exec time, because `.worktrees` could have been replaced
 /// between submission and the workspace shell starting.
 pub fn verify_worktree_inside_repo(repo_root: &Path, worktree: &Path) -> Result<()> {
-    let root = worktrees_root(repo_root);
+    let root = worktrees_root(repo_root)?;
     if let Ok(meta) = std::fs::symlink_metadata(&root)
         && meta.file_type().is_symlink()
     {
@@ -182,13 +261,17 @@ pub fn verify_worktree_inside_repo(repo_root: &Path, worktree: &Path) -> Result<
     // check into exactly that prefix test, so a path that cannot be resolved is
     // refused instead. Nothing legitimate reaches here unresolvable: the
     // worktree has been created and materialized into by the time it is checked.
-    let canonical_repo = repo_root.canonicalize().map_err(|e| {
-        Error::new(format!(
-            "cannot resolve the repository root {}: {e}. \
+    let canonical_repo = root
+        .parent()
+        .expect("worktrees has parent")
+        .canonicalize()
+        .map_err(|e| {
+            Error::new(format!(
+                "cannot resolve the repository root {}: {e}. \
              ahu will not start a session it cannot place inside a repository.",
-            repo_root.display()
-        ))
-    })?;
+                repo_root.display()
+            ))
+        })?;
     let canonical_worktree = worktree.canonicalize().map_err(|e| {
         Error::new(format!(
             "cannot resolve the task worktree {}: {e}. \
@@ -224,11 +307,32 @@ pub struct LaunchLock {
 
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
 
+fn state_io_error(operation: &str, path: &Path, error: std::io::Error) -> Error {
+    let mut message = format!(
+        "cannot {operation} ahu state at {}: {error}",
+        path.display()
+    );
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        message.push_str(
+            "\nCheck directory permissions and the calling process's sandbox. \
+             Run ahu from a terminal with access to this state directory, or set \
+             AHU_STATE_DIR to an absolute, writable path inside the checkout's ignored .ahu directory. \
+             Use the same AHU_STATE_DIR for subsequent ahu commands; changing it \
+             does not migrate existing task records. State access does not grant \
+             permission to create Git worktrees or access cmux.",
+        );
+    }
+    Error::new(message)
+}
+
 impl LaunchLock {
     pub fn acquire(repo_identity: &str) -> Result<Self> {
-        let path = lock_path(repo_identity)?;
+        Self::acquire_at(lock_path(repo_identity)?)
+    }
+
+    pub fn acquire_at(path: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            create_private_dir_all(parent)?;
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
@@ -259,7 +363,7 @@ impl LaunchLock {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                Err(e) => bail!("cannot create {}: {e}", path.display()),
+                Err(e) => return Err(state_io_error("create launch lock", &path, e)),
             }
         }
     }
@@ -277,7 +381,7 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Resul
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)
             .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(e) => bail!("cannot read {}: {e}", path.display()),
+        Err(e) => Err(state_io_error("read", path, e)),
     }
 }
 
@@ -286,14 +390,29 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Resul
 /// ahu's state holds task prompts, records, and worktrees. None of it has any
 /// reason to be readable by other accounts on the machine.
 pub fn create_private_dir_all(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
+    let state_root = root()?;
+    if let Some(local_state) = dir.ancestors().find(|ancestor| {
+        ancestor.file_name().is_some_and(|name| name == "state")
+            && ancestor
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == ".ahu")
+    }) {
+        ensure_checkout_state(
+            local_state
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| Error::new("invalid checkout state root"))?,
+        )?;
+    }
+    std::fs::create_dir_all(dir).map_err(|e| state_io_error("create directory", dir, e))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut current = PathBuf::new();
         for component in dir.components() {
             current.push(component);
-            if current.starts_with(root()?) && current.is_dir() {
+            if (current.starts_with(&state_root) || current == dir) && current.is_dir() {
                 let _ = std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700));
             }
         }
@@ -309,15 +428,55 @@ pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let temp = path.with_extension(format!("tmp{}", std::process::id()));
     let body = serde_json::to_vec_pretty(value)
         .map_err(|e| Error::new(format!("cannot serialize state: {e}")))?;
-    std::fs::write(&temp, &body)?;
+    std::fs::write(&temp, &body).map_err(|e| state_io_error("write temporary file", &temp, e))?;
     // Owner-only here, so no caller has to remember. State records carry task
     // titles, hook labels, and repository paths.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| state_io_error("set private permissions", &temp, e))?;
     }
-    std::fs::rename(&temp, path)
-        .map_err(|e| Error::new(format!("cannot write {}: {e}", path.display())))?;
+    std::fs::rename(&temp, path).map_err(|e| state_io_error("replace file", path, e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn permission_errors_explain_state_location_and_sandbox_recovery() {
+        // EPERM (sandbox denial) and EACCES (filesystem permissions) must both
+        // explain recovery. Inject errors so this also works when run as root.
+        for code in [1, 13] {
+            let error = state_io_error(
+                "write temporary file",
+                Path::new("/example/state/hygiene.tmp123"),
+                std::io::Error::from_raw_os_error(code),
+            )
+            .to_string();
+            assert!(error.contains("write temporary file"), "{error}");
+            assert!(error.contains("/example/state/hygiene.tmp123"), "{error}");
+            assert!(error.contains("sandbox"), "{error}");
+            assert!(error.contains("AHU_STATE_DIR"), "{error}");
+            assert!(error.contains("does not migrate"), "{error}");
+        }
+    }
+
+    #[test]
+    fn failed_state_write_names_the_operation_and_preserves_previous_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hygiene.json");
+        std::fs::write(&path, "{}").unwrap();
+        let temp = path.with_extension(format!("tmp{}", std::process::id()));
+        std::fs::create_dir(&temp).unwrap();
+        let error = write_json(&path, &serde_json::json!({"updated": true}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("write temporary file"), "{error}");
+        assert!(error.contains(&temp.display().to_string()), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+    }
 }

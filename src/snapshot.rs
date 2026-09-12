@@ -37,6 +37,7 @@ const SKIP_DIR_NAMES: &[&str] = &[
     // descending into them would inventory a task's own copy of the
     // configuration and recurse.
     ".worktrees",
+    ".ahu",
     "node_modules",
     "target",
     "dist",

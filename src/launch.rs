@@ -43,8 +43,8 @@ pub struct GroupMapping {
     pub anchor_workspace_id: Option<String>,
 }
 
-fn mapping_path(repo_identity: &str) -> Result<PathBuf> {
-    Ok(state::repo_dir(repo_identity)?.join("cmux.json"))
+fn mapping_path(repo: &Repo) -> Result<PathBuf> {
+    Ok(state::coordination_dir(repo)?.join("cmux.json"))
 }
 
 /// What a launch is going to do, shown before anything is created.
@@ -325,7 +325,7 @@ pub fn execute(
     focus: bool,
 ) -> Result<Launched> {
     let repo_identity = repo.identity();
-    let _lock = LaunchLock::acquire(&repo_identity)?;
+    let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
     let mut notes = Vec::new();
 
     // cmux must be reachable before a worktree is created, so an unavailable
@@ -428,7 +428,7 @@ pub fn execute(
         return Err(e);
     }
 
-    let group = match ensure_group(&cmux_client, repo, &repo_identity, &mut notes) {
+    let group = match ensure_group(&cmux_client, repo, &mut notes) {
         Ok(group) => group,
         Err(e) => {
             let _ = git::remove_worktree(repo, &plan.worktree, &plan.branch);
@@ -490,13 +490,8 @@ pub fn execute(
 /// replaced; a group whose anchor was closed (cmux promotes a child, which then
 /// loses its own sidebar row) gets a fresh dedicated anchor so every task keeps
 /// a visible row.
-fn ensure_group(
-    client: &Cmux,
-    repo: &Repo,
-    repo_identity: &str,
-    notes: &mut Vec<String>,
-) -> Result<cmux::Group> {
-    let path = mapping_path(repo_identity)?;
+fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<cmux::Group> {
+    let path = mapping_path(repo)?;
     let mut mapping: GroupMapping = state::read_json(&path)?;
     let current_window = client.current_window().ok().flatten();
 
@@ -765,6 +760,9 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     eprintln!("branch   {}", record.branch);
     eprintln!();
 
+    // A session's nested ahu commands belong to the checkout it edits, even
+    // when the launcher inherited an explicit state override from its caller.
+    let session_state = state::ensure_checkout_state(&record.worktree)?;
     let _ = task::set_state(task_dir, TaskState::Running);
     if let (Ok(client), Some(workspace)) = (Cmux::discover(), record.cmux_workspace_id.as_deref()) {
         let _ = client.set_status(workspace, TaskState::Running.as_str());
@@ -773,6 +771,7 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     let status = std::process::Command::new(&executable)
         .args(&rebuilt.args)
         .env("AHU_BIN", std::env::current_exe()?)
+        .env("AHU_STATE_DIR", &session_state)
         .current_dir(&record.worktree)
         .status()
         .map_err(|e| {

@@ -336,9 +336,12 @@ pub fn document() -> Vec<Section> {
         Section {
             title: "State and records",
             blocks: vec![para(&[
-                "Task records, worktrees, the repository-to-cmux-group mapping, and hygiene",
-                "timestamps are local operational state under `$AHU_STATE_DIR` (default",
-                "`~/.local/state/ahu`). Policy never lives there. Each record freezes the launched",
+                "Task worktrees are siblings under `.worktrees/` in the primary checkout.",
+                "Task records and hygiene timestamps default to `.ahu/state/` inside the",
+                "current checkout. The shared launch lock and cmux group mapping live in the",
+                "primary checkout's `.ahu/state/`. `.ahu/` ignores itself in Git. Each worktree",
+                "has its own store. `AHU_STATE_DIR` explicitly overrides it. Policy never lives",
+                "there. Each record freezes the launched",
                 "identity, digests, base commit, branch, worktree, and cmux ids, so editing an agent",
                 "later changes the next launch while a running task keeps what it started with.",
             ])],
