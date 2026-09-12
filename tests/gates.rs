@@ -597,8 +597,8 @@ fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
         "the message must name the field whose meaning moved: {error}"
     );
 
-    // `task::list` skips a record it cannot read rather than breaking the
-    // listing of the others, so an old task disappears from `ahu tasks` instead
-    // of appearing with a digest that means something else.
+    // A refused record is carried, not dropped: it must not appear with a digest
+    // that means something else, and it must not vanish either. `ahu tasks`
+    // reports it — see `tests/tasks_listing.rs`.
     assert!(ahu::task::list("no-such-repo-identity").unwrap().is_empty());
 }

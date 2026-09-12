@@ -178,3 +178,33 @@ pub fn branch_exists(repo: &Repo, branch: &str) -> Result<bool> {
     )?;
     Ok(out.status.success())
 }
+
+/// Branch names matching a glob, e.g. `ahu/*/<task-id>`.
+///
+/// Used to recover the branch belonging to a task whose record ahu cannot read.
+/// The record is refused, but the task id is the state directory's own name, and
+/// Git still knows what branch carries it — so the user can be told where their
+/// leftover work is without ahu reinterpreting a schema it does not understand.
+pub fn branches_matching(repo: &Repo, pattern: &str) -> Result<Vec<String>> {
+    // `--format` rather than parsing `git branch` output, which decorates the
+    // current branch with a marker. `--` is not accepted by `branch --list`, so
+    // the pattern is passed as the single positional it expects; a pattern
+    // starting with `-` would be read as an option, and ahu builds this one
+    // itself from a validated task id rather than taking it from a repository.
+    let out = run(
+        &repo.root,
+        &["branch", "--list", "--format=%(refname:short)", pattern],
+    )?;
+    if !out.status.success() {
+        bail!(
+            "cannot list branches matching {pattern:?}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
