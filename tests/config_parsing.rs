@@ -266,7 +266,7 @@ fn a_missing_agent_never_falls_back_to_automatic_selection() {
 }
 
 #[test]
-fn an_agent_for_a_harness_without_an_adapter_is_refused() {
+fn a_manifest_may_not_point_at_another_harnesss_definition_format() {
     let repo = TestRepo::new();
     repo.init_config();
     repo.write(".codex/agents/sam.toml", "model = \"something\"\n");
@@ -275,14 +275,45 @@ fn an_agent_for_a_harness_without_an_adapter_is_refused() {
         "schema_version = 1\n\
          name = \"sam\"\n\
          version = \"0.1.0\"\n\
-         harness = \"codex\"\n\
+         harness = \"claude-code\"\n\
          model = \"claude-opus-5\"\n\
          \n[source]\n\
          format = \"codex-agent\"\n\
          path = \".codex/agents/sam.toml\"\n",
     );
     let error = agent::load_all(repo.path()).unwrap_err().to_string();
-    assert!(error.contains("no validated adapter"), "{error}");
+    assert!(
+        error.contains("does not translate an agent from one harness to another"),
+        "{error}"
+    );
+}
+
+#[test]
+fn each_supported_harness_pins_models_from_its_own_catalog_entry() {
+    // A model belonging to another harness is refused rather than substituted.
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.write(".agents/ahu/instructions/sam.md", "You are sam.\n");
+    repo.write(
+        ".agents/ahu/agents/sam.toml",
+        "schema_version = 1\n\
+         name = \"sam\"\n\
+         version = \"0.1.0\"\n\
+         harness = \"codex\"\n\
+         model = \"claude-opus-5\"\n\
+         \n[source]\n\
+         format = \"markdown\"\n\
+         path = \".agents/ahu/instructions/sam.md\"\n",
+    );
+    let error = agent::load_all(repo.path()).unwrap_err().to_string();
+    assert!(
+        error.contains("is not a catalog model for harness"),
+        "{error}"
+    );
+    assert!(
+        error.contains("will not substitute a different model"),
+        "{error}"
+    );
 }
 
 // --- automatic selection ---

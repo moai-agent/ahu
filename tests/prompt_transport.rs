@@ -153,9 +153,10 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
     let temp = tempfile::TempDir::new().unwrap();
     // `run_task` re-derives the working directory from the repository identity
     // and task id, so the fixture must use the path ahu would actually create.
-    let worktree = repo
-        .state_path()
-        .join("repos/testrepo/worktrees/testtask0001");
+    // `run_task` re-derives the worktree from the record's repo_root and task id.
+    let worktree = std::fs::canonicalize(repo.path())
+        .unwrap()
+        .join(".worktrees/testtask0001");
     std::fs::create_dir_all(&worktree).unwrap();
     let recorder = temp.path().join("argv.txt");
     let bin = fake_harness(temp.path(), &recorder);
@@ -208,9 +209,10 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
 fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
     let repo = TestRepo::new();
     let temp = tempfile::TempDir::new().unwrap();
-    let worktree = repo
-        .state_path()
-        .join("repos/testrepo/worktrees/testtask0001");
+    // `run_task` re-derives the worktree from the record's repo_root and task id.
+    let worktree = std::fs::canonicalize(repo.path())
+        .unwrap()
+        .join(".worktrees/testtask0001");
     std::fs::create_dir_all(&worktree).unwrap();
     let recorder = temp.path().join("argv.txt");
     let bin = fake_harness(temp.path(), &recorder);
@@ -285,7 +287,11 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str) {
         title: "fixture".to_string(),
         created_at: ahu::task::now_rfc3339(),
         repo_identity: "testrepo".to_string(),
-        repo_root: worktree.to_path_buf(),
+        repo_root: worktree
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap()
+            .to_path_buf(),
         branch: "ahu/chris/testtask0001".to_string(),
         worktree: worktree.to_path_buf(),
         base_commit: Some("0".repeat(40)),
@@ -320,4 +326,103 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str) {
         state: TaskState::Starting,
     };
     ahu::task::save(task_dir, &record, prompt).unwrap();
+}
+
+/// Every adapter must keep the prompt a single literal argv element and must
+/// not widen the harness's own permission or sandbox defaults.
+#[test]
+fn every_adapter_delivers_the_prompt_literally_and_widens_no_permissions() {
+    for (harness, model, expect_agent_flag) in [
+        ("claude-code", "claude-opus-5", true),
+        ("codex", "gpt-6-astra", false),
+        ("antigravity", "gemini-3.1-pro-high", true),
+    ] {
+        let adapter = harness::adapter_for(harness).unwrap();
+        let command = adapter
+            .launch_command(&LaunchRequest {
+                model,
+                native_agent: Some("chris"),
+                prompt: HOSTILE_PROMPT,
+                cwd: Path::new("/tmp"),
+            })
+            .unwrap_or_else(|e| panic!("{harness}: {e}"));
+
+        // The prompt survives byte for byte, in exactly one element.
+        let index = command
+            .prompt_arg
+            .expect("{harness} records the prompt slot");
+        assert_eq!(command.args[index], HOSTILE_PROMPT, "{harness}");
+        assert_eq!(
+            command
+                .args
+                .iter()
+                .filter(|a| a.contains("$(touch"))
+                .count(),
+            1,
+            "{harness} must hold the prompt exactly once"
+        );
+        // The exact model is pinned.
+        assert!(command.args.iter().any(|a| a == model), "{harness}");
+        // Agent selection is requested where the harness has the concept.
+        assert_eq!(
+            command.args.iter().any(|a| a == "--agent"),
+            expect_agent_flag,
+            "{harness} agent flag"
+        );
+        // No adapter may widen permissions, sandboxing, or approvals.
+        for forbidden in [
+            "--dangerously-skip-permissions",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+            "--permission-mode",
+            "--approve-for-me",
+            "--sandbox",
+            "--ask-for-approval",
+            "--yolo",
+            "--add-dir",
+        ] {
+            assert!(
+                !command.args[..index].iter().any(|a| a == forbidden),
+                "{harness} must not pass {forbidden}"
+            );
+        }
+        // Redaction keeps the prompt out of the stored record.
+        assert_ne!(command.redacted().args[index], HOSTILE_PROMPT, "{harness}");
+    }
+}
+
+/// Only Claude Code can actually enforce a named agent's system prompt. The
+/// other two say so instead of implying a guarantee they cannot keep.
+#[test]
+fn adapters_report_their_real_enforcement_limits() {
+    for (harness, model) in [
+        ("claude-code", "claude-opus-5"),
+        ("codex", "gpt-6-astra"),
+        ("antigravity", "gemini-3.1-pro-high"),
+    ] {
+        let report = harness::adapter_for(harness).unwrap().enforcement(model);
+        assert_eq!(report.harness, harness);
+        assert!(
+            !report.model_fixed_for_session,
+            "{harness}: none of the three can hold a model for a whole session"
+        );
+        assert!(report.needs_reliability_warning(), "{harness}");
+        assert!(!report.gaps.is_empty(), "{harness} must name its gaps");
+        assert!(
+            !report.applied_controls.is_empty(),
+            "{harness} must name what it does control"
+        );
+    }
+
+    // The two harnesses without working per-agent selection must say so.
+    for harness in ["codex", "antigravity"] {
+        let report = harness::adapter_for(harness).unwrap().enforcement("x");
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|g| g.contains("instructions in the prompt")),
+            "{harness} must tell the user where the instructions have to go"
+        );
+    }
 }

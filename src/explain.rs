@@ -163,14 +163,22 @@ pub fn document() -> Vec<Section> {
             blocks: vec![
                 bullets(&[
                     "**cmux**, required: every task session is a cmux workspace.",
-                    "**A supported harness**, installed and authenticated by you.",
+                    "**A supported harness**, installed and signed in by you: Claude Code, Codex, or the Antigravity CLI.",
                     "**Git**: every task gets its own branch and worktree.",
                 ]),
                 para(&[
                     "ahu creates the repository group and the per-task workspace through cmux, and",
                     "0.1.1 has no mode that runs without it. The harness is what actually runs the",
                     "agent; ahu never installs, configures, or authenticates one, and it does not",
-                    "ship one.",
+                    "ship one. Sign-in is the harness's own, and ahu holds no API key for any of",
+                    "them.",
+                ]),
+                para(&[
+                    "Only Claude Code can actually apply a named agent's system prompt. Codex has",
+                    "no per-agent selection at all, and the Antigravity CLI accepts --agent without",
+                    "validating or visibly applying it. For those two, an ahu agent pins the harness",
+                    "and the exact model, the task prompt carries the instructions, and ahu shows",
+                    "the reliability warning rather than implying a guarantee it cannot keep.",
                 ]),
                 para(&[
                     "ahu holds no credentials and speaks to no model provider. Your harness's own",

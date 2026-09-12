@@ -387,3 +387,45 @@ fn a_committed_symlink_cannot_redirect_a_mode_only_change() {
         assert_eq!(mode, 0o600, "the outside file's mode must be untouched");
     }
 }
+
+/// Task worktrees live in the repository, and must be invisible to Git.
+#[test]
+fn task_worktrees_live_under_a_self_ignoring_directory_in_the_repository() {
+    let repo = TestRepo::new();
+    repo.commit("base");
+    let discovered = git::discover(repo.path()).unwrap();
+
+    let root = ahu::state::ensure_worktrees_root(&discovered.root).unwrap();
+    assert_eq!(root, discovered.root.join(".worktrees"));
+    assert_eq!(
+        std::fs::read_to_string(root.join(".gitignore")).unwrap(),
+        ahu::state::WORKTREES_GITIGNORE
+    );
+
+    let worktree = ahu::state::worktree_dir(&discovered.root, "task0001").unwrap();
+    git::add_worktree(
+        &discovered,
+        &worktree,
+        "ahu/test/inrepo",
+        discovered.head.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert!(worktree.join("README.md").is_file());
+
+    // The whole directory ignores itself, so nothing ahu creates can be
+    // committed by accident and `git status` stays clean.
+    let status = common::git(repo.path(), &["status", "--porcelain"]);
+    assert!(
+        !status.contains(".worktrees"),
+        "task worktrees must not show up in git status: {status}"
+    );
+
+    // And the configuration scan must not descend into a task's own checkout.
+    repo.write("CLAUDE.md", "guidance\n");
+    let taken = snapshot::collect(&discovered.root).unwrap();
+    assert!(
+        !taken.entries.iter().any(|e| e.path.contains(".worktrees")),
+        "the snapshot must not inventory a task worktree: {:?}",
+        taken.entries
+    );
+}

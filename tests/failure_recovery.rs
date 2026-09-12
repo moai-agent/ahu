@@ -78,7 +78,10 @@ fn a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record() {
             .to_string();
         (plan, error)
     });
-    assert!(plan.worktree.starts_with(repo.state_path()));
+    assert!(
+        plan.worktree
+            .starts_with(discovered.root.join(".worktrees"))
+    );
     assert!(error.contains("cmux"), "{error}");
 
     assert!(

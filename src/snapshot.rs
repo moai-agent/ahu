@@ -33,6 +33,10 @@ const CONFIG_FILE_NAMES: &[&str] = &[
 /// these directories is not inherited, and the inventory says so.
 const SKIP_DIR_NAMES: &[&str] = &[
     ".git",
+    // Task worktrees live in the repository. They are checkouts of it, so
+    // descending into them would inventory a task's own copy of the
+    // configuration and recurse.
+    ".worktrees",
     "node_modules",
     "target",
     "dist",

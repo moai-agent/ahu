@@ -109,7 +109,7 @@ pub fn plan(
     };
     let branch = format!("ahu/{agent_segment}/{task_id}");
     let repo_identity = repo.identity();
-    let worktree = state::worktree_dir(&repo_identity, &task_id)?;
+    let worktree = state::worktree_dir(&repo.root, &task_id)?;
     let task_dir = state::task_dir(&repo_identity, &task_id)?;
     let title = crate::util::task_title_from_prompt(prompt);
 
@@ -196,6 +196,9 @@ pub fn execute(
         .base_commit
         .as_deref()
         .ok_or_else(|| Error::new("the launch plan has no base commit"))?;
+    // `.worktrees/` ignores itself, so task checkouts never show up in
+    // `git status` and cannot be committed by accident.
+    state::ensure_worktrees_root(&repo.root)?;
     git::add_worktree(repo, &plan.worktree, &plan.branch, base)?;
 
     // From here on, a failure must clean up the worktree it just made, but only
@@ -452,7 +455,7 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     // discovers instructions, skills, hooks, and MCP configuration from it. It
     // is re-derived from the repository identity and task id rather than trusted
     // as written, so an edited record cannot redirect the session.
-    let expected_worktree = state::worktree_dir(&record.repo_identity, &record.task_id)?;
+    let expected_worktree = state::worktree_dir(&record.repo_root, &record.task_id)?;
     if record.worktree != expected_worktree {
         bail!(
             "task {} records a working directory that is not the one ahu would create for it.\n\

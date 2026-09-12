@@ -102,11 +102,10 @@ fn every_harness_in_the_catalog_is_listed_with_its_status() {
         for harness in ahu::catalog::HARNESSES {
             assert!(text.contains(harness.id), "{} missing", harness.id);
         }
-        assert!(text.contains("2.1.269"), "the verified version is shown");
-        assert!(
-            text.contains("future work"),
-            "unsupported harnesses are labelled"
-        );
+        // Each harness shows the version its adapter was verified against.
+        for version in ["2.1.269", "0.154.0", "1.2.2"] {
+            assert!(text.contains(version), "{version} missing from {text}");
+        }
     }
 }
 
@@ -125,8 +124,12 @@ fn the_overview_says_ahu_is_not_a_harness_and_names_what_it_needs() {
             "the harness dependency must be named: {text}"
         );
         assert!(
-            text.contains("installed and authenticated by you"),
+            text.contains("installed and signed in by you"),
             "who installs it must be explicit: {text}"
+        );
+        assert!(
+            text.contains("holds no API key"),
+            "ahu must state that it holds no credentials: {text}"
         );
         assert!(
             text.contains("never installs, configures, or authenticates one"),

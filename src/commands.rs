@@ -168,6 +168,7 @@ pub fn onboard_cmd(
 /// `ahu doctor`
 pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
     let mut problems = 0;
+    let mut warnings = 0;
     match repo {
         Ok(repo) => {
             console.say(&format!(
@@ -219,7 +220,10 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                 }
                 let outside = found.outside_project_policy();
                 if !outside.is_empty() {
-                    problems += 1;
+                    // A hook outside project policy is a warning, not a blocker:
+                    // the launch will succeed, it just will not behave the same
+                    // for every teammate.
+                    warnings += 1;
                     console.say(&format!(
                         "  {} ({} of them)\n",
                         hooks::NON_PROJECT_HOOK_WARNING,
@@ -242,7 +246,7 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                     )?;
                 }
                 for unreadable in &found.unreadable {
-                    problems += 1;
+                    warnings += 1;
                     console.say(&format!("  unreadable {}\n", display_safe(unreadable)))?;
                 }
             }
@@ -304,13 +308,18 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         "state        {}\n",
         crate::state::root()?.display()
     ))?;
-    if problems == 0 {
-        console.say("\nNo blocking problems found.\n")?;
-        Ok(0)
-    } else {
-        console.say(&format!("\n{problems} problem(s) would block a launch.\n"))?;
-        Ok(1)
-    }
+    let summary = match (problems, warnings) {
+        (0, 0) => "\nNo blocking problems found.\n".to_string(),
+        (0, w) => format!(
+            "\nNo blocking problems found. {w} warning(s) above affect behaviour but do not stop a launch.\n"
+        ),
+        (p, 0) => format!("\n{p} problem(s) would block a launch.\n"),
+        (p, w) => format!(
+            "\n{p} problem(s) would block a launch, and {w} warning(s) affect behaviour without stopping one.\n"
+        ),
+    };
+    console.say(&summary)?;
+    if problems == 0 { Ok(0) } else { Ok(1) }
 }
 
 /// `ahu tasks`

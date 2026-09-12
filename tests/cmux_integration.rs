@@ -334,8 +334,9 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
     let plan = planned.expect("plan builds");
     let launched = launched.expect("launch succeeds");
     assert!(
-        plan.worktree.starts_with(repo.state_path()),
-        "the test must never write into the real ahu state directory"
+        plan.worktree
+            .starts_with(discovered.root.join(".worktrees")),
+        "task worktrees live under .worktrees/ in the repository"
     );
 
     let workspace = launched
@@ -451,8 +452,8 @@ fn repeated_launches_reuse_one_repository_group_with_distinct_tasks() {
             };
             let plan = ahu::launch::plan(source, Some(agent), pair, prompt).unwrap();
             assert!(
-                plan.worktree.starts_with(repo.state_path()),
-                "the test must never write into the real ahu state directory"
+                plan.worktree.starts_with(source.root.join(".worktrees")),
+                "task worktrees live under .worktrees/ in the repository"
             );
             let result = ahu::launch::execute(source, &loaded, &plan, prompt, false)
                 .expect("launch succeeds");

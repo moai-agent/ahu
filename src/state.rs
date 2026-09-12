@@ -38,8 +38,44 @@ pub fn task_dir(repo_identity: &str, task_id: &str) -> Result<PathBuf> {
     Ok(tasks_dir(repo_identity)?.join(task_id))
 }
 
-pub fn worktree_dir(repo_identity: &str, task_id: &str) -> Result<PathBuf> {
-    Ok(repo_dir(repo_identity)?.join("worktrees").join(task_id))
+/// Directory holding a repository's task worktrees.
+///
+/// Task worktrees live beside the code they are based on, under `.worktrees/`
+/// in the repository itself, rather than off in ahu's state directory. That
+/// keeps a task's checkout discoverable from the repository it belongs to.
+///
+/// The directory ignores itself (see [`WORKTREES_GITIGNORE`]), so it never
+/// appears in `git status` and cannot be committed by accident.
+pub fn worktrees_root(repo_root: &Path) -> PathBuf {
+    repo_root.join(WORKTREES_DIR)
+}
+
+/// Name of the in-repository directory holding task worktrees.
+pub const WORKTREES_DIR: &str = ".worktrees";
+
+/// Contents of the `.gitignore` ahu places inside `.worktrees/`.
+///
+/// `*` ignores every entry including this file, so the whole directory is
+/// invisible to Git without ahu ever editing the repository's own `.gitignore`.
+pub const WORKTREES_GITIGNORE: &str =
+    "# Created by ahu. Task worktrees are local state, never committed.\n*\n";
+
+/// Path of one task's worktree, inside its repository.
+pub fn worktree_dir(repo_root: &Path, task_id: &str) -> Result<PathBuf> {
+    Ok(worktrees_root(repo_root).join(task_id))
+}
+
+/// Create `.worktrees/` and make it ignore itself.
+pub fn ensure_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
+    let root = worktrees_root(repo_root);
+    std::fs::create_dir_all(&root)
+        .map_err(|e| Error::new(format!("cannot create {}: {e}", root.display())))?;
+    let ignore = root.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(&ignore, WORKTREES_GITIGNORE)
+            .map_err(|e| Error::new(format!("cannot create {}: {e}", ignore.display())))?;
+    }
+    Ok(root)
 }
 
 /// Path of the lock that serialises find-or-create of a repository's cmux group
