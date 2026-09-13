@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify runner prerequisites
+        run: |
+          git --version
+          python3 -c 'import sys; assert sys.version_info >= (3, 9), "Python 3.9+ required"'
+          rustup --version
+      - name: Install pinned Rust and components
+        # Reads rust-toolchain.toml; fresh runners may fetch tools/dependencies.
+        run: rustup toolchain install --no-self-update
+      - name: Check repository skill copies
+        run: python3 scripts/check-skills.py
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Build
+        run: cargo build --locked
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test with synthetic fixtures
+        run: |
+          unset AHU_TEST_CMUX
+          cargo test --locked
+      # Configured knowledge validation remains a separate maintainer check:
+      # install OKF 0.5.0 outside the checkout, then run
+      # cargo run --locked -- knowledge lint. CI tests its fixture integration.
+      # A required bundle check needs a reviewed, pinned OKF distribution first.
