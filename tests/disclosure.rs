@@ -20,15 +20,13 @@ fn locations(home: &Path) -> Locations {
     }
 }
 
-/// Build a plan for a repository whose only agent is `sable` on Claude Code.
+/// Build a plan for a repository whose only agent is `sable`.
 ///
-/// Returns `None` when Claude Code is not resolvable here; the caller then has
-/// nothing to assert rather than a silently skipped assertion.
-fn plan_for(
-    repo: &TestRepo,
-    harness: &str,
-    model: &str,
-) -> Option<(git::Repo, launch::LaunchPlan)> {
+/// Every caller runs inside [`common::in_harness_fixture`], whose `PATH` finds a
+/// fake executable for each harness ahu knows. So an unresolved harness is a
+/// broken fixture, not a machine without the tool installed, and it fails here
+/// instead of turning the caller's assertions into a silent skip.
+fn plan_for(repo: &TestRepo, harness: &str, model: &str) -> (git::Repo, launch::LaunchPlan) {
     let discovered = git::discover(repo.path()).unwrap();
     let loaded = config::load(repo.path()).unwrap().unwrap();
     let found = agent::find(repo.path(), "sable").unwrap();
@@ -39,8 +37,10 @@ fn plan_for(
         policy_digest: loaded.digest.clone(),
         catalog_version: loaded.config.catalog_version.clone(),
     };
-    let plan = launch::plan(&discovered, Some(found), pair, "review it").ok()?;
-    Some((discovered, plan))
+    let plan = launch::plan(&discovered, Some(found), pair, "review it").unwrap_or_else(|e| {
+        panic!("the fixture PATH must resolve {harness}: {e}");
+    });
+    (discovered, plan)
 }
 
 /// A repository configured for one harness, with one agent registered on it.
@@ -75,6 +75,11 @@ fn repo_on(harness: &str, model: &str) -> TestRepo {
 /// was the number in `config N file(s)`.
 #[test]
 fn the_approvals_block_reports_what_the_repositorys_settings_actually_declare() {
+    if !common::in_harness_fixture(
+        "the_approvals_block_reports_what_the_repositorys_settings_actually_declare",
+    ) {
+        return;
+    }
     let repo = repo_on("claude-code", "claude-opus-5");
     repo.write(
         ".claude/settings.json",
@@ -95,9 +100,7 @@ fn the_approvals_block_reports_what_the_repositorys_settings_actually_declare() 
     );
     repo.commit("fixture");
 
-    let Some((discovered, plan)) = plan_for(&repo, "claude-code", "claude-opus-5") else {
-        panic!("the fixtures install a fake claude, so this must resolve");
-    };
+    let (discovered, plan) = plan_for(&repo, "claude-code", "claude-opus-5");
     let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
 
     for expected in [
@@ -207,6 +210,9 @@ fn an_approval_setting_change_shows_up_as_drift() {
 /// denies no tool anywhere, and the line says what it actually does.
 #[test]
 fn the_preview_claims_no_tool_denial_on_any_harness() {
+    if !common::in_harness_fixture("the_preview_claims_no_tool_denial_on_any_harness") {
+        return;
+    }
     for (harness, model) in [
         ("claude-code", "claude-opus-5"),
         ("codex", "gpt-6-astra"),
@@ -214,9 +220,7 @@ fn the_preview_claims_no_tool_denial_on_any_harness() {
     ] {
         let repo = repo_on(harness, model);
         repo.commit("fixture");
-        let Some((discovered, plan)) = plan_for(&repo, harness, model) else {
-            continue;
-        };
+        let (discovered, plan) = plan_for(&repo, harness, model);
         let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
         for forbidden in [
             "Claude Agent/Task/TeamCreate tools are denied",
@@ -282,11 +286,12 @@ fn hooks_are_reported_as_unknown_for_a_harness_ahu_does_not_scan() {
 /// The gap reaches the enforcement report too, so it is in the task record.
 #[test]
 fn an_unscanned_hook_surface_is_an_enforcement_gap() {
+    if !common::in_harness_fixture("an_unscanned_hook_surface_is_an_enforcement_gap") {
+        return;
+    }
     let repo = repo_on("codex", "gpt-6-astra");
     repo.commit("fixture");
-    let Some((_, plan)) = plan_for(&repo, "codex", "gpt-6-astra") else {
-        return;
-    };
+    let (_, plan) = plan_for(&repo, "codex", "gpt-6-astra");
     assert!(
         plan.enforcement
             .gaps
@@ -383,6 +388,11 @@ fn an_ordinary_hook_command_still_names_its_program() {
 /// choice, so this is closing a rule that had an exception, not an exploit.
 #[test]
 fn a_path_printed_by_a_renderer_is_escaped_like_every_other_string() {
+    if !common::in_harness_fixture(
+        "a_path_printed_by_a_renderer_is_escaped_like_every_other_string",
+    ) {
+        return;
+    }
     let hostile = Path::new("/tmp/repo\u{1b}[2J\u{1b}[1;31mEVIL/.worktrees/abc");
     let rendered = ahu::util::display_path(hostile);
     assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
@@ -392,9 +402,7 @@ fn a_path_printed_by_a_renderer_is_escaped_like_every_other_string() {
     // And the preview uses it for the paths it prints.
     let repo = repo_on("claude-code", "claude-opus-5");
     repo.commit("fixture");
-    let Some((discovered, plan)) = plan_for(&repo, "claude-code", "claude-opus-5") else {
-        return;
-    };
+    let (discovered, plan) = plan_for(&repo, "claude-code", "claude-opus-5");
     let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
     assert!(
         preview.contains(&ahu::util::display_path(&plan.worktree)),
@@ -413,11 +421,14 @@ fn a_path_printed_by_a_renderer_is_escaped_like_every_other_string() {
 /// never read; it is now a statement about bytes ahu delivers itself.
 #[test]
 fn the_preview_attributes_the_instructions_to_the_file_ahu_digested() {
+    if !common::in_harness_fixture(
+        "the_preview_attributes_the_instructions_to_the_file_ahu_digested",
+    ) {
+        return;
+    }
     let repo = repo_on("claude-code", "claude-opus-5");
     repo.commit("fixture");
-    let Some((discovered, plan)) = plan_for(&repo, "claude-code", "claude-opus-5") else {
-        return;
-    };
+    let (discovered, plan) = plan_for(&repo, "claude-code", "claude-opus-5");
     let agent = plan.agent.as_ref().unwrap();
     let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
 
@@ -467,6 +478,11 @@ fn hook_scope_reporting_is_unchanged_by_the_settings_scan() {
 /// first.
 #[test]
 fn the_instructions_digest_covers_exactly_the_delivered_fence_body() {
+    if !common::in_harness_fixture(
+        "the_instructions_digest_covers_exactly_the_delivered_fence_body",
+    ) {
+        return;
+    }
     let repo = repo_on("claude-code", "claude-opus-5");
     // A claude-agent source *with* frontmatter, so the two digests must differ.
     repo.write(
@@ -502,9 +518,7 @@ fn the_instructions_digest_covers_exactly_the_delivered_fence_body() {
     );
 
     // Now the part that matters: the delivered prompt's fence body.
-    let Some((discovered, plan)) = plan_for(&repo, "claude-code", "claude-opus-5") else {
-        panic!("the fixtures install a fake claude, so this must resolve");
-    };
+    let (discovered, plan) = plan_for(&repo, "claude-code", "claude-opus-5");
     let delivered = &plan.command.args[plan.command.prompt_arg.unwrap()];
     let fence_body = ahu::orchestration::fence_body(delivered, "agent", &plan.delivery.nonce)
         .expect("the agent fence is present");
@@ -559,6 +573,11 @@ fn the_instructions_digest_covers_exactly_the_delivered_fence_body() {
 /// the same bytes — computed the same way, not special-cased to be absent.
 #[test]
 fn a_frontmatterless_source_has_two_equal_digests_not_one_missing_one() {
+    if !common::in_harness_fixture(
+        "a_frontmatterless_source_has_two_equal_digests_not_one_missing_one",
+    ) {
+        return;
+    }
     let repo = repo_on("claude-code", "claude-opus-5");
     repo.commit("fixture");
     let agent = agent::find(repo.path(), "sable").unwrap();
@@ -572,9 +591,7 @@ fn a_frontmatterless_source_has_two_equal_digests_not_one_missing_one() {
     );
     assert!(!agent.instructions_digest.is_empty());
 
-    let Some((discovered, plan)) = plan_for(&repo, "claude-code", "claude-opus-5") else {
-        return;
-    };
+    let (discovered, plan) = plan_for(&repo, "claude-code", "claude-opus-5");
     let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
     // Equal is not the same as interchangeable: the preview still says which is
     // which, and why they match here.

@@ -157,6 +157,11 @@ fn plan_from(from: &Path) -> ahu::launch::LaunchPlan {
 /// worktree ahu is about to create, not from the environment.
 #[test]
 fn a_plain_launch_places_task_state_inside_the_worktree_it_creates() {
+    if !common::in_harness_fixture(
+        "a_plain_launch_places_task_state_inside_the_worktree_it_creates",
+    ) {
+        return;
+    }
     let repo = fixture();
     let discovered = git::discover(repo.path()).unwrap();
     let plan = plan_from(repo.path());
@@ -190,6 +195,9 @@ fn a_plain_launch_places_task_state_inside_the_worktree_it_creates() {
 /// worktree, not into the parent task's.
 #[test]
 fn a_nested_launch_records_into_its_own_worktree_not_its_parent() {
+    if !common::in_harness_fixture("a_nested_launch_records_into_its_own_worktree_not_its_parent") {
+        return;
+    }
     let repo = fixture();
     let parent = state::worktree_dir(repo.path(), "006aa50000000000p1").unwrap();
     state::ensure_worktrees_root(repo.path()).unwrap();
@@ -803,23 +811,8 @@ fn stub_cmux(dir: &Path) -> PathBuf {
     script
 }
 
-/// Start a launch case in a child process configured to reach the stub.
-///
-/// `AHU_CMUX_BIN` is process-wide, and a stub that answers `ping` would be
-/// picked up by any other test spawning ahu at the same moment, so it is set on
-/// the child's command and nowhere else.
-fn run_launch_case(case: &str, repo: &TestRepo, cmux: &Path) {
-    let output = common::run_child_case(case, |command| {
-        command
-            .env_remove("AHU_STATE_DIR")
-            .env("AHU_CMUX_BIN", cmux)
-            .env("AHU_TEST_REPO", repo.path());
-    });
-    common::assert_child_passed(case, &output);
-}
-
-/// Plan and execute in the child, where the environment is already right.
-fn execute_in_child(repo_root: &Path, plan: &ahu::launch::LaunchPlan) -> ahu::util::Result<()> {
+/// Plan and execute in this process, which the fixture has already configured.
+fn execute_here(repo_root: &Path, plan: &ahu::launch::LaunchPlan) -> ahu::util::Result<()> {
     let discovered = git::discover(repo_root).unwrap();
     let loaded = ahu::config::load(&discovered.root).unwrap().unwrap();
     ahu::launch::execute(&discovered, &loaded, plan, "do the thing", false).map(|_| ())
@@ -830,6 +823,21 @@ fn execute_in_child(repo_root: &Path, plan: &ahu::launch::LaunchPlan) -> ahu::ut
 #[cfg(unix)]
 #[test]
 fn a_failure_after_materialization_reports_the_worktree_it_could_not_remove() {
+    // Built before the fixture check so the parent can hand the child a cmux
+    // that answers, and kept alive by the parent for as long as the child runs.
+    let scratch = tempfile::TempDir::new().unwrap();
+    let stub = stub_cmux(scratch.path());
+    if !common::in_child_fixture(
+        "a_failure_after_materialization_reports_the_worktree_it_could_not_remove",
+        |command| {
+            command
+                .env_remove("AHU_STATE_DIR")
+                .env("AHU_CMUX_BIN", &stub);
+        },
+    ) {
+        return;
+    }
+
     let repo = fixture();
     // Committed so the new worktree gets it from HEAD: a state ignore file that
     // ignores nothing, which state preparation refuses.
@@ -845,30 +853,8 @@ fn a_failure_after_materialization_reports_the_worktree_it_could_not_remove() {
     // materialization, which is what makes the new checkout dirty.
     repo.write("CLAUDE.md", "uncommitted guidance\n");
 
-    let scratch = tempfile::TempDir::new().unwrap();
-    run_launch_case(
-        "a_refused_cleanup_is_reported_case",
-        &repo,
-        &stub_cmux(scratch.path()),
-    );
-
-    // The retained checkout is not omitted from the listing.
-    let listed = ahu_in(repo.path(), &["tasks"]);
-    let text = text_of(&listed);
-    assert!(listed.status.success(), "{text}");
-    assert!(text.contains("no record anywhere"), "{text}");
-    assert!(text.contains("ahu/chris/"), "{text}");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_refused_cleanup_is_reported_case() {
-    if !common::is_child_case("a_refused_cleanup_is_reported_case") {
-        return;
-    }
-    let repo_root = child_repo();
-    let plan = plan_from(&repo_root);
-    let error = execute_in_child(&repo_root, &plan)
+    let plan = plan_from(repo.path());
+    let error = execute_here(repo.path(), &plan)
         .expect_err("state preparation must fail on the committed ignore file")
         .to_string();
 
@@ -883,17 +869,39 @@ fn a_refused_cleanup_is_reported_case() {
         "{error}"
     );
     assert!(plan.worktree.is_dir(), "dirty work must be preserved");
+
+    // The retained checkout is not omitted from the listing.
+    let listed = ahu_in(repo.path(), &["tasks"]);
+    let text = text_of(&listed);
+    assert!(listed.status.success(), "{text}");
+    assert!(text.contains(&plan.task_id), "{text}");
+    assert!(text.contains("no record anywhere"), "{text}");
+    assert!(text.contains(&plan.branch), "{text}");
 }
 
 /// The cleanup that follows a failed launch is not a way out of the checkout.
 ///
 /// The failure being cleaned up here is a committed link at the worktree's
 /// `.ahu`. Removing the task directory by name would follow that same link, so
-/// the child plants a file at the exact path an unguarded `remove_dir_all`
-/// would delete and checks it is still there afterwards.
+/// this plants a file at the exact path an unguarded `remove_dir_all` would
+/// delete and checks it is still there afterwards.
 #[cfg(unix)]
 #[test]
 fn a_failed_rollback_does_not_delete_through_a_redirected_state_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = tempfile::TempDir::new().unwrap();
+    let stub = stub_cmux(scratch.path());
+    if !common::in_child_fixture(
+        "a_failed_rollback_does_not_delete_through_a_redirected_state_path",
+        |command| {
+            command
+                .env_remove("AHU_STATE_DIR")
+                .env("AHU_CMUX_BIN", &stub);
+        },
+    ) {
+        return;
+    }
+
     let repo = fixture();
     let external = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(external.path().join("state/repos")).unwrap();
@@ -905,33 +913,12 @@ fn a_failed_rollback_does_not_delete_through_a_redirected_state_path() {
     std::fs::remove_file(repo.path().join(".ahu")).unwrap();
     repo.write("CLAUDE.md", "uncommitted guidance\n");
 
-    let scratch = tempfile::TempDir::new().unwrap();
-    let output = common::run_child_case("a_redirected_rollback_deletes_nothing_case", |command| {
-        command
-            .env_remove("AHU_STATE_DIR")
-            .env("AHU_CMUX_BIN", stub_cmux(scratch.path()))
-            .env("AHU_TEST_REPO", repo.path())
-            .env("AHU_TEST_EXTERNAL", external.path());
-    });
-    common::assert_child_passed("a_redirected_rollback_deletes_nothing_case", &output);
-}
-
-#[cfg(unix)]
-#[test]
-fn a_redirected_rollback_deletes_nothing_case() {
-    use std::os::unix::fs::PermissionsExt;
-    if !common::is_child_case("a_redirected_rollback_deletes_nothing_case") {
-        return;
-    }
-    let repo_root = child_repo();
-    let external =
-        PathBuf::from(std::env::var_os("AHU_TEST_EXTERNAL").expect("the parent names it"));
-    let plan = plan_from(&repo_root);
-
+    let plan = plan_from(repo.path());
     // Exactly where an unguarded `remove_dir_all(plan.task_dir)` would land,
     // because `<worktree>/.ahu` is the committed link to this directory.
-    let identity = git::discover(&repo_root).unwrap().identity();
+    let identity = git::discover(repo.path()).unwrap().identity();
     let target = external
+        .path()
         .join("state/repos")
         .join(&identity)
         .join("tasks")
@@ -942,7 +929,7 @@ fn a_redirected_rollback_deletes_nothing_case() {
     std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o640)).unwrap();
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
 
-    let error = execute_in_child(&repo_root, &plan)
+    let error = execute_here(repo.path(), &plan)
         .expect_err("a linked state directory must fail the launch")
         .to_string();
     assert!(error.contains("refusing ahu state path"), "{error}");
@@ -966,7 +953,7 @@ fn a_redirected_rollback_deletes_nothing_case() {
             & 0o777,
         0o750
     );
-    let mut entries: Vec<String> = std::fs::read_dir(&external)
+    let mut entries: Vec<String> = std::fs::read_dir(external.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
         .collect();

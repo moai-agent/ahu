@@ -593,6 +593,10 @@ fn adapters_report_their_real_enforcement_limits() {
 fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
     use common::TestRepo;
 
+    if !common::in_harness_fixture("every_launch_reports_prompt_delivery_as_a_gap_not_a_control") {
+        return;
+    }
+
     for (harness, model) in [
         ("claude-code", "claude-opus-5"),
         ("codex", "gpt-6-astra"),
@@ -627,12 +631,11 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
             policy_digest: loaded.digest.clone(),
             catalog_version: loaded.config.catalog_version.clone(),
         };
-        let Ok(plan) = ahu::launch::plan(&discovered, Some(agent), pair, "review it") else {
-            // The harness is not installed on this machine; `plan` resolves the
-            // executable. Nothing to assert, and nothing to skip silently: the
-            // claude-code case always runs, because the fixtures install a fake.
-            continue;
-        };
+        // Every harness resolves, because the fixture PATH installs a fake for
+        // each one. Skipping a harness here would have made "no harness is
+        // different" a claim about whichever harness happened to be installed.
+        let plan = ahu::launch::plan(&discovered, Some(agent), pair, "review it")
+            .unwrap_or_else(|e| panic!("the fixture PATH must resolve {harness}: {e}"));
 
         assert!(
             plan.enforcement
