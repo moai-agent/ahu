@@ -356,15 +356,68 @@ a global deletion as a local one.
 
 ## State and compatibility
 
-Task records and hygiene timestamps default to `.ahu/state/` in the invoking
-checkout. Each linked worktree has its own store. Run `ahu tasks`, `ahu task`,
-`ahu diff`, and `ahu focus` from the checkout that launched the task. The shared
-launch lock and cmux group mapping live in the primary checkout's `.ahu/state/`.
-All task checkouts are siblings under its `.worktrees/`, including child tasks.
-Both state and worktree directories contain their own ignore files.
+Each new task stores `task.json` and `prompt.txt` under
+`<task-worktree>/.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Session status
+is part of `task.json`. ahu derives this location from the worktree it creates;
+ordinary invocations need no manual `AHU_STATE_DIR` export. Removing the worktree removes its
+state. Task checkouts are siblings under the primary checkout's `.worktrees/`,
+including nested launches. State and worktree directories ignore themselves.
 
-`AHU_STATE_DIR` explicitly overrides the state store and coordination location.
-Harness configuration and credentials retain their native handling.
+`tasks`, `task`, `diff`, and `focus` discover task records through those worktrees
+from the primary checkout or a sibling. Discovery also reads compatible legacy
+records in the invoking checkout's store and, by default, the primary checkout's
+store. A worktree record takes precedence for a duplicate task ID. Missing
+worktrees have no worktree-local record to list; independent legacy records are
+not automatically deleted. Refused task directories are reported as unreadable.
+
+Only the launch lock and cmux group mapping need shared coordination state, under
+`<primary-checkout>/.ahu/state/repos/<repo-identity>/`. Hygiene timestamps and
+generated architecture documents use the invoking checkout's `.ahu/state/`.
+
+`AHU_STATE_DIR` overrides that auxiliary store. The code uses the supplied path
+as-is, without requiring an absolute path or migrating records; use a consistent
+absolute path for tools that need an override. If it differs lexically from the
+invoking checkout's default store, coordination uses it and legacy lookup searches
+it instead of the default checkout stores. An override exactly equal to the
+default path retains primary-checkout coordination and legacy lookup. In either
+case, discovery still scans task worktrees and new task records and prompts still
+go inside their own worktree. The launched harness receives `AHU_STATE_DIR` set
+to its own worktree's `.ahu/state`, replacing any inherited override. Harness
+configuration and credentials retain their native handling.
+
+Default state paths refuse existing symlinks at `.ahu`, `state`, and descendant
+directories and files; state files must be regular files. For a user-selected
+override outside the checkout-store layout, the root and its ancestors are the
+user's selection; descendants remain checked. Files are created owner-only on
+Unix and replaced through temporary files. These checks refuse static path
+redirection; they do not prevent a concurrent host process from replacing paths
+between inspection and use.
+
+At startup, ahu checks prompt and delivered-instruction digests, reconstructs the
+launch command, and checks repository and worktree identity, including which task
+worktree owns a local record. Records and their digests are mutable local files,
+not authenticated evidence against a writer able to change both. Neither these
+checks nor Git worktrees provide OS isolation or protection against concurrent
+hostile host processes.
+
+### Utility lookup
+
+Git and default cmux lookup skip empty and relative `PATH` entries. Candidates
+must be executable, canonicalize to an absolute path, and be outside registered
+repository roots and Git working trees. The resolver inspects each canonical
+candidate's parent ancestry for `.git` with filesystem metadata, without running
+candidate Git or following `.git` pointers. Any `.git` entry (including a file or
+symlink), inspection error other than absence, or ancestry beyond 256 directories
+rejects the candidate. This also excludes executables in unopened sibling or
+unrelated working trees. Symlinked installations outside working trees remain
+usable; aliases resolving into a working tree do not.
+
+The selected canonical Git path is used for that Git invocation; default cmux
+keeps its canonical path across calls on the discovered client. `AHU_CMUX_BIN`
+is a deliberate user selection and retains normal command semantics: a bare name
+uses command lookup, and relative or absolute paths are accepted without the
+default working-tree exclusion. These are executable selection checks, not a
+sandbox or a guarantee against later replacement by a host process.
 
 The catalog in `src/catalog.rs` records adapter verification against Claude Code
 2.1.269, Codex 0.154.0, and Antigravity CLI 1.2.2. These are recorded compatibility

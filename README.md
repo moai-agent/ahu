@@ -16,7 +16,9 @@ cargo install --git https://github.com/moai-agent/ahu --locked
 Task sessions require Git, cmux, and the selected harness installed and
 authenticated: Claude Code (`claude`), Codex (`codex`), or Antigravity CLI (`agy`).
 ahu installs none of these and holds no provider credentials. Read-only help and
-launch previews do not require a cmux connection.
+launch previews do not require a cmux connection. Git and default cmux lookup
+require executables outside Git working trees; see the
+[lookup rules](docs/reference.md#utility-lookup).
 
 ## Everyday use
 
@@ -59,7 +61,7 @@ All five agents in this repository declare `permissions = "auto"`, so this path
 requires the explicit approval-widening flag, even for previews. The flag controls
 the child's requested settings; it grants no extra access to the caller.
 
-Inspect work from the checkout that launched it:
+Inspect work from the primary checkout or a sibling task worktree:
 
 ```sh
 ahu tasks
@@ -105,9 +107,12 @@ without a mandatory interview. Repository copies are provided for Codex and Clau
 Each task starts at the invoking checkout's HEAD on `ahu/<agent>/<task-id>`, in
 `.worktrees/` under the primary checkout. Recognized agent configuration is copied
 from the invoking checkout, including uncommitted and ignored files and local
-deletions. Unrelated dirty source files stay behind. State defaults to the
-launching checkout's ignored `.ahu/state/`; sibling worktrees share a launch lock
-and cmux group mapping in the primary checkout.
+deletions. Unrelated dirty source files stay behind. Each task's record and prompt
+live in its worktree's ignored `.ahu/state/`, automatically; no `AHU_STATE_DIR`
+setup is needed. Removing that worktree removes its state. Siblings share only
+the launch lock and cmux group mapping in the primary checkout. See
+[state and compatibility](docs/reference.md#state-and-compatibility) for discovery,
+legacy records, overrides, and integrity limits.
 
 ahu delivers its delegation contract and agent instructions as prompt text.
 They are not an enforced system prompt. The harness controls the running session,
@@ -149,8 +154,8 @@ cargo test --locked
 
 Fresh environments may fetch tools and dependencies. Add `--offline` to Cargo
 checks only after dependencies are cached. The separate
-[dependency policy proposal](docs/dependencies.md) documents its scanner and
-review requirements; implementation does not imply maintainer approval.
+[release dependency policy](docs/dependencies.md) defines scanner, review, and
+exception requirements.
 
 With OKF 0.5.0 installed outside the checkout, also run:
 

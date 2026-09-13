@@ -1,13 +1,12 @@
-# Dependency policy proposal
+# Release dependency policy
 
-This is a concrete policy for maintainer review. Implementation of its checks
-does not record maintainer acceptance. A maintainer must accept or amend this
-proposal before treating it as an approved merge requirement.
+This policy governs dependency review and release checks. Complete the scan and
+maintainer review before release; exceptions require the approval described below.
 
 [`deny.toml`](../deny.toml) checks the locked dependency graph with all features and no target
 filter, including build and development dependencies.
 
-| Area | Proposed rule |
+| Area | Rule |
 | --- | --- |
 | Licenses | Accept MIT, Apache-2.0 and Unicode-3.0 expressions; reject other or unidentified licenses. For an `OR` expression, an allowed alternative suffices. Unicode-3.0 covers the Unicode data license required by `unicode-ident`. Only unpublished workspace packages are exempt; this does not license ahu itself. |
 | Sources | Accept crates.io only; reject Git dependencies and other registries. Review local path dependencies and Cargo source replacement configuration manually. |
@@ -39,7 +38,7 @@ The workflow runs on pull requests, main pushes, weekly and on manual dispatch.
 Offline runs use cached information and are diagnostic only;
 the configured seven-day staleness limit does not make them equivalent to an
 online scan. Record the database revision when preserving scan evidence.
-A separate `cargo audit` gate is not proposed: it adds no required advisory
+A separate `cargo audit` gate is not required: it adds no required advisory
 guarantee to this RustSec-backed check. Neither tool proves absence of unknown
 vulnerabilities or substitutes for dependency review.
 

@@ -1,4 +1,4 @@
-# Proposed dependency policy; see docs/dependencies.md for review and exceptions.
+# Release dependency policy; see docs/dependencies.md for review and exceptions.
 [graph]
 all-features = true
 # No target filter: include platform-specific, build and development dependencies.
