@@ -401,3 +401,74 @@ fn a_state_file_is_created_owner_only() {
         0o700
     );
 }
+
+/// A `.ahu/state` pair further down a path is not a new boundary.
+///
+/// The confinement root is the outermost one that applies. If a nested marker
+/// could reset it, a link *above* that marker would never be inspected — and
+/// the whole point of the boundary is that a repository-reachable link cannot
+/// move ahu's files somewhere else.
+#[test]
+fn a_nested_state_marker_does_not_move_the_confinement_boundary() {
+    // Both shapes the boundary can take: an explicitly chosen store, and a
+    // checkout's own store.
+    for explicit in [true, false] {
+        let repo = repo_with_state();
+        let external = External::new();
+        // The external target is a complete, ordinary store of its own, so
+        // nothing below the marker is refusable on its own merits.
+        std::fs::create_dir_all(external.path().join(".ahu/state")).unwrap();
+
+        let chosen = tempfile::TempDir::new().unwrap();
+        let store = if explicit {
+            chosen.path().to_path_buf()
+        } else {
+            repo.path().join(".ahu/state")
+        };
+        link(external.path(), store.join("link"));
+
+        let ordinary = store.join("link/value.json");
+        let nested = store.join("link/.ahu/state/value.json");
+        let run = |path: &Path| {
+            let _guard = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: every mutation of this variable in this binary is under
+            // the same guard, and nothing else here reads it concurrently.
+            unsafe {
+                if explicit {
+                    std::env::set_var("AHU_STATE_DIR", chosen.path());
+                } else {
+                    std::env::remove_var("AHU_STATE_DIR");
+                }
+            }
+            let result = ahu::state::write_json(path, &serde_json::json!({"written": true}));
+            unsafe { std::env::remove_var("AHU_STATE_DIR") };
+            result
+        };
+
+        let error = run(&ordinary)
+            .expect_err("a link directly below the store is refused")
+            .to_string();
+        assert!(error.contains("refusing ahu state path"), "{error}");
+
+        let error = run(&nested)
+            .expect_err("a nested marker must not reset the boundary")
+            .to_string();
+        assert!(
+            error.contains("refusing ahu state path"),
+            "explicit={explicit}: {error}"
+        );
+
+        // Nothing reached the external directory by either route: same entries,
+        // same bytes, same mode. `.ahu` is the one entry the fixture created.
+        assert!(!external.path().join(".ahu/state/value.json").exists());
+        assert!(!external.path().join("value.json").exists());
+        assert_eq!(external.mode(), 0o755);
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("keep.txt")).unwrap(),
+            "untouched\n"
+        );
+    }
+}
+
+/// `AHU_STATE_DIR` is process-wide; these tests are the only mutators here.
+static STATE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());

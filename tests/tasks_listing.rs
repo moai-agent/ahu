@@ -214,7 +214,7 @@ fn tasks_lists_the_readable_record_and_reports_the_unreadable_one() {
     assert!(text.contains("006aa50000000000a1"), "{text}");
     assert!(text.contains("[unreadable]"), "{text}");
     assert!(
-        text.contains("1 task record(s) in this repository could not be read"),
+        text.contains("1 task(s) in this repository could not be read or are incomplete"),
         "{text}"
     );
     assert!(
@@ -267,7 +267,7 @@ fn tasks_never_claims_no_tasks_exist_when_records_were_refused() {
         "ahu claimed no tasks exist while holding five refused records:\n{text}"
     );
     assert!(
-        text.contains("5 task record(s) in this repository could not be read"),
+        text.contains("5 task(s) in this repository could not be read or are incomplete"),
         "{text}"
     );
     for id in [

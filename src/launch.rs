@@ -332,6 +332,53 @@ pub fn plan(
     })
 }
 
+/// Undo the worktree a failed launch created, and say so when Git refuses.
+///
+/// `git worktree remove` will not force-delete a checkout that holds work, and
+/// materialization can legitimately leave one dirty by copying uncommitted
+/// agent configuration into it. When that happens the worktree and its branch
+/// stay, so the failure that is reported has to name them: they are the user's
+/// to inspect, and nothing else is going to mention them.
+fn rollback_worktree(repo: &Repo, plan: &LaunchPlan, cause: Error) -> Error {
+    // The record lives inside the worktree, so removing the worktree takes it.
+    // If Git refuses, the record is removed on its own so no half-prepared
+    // task is left claiming to be one.
+    if let Err(refused) = git::remove_worktree(repo, &plan.worktree, &plan.branch) {
+        discard_task_dir(&plan.task_dir);
+        let kind = cause.kind();
+        return Error::new(format!(
+            "{cause}\n\n\
+             The task checkout ahu created for this launch could not be removed, so it is still \
+             here along with its branch:\n  \
+             worktree {}\n  branch   {}\n\
+             {refused}\n\
+             ahu does not force-remove a checkout that holds work. Inspect it, then remove it \
+             yourself once you are sure nothing in it is needed. `ahu tasks` lists it as a task \
+             worktree with no record until then.",
+            plan.worktree.display(),
+            plan.branch
+        ))
+        .with_kind(kind);
+    }
+    discard_task_dir(&plan.task_dir);
+    cause
+}
+
+/// Remove a task directory a failed launch created, but never through a path
+/// ahu would refuse to write to.
+///
+/// One of the ways a launch fails here is a repository that committed a link at
+/// the worktree's `.ahu`. Deleting the task directory by name would follow that
+/// same link and take the deletion outside the checkout, which would turn a
+/// refusal into the damage the refusal exists to prevent. A path that cannot be
+/// validated is left exactly as it is; the error already tells the user the
+/// worktree was kept.
+fn discard_task_dir(task_dir: &Path) {
+    if state::confine_existing_dir(task_dir).is_ok() {
+        let _ = std::fs::remove_dir_all(task_dir);
+    }
+}
+
 /// Result of a successful launch.
 #[derive(Debug, Clone)]
 pub struct Launched {
@@ -378,17 +425,13 @@ pub fn execute(
     // while no session could have started in it.
     let materialize = match snapshot::materialize(&repo.root, &plan.snapshot, &plan.worktree) {
         Ok(report) => report,
-        Err(e) => {
-            let _ = git::remove_worktree(repo, &plan.worktree, &plan.branch);
-            return Err(e);
-        }
+        Err(e) => return Err(rollback_worktree(repo, plan, e)),
     };
     // The task's own state directory, created now that its worktree exists. A
     // repository that committed a link at `.ahu` or `.ahu/state` is refused
     // here, before a record or a prompt is written through it.
     if let Err(e) = state::ensure_checkout_state(&plan.worktree) {
-        let _ = git::remove_worktree(repo, &plan.worktree, &plan.branch);
-        return Err(e);
+        return Err(rollback_worktree(repo, plan, e));
     }
     if !materialize.concurrently_modified.is_empty() {
         notes.push(format!(
@@ -458,17 +501,12 @@ pub fn execute(
     };
 
     if let Err(e) = task::save(&plan.task_dir, &record, prompt) {
-        let _ = git::remove_worktree(repo, &plan.worktree, &plan.branch);
-        return Err(e);
+        return Err(rollback_worktree(repo, plan, e));
     }
 
     let group = match ensure_group(&cmux_client, repo, &mut notes) {
         Ok(group) => group,
-        Err(e) => {
-            let _ = git::remove_worktree(repo, &plan.worktree, &plan.branch);
-            let _ = std::fs::remove_dir_all(&plan.task_dir);
-            return Err(e);
-        }
+        Err(e) => return Err(rollback_worktree(repo, plan, e)),
     };
     record.cmux_group_id = Some(group.id.clone());
 
@@ -488,12 +526,8 @@ pub fn execute(
         focus,
     ) {
         Ok(created) => created,
-        Err(e) => {
-            // No session exists, so the worktree cannot hold work yet.
-            let _ = git::remove_worktree(repo, &plan.worktree, &plan.branch);
-            let _ = std::fs::remove_dir_all(&plan.task_dir);
-            return Err(e);
-        }
+        // No session exists, so nothing in the worktree came from a task.
+        Err(e) => return Err(rollback_worktree(repo, plan, e)),
     };
 
     record.cmux_workspace_id = Some(created.workspace_id.clone());

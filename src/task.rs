@@ -126,8 +126,11 @@ pub struct TaskRecord {
     pub prompt_digest: String,
     /// Absolute path of the harness binary as resolved at submission.
     ///
-    /// Recorded so the exec does not consult `PATH` a second time, and so the
-    /// preview can show exactly which binary will run.
+    /// Evidence, not a path that gets executed: the preview shows it, and
+    /// `run_task` compares it with what it resolves itself. The workspace
+    /// resolves the same harness *name* on its own `PATH` again, because cmux
+    /// installs a per-surface wrapper whose path differs from the submitting
+    /// shell's.
     #[serde(default)]
     pub harness_executable: PathBuf,
     pub enforcement: EnforcementReport,
@@ -315,9 +318,22 @@ pub struct TaskListing {
     pub records: Vec<(PathBuf, TaskRecord)>,
     /// Directories ahu could not read, by task id.
     pub unreadable: Vec<UnreadableTask>,
+    /// Things found while listing that are not tasks and must not be presented
+    /// as any task's, such as a record copied into another task's store.
+    ///
+    /// Deliberately not an [`UnreadableTask`]: a row carrying a task id makes
+    /// that id ambiguous to an exact lookup, which is precisely what a
+    /// transplanted record would exploit.
+    pub notes: Vec<String>,
 }
 
 impl TaskListing {
+    /// Whether a task id already has a row, readable or not.
+    fn has(&self, task_id: &str) -> bool {
+        self.records.iter().any(|(_, r)| r.task_id == task_id)
+            || self.unreadable.iter().any(|u| u.task_id == task_id)
+    }
+
     /// Whether this repository has no task directories at all.
     ///
     /// Not "no readable records": a caller asking this is usually about to tell
@@ -356,10 +372,12 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
     let identity = repo.identity();
     let primary_root = repo.primary_root()?;
     let mut listing = TaskListing::default();
+    let mut incomplete = Vec::new();
     scan_worktrees(
         &state::worktrees_root_at(&primary_root),
         &identity,
         &mut listing,
+        &mut incomplete,
     )?;
 
     for store in checkout_stores(repo, &primary_root, &identity)? {
@@ -368,25 +386,27 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
         // not walked.
         state::confine_existing_dir(&store)?;
         let mut found = TaskListing::default();
-        scan_tasks_dir(&store, &mut found)?;
-        let known: std::collections::BTreeSet<String> = listing
-            .records
-            .iter()
-            .map(|(_, record)| record.task_id.clone())
-            .chain(listing.unreadable.iter().map(|found| found.task_id.clone()))
-            .collect();
-        listing.records.extend(
-            found
-                .records
-                .into_iter()
-                .filter(|(_, r)| !known.contains(&r.task_id)),
-        );
-        listing.unreadable.extend(
-            found
-                .unreadable
-                .into_iter()
-                .filter(|u| !known.contains(&u.task_id)),
-        );
+        scan_tasks_dir(&store, &identity, Store::Checkout, &mut found)?;
+        listing.notes.extend(found.notes);
+        for (dir, record) in found.records {
+            if !listing.has(&record.task_id) {
+                listing.records.push((dir, record));
+            }
+        }
+        for refused in found.unreadable {
+            if !listing.has(&refused.task_id) {
+                listing.unreadable.push(refused);
+            }
+        }
+    }
+
+    // Only now, when every store has been read: a worktree from the older
+    // layout has no state of its own and its record has just been found in a
+    // checkout store, so reporting it as recordless would be wrong.
+    for row in incomplete {
+        if !listing.has(&row.task_id) {
+            listing.unreadable.push(row);
+        }
     }
 
     listing
@@ -398,47 +418,94 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
 
 /// The per-checkout stores that can hold a task record for this repository.
 ///
-/// The invoking checkout's store comes first. The primary checkout's store is
-/// searched too, so a record written before task state moved into worktrees is
-/// still found when `ahu tasks` runs from a sibling worktree rather than from
-/// the checkout that launched it.
+/// The invoking checkout's store comes first, then the primary checkout's, so a
+/// record written before task state moved into worktrees is still found when
+/// `ahu tasks` runs from a sibling worktree rather than from the checkout that
+/// launched it. Both are derived from the repository passed in, not from the
+/// process working directory, so a caller holding a valid repository gets the
+/// same answer wherever it is standing.
 ///
-/// An explicit `AHU_STATE_DIR` is an isolated store on purpose: when one is in
-/// effect, that store is the only one searched, and a checkout's own `.ahu` is
-/// left out rather than quietly widening what the caller asked for.
+/// An explicit `AHU_STATE_DIR` that is not simply one of this repository's own
+/// checkout stores replaces these default stores, and is then the only one read
+/// here. It changes nothing else: `list` scans task worktrees separately and
+/// always, so a task launched by an ordinary ahu is still found by a tool that
+/// sets one -- and `ahu tasks` may then update that task's recorded state
+/// inside its own worktree. An override is not a promise of isolation from live
+/// tasks, and nothing here should be read as one.
 fn checkout_stores(
     repo: &crate::git::Repo,
     primary_root: &Path,
     identity: &str,
 ) -> Result<Vec<PathBuf>> {
     let tasks_under = |root: &Path| root.join("repos").join(identity).join("tasks");
-    let current = state::root()?;
-    let mut stores = vec![tasks_under(&current)];
-    if current == state::checkout_root(&repo.root)? {
-        let primary = tasks_under(&state::checkout_root(primary_root)?);
-        if !stores.contains(&primary) {
-            stores.push(primary);
-        }
+    if let Some(explicit) = state::isolated_store(repo)? {
+        return Ok(vec![tasks_under(&explicit)]);
+    }
+    let mut stores = vec![tasks_under(&state::checkout_root(&repo.root)?)];
+    let primary = tasks_under(&state::checkout_root(primary_root)?);
+    if !stores.contains(&primary) {
+        stores.push(primary);
     }
     Ok(stores)
+}
+
+/// Which store a scan is reading, and therefore what it may contain.
+///
+/// A task worktree holds exactly one task's state: its own. A checkout store
+/// holds whatever was launched from that checkout, so it may hold many.
+#[derive(Debug, Clone, Copy)]
+enum Store<'a> {
+    Worktree { path: &'a Path, task_id: &'a str },
+    Checkout,
 }
 
 /// Read every task directory directly inside `dir`, if it is there at all.
 ///
 /// A directory that does not exist is not an error: a repository with no tasks
 /// in a given store simply has none.
-fn scan_tasks_dir(dir: &Path, listing: &mut TaskListing) -> Result<()> {
+///
+/// A record is only accepted as the task the directory names. Copying a valid
+/// record for task B into task A's store would otherwise put B in the listing
+/// twice -- once as itself and once as something found in A -- and make an
+/// exact lookup of B ambiguous, so a record that does not match where it was
+/// found is carried as unreadable instead.
+fn scan_tasks_dir(
+    dir: &Path,
+    repo_identity: &str,
+    store: Store<'_>,
+    listing: &mut TaskListing,
+) -> Result<usize> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(e) => bail!("cannot read {}: {e}", dir.display()),
     };
+    // Counts only what accounts for the task this store belongs to. A stray
+    // that is rejected below must not stand in for the owner's own record, or a
+    // worktree with nothing of its own would stop being reported as such.
+    let mut accounted = 0;
     for entry in entries {
         let path = entry?.path();
         let task_id = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
+        // In a worktree store, only the owner's own task id can be a task.
+        // Anything else gets a note rather than a row, because a row carries an
+        // id and would make that id ambiguous to an exact lookup.
+        if let Store::Worktree {
+            path: owner,
+            task_id: owner_id,
+        } = store
+            && task_id != owner_id
+        {
+            listing.notes.push(format!(
+                "{} holds {task_id}, which is not its own task state. It is not listed as a \
+                 task. Nothing was changed or removed.",
+                owner.display()
+            ));
+            continue;
+        }
         match std::fs::symlink_metadata(&path) {
             // A task directory ahu wrote is a real directory.
             Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
@@ -447,6 +514,7 @@ fn scan_tasks_dir(dir: &Path, listing: &mut TaskListing) -> Result<()> {
             // listing that skipped it would report fewer tasks than the store
             // has entries for.
             Ok(meta) if meta.file_type().is_symlink() => {
+                accounted += 1;
                 listing.unreadable.push(UnreadableTask {
                     dir: path,
                     task_id,
@@ -459,17 +527,84 @@ fn scan_tasks_dir(dir: &Path, listing: &mut TaskListing) -> Result<()> {
             _ => continue,
         }
         match load(&path) {
-            Ok(record) => listing.records.push((path, record)),
+            Ok(record) => match misplaced(&record, &task_id, repo_identity, store) {
+                None => {
+                    accounted += 1;
+                    listing.records.push((path, record));
+                }
+                // A record that does not belong where it was found is named,
+                // not listed, and does not account for the task whose place it
+                // is occupying.
+                Some(reason) => match store {
+                    Store::Worktree { path: owner, .. } => listing.notes.push(format!(
+                        "{} holds a record that does not belong to it: {reason} It is not \
+                         listed as a task. Nothing was changed or removed.",
+                        owner.display()
+                    )),
+                    Store::Checkout => listing.unreadable.push(UnreadableTask {
+                        dir: path,
+                        task_id,
+                        reason,
+                    }),
+                },
+            },
             // Carried, not dropped. It must still not break the listing of the
             // others. Keep the refused directory visible for inspection.
-            Err(e) => listing.unreadable.push(UnreadableTask {
-                dir: path,
-                task_id,
-                reason: e.to_string(),
-            }),
+            Err(e) => {
+                accounted += 1;
+                listing.unreadable.push(UnreadableTask {
+                    dir: path,
+                    task_id,
+                    reason: e.to_string(),
+                });
+            }
         }
     }
-    Ok(())
+    Ok(accounted)
+}
+
+/// Why a record does not belong where it was found, if it does not.
+///
+/// Nothing here trusts the record to describe itself correctly; each field is
+/// compared against something ahu knows independently -- the directory name it
+/// chose, the repository it is looking in, and the worktree it is standing in.
+fn misplaced(
+    record: &TaskRecord,
+    task_id: &str,
+    repo_identity: &str,
+    store: Store<'_>,
+) -> Option<String> {
+    if record.task_id != task_id {
+        return Some(format!(
+            "this directory is named for task {task_id}, but the record in it is for task {}. \
+             ahu will not present a record as a task it does not name.",
+            record.task_id
+        ));
+    }
+    if record.repo_identity != repo_identity {
+        return Some(
+            "this record was written for a different repository than the one being listed."
+                .to_string(),
+        );
+    }
+    let Store::Worktree { path, .. } = store else {
+        return None;
+    };
+    // Compared resolved, because the worktree path is reached one way here and
+    // recorded another way at submission.
+    let same = path
+        .canonicalize()
+        .ok()
+        .zip(record.worktree.canonicalize().ok())
+        .is_some_and(|(found, recorded)| found == recorded);
+    if !same {
+        return Some(format!(
+            "this record names the worktree {}, but it was found in {}.",
+            record.worktree.display(),
+            path.display()
+        ));
+    }
+    None
 }
 
 /// Look in every task worktree of the repository for the record it owns.
@@ -478,7 +613,12 @@ fn scan_tasks_dir(dir: &Path, listing: &mut TaskListing) -> Result<()> {
 /// gone takes its task out of the listing by simply not being there. A worktree
 /// whose state directory ahu refuses stays *in* the listing as unreadable:
 /// hiding it would claim work does not exist when its checkout and branch do.
-fn scan_worktrees(root: &Path, repo_identity: &str, listing: &mut TaskListing) -> Result<()> {
+fn scan_worktrees(
+    root: &Path,
+    repo_identity: &str,
+    listing: &mut TaskListing,
+    incomplete: &mut Vec<UnreadableTask>,
+) -> Result<()> {
     match std::fs::symlink_metadata(root) {
         Ok(meta) if meta.file_type().is_symlink() => bail!(
             "refusing to enumerate task worktrees through {}: it is a symlink.",
@@ -540,7 +680,37 @@ fn scan_worktrees(root: &Path, repo_identity: &str, listing: &mut TaskListing) -
             });
             continue;
         }
-        scan_tasks_dir(&tasks, listing)?;
+        let found = scan_tasks_dir(
+            &tasks,
+            repo_identity,
+            Store::Worktree {
+                path: &worktree,
+                task_id: &task_id,
+            },
+            listing,
+        )?;
+        if found == 0 {
+            // A checkout ahu created with nothing recorded in it. Leaving it out
+            // would make `ahu tasks` claim the repository has no such task while
+            // its checkout and branch are sitting there -- which happens exactly
+            // when a launch failed after creating the worktree and Git then
+            // refused to remove it because it already held work.
+            //
+            // Held back rather than added here: a task from the older layout
+            // legitimately has a worktree with no state in it and its record in
+            // a checkout store. These rows are only used for the worktrees that
+            // still have nothing after every store has been read.
+            incomplete.push(UnreadableTask {
+                dir: tasks,
+                task_id,
+                reason: format!(
+                    "this task worktree has no record anywhere ahu looked. A launch may still \
+                     be preparing it, or one failed after creating the checkout {} and could \
+                     not remove it. The checkout and its branch are still here.",
+                    worktree.display()
+                ),
+            });
+        }
     }
     Ok(())
 }

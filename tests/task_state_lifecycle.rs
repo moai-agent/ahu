@@ -23,6 +23,23 @@ fn fixture() -> TestRepo {
     repo
 }
 
+/// `AHU_STATE_DIR` is process-wide, so the tests that touch it are serialised.
+///
+/// The suite can be run from inside an ahu task session, which injects the
+/// variable. These tests are about what ahu does without one, so they clear it
+/// for the calls that read it rather than inheriting whatever launched them.
+static STATE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn without_override<T>(f: impl FnOnce() -> T) -> T {
+    let guard = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: every mutation of this variable in this binary is under the same
+    // guard, and the readers that matter run inside it.
+    unsafe { std::env::remove_var("AHU_STATE_DIR") };
+    let result = f();
+    drop(guard);
+    result
+}
+
 /// Run the real binary with no state override at all, from `dir`.
 ///
 /// `env_remove` rather than a pointed-at temporary directory: these tests are
@@ -32,6 +49,11 @@ fn ahu_in(dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env_remove("AHU_STATE_DIR")
+        // Listing reconciles against cmux when it can reach one. These tests
+        // are about what is on disk, so they are pointed at a cmux that is not
+        // there: neither a developer's real session nor another test's stub can
+        // change what they see.
+        .env("AHU_CMUX_BIN", dir.join("no-such-cmux"))
         .output()
         .expect("ahu runs")
 }
@@ -413,17 +435,584 @@ fn a_record_held_by_another_tasks_worktree_does_not_start_a_session() {
 fn a_linked_task_directory_is_reported_rather_than_passed_over() {
     let repo = fixture();
     let real = "006aa50000000000s1";
-    let linked = "006aa50000000000s2";
+    let target = "006aa50000000000s3";
     let real_dir = prepare_task(&repo, repo.path(), real);
-    std::os::unix::fs::symlink(&real_dir, real_dir.parent().unwrap().join(linked)).unwrap();
+    let target_dir = prepare_task(&repo, repo.path(), target);
 
-    let listing = ahu_in(repo.path(), &["tasks"]);
-    let text = text_of(&listing);
-    assert!(listing.status.success(), "{text}");
-    assert!(text.contains(real), "{text}");
+    // A link standing where this worktree's own record belongs. It is refused
+    // as that task being unreadable, not followed to whatever it points at.
+    let store = real_dir.parent().unwrap().to_path_buf();
+    std::fs::remove_dir_all(&real_dir).unwrap();
+    std::os::unix::fs::symlink(&target_dir, store.join(real)).unwrap();
+    // And a link under someone else's task id in the same store, which is not
+    // a task of this worktree at all.
+    let foreign = "006aa50000000000s2";
+    std::os::unix::fs::symlink(&target_dir, store.join(foreign)).unwrap();
+
+    let listed = ahu_in(repo.path(), &["tasks"]);
+    let text = text_of(&listed);
+    assert!(listed.status.success(), "{text}");
+    assert!(text.contains(target), "{text}");
     assert!(
-        text.contains(linked) && text.contains("could not be read"),
-        "the linked entry must be reported: {text}"
+        text.contains(real) && text.contains("symlink"),
+        "a link at the worktree's own record must be refused as that task: {text}"
     );
-    assert!(text.contains("symlink"), "{text}");
+    assert!(
+        text.contains(foreign) && text.contains("not its own task state"),
+        "a link under another task's id must be named without claiming to be a task: {text}"
+    );
+    // Neither link produced a second row for the task it points at.
+    let discovered = git::discover(repo.path()).unwrap();
+    let listing = without_override(|| task::list(&discovered).unwrap());
+    assert_eq!(
+        listing
+            .records
+            .iter()
+            .filter(|(_, r)| r.task_id == target)
+            .count(),
+        1,
+        "{:?}",
+        listing.records
+    );
+}
+
+/// A record copied into another task's store is not presented as a task, and
+/// does not make the task it names ambiguous.
+#[test]
+fn a_transplanted_record_is_named_but_never_listed_as_a_task() {
+    let repo = fixture();
+    let owner = "006aa50000000000t1";
+    let other = "006aa50000000000t2";
+    prepare_task(&repo, repo.path(), owner);
+    prepare_task(&repo, repo.path(), other);
+
+    let discovered = git::discover(repo.path()).unwrap();
+    let owner_worktree = repo.path().join(".worktrees").join(owner);
+    let other_worktree = repo.path().join(".worktrees").join(other);
+    // `other`'s complete, self-consistent record, sitting in `owner`'s store.
+    task::save(
+        &state::worktree_task_dir(&owner_worktree, &discovered.identity(), other),
+        &record_for(&repo, other, &other_worktree),
+        "current work",
+    )
+    .unwrap();
+
+    let listing = without_override(|| task::list(&discovered).unwrap());
+    assert_eq!(
+        listing
+            .records
+            .iter()
+            .filter(|(_, r)| r.task_id == other)
+            .count(),
+        1,
+        "the copy must not enter the listing as a second {other}"
+    );
+    assert_eq!(listing.records.len(), 2);
+    assert!(
+        listing.notes.iter().any(|note| note.contains(other)),
+        "the stray record must still be named: {:?}",
+        listing.notes
+    );
+    // And it carries no task id of its own, so nothing became ambiguous.
+    assert!(listing.unreadable.is_empty(), "{:?}", listing.unreadable);
+
+    // Exact lookup of both tasks still resolves, from the CLI.
+    for id in [owner, other] {
+        let inspected = ahu_in(repo.path(), &["task", id, "--output", "json"]);
+        let text = text_of(&inspected);
+        assert!(inspected.status.success(), "{id}: {text}");
+        let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(value["task_id"], id);
+    }
+    // `task_dirs` accounts for two tasks, not three.
+    assert_eq!(
+        without_override(|| ahu::commands::task_dirs(&discovered).unwrap()).len(),
+        2
+    );
+
+    let listed = ahu_in(repo.path(), &["tasks"]);
+    let text = text_of(&listed);
+    assert!(listed.status.success(), "{text}");
+    assert!(
+        text.contains("not its own task state"),
+        "the stray record must be reported: {text}"
+    );
+}
+
+/// A record whose directory name is not the task it names, and one written for
+/// another repository, are both refused where a checkout store holds them.
+#[test]
+fn a_record_that_does_not_match_where_it_was_found_is_refused() {
+    let repo = fixture();
+    let discovered = git::discover(repo.path()).unwrap();
+    let store = state::ensure_checkout_state(repo.path())
+        .unwrap()
+        .join("repos")
+        .join(discovered.identity())
+        .join("tasks");
+
+    // Named for one task, holding another's record.
+    let mismatched = record_for(
+        &repo,
+        "006aa50000000000m9",
+        &repo.path().join(".worktrees/x"),
+    );
+    task::save(
+        &store.join("006aa50000000000m1"),
+        &mismatched,
+        "current work",
+    )
+    .unwrap();
+    // A valid record from a different repository.
+    let mut foreign = record_for(
+        &repo,
+        "006aa50000000000m2",
+        &repo.path().join(".worktrees/y"),
+    );
+    foreign.repo_identity = "0".repeat(16);
+    task::save(&store.join("006aa50000000000m2"), &foreign, "current work").unwrap();
+
+    let listing = without_override(|| task::list(&discovered).unwrap());
+    assert!(listing.records.is_empty(), "{:?}", listing.records);
+    let reasons: Vec<&str> = listing
+        .unreadable
+        .iter()
+        .map(|u| u.reason.as_str())
+        .collect();
+    assert_eq!(listing.unreadable.len(), 2, "{reasons:?}");
+    assert!(
+        reasons.iter().any(|r| r.contains("is named for task")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.iter().any(|r| r.contains("different repository")),
+        "{reasons:?}"
+    );
+}
+
+/// A task from the older layout has a worktree with no state in it and its
+/// record in a checkout store. That is complete, not incomplete.
+#[test]
+fn an_older_layout_task_with_a_live_worktree_is_listed_once() {
+    let repo = fixture();
+    let task_id = "006aa50000000000w1";
+    let discovered = git::discover(repo.path()).unwrap();
+    state::ensure_worktrees_root(repo.path()).unwrap();
+    let worktree = state::worktree_dir(repo.path(), task_id).unwrap();
+    git::add_worktree(
+        &discovered,
+        &worktree,
+        &format!("ahu/chris/{task_id}"),
+        "HEAD",
+    )
+    .unwrap();
+    assert!(!worktree.join(".ahu").exists(), "the older layout has none");
+
+    // The record where the older ahu put it: the primary checkout's own store.
+    task::save(
+        &state::ensure_checkout_state(repo.path())
+            .unwrap()
+            .join("repos")
+            .join(discovered.identity())
+            .join("tasks")
+            .join(task_id),
+        &record_for(&repo, task_id, &worktree),
+        "current work",
+    )
+    .unwrap();
+
+    // From the primary checkout and from that worktree itself.
+    for from in [repo.path(), worktree.as_path()] {
+        let listed = ahu_in(from, &["tasks"]);
+        let text = text_of(&listed);
+        assert!(listed.status.success(), "{text}");
+        assert!(text.contains(task_id), "from {from:?}: {text}");
+        assert!(
+            !text.contains("no record anywhere"),
+            "a worktree whose record is in a checkout store is not incomplete: {text}"
+        );
+        assert!(!text.contains("could not be read"), "{text}");
+    }
+    let listing = without_override(|| task::list(&git::discover(&worktree).unwrap()).unwrap());
+    assert_eq!(listing.records.len(), 1);
+    assert!(listing.unreadable.is_empty(), "{:?}", listing.unreadable);
+}
+
+/// A task worktree with no record anywhere is reported, not omitted.
+#[test]
+fn a_worktree_with_no_record_anywhere_is_reported_as_incomplete() {
+    let repo = fixture();
+    let stranded = "006aa50000000000i1";
+    let discovered = git::discover(repo.path()).unwrap();
+    state::ensure_worktrees_root(repo.path()).unwrap();
+    let worktree = state::worktree_dir(repo.path(), stranded).unwrap();
+    git::add_worktree(
+        &discovered,
+        &worktree,
+        &format!("ahu/chris/{stranded}"),
+        "HEAD",
+    )
+    .unwrap();
+
+    let listed = ahu_in(repo.path(), &["tasks"]);
+    let text = text_of(&listed);
+    assert!(listed.status.success(), "{text}");
+    assert!(text.contains(stranded), "{text}");
+    assert!(text.contains("no record anywhere"), "{text}");
+    // And the branch it is holding is recovered for the reader.
+    assert!(text.contains(&format!("ahu/chris/{stranded}")), "{text}");
+}
+
+/// The library answers from the repository it is given, wherever the process
+/// happens to be standing.
+#[test]
+fn discovery_uses_the_repository_it_is_given_not_the_working_directory() {
+    let repo = fixture();
+    let live = "006aa50000000000q1";
+    prepare_task(&repo, repo.path(), live);
+    let sibling = repo.path().join(".worktrees").join(live);
+
+    let legacy = "006aa50000000000q2";
+    let discovered = git::discover(repo.path()).unwrap();
+    task::save(
+        &state::ensure_checkout_state(repo.path())
+            .unwrap()
+            .join("repos")
+            .join(discovered.identity())
+            .join("tasks")
+            .join(legacy),
+        &record_for(&repo, legacy, &repo.path().join(".worktrees").join(legacy)),
+        "current work",
+    )
+    .unwrap();
+
+    // The same primary repository, resolved while standing in three different
+    // places, including one that is not a repository at all.
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let guard = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: guarded as above; this binary is the only mutator.
+    unsafe { std::env::remove_var("AHU_STATE_DIR") };
+    let original = std::env::current_dir().unwrap();
+    for cwd in [repo.path(), sibling.as_path(), elsewhere.path()] {
+        std::env::set_current_dir(cwd).unwrap();
+        let listing = task::list(&discovered).expect("a valid repository lists from any cwd");
+        let ids: Vec<&str> = listing
+            .records
+            .iter()
+            .map(|(_, r)| r.task_id.as_str())
+            .collect();
+        assert!(ids.contains(&live), "from {cwd:?}: {ids:?}");
+        assert!(
+            ids.contains(&legacy),
+            "the primary store's record must not depend on the working directory; from {cwd:?}: {ids:?}"
+        );
+    }
+    std::env::set_current_dir(original).unwrap();
+    drop(guard);
+}
+
+/// An unrelated explicit store replaces the checkout store and nothing more.
+///
+/// It is deliberately *not* isolation from live tasks: worktree records stay
+/// visible, and `ahu tasks` may update a live task's own record in its own
+/// worktree. What the override does guarantee is that no task payload is
+/// written into the store the caller chose.
+#[test]
+fn an_explicit_store_still_sees_live_worktree_tasks() {
+    let repo = fixture();
+    let live = "006aa50000000000e1";
+    prepare_task(&repo, repo.path(), live);
+
+    let legacy = "006aa50000000000e2";
+    let discovered = git::discover(repo.path()).unwrap();
+    task::save(
+        &state::ensure_checkout_state(repo.path())
+            .unwrap()
+            .join("repos")
+            .join(discovered.identity())
+            .join("tasks")
+            .join(legacy),
+        &record_for(&repo, legacy, &repo.path().join(".worktrees").join(legacy)),
+        "current work",
+    )
+    .unwrap();
+
+    let chosen = tempfile::TempDir::new().unwrap();
+    let listed = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+        .args(["tasks"])
+        .current_dir(repo.path())
+        .env("AHU_STATE_DIR", chosen.path())
+        .output()
+        .expect("ahu runs");
+    let text = text_of(&listed);
+    assert!(listed.status.success(), "{text}");
+    assert!(
+        text.contains(live),
+        "an override must not hide a live task: {text}"
+    );
+    assert!(
+        !text.contains(legacy),
+        "an override replaces the checkout store, so its records are not read: {text}"
+    );
+    // No task payload was written into the chosen store.
+    assert!(!chosen.path().join("repos").exists(), "{text}");
+}
+
+/// A cmux stand-in that answers only what `execute` asks before it creates the
+/// worktree: a ping and a capability list. Anything after that is not reached
+/// by these tests, which fail the launch in between.
+fn stub_cmux(dir: &Path) -> PathBuf {
+    let script = dir.join("stub-cmux");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+         ping) exit 0 ;;\n\
+         capabilities) printf '%s' '{\"capabilities\":[\"workspace.groups.v1\",\
+\"workspace.group_create.v1\",\"workspace.create_in_group.v1\"]}' ; exit 0 ;;\n\
+         *) echo 'the stub does not answer that' >&2 ; exit 1 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    script
+}
+
+/// Run `execute` against the stub, with no state override, serialised because
+/// both settings are process-wide.
+fn execute_with_stub(
+    repo: &TestRepo,
+    cmux: &Path,
+    plan: &ahu::launch::LaunchPlan,
+) -> ahu::util::Result<ahu::launch::Launched> {
+    let discovered = git::discover(repo.path()).unwrap();
+    let loaded = ahu::config::load(&discovered.root).unwrap().unwrap();
+    let guard = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: guarded as everywhere else in this binary.
+    unsafe {
+        std::env::remove_var("AHU_STATE_DIR");
+        std::env::set_var("AHU_CMUX_BIN", cmux);
+    }
+    let result = ahu::launch::execute(&discovered, &loaded, plan, "do the thing", false);
+    unsafe { std::env::remove_var("AHU_CMUX_BIN") };
+    drop(guard);
+    result
+}
+
+/// A launch that fails after the worktree exists, on a worktree Git will not
+/// remove, says so and leaves the checkout discoverable.
+#[cfg(unix)]
+#[test]
+fn a_failure_after_materialization_reports_the_worktree_it_could_not_remove() {
+    let repo = fixture();
+    // Committed so the new worktree gets it from HEAD: a state ignore file that
+    // ignores nothing, which state preparation refuses.
+    repo.write(".ahu/.gitignore", "# ignores nothing\n");
+    repo.commit("state ignore that ignores nothing");
+    // Repaired only in the invoking checkout, so its own store still works.
+    std::fs::write(
+        repo.path().join(".ahu/.gitignore"),
+        "# Local ahu session state. Never commit.\n*\n",
+    )
+    .unwrap();
+    // Uncommitted agent configuration, copied into the worktree by
+    // materialization, which is what makes the new checkout dirty.
+    repo.write("CLAUDE.md", "uncommitted guidance\n");
+
+    let plan = plan_from(repo.path());
+    let scratch = tempfile::TempDir::new().unwrap();
+    let error = execute_with_stub(&repo, &stub_cmux(scratch.path()), &plan)
+        .expect_err("state preparation must fail on the committed ignore file")
+        .to_string();
+
+    assert!(error.contains("must ignore all state files"), "{error}");
+    assert!(
+        error.contains("could not be removed"),
+        "the refusal to clean up must be reported: {error}"
+    );
+    assert!(error.contains(&plan.branch), "{error}");
+    assert!(
+        error.contains(&plan.worktree.to_string_lossy().to_string()),
+        "{error}"
+    );
+    assert!(plan.worktree.is_dir(), "dirty work must be preserved");
+
+    // And the retained checkout is not omitted from the listing.
+    let listed = ahu_in(repo.path(), &["tasks"]);
+    let text = text_of(&listed);
+    assert!(listed.status.success(), "{text}");
+    assert!(text.contains(&plan.task_id), "{text}");
+    assert!(text.contains("no record anywhere"), "{text}");
+    assert!(text.contains(&plan.branch), "{text}");
+}
+
+/// The cleanup that follows a failed launch is not a way out of the checkout.
+///
+/// The failure being cleaned up here is a committed link at the worktree's
+/// `.ahu`. Removing the task directory by name would follow that same link.
+#[cfg(unix)]
+#[test]
+fn a_failed_rollback_does_not_delete_through_a_redirected_state_path() {
+    let repo = fixture();
+    let external = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(external.path().join("state/repos")).unwrap();
+    std::fs::write(external.path().join("state/keep.txt"), "untouched\n").unwrap();
+
+    // Committed link at `.ahu`, plus uncommitted configuration so the new
+    // checkout is dirty and Git refuses to remove it.
+    std::os::unix::fs::symlink(external.path(), repo.path().join(".ahu")).unwrap();
+    repo.commit("state directory that is a link");
+    std::fs::remove_file(repo.path().join(".ahu")).unwrap();
+    repo.write("CLAUDE.md", "uncommitted guidance\n");
+
+    let plan = plan_from(repo.path());
+    let scratch = tempfile::TempDir::new().unwrap();
+    let error = execute_with_stub(&repo, &stub_cmux(scratch.path()), &plan)
+        .expect_err("a linked state directory must fail the launch")
+        .to_string();
+    assert!(error.contains("refusing ahu state path"), "{error}");
+
+    // The external directory is exactly as it was: same entries, same bytes.
+    let mut entries: Vec<String> = std::fs::read_dir(external.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["state".to_string()],
+        "external directory changed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(external.path().join("state/keep.txt")).unwrap(),
+        "untouched\n"
+    );
+    assert!(external.path().join("state/repos").is_dir());
+}
+
+/// A stray record in a worktree's store does not stand in for the record that
+/// worktree never got, and the note survives an otherwise empty listing.
+#[test]
+fn a_stray_record_does_not_hide_a_worktree_with_no_record_of_its_own() {
+    let repo = fixture();
+    let owner = "006aa50000000000y1";
+    let stray = "006aa50000000000y2";
+    let discovered = git::discover(repo.path()).unwrap();
+    state::ensure_worktrees_root(repo.path()).unwrap();
+    let worktree = state::worktree_dir(repo.path(), owner).unwrap();
+    git::add_worktree(
+        &discovered,
+        &worktree,
+        &format!("ahu/chris/{owner}"),
+        "HEAD",
+    )
+    .unwrap();
+    state::ensure_checkout_state(&worktree).unwrap();
+    // Someone else's record, and nothing of the worktree's own.
+    task::save(
+        &state::worktree_task_dir(&worktree, &discovered.identity(), stray),
+        &record_for(&repo, stray, &repo.path().join(".worktrees").join(stray)),
+        "current work",
+    )
+    .unwrap();
+
+    let listing = without_override(|| task::list(&discovered).unwrap());
+    assert!(listing.records.is_empty(), "{:?}", listing.records);
+    assert_eq!(listing.unreadable.len(), 1, "{:?}", listing.unreadable);
+    assert_eq!(listing.unreadable[0].task_id, owner);
+    assert!(
+        listing.unreadable[0].reason.contains("no record anywhere"),
+        "{}",
+        listing.unreadable[0].reason
+    );
+    assert!(
+        listing.notes.iter().any(|note| note.contains(stray)),
+        "{:?}",
+        listing.notes
+    );
+
+    let listed = ahu_in(repo.path(), &["tasks"]);
+    let text = text_of(&listed);
+    assert!(listed.status.success(), "{text}");
+    assert!(
+        text.contains(stray) && text.contains("not listed as a task"),
+        "{text}"
+    );
+    assert!(
+        text.contains(owner) && text.contains("no record anywhere"),
+        "{text}"
+    );
+}
+
+/// A note is printed even when there is nothing else to print.
+#[test]
+fn a_note_survives_a_listing_with_no_tasks_in_it() {
+    let repo = fixture();
+    let owner = "006aa50000000000z1";
+    let stray = "006aa50000000000z2";
+    let discovered = git::discover(repo.path()).unwrap();
+    let worktree = state::worktree_dir(repo.path(), owner).unwrap();
+    state::ensure_worktrees_root(repo.path()).unwrap();
+    git::add_worktree(
+        &discovered,
+        &worktree,
+        &format!("ahu/chris/{owner}"),
+        "HEAD",
+    )
+    .unwrap();
+    task::save(
+        &state::worktree_task_dir(&worktree, &discovered.identity(), stray),
+        &record_for(&repo, stray, &repo.path().join(".worktrees").join(stray)),
+        "current work",
+    )
+    .unwrap();
+    // Remove the worktree's Git registration but keep the directory, so it is
+    // not a task and produces no row -- only the note is left to print.
+    std::fs::remove_dir_all(&worktree).unwrap();
+    std::fs::create_dir_all(worktree.join(".ahu/state")).unwrap();
+    std::fs::write(worktree.join(".ahu/.gitignore"), "*\n").unwrap();
+    task::save(
+        &state::worktree_task_dir(&worktree, &discovered.identity(), stray),
+        &record_for(&repo, stray, &repo.path().join(".worktrees").join(stray)),
+        "current work",
+    )
+    .unwrap();
+
+    let listed = ahu_in(repo.path(), &["tasks"]);
+    let text = text_of(&listed);
+    assert!(listed.status.success(), "{text}");
+    assert!(
+        text.contains(stray) && text.contains("not listed as a task"),
+        "a note must not be swallowed by an empty listing: {text}"
+    );
+}
+
+/// A chosen store inside a repository is the caller's, not ahu's own wiring.
+#[test]
+fn a_store_below_a_checkout_root_is_treated_as_a_chosen_store() {
+    let repo = fixture();
+    let discovered = git::discover(repo.path()).unwrap();
+    let inside = repo.path().join("sub/.ahu/state");
+    std::fs::create_dir_all(&inside).unwrap();
+
+    let guard = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: guarded as everywhere else in this binary.
+    unsafe { std::env::set_var("AHU_STATE_DIR", &inside) };
+    let chosen = state::isolated_store(&discovered).unwrap();
+    // And the real wiring, a checkout root's own store, is not mistaken for one.
+    unsafe { std::env::set_var("AHU_STATE_DIR", repo.path().join(".ahu/state")) };
+    let wiring = state::isolated_store(&discovered).unwrap();
+    unsafe { std::env::remove_var("AHU_STATE_DIR") };
+    drop(guard);
+
+    assert_eq!(
+        chosen.as_deref(),
+        Some(inside.as_path()),
+        "a store under a subdirectory is a chosen store, not ahu's own"
+    );
+    assert_eq!(wiring, None, "a checkout root's own store is ahu's wiring");
 }

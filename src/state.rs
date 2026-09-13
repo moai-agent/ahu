@@ -12,7 +12,13 @@ use crate::util::{Error, Result};
 
 /// Root of ahu's local state inside the current checkout. Linked worktrees
 /// have their own `.ahu/state` rather than writing to the parent.
-/// `AHU_STATE_DIR` remains an explicit override for isolated tests and tools.
+///
+/// `AHU_STATE_DIR` is an explicit override for tools and isolated tests. It
+/// replaces the auxiliary state this resolves -- hygiene timestamps, the
+/// generated architecture document, and the checkout store older task records
+/// were written to. It does not relocate a new task's record, which is placed
+/// in that task's own worktree, and it does not hide live tasks from
+/// discovery.
 pub fn root() -> Result<PathBuf> {
     if let Some(explicit) = std::env::var_os("AHU_STATE_DIR") {
         return Ok(PathBuf::from(explicit));
@@ -54,8 +60,10 @@ pub fn ensure_checkout_state(checkout: &Path) -> Result<PathBuf> {
         .parent()
         .expect("state has local directory")
         .to_path_buf();
-    // One component at a time: `checkout_root` has just refused a symlink at
-    // either name, and creating them separately keeps that decision binding.
+    // One component at a time, so neither name is created through a link that
+    // was already there. `checkout_root` inspected both just above; inspecting
+    // a path and then acting on it cannot prevent something replacing it in
+    // between, and nothing here claims otherwise.
     create_one_dir(&local)?;
     set_private_mode(&local)?;
     create_one_dir(&root)?;
@@ -100,15 +108,62 @@ pub fn repo_dir(repo_identity: &str) -> Result<PathBuf> {
 
 /// The group mapping and launch lock coordinate sibling worktrees, so they
 /// belong to the primary checkout. Per-session data stays in its own checkout.
+///
+/// Derived from the repository that was passed in, never from the process
+/// working directory: `run_task` resolves this while standing in a task
+/// worktree on behalf of the checkout that launched it, and both must reach the
+/// same lock.
+///
+/// An explicit store of the caller's own moves the lock and the group mapping
+/// there with it. That separates this repository's coordination from the
+/// primary checkout's; it says nothing about which tasks `ahu tasks` lists,
+/// which is decided per worktree and not by this path.
 pub fn coordination_dir(repo: &crate::git::Repo) -> Result<PathBuf> {
-    let current = root()?;
-    let shared = if current == checkout_root(&repo.root)? {
-        checkout_root(&repo.primary_root()?)?
-    } else {
-        // Preserve explicit isolated stores used by embedding tools and tests.
-        current
+    let shared = match isolated_store(repo)? {
+        Some(explicit) => explicit,
+        None => checkout_root(&repo.primary_root()?)?,
     };
     Ok(shared.join("repos").join(repo.identity()))
+}
+
+/// An explicit `AHU_STATE_DIR` that is a separate store, rather than ahu's own
+/// wiring handed back to it.
+///
+/// ahu injects a task worktree's own default store into every task session, so
+/// the variable being set does not by itself mean the caller asked for a
+/// separate store. A value that is exactly the default store of one of this
+/// repository's own checkouts is that wiring, and nested ahu commands in such a
+/// session must behave like ordinary ones rather than starting a second lock
+/// and cmux group for the repository.
+///
+/// Anything else is an embedding tool's or a test's own store and is honoured
+/// as one: coordination and the checkout store move there. That is a different
+/// place to keep those files, not isolation from the repository's live tasks,
+/// which are discovered from their worktrees either way.
+///
+/// The checkout has to be a checkout *root*. `<repo>/sub/.ahu/state` is a
+/// directory someone chose inside a repository, not a store ahu ever writes,
+/// and treating it as ahu's own wiring would silently redirect coordination to
+/// the primary checkout instead of honouring what the caller asked for.
+pub fn isolated_store(repo: &crate::git::Repo) -> Result<Option<PathBuf>> {
+    let Some(explicit) = std::env::var_os("AHU_STATE_DIR").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    if let Some(checkout) = enclosing_checkout(&explicit)
+        && explicit == checkout.join(".ahu").join("state")
+        && crate::git::discover(&checkout).is_ok_and(|found| {
+            found.identity() == repo.identity()
+                && found
+                    .root
+                    .canonicalize()
+                    .ok()
+                    .zip(checkout.canonicalize().ok())
+                    .is_some_and(|(root, checkout)| root == checkout)
+        })
+    {
+        return Ok(None);
+    }
+    Ok(Some(explicit))
 }
 
 pub fn tasks_dir(repo_identity: &str) -> Result<PathBuf> {
@@ -465,16 +520,24 @@ pub fn create_private_dir_all(dir: &Path) -> Result<()> {
 /// ahu was run from, or an explicit `AHU_STATE_DIR`. Components below it are
 /// reachable by a repository, because `.ahu/` sits inside the checkout and Git
 /// will happily check out a tracked symlink at `.ahu/state/repos`.
+///
+/// The boundary is the *outermost* one that applies, never the innermost. A
+/// `.ahu/state` pair appearing further down a path is an ordinary pair of names
+/// below the root already in force: treating it as a new root would let a
+/// descendant move the boundary past the link that reached it, which is the one
+/// thing the boundary exists to prevent.
 fn confinement_base(path: &Path) -> Option<PathBuf> {
-    if let Some(root) = path
-        .ancestors()
-        .find(|ancestor| is_checkout_state_root(ancestor))
+    // An explicit store encloses everything under it, markers included.
+    if let Some(explicit) = std::env::var_os("AHU_STATE_DIR").map(PathBuf::from)
+        && path.starts_with(&explicit)
     {
-        return Some(root.to_path_buf());
+        return Some(explicit);
     }
-    std::env::var_os("AHU_STATE_DIR")
-        .map(PathBuf::from)
-        .filter(|root| path.starts_with(root))
+    // `ancestors` runs deepest first, so the last match is the shallowest.
+    path.ancestors()
+        .filter(|ancestor| is_checkout_state_root(ancestor))
+        .last()
+        .map(Path::to_path_buf)
 }
 
 /// `<checkout>/.ahu/state`, the default store of one working tree.

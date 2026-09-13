@@ -408,6 +408,14 @@ pub const NO_TASKS: &str = "No ahu tasks have been launched from this repository
 /// `ahu tasks`
 pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
     let listing = launch::reconcile(repo)?;
+    // Printed before anything returns: a store can hold something that is not a
+    // task and nothing that is, and that is exactly when saying so matters.
+    for note in &listing.notes {
+        console.say(&style::stdout().paint(
+            Role::Warning,
+            &format!("!! {}\n\n", display_safe_block(note)),
+        ))?;
+    }
     if listing.is_empty() {
         console.say(&format!("{NO_TASKS}\n"))?;
         return Ok(0);
@@ -466,7 +474,7 @@ pub fn render_unreadable_tasks(repo: &Repo, unreadable: &[task::UnreadableTask])
     }
     let mut out = String::new();
     out.push_str(&format!(
-        "\n!! {} task record(s) in this repository could not be read.\n\
+        "\n!! {} task(s) in this repository could not be read or are incomplete.\n\
          \x20  They are not listed above, and they are not gone: each one had a worktree and a\n\
          \x20  branch, and ahu does not delete either.\n",
         unreadable.len()
