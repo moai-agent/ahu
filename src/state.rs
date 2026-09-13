@@ -706,14 +706,21 @@ fn describe_file_type(meta: &std::fs::Metadata) -> &'static str {
 
 /// Create a new owner-only file, refusing to write through anything already
 /// there. `create_new` is `O_EXCL`, so an existing symlink fails rather than
-/// being followed.
+/// being followed, and the owner-only mode is part of the creating call rather
+/// than a change made after the file already exists.
 pub fn create_new_private_file(path: &Path) -> Result<std::fs::File> {
     for attempt in 0..2 {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // The mode goes in the creating `open` itself, so the file is never
+        // briefly readable by anyone else. `umask` can only clear further bits,
+        // and the `set_permissions` below pins the result either way.
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(path) {
             Ok(file) => {
                 #[cfg(unix)]
                 {

@@ -376,3 +376,28 @@ fn a_direct_record_read_validates_the_checkout_store_itself() {
     assert!(error.contains("refusing ahu state path"), "{error}");
     external.assert_untouched();
 }
+
+/// A state file is owner-only from the moment it exists, not from a later
+/// chmod: nothing else on the machine gets a window in which to open it.
+#[test]
+fn a_state_file_is_created_owner_only() {
+    let repo = repo_with_state();
+    let record = repo.path().join(".ahu/state/repos/created/hygiene.json");
+    ahu::state::write_json(&record, &serde_json::json!({"written": true})).unwrap();
+    assert_eq!(
+        std::fs::symlink_metadata(&record)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(record.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+}
