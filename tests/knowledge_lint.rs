@@ -309,17 +309,10 @@ fn a_missing_okf_is_a_prerequisite_and_nothing_is_checked() {
 
     // A PATH holding only the `git` ahu needs to discover the repository.
     let bare = tempfile::TempDir::new().unwrap();
-    let git = String::from_utf8_lossy(
-        &Command::new("/usr/bin/env")
-            .args(["sh", "-c", "command -v git"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .trim()
-    .to_string();
+    // Use the system installation: a caller's first Git can itself live inside
+    // a package manager's Git checkout, which utility resolution now refuses.
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&git, bare.path().join("git")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/git", bare.path().join("git")).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
         .current_dir(repo.path())

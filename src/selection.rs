@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::bail;
 use crate::catalog;
 use crate::config::LoadedConfig;
-use crate::util::Result;
+use crate::util::{Error, Result};
 
 /// The frozen harness/model choice for one task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,7 +183,34 @@ pub fn is_excluded(candidate: &Path) -> bool {
 /// `run-task` exec, and the `--version` probes alike. It refuses relative `PATH`
 /// entries and any candidate inside a repository ahu has opened.
 pub fn resolve_executable(executable: &str) -> Option<String> {
-    which(executable)
+    which(executable, Some).map(|path| path.to_string_lossy().into_owned())
+}
+
+/// Bootstrap utilities without Git, including candidates in unopened worktrees.
+pub(crate) fn resolve_utility(executable: &str) -> Result<PathBuf> {
+    which(executable, |candidate| {
+        let candidate = candidate.canonicalize().ok()?;
+        if is_excluded(&candidate) {
+            return None;
+        }
+        // Inspect markers only; never follow .git or parse its untrusted pointers.
+        // Bound ancestry work and reject candidates whose ancestry cannot be checked.
+        for (depth, ancestor) in candidate.parent()?.ancestors().enumerate() {
+            if depth >= 256 {
+                return None;
+            }
+            match std::fs::symlink_metadata(ancestor.join(".git")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => return None,
+            }
+        }
+        Some(candidate)
+    })
+    .ok_or_else(|| {
+        Error::new(format!(
+            "{executable} was not found on PATH outside Git working trees."
+        ))
+    })
 }
 
 /// Ask a resolved harness binary for its version.
@@ -210,7 +237,7 @@ pub fn installed_version(program: &str) -> Option<String> {
     probe_version(&resolve_executable(program)?)
 }
 
-fn which(executable: &str) -> Option<String> {
+fn which(executable: &str, accept: impl Fn(PathBuf) -> Option<PathBuf>) -> Option<PathBuf> {
     // A program name carrying a path separator is not a PATH lookup at all; it
     // would be resolved against the current directory, which for `ahu run-task`
     // is the task worktree.
@@ -243,7 +270,9 @@ fn which(executable: &str) -> Option<String> {
         if is_excluded(&candidate) {
             continue;
         }
-        return Some(candidate.to_string_lossy().to_string());
+        if let Some(candidate) = accept(candidate) {
+            return Some(candidate);
+        }
     }
     None
 }

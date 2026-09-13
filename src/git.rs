@@ -70,8 +70,8 @@ impl Repo {
     }
 }
 
-fn run(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
+pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Command::new(crate::selection::resolve_utility("git")?)
         .args(args)
         .current_dir(dir)
         .output()

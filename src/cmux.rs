@@ -13,7 +13,7 @@
 //! that task would have no visible row of its own.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
@@ -55,7 +55,7 @@ pub struct CreatedWorkspace {
 
 /// A cmux instance reachable over its socket.
 pub struct Cmux {
-    executable: String,
+    executable: PathBuf,
     socket_path: Option<String>,
 }
 
@@ -67,7 +67,16 @@ impl Cmux {
     /// never hard-coded: it comes from `CMUX_SOCKET_PATH` when ahu is running
     /// inside a cmux terminal, and otherwise from cmux's own resolver.
     pub fn discover() -> Result<Self> {
-        let executable = std::env::var("AHU_CMUX_BIN").unwrap_or_else(|_| "cmux".to_string());
+        let executable = match std::env::var("AHU_CMUX_BIN") {
+            // An explicit override intentionally retains its normal command semantics.
+            Ok(executable) => PathBuf::from(executable),
+            Err(_) => crate::selection::resolve_utility("cmux").map_err(|error| {
+                Error::new(format!(
+                    "{error}\nInstall cmux, or set AHU_CMUX_BIN to its executable."
+                ))
+                .with_kind(crate::util::ErrorKind::Prerequisite)
+            })?,
+        };
         let socket_path = std::env::var("CMUX_SOCKET_PATH")
             .ok()
             .filter(|s| !s.is_empty());
@@ -591,7 +600,7 @@ esac
 "#, marker = shell_single_quote(&marker.to_string_lossy()), log = shell_single_quote(&log.to_string_lossy()))).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let client = Cmux {
-            executable: executable.to_string_lossy().into_owned(),
+            executable,
             socket_path: None,
         };
         let summary = "Useful text; $(false) 'quoted' --color=always";

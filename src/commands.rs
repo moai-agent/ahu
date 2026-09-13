@@ -642,10 +642,7 @@ pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32>
         .filter(|base| matches!(base.len(), 40 | 64) && base.bytes().all(|b| b.is_ascii_hexdigit()))
         .ok_or_else(|| crate::util::Error::new("task has no valid launch base commit."))?;
     let run = |args: &[&str]| -> Result<Vec<u8>> {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&record.worktree)
-            .output()?;
+        let output = git::run(&record.worktree, args)?;
         if !output.status.success() {
             bail!(
                 "cannot inspect task diff: {}",
