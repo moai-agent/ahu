@@ -113,6 +113,13 @@ The maintained bundle is [docs/knowledge](knowledge/index.md). README and this
 reference remain outside it. Format checks do not establish that source claims
 are correct or that a human has reviewed them.
 
+The installed validator executes with the caller's privileges; ahu does not
+sandbox it. Tree inspection refuses symlinks and special files before invoking
+OKF, but cannot prevent concurrent changes after inspection. Reports are collected
+before the 16 MiB parsing limit is checked, so this is not a subprocess output
+or memory limit. See [validator boundaries](knowledge/knowledge-validation.md)
+for source provenance.
+
 ## Sidebar text
 
 `--title` and `--summary` set plain display metadata without changing the
@@ -142,8 +149,6 @@ the `.` sentinel, `.cancel`, or the confirmation code required for submission.
 Definitions found elsewhere are onboarding candidates, never implicit
 registrations — a skill is not an agent, and `AGENTS.md` is not an agent
 registry.
-
-
 
 `onboard` offers registration for Claude Code Markdown definitions. It lists
 Codex TOML and Antigravity native definitions with blockers even though both

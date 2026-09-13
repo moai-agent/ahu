@@ -12,6 +12,7 @@ relative to this bundle root and refer to the accompanying checkout.
 
 - [Named agent identity](named-agent-identity.md) - How manifests select an agent's identity and instruction source.
 - [Task configuration inheritance](task-configuration-inheritance.md) - How task worktrees inherit recognized agent configuration.
+- [Knowledge validation](knowledge-validation.md) - How configured bundles are checked and where validator trust ends.
 
 Validate the bundle from the repository root with `okf validate docs/knowledge`
 and `okf lint docs/knowledge`. These checks assess format and lint rules; source

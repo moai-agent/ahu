@@ -6,7 +6,8 @@ previews the configuration, delivers instructions, and records the launch.
 
 ## Install
 
-With Rust and Cargo installed:
+With Rust and Cargo installed (this checkout pins Rust in
+[`rust-toolchain.toml`](rust-toolchain.toml)):
 
 ```sh
 cargo install --git https://github.com/moai-agent/ahu --locked
@@ -133,13 +134,34 @@ contracts, prompt transport, hooks, state, and delegation boundaries.
 
 ## Development
 
+The [CI workflow](.github/workflows/ci.yml) defines checks on Ubuntu 24.04 and
+macOS 14 using Rust 1.96.0, rustfmt, Clippy, Git, Bash, and Python 3.9 or newer.
+From a checkout with rustup installed:
+
 ```sh
+rustup toolchain install --no-self-update
 python3 scripts/check-skills.py
-ahu knowledge lint
 cargo fmt --check
-cargo clippy --all-targets --locked --offline -- -D warnings
-cargo test --locked --offline
+cargo build --locked
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
 ```
+
+Fresh environments may fetch tools and dependencies. Add `--offline` to Cargo
+checks only after dependencies are cached. The separate
+[dependency policy proposal](docs/dependencies.md) documents its scanner and
+review requirements; implementation does not imply maintainer approval.
+
+With OKF 0.5.0 installed outside the checkout, also run:
+
+```sh
+cargo run --locked -- knowledge lint
+```
+
+Configured bundle validation is a separate maintainer check. Ordinary CI tests
+the validator integration with synthetic fixtures; it does not install OKF or
+validate the authored bundle. Workflow files alone do not establish hosted
+success or required-check enforcement.
 
 The [current-code knowledge bundle](docs/knowledge/index.md) uses OKF v0.2.
 Skill maintenance checks compare repository copies byte-for-byte; they do not
@@ -152,11 +174,14 @@ workspaces. Once opted in, unreachable cmux is an error. Run live checks only
 with authorization.
 
 ```sh
-cargo test --locked --offline --doc
-cargo test --locked --offline --test explain
-cargo run --locked --offline -- explain --mermaid > /tmp/ahu-diagrams.md
+cargo test --locked --doc
+cargo test --locked --test explain
+cargo run --locked -- explain --mermaid > /tmp/ahu-diagrams.md
 ```
 
 The explanation tests check diagram structure, not rendering. Full validation
 requires parsing the emitted blocks with Mermaid; `ahu explain --open` displays
 them in cmux.
+
+See the [0.2.0 preparation notes](docs/releases/0.2.0.md) for implemented behavior
+and validation limits. This version is not published as a release.

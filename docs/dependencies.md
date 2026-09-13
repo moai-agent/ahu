@@ -4,7 +4,7 @@ This is a concrete policy for maintainer review. Implementation of its checks
 does not record maintainer acceptance. A maintainer must accept or amend this
 proposal before treating it as an approved merge requirement.
 
-`deny.toml` checks the locked dependency graph with all features and no target
+[`deny.toml`](../deny.toml) checks the locked dependency graph with all features and no target
 filter, including build and development dependencies.
 
 | Area | Proposed rule |
@@ -24,7 +24,7 @@ cargo deny --version
 cargo deny --locked check --deny index-failure
 ```
 
-CI uses the upstream cargo-deny **0.20.2** Linux release archive, verified against
+The [dependency workflow](../.github/workflows/dependencies.yml) uses the upstream cargo-deny **0.20.2** Linux release archive, verified against
 a checked-in SHA-256, and an immutable checkout action revision. Tool upgrades
 must update the version and digest together after verifying the upstream release
 and rerunning the scan and failure probe. Rust 1.96.0 supplies Cargo metadata in
@@ -33,8 +33,8 @@ this workflow; this is not a declaration of the application's minimum Rust versi
 Each normal scan fetches the current
 [RustSec advisory database](https://github.com/RustSec/advisory-db) and registry
 data. The command promotes `index-failure` warnings to errors so an incomplete
-yanked-release lookup also fails CI. Advisory fetch/check failures fail CI. The database intentionally moves independently
-of the tool and lockfile so newly disclosed advisories can fail an unchanged tree.
+yanked-release lookup also fails the check. Advisory fetch/check failures fail the
+check. The database intentionally moves independently of the tool and lockfile so newly disclosed advisories can fail an unchanged tree.
 The workflow runs on pull requests, main pushes, weekly and on manual dispatch.
 Offline runs use cached information and are diagnostic only;
 the configured seven-day staleness limit does not make them equivalent to an
