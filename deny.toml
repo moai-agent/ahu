@@ -24,7 +24,6 @@ unused-license-exception = "deny"
 ignore = true
 
 [bans]
-deny = ["serde"]
 multiple-versions = "warn"
 multiple-versions-include-dev = true
 wildcards = "deny"
