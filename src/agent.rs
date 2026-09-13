@@ -355,7 +355,7 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
     })?;
     if !harness.adapter_available {
         bail!(
-            "{}: ahu 0.1.1 has no validated adapter for harness {:?}, so it cannot launch this agent.\n\
+            "{}: ahu has no validated adapter for harness {:?}, so it cannot launch this agent.\n\
              Use the harness directly, or wait for an ahu release that supports it.",
             path.display(),
             manifest.harness

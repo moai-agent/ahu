@@ -55,7 +55,7 @@ pub fn resolve_automatic(loaded: &LoadedConfig) -> Result<ResolvedPair> {
             continue;
         };
         if !harness.adapter_available {
-            rejected.push(format!("{harness_id}: ahu 0.1.1 has no validated adapter"));
+            rejected.push(format!("{harness_id}: ahu has no validated adapter"));
             continue;
         }
         let ranked = ranked_models(loaded, harness_id);
@@ -83,7 +83,7 @@ pub fn resolve_automatic(loaded: &LoadedConfig) -> Result<ResolvedPair> {
         });
     }
     bail!(
-        "no harness in this project's agreed order can be launched by ahu 0.1.1.\n{}\n\
+        "no harness in this project's agreed order can be launched by ahu.\n{}\n\
          This is a project policy question, not a per-machine one: change the order in {} \
          or install an ahu release with the adapter you need.",
         rejected

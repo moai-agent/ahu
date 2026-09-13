@@ -153,7 +153,7 @@ pub fn review(
                 .to_string(),
         );
         unsupported_controls.extend([
-            "ahu 0.1.1 cannot disable an individual skill for one agent without changing a setting that applies more widely, so it does not offer that as a per-agent operation"
+            "ahu cannot disable an individual skill for one agent without changing a setting that applies more widely, so it does not offer that as a per-agent operation"
                 .to_string(),
             "Claude Code's memory reading and memory writing are not separately switchable per agent from outside a session, so ahu cannot report \"memory off\""
                 .to_string(),

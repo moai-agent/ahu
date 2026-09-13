@@ -1,6 +1,6 @@
 //! Configuration and context drift against previous launches.
 //!
-//! ahu 0.1.1 does not automate agent releases. What it does do is refuse to let
+//! ahu does not automate agent releases. What it does do is refuse to let
 //! a version label quietly cover changed inputs: if `chris@1.2.0` launches today
 //! with a different instruction digest or a different configuration snapshot
 //! than the last `chris@1.2.0` launch, that is reported as drift and treated as
