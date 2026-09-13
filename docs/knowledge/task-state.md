@@ -29,13 +29,32 @@ records include session status, which does not prove task completion.[^state][^l
 Task discovery scans sibling task worktrees under the primary checkout's
 `.worktrees/`, then compatible legacy checkout stores. Worktree records take
 precedence for duplicate IDs. The primary checkout and siblings can discover
-these tasks; refused task directories remain visible as unreadable.[^task][^tests]
+these tasks. Every scan of a managed worktree store enforces its owner's task ID,
+repository identity and canonical worktree path. It is not rescanned as a legacy
+store. Primary, invoking plain-checkout and explicit external legacy stores
+remain readable; older child records in a parent task worktree are reported as
+misplaced, without automatic acceptance or migration.[^task][^tests]
+
+Misplaced entries in managed stores produce warning notes, not task rows; files
+remain untouched. Unreadable owner records and identity mismatches in legacy
+stores produce unreadable rows. After legacy lookup, an unaccounted-for worktree
+is reported as incomplete even if it contains stray records.[^task][^tests]
+
+Failed launches attempt non-forced Git worktree removal. A refusal reports the
+retained worktree and branch. Partial state cleanup validates the path before
+attempting removal, leaves redirected paths alone and can fail. A retained
+recordless worktree is visible as incomplete; listing does not delete it or
+prove its contents disposable.[^launch][^tests]
 
 The launch lock and cmux group mapping coordinate siblings in the primary
 checkout's state store. Hygiene and generated architecture text use the current
-checkout's store. `AHU_STATE_DIR` replaces auxiliary state and, when lexically
-different from the default path, coordination and default legacy-store lookup.
-It neither relocates new task records nor suppresses worktree discovery. The
+checkout's store. `AHU_STATE_DIR` selects auxiliary state. For coordination and
+legacy lookup, a value naming `.ahu/state` of any checkout in the same Git
+repository is recognized as automatic session wiring: coordination stays in the
+primary checkout, and legacy lookup uses the primary and invoking plain-checkout
+stores. Managed stores retain owner checks. A subdirectory's `.ahu/state` does
+not qualify as checkout-root wiring. Other values replace those coordination and legacy stores. Neither case relocates
+new task records or suppresses worktree discovery. The
 harness receives its own worktree's state root as `AHU_STATE_DIR`.[^state][^task][^launch]
 
 State access refuses existing symlinks in default store paths and below explicit

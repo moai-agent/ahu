@@ -359,16 +359,37 @@ a global deletion as a local one.
 Each new task stores `task.json` and `prompt.txt` under
 `<task-worktree>/.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Session status
 is part of `task.json`. ahu derives this location from the worktree it creates;
-ordinary invocations need no manual `AHU_STATE_DIR` export. Removing the worktree removes its
-state. Task checkouts are siblings under the primary checkout's `.worktrees/`,
+ordinary invocations need no manual `AHU_STATE_DIR` export. Removing the worktree
+removes its state. Task checkouts are siblings under the primary checkout's `.worktrees/`,
 including nested launches. State and worktree directories ignore themselves.
 
 `tasks`, `task`, `diff`, and `focus` discover task records through those worktrees
-from the primary checkout or a sibling. Discovery also reads compatible legacy
-records in the invoking checkout's store and, by default, the primary checkout's
-store. A worktree record takes precedence for a duplicate task ID. Missing
-worktrees have no worktree-local record to list; independent legacy records are
-not automatically deleted. Refused task directories are reported as unreadable.
+from the primary checkout or a sibling. Each managed worktree store accepts only
+its owner's task ID, matching repository identity and canonical worktree path.
+This rule applies on every scan, including from inside that worktree; its store
+is not scanned again as an unrestricted legacy store.
+
+Compatible legacy records remain readable in the primary checkout, an invoking
+plain checkout, or an explicitly selected external store. A managed worktree's
+accepted record takes precedence for a duplicate ID. Older nested child records
+kept in a parent task worktree are reported as misplaced for inspection, not
+accepted or migrated automatically. Persisted schema compatibility is unchanged.
+
+`ahu tasks` reports misplaced entries in managed stores as warning notes, without
+adding task rows or changing the files. Invalid task/repository identity in a
+legacy store produces an unreadable row. Unreadable or refused owner records
+remain visible for inspection. After checking legacy stores, a worktree with no
+record accounting for its task is reported as incomplete; a stray record cannot
+hide it. Such a worktree may still be preparing or may remain from a failed
+launch. Missing worktrees have no worktree-local record to list; independent
+legacy records are not automatically deleted.
+
+On launch failure, rollback uses ordinary Git worktree removal, without force.
+If removal fails, the error names the retained worktree and branch for inspection.
+ahu attempts to discard partial task state only after validating its path; it
+leaves redirected paths alone. Cleanup can itself fail, so inspect the reported
+paths. A retained worktree without a record appears as incomplete in `ahu tasks`.
+Listing does not remove it or establish that its contents are safe to delete.
 
 Only the launch lock and cmux group mapping need shared coordination state, under
 `<primary-checkout>/.ahu/state/repos/<repo-identity>/`. Hygiene timestamps and
@@ -376,14 +397,19 @@ generated architecture documents use the invoking checkout's `.ahu/state/`.
 
 `AHU_STATE_DIR` overrides that auxiliary store. The code uses the supplied path
 as-is, without requiring an absolute path or migrating records; use a consistent
-absolute path for tools that need an override. If it differs lexically from the
-invoking checkout's default store, coordination uses it and legacy lookup searches
-it instead of the default checkout stores. An override exactly equal to the
-default path retains primary-checkout coordination and legacy lookup. In either
-case, discovery still scans task worktrees and new task records and prompts still
-go inside their own worktree. The launched harness receives `AHU_STATE_DIR` set
-to its own worktree's `.ahu/state`, replacing any inherited override. Harness
-configuration and credentials retain their native handling.
+absolute path for tools that need an override. A value naming `.ahu/state` of
+any checkout that Git identifies as belonging to the same repository is treated
+as automatic session wiring for coordination and legacy lookup. This retains
+primary-checkout coordination and normal legacy lookup: the primary store and
+an invoking plain checkout's store, with managed worktrees checked only as owned
+stores. The value must name a checkout root's `.ahu/state`; a store under a
+subdirectory is a separate explicit selection. This holds even when the variable
+names a sibling's store. Other values
+select their own coordination and legacy store instead of those default stores.
+In either case, discovery still scans task worktrees and new task records and
+prompts still go inside their own worktree. The launched harness receives
+`AHU_STATE_DIR` set to its own worktree's `.ahu/state`, replacing any inherited
+override. Harness configuration and credentials retain their native handling.
 
 Default state paths refuse existing symlinks at `.ahu`, `state`, and descendant
 directories and files; state files must be regular files. For a user-selected
