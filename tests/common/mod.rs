@@ -241,11 +241,76 @@ pub fn run_child_case(name: &str, configure: impl FnOnce(&mut Command)) -> std::
 }
 
 /// Fail with the child's own output, which carries its assertion message.
+///
+/// Also checks the child really ran the test that was selected. A filter that
+/// matches nothing exits successfully, so without this a renamed or misspelled
+/// case would quietly assert nothing at all.
 pub fn assert_child_passed(name: &str, output: &std::process::Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "child case {name} failed:\n{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "child case {name} failed:\n{stdout}{stderr}"
     );
+    assert!(
+        stdout.contains("test result: ok. 1 passed"),
+        "child case {name} did not run: a filter that matches nothing still exits 0.\n{stdout}{stderr}"
+    );
+}
+
+/// The harness programs every adapter resolves by name.
+pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy"];
+
+/// Run this test in a child process that has a machine of its own.
+///
+/// `launch::plan` resolves the harness through the process `PATH`, so a test
+/// that builds a plan in-process is only hermetic if the process it runs in was
+/// started with a `PATH` the test controls. Setting one from inside the test
+/// would be a process-wide mutation under the harness's threads, so the parent
+/// configures a child instead.
+///
+/// The child gets fake harness executables ahead of everything else on `PATH`,
+/// a private `HOME` so no developer's `~/.claude` is read, a private state
+/// directory, and an `AHU_CMUX_BIN` that is not there. `configure` runs last and
+/// can change any of it — a test about ahu's behaviour with no state override
+/// removes that variable.
+///
+/// Returns `true` in the child, where the body should run, and `false` in the
+/// parent, which has by then run the child and asserted it passed.
+pub fn in_child_fixture(test_name: &str, configure: impl FnOnce(&mut Command)) -> bool {
+    if is_child_case(test_name) {
+        return true;
+    }
+    let fixtures = TempDir::new().expect("fixture directory");
+    let bin = fake_harnesses(fixtures.path(), HARNESS_PROGRAMS, |program| {
+        fixtures.path().join(format!("{program}.argv"))
+    });
+    // The fixtures come first, so they answer whether or not the machine has a
+    // real harness installed. The inherited entries stay, because `git` has to
+    // keep resolving.
+    let mut path = std::ffi::OsString::from(bin.as_os_str());
+    if let Some(inherited) = std::env::var_os("PATH") {
+        path.push(":");
+        path.push(inherited);
+    }
+    let home = fixtures.path().join("home");
+    let state = fixtures.path().join("state");
+    for directory in [&home, &state] {
+        std::fs::create_dir_all(directory).expect("fixture directory");
+    }
+    let output = run_child_case(test_name, |command| {
+        command
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("AHU_STATE_DIR", &state)
+            .env("AHU_CMUX_BIN", fixtures.path().join("no-such-cmux"));
+        configure(command);
+    });
+    assert_child_passed(test_name, &output);
+    false
+}
+
+/// [`in_child_fixture`] with nothing further to configure.
+pub fn in_harness_fixture(test_name: &str) -> bool {
+    in_child_fixture(test_name, |_| {})
 }

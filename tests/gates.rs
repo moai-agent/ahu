@@ -257,6 +257,11 @@ fn anything_other_than_the_code_cancels() {
 /// The code has to reach the reader, and only when it will be asked for.
 #[test]
 fn the_preview_shows_the_confirmation_code_only_when_one_is_required() {
+    if !common::in_harness_fixture(
+        "the_preview_shows_the_confirmation_code_only_when_one_is_required",
+    ) {
+        return;
+    }
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("sable", "1.0.0", "claude-sonnet-5");

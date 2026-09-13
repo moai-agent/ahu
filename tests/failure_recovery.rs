@@ -33,26 +33,20 @@ fn scripted(
     }
 }
 
-/// Serialises the tests that point ahu's state directory at their own temporary
-/// directory. `AHU_STATE_DIR` is process-wide, so only one test may own it at a
-/// time; the guard is held for the whole closure.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn with_state<T>(repo: &TestRepo, f: impl FnOnce() -> T) -> T {
-    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: every reader and writer of these variables in this binary goes
-    // through `with_state`, so the guard makes the mutation exclusive.
-    unsafe {
-        std::env::set_var("AHU_STATE_DIR", repo.state_path());
-        std::env::set_var("AHU_CMUX_BIN", repo.state_path().join("no-such-cmux"));
-    }
-    let result = f();
-    drop(guard);
-    result
+/// The exact child-test fixture provides private state and an unavailable cmux.
+/// Keep each group of assertions together without mutating process globals.
+fn with_state<T>(_repo: &TestRepo, f: impl FnOnce() -> T) -> T {
+    assert!(std::env::var_os(common::CHILD_CASE).is_some());
+    f()
 }
 
 #[test]
 fn a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record() {
+    if !common::in_harness_fixture(
+        "a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record",
+    ) {
+        return;
+    }
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
@@ -68,9 +62,8 @@ fn a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record() {
         policy_digest: loaded.digest.clone(),
         catalog_version: loaded.config.catalog_version.clone(),
     };
-    // `with_state` keeps both the plan's paths and cmux discovery inside this
-    // test's temporary directory, so it can never touch real state or a real
-    // cmux session.
+    // The child fixture keeps state private and makes cmux unavailable, so
+    // this failure cannot touch a real session.
     let (plan, error) = with_state(&repo, || {
         let plan = launch::plan(&discovered, Some(agent), pair, "do the thing").unwrap();
         let error = launch::execute(&discovered, &loaded, &plan, "do the thing", false)
@@ -106,6 +99,9 @@ fn a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record() {
 
 #[test]
 fn an_empty_prompt_is_refused_before_anything_is_created() {
+    if !common::in_harness_fixture("an_empty_prompt_is_refused_before_anything_is_created") {
+        return;
+    }
     let repo = TestRepo::new();
     repo.init_config();
     repo.commit("fixture");
@@ -120,6 +116,11 @@ fn an_empty_prompt_is_refused_before_anything_is_created() {
 
 #[test]
 fn a_repository_without_commits_is_refused_with_an_actionable_message() {
+    if !common::in_harness_fixture(
+        "a_repository_without_commits_is_refused_with_an_actionable_message",
+    ) {
+        return;
+    }
     let dir = tempfile::TempDir::new().unwrap();
     common::git(dir.path(), &["init", "-q", "-b", "main"]);
     let discovered = git::discover(dir.path()).unwrap();
@@ -135,6 +136,11 @@ fn a_repository_without_commits_is_refused_with_an_actionable_message() {
 
 #[test]
 fn outside_a_repository_ahu_explains_rather_than_creating_anything() {
+    if !common::in_harness_fixture(
+        "outside_a_repository_ahu_explains_rather_than_creating_anything",
+    ) {
+        return;
+    }
     let dir = tempfile::TempDir::new().unwrap();
     let error = git::discover(dir.path()).unwrap_err().to_string();
     assert!(error.contains("not inside a Git repository"), "{error}");
@@ -142,6 +148,11 @@ fn outside_a_repository_ahu_explains_rather_than_creating_anything() {
 
 #[test]
 fn the_launch_lock_serialises_concurrent_launches_for_one_repository() {
+    if !common::in_harness_fixture(
+        "the_launch_lock_serialises_concurrent_launches_for_one_repository",
+    ) {
+        return;
+    }
     let repo = TestRepo::new();
     with_state(&repo, || {
         let first = state::LaunchLock::acquire("repo-under-test").unwrap();
@@ -158,12 +169,18 @@ fn the_launch_lock_serialises_concurrent_launches_for_one_repository() {
 
 #[test]
 fn task_ids_are_unique_across_rapid_repeated_launches() {
+    if !common::in_harness_fixture("task_ids_are_unique_across_rapid_repeated_launches") {
+        return;
+    }
     let ids: std::collections::BTreeSet<String> = (0..500).map(|_| task::new_task_id()).collect();
     assert_eq!(ids.len(), 500, "task ids collided");
 }
 
 #[test]
 fn run_task_preserves_the_record_when_its_worktree_is_gone() {
+    if !common::in_harness_fixture("run_task_preserves_the_record_when_its_worktree_is_gone") {
+        return;
+    }
     let temp = tempfile::TempDir::new().unwrap();
     let task_dir = temp.path().join("task");
     let missing = temp.path().join("gone");
@@ -240,6 +257,9 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
 
 #[test]
 fn pasting_a_multiline_prompt_does_not_submit_it() {
+    if !common::in_harness_fixture("pasting_a_multiline_prompt_does_not_submit_it") {
+        return;
+    }
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
@@ -278,6 +298,11 @@ fn pasting_a_multiline_prompt_does_not_submit_it() {
 /// only that code submits.
 #[test]
 fn a_pasted_confirmation_no_longer_submits_through_the_interactive_flow() {
+    if !common::in_harness_fixture(
+        "a_pasted_confirmation_no_longer_submits_through_the_interactive_flow",
+    ) {
+        return;
+    }
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
@@ -327,6 +352,11 @@ fn a_pasted_confirmation_no_longer_submits_through_the_interactive_flow() {
 
 #[test]
 fn the_resolved_harness_and_model_are_shown_before_the_prompt_is_entered() {
+    if !common::in_harness_fixture(
+        "the_resolved_harness_and_model_are_shown_before_the_prompt_is_entered",
+    ) {
+        return;
+    }
     let repo = TestRepo::new();
     repo.init_config();
     repo.commit("fixture");
@@ -350,6 +380,11 @@ fn the_resolved_harness_and_model_are_shown_before_the_prompt_is_entered() {
 
 #[test]
 fn a_first_load_hygiene_review_runs_before_submission_and_deletes_nothing() {
+    if !common::in_harness_fixture(
+        "a_first_load_hygiene_review_runs_before_submission_and_deletes_nothing",
+    ) {
+        return;
+    }
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
@@ -372,6 +407,9 @@ fn a_first_load_hygiene_review_runs_before_submission_and_deletes_nothing() {
 
 #[test]
 fn a_noninteractive_first_run_asks_for_setup_and_writes_nothing() {
+    if !common::in_harness_fixture("a_noninteractive_first_run_asks_for_setup_and_writes_nothing") {
+        return;
+    }
     let repo = TestRepo::new();
     let discovered = git::discover(repo.path()).unwrap();
     let mut reader = Cursor::new(Vec::new());
@@ -394,6 +432,9 @@ fn a_noninteractive_first_run_asks_for_setup_and_writes_nothing() {
 
 #[test]
 fn cancelled_setup_writes_nothing() {
+    if !common::in_harness_fixture("cancelled_setup_writes_nothing") {
+        return;
+    }
     let repo = TestRepo::new();
     let discovered = git::discover(repo.path()).unwrap();
     // Choose Claude Code, accept catalog model order, default interval, then say no.
@@ -407,6 +448,9 @@ fn cancelled_setup_writes_nothing() {
 
 #[test]
 fn setup_saves_only_the_config_file() {
+    if !common::in_harness_fixture("setup_saves_only_the_config_file") {
+        return;
+    }
     let repo = TestRepo::new();
     let discovered = git::discover(repo.path()).unwrap();
     let (code, text) = with_state(&repo, || {
@@ -441,6 +485,9 @@ fn setup_saves_only_the_config_file() {
 
 #[test]
 fn onboarding_is_additive_idempotent_and_reversible() {
+    if !common::in_harness_fixture("onboarding_is_additive_idempotent_and_reversible") {
+        return;
+    }
     let repo = TestRepo::new();
     repo.init_config();
     repo.write(
@@ -499,6 +546,11 @@ fn onboarding_is_additive_idempotent_and_reversible() {
 
 #[test]
 fn the_inventory_separates_available_from_loaded_and_admits_its_gaps() {
+    if !common::in_harness_fixture(
+        "the_inventory_separates_available_from_loaded_and_admits_its_gaps",
+    ) {
+        return;
+    }
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
@@ -526,6 +578,9 @@ fn the_inventory_separates_available_from_loaded_and_admits_its_gaps() {
 
 #[test]
 fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
+    if !common::in_harness_fixture("drift_is_reported_when_a_version_label_covers_changed_inputs") {
+        return;
+    }
     use ahu::drift;
     let repo = TestRepo::new();
     repo.init_config();
@@ -636,6 +691,11 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
 /// must produce a message, not a panic in the middle of the interactive flow.
 #[test]
 fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
+    if !common::in_harness_fixture(
+        "a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report",
+    ) {
+        return;
+    }
     use ahu::drift;
     let repo = TestRepo::new();
     repo.init_config();
@@ -725,6 +785,11 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
 /// caller can report, not as a panic inside a harness adapter.
 #[test]
 fn adapter_enforcement_reports_a_missing_catalog_entry_instead_of_panicking() {
+    if !common::in_harness_fixture(
+        "adapter_enforcement_reports_a_missing_catalog_entry_instead_of_panicking",
+    ) {
+        return;
+    }
     for harness_id in ["claude-code", "codex", "antigravity"] {
         let adapter = ahu::harness::adapter_for(harness_id).unwrap();
         let report: ahu::util::Result<ahu::harness::EnforcementReport> =
@@ -738,6 +803,9 @@ fn adapter_enforcement_reports_a_missing_catalog_entry_instead_of_panicking() {
 
 #[test]
 fn selector_positions_follow_the_displayed_registered_agents() {
+    if !common::in_harness_fixture("selector_positions_follow_the_displayed_registered_agents") {
+        return;
+    }
     let repo = TestRepo::new();
     repo.add_agent("zeta", "1.0.0", "claude-opus-5");
     repo.add_agent("alpha", "1.0.0", "claude-opus-5");
@@ -763,6 +831,9 @@ fn selector_positions_follow_the_displayed_registered_agents() {
 
 #[test]
 fn selector_recovers_from_invalid_positions_and_names() {
+    if !common::in_harness_fixture("selector_recovers_from_invalid_positions_and_names") {
+        return;
+    }
     let repo = TestRepo::new();
     repo.add_agent("alpha", "1.0.0", "claude-opus-5");
     let agents = ahu::agent::load_all(repo.path()).unwrap();
@@ -789,6 +860,9 @@ fn selector_recovers_from_invalid_positions_and_names() {
 
 #[test]
 fn selector_does_not_promote_native_onboarding_candidates() {
+    if !common::in_harness_fixture("selector_does_not_promote_native_onboarding_candidates") {
+        return;
+    }
     let repo = TestRepo::new();
     repo.add_agent("alpha", "1.0.0", "claude-opus-5");
     repo.write(".claude/agents/candidate.md", "---\nname: candidate\ndescription: Native candidate\nmodel: claude-opus-5\n---\nInstructions.\n");
@@ -814,6 +888,9 @@ fn selector_does_not_promote_native_onboarding_candidates() {
 
 #[test]
 fn selector_escapes_repository_fields_and_bounds_descriptions() {
+    if !common::in_harness_fixture("selector_escapes_repository_fields_and_bounds_descriptions") {
+        return;
+    }
     let repo = TestRepo::new();
     repo.add_agent("alpha", "1.0.0", "claude-opus-5");
     let mut agents = ahu::agent::load_all(repo.path()).unwrap();
@@ -834,6 +911,9 @@ fn selector_escapes_repository_fields_and_bounds_descriptions() {
 
 #[test]
 fn selector_numeric_names_use_an_explicit_at_prefix() {
+    if !common::in_harness_fixture("selector_numeric_names_use_an_explicit_at_prefix") {
+        return;
+    }
     let repo = TestRepo::new();
     repo.add_agent("2", "1.0.0", "claude-opus-5");
     repo.add_agent("alpha", "1.0.0", "claude-opus-5");
@@ -856,6 +936,9 @@ fn selector_numeric_names_use_an_explicit_at_prefix() {
 
 #[test]
 fn selector_truncates_wide_descriptions_on_character_boundaries() {
+    if !common::in_harness_fixture("selector_truncates_wide_descriptions_on_character_boundaries") {
+        return;
+    }
     let repo = TestRepo::new();
     repo.add_agent("alpha", "1.0.0", "claude-opus-5");
     let mut agents = ahu::agent::load_all(repo.path()).unwrap();
