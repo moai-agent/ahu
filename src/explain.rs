@@ -334,10 +334,14 @@ pub fn document() -> Vec<Section> {
             title: "State and records",
             blocks: vec![para(&[
                 "Task worktrees are siblings under `.worktrees/` in the primary checkout.",
-                "Task records and hygiene timestamps default to `.ahu/state/` inside the",
-                "current checkout. The shared launch lock and cmux group mapping live in the",
-                "primary checkout's `.ahu/state/`. `.ahu/` ignores itself in Git. Each worktree",
-                "has its own store. `AHU_STATE_DIR` explicitly overrides it. Policy never lives",
+                "A task's record and prompt live in `.ahu/state/` inside its own worktree, chosen",
+                "by ahu at launch and passed to the session, so removing that worktree removes",
+                "them with it. `ahu tasks`, `task`, `diff` and `focus` find them by looking through",
+                "`.worktrees/`, from the primary checkout or from any sibling. Only the launch lock",
+                "and the cmux group mapping are shared, in the primary checkout's `.ahu/state/`;",
+                "hygiene timestamps stay in the checkout they were recorded from. `.ahu/` ignores",
+                "itself in Git. `AHU_STATE_DIR` explicitly overrides the store for a tool or an",
+                "isolated test and is not needed for ordinary use. Policy never lives",
                 "there. Each record freezes the launched",
                 "identity, digests, base commit, branch, worktree, and cmux ids, so editing an agent",
                 "later changes the next launch while a running task keeps what it started with.",
@@ -645,10 +649,7 @@ pub fn document_path() -> Result<PathBuf> {
 /// Write the Markdown document to ahu's state directory.
 pub fn write_document() -> Result<PathBuf> {
     let path = document_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, markdown())
+    crate::state::write_private_file(&path, markdown().as_bytes())
         .map_err(|e| Error::new(format!("cannot write {}: {e}", path.display())))?;
     Ok(path)
 }

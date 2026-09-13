@@ -407,7 +407,7 @@ pub const NO_TASKS: &str = "No ahu tasks have been launched from this repository
 
 /// `ahu tasks`
 pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
-    let listing = launch::reconcile(&repo.identity())?;
+    let listing = launch::reconcile(repo)?;
     if listing.is_empty() {
         console.say(&format!("{NO_TASKS}\n"))?;
         return Ok(0);
@@ -560,7 +560,7 @@ fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
         bail!(kind: crate::util::ErrorKind::Usage, "a task id must not be empty.");
     }
     // Inspection needs no live cmux connection and does not rewrite records.
-    let listing = task::list(&repo.identity())?;
+    let listing = task::list(repo)?;
     let exact = listing.records.iter().any(|(_, r)| r.task_id == id)
         || listing.unreadable.iter().any(|r| r.task_id == id);
     let matches = |candidate: &str| candidate == id || (!exact && candidate.starts_with(id));
@@ -679,7 +679,7 @@ pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32>
 
 /// `ahu focus <task-id>`
 pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i32> {
-    let listing = task::list(&repo.identity())?;
+    let listing = task::list(repo)?;
     let found = listing
         .records
         .iter()
@@ -1044,7 +1044,7 @@ fn submit(
     }
 
     // Drift against the last launch of this same agent at this same version.
-    let previous = task::list(&identity)?;
+    let previous = task::list(repo)?;
     // Drift can only compare against records it can read. Saying nothing when
     // some are unreadable would make "no drift reported" mean two different
     // things — nothing changed, or ahu could not look — and only one of those
@@ -1490,6 +1490,6 @@ pub fn with_stdio_output<T>(
 ///
 /// Includes unreadable records so callers can account for retained work even
 /// when a record cannot be trusted or interpreted.
-pub fn task_dirs(repo_identity: &str) -> Result<Vec<PathBuf>> {
-    Ok(task::list(repo_identity)?.dirs())
+pub fn task_dirs(repo: &Repo) -> Result<Vec<PathBuf>> {
+    Ok(task::list(repo)?.dirs())
 }

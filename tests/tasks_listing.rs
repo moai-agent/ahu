@@ -235,9 +235,7 @@ fn tasks_lists_the_readable_record_and_reports_the_unreadable_one() {
     );
 
     // And `task_dirs` accounts for both, so a helper cannot reintroduce the bug.
-    let dirs = with_state(&repo, || {
-        ahu::commands::task_dirs(&discovered.identity()).unwrap()
-    });
+    let dirs = with_state(&repo, || ahu::commands::task_dirs(&discovered).unwrap());
     assert_eq!(dirs.len(), 2, "{dirs:?}");
 }
 
@@ -424,7 +422,7 @@ fn list_carries_what_it_could_not_read() {
     write_current(&dir, &repo, "006aa50000000000g2");
 
     let discovered = ahu::git::discover(repo.path()).unwrap();
-    let listing = with_state(&repo, || ahu::task::list(&discovered.identity()).unwrap());
+    let listing = with_state(&repo, || ahu::task::list(&discovered).unwrap());
 
     assert_eq!(listing.records.len(), 1);
     assert_eq!(listing.unreadable.len(), 1);

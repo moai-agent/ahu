@@ -211,53 +211,26 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Create a directory that only its owner can read.
-fn create_private_dir(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-fn set_owner_only(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
-
 /// Write a task record and its prompt.
 ///
-/// The prompt is written as its own file with owner-only permissions and is
-/// never placed on a command line. `ahu run-task` reads it back and passes it to
-/// the harness as a single argument vector element.
+/// Both files are created owner-only through the state helpers, so the record,
+/// the prompt, and every directory leading to them are refused rather than
+/// followed if anything on the way has been replaced by a symlink.
+///
+/// The prompt is written as its own file and is never placed on a command line.
+/// `ahu run-task` reads it back and passes it to the harness as a single
+/// argument vector element.
 pub fn save(dir: &Path, record: &TaskRecord, prompt: &str) -> Result<()> {
-    create_private_dir(dir)?;
-    state::write_json(&dir.join(TASK_FILE), record)?;
+    state::create_private_dir_all(dir)?;
     // The record names the agent, the repository, and the task title. It is not
     // as sensitive as the prompt, but it has no reason to be world-readable.
-    set_owner_only(&dir.join(TASK_FILE))?;
-    let prompt_path = dir.join(PROMPT_FILE);
-    std::fs::write(&prompt_path, prompt.as_bytes())
-        .map_err(|e| Error::new(format!("cannot write {}: {e}", prompt_path.display())))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&prompt_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    state::write_json(&dir.join(TASK_FILE), record)?;
+    state::write_private_file(&dir.join(PROMPT_FILE), prompt.as_bytes())
 }
 
 pub fn load(dir: &Path) -> Result<TaskRecord> {
     let path = dir.join(TASK_FILE);
-    let bytes = std::fs::read(&path)
+    let bytes = state::read_private_file(&path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
 
     // The schema version is read on its own, before the record is deserialized
@@ -302,7 +275,7 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
 
 pub fn load_prompt(dir: &Path) -> Result<String> {
     let path = dir.join(PROMPT_FILE);
-    let bytes = std::fs::read(&path)
+    let bytes = state::read_private_file(&path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
     String::from_utf8(bytes)
         .map_err(|_| Error::new(format!("{} is not valid UTF-8", path.display())))
@@ -312,8 +285,7 @@ pub fn load_prompt(dir: &Path) -> Result<String> {
 pub fn set_state(dir: &Path, new_state: TaskState) -> Result<()> {
     let mut record = load(dir)?;
     record.state = new_state;
-    state::write_json(&dir.join(TASK_FILE), &record)?;
-    set_owner_only(&dir.join(TASK_FILE))
+    state::write_json(&dir.join(TASK_FILE), &record)
 }
 
 /// A task directory whose record ahu could not read.
@@ -367,39 +339,208 @@ impl TaskListing {
 
 /// Every task recorded for a repository: readable records newest first, plus
 /// every directory whose record could not be read.
-pub fn list(repo_identity: &str) -> Result<TaskListing> {
-    let dir = state::tasks_dir(repo_identity)?;
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(TaskListing::default()),
-        Err(e) => bail!("cannot read {}: {e}", dir.display()),
-    };
+///
+/// Two places are searched, and both are reached from any checkout of the
+/// repository, so `ahu tasks` shows the same list from the primary checkout and
+/// from a sibling task worktree without anything being set in the environment:
+///
+/// * each task worktree under `.worktrees/`, which is where a task's own record
+///   lives and where it goes away when the worktree is removed, and
+/// * the invoking checkout's own store, which holds records written before task
+///   state moved into worktrees, and records written under an explicit
+///   `AHU_STATE_DIR`.
+///
+/// A task found in both is reported from its worktree: that copy is the live
+/// one, and the other is a leftover of the older layout.
+pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
+    let identity = repo.identity();
+    let primary_root = repo.primary_root()?;
     let mut listing = TaskListing::default();
-    for entry in entries {
-        let path = entry?.path();
-        if !path.is_dir() {
-            continue;
-        }
-        match load(&path) {
-            Ok(record) => listing.records.push((path, record)),
-            // Carried, not dropped. It must still not break the listing of the
-            // others. Keep the refused directory visible for inspection.
-            Err(e) => {
-                let task_id = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.to_string_lossy().to_string());
-                listing.unreadable.push(UnreadableTask {
-                    dir: path,
-                    task_id,
-                    reason: e.to_string(),
-                });
-            }
-        }
+    scan_worktrees(
+        &state::worktrees_root_at(&primary_root),
+        &identity,
+        &mut listing,
+    )?;
+
+    for store in checkout_stores(repo, &primary_root, &identity)? {
+        // Listing is a read of the store, so the path to it is confined the
+        // same way a record read is: a link below the state root is refused,
+        // not walked.
+        state::confine_existing_dir(&store)?;
+        let mut found = TaskListing::default();
+        scan_tasks_dir(&store, &mut found)?;
+        let known: std::collections::BTreeSet<String> = listing
+            .records
+            .iter()
+            .map(|(_, record)| record.task_id.clone())
+            .chain(listing.unreadable.iter().map(|found| found.task_id.clone()))
+            .collect();
+        listing.records.extend(
+            found
+                .records
+                .into_iter()
+                .filter(|(_, r)| !known.contains(&r.task_id)),
+        );
+        listing.unreadable.extend(
+            found
+                .unreadable
+                .into_iter()
+                .filter(|u| !known.contains(&u.task_id)),
+        );
     }
+
     listing
         .records
         .sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
     listing.unreadable.sort_by(|a, b| b.task_id.cmp(&a.task_id));
     Ok(listing)
+}
+
+/// The per-checkout stores that can hold a task record for this repository.
+///
+/// The invoking checkout's store comes first. The primary checkout's store is
+/// searched too, so a record written before task state moved into worktrees is
+/// still found when `ahu tasks` runs from a sibling worktree rather than from
+/// the checkout that launched it.
+///
+/// An explicit `AHU_STATE_DIR` is an isolated store on purpose: when one is in
+/// effect, that store is the only one searched, and a checkout's own `.ahu` is
+/// left out rather than quietly widening what the caller asked for.
+fn checkout_stores(
+    repo: &crate::git::Repo,
+    primary_root: &Path,
+    identity: &str,
+) -> Result<Vec<PathBuf>> {
+    let tasks_under = |root: &Path| root.join("repos").join(identity).join("tasks");
+    let current = state::root()?;
+    let mut stores = vec![tasks_under(&current)];
+    if current == state::checkout_root(&repo.root)? {
+        let primary = tasks_under(&state::checkout_root(primary_root)?);
+        if !stores.contains(&primary) {
+            stores.push(primary);
+        }
+    }
+    Ok(stores)
+}
+
+/// Read every task directory directly inside `dir`, if it is there at all.
+///
+/// A directory that does not exist is not an error: a repository with no tasks
+/// in a given store simply has none.
+fn scan_tasks_dir(dir: &Path, listing: &mut TaskListing) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => bail!("cannot read {}: {e}", dir.display()),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        let task_id = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
+        match std::fs::symlink_metadata(&path) {
+            // A task directory ahu wrote is a real directory.
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+            // A link here would read a record from wherever it points. It is
+            // not followed -- and not passed over in silence either, because a
+            // listing that skipped it would report fewer tasks than the store
+            // has entries for.
+            Ok(meta) if meta.file_type().is_symlink() => {
+                listing.unreadable.push(UnreadableTask {
+                    dir: path,
+                    task_id,
+                    reason: "this task directory is a symlink; ahu will not read a record \
+                             through one."
+                        .to_string(),
+                });
+                continue;
+            }
+            _ => continue,
+        }
+        match load(&path) {
+            Ok(record) => listing.records.push((path, record)),
+            // Carried, not dropped. It must still not break the listing of the
+            // others. Keep the refused directory visible for inspection.
+            Err(e) => listing.unreadable.push(UnreadableTask {
+                dir: path,
+                task_id,
+                reason: e.to_string(),
+            }),
+        }
+    }
+    Ok(())
+}
+
+/// Look in every task worktree of the repository for the record it owns.
+///
+/// The worktree directory name is the task id ahu chose, so a worktree that is
+/// gone takes its task out of the listing by simply not being there. A worktree
+/// whose state directory ahu refuses stays *in* the listing as unreadable:
+/// hiding it would claim work does not exist when its checkout and branch do.
+fn scan_worktrees(root: &Path, repo_identity: &str, listing: &mut TaskListing) -> Result<()> {
+    match std::fs::symlink_metadata(root) {
+        Ok(meta) if meta.file_type().is_symlink() => bail!(
+            "refusing to enumerate task worktrees through {}: it is a symlink.",
+            root.display()
+        ),
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => bail!("cannot read {}: {e}", root.display()),
+    }
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => bail!("cannot read {}: {e}", root.display()),
+    };
+    for entry in entries {
+        let worktree = entry?.path();
+        let Some(task_id) = worktree
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+        else {
+            continue;
+        };
+        // `.gitignore` is the file that makes `.worktrees/` ignore itself.
+        if task_id.starts_with('.') {
+            continue;
+        }
+        match std::fs::symlink_metadata(&worktree) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+            Ok(meta) if meta.file_type().is_symlink() => {
+                listing.unreadable.push(UnreadableTask {
+                    dir: worktree,
+                    task_id,
+                    reason: "this task worktree is a symlink; ahu will not follow one out of \
+                             the repository."
+                        .to_string(),
+                });
+                continue;
+            }
+            _ => continue,
+        }
+        let state_root = match state::checkout_root(&worktree) {
+            Ok(root) => root,
+            Err(e) => {
+                listing.unreadable.push(UnreadableTask {
+                    dir: worktree.join(".ahu").join("state"),
+                    task_id,
+                    reason: e.to_string(),
+                });
+                continue;
+            }
+        };
+        let tasks = state_root.join("repos").join(repo_identity).join("tasks");
+        if let Err(e) = state::confine_existing_dir(&tasks) {
+            listing.unreadable.push(UnreadableTask {
+                dir: tasks,
+                task_id,
+                reason: e.to_string(),
+            });
+            continue;
+        }
+        scan_tasks_dir(&tasks, listing)?;
+    }
+    Ok(())
 }

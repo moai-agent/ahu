@@ -222,7 +222,10 @@ pub fn plan(
     let branch = format!("ahu/{agent_segment}/{task_id}");
     let repo_identity = repo.identity();
     let worktree = state::worktree_dir(&repo.root, &task_id)?;
-    let task_dir = state::task_dir(&repo_identity, &task_id)?;
+    // The record and the prompt belong to the checkout this task will work in,
+    // so they are placed inside it and removed with it. Nothing in the
+    // environment selects this; it follows from the worktree ahu just chose.
+    let task_dir = state::worktree_task_dir(&worktree, &repo_identity, &task_id);
     let title = crate::util::task_title_from_prompt(prompt);
 
     let permissions = agent
@@ -265,6 +268,13 @@ pub fn plan(
     enforcement
         .gaps
         .push(DELIVERY_IS_NOT_ENFORCEMENT.to_string());
+    enforcement.gaps.push(
+        "This task's record and prompt are kept inside its own worktree, so removing that \
+         worktree removes them -- and the session working there can read and change them too. \
+         ahu verifies both against the digests frozen at submission before it starts the \
+         session; after that the record is a log the session itself could edit."
+            .to_string(),
+    );
     enforcement.gaps.push(
         "Delegation guidance cannot prevent a harness from launching other processes through \
          shell tools, and no adapter denies a harness's own delegation tools."
@@ -373,6 +383,13 @@ pub fn execute(
             return Err(e);
         }
     };
+    // The task's own state directory, created now that its worktree exists. A
+    // repository that committed a link at `.ahu` or `.ahu/state` is refused
+    // here, before a record or a prompt is written through it.
+    if let Err(e) = state::ensure_checkout_state(&plan.worktree) {
+        let _ = git::remove_worktree(repo, &plan.worktree, &plan.branch);
+        return Err(e);
+    }
     if !materialize.concurrently_modified.is_empty() {
         notes.push(format!(
             "agent configuration changed while the task was being prepared: {}. \
@@ -638,8 +655,8 @@ fn restore_anchor(client: &Cmux, repo: &Repo, group: &cmux::Group) -> Result<Str
 /// Returns the whole listing, unreadable directories included. Reconciliation
 /// can only touch records it can read, and a caller that is about to tell the
 /// user what exists needs to know about the ones it could not.
-pub fn reconcile(repo_identity: &str) -> Result<task::TaskListing> {
-    let mut tasks = task::list(repo_identity)?;
+pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
+    let mut tasks = task::list(repo)?;
     let Ok(client) = Cmux::discover() else {
         return Ok(tasks);
     };
@@ -752,6 +769,27 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
             expected_worktree.display(),
             record.worktree.display()
         );
+    }
+
+    // A record kept inside a task worktree must be that worktree's own. Records
+    // written before task state moved into worktrees live in a checkout's store
+    // rather than under `.worktrees/`, and are not subject to this.
+    if let Some(owner) = state::enclosing_checkout(task_dir) {
+        let worktrees = state::worktrees_root_at(&discovered.primary_root()?);
+        let resolved = owner.canonicalize().ok();
+        let inside = resolved
+            .as_deref()
+            .zip(worktrees.canonicalize().ok())
+            .is_some_and(|(owner, worktrees)| owner.starts_with(&worktrees));
+        if inside && resolved != record.worktree.canonicalize().ok() {
+            bail!(
+                "task {} is recorded in the worktree {}, but its record was read from {}.\n\
+                 ahu will not start a session from a record held by a different task's checkout.",
+                record.task_id,
+                record.worktree.display(),
+                owner.display()
+            );
+        }
     }
 
     let adapter = harness::adapter_for(&record.identity.harness)?;

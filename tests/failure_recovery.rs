@@ -265,8 +265,7 @@ fn pasting_a_multiline_prompt_does_not_submit_it() {
     );
 
     // Nothing at all was created.
-    let identity = discovered.identity();
-    assert!(task::list(&identity).unwrap().is_empty());
+    assert!(task::list(&discovered).unwrap().is_empty());
     let branches = common::git(repo.path(), &["branch", "--list", "ahu/*"]);
     assert!(branches.is_empty(), "{branches}");
 }
@@ -299,7 +298,7 @@ fn a_pasted_confirmation_no_longer_submits_through_the_interactive_flow() {
         text.contains("No worktree, branch, or session was created"),
         "{text}"
     );
-    assert!(task::list(&discovered.identity()).unwrap().is_empty());
+    assert!(task::list(&discovered).unwrap().is_empty());
     assert!(common::git(repo.path(), &["branch", "--list", "ahu/*"]).is_empty());
 
     // The preview did offer a code, and it is one `confirm_submit` accepts —
