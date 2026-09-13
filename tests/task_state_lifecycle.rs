@@ -23,21 +23,17 @@ fn fixture() -> TestRepo {
     repo
 }
 
-/// `AHU_STATE_DIR` is process-wide, so the tests that touch it are serialised.
+/// The repository a child case was pointed at.
 ///
-/// The suite can be run from inside an ahu task session, which injects the
-/// variable. These tests are about what ahu does without one, so they clear it
-/// for the calls that read it rather than inheriting whatever launched them.
-static STATE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn without_override<T>(f: impl FnOnce() -> T) -> T {
-    let guard = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: every mutation of this variable in this binary is under the same
-    // guard, and the readers that matter run inside it.
-    unsafe { std::env::remove_var("AHU_STATE_DIR") };
-    let result = f();
-    drop(guard);
-    result
+/// The repository a child case was pointed at.
+///
+/// Cases that depend on the state override being absent, or on a particular
+/// working directory, run in a child process. Both are process-wide, and the
+/// harness runs tests on threads while other threads read the environment and
+/// spawn processes, so the parent starts a child configured the way the case
+/// needs rather than changing anything here.
+fn child_repo() -> PathBuf {
+    PathBuf::from(std::env::var_os("AHU_TEST_REPO").expect("the parent names the repository"))
 }
 
 /// Run the real binary with no state override at all, from `dir`.
@@ -432,7 +428,10 @@ fn a_record_held_by_another_tasks_worktree_does_not_start_a_session() {
 /// used to produce.
 #[cfg(unix)]
 #[test]
-fn a_linked_task_directory_is_reported_rather_than_passed_over() {
+fn a_linked_task_directory_is_reported_rather_than_passed_over_case() {
+    if !common::is_child_case("a_linked_task_directory_is_reported_rather_than_passed_over_case") {
+        return;
+    }
     let repo = fixture();
     let real = "006aa50000000000s1";
     let target = "006aa50000000000s3";
@@ -463,7 +462,7 @@ fn a_linked_task_directory_is_reported_rather_than_passed_over() {
     );
     // Neither link produced a second row for the task it points at.
     let discovered = git::discover(repo.path()).unwrap();
-    let listing = without_override(|| task::list(&discovered).unwrap());
+    let listing = task::list(&discovered).unwrap();
     assert_eq!(
         listing
             .records
@@ -479,7 +478,10 @@ fn a_linked_task_directory_is_reported_rather_than_passed_over() {
 /// A record copied into another task's store is not presented as a task, and
 /// does not make the task it names ambiguous.
 #[test]
-fn a_transplanted_record_is_named_but_never_listed_as_a_task() {
+fn a_transplanted_record_is_named_but_never_listed_as_a_task_case() {
+    if !common::is_child_case("a_transplanted_record_is_named_but_never_listed_as_a_task_case") {
+        return;
+    }
     let repo = fixture();
     let owner = "006aa50000000000t1";
     let other = "006aa50000000000t2";
@@ -497,7 +499,7 @@ fn a_transplanted_record_is_named_but_never_listed_as_a_task() {
     )
     .unwrap();
 
-    let listing = without_override(|| task::list(&discovered).unwrap());
+    let listing = task::list(&discovered).unwrap();
     assert_eq!(
         listing
             .records
@@ -525,10 +527,7 @@ fn a_transplanted_record_is_named_but_never_listed_as_a_task() {
         assert_eq!(value["task_id"], id);
     }
     // `task_dirs` accounts for two tasks, not three.
-    assert_eq!(
-        without_override(|| ahu::commands::task_dirs(&discovered).unwrap()).len(),
-        2
-    );
+    assert_eq!(ahu::commands::task_dirs(&discovered).unwrap().len(), 2);
 
     let listed = ahu_in(repo.path(), &["tasks"]);
     let text = text_of(&listed);
@@ -542,7 +541,10 @@ fn a_transplanted_record_is_named_but_never_listed_as_a_task() {
 /// A record whose directory name is not the task it names, and one written for
 /// another repository, are both refused where a checkout store holds them.
 #[test]
-fn a_record_that_does_not_match_where_it_was_found_is_refused() {
+fn a_record_that_does_not_match_where_it_was_found_is_refused_case() {
+    if !common::is_child_case("a_record_that_does_not_match_where_it_was_found_is_refused_case") {
+        return;
+    }
     let repo = fixture();
     let discovered = git::discover(repo.path()).unwrap();
     let store = state::ensure_checkout_state(repo.path())
@@ -572,7 +574,7 @@ fn a_record_that_does_not_match_where_it_was_found_is_refused() {
     foreign.repo_identity = "0".repeat(16);
     task::save(&store.join("006aa50000000000m2"), &foreign, "current work").unwrap();
 
-    let listing = without_override(|| task::list(&discovered).unwrap());
+    let listing = task::list(&discovered).unwrap();
     assert!(listing.records.is_empty(), "{:?}", listing.records);
     let reasons: Vec<&str> = listing
         .unreadable
@@ -593,7 +595,10 @@ fn a_record_that_does_not_match_where_it_was_found_is_refused() {
 /// A task from the older layout has a worktree with no state in it and its
 /// record in a checkout store. That is complete, not incomplete.
 #[test]
-fn an_older_layout_task_with_a_live_worktree_is_listed_once() {
+fn an_older_layout_task_with_a_live_worktree_is_listed_once_case() {
+    if !common::is_child_case("an_older_layout_task_with_a_live_worktree_is_listed_once_case") {
+        return;
+    }
     let repo = fixture();
     let task_id = "006aa50000000000w1";
     let discovered = git::discover(repo.path()).unwrap();
@@ -633,7 +638,7 @@ fn an_older_layout_task_with_a_live_worktree_is_listed_once() {
         );
         assert!(!text.contains("could not be read"), "{text}");
     }
-    let listing = without_override(|| task::list(&git::discover(&worktree).unwrap()).unwrap());
+    let listing = task::list(&git::discover(&worktree).unwrap()).unwrap();
     assert_eq!(listing.records.len(), 1);
     assert!(listing.unreadable.is_empty(), "{:?}", listing.unreadable);
 }
@@ -665,6 +670,10 @@ fn a_worktree_with_no_record_anywhere_is_reported_as_incomplete() {
 
 /// The library answers from the repository it is given, wherever the process
 /// happens to be standing.
+///
+/// One child per working directory, including one that is not a repository at
+/// all. The working directory is process-wide, so it is set by the process that
+/// starts each case rather than changed underneath the harness's threads.
 #[test]
 fn discovery_uses_the_repository_it_is_given_not_the_working_directory() {
     let repo = fixture();
@@ -686,29 +695,41 @@ fn discovery_uses_the_repository_it_is_given_not_the_working_directory() {
     )
     .unwrap();
 
-    // The same primary repository, resolved while standing in three different
-    // places, including one that is not a repository at all.
     let elsewhere = tempfile::TempDir::new().unwrap();
-    let guard = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: guarded as above; this binary is the only mutator.
-    unsafe { std::env::remove_var("AHU_STATE_DIR") };
-    let original = std::env::current_dir().unwrap();
     for cwd in [repo.path(), sibling.as_path(), elsewhere.path()] {
-        std::env::set_current_dir(cwd).unwrap();
-        let listing = task::list(&discovered).expect("a valid repository lists from any cwd");
-        let ids: Vec<&str> = listing
-            .records
-            .iter()
-            .map(|(_, r)| r.task_id.as_str())
-            .collect();
-        assert!(ids.contains(&live), "from {cwd:?}: {ids:?}");
+        let output = common::run_child_case("discovery_from_a_given_repository_case", |command| {
+            command
+                .env_remove("AHU_STATE_DIR")
+                .env("AHU_TEST_REPO", repo.path())
+                .current_dir(cwd);
+        });
         assert!(
-            ids.contains(&legacy),
-            "the primary store's record must not depend on the working directory; from {cwd:?}: {ids:?}"
+            output.status.success(),
+            "listing from {cwd:?} failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
-    std::env::set_current_dir(original).unwrap();
-    drop(guard);
+}
+
+#[test]
+fn discovery_from_a_given_repository_case() {
+    if !common::is_child_case("discovery_from_a_given_repository_case") {
+        return;
+    }
+    let repo_root = child_repo();
+    let discovered = git::discover(&repo_root).unwrap();
+    let listing = task::list(&discovered).expect("a valid repository lists from any cwd");
+    let ids: Vec<&str> = listing
+        .records
+        .iter()
+        .map(|(_, r)| r.task_id.as_str())
+        .collect();
+    assert!(ids.contains(&"006aa50000000000q1"), "{ids:?}");
+    assert!(
+        ids.contains(&"006aa50000000000q2"),
+        "the primary store's record must not depend on the working directory: {ids:?}"
+    );
 }
 
 /// An unrelated explicit store replaces the checkout store and nothing more.
@@ -782,25 +803,26 @@ fn stub_cmux(dir: &Path) -> PathBuf {
     script
 }
 
-/// Run `execute` against the stub, with no state override, serialised because
-/// both settings are process-wide.
-fn execute_with_stub(
-    repo: &TestRepo,
-    cmux: &Path,
-    plan: &ahu::launch::LaunchPlan,
-) -> ahu::util::Result<ahu::launch::Launched> {
-    let discovered = git::discover(repo.path()).unwrap();
+/// Start a launch case in a child process configured to reach the stub.
+///
+/// `AHU_CMUX_BIN` is process-wide, and a stub that answers `ping` would be
+/// picked up by any other test spawning ahu at the same moment, so it is set on
+/// the child's command and nowhere else.
+fn run_launch_case(case: &str, repo: &TestRepo, cmux: &Path) {
+    let output = common::run_child_case(case, |command| {
+        command
+            .env_remove("AHU_STATE_DIR")
+            .env("AHU_CMUX_BIN", cmux)
+            .env("AHU_TEST_REPO", repo.path());
+    });
+    common::assert_child_passed(case, &output);
+}
+
+/// Plan and execute in the child, where the environment is already right.
+fn execute_in_child(repo_root: &Path, plan: &ahu::launch::LaunchPlan) -> ahu::util::Result<()> {
+    let discovered = git::discover(repo_root).unwrap();
     let loaded = ahu::config::load(&discovered.root).unwrap().unwrap();
-    let guard = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: guarded as everywhere else in this binary.
-    unsafe {
-        std::env::remove_var("AHU_STATE_DIR");
-        std::env::set_var("AHU_CMUX_BIN", cmux);
-    }
-    let result = ahu::launch::execute(&discovered, &loaded, plan, "do the thing", false);
-    unsafe { std::env::remove_var("AHU_CMUX_BIN") };
-    drop(guard);
-    result
+    ahu::launch::execute(&discovered, &loaded, plan, "do the thing", false).map(|_| ())
 }
 
 /// A launch that fails after the worktree exists, on a worktree Git will not
@@ -823,9 +845,30 @@ fn a_failure_after_materialization_reports_the_worktree_it_could_not_remove() {
     // materialization, which is what makes the new checkout dirty.
     repo.write("CLAUDE.md", "uncommitted guidance\n");
 
-    let plan = plan_from(repo.path());
     let scratch = tempfile::TempDir::new().unwrap();
-    let error = execute_with_stub(&repo, &stub_cmux(scratch.path()), &plan)
+    run_launch_case(
+        "a_refused_cleanup_is_reported_case",
+        &repo,
+        &stub_cmux(scratch.path()),
+    );
+
+    // The retained checkout is not omitted from the listing.
+    let listed = ahu_in(repo.path(), &["tasks"]);
+    let text = text_of(&listed);
+    assert!(listed.status.success(), "{text}");
+    assert!(text.contains("no record anywhere"), "{text}");
+    assert!(text.contains("ahu/chris/"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_refused_cleanup_is_reported_case() {
+    if !common::is_child_case("a_refused_cleanup_is_reported_case") {
+        return;
+    }
+    let repo_root = child_repo();
+    let plan = plan_from(&repo_root);
+    let error = execute_in_child(&repo_root, &plan)
         .expect_err("state preparation must fail on the committed ignore file")
         .to_string();
 
@@ -840,27 +883,20 @@ fn a_failure_after_materialization_reports_the_worktree_it_could_not_remove() {
         "{error}"
     );
     assert!(plan.worktree.is_dir(), "dirty work must be preserved");
-
-    // And the retained checkout is not omitted from the listing.
-    let listed = ahu_in(repo.path(), &["tasks"]);
-    let text = text_of(&listed);
-    assert!(listed.status.success(), "{text}");
-    assert!(text.contains(&plan.task_id), "{text}");
-    assert!(text.contains("no record anywhere"), "{text}");
-    assert!(text.contains(&plan.branch), "{text}");
 }
 
 /// The cleanup that follows a failed launch is not a way out of the checkout.
 ///
 /// The failure being cleaned up here is a committed link at the worktree's
-/// `.ahu`. Removing the task directory by name would follow that same link.
+/// `.ahu`. Removing the task directory by name would follow that same link, so
+/// the child plants a file at the exact path an unguarded `remove_dir_all`
+/// would delete and checks it is still there afterwards.
 #[cfg(unix)]
 #[test]
 fn a_failed_rollback_does_not_delete_through_a_redirected_state_path() {
     let repo = fixture();
     let external = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(external.path().join("state/repos")).unwrap();
-    std::fs::write(external.path().join("state/keep.txt"), "untouched\n").unwrap();
 
     // Committed link at `.ahu`, plus uncommitted configuration so the new
     // checkout is dirty and Git refuses to remove it.
@@ -869,15 +905,68 @@ fn a_failed_rollback_does_not_delete_through_a_redirected_state_path() {
     std::fs::remove_file(repo.path().join(".ahu")).unwrap();
     repo.write("CLAUDE.md", "uncommitted guidance\n");
 
-    let plan = plan_from(repo.path());
     let scratch = tempfile::TempDir::new().unwrap();
-    let error = execute_with_stub(&repo, &stub_cmux(scratch.path()), &plan)
+    let output = common::run_child_case("a_redirected_rollback_deletes_nothing_case", |command| {
+        command
+            .env_remove("AHU_STATE_DIR")
+            .env("AHU_CMUX_BIN", stub_cmux(scratch.path()))
+            .env("AHU_TEST_REPO", repo.path())
+            .env("AHU_TEST_EXTERNAL", external.path());
+    });
+    common::assert_child_passed("a_redirected_rollback_deletes_nothing_case", &output);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_redirected_rollback_deletes_nothing_case() {
+    use std::os::unix::fs::PermissionsExt;
+    if !common::is_child_case("a_redirected_rollback_deletes_nothing_case") {
+        return;
+    }
+    let repo_root = child_repo();
+    let external =
+        PathBuf::from(std::env::var_os("AHU_TEST_EXTERNAL").expect("the parent names it"));
+    let plan = plan_from(&repo_root);
+
+    // Exactly where an unguarded `remove_dir_all(plan.task_dir)` would land,
+    // because `<worktree>/.ahu` is the committed link to this directory.
+    let identity = git::discover(&repo_root).unwrap().identity();
+    let target = external
+        .join("state/repos")
+        .join(&identity)
+        .join("tasks")
+        .join(&plan.task_id);
+    std::fs::create_dir_all(&target).unwrap();
+    let sentinel = target.join("sentinel.txt");
+    std::fs::write(&sentinel, "untouched\n").unwrap();
+    std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o640)).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+    let error = execute_in_child(&repo_root, &plan)
         .expect_err("a linked state directory must fail the launch")
         .to_string();
     assert!(error.contains("refusing ahu state path"), "{error}");
 
-    // The external directory is exactly as it was: same entries, same bytes.
-    let mut entries: Vec<String> = std::fs::read_dir(external.path())
+    // The directory the deletion would have taken is exactly as it was.
+    assert!(target.is_dir(), "the redirected task directory was removed");
+    assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "untouched\n");
+    assert_eq!(
+        std::fs::symlink_metadata(&sentinel)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o640
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&target)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o750
+    );
+    let mut entries: Vec<String> = std::fs::read_dir(&external)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
         .collect();
@@ -887,17 +976,17 @@ fn a_failed_rollback_does_not_delete_through_a_redirected_state_path() {
         vec!["state".to_string()],
         "external directory changed"
     );
-    assert_eq!(
-        std::fs::read_to_string(external.path().join("state/keep.txt")).unwrap(),
-        "untouched\n"
-    );
-    assert!(external.path().join("state/repos").is_dir());
 }
 
 /// A stray record in a worktree's store does not stand in for the record that
 /// worktree never got, and the note survives an otherwise empty listing.
 #[test]
-fn a_stray_record_does_not_hide_a_worktree_with_no_record_of_its_own() {
+fn a_stray_record_does_not_hide_a_worktree_with_no_record_of_its_own_case() {
+    if !common::is_child_case(
+        "a_stray_record_does_not_hide_a_worktree_with_no_record_of_its_own_case",
+    ) {
+        return;
+    }
     let repo = fixture();
     let owner = "006aa50000000000y1";
     let stray = "006aa50000000000y2";
@@ -920,7 +1009,7 @@ fn a_stray_record_does_not_hide_a_worktree_with_no_record_of_its_own() {
     )
     .unwrap();
 
-    let listing = without_override(|| task::list(&discovered).unwrap());
+    let listing = task::list(&discovered).unwrap();
     assert!(listing.records.is_empty(), "{:?}", listing.records);
     assert_eq!(listing.unreadable.len(), 1, "{:?}", listing.unreadable);
     assert_eq!(listing.unreadable[0].task_id, owner);
@@ -995,24 +1084,218 @@ fn a_note_survives_a_listing_with_no_tasks_in_it() {
 #[test]
 fn a_store_below_a_checkout_root_is_treated_as_a_chosen_store() {
     let repo = fixture();
-    let discovered = git::discover(repo.path()).unwrap();
     let inside = repo.path().join("sub/.ahu/state");
     std::fs::create_dir_all(&inside).unwrap();
 
-    let guard = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: guarded as everywhere else in this binary.
-    unsafe { std::env::set_var("AHU_STATE_DIR", &inside) };
-    let chosen = state::isolated_store(&discovered).unwrap();
-    // And the real wiring, a checkout root's own store, is not mistaken for one.
-    unsafe { std::env::set_var("AHU_STATE_DIR", repo.path().join(".ahu/state")) };
-    let wiring = state::isolated_store(&discovered).unwrap();
-    unsafe { std::env::remove_var("AHU_STATE_DIR") };
-    drop(guard);
+    for (case, store) in [
+        ("a_subdirectory_store_is_chosen_case", inside),
+        (
+            "a_checkout_root_store_is_wiring_case",
+            repo.path().join(".ahu/state"),
+        ),
+    ] {
+        let output = common::run_child_case(case, |command| {
+            command
+                .env("AHU_STATE_DIR", &store)
+                .env("AHU_TEST_REPO", repo.path());
+        });
+        common::assert_child_passed(case, &output);
+    }
+}
 
+#[test]
+fn a_subdirectory_store_is_chosen_case() {
+    if !common::is_child_case("a_subdirectory_store_is_chosen_case") {
+        return;
+    }
+    let discovered = git::discover(&child_repo()).unwrap();
+    let expected = PathBuf::from(std::env::var_os("AHU_STATE_DIR").unwrap());
     assert_eq!(
-        chosen.as_deref(),
-        Some(inside.as_path()),
+        state::isolated_store(&discovered).unwrap().as_deref(),
+        Some(expected.as_path()),
         "a store under a subdirectory is a chosen store, not ahu's own"
     );
-    assert_eq!(wiring, None, "a checkout root's own store is ahu's wiring");
+}
+
+#[test]
+fn a_checkout_root_store_is_wiring_case() {
+    if !common::is_child_case("a_checkout_root_store_is_wiring_case") {
+        return;
+    }
+    let discovered = git::discover(&child_repo()).unwrap();
+    assert_eq!(
+        state::isolated_store(&discovered).unwrap(),
+        None,
+        "a checkout root's own store is ahu's wiring"
+    );
+}
+
+/// Driven as a child process so no state override from the surrounding session
+/// reaches the library calls this makes. See [`run_without_override`].
+#[test]
+fn a_transplanted_record_is_named_but_never_listed_as_a_task() {
+    let output = common::run_child_case(
+        "a_transplanted_record_is_named_but_never_listed_as_a_task_case",
+        |command| {
+            command.env_remove("AHU_STATE_DIR");
+        },
+    );
+    common::assert_child_passed(
+        "a_transplanted_record_is_named_but_never_listed_as_a_task_case",
+        &output,
+    );
+}
+
+/// Driven as a child process so no state override from the surrounding session
+/// reaches the library calls this makes. See [`run_without_override`].
+#[test]
+fn a_record_that_does_not_match_where_it_was_found_is_refused() {
+    let output = common::run_child_case(
+        "a_record_that_does_not_match_where_it_was_found_is_refused_case",
+        |command| {
+            command.env_remove("AHU_STATE_DIR");
+        },
+    );
+    common::assert_child_passed(
+        "a_record_that_does_not_match_where_it_was_found_is_refused_case",
+        &output,
+    );
+}
+
+/// Driven as a child process so no state override from the surrounding session
+/// reaches the library calls this makes. See [`run_without_override`].
+#[test]
+fn an_older_layout_task_with_a_live_worktree_is_listed_once() {
+    let output = common::run_child_case(
+        "an_older_layout_task_with_a_live_worktree_is_listed_once_case",
+        |command| {
+            command.env_remove("AHU_STATE_DIR");
+        },
+    );
+    common::assert_child_passed(
+        "an_older_layout_task_with_a_live_worktree_is_listed_once_case",
+        &output,
+    );
+}
+
+/// Driven as a child process so no state override from the surrounding session
+/// reaches the library calls this makes. See [`run_without_override`].
+#[test]
+fn a_stray_record_does_not_hide_a_worktree_with_no_record_of_its_own() {
+    let output = common::run_child_case(
+        "a_stray_record_does_not_hide_a_worktree_with_no_record_of_its_own_case",
+        |command| {
+            command.env_remove("AHU_STATE_DIR");
+        },
+    );
+    common::assert_child_passed(
+        "a_stray_record_does_not_hide_a_worktree_with_no_record_of_its_own_case",
+        &output,
+    );
+}
+
+/// Driven as a child process so no state override from the surrounding session
+/// reaches the library calls this makes. See [`run_without_override`].
+#[test]
+fn a_linked_task_directory_is_reported_rather_than_passed_over() {
+    let output = common::run_child_case(
+        "a_linked_task_directory_is_reported_rather_than_passed_over_case",
+        |command| {
+            command.env_remove("AHU_STATE_DIR");
+        },
+    );
+    common::assert_child_passed(
+        "a_linked_task_directory_is_reported_rather_than_passed_over_case",
+        &output,
+    );
+}
+
+/// Listing from inside task A must not take back the record for task B that A's
+/// own store was refused.
+///
+/// A's store is A's default checkout store as well as A's worktree store, so a
+/// second, unowned pass over it would accept exactly what the first refused —
+/// and only when the listing is made from A.
+#[test]
+fn a_foreign_record_in_a_worktree_is_refused_from_that_worktree_too() {
+    for genuine_b in [false, true] {
+        let case = if genuine_b {
+            "a_foreign_record_is_refused_with_a_genuine_b_case"
+        } else {
+            "a_foreign_record_is_refused_without_a_genuine_b_case"
+        };
+        let output = common::run_child_case(case, |command| {
+            command.env_remove("AHU_STATE_DIR");
+        });
+        common::assert_child_passed(case, &output);
+    }
+}
+
+#[test]
+fn a_foreign_record_is_refused_without_a_genuine_b_case() {
+    if !common::is_child_case("a_foreign_record_is_refused_without_a_genuine_b_case") {
+        return;
+    }
+    foreign_record_is_refused_everywhere(false);
+}
+
+#[test]
+fn a_foreign_record_is_refused_with_a_genuine_b_case() {
+    if !common::is_child_case("a_foreign_record_is_refused_with_a_genuine_b_case") {
+        return;
+    }
+    foreign_record_is_refused_everywhere(true);
+}
+
+fn foreign_record_is_refused_everywhere(genuine_b: bool) {
+    let repo = fixture();
+    let a = "006aa50000000000f1";
+    let b = "006aa50000000000f2";
+    prepare_task(&repo, repo.path(), a);
+    if genuine_b {
+        prepare_task(&repo, repo.path(), b);
+    }
+
+    let discovered = git::discover(repo.path()).unwrap();
+    let a_worktree = repo.path().join(".worktrees").join(a);
+    let b_worktree = repo.path().join(".worktrees").join(b);
+    // A valid, self-consistent record for B, in A's store.
+    task::save(
+        &state::worktree_task_dir(&a_worktree, &discovered.identity(), b),
+        &record_for(&repo, b, &b_worktree),
+        "current work",
+    )
+    .unwrap();
+
+    // From the primary checkout, and from A itself, where A's store is also the
+    // invoking checkout's default store.
+    for from in [repo.path(), a_worktree.as_path()] {
+        let listing = task::list(&git::discover(from).unwrap()).unwrap();
+        let b_rows = listing
+            .records
+            .iter()
+            .filter(|(_, r)| r.task_id == b)
+            .count();
+        assert_eq!(
+            b_rows,
+            usize::from(genuine_b),
+            "listing from {from:?} with genuine_b={genuine_b}: {:?}",
+            listing.records.iter().map(|(d, _)| d).collect::<Vec<_>>()
+        );
+        assert!(
+            listing.records.iter().any(|(_, r)| r.task_id == a),
+            "A must still be listed from {from:?}"
+        );
+        assert!(
+            listing.notes.iter().any(|note| note.contains(b)),
+            "the stray must be named from {from:?}: {:?}",
+            listing.notes
+        );
+        // And no row anywhere claims B's id other than B's own record.
+        assert!(
+            !listing.unreadable.iter().any(|u| u.task_id == b),
+            "from {from:?}: {:?}",
+            listing.unreadable
+        );
+    }
 }

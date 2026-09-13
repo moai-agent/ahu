@@ -408,67 +408,71 @@ fn a_state_file_is_created_owner_only() {
 /// could reset it, a link *above* that marker would never be inspected — and
 /// the whole point of the boundary is that a repository-reachable link cannot
 /// move ahu's files somewhere else.
+///
+/// Split in two so the environment is set by the process that starts the case,
+/// never by this one: the harness runs tests on threads, and mutating the
+/// environment under them is unsound whatever the writers agree among
+/// themselves.
 #[test]
 fn a_nested_state_marker_does_not_move_the_confinement_boundary() {
-    // Both shapes the boundary can take: an explicitly chosen store, and a
-    // checkout's own store.
-    for explicit in [true, false] {
-        let repo = repo_with_state();
-        let external = External::new();
-        // The external target is a complete, ordinary store of its own, so
-        // nothing below the marker is refusable on its own merits.
-        std::fs::create_dir_all(external.path().join(".ahu/state")).unwrap();
+    let chosen = TempDir::new().unwrap();
+    let output = common::run_child_case("nested_marker_under_a_chosen_store", |command| {
+        command.env("AHU_STATE_DIR", chosen.path());
+    });
+    common::assert_child_passed("nested_marker_under_a_chosen_store", &output);
 
-        let chosen = tempfile::TempDir::new().unwrap();
-        let store = if explicit {
-            chosen.path().to_path_buf()
-        } else {
-            repo.path().join(".ahu/state")
-        };
-        link(external.path(), store.join("link"));
-
-        let ordinary = store.join("link/value.json");
-        let nested = store.join("link/.ahu/state/value.json");
-        let run = |path: &Path| {
-            let _guard = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
-            // SAFETY: every mutation of this variable in this binary is under
-            // the same guard, and nothing else here reads it concurrently.
-            unsafe {
-                if explicit {
-                    std::env::set_var("AHU_STATE_DIR", chosen.path());
-                } else {
-                    std::env::remove_var("AHU_STATE_DIR");
-                }
-            }
-            let result = ahu::state::write_json(path, &serde_json::json!({"written": true}));
-            unsafe { std::env::remove_var("AHU_STATE_DIR") };
-            result
-        };
-
-        let error = run(&ordinary)
-            .expect_err("a link directly below the store is refused")
-            .to_string();
-        assert!(error.contains("refusing ahu state path"), "{error}");
-
-        let error = run(&nested)
-            .expect_err("a nested marker must not reset the boundary")
-            .to_string();
-        assert!(
-            error.contains("refusing ahu state path"),
-            "explicit={explicit}: {error}"
-        );
-
-        // Nothing reached the external directory by either route: same entries,
-        // same bytes, same mode. `.ahu` is the one entry the fixture created.
-        assert!(!external.path().join(".ahu/state/value.json").exists());
-        assert!(!external.path().join("value.json").exists());
-        assert_eq!(external.mode(), 0o755);
-        assert_eq!(
-            std::fs::read_to_string(external.path().join("keep.txt")).unwrap(),
-            "untouched\n"
-        );
-    }
+    let output = common::run_child_case("nested_marker_under_a_checkout_store", |command| {
+        command.env_remove("AHU_STATE_DIR");
+    });
+    common::assert_child_passed("nested_marker_under_a_checkout_store", &output);
 }
 
-/// `AHU_STATE_DIR` is process-wide; these tests are the only mutators here.
-static STATE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The chosen-store half: `AHU_STATE_DIR` names the store this runs in.
+#[test]
+fn nested_marker_under_a_chosen_store() {
+    if !common::is_child_case("nested_marker_under_a_chosen_store") {
+        return;
+    }
+    let store = PathBuf::from(std::env::var_os("AHU_STATE_DIR").expect("the parent sets it"));
+    refuse_through_a_nested_marker(&store);
+}
+
+/// The checkout-store half, with no override in this process's environment.
+#[test]
+fn nested_marker_under_a_checkout_store() {
+    if !common::is_child_case("nested_marker_under_a_checkout_store") {
+        return;
+    }
+    assert!(std::env::var_os("AHU_STATE_DIR").is_none());
+    let repo = repo_with_state();
+    refuse_through_a_nested_marker(&repo.path().join(".ahu/state"));
+}
+
+/// A link directly below the store is refused, and so is the same link with an
+/// ordinary `.ahu/state` pair sitting under it. Nothing reaches the target.
+fn refuse_through_a_nested_marker(store: &Path) {
+    let external = External::new();
+    // The target is a complete, ordinary store of its own, so nothing below the
+    // marker is refusable on its own merits.
+    std::fs::create_dir_all(external.path().join(".ahu/state")).unwrap();
+    link(external.path(), store.join("link"));
+
+    for relative in ["link/value.json", "link/.ahu/state/value.json"] {
+        let error =
+            ahu::state::write_json(&store.join(relative), &serde_json::json!({"written": true}))
+                .expect_err("a link below the store must not be written through")
+                .to_string();
+        assert!(
+            error.contains("refusing ahu state path"),
+            "{relative}: {error}"
+        );
+    }
+
+    assert!(!external.path().join("value.json").exists());
+    assert!(!external.path().join(".ahu/state/value.json").exists());
+    assert_eq!(external.mode(), 0o755);
+    assert_eq!(
+        std::fs::read_to_string(external.path().join("keep.txt")).unwrap(),
+        "untouched\n"
+    );
+}

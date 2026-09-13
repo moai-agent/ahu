@@ -425,6 +425,13 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
 /// process working directory, so a caller holding a valid repository gets the
 /// same answer wherever it is standing.
 ///
+/// A managed task worktree's store is deliberately absent from this list.
+/// [`scan_worktrees`] has already read it as that task's own store, under the
+/// rule that a task worktree holds only its own state. Reading it again here --
+/// as a checkout store, which may legitimately hold many tasks -- would take
+/// back exactly the records that rule refused, and would do so only when
+/// listing from inside that worktree.
+///
 /// An explicit `AHU_STATE_DIR` that is not simply one of this repository's own
 /// checkout stores replaces these default stores, and is then the only one read
 /// here. It changes nothing else: `list` scans task worktrees separately and
@@ -441,12 +448,27 @@ fn checkout_stores(
     if let Some(explicit) = state::isolated_store(repo)? {
         return Ok(vec![tasks_under(&explicit)]);
     }
-    let mut stores = vec![tasks_under(&state::checkout_root(&repo.root)?)];
+    let mut stores = Vec::new();
+    if !is_managed_worktree(&repo.root, primary_root) {
+        stores.push(tasks_under(&state::checkout_root(&repo.root)?));
+    }
     let primary = tasks_under(&state::checkout_root(primary_root)?);
     if !stores.contains(&primary) {
         stores.push(primary);
     }
     Ok(stores)
+}
+
+/// Whether `root` is one of the task worktrees ahu creates.
+///
+/// Resolved before comparing: the same directory is reached one way through
+/// Git's answer and another through a path ahu built.
+fn is_managed_worktree(root: &Path, primary_root: &Path) -> bool {
+    let worktrees = state::worktrees_root_at(primary_root);
+    root.canonicalize()
+        .ok()
+        .zip(worktrees.canonicalize().ok())
+        .is_some_and(|(root, worktrees)| root.parent() == Some(worktrees.as_path()))
 }
 
 /// Which store a scan is reading, and therefore what it may contain.

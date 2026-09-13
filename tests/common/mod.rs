@@ -208,3 +208,44 @@ pub const HOSTILE_PROMPT: &str = "Fix $(touch /tmp/ahu-pwned) and `rm -rf /` now
 second line with 'single' and \"double\" quotes && a pipe | and ; a semicolon\n\
 third line with a trailing backslash \\\n\
 --not-a-flag";
+
+/// The environment variable that tells a re-run of this test binary which case
+/// it is standing in for.
+pub const CHILD_CASE: &str = "AHU_TEST_CHILD_CASE";
+
+/// Whether this process is the child running `name`.
+///
+/// A test whose subject is the environment or the working directory cannot set
+/// those in-process: `set_var` and `remove_var` are unsafe on Unix because the
+/// harness runs tests on threads, and other threads read the environment and
+/// spawn processes while a mutation is in flight. A mutex over the writers does
+/// not change that — the readers are in the standard library and in `Command`.
+/// So the parent configures a child process instead, and the case runs there.
+pub fn is_child_case(name: &str) -> bool {
+    std::env::var(CHILD_CASE).as_deref() == Ok(name)
+}
+
+/// Run one of this binary's tests again in a child process, with an environment
+/// and working directory the parent never mutates.
+///
+/// The named test must return immediately unless [`is_child_case`] says it is
+/// the child, so the parent's own run of it does nothing.
+pub fn run_child_case(name: &str, configure: impl FnOnce(&mut Command)) -> std::process::Output {
+    let mut command = Command::new(std::env::current_exe().expect("the test binary"));
+    command
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD_CASE, name)
+        .env("RUST_BACKTRACE", "1");
+    configure(&mut command);
+    command.output().expect("the child test runs")
+}
+
+/// Fail with the child's own output, which carries its assertion message.
+pub fn assert_child_passed(name: &str, output: &std::process::Output) {
+    assert!(
+        output.status.success(),
+        "child case {name} failed:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
