@@ -817,3 +817,89 @@ fn the_check_neither_starts_a_session_nor_touches_the_bundle() {
         1
     );
 }
+
+#[test]
+fn redirected_lint_preserves_plain_layout_and_json_values() {
+    let repo = TestRepo::new();
+    configure(&repo, &["docs/knowledge"], false);
+    bundle(&repo, "docs/knowledge", &[("a.md", CONCEPT)]);
+    let stub = StubOkf::install();
+    let hostile = "BEGIN\x1b[2J\u{202e}\u{200b}END";
+    for findings in [
+        vec![],
+        vec![("WARN", hostile, hostile, hostile)],
+        vec![("ERROR", hostile, hostile, hostile)],
+    ] {
+        stub.answers("knowledge", &findings);
+        for json in [false, true] {
+            let render = |color: &str| {
+                let stdout = tempfile::NamedTempFile::new().unwrap();
+                let mut command = Command::new(env!("CARGO_BIN_EXE_ahu"));
+                command.args([color, "knowledge", "lint"]);
+                if json {
+                    command.args(["--output", "json"]);
+                }
+                let result = command
+                    .current_dir(repo.path())
+                    .env("AHU_STATE_DIR", repo.state_path())
+                    .env("STUB_OKF_FIXTURES", stub.fixtures())
+                    .env("PATH", format!("{}:/usr/bin:/bin", stub.bin().display()))
+                    .env("TERM", "xterm-256color")
+                    .env_remove("NO_COLOR")
+                    .stdin(Stdio::null())
+                    .stdout(stdout.reopen().unwrap())
+                    .output()
+                    .unwrap();
+                (
+                    result.status.code(),
+                    std::fs::read(stdout.path()).unwrap(),
+                    result.stderr,
+                )
+            };
+            let plain = render("--color=never");
+            assert_eq!(render("--color=auto"), plain);
+            assert_eq!(
+                plain.0,
+                Some(if findings.first().is_some_and(|f| f.0 == "ERROR") {
+                    5
+                } else {
+                    0
+                })
+            );
+            let colored = render("--color=always");
+            assert_eq!(colored.0, plain.0);
+            let human = if json { &colored.2 } else { &colored.1 };
+            let plain_human = if json { &plain.2 } else { &plain.1 };
+            let text = String::from_utf8(human.clone()).unwrap();
+            assert!(text.contains('\x1b'));
+            let mut stripped = text.clone();
+            for sgr in [
+                "\x1b[1m",
+                "\x1b[2m",
+                "\x1b[33m",
+                "\x1b[1;31m",
+                "\x1b[32m",
+                "\x1b[0m",
+            ] {
+                stripped = stripped.replace(sgr, "");
+            }
+            assert_eq!(stripped.as_bytes(), plain_human);
+            assert!(!stripped.contains('\x1b'));
+            assert!(!text.contains('\u{202e}'));
+            assert!(!text.contains('\u{200b}'));
+            if !findings.is_empty() {
+                assert_eq!(text.matches(&ahu::util::display_safe(hostile)).count(), 3);
+            }
+            if json {
+                assert_eq!(colored.1, plain.1);
+                let value: serde_json::Value = serde_json::from_slice(&colored.1).unwrap();
+                assert_eq!(value["schema_version"], 1);
+                if !findings.is_empty() {
+                    for field in ["concept_id", "rule", "message"] {
+                        assert_eq!(value["bundles"][0]["findings"][0][field], hostile);
+                    }
+                }
+            }
+        }
+    }
+}

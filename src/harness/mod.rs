@@ -144,7 +144,7 @@ pub fn adapter_for(harness_id: &str) -> Result<Box<dyn Adapter>> {
         "codex" => Ok(Box::new(codex::Codex)),
         "antigravity" => Ok(Box::new(antigravity::Antigravity)),
         other => bail!(
-            "ahu 0.1.1 has no validated adapter for harness {other:?}. \
+            "ahu has no validated adapter for harness {other:?}. \
              It will not substitute another harness."
         ),
     }

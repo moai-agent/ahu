@@ -511,8 +511,8 @@ pub fn render(report: &LintReport) -> String {
             // from repository content, so all of it is escaped before it
             // reaches the terminal. The severity is ahu's own word for it.
             out.push_str(&format!(
-                "  {:<5} {}  {}\n        {}\n",
-                style.paint(role, finding.severity.as_str()),
+                "  {} {}  {}\n        {}\n",
+                style.paint(role, &format!("{:<5}", finding.severity.as_str())),
                 display_safe(&finding.concept_id),
                 style.paint(Role::Hint, &display_safe(&finding.rule)),
                 display_safe(&finding.message)

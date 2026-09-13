@@ -295,7 +295,7 @@ pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
     for (index, harness) in catalog::HARNESSES.iter().enumerate() {
         let prerequisite = selection::check_prerequisite(harness.id);
         let availability = if !harness.adapter_available {
-            "no ahu adapter in 0.1.1".to_string()
+            "no ahu adapter in this release".to_string()
         } else if prerequisite.satisfied() {
             format!(
                 "installed{}",

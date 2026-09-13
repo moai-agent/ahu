@@ -102,6 +102,7 @@ fn client_or_skip() -> Option<Cmux> {
 
 #[test]
 fn a_repository_group_holds_one_child_workspace_per_task() {
+    let _environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
         return;
     };
@@ -187,6 +188,7 @@ fn a_repository_group_holds_one_child_workspace_per_task() {
 
 #[test]
 fn a_closed_anchor_is_replaced_so_no_task_is_hidden_under_the_header() {
+    let _environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
         return;
     };
@@ -241,6 +243,7 @@ fn a_closed_anchor_is_replaced_so_no_task_is_hidden_under_the_header() {
 /// its task directory intact, even when that path contains shell syntax.
 #[test]
 fn the_startup_command_reaches_ahu_intact_through_a_real_cmux_shell() {
+    let _environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
         return;
     };
@@ -307,6 +310,7 @@ fn write_argv_recorder(dir: &Path, record: &Path) -> PathBuf {
 
 #[test]
 fn the_socket_path_is_discovered_rather_than_hard_coded() {
+    let _environment = TestEnvironment::new();
     // The installed build's socket is not the legacy /tmp/cmux.sock, so ahu must
     // never assume that path.
     let discovered = std::env::var("CMUX_SOCKET_PATH").ok();
@@ -327,6 +331,7 @@ fn the_socket_path_is_discovered_rather_than_hard_coded() {
 /// is started here — see the README for what that leaves unverified.
 #[test]
 fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
+    let mut environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
         return;
     };
@@ -352,9 +357,7 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
 
     // The state directory must be set before planning: the plan is where the
     // worktree and task-record paths are chosen.
-    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: the guard makes this the only test mutating the variable.
-    unsafe { std::env::set_var("AHU_STATE_DIR", repo.state_path()) };
+    environment.set("AHU_STATE_DIR", repo.state_path().as_os_str());
     let planned = ahu::launch::plan(&discovered, Some(agent), pair, prompt);
     let launched = planned
         .as_ref()
@@ -363,13 +366,12 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
             ahu::launch::execute(&discovered, &loaded, plan, prompt, false)
                 .map_err(|e| e.to_string())
         });
-    drop(guard);
     let plan = planned.expect("plan builds");
     let launched = launched.expect("launch succeeds");
     assert!(
         plan.worktree
             .starts_with(discovered.root.join(".worktrees")),
-        "task worktrees live under .worktrees/ in the repository"
+        "task worktrees live under .worktrees/ in the primary checkout"
     );
 
     let workspace = launched
@@ -434,13 +436,93 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
     }
 }
 
-/// Guards the one test that points ahu's state directory somewhere else.
+/// Serialize live tests, including readers of PATH during cmux discovery.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Restore every changed variable before releasing the test lock, including
+/// during unwinding. Keep OsString values so unset and non-Unicode values survive.
+struct TestEnvironment {
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl TestEnvironment {
+    fn new() -> Self {
+        Self {
+            previous: Vec::new(),
+            _lock: ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+        }
+    }
+
+    fn set(&mut self, name: &'static str, value: &std::ffi::OsStr) {
+        if !self.previous.iter().any(|(key, _)| *key == name) {
+            self.previous.push((name, std::env::var_os(name)));
+        }
+        // SAFETY: all tests in this binary hold ENV_LOCK, including readers.
+        unsafe { std::env::set_var(name, value) };
+    }
+}
+
+impl Drop for TestEnvironment {
+    fn drop(&mut self) {
+        for (name, value) in self.previous.iter().rev() {
+            // SAFETY: the lock is still held until after this destructor.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn environment_overrides_restore_values_even_after_unwinding() {
+    // Isolate this regression from the live tests and the caller's environment.
+    if std::env::var_os("AHU_TEST_ENV_RESTORE_CHILD").is_none() {
+        let _environment = TestEnvironment::new();
+        for initial in [None, Some(""), Some("synthetic-state")] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "environment_overrides_restore_values_even_after_unwinding",
+                ])
+                .env("AHU_TEST_ENV_RESTORE_CHILD", "1")
+                .env("AHU_TEST_CMUX", "0");
+            if let Some(value) = initial {
+                child.env("AHU_STATE_DIR", value);
+            } else {
+                child.env_remove("AHU_STATE_DIR");
+            }
+            let result = child.output().unwrap();
+            assert!(result.status.success(), "{:?}", result);
+        }
+        return;
+    }
+    let original_state = std::env::var_os("AHU_STATE_DIR");
+    let original_path = std::env::var_os("PATH");
+    for panic in [false, true] {
+        let result = std::panic::catch_unwind(|| {
+            let mut environment = TestEnvironment::new();
+            environment.set("AHU_STATE_DIR", std::ffi::OsStr::new("first"));
+            environment.set("AHU_STATE_DIR", std::ffi::OsStr::new("second"));
+            environment.set("PATH", std::ffi::OsStr::new("synthetic-bin"));
+            assert_eq!(std::env::var("AHU_STATE_DIR").unwrap(), "second");
+            assert!(!panic, "synthetic unwind");
+        });
+        assert_eq!(result.is_err(), panic);
+        assert_eq!(std::env::var_os("AHU_STATE_DIR"), original_state);
+        assert_eq!(std::env::var_os("PATH"), original_path);
+    }
+}
 
 /// Repeated launches, including from a second worktree of the same repository,
 /// must land in one group as distinct tasks.
 #[test]
 fn repeated_launches_reuse_one_repository_group_with_distinct_tasks() {
+    let mut environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
         return;
     };
@@ -465,9 +547,7 @@ fn repeated_launches_reuse_one_repository_group_with_distinct_tasks() {
     assert_eq!(sibling.identity(), discovered.identity());
 
     let mut launched = Vec::new();
-    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: the guard makes this the only test mutating the variable.
-    unsafe { std::env::set_var("AHU_STATE_DIR", repo.state_path()) };
+    environment.set("AHU_STATE_DIR", repo.state_path().as_os_str());
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for (source, prompt) in [
             (&discovered, "First task from the main checkout"),
@@ -484,15 +564,15 @@ fn repeated_launches_reuse_one_repository_group_with_distinct_tasks() {
             };
             let plan = ahu::launch::plan(source, Some(agent), pair, prompt).unwrap();
             assert!(
-                plan.worktree.starts_with(source.root.join(".worktrees")),
-                "task worktrees live under .worktrees/ in the repository"
+                plan.worktree
+                    .starts_with(discovered.root.join(".worktrees")),
+                "task worktrees live under .worktrees/ in the primary checkout"
             );
             let result = ahu::launch::execute(source, &loaded, &plan, prompt, false)
                 .expect("launch succeeds");
             launched.push((plan, result));
         }
     }));
-    drop(guard);
 
     let cleanup = || {
         for (plan, result) in &launched {
@@ -575,6 +655,7 @@ fn repeated_launches_reuse_one_repository_group_with_distinct_tasks() {
 /// binary actually ran, with which model and which agent name.
 #[test]
 fn two_agents_keep_their_own_harness_model_and_workspace_in_one_group() {
+    let mut environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
         return;
     };
@@ -609,13 +690,11 @@ fn two_agents_keep_their_own_harness_model_and_workspace_in_one_group() {
     let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
 
     let mut launched = Vec::new();
-    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let original_path = std::env::var("PATH").unwrap();
-    // SAFETY: the guard makes this the only test mutating these variables.
-    unsafe {
-        std::env::set_var("AHU_STATE_DIR", repo.state_path());
-        std::env::set_var("PATH", format!("{}:{original_path}", bin.display()));
-    }
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(&original_path));
+    environment.set("AHU_STATE_DIR", repo.state_path().as_os_str());
+    environment.set("PATH", &std::env::join_paths(paths).unwrap());
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for (name, prompt) in [
             ("chris", "Review the launcher"),
@@ -638,9 +717,6 @@ fn two_agents_keep_their_own_harness_model_and_workspace_in_one_group() {
             launched.push((plan, result));
         }
     }));
-    // SAFETY: still under the guard.
-    unsafe { std::env::set_var("PATH", &original_path) };
-    drop(guard);
 
     let cleanup = || {
         for (plan, result) in &launched {

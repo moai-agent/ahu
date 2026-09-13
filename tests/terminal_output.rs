@@ -382,6 +382,8 @@ fn redirected_commands_match_explicit_plain_output() {
         &["diff", "missing"],
         &["codex"],
         &["doctor"],
+        &["knowledge", "lint"],
+        &["knowledge", "lint", "--output", "json"],
         &["focus", "missing"],
         &["launch", "@missing", "--prompt", "fixture", "--dry-run"],
         &["run-task", "--task-dir", "missing"],
@@ -710,4 +712,97 @@ fn previews_contain_hostile_fields_and_preserve_plain_structure() {
             );
         }
     }
+}
+
+#[test]
+fn selector_output_fixture() {
+    let Ok(path) = std::env::var("AHU_TEST_SELECTOR_OUTPUT") else {
+        return;
+    };
+    let color = match std::env::var("AHU_TEST_SELECTOR_COLOR").unwrap().as_str() {
+        "always" => ahu::style::ColorChoice::Always,
+        "auto" => ahu::style::ColorChoice::Auto,
+        "never" => ahu::style::ColorChoice::Never,
+        _ => panic!("invalid fixture color"),
+    };
+    ahu::style::configure(Some(color));
+    let repo = TestRepo::new();
+    repo.add_agent_on("fixture", "1.0.0", "codex", "gpt-6-astra");
+    let mut agents = ahu::agent::load_all(repo.path()).unwrap();
+    // Exercise the renderer's backstop even for identities that the manifest
+    // reader rejects, without weakening registration validation.
+    let hostile = "BEGIN\x1b[2J\u{202e}\u{200b}END";
+    agents[0].manifest.name = hostile.into();
+    agents[0].manifest.description = format!("{hostile} {}", "界".repeat(80));
+    let mut reader = std::io::Cursor::new("9\nunknown\n1\n");
+    let mut output = Vec::new();
+    let mut console = ahu::launcher::Console {
+        input: &mut reader,
+        output: &mut output,
+        interactive: true,
+    };
+    assert_eq!(
+        ahu::launcher::read_selector(&mut console, &agents).unwrap(),
+        Some(hostile.into())
+    );
+    std::fs::write(path, output).unwrap();
+}
+
+#[test]
+fn selector_styling_contains_hostile_fields_and_preserves_selection() {
+    let render = |color: &str| {
+        let rendered = tempfile::NamedTempFile::new().unwrap();
+        let stdout = tempfile::NamedTempFile::new().unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "selector_output_fixture"])
+            .env("AHU_TEST_SELECTOR_OUTPUT", rendered.path())
+            .env("AHU_TEST_SELECTOR_COLOR", color)
+            .env("TERM", "xterm-256color")
+            .env_remove("NO_COLOR")
+            .stdout(stdout.reopen().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            std::fs::read_to_string(stdout.path()).unwrap()
+        );
+        std::fs::read_to_string(rendered.path()).unwrap()
+    };
+    let plain = render("never");
+    assert_eq!(render("auto"), plain);
+    let colored = render("always");
+    let safe = display_safe("BEGIN\x1b[2J\u{202e}\u{200b}END");
+    assert!(colored.contains(&format!("  1. \x1b[1;36m@{safe}\x1b[0m")));
+    assert!(colored.contains("     \x1b[36mcodex / gpt-6-astra\x1b[0m\n"));
+    assert!(colored.contains(&format!("     \x1b[2m{safe} ")));
+    let mut stripped = colored;
+    for sgr in [
+        "\x1b[1m",
+        "\x1b[1;36m",
+        "\x1b[36m",
+        "\x1b[2m",
+        "\x1b[33m",
+        "\x1b[0m",
+    ] {
+        stripped = stripped.replace(sgr, "");
+    }
+    assert_eq!(stripped, plain);
+    assert!(!plain.contains('\x1b'));
+    assert!(!plain.contains('\u{202e}'));
+    assert!(!plain.contains('\u{200b}'));
+    let description = plain
+        .lines()
+        .find(|line| line.starts_with("     BEGIN"))
+        .unwrap();
+    assert!(description.ends_with("..."));
+    assert!(
+        description
+            .chars()
+            .map(|c| if c.is_ascii() { 1 } else { 2 })
+            .sum::<usize>()
+            <= 80
+    );
+    assert!(plain.contains("range 1–1"));
+    assert!(plain.contains(&format!("Valid agents: @{safe}")));
 }

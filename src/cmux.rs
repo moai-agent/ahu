@@ -91,7 +91,7 @@ impl Cmux {
             ),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
                 "cmux was not found on PATH.\n\
-                 ahu 0.1.1 organises task sessions in cmux, so it cannot launch without it.\n\
+                 ahu organises task sessions in cmux, so it cannot launch without it.\n\
                  Install cmux, or set AHU_CMUX_BIN to its executable."
             ),
             Err(e) => bail!("cannot run cmux: {e}"),
