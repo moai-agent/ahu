@@ -1,6 +1,6 @@
 //! Semantic terminal styling. Only this module emits terminal escapes.
 
-use std::io::IsTerminal;
+use    std::io::IsTerminal;
 use std::sync::OnceLock;
 
 use crate::util::display_safe_block;
