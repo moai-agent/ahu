@@ -72,7 +72,10 @@ Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
 The admitted CLI profiles are Codex 0.154.0, Claude Code 2.1.269/2.1.270,
 and Antigravity CLI 1.2.2. Other versions fail before worktree creation, with no
-fallback harness or model. Profile admission describes the adapter's argument
+fallback harness or model. OpenCode has no headless profile at all: `--headless`
+with an OpenCode agent is refused, and ahu runs the assignment on no other
+harness. Launch OpenCode agents interactively; see
+[OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models). Profile admission describes the adapter's argument
 surface, not successful authentication, provider availability, or full native
 helper lifecycle validation.
 
@@ -219,6 +222,7 @@ requests must retain the policy frozen in their host grant.
 | Claude Code 2.1.270 | Admitted | Read-only profile |
 | Codex 0.154.0 | Admitted | Refused: incomplete helper identity/join event visibility |
 | Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
+| OpenCode | Refused: no headless profile | Not applicable |
 
 The Claude bounded profile restricts the **entire attempt, including the owner**,
 to the model tools `Read`, `Grep`, `Glob`, and the parent's `Task` delegation tool.
@@ -354,8 +358,8 @@ registry.
 `onboard` offers registration for Claude Code Markdown definitions. It lists
 Codex TOML and Antigravity native definitions with blockers even though both
 harness adapters exist; this native-onboarding path cannot register them.
-Explicit manifests can use plain Markdown with any supported harness;
-`antigravity-agent` also reads a Markdown body after frontmatter. An explicit
+Explicit manifests can use plain Markdown with any supported harness, OpenCode
+included; `antigravity-agent` also reads a Markdown body after frontmatter. An explicit
 `codex-agent` source is delivered verbatim as text; its TOML fields are not parsed
 as native model or instruction metadata. Plain Markdown makes the delivered
 instructions explicit.
@@ -395,13 +399,200 @@ Registration and removal ask for confirmation; neither edits the native file.
 `harness` and `model` are required, explicit values. If the native definition
 has parsed frontmatter declaring a nonempty model other than `inherit`,
 the two must agree; `ahu` will not rewrite either file or
-pick one silently.
+pick one silently. A model identifier is written exactly as its harness expects
+it: OpenCode's `-m` takes `provider/model`, so an OpenCode manifest pins the
+provider prefix too, as in
+[OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models).
 
 Every named agent needs a semantic version. `ahu` does not manage releases for
 you, but it will tell you when a version label has stopped matching its inputs:
 if `chris@1.2.0` launches with different instructions or a different repository
 configuration than the last `chris@1.2.0` launch, that drift is reported as a
 pending behavior change for the next version bump.
+
+## OpenCode with Ollama-hosted models
+
+This section walks one combination end to end: the OpenCode CLI driving GLM
+through a local Ollama endpoint. ahu installs none of it, writes no OpenCode
+configuration, and holds no provider credentials.
+
+### Inference runs on Ollama's hosted service
+
+`glm-5.3:cloud` is an Ollama **cloud** model. Registering an agent on it selects
+a remote inference provider: the prompts, repository file contents, and tool
+output that the model sees leave the machine and are processed by Ollama's hosted
+service. The Ollama process on the machine is the endpoint and router; it is not
+where inference happens. Decide whether this repository's contents may leave the
+machine before registering the agent, not after.
+
+Check it yourself. `ollama list` shows a cloud model with an empty size column,
+because there is no local weight file — on 2026-09-13 `glm-5.3:cloud` listed
+digest `8477dab3e25b` and no size. A model whose weights are on disk shows a size.
+
+A `:cloud` tag is also a moving alias: the digest behind the name can change
+without the name changing. ahu records `ollama/glm-5.3:cloud` as a moving alias
+rather than a pinned build, so a task record names the identifier that was
+requested, not the build that answered.
+
+### Check the prerequisites
+
+```sh
+opencode --version
+ollama --version
+ollama list
+ollama show glm-5.3:cloud
+curl -sS http://localhost:11434/v1/models
+```
+
+`ollama show` prints the model's `context length`. The `curl` request lists what
+the OpenAI-compatible endpoint serves without running inference; a connection
+error there means Ollama is not running or is not listening on that address.
+
+More than one OpenCode installation can sit on `PATH` at once — a package-manager
+copy and the installer's copy under your home directory, often at different
+versions. ahu resolves `opencode` on the submitting shell's `PATH` and reports the
+resolved executable path in the launch preview. To see which one that is:
+
+```sh
+command -v opencode
+opencode --version
+```
+
+`type -a opencode` (bash or zsh) lists every match in `PATH` order. Compare the
+first match against the path in the preview: ahu runs the installation its own
+resolution picks and reports it, and it does not go looking for a different one.
+
+### Configure the Ollama provider in OpenCode
+
+OpenCode ships no Ollama provider. Until one is configured, `opencode models`
+lists only `opencode/*` entries and `ollama/glm-5.3:cloud` does not resolve. The
+provider is your own OpenCode configuration, never something ahu writes:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama",
+      "options": { "baseURL": "http://localhost:11434/v1" },
+      "models": {
+        "glm-5.3:cloud": { "name": "GLM 5.3 (Ollama cloud)" }
+      }
+    }
+  }
+}
+```
+
+Put that in the project's `opencode.json` or in the global OpenCode
+configuration; `ollama/glm-5.3:cloud` then appears in `opencode models`.
+OpenCode's `-m` takes `provider/model`, so the `ollama/` prefix is part of the
+identifier a manifest pins.
+
+Ollama's OpenCode integration documentation requires a context length of 64k or
+higher. `ollama show <model>` reports the model's own context length, and a model
+entry in the provider configuration can declare `limit.context`, which is what
+OpenCode asks for. Check both before assigning long work.
+
+### Configuration precedence, and what travels into a task
+
+OpenCode merges configuration in its documented order, later sources overriding
+earlier ones for conflicting keys: remote `.well-known/opencode`, the global
+`~/.config/opencode/opencode.json(c)`, `OPENCODE_CONFIG`, the project's
+`opencode.json(c)`, `.opencode/` directories, `OPENCODE_CONFIG_CONTENT`, managed
+configuration files, and macOS MDM preferences. Rules come from `AGENTS.md`, with
+`CLAUDE.md` as a fallback when there is no `AGENTS.md`; the first match in each
+category wins. Skills are discovered on demand, including under
+`.opencode/skills/`, `.claude/skills/`, and `.agents/skills/`.
+
+ahu's configuration snapshot carries the invoking checkout's `.opencode/`,
+`opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md`, `.agents/`, and
+`.claude/` into the task worktree, as described in
+[what a task gets](#what-a-task-gets). The global, `OPENCODE_CONFIG`, managed, and
+MDM sources belong to the host: they are not snapshotted, so a task can resolve
+configuration ahu never saw and does not report.
+
+An `opencode.json` can name `plugin` modules that OpenCode installs and runs at
+startup. That is executable configuration travelling with the task, on the same
+footing as hooks: ahu copies it and reports what it can see, decides nothing about
+it, and provides no OS isolation. Review a repository's OpenCode configuration
+before launching an agent in it.
+
+### Register an OpenCode agent
+
+`harness = "opencode"` accepts `permissions = "prompt"` and `permissions = "auto"`;
+`accept-edits` is refused. On this harness `prompt` is not an approval gate — see
+[delegation and approval boundaries](#delegation-and-approval-boundaries) for the
+mapping and the reason.
+
+Write the instructions the agent will be given:
+
+```sh
+mkdir -p .agents/ahu/agents .agents/ahu/instructions
+printf '%s\n' 'Review the assigned changes and report findings with file and line references.' \
+  > .agents/ahu/instructions/glm-reviewer.md
+```
+
+Register it as `.agents/ahu/agents/glm-reviewer.toml`:
+
+```toml
+schema_version = 1
+name = "glm-reviewer"
+version = "1.0.0"
+description = "Reviews assigned changes and reports findings"
+harness = "opencode"
+model = "ollama/glm-5.3:cloud"
+permissions = "prompt"
+
+[source]
+format = "markdown"
+path = ".agents/ahu/instructions/glm-reviewer.md"
+```
+
+Preview before launching anything:
+
+```sh
+ahu agents
+ahu launch @glm-reviewer --prompt 'Review the configuration validation and report findings.' --dry-run
+```
+
+The preview's `argv` shows the command ahu builds:
+`opencode --model ollama/glm-5.3:cloud --prompt <PROMPT>`, with `--auto` added
+only for `permissions = "auto"`. The prompt is one argument and never passes
+through a shell; see [prompts are data](#prompts-are-data). Then submit the real
+assignment:
+
+```sh
+printf '%s\n' 'Review configuration validation and report findings.' > assignment.txt
+ahu launch @glm-reviewer --prompt-file assignment.txt
+```
+
+This manifest declares `prompt`, so no approval-widening flag is needed. A
+manifest declaring `auto` requires `--allow-widened-approvals` on previews and
+launches alike. Interactive launches need cmux; OpenCode agents cannot run
+headless, so `--headless` here is refused rather than redirected to another
+harness.
+
+### Troubleshooting
+
+ahu's own preflight covers Git, project configuration, the manifest, and the
+`opencode` executable on `PATH`. Everything past launch — endpoint reachability,
+provider resolution, model availability, authentication, and context limits — is
+between OpenCode and Ollama.
+
+| Symptom | Your check | What ahu does |
+| --- | --- | --- |
+| `opencode` not found; exit `4` | `command -v opencode` | Reports the missing prerequisite and stops before creating a worktree. |
+| The session cannot reach the endpoint | `curl -sS http://localhost:11434/v1/models` | Does not probe the endpoint. The failure surfaces in the session; the task, branch, and worktree remain. |
+| `ollama/glm-5.3:cloud` does not resolve; `opencode models` lists only `opencode/*` | The `provider` block in `opencode.json` or the global configuration | Does not write or repair OpenCode configuration. |
+| The tag is absent from `ollama list` | `ollama list`, then pull the tag yourself | Does not pull or create models. |
+| Hosted-model authentication fails | Ollama's own sign-in for cloud models | Holds no provider credentials and cannot authenticate for you. |
+| Context below 64k | `ollama show <model>`; `limit.context` in the provider entry | Does not set or raise context limits. |
+| Manifest declares `accept-edits` | The manifest's `permissions` value | Refuses the manifest with an error and offers no substitute mode. |
+
+In every one of these cases ahu reports and stops. It never silently selects
+another model, provider, or harness, and a failed session does not remove the
+task's branch, worktree, or record.
 
 ## What a task gets
 
@@ -440,11 +631,14 @@ to another repository. Neither command stages, commits, or applies changes.
   the checkout you launched from, under `.worktrees/` in the primary checkout.
   Repeated and concurrent launches always produce distinct tasks.
 - **Recognized repository agent configuration.** Recognized `.agents/`, `.claude/`,
-  `.codex/`, and `.agent/` directories, plus `CLAUDE.md`, `CLAUDE.local.md`,
-  `AGENTS.md`, `AGENTS.override.md`, and `.mcp.json` files, are
+  `.codex/`, `.agent/`, and `.opencode/` directories, plus `CLAUDE.md`,
+  `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`, `.mcp.json`,
+  `opencode.json`, and `opencode.jsonc` files, are
   copied at their native paths, including uncommitted and Git-ignored files, and
   configuration you have deleted locally stays deleted. Unrelated dirty source
-  files stay in your original checkout.
+  files stay in your original checkout. Some of this is executable
+  configuration — hooks, and OpenCode `plugin` modules — so it travels with the
+  same trust consequences as the rest of the repository.
 - **The configured harness and model at launch.** The preview records the
   executable found on the submitting shell's `PATH`. For interactive startup, `run-task`
   resolves the same harness name on the workspace's `PATH`; cmux wrappers can
@@ -503,8 +697,8 @@ under skipped paths still arrive through Git; local edits there are not copied.
 ## Hooks
 
 Hooks run on harness lifecycle events and can affect tool calls or context.
-ahu inventories Claude Code hook settings and reports Codex and Antigravity
-hook coverage as unknown. It does not add, edit, remove, or disable hooks.
+ahu inventories Claude Code hook settings and reports Codex, Antigravity, and
+OpenCode hook coverage as unknown. It does not add, edit, remove, or disable hooks.
 
 Only a hook's program is shown, never its arguments, and only its digest is
 stored in the task record — hook commands routinely carry tokens, and an
@@ -514,8 +708,8 @@ For Claude Code, `ahu inventory` lists hooks ahu can read from
 `.claude/settings.json`, `.claude/settings.local.json`, `~/.claude/settings.json`,
 and managed settings, with event, matcher, scope, and digest. `ahu doctor` shows
 this hook section only when the project harness preferences include Claude Code;
-it omits it for this repository's Codex-only preferences. Codex and Antigravity
-launch previews explicitly report unknown hook coverage. For scanned hooks,
+it omits it for this repository's Codex-only preferences. Codex, Antigravity, and
+OpenCode launch previews explicitly report unknown hook coverage. For scanned hooks,
 the launch preview says what each one means for the task:
 
 - **Recognized repository hook configuration travels into the task worktree**,
@@ -652,9 +846,12 @@ uses command lookup, and relative or absolute paths are accepted without the
 default working-tree exclusion. These are executable selection checks, not a
 sandbox or a guarantee against later replacement by a host process.
 
-The catalog in `src/catalog.rs` records adapter verification against Claude Code
-2.1.269, Codex 0.154.0, and Antigravity CLI 1.2.2. These are recorded compatibility
-baselines, not claims that newer versions or account entitlements were tested.
+The catalog in `src/catalog.rs` records, per adapter, the CLI version its
+behavior was verified against and the enforcement gaps ahu discloses for it.
+These are recorded compatibility baselines, not claims that newer versions or
+account entitlements were tested. Where more than one installation of a harness
+is on `PATH`, ahu runs and reports the one its own resolution picks; it does not
+search for a version that matches the catalog.
 Project configuration pins catalog `2026-09-12`; a mismatch is an error.
 
 Persisted task records use schema 2; launch-preview and task-inspection JSON use
@@ -687,6 +884,28 @@ request adapter-specific flags; `ahu launch` requires
 `--allow-widened-approvals` for either, including dry runs. Existing harness
 settings still affect approvals. The flag grants no additional access to the
 calling session.
+
+`prompt` therefore means *ahu imposes nothing*, not *the session will ask*. What
+happens next is the harness's own default, and the harnesses do not agree:
+
+| Manifest `permissions` | OpenCode | Effect |
+| --- | --- | --- |
+| `prompt` | no flag passed | OpenCode's own permission configuration decides. Its defaults allow most tools, deny reads of `.env*` files, and ask only for `doom_loop` and `external_directory` — so an OpenCode agent can edit files and run commands without asking. |
+| `auto` | `--auto` | Auto-approves every permission that is not explicitly denied. Still requires `--allow-widened-approvals`. |
+| `accept-edits` | rejected | OpenCode has no accept-edits flag and its permission actions are static configuration, so ahu refuses the manifest instead of approximating the mode. There is no fallback to `prompt` or `auto`. |
+
+Readers arriving from Claude Code or Codex should not carry over the assumption
+that `prompt` gates edits and commands: on OpenCode it does not. Express finer
+rules in OpenCode's own `permission` configuration, whose actions are `ask`,
+`allow`, and `deny` per tool. No permission flag on any harness gives OS-level
+isolation.
+
+ahu passes no `--agent` flag on OpenCode. A wrong agent name does not fail there:
+OpenCode reports that the agent was not found and continues with its default
+agent, so the flag cannot confirm that an identity was applied. `--agent` would
+also override the agent's own model and permissions, contradicting the exact
+model the manifest pins. As on every other harness, the agent's instructions and
+ahu's delegation contract travel as prompt text — delivery, not enforcement.
 
 `ahu codex` opens Codex in the current Git checkout with `--sandbox
 workspace-write --ask-for-approval on-request` and Codex's configured model. It

@@ -14,7 +14,10 @@ cargo install --git https://github.com/moai-agent/ahu --locked
 ```
 
 Tasks require Git and the selected harness installed and
-authenticated: Claude Code (`claude`), Codex (`codex`), or Antigravity CLI (`agy`).
+authenticated: Claude Code (`claude`), Codex (`codex`), Antigravity CLI (`agy`),
+or OpenCode (`opencode`). An OpenCode agent also needs the model's provider
+configured in your own OpenCode configuration; see
+[OpenCode with Ollama-hosted models](docs/reference.md#opencode-with-ollama-hosted-models).
 Interactive sessions also require cmux. Headless tasks need no cmux connection.
 ahu installs none of these and holds no provider credentials. Read-only help and
 launch previews do not require a cmux connection. Git and default cmux lookup
@@ -75,6 +78,8 @@ The first command waits in the foreground; the second returns after supervisor
 startup. Each launches a separate task. Headless results and logs live outside
 repositories. See [headless execution](docs/reference.md#headless-execution) for
 supported CLI versions, result collection, resume, cancellation, and limits.
+Headless mode covers Claude Code, Codex, and Antigravity; `--headless` with an
+OpenCode agent is refused rather than run on another harness.
 Headless child launches need host grants (`--allow-child` or
 `--allow-child-widened`). Claude Code 2.1.270 also supports bounded native helpers
 for entirely read-only assignments; use a separate registered reviewer for that
