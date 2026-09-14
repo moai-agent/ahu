@@ -908,14 +908,21 @@ pub fn render_settings_for_preview(inventory: &HookInventory) -> String {
         .iter()
         .filter(|f| !f.is_empty())
         .collect();
+    // What ahu did not read is not retracted by finding something it did read.
+    // `.mcp.json` and `opencode.json` are repository configuration ahu parses
+    // for every harness, while the harness's own settings can still be a surface
+    // it has no implementation for. Emitting this independently stops "unknown"
+    // becoming "none" the moment one of those files happens to be present.
+    if let Some(harness) = &inventory.unscanned_harness {
+        out.push_str(&format!(
+            "  ahu did not read {}'s settings; what it allows, denies, or\n  \
+             pre-approves is unknown to ahu, not known to be empty.\n",
+            display_safe(harness)
+        ));
+    }
     if facts.is_empty() && inventory.mcp_servers.is_empty() && inventory.declared_plugins.is_empty()
     {
-        if inventory.unscanned_harness.is_some() {
-            out.push_str(
-                "  ahu did not read this harness's settings; what it allows, denies, or\n  \
-                 pre-approves is unknown to ahu, not known to be empty.\n",
-            );
-        } else {
+        if inventory.unscanned_harness.is_none() {
             out.push_str(
                 "  the settings files ahu read declare no permission, plugin, MCP, or env keys\n",
             );
@@ -1004,9 +1011,19 @@ pub fn render_settings_for_preview(inventory: &HookInventory) -> String {
             ));
         }
     }
-    out.push_str(
-        "  ahu reads these files; it does not set, override, or remove any of them, and it\n  \
-         cannot tell you which keys the installed harness honours from a project settings file.\n",
-    );
+    // Qualified rather than fixed: on a harness whose settings ahu has no
+    // implementation for, "ahu reads these files" would describe the repository
+    // files it parsed as though they were the harness's approval configuration.
+    if inventory.unscanned_harness.is_some() {
+        out.push_str(
+            "  the files above are the repository configuration ahu parses; it did not read\n  \
+             this harness's own settings, and it does not set, override, or remove any of them.\n",
+        );
+    } else {
+        out.push_str(
+            "  ahu reads these files; it does not set, override, or remove any of them, and it\n  \
+             cannot tell you which keys the installed harness honours from a project settings file.\n",
+        );
+    }
     out
 }

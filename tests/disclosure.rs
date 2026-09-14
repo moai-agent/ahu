@@ -913,3 +913,37 @@ fn a_claude_launch_is_not_told_it_executes_opencode_plugins() {
         "a Claude Code launch must not claim it executes OpenCode plugins:\n{gaps}"
     );
 }
+
+/// Finding repository configuration must not retract the statement that the
+/// harness's own settings were never read.
+///
+/// `.mcp.json` and `opencode.json` are parsed for every harness, but on a
+/// harness whose settings surface ahu has no implementation for, the approval
+/// configuration is still uninspected. Suppressing that sentence because one of
+/// those files turned up would report "unknown" as "none" in exactly the case
+/// the reader most needs it — a repository declaring an executable plugin.
+#[test]
+fn declared_plugins_do_not_suppress_the_unscanned_settings_disclosure() {
+    for (name, contents) in [
+        ("no plugin", r#"{"model":"ollama/glm-5.3:cloud"}"#),
+        ("one plugin", r#"{"plugin":["some-remote-plugin"]}"#),
+    ] {
+        let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
+        repo.write("opencode.json", contents);
+        repo.commit("fixture");
+
+        let (discovered, plan) = plan_for(&repo, "opencode", "ollama/glm-5.3:cloud");
+        let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+
+        assert!(
+            preview.contains("did not read opencode's settings"),
+            "with {name}, the preview must still say the harness's settings were \
+             not read:\n{preview}"
+        );
+        assert!(
+            !preview.contains("ahu reads these files;"),
+            "with {name}, an unscanned harness must not be told ahu reads its \
+             settings files:\n{preview}"
+        );
+    }
+}
