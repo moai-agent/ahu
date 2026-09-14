@@ -361,14 +361,13 @@ fn the_catalog_entry_and_the_adapter_agree() {
 ///
 /// The cross-harness control test skips a `(harness, permissions)` pair whose
 /// `launch_command` refuses, because a refused pair has no argv for a control
-/// to contradict. That leaves a gap in the other direction: if `accept-edits`
-/// were ever made to build a command — widening it to `--auto`, say — the
-/// enforcement report would still be claiming ahu "refuses to build this launch
-/// at all", and nothing would fail. An independent review found exactly that
-/// mutation surviving this suite.
+/// to contradict. That leaves the opposite direction unguarded: were
+/// `accept-edits` ever made to build a command — widened to `--auto`, say — the
+/// enforcement report would go on claiming ahu "refuses to build this launch at
+/// all" while a launch was being built.
 ///
-/// So this pins the pairing itself: the report may describe a refusal only
-/// while the adapter really does refuse.
+/// The invariant is the pairing: the report describes a refusal exactly when
+/// the adapter refuses.
 #[test]
 fn a_refusal_control_is_only_reported_for_a_permission_value_that_is_refused() {
     let adapter = harness::adapter_for("opencode").unwrap();

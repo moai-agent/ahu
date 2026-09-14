@@ -357,11 +357,10 @@ mod tests {
     /// A verified version must not match a longer number that merely starts
     /// with it.
     ///
-    /// The catalog gained a comma-separated `verified_versions` because
-    /// OpenCode replaced its own binary in place during verification. That made
-    /// the matching rule load-bearing, and a plain `contains` would read a
-    /// future 1.18.290 as the verified 1.18.29 and suppress the note the entry
-    /// exists to produce. An independent review caught this.
+    /// `verified_versions` is comma-separated because a harness can replace its
+    /// own binary in place between launches, which makes the matching rule
+    /// load-bearing: a plain `contains` reads a future 1.18.290 as the verified
+    /// 1.18.29 and suppresses the note the entry exists to produce.
     #[test]
     fn a_verified_version_does_not_match_a_longer_number_beginning_with_it() {
         assert!(version_reports("1.18.29", "1.18.29"));

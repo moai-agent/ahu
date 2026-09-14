@@ -800,3 +800,116 @@ fn the_inventory_labels_both_digests() {
         "{rendered}"
     );
 }
+
+/// A plugin module an `opencode.json` declares is named on the launch preview.
+///
+/// The configuration snapshot carries the file and digests it, but that digest
+/// covers the declaration, not the code the specifier resolves to, and a remote
+/// npm module is not a file the executable-bit scan can see. Without this the
+/// preview shows an `opencode.json` as one more inherited instruction file and
+/// says nothing about the harness fetching and running code named inside it.
+#[test]
+fn declared_opencode_plugins_are_named_on_the_preview() {
+    let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
+    repo.write(
+        "opencode.json",
+        r#"{"plugin":["some-remote-plugin","@scope/another@1.2.3"]}"#,
+    );
+    repo.commit("fixture");
+
+    let (discovered, plan) = plan_for(&repo, "opencode", "ollama/glm-5.3:cloud");
+    let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+
+    for expected in [
+        "some-remote-plugin",
+        "@scope/another@1.2.3",
+        "plugin module(s) declared by this repository",
+        "does not resolve, pin, or sandbox what they fetch",
+    ] {
+        assert!(
+            preview.contains(expected),
+            "the preview must disclose {expected:?}:\n{preview}"
+        );
+    }
+}
+
+/// A `.jsonc` ahu cannot parse is reported as unknown, never as "no plugins".
+#[test]
+fn an_unparseable_opencode_config_is_unknown_rather_than_empty() {
+    let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
+    repo.write(
+        "opencode.jsonc",
+        "{\n  // a comment makes this invalid JSON\n  \"plugin\": [\"x\"]\n}",
+    );
+    repo.commit("fixture");
+
+    let (discovered, plan) = plan_for(&repo, "opencode", "ollama/glm-5.3:cloud");
+    let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+
+    assert!(
+        preview.contains("opencode.jsonc"),
+        "an unparseable config must be named:\n{preview}"
+    );
+}
+
+/// A repository that declares no plugin must serialize and digest exactly as it
+/// did before `declared_plugins` existed.
+///
+/// Task records are frozen and digested. An always-present `"declared_plugins":
+/// []` would change the serialized bytes, and therefore the digest, of every
+/// existing record whose configuration did not move — drift reported where
+/// nothing drifted. An empty list is skipped on the wire and contributes
+/// nothing to the digest; a non-empty one does both, so a plugin appearing or
+/// changing is still visible as drift.
+#[test]
+fn an_empty_plugin_list_changes_neither_the_serialization_nor_the_digest() {
+    let mut inventory = ahu::hooks::HookInventory::default();
+    let legacy_json = serde_json::to_string(&inventory).unwrap();
+    let legacy_digest = inventory.digest();
+
+    assert!(
+        !legacy_json.contains("declared_plugins"),
+        "an empty plugin list must not appear on the wire: {legacy_json}"
+    );
+
+    // A record written by a build that predates the field still loads.
+    let restored: ahu::hooks::HookInventory = serde_json::from_str(&legacy_json).unwrap();
+    assert_eq!(restored.declared_plugins, Vec::new());
+    assert_eq!(restored.digest(), legacy_digest);
+
+    inventory.declared_plugins.push(ahu::hooks::DeclaredPlugin {
+        source: "opencode.json".to_string(),
+        module: "some-remote-plugin".to_string(),
+    });
+    assert!(
+        serde_json::to_string(&inventory)
+            .unwrap()
+            .contains("some-remote-plugin"),
+        "a declared plugin must be recorded"
+    );
+    assert_ne!(
+        inventory.digest(),
+        legacy_digest,
+        "a declared plugin must move the digest, or its appearance is not drift"
+    );
+}
+
+/// A non-OpenCode launch is never told it executes `opencode.json` plugins.
+///
+/// The file travels into every task worktree, so it is inventoried whatever the
+/// harness is. Only OpenCode reads it, so only an OpenCode launch carries the
+/// startup-execution gap.
+#[test]
+fn a_claude_launch_is_not_told_it_executes_opencode_plugins() {
+    let repo = repo_on("claude-code", "claude-opus-5");
+    repo.write("opencode.json", r#"{"plugin":["some-remote-plugin"]}"#);
+    repo.commit("fixture");
+
+    let (_discovered, plan) = plan_for(&repo, "claude-code", "claude-opus-5");
+    let gaps = plan.enforcement.gaps.join("\n");
+
+    assert!(
+        !gaps.contains("installed and executed by OpenCode at startup"),
+        "a Claude Code launch must not claim it executes OpenCode plugins:\n{gaps}"
+    );
+}

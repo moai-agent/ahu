@@ -274,6 +274,18 @@ pub struct McpServer {
     pub command: String,
 }
 
+/// A plugin module an `opencode.json` declares.
+///
+/// OpenCode installs and runs these at startup, so a name here is executable
+/// configuration the reader is trusting, not an inert setting. ahu records the
+/// module string exactly as declared — it may be an npm specifier that resolves
+/// to code ahu never sees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredPlugin {
+    pub source: String,
+    pub module: String,
+}
+
 /// Every hook ahu could find, plus an honest account of what it could not.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookInventory {
@@ -284,6 +296,15 @@ pub struct HookInventory {
     /// MCP servers declared by the repository's `.mcp.json`.
     #[serde(default)]
     pub mcp_servers: Vec<McpServer>,
+    /// Plugin modules declared by the repository's `opencode.json(c)`.
+    ///
+    /// Skipped when empty so a record written by a build without this field and
+    /// a record written by one with it are byte-identical. Task records are
+    /// frozen and digested; a new always-present `[]` would change the digest of
+    /// every existing record that declares no plugin, which would read as
+    /// configuration drift where nothing about the configuration moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_plugins: Vec<DeclaredPlugin>,
     /// Settings files that exist but could not be parsed. Their hooks are
     /// unknown, which is reported rather than treated as "none".
     pub unreadable: Vec<String>,
@@ -356,6 +377,13 @@ impl HookInventory {
                 self.mcp_servers
                     .iter()
                     .map(|m| digest_bytes(format!("{m:?}").as_bytes())),
+            )
+            // Empty contributes nothing, so a repository declaring no plugin
+            // digests exactly as it did before this field existed.
+            .chain(
+                self.declared_plugins
+                    .iter()
+                    .map(|p| digest_bytes(format!("{p:?}").as_bytes())),
             )
             .collect();
         facts.sort();
@@ -489,6 +517,10 @@ pub fn collect_for(
     // travels into the task worktree either way. Whether a declared server
     // starts depends on the selected harness.
     collect_mcp_servers(repo_root, &mut inventory);
+    // `opencode.json` likewise travels into the task worktree whatever the
+    // harness is, and its `plugin` entries are modules OpenCode installs and
+    // executes at startup.
+    collect_opencode_plugins(repo_root, &mut inventory);
     if !hook_surface_is_implemented(harness_id) {
         inventory.unscanned_harness = Some(harness_id.to_string());
         return Ok(inventory);
@@ -552,6 +584,62 @@ pub fn collect_for(
 ///
 /// Use the same no-follow resolver as hook settings so repository symlinks
 /// cannot redirect the read.
+/// Record the plugin modules an `opencode.json` or `opencode.jsonc` declares.
+///
+/// These are named, not resolved: OpenCode installs them itself, from wherever
+/// the specifier points. Reporting the names is the whole point — the snapshot
+/// already carries the file and digests it, but a digest of a file naming a
+/// remote module tells the reader nothing about what will run, and an npm
+/// specifier is not a file the executable-bit scan can see.
+///
+/// A `.jsonc` with comments will not parse as JSON. That is recorded as
+/// unreadable rather than as "no plugins", because the difference matters.
+fn collect_opencode_plugins(repo_root: &Path, inventory: &mut HookInventory) {
+    for source in ["opencode.json", "opencode.jsonc"] {
+        let path = match crate::util::resolve_existing_within(repo_root, source) {
+            Ok(Some(path)) => path,
+            Ok(None) => continue,
+            Err(_) => {
+                inventory.unreadable.push(format!(
+                    "{source} (not read: it or one of its parent directories is a symlink, so \
+                     its plugin declarations are not this repository's)"
+                ));
+                continue;
+            }
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            inventory.unreadable.push(source.to_string());
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            inventory.unreadable.push(format!(
+                "{source} (not valid JSON to ahu, so its plugin declarations are unknown rather \
+                 than absent; JSONC comments are not parsed)"
+            ));
+            continue;
+        };
+        let Some(plugins) = value.get("plugin") else {
+            continue;
+        };
+        let Some(plugins) = plugins.as_array() else {
+            inventory.unreadable.push(format!(
+                "{source} (its plugin key is not a shape ahu understands, so its plugins are \
+                 unknown rather than absent)"
+            ));
+            continue;
+        };
+        for module in plugins {
+            inventory.declared_plugins.push(DeclaredPlugin {
+                source: source.to_string(),
+                module: module
+                    .as_str()
+                    .unwrap_or("(non-string plugin entry)")
+                    .to_string(),
+            });
+        }
+    }
+}
+
 fn collect_mcp_servers(repo_root: &Path, inventory: &mut HookInventory) {
     const SOURCE: &str = ".mcp.json";
     let path = match crate::util::resolve_existing_within(repo_root, SOURCE) {
@@ -820,7 +908,8 @@ pub fn render_settings_for_preview(inventory: &HookInventory) -> String {
         .iter()
         .filter(|f| !f.is_empty())
         .collect();
-    if facts.is_empty() && inventory.mcp_servers.is_empty() {
+    if facts.is_empty() && inventory.mcp_servers.is_empty() && inventory.declared_plugins.is_empty()
+    {
         if inventory.unscanned_harness.is_some() {
             out.push_str(
                 "  ahu did not read this harness's settings; what it allows, denies, or\n  \
@@ -897,6 +986,21 @@ pub fn render_settings_for_preview(inventory: &HookInventory) -> String {
                 "       {} → {}\n",
                 display_safe(&server.name),
                 display_safe(&server.command)
+            ));
+        }
+    }
+    if !inventory.declared_plugins.is_empty() {
+        out.push_str(&format!(
+            "  !! {} plugin module(s) declared by this repository. OpenCode installs and runs\n     \
+             these at startup when it is the launched harness; another harness does not read\n     \
+             this file. ahu does not resolve, pin, or sandbox what they fetch:\n",
+            inventory.declared_plugins.len()
+        ));
+        for plugin in &inventory.declared_plugins {
+            out.push_str(&format!(
+                "       {} → {}\n",
+                display_safe(&plugin.source),
+                display_safe(&plugin.module)
             ));
         }
     }

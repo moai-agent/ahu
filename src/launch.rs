@@ -301,6 +301,29 @@ pub fn plan(
             found_hooks.mcp_servers.len()
         ));
     }
+    // A plugin entry names a module OpenCode installs and runs at startup. The
+    // snapshot carries and digests the file that declares it, but the digest
+    // describes the declaration, not the code it resolves to, and an npm
+    // specifier is not a file the executable-bit scan can see. Counting the
+    // names is what makes the trust decision visible on the launch preview.
+    //
+    // Gated on the selected harness: `opencode.json` travels into every task
+    // worktree, but only OpenCode reads it, and telling a Claude Code or Codex
+    // launch that it executes these modules would be false.
+    if pair.harness == "opencode" && !found_hooks.declared_plugins.is_empty() {
+        let modules: Vec<String> = found_hooks
+            .declared_plugins
+            .iter()
+            .map(|plugin| crate::util::display_safe(&plugin.module))
+            .collect();
+        enforcement.gaps.push(format!(
+            "{} plugin module(s) declared by this repository ({}) are installed and executed by \
+             OpenCode at startup; ahu carries the declaration into the task worktree but \
+             neither resolves, pins, nor sandboxes what it fetches.",
+            modules.len(),
+            modules.join(", ")
+        ));
+    }
     // A wrapper between ahu and the harness can add flags ahu refuses to pass.
     if let Some(note) = harness::wrapper_interposed(&harness_executable) {
         enforcement.gaps.push(note);
