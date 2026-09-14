@@ -43,7 +43,7 @@ fn error_for(model: &str) -> String {
 /// The whole argv, not a subset of it.
 ///
 /// An exact vector is the only assertion that catches a flag being *added*.
-/// Verified against OpenCode 1.18.29: `--prompt` submits the prompt and leaves
+/// Verified against OpenCode 1.18.29 and 1.18.30: `--prompt` submits the prompt and leaves
 /// the session interactive, and there is no `--` because the default command's
 /// positional argument is a project directory.
 #[test]
@@ -176,7 +176,7 @@ fn the_prompt_is_one_argv_element_that_redaction_replaces() {
 /// A prompt that begins with `-` is refused, because OpenCode would not read it
 /// as the `--prompt` value and `--` cannot be used to stop it.
 ///
-/// Observed on 1.18.29: `opencode --prompt --version` printed the version, and
+/// Observed on 1.18.29 and re-checked on 1.18.30: `opencode --prompt --version` printed the version, and
 /// `opencode --prompt -h` printed help — the token after `--prompt` was parsed
 /// as an option in both cases. `opencode /definitely/not/a/dir-xyz` failed with
 /// "Failed to change directory", which is why `--` is not an option here: the
@@ -353,5 +353,42 @@ fn the_catalog_entry_and_the_adapter_agree() {
     // The catalog does not offer this model to any other harness.
     for other in ["claude-code", "codex", "antigravity"] {
         assert!(ahu::catalog::model(other, MODEL).is_none());
+    }
+}
+
+/// A refusal control string must only appear on a permission value that is
+/// actually refused.
+///
+/// The cross-harness control test skips a `(harness, permissions)` pair whose
+/// `launch_command` refuses, because a refused pair has no argv for a control
+/// to contradict. That leaves a gap in the other direction: if `accept-edits`
+/// were ever made to build a command — widening it to `--auto`, say — the
+/// enforcement report would still be claiming ahu "refuses to build this launch
+/// at all", and nothing would fail. An independent review found exactly that
+/// mutation surviving this suite.
+///
+/// So this pins the pairing itself: the report may describe a refusal only
+/// while the adapter really does refuse.
+#[test]
+fn a_refusal_control_is_only_reported_for_a_permission_value_that_is_refused() {
+    let adapter = harness::adapter_for("opencode").unwrap();
+    for permissions in [
+        Permissions::Prompt,
+        Permissions::AcceptEdits,
+        Permissions::Auto,
+    ] {
+        let control = adapter
+            .enforcement(MODEL, permissions)
+            .expect("the catalog entry must exist")
+            .applied_controls
+            .join("\n");
+        let claims_refusal = control.contains("refuses to build this launch");
+        let refused = command_for(permissions).is_err();
+        assert_eq!(
+            claims_refusal, refused,
+            "the enforcement report for {permissions:?} claims refusal={claims_refusal} \
+             while launch_command refused={refused}; a report may describe a refusal only \
+             when the adapter actually refuses"
+        );
     }
 }

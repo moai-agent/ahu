@@ -132,7 +132,7 @@ pub fn check_prerequisite(harness_id: &str) -> Prerequisite {
             .split(',')
             .map(str::trim)
             .filter(|verified| !verified.is_empty())
-            .any(|verified| version.contains(verified))
+            .any(|verified| version_reports(version, verified))
     {
         notes.push(format!(
             "installed {executable} reports {version:?}; the ahu adapter was verified against {}",
@@ -145,6 +145,25 @@ pub fn check_prerequisite(harness_id: &str) -> Prerequisite {
         version,
         notes,
     }
+}
+
+/// Whether a reported version string actually names `verified`.
+///
+/// Substring matching alone is wrong here: `"1.18.290".contains("1.18.29")` is
+/// true, so a catalog entry verified against 1.18.29 would silently accept a
+/// future 1.18.290 and suppress the very note the entry exists to produce. A
+/// match must therefore not continue into another digit or dot on either side.
+///
+/// It stays a substring search rather than an equality test because harnesses
+/// pad their version output differently — `codex-cli 0.154.0`, a bare
+/// `1.18.30`, a leading `v` — and an equality test would reintroduce false
+/// notes for the harnesses that do.
+fn version_reports(version: &str, verified: &str) -> bool {
+    let boundary = |c: Option<char>| !matches!(c, Some(c) if c.is_ascii_digit() || c == '.');
+    version.match_indices(verified).any(|(at, _)| {
+        boundary(version[..at].chars().next_back())
+            && boundary(version[at + verified.len()..].chars().next())
+    })
 }
 
 /// Repositories a harness binary must never be resolved from.
@@ -328,5 +347,36 @@ fn is_executable(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         path.is_file()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_reports;
+
+    /// A verified version must not match a longer number that merely starts
+    /// with it.
+    ///
+    /// The catalog gained a comma-separated `verified_versions` because
+    /// OpenCode replaced its own binary in place during verification. That made
+    /// the matching rule load-bearing, and a plain `contains` would read a
+    /// future 1.18.290 as the verified 1.18.29 and suppress the note the entry
+    /// exists to produce. An independent review caught this.
+    #[test]
+    fn a_verified_version_does_not_match_a_longer_number_beginning_with_it() {
+        assert!(version_reports("1.18.29", "1.18.29"));
+        assert!(!version_reports("1.18.290", "1.18.29"));
+        assert!(!version_reports("1.18.29.1", "1.18.29"));
+        assert!(!version_reports("11.18.29", "1.18.29"));
+    }
+
+    /// The harnesses pad their version output differently, and all of those
+    /// shapes must still match, which is why this is not an equality test.
+    #[test]
+    fn the_shapes_harnesses_actually_print_still_match() {
+        assert!(version_reports("codex-cli 0.154.0", "0.154.0"));
+        assert!(version_reports("1.18.30", "1.18.30"));
+        assert!(version_reports("v1.18.30", "1.18.30"));
+        assert!(version_reports("2.1.270 (Claude Code)", "2.1.270"));
     }
 }

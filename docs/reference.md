@@ -895,8 +895,8 @@ happens next is the harness's own default, and the harnesses do not agree:
 
 | Manifest `permissions` | OpenCode | Effect |
 | --- | --- | --- |
-| `prompt` | no flag passed | OpenCode's own permission configuration decides. Its defaults allow most tools, deny reads of `.env*` files, and ask only for `doom_loop` and `external_directory` — so an OpenCode agent can edit files and run commands without asking. |
-| `auto` | `--auto` | Auto-approves every permission that is not explicitly denied. Still requires `--allow-widened-approvals`. |
+| `prompt` | no flag passed | OpenCode's own permission configuration decides. Its defaults allow most tools outright, so an OpenCode agent can edit files and run commands without asking. The built-in `build` agent's only `deny` rules are `question`, `plan_enter` and `plan_exit`; reads of `*.env` and `*.env.*` default to `ask`, not `deny`, and so do `doom_loop` and `external_directory`. |
+| `auto` | `--auto` | Auto-approves every permission that is not explicitly denied. An `ask` rule is not a denial, so `--auto` approves it silently: with OpenCode's defaults that includes reading `*.env` and `*.env.*`, and reaching outside the project directory. If you need those refused rather than merely prompted, write a `deny` rule in your own OpenCode `permission` configuration; ahu does not add one. Still requires `--allow-widened-approvals`. |
 | `accept-edits` | rejected | OpenCode has no accept-edits flag and its permission actions are static configuration, so ahu refuses the manifest instead of approximating the mode. There is no fallback to `prompt` or `auto`. |
 
 Readers arriving from Claude Code or Codex should not carry over the assumption

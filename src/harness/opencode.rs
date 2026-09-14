@@ -1,7 +1,9 @@
 //! The OpenCode adapter.
 //!
-//! Verified against OpenCode 1.18.29 on 2026-09-13 using the installed CLI's
-//! own `--help`, `opencode agent list`, `opencode models`, and live probes.
+//! Verified against OpenCode 1.18.29 and 1.18.30 on 2026-09-13 using the
+//! installed CLI's own `--help`, `opencode agent list`, `opencode models`, and
+//! live probes. The install replaced itself in place between those two
+//! versions during verification, which is why the catalog entry names both.
 //!
 //! Native conventions this adapter defers to:
 //!   - the model is selected with `--model <provider>/<model>`, and OpenCode
