@@ -10,9 +10,9 @@ Never include or execute a remote push without the user's explicit permission.
 
 ## Issue completion is part of the work
 
-These rules apply to every agent working in this repository, including
-offsec-astra, defsec-astra, dev-astra, dev-opus, docs-astra, and any coordinating
-agent.
+These rules apply to every agent working in this repository: every agent
+registered under `.agents/ahu/agents/` (run `ahu agents` for the current set) and
+any coordinating agent.
 
 For work assigned through issues, the user authorizes agents to comment on the
 associated issues and close those resolved by the work. Do this as part of the

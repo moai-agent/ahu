@@ -103,11 +103,14 @@ keep their branches, worktrees, and records after the harness exits.
 | Agent | Harness / model | Role |
 | --- | --- | --- |
 | `@arch-astra` | Codex / `gpt-6-astra` | Plans implementation with code-grounded designs, dependencies, and verifiable work increments. |
-| `@offsec-astra` | Codex / `gpt-6-astra` | Investigates security issues and reports evidence without editing source. |
-| `@defsec-astra` | Codex / `gpt-6-astra` | Reviews defensive programming; implements requested hardening and focused refactoring. |
-| `@dev-astra` | Codex / `gpt-6-astra` | Validates reported issues and implements fixes with regression coverage. |
-| `@dev-opus` | Claude Code / `claude-opus-5` | General development and code review; hands product documentation to docs-astra. |
-| `@docs-astra` | Codex / `gpt-6-astra` | Maintains tracked documentation, specifications, and current project context. |
+| `@offsec-astra` | Codex / `gpt-6-astra` | Identifies and validates security issues with concrete evidence. |
+| `@defsec-astra` | Codex / `gpt-6-astra` | Reviews and implements defensive programming and focused refactoring. |
+| `@dev-astra` | Codex / `gpt-6-astra` | Validates and remediates reported issues with regression coverage. |
+| `@docs-astra` | Codex / `gpt-6-astra` | Maintains all tracked Markdown, specifications, knowledge formats, and current project context. |
+| `@arch-opus` | Claude Code / `claude-opus-5` | Plans implementation with code-grounded designs, dependencies, and verifiable work increments. |
+| `@defsec-opus` | Claude Code / `claude-opus-5` | Reviews and implements defensive programming and focused refactoring. |
+| `@dev-opus` | Claude Code / `claude-opus-5` | General-purpose ahu development and code review; product documentation belongs to docs-opus. |
+| `@docs-opus` | Claude Code / `claude-opus-5` | Maintains all tracked Markdown, specifications, knowledge formats, and current project context. |
 
 [Manifests](.agents/ahu/agents/) reference versioned
 [instructions](.agents/ahu/instructions/). Named launches use their manifest's
