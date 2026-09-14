@@ -16,7 +16,7 @@ use crate::bail;
 use crate::util::{Error, Result, digest_bytes, digest_file};
 
 /// Directory names whose contents are agent configuration wherever they appear.
-const CONFIG_DIR_NAMES: &[&str] = &[".agents", ".claude", ".codex", ".agent"];
+const CONFIG_DIR_NAMES: &[&str] = &[".agents", ".claude", ".codex", ".agent", ".opencode"];
 
 /// File names that are agent configuration wherever they appear.
 const CONFIG_FILE_NAMES: &[&str] = &[
@@ -25,6 +25,12 @@ const CONFIG_FILE_NAMES: &[&str] = &[
     "AGENTS.md",
     "AGENTS.override.md",
     ".mcp.json",
+    // OpenCode project configuration. It may name `plugin` modules OpenCode
+    // installs and runs at startup, so it is executable configuration under the
+    // same trust boundary as any other inherited config: carried, digested and
+    // disclosed, never rewritten or disabled.
+    "opencode.json",
+    "opencode.jsonc",
 ];
 
 /// Directories never descended into while looking for configuration.
