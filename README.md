@@ -152,6 +152,7 @@ require explicit user permission.
 | `ahu knowledge lint` | Validate and lint configured OKF bundles with installed `okf` |
 | `ahu explain` | Built-in architecture overview |
 | `ahu explain --open` | Open the overview in cmux's Markdown viewer |
+| `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON

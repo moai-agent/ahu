@@ -692,3 +692,9 @@ calling session.
 workspace-write --ask-for-approval on-request` and Codex's configured model. It
 creates no task or worktree and needs neither project configuration nor cmux.
 Start it from a terminal; an existing outer sandbox still applies.
+
+`ahu claude` opens Claude in the current Git checkout using its configured model
+and permission behavior. It passes no model or permission overrides and accepts
+no additional arguments. Like `ahu codex`, it preserves the invoking directory
+and terminal, sets `AHU_BIN` and checkout-local `AHU_STATE_DIR`, and creates no
+task, worktree or cmux session.

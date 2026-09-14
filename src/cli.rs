@@ -56,6 +56,7 @@ Commands:
                                   child/worker resume unsupported: submit a new registered assignment
   focus <task-id>       Bring a task's cmux session to the front
   doctor                Check repository, configuration, harness, and cmux
+  claude                Open Claude here using its configured model and permissions
   codex                 Open Codex here with workspace-write sandboxing and
                         on-request approvals (uses Codex's configured model)
   run-task              Internal: run a prepared task (used by cmux)
@@ -202,6 +203,7 @@ pub enum Command {
     },
     Doctor,
     Codex,
+    Claude,
     RunTask {
         task_dir: PathBuf,
     },
@@ -358,6 +360,10 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         "doctor" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Doctor)
+        }
+        "claude" => {
+            expect_no_more(&args[1..])?;
+            Ok(Command::Claude)
         }
         "codex" => {
             expect_no_more(&args[1..])?;

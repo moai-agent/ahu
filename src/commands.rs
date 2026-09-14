@@ -33,32 +33,46 @@ pub fn repo_from_cwd() -> Result<Repo> {
 }
 
 /// Open a coordinating session in the invoking terminal. Repository discovery
-/// registers executable exclusions before resolving Codex, just as for agents.
+/// registers executable exclusions before resolving the harness, just as for agents.
 pub fn codex(repo: &Repo) -> Result<i32> {
-    let executable = selection::resolve_executable("codex").ok_or_else(|| {
-        crate::util::Error::new(
-            "Codex is not installed or is not available on PATH outside the repository.",
-        )
+    coordinating_session(
+        repo,
+        "codex",
+        "Codex",
+        &[
+            "--sandbox",
+            "workspace-write",
+            "--ask-for-approval",
+            "on-request",
+        ],
+    )
+}
+
+/// Open Claude using its configured model and permission behavior.
+pub fn claude(repo: &Repo) -> Result<i32> {
+    coordinating_session(repo, "claude", "Claude", &[])
+}
+
+fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) -> Result<i32> {
+    let executable = selection::resolve_executable(program).ok_or_else(|| {
+        crate::util::Error::new(format!(
+            "{label} is not installed or is not available on PATH outside the repository."
+        ))
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
     let state = crate::state::ensure_checkout_state(&repo.root)?;
     let mut command = std::process::Command::new(executable);
     command
-        .args([
-            "--sandbox",
-            "workspace-write",
-            "--ask-for-approval",
-            "on-request",
-        ])
+        .args(args)
         .env("AHU_BIN", std::env::current_exe()?)
         .env("AHU_STATE_DIR", state);
-    // Inherit the terminal and cwd. Replacing ahu gives Codex terminal signals
+    // Inherit the terminal and cwd. Replacing ahu gives the harness terminal signals
     // directly and preserves its exit status, including signal termination.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         Err(crate::util::Error::new(format!(
-            "cannot start Codex: {}",
+            "cannot start {label}: {}",
             command.exec()
         )))
     }
@@ -66,7 +80,7 @@ pub fn codex(repo: &Repo) -> Result<i32> {
     {
         let status = command
             .status()
-            .map_err(|e| crate::util::Error::new(format!("cannot start Codex: {e}")))?;
+            .map_err(|e| crate::util::Error::new(format!("cannot start {label}: {e}")))?;
         Ok(status.code().unwrap_or(5))
     }
 }

@@ -129,6 +129,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 )
             })
         }
+        Command::Claude => {
+            let repo = commands::repo_from_cwd()?;
+            commands::claude(&repo)
+        }
         Command::Codex => {
             let repo = commands::repo_from_cwd()?;
             commands::codex(&repo)
@@ -209,6 +213,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Version
                 | Command::Explain { .. }
                 | Command::Doctor
+                | Command::Claude
                 | Command::Codex
                 | Command::Launch { .. }
                 | Command::KnowledgeLint { .. }
