@@ -158,6 +158,7 @@ fn every_harness_receives_the_same_nonce_fenced_contract_and_agent_instructions(
         ("claude-code", "claude-opus-5"),
         ("codex", "gpt-6-astra"),
         ("antigravity", "gemini-3.1-pro-high"),
+        ("opencode", "ollama/glm-5.3:cloud"),
     ] {
         let (delivered, delivery) =
             ahu::orchestration::deliver(Some(AGENT_INSTRUCTIONS), HOSTILE_PROMPT).unwrap();

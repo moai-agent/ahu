@@ -259,7 +259,7 @@ pub fn assert_child_passed(name: &str, output: &std::process::Output) {
 }
 
 /// The harness programs every adapter resolves by name.
-pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy"];
+pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy", "opencode"];
 
 /// Run this test in a child process that has a machine of its own.
 ///

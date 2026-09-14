@@ -115,6 +115,7 @@ fn file_inline_and_stdin_prompts_reach_the_argv_boundary_byte_for_byte() {
             ("claude-code", "claude-opus-5"),
             ("codex", "gpt-6-astra"),
             ("antigravity", "gemini-3.1-pro-high"),
+            ("opencode", "ollama/glm-5.3:cloud"),
         ] {
             let command = harness::adapter_for(harness)
                 .unwrap()
@@ -486,6 +487,7 @@ fn every_adapter_delivers_the_prompt_literally_and_widens_no_permissions() {
         ("claude-code", "claude-opus-5"),
         ("codex", "gpt-6-astra"),
         ("antigravity", "gemini-3.1-pro-high"),
+        ("opencode", "ollama/glm-5.3:cloud"),
     ] {
         let adapter = harness::adapter_for(harness).unwrap();
         let command = adapter
@@ -544,14 +546,15 @@ fn every_adapter_delivers_the_prompt_literally_and_widens_no_permissions() {
     }
 }
 
-/// Only Claude Code can actually enforce a named agent's system prompt. The
-/// other two say so instead of implying a guarantee they cannot keep.
+/// No adapter can actually enforce a named agent's system prompt. Each says so
+/// instead of implying a guarantee it cannot keep.
 #[test]
 fn adapters_report_their_real_enforcement_limits() {
     for (harness, model) in [
         ("claude-code", "claude-opus-5"),
         ("codex", "gpt-6-astra"),
         ("antigravity", "gemini-3.1-pro-high"),
+        ("opencode", "ollama/glm-5.3:cloud"),
     ] {
         let report = harness::adapter_for(harness)
             .unwrap()
@@ -560,7 +563,7 @@ fn adapters_report_their_real_enforcement_limits() {
         assert_eq!(report.harness, harness);
         assert!(
             !report.model_fixed_for_session,
-            "{harness}: none of the three can hold a model for a whole session"
+            "{harness}: no adapter can hold a model for a whole session"
         );
         assert!(!report.gaps.is_empty(), "{harness} must name its gaps");
         assert!(
@@ -570,7 +573,7 @@ fn adapters_report_their_real_enforcement_limits() {
     }
 
     // No adapter may claim to select or enforce an agent identity.
-    for harness in ["claude-code", "codex", "antigravity"] {
+    for harness in ["claude-code", "codex", "antigravity", "opencode"] {
         let report = harness::adapter_for(harness)
             .unwrap()
             .enforcement("x", Default::default())
@@ -766,13 +769,14 @@ fn approval_widening_is_opt_in_and_harness_native() {
     use ahu::agent::Permissions;
 
     // Default: ahu adds no permission flag anywhere.
-    for harness_id in ["claude-code", "codex", "antigravity"] {
+    for harness_id in ["claude-code", "codex", "antigravity", "opencode"] {
         let command = harness::adapter_for(harness_id)
             .unwrap()
             .launch_command(&LaunchRequest {
                 model: match harness_id {
                     "codex" => "gpt-6-astra",
                     "antigravity" => "gemini-3.1-pro-high",
+                    "opencode" => "ollama/glm-5.3:cloud",
                     _ => "claude-opus-5",
                 },
                 prompt: "p",
@@ -787,6 +791,7 @@ fn approval_widening_is_opt_in_and_harness_native() {
             "--ask-for-approval",
             "--sandbox",
             "--mode",
+            "--auto",
         ] {
             assert!(
                 !command.args.iter().any(|a| a == flag),
@@ -833,6 +838,12 @@ fn approval_widening_is_opt_in_and_harness_native() {
             Permissions::AcceptEdits,
             vec!["--approve-for-me"],
         ),
+        (
+            "opencode",
+            "ollama/glm-5.3:cloud",
+            Permissions::Auto,
+            vec!["--auto"],
+        ),
     ] {
         let command = harness::adapter_for(harness_id)
             .unwrap()
@@ -855,6 +866,23 @@ fn approval_widening_is_opt_in_and_harness_native() {
         let index = command.prompt_arg.unwrap();
         assert_eq!(command.args[index], HOSTILE_PROMPT, "{harness_id}");
     }
+
+    // Where a harness has no equivalent of a requested widening, the launch is
+    // refused rather than mapped onto the nearest flag. OpenCode's permission
+    // actions are static configuration and its only flag is the widening
+    // `--auto`, so accept-edits has nothing honest to map to.
+    let refusal = harness::adapter_for("opencode")
+        .unwrap()
+        .launch_command(&LaunchRequest {
+            model: "ollama/glm-5.3:cloud",
+            prompt: HOSTILE_PROMPT,
+            cwd: Path::new("/tmp"),
+            permissions: Permissions::AcceptEdits,
+        })
+        .expect_err("accept-edits must not be approximated")
+        .to_string();
+    assert!(refusal.contains("no accept-edits"), "{refusal}");
+    assert!(refusal.contains("will not widen"), "{refusal}");
 
     // Every mode explains itself, and only the widening ones say so.
     assert!(!Permissions::Prompt.widens_defaults());
@@ -886,6 +914,7 @@ fn no_enforcement_control_denies_a_flag_the_launch_actually_passes() {
         ("claude-code", "claude-opus-5"),
         ("codex", "gpt-6-astra"),
         ("antigravity", "gemini-3.1-pro-high"),
+        ("opencode", "ollama/glm-5.3:cloud"),
     ] {
         for permissions in [
             Permissions::Prompt,
@@ -893,14 +922,17 @@ fn no_enforcement_control_denies_a_flag_the_launch_actually_passes() {
             Permissions::Auto,
         ] {
             let adapter = harness::adapter_for(harness).unwrap();
-            let command = adapter
-                .launch_command(&LaunchRequest {
-                    model,
-                    prompt: "do the thing",
-                    cwd: Path::new("/tmp/ahu-fixture-worktree"),
-                    permissions,
-                })
-                .unwrap();
+            // An adapter with no honest mapping for a permission value refuses
+            // the launch. There is then no argv for a control to contradict,
+            // and the contradiction this test exists to catch cannot arise.
+            let Ok(command) = adapter.launch_command(&LaunchRequest {
+                model,
+                prompt: "do the thing",
+                cwd: Path::new("/tmp/ahu-fixture-worktree"),
+                permissions,
+            }) else {
+                continue;
+            };
             let report = adapter.enforcement(model, permissions).unwrap();
 
             for control in &report.applied_controls {

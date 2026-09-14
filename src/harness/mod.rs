@@ -8,6 +8,7 @@
 pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
+pub mod opencode;
 
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +144,7 @@ pub fn adapter_for(harness_id: &str) -> Result<Box<dyn Adapter>> {
         "claude-code" => Ok(Box::new(claude_code::ClaudeCode)),
         "codex" => Ok(Box::new(codex::Codex)),
         "antigravity" => Ok(Box::new(antigravity::Antigravity)),
+        "opencode" => Ok(Box::new(opencode::OpenCode)),
         other => bail!(
             "ahu has no validated adapter for harness {other:?}. \
              It will not substitute another harness."
