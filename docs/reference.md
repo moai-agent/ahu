@@ -851,8 +851,13 @@ behavior was verified against and the enforcement gaps ahu discloses for it.
 These are recorded compatibility baselines, not claims that newer versions or
 account entitlements were tested. Where more than one installation of a harness
 is on `PATH`, ahu runs and reports the one its own resolution picks; it does not
-search for a version that matches the catalog.
-Project configuration pins catalog `2026-09-12`; a mismatch is an error.
+search for a version that matches the catalog. An entry may name more than one
+verified version, comma-separated, and the prerequisite check accepts any of
+them. That exists because a harness can replace its own binary in place between
+launches: OpenCode did so during this adapter's verification, moving from
+1.18.29 to 1.18.30 with no user action, and a single-version entry would have
+warned every user on the newer build that it was unverified when it was not.
+Project configuration pins catalog `2026-09-13`; a mismatch is an error.
 
 Persisted task records use schema 2; launch-preview and task-inspection JSON use
 schema 1. Incompatible persisted records are refused and listed as unreadable;
