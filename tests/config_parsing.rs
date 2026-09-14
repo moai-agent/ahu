@@ -581,3 +581,91 @@ fn a_proposed_manifest_round_trips_through_the_loader() {
         std::fs::remove_file(&written).unwrap();
     }
 }
+
+/// Adding a harness to the catalog moves its version, and a project pinned to
+/// the previous one stops rather than being upgraded for free.
+///
+/// That is the point of the pin: catalog `2026-09-13` offers a harness and a
+/// model that `2026-09-12` did not, so what an automatic launch resolves to can
+/// differ between them. Changing which catalog a project uses is a project
+/// decision, made by editing `catalog_version`, not a side effect of installing
+/// a newer ahu.
+#[test]
+fn a_project_pinned_to_the_previous_catalog_is_stopped_not_upgraded() {
+    assert_eq!(catalog::CATALOG_VERSION, "2026-09-13");
+
+    let error = catalog::require_version("2026-09-12")
+        .expect_err("a superseded pin must not be silently accepted")
+        .to_string();
+    assert!(error.contains("2026-09-12"), "{error}");
+    assert!(error.contains(catalog::CATALOG_VERSION), "{error}");
+    assert!(error.contains("will not substitute"), "{error}");
+    assert!(
+        error.contains("catalog_version"),
+        "the message must name the field to edit: {error}"
+    );
+
+    // Through a real project configuration, too.
+    let repo = TestRepo::new();
+    repo.init_config();
+    let text = repo.read(".agents/ahu/config.toml");
+    repo.write(
+        ".agents/ahu/config.toml",
+        &text.replace(catalog::CATALOG_VERSION, "2026-09-12"),
+    );
+    let error = config::load(repo.path()).unwrap_err().to_string();
+    assert!(error.contains("2026-09-12"), "{error}");
+
+    // The catalog this build ships does carry the OpenCode pair.
+    assert!(catalog::require_version(catalog::CATALOG_VERSION).is_ok());
+    assert!(catalog::harness("opencode").is_some());
+    assert_eq!(
+        catalog::models_for("opencode")
+            .iter()
+            .map(|m| m.model)
+            .collect::<Vec<_>>(),
+        vec!["ollama/glm-5.3:cloud"]
+    );
+}
+
+/// A registered OpenCode agent loads, keeps its harness, and is refused a model
+/// belonging to someone else.
+#[test]
+fn an_opencode_agent_keeps_its_own_harness_and_model() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.write(".agents/ahu/instructions/oc.md", "You are oc.\n");
+    let manifest = "schema_version = 1\n\
+         name = \"oc\"\n\
+         version = \"1.0.0\"\n\
+         description = \"fixture opencode agent\"\n\
+         harness = \"opencode\"\n\
+         model = \"ollama/glm-5.3:cloud\"\n\
+         \n[source]\n\
+         format = \"markdown\"\n\
+         path = \".agents/ahu/instructions/oc.md\"\n";
+    repo.write(".agents/ahu/agents/oc.toml", manifest);
+
+    let agents = agent::load_all(repo.path()).unwrap();
+    let loaded = agents
+        .iter()
+        .find(|a| a.manifest.name == "oc")
+        .expect("oc loads");
+    assert_eq!(loaded.manifest.harness, "opencode");
+    assert_eq!(loaded.manifest.model, "ollama/glm-5.3:cloud");
+
+    // The bare Ollama tag is not a catalog model for this harness.
+    repo.write(
+        ".agents/ahu/agents/oc.toml",
+        &manifest.replace("ollama/glm-5.3:cloud", "glm-5.3:cloud"),
+    );
+    let error = agent::load_all(repo.path()).unwrap_err().to_string();
+    assert!(
+        error.contains("is not a catalog model for harness"),
+        "{error}"
+    );
+    assert!(
+        error.contains("will not substitute a different model"),
+        "{error}"
+    );
+}

@@ -12,7 +12,7 @@ use crate::bail;
 use crate::util::Result;
 
 /// The catalog revision shipped with this ahu build.
-pub const CATALOG_VERSION: &str = "2026-09-12";
+pub const CATALOG_VERSION: &str = "2026-09-13";
 
 /// A harness ahu can name. Only harnesses with a validated adapter can launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +84,22 @@ pub const HARNESSES: &[HarnessEntry] = &[
         enforcement_gaps: &[
             "the model is set at launch with --model, but ahu cannot stop an interactive session changing it",
             "the CLI accepts --agent but does not validate it: a nonexistent agent name produced a normal reply instead of an error, and a workspace agent whose instructions were unmistakable did not change the response, so the harness never confirms an identity was applied. ahu does not pass it",
+        ],
+    },
+    HarnessEntry {
+        id: "opencode",
+        display_name: "OpenCode",
+        adapter_available: true,
+        executable: "opencode",
+        // Both were checked on 2026-09-13; the install updated itself in place
+        // between the two probe runs, which is why the entry lists a pair.
+        verified_versions: "1.18.29, 1.18.30",
+        enforces_model_for_session: false,
+        enforcement_gaps: &[
+            "the model is set at launch with --model, but ahu cannot stop an interactive session changing it",
+            "--agent <name> is accepted but not validated: a missing name only warns \"agent ... not found. Falling back to default agent\" and the run continues, so the flag can never confirm an identity was applied. It would also override the agent's own model and permissions, contradicting the model ahu pins. ahu does not pass it",
+            "OpenCode defaults most tool permissions to allow, so an agent declaring permissions = prompt does not mean OpenCode asks before acting; the effective boundary comes from the user's own OpenCode configuration, not from any flag ahu passes",
+            "inference for an ollama/*:cloud model is performed by Ollama's cloud service reached through the local endpoint; it is not local inference, and ahu neither holds nor checks those credentials",
         ],
     },
 ];
@@ -167,6 +183,18 @@ pub const MODELS: &[ModelEntry] = &[
         evaluation_basis: "listed by `agy models` on the installed CLI; not evaluated on this project's tasks",
         reviewed_on: "2026-09-12",
         is_moving_alias: false,
+    },
+    // Routed by OpenCode through an `ollama` provider the user configures; the
+    // `:cloud` tag runs on Ollama's cloud service reached through the local
+    // endpoint, so entitlement is an account matter ahu does not verify.
+    ModelEntry {
+        harness: "opencode",
+        model: "ollama/glm-5.3:cloud",
+        display_name: "GLM 5.3 (Ollama cloud)",
+        quality_rank: 0,
+        evaluation_basis: "offered by the local Ollama endpoint as digest 8477dab3e25b on 2026-09-13; a cloud entitlement ahu does not verify, and not evaluated on this project's tasks",
+        reviewed_on: "2026-09-13",
+        is_moving_alias: true,
     },
 ];
 

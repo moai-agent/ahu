@@ -121,9 +121,18 @@ pub fn check_prerequisite(harness_id: &str) -> Prerequisite {
     // Probe the resolved absolute path so version checks obey the same
     // repository and relative-PATH exclusions as actual launches.
     let version = found_at.as_deref().and_then(probe_version);
+    // A catalog entry may list more than one verified version, comma-separated:
+    // a harness that updates itself in place can move under a user between two
+    // launches, and a note saying the adapter was verified against a version
+    // they no longer have would be wrong rather than cautious.
     if let (Some(entry), Some(version)) = (entry, version.as_deref())
         && !entry.verified_versions.is_empty()
-        && !version.contains(entry.verified_versions)
+        && !entry
+            .verified_versions
+            .split(',')
+            .map(str::trim)
+            .filter(|verified| !verified.is_empty())
+            .any(|verified| version.contains(verified))
     {
         notes.push(format!(
             "installed {executable} reports {version:?}; the ahu adapter was verified against {}",
