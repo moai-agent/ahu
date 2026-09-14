@@ -1339,3 +1339,59 @@ fn a_notification_for_an_unseen_task_invents_no_helper() {
     );
     assert!(!completeness.evidence_complete, "{completeness:?}");
 }
+
+/// OpenCode falls into the `other` arm of the disabled policy, and that arm
+/// makes no claim at all.
+///
+/// OpenCode has a `task` tool and its own subagents (`explore`, `general`), and
+/// ahu passes nothing that withholds them. So the honest report is a gap saying
+/// delegation is not disabled by anything ahu passes — not an invented tool
+/// switch, and not a claim that delegation is off.
+#[test]
+fn disabled_makes_no_delegation_claim_for_opencode() {
+    let request = Request {
+        harness: "opencode",
+        harness_version: "1.18.29",
+        session_model: "ollama/glm-5.3:cloud",
+        helper_model: None,
+        ..disabled()
+    };
+    let profile = profile_of(&request);
+
+    assert!(
+        profile.args.is_empty(),
+        "ahu has no validated OpenCode control to pass: {:?}",
+        profile.args
+    );
+    assert!(
+        profile.enforced.is_empty(),
+        "nothing may be reported as enforced: {:?}",
+        profile.enforced
+    );
+    assert!(
+        control(&profile, "native.delegation.off").is_none(),
+        "delegation is not off, so no control may say it is"
+    );
+    assert_eq!(profile.gaps.len(), 1);
+    let gap = &profile.gaps[0];
+    assert!(
+        gap.contains("opencode"),
+        "the gap must name the harness: {gap}"
+    );
+    assert!(
+        gap.contains("not disabled by any control ahu passes"),
+        "{gap}"
+    );
+    assert!(
+        gap.contains("has not been checked"),
+        "the gap must not imply the default was inspected: {gap}"
+    );
+
+    // And bounded helpers are refused outright rather than approximated.
+    let error = native::profile(&Request {
+        policy: native::BOUNDED,
+        ..request
+    })
+    .expect_err("bounded must be refused for opencode");
+    assert!(error.to_string().contains("opencode"), "{error}");
+}

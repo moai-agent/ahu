@@ -449,7 +449,13 @@ pub fn launch(
         "codex" => "codex",
         "claude-code" => "claude",
         "antigravity" => "agy",
-        _ => bail!("unsupported headless harness"),
+        // Named, because the caller's next question is always "which one?" and
+        // the only correct answer to this refusal is to report it. A harness
+        // with an interactive adapter still needs its batch argument surface
+        // and event stream validated separately before it can run here.
+        other => bail!(
+            "unsupported headless harness {other:?}; ahu has no validated batch profile for it and selected no fallback."
+        ),
     };
     let candidate = crate::selection::resolve_executable(program)
         .ok_or_else(|| Error::new("harness executable unavailable"))?;

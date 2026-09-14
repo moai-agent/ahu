@@ -1154,3 +1154,97 @@ scenario=os.environ"#);
             .is_empty()
     );
 }
+
+/// Headless OpenCode is out of scope, and the refusal has to look like one.
+///
+/// Adding an interactive adapter must not quietly enrol the harness in the
+/// batch path: OpenCode's headless form is `opencode run`, whose argument
+/// surface and event stream were never validated here. `batch_command` builds
+/// arguments for a validated profile or refuses, and the message has to name
+/// the harness and say no fallback was chosen — a bare "unsupported" would
+/// invite a caller to drop to another harness or another headless profile.
+#[test]
+fn an_opencode_agent_is_refused_by_the_headless_path_with_no_fallback() {
+    use ahu::harness::LaunchRequest;
+    use ahu::headless::{Options, Spec};
+
+    let spec = Spec {
+        schema_version: 1,
+        options: Options::default(),
+        harness_version: "1.18.29".into(),
+        executable_digest: "0".repeat(64),
+        parent_task: None,
+        parent_attempt: None,
+        root_task: None,
+        broker_request: None,
+        child_grants: Vec::new(),
+        depth: 0,
+        attempt: 1,
+        session: None,
+        broker_dir: None,
+        native_profile: None,
+        native_controls: Vec::new(),
+        gaps: Vec::new(),
+    };
+    let error = ahu::headless::batch_command(
+        "opencode",
+        &LaunchRequest {
+            model: "ollama/glm-5.3:cloud",
+            prompt: "do the thing",
+            cwd: std::path::Path::new("/tmp"),
+            permissions: Default::default(),
+        },
+        &spec,
+    )
+    .expect_err("headless opencode is not validated")
+    .to_string();
+    assert!(error.contains("opencode"), "{error}");
+    assert!(error.contains("no headless adapter"), "{error}");
+    assert!(error.contains("no fallback selected"), "{error}");
+    for other in ["claude", "codex", "agy", "--print", "--output-format"] {
+        assert!(
+            !error.contains(other),
+            "the refusal must not point at another harness or profile: {error}"
+        );
+    }
+
+    // The interactive adapter exists all the same; the two paths are separate.
+    assert!(ahu::harness::adapter_for("opencode").is_ok());
+}
+
+/// The same refusal through the command line, so the whole path is covered.
+#[test]
+fn a_registered_opencode_agent_cannot_be_launched_headless() {
+    let f = Fixture::new();
+    f.repo
+        .add_agent_on("oc", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    f.repo.commit("an opencode agent");
+    let out = f
+        .command()
+        .args([
+            "launch",
+            "@oc",
+            "--headless",
+            "--prompt",
+            "perform synthetic task",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a headless opencode launch must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unsupported headless harness \"opencode\""),
+        "the refusal must name the path and the harness that refused: {stderr}"
+    );
+    assert!(
+        stderr.contains("selected no fallback"),
+        "the refusal must say nothing was substituted: {stderr}"
+    );
+    assert!(
+        !stderr.contains("claude-code") && !stderr.contains("antigravity"),
+        "no other harness may be offered in its place: {stderr}"
+    );
+}
