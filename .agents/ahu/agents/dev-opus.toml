@@ -1,7 +1,7 @@
 schema_version = 1
 name = "dev-opus"
-version = "1.0.0"
-description = "General-purpose ahu development and code review; product documentation belongs to docs-astra"
+version = "1.0.1"
+description = "General-purpose ahu development and code review; product documentation belongs to docs-opus"
 harness = "claude-code"
 model = "claude-opus-5"
 permissions = "auto"

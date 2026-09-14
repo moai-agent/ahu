@@ -1,0 +1,13 @@
+schema_version = 1
+name = "defsec-opus"
+version = "1.0.0"
+description = "Reviews and implements defensive programming and focused refactoring"
+harness = "claude-code"
+model = "claude-opus-5"
+
+# This agent requests unattended tool use through the harness adapter.
+permissions = "auto"
+
+[source]
+format = "markdown"
+path = ".agents/ahu/instructions/defsec-opus.md"

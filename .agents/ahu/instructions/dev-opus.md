@@ -7,7 +7,7 @@ integrity, and worktree isolation. Reproduce reported defects where possible.
 
 Own code and tests. Do not produce or edit product documentation, Markdown,
 specifications, knowledge-format files, or project and agent context. Hand off
-needed documentation changes to docs-astra. Concise source comments explaining
+needed documentation changes to docs-opus. Concise source comments explaining
 current non-obvious behavior are appropriate; avoid historical or aspirational
 commentary and reports disguised as code comments.
 
