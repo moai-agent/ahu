@@ -77,6 +77,58 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         // `run-task` is started by cmux inside the task worktree and works from
         // the task record alone, so it does not need repository discovery.
         Command::RunTask { task_dir } => commands::run_task(&task_dir),
+        Command::BatchSupervisor { task_dir } => ahu::headless::supervise(&task_dir),
+        Command::BatchControl {
+            action,
+            task_id,
+            prompt,
+            json,
+        } => {
+            let repo = commands::repo_from_cwd()?;
+            ahu::headless::control(&repo, &action, &task_id, prompt.as_deref(), json)
+        }
+        Command::TasksJson => {
+            let repo = commands::repo_from_cwd()?;
+            let listing = ahu::task::list(&repo)?;
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "schema_version": 1,
+                    "tasks": listing.records.iter().map(|(dir,r)| commands::task_summary(dir,r)).collect::<ahu::util::Result<Vec<_>>>()?,
+                    "unreadable": listing.unreadable.iter().map(|row| serde_json::json!({"task_id":row.task_id,"reason":row.reason})).collect::<Vec<_>>(),
+                    "notes":listing.notes,
+                }))?
+            );
+            Ok(0)
+        }
+        Command::HeadlessLaunch { launch, options } => {
+            let Command::Launch {
+                agent,
+                prompt,
+                display,
+                output_json,
+                dry_run,
+                allow_widened_approvals,
+            } = *launch
+            else {
+                unreachable!()
+            };
+            let repo = commands::repo_from_cwd()?;
+            let prompt = prompt.read(&mut std::io::stdin(), std::io::stdin().is_terminal())?;
+            commands::with_stdio_output(output_json, |console| {
+                ahu::headless::launch(
+                    console,
+                    &repo,
+                    &agent,
+                    &prompt,
+                    &display,
+                    output_json,
+                    dry_run,
+                    allow_widened_approvals,
+                    options,
+                )
+            })
+        }
         Command::Codex => {
             let repo = commands::repo_from_cwd()?;
             commands::codex(&repo)
@@ -150,6 +202,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 Command::Diff { task_id } => commands::diff_cmd(console, &repo, &task_id),
                 Command::Focus { task_id } => commands::focus(console, &repo, &task_id),
                 Command::Help
+                | Command::HeadlessLaunch { .. }
+                | Command::BatchControl { .. }
+                | Command::BatchSupervisor { .. }
+                | Command::TasksJson
                 | Command::Version
                 | Command::Explain { .. }
                 | Command::Doctor

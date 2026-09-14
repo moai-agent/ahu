@@ -400,6 +400,29 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
         }
     }
 
+    for dir in crate::headless::discover(repo)? {
+        let record = load(&dir)?;
+        if record.repo_identity != identity
+            || record.task_id != dir.file_name().unwrap_or_default().to_string_lossy()
+        {
+            bail!("external task record has inconsistent repository/task identity");
+        }
+        if listing
+            .records
+            .iter()
+            .any(|(_, old)| old.task_id == record.task_id)
+        {
+            bail!(
+                "conflicting internal and external task records for {}",
+                record.task_id
+            );
+        }
+        listing
+            .unreadable
+            .retain(|row| row.task_id != record.task_id);
+        listing.records.push((dir, record));
+    }
+
     // Only now, when every store has been read: a worktree from the older
     // layout has no state of its own and its record has just been found in a
     // checkout store, so reporting it as recordless would be wrong.

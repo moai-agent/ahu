@@ -332,6 +332,74 @@ pub fn plan(
     })
 }
 
+pub(crate) fn prepared_record(
+    repo: &Repo,
+    loaded: &LoadedConfig,
+    plan: &LaunchPlan,
+    prompt: &str,
+    materialize: crate::snapshot::MaterializeReport,
+) -> TaskRecord {
+    let repo_identity = repo.identity();
+    TaskRecord {
+        schema_version: task::TASK_SCHEMA_VERSION,
+        task_id: plan.task_id.clone(),
+        title: plan.title.clone(),
+        summary: plan.summary.clone(),
+        created_at: task::now_rfc3339(),
+        repo_identity: repo_identity.clone(),
+        repo_root: repo.root.clone(),
+        branch: plan.branch.clone(),
+        worktree: plan.worktree.clone(),
+        base_commit: plan.base_commit.clone(),
+        identity: LaunchIdentity {
+            mode: plan.mode.clone(),
+            agent: plan
+                .agent
+                .as_ref()
+                .map(|a| a.manifest.name.clone())
+                .unwrap_or_else(|| "auto".to_string()),
+            agent_version: plan.agent.as_ref().map(|a| a.manifest.version.clone()),
+            permissions: plan.permissions,
+            harness: plan.pair.harness.clone(),
+            model: plan.pair.model.clone(),
+            instructions_source: plan.agent.as_ref().map(|a| {
+                a.source_path
+                    .strip_prefix(&repo.root)
+                    .unwrap_or(&a.source_path)
+                    .to_string_lossy()
+                    .to_string()
+            }),
+            source_digest: plan.agent.as_ref().map(|a| a.source_digest.clone()),
+            instructions_digest: plan.agent.as_ref().map(|a| a.instructions_digest.clone()),
+            identity_digest: plan.agent.as_ref().map(|a| a.identity_digest()),
+            selection_basis: if plan.mode == LaunchMode::Automatic {
+                Some(plan.pair.basis.clone())
+            } else {
+                None
+            },
+        },
+        policy_digest: loaded.digest.clone(),
+        catalog_version: plan.pair.catalog_version.clone(),
+        config_snapshot_digest: plan.snapshot.digest(),
+        config_snapshot: plan.snapshot.clone(),
+        hooks: plan.hooks.clone(),
+        hooks_digest: plan.hooks.digest(),
+        materialize,
+        // The prompt lives only in prompt.txt, which is owner-only.
+        launch_command: plan.command.redacted(),
+        delivery: plan.delivery.clone(),
+        prompt_digest: crate::util::digest_bytes(prompt.as_bytes()),
+        harness_executable: plan.harness_executable.clone(),
+        enforcement: plan.enforcement.clone(),
+        // Retain the field for compatibility with older records.
+        reliability_warning: None,
+        cmux_group_id: None,
+        cmux_workspace_id: None,
+        cmux_window_id: None,
+        state: TaskState::Starting,
+    }
+}
+
 /// Undo the worktree a failed launch created, and say so when Git refuses.
 ///
 /// `git worktree remove` will not force-delete a checkout that holds work, and
@@ -396,7 +464,6 @@ pub fn execute(
     prompt: &str,
     focus: bool,
 ) -> Result<Launched> {
-    let repo_identity = repo.identity();
     let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
     let mut notes = Vec::new();
 
@@ -441,64 +508,7 @@ pub fn execute(
         ));
     }
 
-    let mut record = TaskRecord {
-        schema_version: task::TASK_SCHEMA_VERSION,
-        task_id: plan.task_id.clone(),
-        title: plan.title.clone(),
-        summary: plan.summary.clone(),
-        created_at: task::now_rfc3339(),
-        repo_identity: repo_identity.clone(),
-        repo_root: repo.root.clone(),
-        branch: plan.branch.clone(),
-        worktree: plan.worktree.clone(),
-        base_commit: plan.base_commit.clone(),
-        identity: LaunchIdentity {
-            mode: plan.mode.clone(),
-            agent: plan
-                .agent
-                .as_ref()
-                .map(|a| a.manifest.name.clone())
-                .unwrap_or_else(|| "auto".to_string()),
-            agent_version: plan.agent.as_ref().map(|a| a.manifest.version.clone()),
-            permissions: plan.permissions,
-            harness: plan.pair.harness.clone(),
-            model: plan.pair.model.clone(),
-            instructions_source: plan.agent.as_ref().map(|a| {
-                a.source_path
-                    .strip_prefix(&repo.root)
-                    .unwrap_or(&a.source_path)
-                    .to_string_lossy()
-                    .to_string()
-            }),
-            source_digest: plan.agent.as_ref().map(|a| a.source_digest.clone()),
-            instructions_digest: plan.agent.as_ref().map(|a| a.instructions_digest.clone()),
-            identity_digest: plan.agent.as_ref().map(|a| a.identity_digest()),
-            selection_basis: if plan.mode == LaunchMode::Automatic {
-                Some(plan.pair.basis.clone())
-            } else {
-                None
-            },
-        },
-        policy_digest: loaded.digest.clone(),
-        catalog_version: plan.pair.catalog_version.clone(),
-        config_snapshot_digest: plan.snapshot.digest(),
-        config_snapshot: plan.snapshot.clone(),
-        hooks: plan.hooks.clone(),
-        hooks_digest: plan.hooks.digest(),
-        materialize,
-        // The prompt lives only in prompt.txt, which is owner-only.
-        launch_command: plan.command.redacted(),
-        delivery: plan.delivery.clone(),
-        prompt_digest: crate::util::digest_bytes(prompt.as_bytes()),
-        harness_executable: plan.harness_executable.clone(),
-        enforcement: plan.enforcement.clone(),
-        // Retain the field for compatibility with older records.
-        reliability_warning: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
-        state: TaskState::Starting,
-    };
+    let mut record = prepared_record(repo, loaded, plan, prompt, materialize);
 
     if let Err(e) = task::save(&plan.task_dir, &record, prompt) {
         return Err(rollback_worktree(repo, plan, e));
@@ -720,7 +730,10 @@ pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
 /// invokes. It receives only a directory path; the prompt is read from a file
 /// and handed to the harness as one argument, so shell syntax in the prompt is
 /// never interpreted.
-pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
+pub(crate) fn verify_task(
+    task_dir: &Path,
+    batch: Option<&crate::headless::Spec>,
+) -> Result<(TaskRecord, LaunchCommand, PathBuf)> {
     // A refused record is read here inside a live cmux pane, where the user has
     // no other context, so the error says what to do next rather than only what
     // went wrong.
@@ -769,7 +782,15 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     // contract, the agent's instructions and the prompt all live in the one argv
     // element that redaction replaces. `redeliver` rebuilds that element from
     // the frozen delivery and refuses if its digest has moved.
-    let delivered = crate::orchestration::redeliver(&record.delivery, &prompt)?;
+    let delivered = if let Some(spec) = batch {
+        crate::orchestration::redeliver_headless_policy(
+            &record.delivery,
+            &prompt,
+            &spec.options.native_helpers,
+        )?
+    } else {
+        crate::orchestration::redeliver(&record.delivery, &prompt)?
+    };
 
     // The working directory is part of the launch identity: the harness
     // discovers instructions, skills, hooks, and MCP configuration from it.
@@ -827,12 +848,17 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     }
 
     let adapter = harness::adapter_for(&record.identity.harness)?;
-    let rebuilt = adapter.launch_command(&LaunchRequest {
+    let request = LaunchRequest {
         model: &record.identity.model,
         prompt: &delivered,
         cwd: &record.worktree,
         permissions: record.identity.permissions,
-    })?;
+    };
+    let rebuilt = if let Some(spec) = batch {
+        crate::headless::batch_command(&record.identity.harness, &request, spec)?
+    } else {
+        adapter.launch_command(&request)?
+    };
     if rebuilt.redacted() != record.launch_command {
         bail!(
             "the recorded launch command for task {} does not match what its configuration \
@@ -887,7 +913,9 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
             }
         }
     }
-    if !record.harness_executable.as_os_str().is_empty() && record.harness_executable != executable
+    if batch.is_none()
+        && !record.harness_executable.as_os_str().is_empty()
+        && record.harness_executable != executable
     {
         eprintln!(
             "ahu: this workspace resolves {} to {}, not the {} seen at submission. \
@@ -898,6 +926,11 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         );
     }
 
+    Ok((record, rebuilt, executable))
+}
+
+pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
+    let (record, rebuilt, executable) = verify_task(task_dir, None)?;
     eprintln!(
         "ahu task {} — {} on {} / {}",
         record.task_id,

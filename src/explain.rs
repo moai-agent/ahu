@@ -13,9 +13,9 @@ use crate::catalog;
 use crate::hooks::{NON_PROJECT_HOOK_DETAIL, NON_PROJECT_HOOK_WARNING};
 use crate::util::{Error, Result};
 
-/// The launch pipeline, as a Mermaid flowchart.
+/// Interactive composition and the two execution backends, as a Mermaid flowchart.
 pub const MERMAID_PIPELINE: &str = r#"flowchart TD
-    A["ahu (in a Git repo, inside cmux)"] --> B{".agents/ahu/config.toml?"}
+    A["ahu (in a Git repo)"] --> B{".agents/ahu/config.toml?"}
     B -- no --> C["First-run setup:<br/>project-agreed harness order,<br/>model order, catalog pin"]
     C --> D
     B -- yes --> D["Launcher"]
@@ -28,13 +28,16 @@ pub const MERMAID_PIPELINE: &str = r#"flowchart TD
 
     H --> I["Prompt composer<br/>paste never submits"]
     I --> J["Plan: snapshot config, detect drift,<br/>read hooks, build argv"]
+    X["Scripted launch<br/>prompt file, inline or stdin"] --> J
     J --> K["Submission preview<br/>identity, Git effects, hooks, warnings"]
     K -- "no" --> L["Nothing created"]
     K -- "yes" --> M["git worktree add<br/>branch ahu/&lt;agent&gt;/&lt;task-id&gt;"]
 
     M --> N["Materialize parent agent config<br/>at native paths"]
     N --> O["Write task record + prompt.txt"]
-    O --> P["cmux: find-or-create repository group"]
+    O --> U{"Execution backend"}
+    U -- headless --> V["Supervisor: batch argv,<br/>external attempts + results"]
+    U -- interactive --> P["cmux: find-or-create repository group"]
     P --> Q["cmux: child workspace in that group"]
     Q --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
     R --> S["Re-derive argv, compare to record"]
@@ -145,9 +148,9 @@ pub fn document() -> Vec<Section> {
             title: "What ahu is",
             blocks: vec![
                 para(&[
-                    "ahu is cross-harness configuration management for agent sessions, built for",
-                    "cmux. It launches agents that a repository defines into isolated Git worktrees",
-                    "and organises their sessions as rows under a repository group in cmux.",
+                    "ahu is cross-harness configuration management for agent sessions. It launches",
+                    "agents that a repository defines into separate Git worktrees",
+                    "and runs interactive sessions in cmux or unattended headless attempts.",
                 ]),
                 para(&[
                     "ahu is not an agent harness. It does not host a model, run an agent loop, own a",
@@ -166,11 +169,13 @@ pub fn document() -> Vec<Section> {
             title: "Delegation follows the entrypoint",
             blocks: vec![para(&[
                 "Outside ahu, sub-agents and fan out use the current harness's native",
-                "sub-agent features. Inside an ahu task, they mean only registered ahu",
-                "agents, each using its configured harness and model in a separate cmux",
-                "workspace. Use ahu launch @name --prompt-file /path/to/task.txt.",
-                "Every ahu launch supplies this delegation contract, identically on every",
-                "harness: as prompt text, inside a fence tagged with a per-launch nonce,",
+                "sub-agent features. Inside ahu, registered assignments use registered ahu",
+                "agents, each using its configured harness and model in a separate worktree.",
+                "Headless children inherit that backend; interactive children use cmux.",
+                "Use ahu launch @name --prompt-file /path/to/task.txt.",
+                "Headless native helpers follow the frozen policy described below. Every",
+                "launch supplies its backend delegation contract as prompt text on every",
+                "harness, inside a fence tagged with a per-launch nonce,",
                 "ahead of the agent's instructions and then the task prompt. ahu uses no",
                 "system-prompt or agent-selection flag anywhere, so none of it is enforced;",
                 "the task prompt that follows can contradict it, and ahu cannot prevent a",
@@ -181,13 +186,13 @@ pub fn document() -> Vec<Section> {
             title: "What ahu needs",
             blocks: vec![
                 bullets(&[
-                    "**cmux**, required: every task session is a cmux workspace.",
+                    "**cmux**, required for interactive task sessions; headless execution needs no cmux.",
                     "**A supported harness**, installed and signed in by you: Claude Code, Codex, or the Antigravity CLI.",
                     "**Git**: every task gets its own branch and worktree.",
                 ]),
                 para(&[
                     "ahu creates the repository group and the per-task workspace through cmux, and",
-                    "task sessions require that connection. Help, previews, and local inspection do",
+                    "interactive sessions require that connection. Headless tasks and local inspection do",
                     "not. The harness is what actually runs the",
                     "agent; ahu never installs, configures, or authenticates one, and it does not",
                     "ship one. Sign-in is the harness's own, and ahu holds no API key for any of",
@@ -205,9 +210,9 @@ pub fn document() -> Vec<Section> {
                 ]),
                 para(&[
                     "ahu holds no credentials and speaks to no model provider. Sign-in and the",
-                    "approval boundary are the harness's own: ahu passes no permission flag unless",
-                    "an agent's manifest asks for one, and it cannot tell you what the",
-                    "effective boundary is — the harness's settings files decide that, and a",
+                    "approval boundary are the harness's own. Headless adapters pass explicit batch",
+                    "controls; manifest-requested widening remains gated. ahu cannot assert the",
+                    "effective boundary; harness settings also apply. The",
                     "launch preview reports what ahu read in them rather than asserting a result.",
                 ]),
             ],
@@ -335,17 +340,65 @@ pub fn document() -> Vec<Section> {
             ])],
         },
         Section {
+            title: "Headless attempts and results",
+            blocks: vec![para(&[
+                "launch --headless uses batch execution without cmux or a PTY. Add --background",
+                "to return after supervisor startup; otherwise execution stays in the foreground.",
+                "The preview names the admitted CLI profile, exact command, timeout and gaps.",
+                "Known cmux wrappers and unsupported versions fail without a fallback.",
+                "Records, prompts and attempt artifacts use an owner-only directory outside Git:",
+                "$HOME/.local/state/ahu/runtime, or the absolute AHU_RUNTIME_DIR override.",
+                "Native harness session stores keep their own external homes and retention.",
+                "tasks --output json and task inspect records; wait follows an attempt, result",
+                "reads its outcome, resume explicitly continues its recorded native session, and",
+                "cancel requests termination of the task and its recorded ahu descendants.",
+                "Earlier attempt artifacts survive resume. Configuration or executable drift",
+                "refuses resume. A child cannot resume after its owning parent attempt terminates",
+                "or closes admission. Submit a new registered assignment with the prior result",
+                "and explicit source/revision scope; dirty changes and native sessions do not",
+                "transfer automatically. Child resume does not use the launch broker.",
+                "Supervisor loss is interrupted, with no automatic replay.",
+                "Process success and harness success are evidence, not orchestrator acceptance.",
+                "Reports and same-user editable records remain untrusted; provider-managed child",
+                "cleanup and child usage accounting can be unknown. Review actual work and tests.",
+                "Host submission grants registered children with --allow-child @name or",
+                "--allow-child-widened @name. Grants freeze identity and policy; descendants",
+                "cannot expand them. The supervisor broker dispatches the real registered child",
+                "outside the worker sandbox using the child's own harness and approval mapping.",
+                "Codex workspace-write gets a narrow request-directory write root; read-only",
+                "Codex broker transport is refused. Dead or stale parent attempts cannot admit",
+                "children. Failed or unjoined current-attempt children block parent success.",
+                "Limits: depth eight, 128 assignments per root grant, 16 active/interrupted",
+                "assignments per repository runtime store. No global token cap is promised.",
+                "Native helpers default to disabled. Bounded supports Claude Code 2.1.270 only:",
+                "the entire owner and helpers have read-only model tools, with no shell or edits.",
+                "The owner cannot shell-launch ahu children. A shell-capable coordinator instead",
+                "grants a separate registered bounded reviewer, which uses helpers internally.",
+                "Bounded uses one concurrent helper, depth one, the owner's exact model and a",
+                "USD 5 budget per attempt. Roles are requested; total helper count is not capped.",
+                "MCP and slash commands are excluded; settings and deny rules remain discoverable.",
+                "The model tool ceiling does not prove hooks cannot write or spawn processes.",
+                "Known successful helper joins are required. Provider-side cleanup stays unknown.",
+                "Codex 0.154.0 and Antigravity 1.2.2 admit ordinary headless execution, but refuse",
+                "bounded helpers. Claude 2.1.269 also admits only the disabled profile.",
+                "Same-user code is not isolated from broker state. Hooks and arbitrary shell",
+                "commands require a vetted environment; ahu's backend itself does not use cmux.",
+                "Explicit cleanup removes captured logs after known termination, retaining",
+                "structured results, frozen inputs, native stores, branches and worktrees.",
+            ])],
+        },
+        Section {
             title: "State and records",
             blocks: vec![para(&[
                 "Task worktrees are siblings under `.worktrees/` in the primary checkout.",
-                "A task's record and prompt live in `.ahu/state/` inside its own worktree, chosen",
+                "An interactive task's record and prompt live in `.ahu/state/` in its worktree, chosen",
                 "by ahu at launch and passed to the session, so removing that worktree removes",
                 "them with it. `ahu tasks`, `task`, `diff` and `focus` find them by looking through",
                 "`.worktrees/`, from the primary checkout or from any sibling. Only the launch lock",
                 "and the cmux group mapping are shared, in the primary checkout's `.ahu/state/`;",
                 "hygiene timestamps stay in the checkout they were recorded from. `.ahu/` ignores",
                 "itself in Git. `AHU_STATE_DIR` overrides auxiliary state and legacy-store lookup,",
-                "not new task records or worktree discovery; no manual export is required.",
+                "not new interactive records or worktree discovery; no manual export is required.",
                 "A value naming any same-repository checkout's `.ahu/state` is automatic wiring:",
                 "coordination stays in the primary checkout. Legacy lookup reads the primary and",
                 "invoking plain-checkout stores; managed worktree stores always enforce ownership.",

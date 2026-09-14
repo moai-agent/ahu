@@ -407,7 +407,13 @@ pub const NO_TASKS: &str = "No ahu tasks have been launched from this repository
 
 /// `ahu tasks`
 pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
-    let listing = launch::reconcile(repo)?;
+    let listing = if std::env::var("AHU_EXECUTION_BACKEND").ok().as_deref() == Some("headless")
+        || !crate::headless::discover(repo)?.is_empty()
+    {
+        task::list(repo)?
+    } else {
+        launch::reconcile(repo)?
+    };
     // Printed before anything returns: a store can hold something that is not a
     // task and nothing that is, and that is exactly when saying so matters.
     for note in &listing.notes {
@@ -599,27 +605,40 @@ fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
     })
 }
 
+pub fn task_summary(dir: &Path, record: &task::TaskRecord) -> Result<serde_json::Value> {
+    let mut value = serde_json::json!({
+        "schema_version": 1,
+        "task_id": record.task_id,
+        "agent": record.agent_label(),
+        "harness": record.identity.harness,
+        "model": record.identity.model,
+        "branch": record.branch,
+        "base_commit": record.base_commit,
+        "worktree": record.worktree,
+        "worktree_exists": record.worktree.is_dir(),
+        "record_path": dir.join("task.json"),
+        "cmux_workspace_id": record.cmux_workspace_id,
+        "cmux_window_id": record.cmux_window_id,
+        "session_state": record.state.as_str(),
+        "state_source": "record",
+        "completion_verified": false,
+    });
+    value["execution_backend"] = if dir.join("headless.json").exists() {
+        "headless".into()
+    } else {
+        "cmux".into()
+    };
+    if dir.join("headless.json").exists() {
+        value["attempt"] = crate::headless::inspection(dir)?;
+    }
+    Ok(value)
+}
+
 /// A small, versioned inspection contract; never expose the full launch record.
 pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) -> Result<i32> {
     let (dir, record) = inspect_task(repo, id)?;
     if json {
-        let value = serde_json::json!({
-            "schema_version": 1,
-            "task_id": record.task_id,
-            "agent": record.agent_label(),
-            "harness": record.identity.harness,
-            "model": record.identity.model,
-            "branch": record.branch,
-            "base_commit": record.base_commit,
-            "worktree": record.worktree,
-            "worktree_exists": record.worktree.is_dir(),
-            "record_path": dir.join("task.json"),
-            "cmux_workspace_id": record.cmux_workspace_id,
-            "cmux_window_id": record.cmux_window_id,
-            "session_state": record.state.as_str(),
-            "state_source": "record",
-            "completion_verified": false,
-        });
+        let value = task_summary(&dir, &record)?;
         console.say(&format!("{}\n", serde_json::to_string(&value)?))?;
     } else {
         console.say(&format!(
@@ -854,7 +873,7 @@ pub fn run_task(task_dir: &Path) -> Result<i32> {
 }
 
 /// Resolve a launch identity from an optional `@name`.
-fn resolve_identity(
+pub(crate) fn resolve_identity(
     repo: &Repo,
     loaded: &LoadedConfig,
     agent_name: Option<&str>,
@@ -1026,6 +1045,59 @@ fn submit(
     let mut plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
     plan.apply_display(display)?;
 
+    preflight(console, repo, loaded, &plan, prompt, dry_run)?;
+
+    // Generated here, after the prompt has been read and after the plan is
+    // built, so nothing in the prompt can have contained it.
+    let code = confirmation_code();
+    if dry_run {
+        console.say(&render_preview(
+            repo,
+            &plan,
+            prompt,
+            confirm.then_some(code.as_str()),
+        ))?;
+    } else {
+        console.say(&render_launch_preview(
+            repo,
+            &plan,
+            prompt,
+            confirm.then_some(code.as_str()),
+        ))?;
+    }
+
+    if dry_run {
+        console.say("Dry run. No task or session was created.\n")?;
+        if output_json {
+            println!("{}", launch::render_json(&plan, prompt)?);
+        }
+        return Ok(0);
+    }
+    if confirm && !launcher::confirm_submit(console, &code)? {
+        console.say("Cancelled. No worktree, branch, or session was created.\n")?;
+        return Ok(1);
+    }
+
+    let launched = launch::execute(repo, loaded, &plan, prompt, focus_new)?;
+    console.say(&format!(
+        "\nStarted @{} in cmux.\n  task       {}\n  worktree   {}\n\nOpen session: ahu focus {}\nList tasks:   ahu tasks\n",
+        display_safe(&launched.record.identity.agent),
+        display_safe(&launched.record.task_id),
+        display_path(launched.record.worktree.strip_prefix(&repo.root).unwrap_or(&launched.record.worktree)),
+        display_safe(&launched.record.task_id),
+    ))?;
+    console.say(&style::stdout().paint(Role::Warning, &render_launch_notes(&launched.notes)))?;
+    Ok(0)
+}
+
+pub(crate) fn preflight(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    loaded: &LoadedConfig,
+    plan: &launch::LaunchPlan,
+    prompt: &str,
+    dry_run: bool,
+) -> Result<()> {
     // First-load and overdue context hygiene review, before submission.
     let identity = repo.identity();
     let key = plan.agent_label();
@@ -1084,47 +1156,7 @@ fn submit(
         console.say(&style::stdout().paint(Role::Drift, &drift::render(&found)))?;
     }
 
-    // Generated here, after the prompt has been read and after the plan is
-    // built, so nothing in the prompt can have contained it.
-    let code = confirmation_code();
-    if dry_run {
-        console.say(&render_preview(
-            repo,
-            &plan,
-            prompt,
-            confirm.then_some(code.as_str()),
-        ))?;
-    } else {
-        console.say(&render_launch_preview(
-            repo,
-            &plan,
-            prompt,
-            confirm.then_some(code.as_str()),
-        ))?;
-    }
-
-    if dry_run {
-        console.say("Dry run. No task or session was created.\n")?;
-        if output_json {
-            println!("{}", launch::render_json(&plan, prompt)?);
-        }
-        return Ok(0);
-    }
-    if confirm && !launcher::confirm_submit(console, &code)? {
-        console.say("Cancelled. No worktree, branch, or session was created.\n")?;
-        return Ok(1);
-    }
-
-    let launched = launch::execute(repo, loaded, &plan, prompt, focus_new)?;
-    console.say(&format!(
-        "\nStarted @{} in cmux.\n  task       {}\n  worktree   {}\n\nOpen session: ahu focus {}\nList tasks:   ahu tasks\n",
-        display_safe(&launched.record.identity.agent),
-        display_safe(&launched.record.task_id),
-        display_path(launched.record.worktree.strip_prefix(&repo.root).unwrap_or(&launched.record.worktree)),
-        display_safe(&launched.record.task_id),
-    ))?;
-    console.say(&style::stdout().paint(Role::Warning, &render_launch_notes(&launched.notes)))?;
-    Ok(0)
+    Ok(())
 }
 
 /// The normal launch view contains decisions and next actions. Full audit

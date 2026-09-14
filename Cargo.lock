@@ -6,6 +6,7 @@ version = 4
 name = "ahu"
 version = "0.2.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "sha2",

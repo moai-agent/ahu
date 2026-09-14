@@ -23,12 +23,13 @@ prompt text retains its original bytes, including leading and trailing newlines.
 `--dry-run --output json` writes one JSON object to stdout and human-readable
 preview information to stderr. Previewing requires Git, valid project settings,
 and the selected harness, but no cmux session. It launches no task. Actual
-execution still requires cmux. Manifests that widen approvals require the
+interactive execution requires cmux; `--headless` uses a separate supervisor.
+Manifests that widen approvals require the
 explicit `--allow-widened-approvals` flag for both previews and execution, as in
-the examples above. JSON output is supported only with
-`--dry-run`.
+the examples above. Interactive launch JSON requires `--dry-run`; headless
+launches also support JSON execution results.
 
-The JSON object has `schema_version: 1` and these fields:
+The interactive preview has `schema_version: 1` and these fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -58,6 +59,206 @@ Commands return these exit codes:
 | `3` | Unknown or unregistered agent. |
 | `4` | Missing prerequisite, such as Git repository, harness, or cmux. |
 | `5` | Run failure, including invalid persisted configuration. |
+
+## Headless execution
+
+`launch --headless` runs the selected harness in batch mode without cmux, a PTY,
+or screen scraping. `--background` detaches the supervisor after startup
+acknowledgement; without it, the caller supervises in the foreground. Use the
+foreground form under CI or a host service that manages process lifetime.
+A dry run performs preflight checks and prints the redacted command, frozen
+identity, capabilities, gaps, timeout, and external runtime path without launching.
+Known cmux wrappers are refused; use the actual harness executable on `PATH`.
+
+The admitted CLI profiles are Codex 0.154.0, Claude Code 2.1.269/2.1.270,
+and Antigravity CLI 1.2.2. Other versions fail before worktree creation, with no
+fallback harness or model. Profile admission describes the adapter's argument
+surface, not successful authentication, provider availability, or full native
+helper lifecycle validation.
+
+```sh
+ahu launch @dev-astra --headless --background --timeout 1800 \
+  --prompt-file assignment.txt --allow-widened-approvals --output json
+ahu tasks --output json
+task_id=abc123  # replace with the returned task ID
+ahu task "$task_id" --output json
+ahu wait "$task_id" --output json
+ahu result "$task_id" --output json
+ahu diff "$task_id"
+```
+
+Captured stdout and stderr are limited to 64 MiB each; a parsed event line is
+limited to 1 MiB. Capture failure stops the attempt. Admission refuses a new task
+when 16 tasks in the repository runtime store lack terminal results, including
+interrupted tasks; there is no queue.
+
+The timeout is positive seconds, default 1800 per attempt. `wait` follows the
+current attempt until it stops, returning 0 for `succeeded` and 5 otherwise.
+`result` reads the durable envelope without waiting; check its `outcome`, not
+just the command's exit status. Outcomes include `running`, `succeeded`, `failed`,
+`timed_out`, `cancelled`, `capture_failed`, `supervisor_error`, and `interrupted`. JSON schema 1 separates process exit,
+parsed harness events, agent report, worktree changes, and artifact paths.
+`acceptance` stays `not assessed` and `completion_verified` stays false: a provider
+success or an agent's report does not establish that the assignment was accepted.
+Treat reports and logs as untrusted data before feeding them to another agent.
+
+Resume explicitly uses the recorded native session and creates another attempt
+in the same task, preserving earlier attempt artifacts:
+
+```sh
+printf '%s\n' 'Continue the review and report remaining findings.' > followup.txt
+ahu resume "$task_id" --prompt-file followup.txt --output json
+ahu wait "$task_id" --output json
+ahu cancel "$task_id" --output json
+ahu wait "$task_id" --output json
+```
+
+Resume requires a terminal result and recorded session identity, unchanged frozen
+configuration and executable, and an available adapter mapping. Codex
+`accept-edits` resume is refused because that mapping is not validated. Interrupted
+attempts are not automatically replayed.
+
+Resuming a registered child or invoking resume from a worker is unsupported,
+including while the owning parent is live. ahu refuses these requests before
+mutating attempt state. Its original parent/attempt binding is retained; ahu does
+not silently turn a child into an independent task or select a different native
+session. Child resume is not routed through the launch broker. For follow-up, submit a new
+registered assignment from the host, or request a new child through a live owner
+with the necessary frozen grant. Include the previous task ID, the source checkout
+and revision/diff scope, and the remaining work in the new prompt. New assignments
+start at the invoking checkout's HEAD; they do not inherit the prior child's dirty
+source changes or native conversation automatically. Inspect retained results and
+attempts after any refused resume before deciding what to submit next.
+
+Cancellation records a request for the
+task and its recorded ahu descendants; confirm termination with `wait` or `result`.
+The live supervisor owns process termination rather than trusting a saved PID.
+Provider-managed or escaped processes have unknown cleanup status. A host reboot
+or supervisor loss does not trigger automatic retry or prove child termination.
+
+Headless records and prompts live under
+`$HOME/.local/state/ahu/runtime/<repo-identity>/<task-id>/` by default.
+`AHU_RUNTIME_DIR` selects another absolute private directory outside every Git
+checkout. An existing root must be owned by the current user with owner-only
+permissions. Attempt artifacts include events, stderr, final text, and structured
+results. `ahu cleanup "$task_id" --output json` explicitly removes captured
+logs and final-text files across attempts after a known terminal attempt. It
+retains structured results (including report text), frozen inputs, native session
+stores, branches and worktrees; it refuses unknown/interrupted ownership.
+Removing a worktree does not remove these records. Reuse the same runtime
+root when collecting results from another checkout. Native harness homes and
+credentials retain their own external locations and retention policies; ahu does
+not relocate or impose a disk quota on provider session stores. Do not place
+execution traces in a repository, even ignored directories. Runtime records and
+their digests remain editable by the same user: they are integrity checks, not
+authenticated evidence or an OS security boundary.
+
+Unattended approval mappings never grant extra authority merely to avoid a prompt.
+Claude denies unanswered permission requests; Codex uses explicit batch sandbox
+and approval flags; Antigravity preserves the manifest mapping (`auto` requests
+`--dangerously-skip-permissions`). `auto` and
+`accept-edits` still require `--allow-widened-approvals`, including dry runs.
+Inspect the exact preview and denial evidence; exit zero alone is insufficient.
+
+### Registered children and host grants
+
+A headless worker can request only registered children granted when its root task
+was submitted from the host. Repeat `--allow-child @name` for ordinary approval
+profiles or `--allow-child-widened @name` for manifests declaring `auto` or
+`accept-edits`. Granting the parent's own `--allow-widened-approvals` does not
+also grant children. The grant freezes each child's identity, permission mode,
+hook inventory, and native-helper policy; descendants cannot expand it.
+
+For example, after registering a shell-capable `@coordinator` and a `@reviewer`
+with ordinary approval settings:
+
+```sh
+ahu launch @coordinator --headless --background --allow-child @reviewer \
+  --prompt-file assignment.txt --output json
+```
+
+If either manifest requests wider approvals, supply the corresponding parent
+`--allow-widened-approvals` or child `--allow-child-widened @reviewer` flag.
+Inside the owning task, request the child through the launching executable:
+
+```sh
+"$AHU_BIN" launch @reviewer --headless --background \
+  --prompt 'Read the assigned source and report findings.' --output json
+```
+
+The child request still needs `--allow-widened-approvals` when its manifest
+requires it. ahu sends a bounded request to the owning supervisor's broker; the
+supervisor starts the real registered child outside the worker sandbox with
+that child's configured harness, model, sandbox and approval mapping. It does
+not run a replacement harness inside the parent sandbox. Codex workspace-write
+receives the task's request directory as a narrow additional write root;
+read-only Codex broker transport is refused.
+
+Requests bind to a live parent attempt. Invalid, replayed, stale or cancelled
+requests are refused; configuration changes also refuse dispatch. Request and
+dispatch capture are limited to 2 MiB, dispatch to 30 seconds. A lost
+acknowledgement does not justify replay: inspect recorded child tasks first.
+Admission closes when the parent process exits. Failed or unjoined registered
+children from its current attempt prevent parent success. The result's
+`ahu_children` records their task IDs and outcomes. Limits are eight child levels,
+128 assignments per root grant, and 16 active/interrupted assignments per
+repository runtime store. No global token cap or hidden task queue is promised.
+The broker is not isolation against hostile code running as the same OS user.
+
+### Bounded native helpers
+
+Native helpers belong to the owning harness attempt; they cannot replace a
+registered specialist, another harness, or independently supervised work.
+`--native-helpers` overrides the agent manifest's top-level `native_helpers`,
+then project `[execution].native_helpers`; the default is `disabled`. Child
+requests must retain the policy frozen in their host grant.
+
+| Harness CLI | Headless launch | Bounded native helpers |
+| --- | --- | --- |
+| Claude Code 2.1.269 | Admitted | Refused |
+| Claude Code 2.1.270 | Admitted | Read-only profile |
+| Codex 0.154.0 | Admitted | Refused: incomplete helper identity/join event visibility |
+| Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
+
+The Claude bounded profile restricts the **entire attempt, including the owner**,
+to the model tools `Read`, `Grep`, `Glob`, and the parent's `Task` delegation tool.
+Through those tools it cannot edit,
+run shell commands, builds or tests, create native worktrees/teams, or shell-launch
+registered ahu children. Use it for read-only review or investigation:
+
+```sh
+ahu launch @reviewer --headless --native-helpers bounded \
+  --prompt 'Read the relevant source, use and await a helper, and report findings.' \
+  --output json
+```
+
+This example requires a registered Claude-backed reviewer and CLI 2.1.270.
+Apply the usual approval-widening flag if its manifest requires it. For a mixed
+workflow, register that reviewer's manifest with `native_helpers = "bounded"`
+and grant it to a shell-capable coordinator at host submission. The coordinator
+launches the separate registered review task and collects its result; the reviewer
+uses native helpers internally. Keep writing assignments in `disabled` mode.
+ahu does not infer from prompt text whether an assignment requires writes.
+
+The integrated bounded profile pins helpers to the owner's exact manifest model,
+one concurrent helper, depth one, and a USD 5 budget per attempt. MCP tools and
+slash commands are excluded. Repository settings and deny rules remain
+discoverable; hook execution as a helper constraint is not established. The
+`ahu-reader` role is requested and actual roles are recorded, but no role
+allowlist or total helper-count cap is enforced. A role change cannot widen the
+profile's tool ceiling or model pin. The ceiling does not establish that
+settings-defined hooks cannot spawn processes or write files; review those
+settings separately before relying on a read-only execution environment.
+
+`native_completeness` records joins, unjoined helpers, violations and unknowns.
+A parent's final message is insufficient: bounded attempts require known,
+successful helper completion. Provider-side cancellation and child usage
+accounting remain unknown. Disabled mode withholds Claude's `Task` tool and
+sets Codex `agents.enabled=false`; Antigravity has no validated native-disable
+control. ahu's headless path does not invoke cmux, but arbitrary hooks, native
+configuration and shell commands still require a vetted environment. Neither
+these controls nor local records establish a universal sandbox or independently
+verified assignment acceptance.
 
 ## Knowledge checks
 
@@ -224,7 +425,7 @@ includes `task_id`, `agent`, `harness`, `model`, `branch`, `base_commit`,
 JSON remains unstyled even with `--color=always` and omits prompt text and titles.
 Consumers should tolerate additional fields and check `schema_version`.
 
-The task list labels states as `session running`, `session exited`, and so on.
+The interactive task list labels states as `session running`, `session exited`, and so on.
 A running session may be awaiting input; a process exit does not verify success.
 
 `ahu diff` compares the launch base to the current task worktree, including
@@ -245,7 +446,7 @@ to another repository. Neither command stages, commits, or applies changes.
   configuration you have deleted locally stays deleted. Unrelated dirty source
   files stay in your original checkout.
 - **The configured harness and model at launch.** The preview records the
-  executable found on the submitting shell's `PATH`. At startup, `run-task`
+  executable found on the submitting shell's `PATH`. For interactive startup, `run-task`
   resolves the same harness name on the workspace's `PATH`; cmux wrappers can
   differ between surfaces. ahu reports a changed path and rejects relative or
   repository-local executables. ahu does not substitute a model or pass permission
@@ -356,7 +557,13 @@ a global deletion as a local one.
 
 ## State and compatibility
 
-Each new task stores `task.json` and `prompt.txt` under
+Headless tasks use the external runtime store described above. `tasks`, `task`,
+and `diff` include those records alongside interactive and legacy records.
+`focus` is for interactive cmux sessions. The following worktree-local layout
+and `AHU_STATE_DIR` rules describe interactive tasks and compatible legacy state;
+`AHU_RUNTIME_DIR` independently selects the headless store.
+
+Each interactive task stores `task.json` and `prompt.txt` under
 `<task-worktree>/.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Session status
 is part of `task.json`. ahu derives this location from the worktree it creates;
 ordinary invocations need no manual `AHU_STATE_DIR` export. Removing the worktree
@@ -406,7 +613,7 @@ stores. The value must name a checkout root's `.ahu/state`; a store under a
 subdirectory is a separate explicit selection. This holds even when the variable
 names a sibling's store. Other values
 select their own coordination and legacy store instead of those default stores.
-In either case, discovery still scans task worktrees and new task records and
+In either case, discovery still scans task worktrees and interactive task records and
 prompts still go inside their own worktree. The launched harness receives
 `AHU_STATE_DIR` set to its own worktree's `.ahu/state`, replacing any inherited
 override. Harness configuration and credentials retain their native handling.
@@ -456,9 +663,12 @@ ahu does not reinterpret their digests or delete their worktrees.
 
 ## Delegation and approval boundaries
 
-Outside ahu, delegation belongs to the current harness. Inside an ahu task,
-sub-agents and fan out mean registered ahu agents running their configured
-harnesses and models in separate cmux workspaces. The supplied contract requires
+Outside ahu, delegation belongs to the current harness. Registered assignments
+inside ahu use registered ahu agents running their configured
+harnesses and models in separate worktrees. Interactive tasks use cmux workspaces;
+headless descendants inherit the headless backend and external runtime root.
+Headless child grants and bounded native helpers follow the policies above.
+The supplied contract requires
 `ahu agents`, a complete UTF-8 assignment file, and `ahu launch @name
 --prompt-file assignment.txt`. `AHU_BIN` points to the launching ahu executable.
 
@@ -472,7 +682,7 @@ their fences. These delimiters identify supplied text; they do not enforce
 authority. No adapter passes an agent-selection or system-prompt flag, and ahu
 cannot stop the harness or its shell tools from starting other processes.
 
-`permissions = "prompt"` passes no approval flag. `accept-edits` and `auto`
+For interactive launches, `permissions = "prompt"` passes no approval flag. `accept-edits` and `auto`
 request adapter-specific flags; `ahu launch` requires
 `--allow-widened-approvals` for either, including dry runs. Existing harness
 settings still affect approvals. The flag grants no additional access to the

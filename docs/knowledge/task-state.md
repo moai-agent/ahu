@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: Task state
-description: Worktree-local task records, discovery and integrity boundaries.
+description: Interactive and headless task records, discovery and integrity boundaries.
 tags: [worktrees, state]
 status: draft
 sources:
@@ -21,12 +21,38 @@ sources:
 
 # Task state
 
-Each task's `task.json` and `prompt.txt` live under its own worktree at
+Each interactive task's `task.json` and `prompt.txt` live under its own worktree at
 `.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Launch derives this path
 without an environment override. Removing the worktree removes its state;
 records include session status, which does not prove task completion.[^state][^launch][^tests]
 
-Task discovery scans sibling task worktrees under the primary checkout's
+Headless tasks instead store records, prompts and per-attempt results outside Git
+checkouts, under the default home runtime directory or `AHU_RUNTIME_DIR`.
+Discovery includes this external store. Worktree deletion retains headless
+results; supervisor loss reports an interrupted attempt without automatic replay.
+Process and harness outcomes remain separate from acceptance: agent reports and
+same-user editable records do not prove completion. The headless implementation
+in src/headless.rs defines this backend; interactive state rules below do not
+relocate it through `AHU_STATE_DIR`.
+
+Headless child grants freeze registered identities and native policies at host
+submission. The broker in src/broker.rs binds requests to a live parent attempt
+and dispatches the registered child with its own harness policy outside the
+worker sandbox. Descendants cannot expand the grant. Failed or unjoined children
+from the current attempt block parent success. Native helper joins are recorded
+separately from registered task IDs; src/native.rs defines the bounded Claude
+2.1.270 profile, which supplies read-only model tools to both owner and helpers;
+this does not prove settings-defined hooks cannot write. A child's retained
+parent-attempt binding prevents resume once that parent terminates or closes
+admission. Further work needs a new registered assignment with explicit source
+scope, rather than silently detaching the old task from its provenance. Same-user code is
+not isolated from supervisor records, and provider-side cleanup remains unknown.
+
+Explicit cleanup removes captured attempt artifacts after known termination,
+retaining structured results, frozen inputs, native stores, branches and worktrees.
+It is not a full erasure of task content.
+
+Interactive task discovery scans sibling task worktrees under the primary checkout's
 `.worktrees/`, then compatible legacy checkout stores. Worktree records take
 precedence for duplicate IDs. The primary checkout and siblings can discover
 these tasks. Every scan of a managed worktree store enforces its owner's task ID,
@@ -54,8 +80,8 @@ repository is recognized as automatic session wiring: coordination stays in the
 primary checkout, and legacy lookup uses the primary and invoking plain-checkout
 stores. Managed stores retain owner checks. A subdirectory's `.ahu/state` does
 not qualify as checkout-root wiring. Other values replace those coordination and legacy stores. Neither case relocates
-new task records or suppresses worktree discovery. The
-harness receives its own worktree's state root as `AHU_STATE_DIR`.[^state][^task][^launch]
+new interactive task records or suppresses worktree discovery. The
+interactive harness receives its own worktree's state root as `AHU_STATE_DIR`.[^state][^task][^launch]
 
 State access refuses existing symlinks in default store paths and below explicit
 state roots; an explicit root outside the checkout-store layout is user-selected.

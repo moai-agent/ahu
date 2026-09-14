@@ -78,7 +78,7 @@ pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
         .map_err(|e| Error::new(format!("cannot run git: {e}")))
 }
 
-fn run_ok(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn run_ok(dir: &Path, args: &[&str]) -> Result<String> {
     let out = run(dir, args)?;
     if !out.status.success() {
         bail!(

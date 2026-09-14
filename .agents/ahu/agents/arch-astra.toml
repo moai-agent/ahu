@@ -1,0 +1,11 @@
+schema_version = 1
+name = "arch-astra"
+version = "1.0.0"
+description = "Plans implementation with code-grounded designs, dependencies, and verifiable work increments"
+harness = "codex"
+model = "gpt-6-astra"
+permissions = "prompt"
+
+[source]
+format = "markdown"
+path = ".agents/ahu/instructions/arch-astra.md"

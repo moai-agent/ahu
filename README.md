@@ -1,8 +1,8 @@
 # ahu
 
-Launch repository-defined coding agents in fresh Git worktrees, with each session
-in its own cmux workspace. Agent manifests pin the harness and model; ahu
-previews the configuration, delivers instructions, and records the launch.
+Launch repository-defined coding agents in fresh Git worktrees, interactively
+in cmux or unattended in headless mode. Agent manifests pin the harness and
+model; ahu previews the configuration, delivers instructions, and records the launch.
 
 ## Install
 
@@ -13,8 +13,9 @@ With Rust and Cargo installed (this checkout pins Rust in
 cargo install --git https://github.com/moai-agent/ahu --locked
 ```
 
-Task sessions require Git, cmux, and the selected harness installed and
+Tasks require Git and the selected harness installed and
 authenticated: Claude Code (`claude`), Codex (`codex`), or Antigravity CLI (`agy`).
+Interactive sessions also require cmux. Headless tasks need no cmux connection.
 ahu installs none of these and holds no provider credentials. Read-only help and
 launch previews do not require a cmux connection. Git and default cmux lookup
 require executables outside Git working trees; see the
@@ -57,9 +58,27 @@ ahu launch @dev-astra --prompt-file assignment.txt \
 ```
 
 `launch` submits without interactive confirmation and keeps focus on the caller.
-All five agents in this repository declare `permissions = "auto"`, so this path
-requires the explicit approval-widening flag, even for previews. The flag controls
+The development, security, and documentation agents declare `permissions = "auto"`,
+so their launches require the explicit approval-widening flag, even for previews. The flag controls
 the child's requested settings; it grants no extra access to the caller.
+
+For unattended execution, use an initialized project and the same registered agent:
+
+```sh
+ahu launch @dev-astra --headless --prompt-file assignment.txt \
+  --allow-widened-approvals --output json
+ahu launch @dev-astra --headless --background --prompt-file assignment.txt \
+  --allow-widened-approvals --output json
+```
+
+The first command waits in the foreground; the second returns after supervisor
+startup. Each launches a separate task. Headless results and logs live outside
+repositories. See [headless execution](docs/reference.md#headless-execution) for
+supported CLI versions, result collection, resume, cancellation, and limits.
+Headless child launches need host grants (`--allow-child` or
+`--allow-child-widened`). Claude Code 2.1.270 also supports bounded native helpers
+for entirely read-only assignments; use a separate registered reviewer for that
+mode when the coordinator needs to edit or run commands.
 
 Inspect work from the primary checkout or a sibling task worktree:
 
@@ -78,6 +97,7 @@ keep their branches, worktrees, and records after the harness exits.
 
 | Agent | Harness / model | Role |
 | --- | --- | --- |
+| `@arch-astra` | Codex / `gpt-6-astra` | Plans implementation with code-grounded designs, dependencies, and verifiable work increments. |
 | `@offsec-astra` | Codex / `gpt-6-astra` | Investigates security issues and reports evidence without editing source. |
 | `@defsec-astra` | Codex / `gpt-6-astra` | Reviews defensive programming; implements requested hardening and focused refactoring. |
 | `@dev-astra` | Codex / `gpt-6-astra` | Validates reported issues and implements fixes with regression coverage. |
@@ -107,10 +127,10 @@ without a mandatory interview. Repository copies are provided for Codex and Clau
 Each task starts at the invoking checkout's HEAD on `ahu/<agent>/<task-id>`, in
 `.worktrees/` under the primary checkout. Recognized agent configuration is copied
 from the invoking checkout, including uncommitted and ignored files and local
-deletions. Unrelated dirty source files stay behind. Each task's record and prompt
-live in its worktree's ignored `.ahu/state/`, automatically; no `AHU_STATE_DIR`
-setup is needed. Removing that worktree removes its state. Siblings share only
-the launch lock and cmux group mapping in the primary checkout. See
+deletions. Unrelated dirty source files stay behind. Interactive task records and
+prompts live in the worktree's ignored `.ahu/state/`; removing the worktree removes
+that state. Headless records, prompts, attempts, and results use an external
+runtime directory and survive worktree deletion. See
 [state and compatibility](docs/reference.md#state-and-compatibility) for discovery,
 legacy records, overrides, and integrity limits.
 

@@ -8,7 +8,8 @@ use crate::util::Result;
 pub const HELP: &str = "ahu - The moai-agent command-line interface
 
 Launch repository-defined agents in fresh Git worktrees and organise their
-interactive sessions in cmux.
+interactive sessions in cmux. Use --headless for unattended execution with
+external results and optional detached supervision.
 
 Usage: ahu [COMMAND]
 
@@ -45,6 +46,14 @@ Commands:
   task <task-id> [--output json]
                         Inspect a task's recorded session state and locations
   diff <task-id>         Review tracked changes since launch; list untracked files
+  wait <task-id> [--output json]    Wait for a headless attempt to stop
+  result <task-id> [--output json]  Read durable process and harness outcomes
+  cleanup <task-id>                Remove captured logs after a recorded terminal result;
+                                  retain results, native sessions, branches and worktrees
+  cancel <task-id>                 Request cancellation of task and ahu descendants
+  resume <task-id> --prompt-file PATH [--output json]
+                                  Resume a root task from the host using its recorded native session;
+                                  child/worker resume unsupported: submit a new registered assignment
   focus <task-id>       Bring a task's cmux session to the front
   doctor                Check repository, configuration, harness, and cmux
   codex                 Open Codex here with workspace-write sandboxing and
@@ -84,8 +93,24 @@ launch options:
   --prompt-file <path>  Read a UTF-8 prompt file
                         With neither option, read non-terminal stdin to EOF.
                         Explicit sources take precedence over unread stdin.
-  --output json        Emit a versioned JSON plan; requires --dry-run.
+  --output json        Emit a versioned plan or headless launch/result envelope.
                         JSON goes to stdout, diagnostics to stderr.
+  --headless            Run without cmux; descendants inherit this backend
+  --allow-child @name   Grant this exact registered child identity (repeatable)
+  --allow-child-widened @name
+                        Grant a child whose manifest widens approvals. Frozen at
+                        host submission; child requests cannot expand the grant
+  --background          Detach a headless supervisor after startup acknowledgement
+  --timeout <seconds>   Bound a headless attempt (default 1800)
+  --native-helpers <policy>
+                        disabled (default), or bounded: Claude 2.1.270 ONLY.
+                        Bounded confines the entire parent and helpers to read-only
+                        model tools. No shell, edits, builds or ahu child launches.
+                        Settings-defined hook side effects remain unverified. Budget
+                        $5 per attempt; one concurrent helper, depth one, same model.
+                        Roles are requested; total helper count is not capped.
+                        Agent native_helpers or project [execution].native_helpers
+                        supplies the default; this flag overrides it.
   --dry-run             Show the preview and create nothing
   --allow-widened-approvals
                         Required to launch an agent whose manifest declares
@@ -134,6 +159,20 @@ pub enum Command {
         /// interactive confirmation.
         allow_widened_approvals: bool,
     },
+    HeadlessLaunch {
+        launch: Box<Command>,
+        options: crate::headless::Options,
+    },
+    BatchControl {
+        action: String,
+        task_id: String,
+        prompt: Option<PathBuf>,
+        json: bool,
+    },
+    BatchSupervisor {
+        task_dir: PathBuf,
+    },
+    TasksJson,
     Agents,
     Onboard {
         register: Option<String>,
@@ -260,6 +299,58 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             expect_no_more(&args[1..])?;
             Ok(Command::Agents)
         }
+        "supervise" => {
+            if args.len() != 3 || args[1] != "--task-dir" {
+                bail!("supervise requires --task-dir PATH");
+            }
+            Ok(Command::BatchSupervisor {
+                task_dir: PathBuf::from(&args[2]),
+            })
+        }
+        "wait" | "result" | "cancel" | "resume" | "cleanup" => {
+            let task_id = args
+                .get(1)
+                .filter(|s| !s.starts_with('-'))
+                .cloned()
+                .ok_or_else(|| crate::util::Error::new("task id required"))?;
+            let mut prompt = None;
+            let mut json = false;
+            let mut index = 2;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--output" if !json => {
+                        if value_for("--output", &args, &mut index)? != "json" {
+                            bail!("expected json");
+                        }
+                        json = true;
+                    }
+                    "--prompt-file" if first == "resume" && prompt.is_none() => {
+                        prompt = Some(PathBuf::from(value_for(
+                            "--prompt-file",
+                            &args,
+                            &mut index,
+                        )?));
+                    }
+                    other => bail!("unexpected option {other:?}"),
+                }
+                index += 1;
+            }
+            if first == "resume" && prompt.is_none() {
+                bail!("resume requires --prompt-file PATH");
+            }
+            Ok(Command::BatchControl {
+                action: first.to_string(),
+                task_id,
+                prompt,
+                json,
+            })
+        }
+        "tasks" if args.get(1).map(String::as_str) == Some("--output") => {
+            if args.len() != 3 || args[2] != "json" {
+                bail!("expected tasks --output json");
+            }
+            Ok(Command::TasksJson)
+        }
         "tasks" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Tasks)
@@ -308,7 +399,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             agent: optional_agent(&args[1..])?,
         }),
         "knowledge" => parse_knowledge(&args[1..]),
-        "launch" => parse_launch(&args[1..], stdin_available),
+        "launch" => parse_launch_backend(&args[1..], stdin_available),
         "onboard" => parse_onboard(&args[1..]),
         "run-task" => parse_run_task(&args[1..]),
         "--no-focus" => {
@@ -421,6 +512,88 @@ fn value_for(flag: &str, rest: &[String], index: &mut usize) -> Result<String> {
     rest.get(*index)
         .cloned()
         .ok_or_else(|| crate::util::Error::new(format!("{flag} needs a value.")))
+}
+
+fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Command> {
+    let inherited = std::env::var("AHU_EXECUTION_BACKEND").ok().as_deref() == Some("headless");
+    let mut options = crate::headless::Options::default();
+    let mut headless = inherited;
+    let mut filtered = Vec::new();
+    let mut requested_dry_run = false;
+    let mut batch_flags = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let flag = rest[i].as_str();
+        if matches!(
+            flag,
+            "--headless" | "--background" | "--timeout" | "--native-helpers"
+        ) && !batch_flags.insert(flag)
+        {
+            bail!("repeated batch option {flag}");
+        }
+        if flag == "--dry-run" {
+            requested_dry_run = true;
+        }
+        match flag {
+            "--headless" => headless = true,
+            "--background" => options.background = true,
+            "--timeout" => {
+                options.timeout_seconds = value_for("--timeout", rest, &mut i)?
+                    .parse()
+                    .map_err(|_| crate::util::Error::new("--timeout needs seconds"))?;
+                if options.timeout_seconds == 0 {
+                    bail!("timeout must be positive");
+                }
+            }
+            "--allow-child" | "--allow-child-widened" => {
+                let name = value_for(flag, rest, &mut i)?;
+                let name = name.strip_prefix('@').unwrap_or(&name).to_string();
+                if !crate::util::is_safe_name(&name) {
+                    bail!("invalid child agent name");
+                }
+                if flag == "--allow-child" {
+                    options.child_agents.push(name);
+                } else {
+                    options.child_widened.push(name);
+                }
+            }
+            "--native-helpers" => {
+                options.native_helpers_explicit = true;
+                options.native_helpers = value_for("--native-helpers", rest, &mut i)?;
+                if !matches!(options.native_helpers.as_str(), "disabled" | "bounded") {
+                    bail!("native helpers must be disabled or bounded");
+                }
+            }
+            value => {
+                filtered.push(value.to_string());
+                if matches!(
+                    value,
+                    "--prompt" | "--prompt-file" | "--title" | "--summary" | "--output"
+                ) {
+                    filtered.push(value_for(value, rest, &mut i)?);
+                }
+            }
+        }
+        i += 1;
+    }
+    if !headless {
+        if options != crate::headless::Options::default() {
+            bail!("batch options require --headless");
+        }
+        return parse_launch(&filtered, stdin_available);
+    }
+    // Let the existing parser enforce prompt exclusivity and all shared flags.
+    if !requested_dry_run {
+        filtered.push("--dry-run".into());
+    }
+    let mut launch = parse_launch(&filtered, stdin_available)?;
+    if let Command::Launch { dry_run, .. } = &mut launch {
+        *dry_run = requested_dry_run;
+    }
+    Ok(Command::HeadlessLaunch {
+        launch: Box::new(launch),
+        options,
+    })
 }
 
 fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
@@ -538,6 +711,10 @@ pub fn extract_color(
                     | "--model"
                     | "--agent-version"
                     | "--task-dir"
+                    | "--timeout"
+                    | "--native-helpers"
+                    | "--allow-child"
+                    | "--allow-child-widened"
             );
             remaining.push(arg);
             if takes_value && let Some(value) = args.next() {

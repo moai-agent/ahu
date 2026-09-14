@@ -222,14 +222,45 @@ pub fn probe_version(resolved: &str) -> Option<String> {
     if !path.is_absolute() || is_excluded(path) {
         return None;
     }
-    let output = std::process::Command::new(path)
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let mut child = std::process::Command::new(path)
         .arg("--version")
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+    let pipe = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let ok = pipe.take(65537).read_to_end(&mut bytes).is_ok() && bytes.len() <= 65536;
+        let _ = tx.send(ok.then_some(bytes));
+    });
+    let pid = child.id();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exited = loop {
+        match crate::headless::child_exited(pid) {
+            Ok(true) => break true,
+            Err(_) => break false,
+            Ok(false) if Instant::now() >= deadline => break false,
+            Ok(false) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    // SAFETY: child is not reaped yet, so this process group id cannot be reused.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+    let status = child.wait().ok()?;
+    if !exited || !status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let bytes = rx.recv_timeout(Duration::from_millis(100)).ok()??;
+    Some(String::from_utf8_lossy(&bytes).trim().to_string())
 }
 
 /// Resolve `program` and ask it for its version, for an enforcement report.
