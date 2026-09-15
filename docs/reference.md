@@ -493,7 +493,11 @@ provider is your own OpenCode configuration, never something ahu writes:
 ```
 
 Put that in the project's `opencode.json` or in the global OpenCode
-configuration; `ollama/glm-5.3:cloud` then appears in `opencode models`.
+configuration; `ollama/glm-5.3:cloud` then appears in `opencode models`. This
+repository carries exactly that block in its own committed `opencode.json`, so a
+checkout of ahu needs only a running Ollama with the tag pulled. A global
+configuration is the better home when the endpoint or account is personal to one
+machine, since a committed one applies to everyone who clones the repository.
 OpenCode's `-m` takes `provider/model`, so the `ollama/` prefix is part of the
 identifier a manifest pins.
 
