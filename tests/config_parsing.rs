@@ -669,3 +669,105 @@ fn an_opencode_agent_keeps_its_own_harness_and_model() {
         "{error}"
     );
 }
+
+/// An OpenCode agent definition is an onboarding candidate ahu can propose a
+/// manifest for, not a file it merely notices.
+///
+/// `.opencode/agent/<name>.md` is the same shape as a Claude Code agent — one
+/// Markdown file per agent, YAML frontmatter, the name in the filename — so it
+/// is read the same way. The difference is the model: OpenCode's is
+/// provider-qualified, and it is checked against the OpenCode rows of the
+/// catalog rather than Claude Code's.
+#[test]
+fn an_opencode_agent_definition_is_a_registrable_onboarding_candidate() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.write(
+        ".opencode/agent/reviewer.md",
+        "---\ndescription: Reviews changes\nmode: primary\nmodel: ollama/glm-5.3:cloud\n\
+         temperature: 0.1\n---\n\nYou review changes.\n",
+    );
+    // A definition whose model belongs to another harness is a blocker, not a
+    // silent re-targeting of the launch.
+    repo.write(
+        ".opencode/agent/borrowed.md",
+        "---\ndescription: Borrowed model\nmodel: claude-opus-5\n---\n\nBody.\n",
+    );
+    // OpenCode writes no `model` key at all when an agent inherits one, where
+    // Claude Code writes `inherit`. Both mean ahu needs an explicit --model.
+    repo.write(
+        ".opencode/agent/inheriting.md",
+        "---\ndescription: Inherits the session model\nmode: subagent\n---\n\nBody.\n",
+    );
+
+    let candidates = ahu::onboard::preview(repo.path()).expect("preview");
+    let reviewer = candidates
+        .iter()
+        .find(|c| c.name == "reviewer")
+        .expect("the OpenCode definition is a candidate");
+    assert_eq!(reviewer.path, ".opencode/agent/reviewer.md");
+    assert_eq!(reviewer.format.as_str(), "opencode-agent");
+    assert_eq!(reviewer.format.native_harness(), Some("opencode"));
+    assert_eq!(
+        reviewer.native_model.as_deref(),
+        Some("ollama/glm-5.3:cloud")
+    );
+    assert_eq!(reviewer.description, "Reviews changes");
+    assert!(reviewer.registrable(), "{:?}", reviewer.blockers);
+    // Native fields ahu does not interpret are reported as left where they are.
+    for preserved in ["mode", "temperature"] {
+        assert!(
+            reviewer.preserved_fields.iter().any(|f| f == preserved),
+            "{:?}",
+            reviewer.preserved_fields
+        );
+    }
+
+    let borrowed = candidates
+        .iter()
+        .find(|c| c.name == "borrowed")
+        .expect("the borrowed-model definition is still listed");
+    assert!(!borrowed.registrable());
+    assert!(
+        borrowed
+            .blockers
+            .iter()
+            .any(|b| b.contains("claude-opus-5") && b.contains("opencode")),
+        "the blocker must name the model and the harness it was checked against: {:?}",
+        borrowed.blockers
+    );
+
+    let inheriting = candidates
+        .iter()
+        .find(|c| c.name == "inheriting")
+        .expect("the inheriting definition is a candidate");
+    assert_eq!(inheriting.native_model, None);
+    assert!(inheriting.registrable(), "{:?}", inheriting.blockers);
+
+    // The proposed manifest pins OpenCode, not the format's default harness.
+    let body = ahu::onboard::proposed_manifest(reviewer, "ollama/glm-5.3:cloud", "1.0.0");
+    assert!(body.contains("harness = \"opencode\""), "{body}");
+    assert!(body.contains("format = \"opencode-agent\""), "{body}");
+    assert!(
+        body.contains("path = \".opencode/agent/reviewer.md\""),
+        "{body}"
+    );
+
+    let written = repo.path().join(".agents/ahu/agents/reviewer.toml");
+    std::fs::create_dir_all(written.parent().unwrap()).unwrap();
+    std::fs::write(&written, &body).unwrap();
+    let agents = agent::load_all(repo.path()).expect("the registry still loads");
+    let loaded = agents
+        .iter()
+        .find(|a| a.manifest.name == "reviewer")
+        .expect("the registered OpenCode agent loads");
+    assert_eq!(loaded.manifest.harness, "opencode");
+    assert_eq!(loaded.manifest.model, "ollama/glm-5.3:cloud");
+    // Frontmatter is metadata, so it is not delivered as instruction text.
+    assert!(
+        !loaded.instructions.contains("temperature"),
+        "{}",
+        loaded.instructions
+    );
+    assert!(loaded.instructions.contains("You review changes."));
+}

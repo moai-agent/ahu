@@ -154,7 +154,7 @@ pub fn document() -> Vec<Section> {
                 ]),
                 para(&[
                     "ahu is not an agent harness. It does not host a model, run an agent loop, own a",
-                    "conversation, or provide tools. Claude Code, Codex, and the Antigravity CLI do",
+                    "conversation, or provide tools. Claude Code, Codex, the Antigravity CLI and OpenCode do",
                     "that. ahu decides which of them runs, with which model and instructions, in",
                     "which worktree, and reports visible context sources and coverage gaps.",
                 ]),
@@ -187,7 +187,7 @@ pub fn document() -> Vec<Section> {
             blocks: vec![
                 bullets(&[
                     "**cmux**, required for interactive task sessions; headless execution needs no cmux.",
-                    "**A supported harness**, installed and signed in by you: Claude Code, Codex, or the Antigravity CLI.",
+                    "**A supported harness**, installed and signed in by you: Claude Code, Codex, the Antigravity CLI, or OpenCode.",
                     "**Git**: every task gets its own branch and worktree.",
                 ]),
                 para(&[
@@ -312,8 +312,9 @@ pub fn document() -> Vec<Section> {
             blocks: vec![
                 para(&[
                     "Hooks run on harness lifecycle events and can affect tool calls or context.",
-                    "ahu inventories Claude Code hook settings. Codex and Antigravity launches",
-                    "report unknown hook coverage; a missing scan is not evidence of no hooks.",
+                    "ahu inventories Claude Code hook settings. Codex, Antigravity and OpenCode",
+                    "launches report unknown hook coverage; a missing scan is not evidence of no",
+                    "hooks. An OpenCode launch does name the plugin modules a repository declares.",
                 ]),
                 para(&[
                     "ahu reports hooks and never writes them. Recognized repository configuration",
@@ -379,8 +380,9 @@ pub fn document() -> Vec<Section> {
                 "MCP and slash commands are excluded; settings and deny rules remain discoverable.",
                 "The model tool ceiling does not prove hooks cannot write or spawn processes.",
                 "Known successful helper joins are required. Provider-side cleanup stays unknown.",
-                "Codex 0.154.0 and Antigravity 1.2.2 admit ordinary headless execution, but refuse",
-                "bounded helpers. Claude 2.1.269 also admits only the disabled profile.",
+                "Codex 0.154.0, Antigravity 1.2.2 and OpenCode 1.18.29/1.18.30 admit ordinary",
+                "headless execution, but refuse bounded helpers. Claude 2.1.269 also admits only",
+                "the disabled profile.",
                 "Same-user code is not isolated from broker state. Hooks and arbitrary shell",
                 "commands require a vetted environment; ahu's backend itself does not use cmux.",
                 "Explicit cleanup removes captured logs after known termination, retaining",

@@ -31,6 +31,11 @@ pub enum SourceFormat {
     /// `.agents/agents/<name>/agent.md`, YAML frontmatter plus Markdown instructions.
     #[serde(rename = "antigravity-agent")]
     AntigravityAgent,
+    /// `.opencode/agent/<name>.md`, YAML frontmatter plus Markdown instructions.
+    /// Its `model` is provider-qualified, the shape OpenCode's own `--model`
+    /// takes, so a declared model is a catalog identifier rather than a bare name.
+    #[serde(rename = "opencode-agent")]
+    OpenCodeAgent,
 }
 
 impl SourceFormat {
@@ -40,6 +45,7 @@ impl SourceFormat {
             SourceFormat::Markdown => "markdown",
             SourceFormat::CodexAgent => "codex-agent",
             SourceFormat::AntigravityAgent => "antigravity-agent",
+            SourceFormat::OpenCodeAgent => "opencode-agent",
         }
     }
 
@@ -52,7 +58,9 @@ impl SourceFormat {
     pub fn has_frontmatter(self) -> bool {
         matches!(
             self,
-            SourceFormat::ClaudeAgent | SourceFormat::AntigravityAgent
+            SourceFormat::ClaudeAgent
+                | SourceFormat::AntigravityAgent
+                | SourceFormat::OpenCodeAgent
         )
     }
 
@@ -62,6 +70,7 @@ impl SourceFormat {
             SourceFormat::ClaudeAgent => Some("claude-code"),
             SourceFormat::CodexAgent => Some("codex"),
             SourceFormat::AntigravityAgent => Some("antigravity"),
+            SourceFormat::OpenCodeAgent => Some("opencode"),
             SourceFormat::Markdown => None,
         }
     }

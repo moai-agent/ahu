@@ -49,22 +49,34 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
         .unwrap_or_default();
     let mut candidates = Vec::new();
 
-    // Claude Code: `.claude/agents/<name>.md`.
-    let claude_agents = repo_root.join(".claude/agents");
-    if let Ok(entries) = std::fs::read_dir(&claude_agents) {
+    // Definitions ahu can read well enough to propose a manifest for: one
+    // Markdown file per agent, named by the file, with YAML frontmatter whose
+    // `model` and `description` are the only fields ahu interprets. A format
+    // belongs here when its declared model is an identifier the catalog can be
+    // asked about; everything else is listed below with a blocker instead.
+    for (dir, format) in [
+        (".claude/agents", SourceFormat::ClaudeAgent),
+        (".opencode/agent", SourceFormat::OpenCodeAgent),
+    ] {
+        let Ok(entries) = std::fs::read_dir(repo_root.join(dir)) else {
+            continue;
+        };
         let mut paths: Vec<PathBuf> = entries
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
             .collect();
         paths.sort();
+        // Every one of these formats names a harness; `unwrap_or` keeps the
+        // lookup total without inventing a second source of truth for it.
+        let harness = format.native_harness().unwrap_or("claude-code");
         for path in paths {
             let name = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default()
                 .to_string();
-            let relative = format!(".claude/agents/{name}.md");
+            let relative = format!("{dir}/{name}.md");
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             let (native_model, preserved_fields, description) = frontmatter_summary(&text);
             let mut blockers = Vec::new();
@@ -73,12 +85,15 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
                     "{name:?} is not usable as an ahu selector, branch segment, and session title"
                 ));
             }
+            // OpenCode spells an inherited model as no `model` key at all,
+            // where Claude Code writes `inherit`; both land as "ahu needs an
+            // explicit --model", which is the same conversation either way.
             if let Some(model) = native_model.as_deref()
                 && model != "inherit"
-                && catalog::model("claude-code", model).is_none()
+                && catalog::model(harness, model).is_none()
             {
                 blockers.push(format!(
-                    "the definition declares model {model:?}, which is not in compatibility catalog {}",
+                    "the definition declares model {model:?}, which is not a {harness} model in compatibility catalog {}",
                     catalog::CATALOG_VERSION
                 ));
             }
@@ -86,7 +101,7 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
                 already_registered: registered.contains(&name),
                 name,
                 path: relative,
-                format: SourceFormat::ClaudeAgent,
+                format,
                 native_model,
                 blockers,
                 preserved_fields,

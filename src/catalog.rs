@@ -100,6 +100,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
             "--agent <name> is accepted but not validated: a missing name only warns \"agent ... not found. Falling back to default agent\" and the run continues, so the flag can never confirm an identity was applied. It would also override the agent's own model and permissions, contradicting the model ahu pins. ahu does not pass it",
             "OpenCode defaults most tool permissions to allow, so an agent declaring permissions = prompt does not mean OpenCode asks before acting; the effective boundary comes from the user's own OpenCode configuration, not from any flag ahu passes",
             "inference for an ollama/*:cloud model is performed by Ollama's cloud service reached through the local endpoint; it is not local inference, and ahu neither holds nor checks those credentials",
+            "OpenCode has no sandbox of its own and ahu passes none, so its file tools act on whatever absolute path the model names. Observed under --auto on 1.18.30: a write landed in the parent checkout rather than the task worktree ahu launched in, where `ahu diff` does not look. The worktree is where the session starts, not a boundary it is held to",
         ],
     },
 ];

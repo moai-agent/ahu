@@ -241,7 +241,7 @@ fn no_agent_selection_or_session_flag_is_ever_passed() {
 fn the_enforcement_report_matches_the_catalog_and_the_argv() {
     let adapter = harness::adapter_for("opencode").unwrap();
     let entry = ahu::catalog::harness("opencode").expect("catalog entry");
-    assert_eq!(entry.enforcement_gaps.len(), 4);
+    assert_eq!(entry.enforcement_gaps.len(), 5);
 
     for permissions in [Permissions::Prompt, Permissions::Auto] {
         let report = adapter.enforcement(MODEL, permissions).unwrap();
@@ -255,7 +255,7 @@ fn the_enforcement_report_matches_the_catalog_and_the_argv() {
         }
         assert_eq!(report.gaps.len(), entry.enforcement_gaps.len());
 
-        // The four gaps say the four things they have to say.
+        // The five gaps say the five things they have to say.
         let all = report.gaps.join("\n");
         assert!(all.contains("--model"), "{all}");
         assert!(all.contains("Falling back to default agent"), "{all}");
@@ -266,6 +266,14 @@ fn the_enforcement_report_matches_the_catalog_and_the_argv() {
         assert!(
             all.contains("Ollama's cloud service") && all.contains("not local inference"),
             "the report must not let a :cloud tag read as local inference: {all}"
+        );
+        // Observed live on 1.18.30: an --auto session wrote to an absolute path
+        // in the parent checkout. ahu sets the worktree as the launch directory
+        // and nothing holds the harness to it, so the preview says so rather
+        // than letting the worktree read as a sandbox.
+        assert!(
+            all.contains("no sandbox of its own") && all.contains("task worktree"),
+            "the report must not let the task worktree read as a boundary: {all}"
         );
 
         let controls = report.applied_controls.join("\n");

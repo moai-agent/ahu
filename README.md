@@ -78,8 +78,8 @@ The first command waits in the foreground; the second returns after supervisor
 startup. Each launches a separate task. Headless results and logs live outside
 repositories. See [headless execution](docs/reference.md#headless-execution) for
 supported CLI versions, result collection, resume, cancellation, and limits.
-Headless mode covers Claude Code, Codex, and Antigravity; `--headless` with an
-OpenCode agent is refused rather than run on another harness.
+Headless mode covers Claude Code, Codex, Antigravity, and OpenCode; an agent on
+any other harness is refused rather than run on one of them.
 Headless child launches need host grants (`--allow-child` or
 `--allow-child-widened`). Claude Code 2.1.270 also supports bounded native helpers
 for entirely read-only assignments; use a separate registered reviewer for that
@@ -162,6 +162,7 @@ require explicit user permission.
 | `ahu explain --open` | Open the overview in cmux's Markdown viewer |
 | `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
+| `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON
 contracts, prompt transport, hooks, state, and delegation boundaries.

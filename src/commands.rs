@@ -53,6 +53,17 @@ pub fn claude(repo: &Repo) -> Result<i32> {
     coordinating_session(repo, "claude", "Claude", &[])
 }
 
+/// Open OpenCode using its configured model and permission behavior.
+///
+/// No flags, unlike the Codex session: OpenCode's permission actions are static
+/// configuration, and its one permission flag is `--auto`, which auto-approves
+/// everything not explicitly denied. A coordinating session that widened the
+/// user's own boundary on their behalf would be the opposite of the adapter's
+/// rule, which refuses to widen even when an agent asks for it.
+pub fn opencode(repo: &Repo) -> Result<i32> {
+    coordinating_session(repo, "opencode", "OpenCode", &[])
+}
+
 fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) -> Result<i32> {
     let executable = selection::resolve_executable(program).ok_or_else(|| {
         crate::util::Error::new(format!(
@@ -208,13 +219,18 @@ pub fn onboard_cmd(
             display_safe(&candidate.blockers.join("; "))
         );
     }
+    let harness = candidate.format.native_harness().unwrap_or("claude-code");
     let model = match model.or(candidate.native_model.as_deref()) {
         Some(model) if model != "inherit" && !model.is_empty() => model.to_string(),
+        // Listed for the harness this definition actually belongs to. A Claude
+        // Code list in front of someone registering an OpenCode agent names
+        // models their manifest would be refused for.
         _ => bail!(kind: crate::util::ErrorKind::Usage,
             "{name} does not declare a usable model, so ahu needs an explicit one.\n\
-             Re-run with --model <exact identifier>. Catalog {} lists: {}.",
+             Re-run with --model <exact identifier>. Catalog {} lists for {}: {}.",
             catalog::CATALOG_VERSION,
-            catalog::models_for("claude-code")
+            harness,
+            catalog::models_for(harness)
                 .iter()
                 .map(|m| m.model)
                 .collect::<Vec<_>>()

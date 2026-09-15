@@ -71,11 +71,12 @@ identity, capabilities, gaps, timeout, and external runtime path without launchi
 Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
 The admitted CLI profiles are Codex 0.154.0, Claude Code 2.1.269/2.1.270,
-and Antigravity CLI 1.2.2. Other versions fail before worktree creation, with no
-fallback harness or model. OpenCode has no headless profile at all: `--headless`
-with an OpenCode agent is refused, and ahu runs the assignment on no other
-harness. Launch OpenCode agents interactively; see
-[OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models). Profile admission describes the adapter's argument
+Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.30. Other versions fail before
+worktree creation, with no fallback harness or model. OpenCode's batch form is
+`opencode run --format json`; its permission mapping is the interactive one, so
+a manifest declaring `permissions = "accept-edits"` is refused here too. See
+[OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models) for the
+provider setup an OpenCode agent needs. Profile admission describes the adapter's argument
 surface, not successful authentication, provider availability, or full native
 helper lifecycle validation.
 
@@ -222,7 +223,7 @@ requests must retain the policy frozen in their host grant.
 | Claude Code 2.1.270 | Admitted | Read-only profile |
 | Codex 0.154.0 | Admitted | Refused: incomplete helper identity/join event visibility |
 | Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
-| OpenCode | Refused: no headless profile | Not applicable |
+| OpenCode 1.18.29/1.18.30 | Admitted | Refused: no validated native tool switch |
 
 The Claude bounded profile restricts the **entire attempt, including the owner**,
 to the model tools `Read`, `Grep`, `Glob`, and the parent's `Task` delegation tool.
@@ -355,7 +356,11 @@ Definitions found elsewhere are onboarding candidates, never implicit
 registrations — a skill is not an agent, and `AGENTS.md` is not an agent
 registry.
 
-`onboard` offers registration for Claude Code Markdown definitions. It lists
+`onboard` offers registration for Claude Code and OpenCode Markdown definitions
+— `.claude/agents/<name>.md` and `.opencode/agent/<name>.md`, each one file per
+agent with YAML frontmatter. A declared `model` is checked against the catalog
+rows for that definition's own harness, so an OpenCode agent naming a Claude
+model is a blocker rather than a re-targeted launch. It lists
 Codex TOML and Antigravity native definitions with blockers even though both
 harness adapters exist; this native-onboarding path cannot register them.
 Explicit manifests can use plain Markdown with any supported harness, OpenCode
@@ -477,7 +482,10 @@ provider is your own OpenCode configuration, never something ahu writes:
       "name": "Ollama",
       "options": { "baseURL": "http://localhost:11434/v1" },
       "models": {
-        "glm-5.3:cloud": { "name": "GLM 5.3 (Ollama cloud)" }
+        "glm-5.3:cloud": {
+          "name": "GLM 5.3 (Ollama cloud)",
+          "limit": { "context": 65536, "output": 8192 }
+        }
       }
     }
   }
@@ -489,10 +497,13 @@ configuration; `ollama/glm-5.3:cloud` then appears in `opencode models`.
 OpenCode's `-m` takes `provider/model`, so the `ollama/` prefix is part of the
 identifier a manifest pins.
 
-Ollama's OpenCode integration documentation requires a context length of 64k or
-higher. `ollama show <model>` reports the model's own context length, and a model
-entry in the provider configuration can declare `limit.context`, which is what
-OpenCode asks for. Check both before assigning long work.
+OpenCode 1.18.30 validates that block on startup and refuses a model entry
+missing either half of `limit`: with `limit.context` alone, `opencode models`
+printed `Missing key provider.ollama.models.glm-5.3:cloud.limit.output` and
+listed no `ollama/*` model at all. Ollama's OpenCode integration documentation
+requires a context length of 64k or higher; `ollama show <model>` reports the
+model's own context length, and `limit.context` is what OpenCode asks for. Check
+both before assigning long work.
 
 ### Configuration precedence, and what travels into a task
 
@@ -569,9 +580,28 @@ ahu launch @glm-reviewer --prompt-file assignment.txt
 
 This manifest declares `prompt`, so no approval-widening flag is needed. A
 manifest declaring `auto` requires `--allow-widened-approvals` on previews and
-launches alike. Interactive launches need cmux; OpenCode agents cannot run
-headless, so `--headless` here is refused rather than redirected to another
-harness.
+launches alike. Interactive launches need cmux. The same agent runs unattended
+with `--headless`, which builds `opencode run --format json` instead and needs
+no cmux; see [headless execution](#headless-execution).
+
+`auto` is the widest of the three and OpenCode has no sandbox to narrow it:
+unlike a Codex launch, which ahu gives `--sandbox workspace-write`, an OpenCode
+session's file tools act on whatever absolute path the model names. A live
+1.18.30 run under `--auto` wrote its file into the parent checkout rather than
+the task worktree it was launched in, where `ahu diff` does not look. The
+worktree is where the session starts, not a boundary the harness is held to;
+the launch preview says so.
+
+For a coordinating OpenCode session in the current terminal, rather than an
+agent in a task worktree:
+
+```sh
+ahu opencode
+```
+
+That session inherits the terminal and the working directory, and ahu passes it
+no arguments at all: OpenCode's permission actions are its own configuration's
+to decide, and the only flag that would change them widens them.
 
 ### Troubleshooting
 
@@ -588,7 +618,8 @@ between OpenCode and Ollama.
 | The tag is absent from `ollama list` | `ollama list`, then pull the tag yourself | Does not pull or create models. |
 | Hosted-model authentication fails | Ollama's own sign-in for cloud models | Holds no provider credentials and cannot authenticate for you. |
 | Context below 64k | `ollama show <model>`; `limit.context` in the provider entry | Does not set or raise context limits. |
-| Manifest declares `accept-edits` | The manifest's `permissions` value | Refuses the manifest with an error and offers no substitute mode. |
+| Manifest declares `accept-edits` | The manifest's `permissions` value | Refuses the manifest with an error and offers no substitute mode, interactively and headless alike. Declare `prompt` or `auto`. |
+| A headless launch reports no terminal event | The captured events under the task's artifacts | Scores a run only on OpenCode's own terminal step, never on its exit status: a refused tool call ends the run with exit 0. |
 
 In every one of these cases ahu reports and stops. It never silently selects
 another model, provider, or harness, and a failed session does not remove the
@@ -922,3 +953,11 @@ and permission behavior. It passes no model or permission overrides and accepts
 no additional arguments. Like `ahu codex`, it preserves the invoking directory
 and terminal, sets `AHU_BIN` and checkout-local `AHU_STATE_DIR`, and creates no
 task, worktree or cmux session.
+
+`ahu opencode` does the same for OpenCode, and passes no arguments either.
+Unlike `ahu codex`, it names no sandbox or approval mode: OpenCode's permission
+actions are static configuration, and its one permission flag, `--auto`,
+auto-approves everything not explicitly denied. A coordinating session that
+passed it would widen the user's own boundary on their behalf, which is the
+opposite of what the adapter does when an agent asks. `--pure` is not passed
+either, so the user's own plugins load exactly as they do outside ahu.

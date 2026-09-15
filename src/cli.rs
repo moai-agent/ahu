@@ -59,6 +59,8 @@ Commands:
   claude                Open Claude here using its configured model and permissions
   codex                 Open Codex here with workspace-write sandboxing and
                         on-request approvals (uses Codex's configured model)
+  opencode              Open OpenCode here using its configured model and
+                        permissions (ahu passes no --auto and no --pure)
   run-task              Internal: run a prepared task (used by cmux)
 
 Options:
@@ -204,6 +206,7 @@ pub enum Command {
     Doctor,
     Codex,
     Claude,
+    OpenCode,
     RunTask {
         task_dir: PathBuf,
     },
@@ -368,6 +371,10 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         "codex" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Codex)
+        }
+        "opencode" => {
+            expect_no_more(&args[1..])?;
+            Ok(Command::OpenCode)
         }
         "task" | "diff" => {
             let task_id = args

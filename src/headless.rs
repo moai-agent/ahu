@@ -175,6 +175,40 @@ pub fn batch_command(
             add(&["--print"]);
             "agy"
         }
+        // Verified against OpenCode 1.18.30 on 2026-09-14 by running
+        // `opencode run --format json` against a local Ollama-served model.
+        // `run` is the non-interactive form: it takes the message as a
+        // positional argument, streams one JSON event per line on stdout, and
+        // exits without a listening port. `-i/--interactive` is the flag that
+        // would make it a session, and this path never passes it.
+        "opencode" => {
+            add(&["run", "--format", "json", "--model", request.model]);
+            match request.permissions {
+                // As in the interactive adapter: OpenCode's permission actions
+                // are static configuration, its only permission flag widens,
+                // and there is no accept-edits equivalent to map onto.
+                Permissions::Prompt => (),
+                Permissions::Auto => add(&["--auto"]),
+                Permissions::AcceptEdits => bail!(
+                    "OpenCode has no accept-edits mode, so the headless path refuses it for the \
+                     same reason the interactive adapter does: --auto would widen the request to \
+                     every permission OpenCode does not explicitly deny, and passing nothing \
+                     while reporting accept-edits would misdescribe the launch. Declare \
+                     permissions = \"prompt\" or permissions = \"auto\"."
+                ),
+            }
+            // `--session <id>` continues a recorded session; observed to keep
+            // the same `sessionID` and the prior turns' context. `--fork` would
+            // branch it instead, which would break the identity ahu recorded.
+            if let Some(session) = &spec.session {
+                add(&["--session", session]);
+            }
+            // Verified: `opencode run --format json -m <model> -- --version`
+            // treated `--version` as the message rather than printing the
+            // version, so `--` ends the option list here as it does elsewhere.
+            add(&["--"]);
+            "opencode"
+        }
         _ => bail!("no headless adapter for {harness}; no fallback selected"),
     };
     let prompt_arg = Some(args.len());
@@ -212,6 +246,9 @@ fn check_version(harness: &str, version: &str) -> Result<()> {
         "codex" => &["0.154.0"],
         "claude-code" => &["2.1.269", "2.1.270"],
         "antigravity" => &["1.2.2"],
+        // The batch surface was inspected on 1.18.30; 1.18.29 carries the same
+        // `run` options and is the other version the catalog entry names.
+        "opencode" => &["1.18.29", "1.18.30"],
         _ => &[],
     };
     let found = version.split_whitespace().any(|v| supported.contains(&v));
@@ -449,6 +486,7 @@ pub fn launch(
         "codex" => "codex",
         "claude-code" => "claude",
         "antigravity" => "agy",
+        "opencode" => "opencode",
         // Named, because the caller's next question is always "which one?" and
         // the only correct answer to this refusal is to report it. A harness
         // with an interactive adapter still needs its batch argument surface
@@ -1009,6 +1047,9 @@ impl Events {
             .get("session_id")
             .or_else(|| event.get("thread_id"))
             .or_else(|| event.get("conversation_id"))
+            // OpenCode spells it `sessionID`, on every event including its
+            // error events, which is what makes its errors resumable at all.
+            .or_else(|| event.get("sessionID"))
             .and_then(Value::as_str);
         if let Some(session) = session {
             if let Some(previous) = &self.session {
@@ -1114,6 +1155,53 @@ impl Events {
                     .unwrap_or("")
                     .into();
                 self.finish(failed);
+            }
+            // OpenCode's `run --format json` stream, observed on 1.18.30. Every
+            // event is `{type, timestamp, sessionID, part}`; the work of a turn
+            // is a sequence of steps, and only the reason on a step's finish
+            // says whether the turn ended or another step follows.
+            ("opencode", "step_start") => (),
+            ("opencode", "text") => {
+                if let Some(text) = event.pointer("/part/text").and_then(Value::as_str) {
+                    self.summary = text.into();
+                }
+            }
+            ("opencode", "tool_use") => {
+                // A refused tool call is reported as an ordinary tool error:
+                // `state.status: "error"` with the refusal as `state.error`.
+                // Observed with a `write` call on a launch that passed no
+                // --auto — and the run then ended with no terminal step and
+                // still exited 0, which is exactly why the exit status is not
+                // allowed to stand in for a result anywhere in this file.
+                let refused = event
+                    .pointer("/part/state/error")
+                    .and_then(Value::as_str)
+                    .is_some_and(|error| {
+                        error.to_ascii_lowercase().contains("rejected permission")
+                    });
+                if refused {
+                    self.failed = true;
+                    self.blockers.push(
+                        "harness reported permission denials; inspect captured events".into(),
+                    );
+                }
+            }
+            ("opencode", "step_finish") => {
+                match event.pointer("/part/reason").and_then(Value::as_str) {
+                    Some("stop") => self.finish(false),
+                    // The model is about to run tools and another step follows.
+                    // Treating this as terminal would score an assignment
+                    // complete at its first tool call.
+                    Some("tool-calls") | None => (),
+                    // Anything else — a token ceiling, an abort — ends the turn
+                    // without the model having said it is done. Recorded as a
+                    // terminal failure rather than left to look like silence.
+                    Some(other) => {
+                        self.blockers
+                            .push(format!("harness ended the step for reason {other:?}"));
+                        self.finish(true);
+                    }
+                }
             }
             (
                 _,

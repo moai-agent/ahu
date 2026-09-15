@@ -1155,23 +1155,26 @@ scenario=os.environ"#);
     );
 }
 
-/// Headless OpenCode is out of scope, and the refusal has to look like one.
+/// OpenCode's batch profile is `opencode run --format json`, and every part of
+/// it was read off the running CLI rather than inferred from the interactive
+/// adapter.
 ///
-/// Adding an interactive adapter must not quietly enrol the harness in the
-/// batch path: OpenCode's headless form is `opencode run`, whose argument
-/// surface and event stream were never validated here. `batch_command` builds
-/// arguments for a validated profile or refuses, and the message has to name
-/// the harness and say no fallback was chosen — a bare "unsupported" would
-/// invite a caller to drop to another harness or another headless profile.
+/// Verified on OpenCode 1.18.30 on 2026-09-14: `run` takes the message as a
+/// positional argument, `--format json` emits one JSON event per line, `--`
+/// ends the option list (`run --format json -m <model> -- --version` sent
+/// `--version` to the model instead of printing the version), and `--session`
+/// continues a recorded session. `-i/--interactive` is what would make `run` a
+/// session, and this path never passes it.
 #[test]
-fn an_opencode_agent_is_refused_by_the_headless_path_with_no_fallback() {
+fn the_opencode_batch_profile_pins_the_model_and_ends_the_option_list() {
+    use ahu::agent::Permissions;
     use ahu::harness::LaunchRequest;
     use ahu::headless::{Options, Spec};
 
-    let spec = Spec {
+    let spec = |session: Option<&str>| Spec {
         schema_version: 1,
         options: Options::default(),
-        harness_version: "1.18.29".into(),
+        harness_version: "1.18.30".into(),
         executable_digest: "0".repeat(64),
         parent_task: None,
         parent_attempt: None,
@@ -1180,45 +1183,208 @@ fn an_opencode_agent_is_refused_by_the_headless_path_with_no_fallback() {
         child_grants: Vec::new(),
         depth: 0,
         attempt: 1,
-        session: None,
+        session: session.map(str::to_owned),
         broker_dir: None,
         native_profile: None,
         native_controls: Vec::new(),
         gaps: Vec::new(),
     };
-    let error = ahu::headless::batch_command(
-        "opencode",
-        &LaunchRequest {
-            model: "ollama/glm-5.3:cloud",
-            prompt: "do the thing",
-            cwd: std::path::Path::new("/tmp"),
-            permissions: Default::default(),
-        },
-        &spec,
-    )
-    .expect_err("headless opencode is not validated")
-    .to_string();
-    assert!(error.contains("opencode"), "{error}");
-    assert!(error.contains("no headless adapter"), "{error}");
-    assert!(error.contains("no fallback selected"), "{error}");
-    for other in ["claude", "codex", "agy", "--print", "--output-format"] {
-        assert!(
-            !error.contains(other),
-            "the refusal must not point at another harness or profile: {error}"
-        );
-    }
+    let request = |permissions| LaunchRequest {
+        model: "ollama/glm-5.3:cloud",
+        prompt: "do the thing",
+        cwd: std::path::Path::new("/tmp"),
+        permissions,
+    };
 
-    // The interactive adapter exists all the same; the two paths are separate.
-    assert!(ahu::harness::adapter_for("opencode").is_ok());
+    let prompting =
+        ahu::headless::batch_command("opencode", &request(Permissions::Prompt), &spec(None))
+            .expect("a prompting opencode batch launch");
+    assert_eq!(prompting.program, "opencode");
+    assert_eq!(
+        prompting.args,
+        [
+            "run",
+            "--format",
+            "json",
+            "--model",
+            "ollama/glm-5.3:cloud",
+            "--",
+            "do the thing"
+        ]
+    );
+    // The prompt is one argv element, and the stored command redacts exactly it.
+    assert_eq!(prompting.prompt_arg, Some(prompting.args.len() - 1));
+    assert!(
+        !prompting.args.iter().any(|a| a == "--auto" || a == "-i"),
+        "a prompting launch may neither widen permissions nor ask for a session: {:?}",
+        prompting.args
+    );
+
+    let auto = ahu::headless::batch_command("opencode", &request(Permissions::Auto), &spec(None))
+        .expect("an auto opencode batch launch");
+    assert!(
+        auto.args.contains(&"--auto".to_string()),
+        "permissions = auto is the manifest's explicit request: {:?}",
+        auto.args
+    );
+
+    // Resume continues the recorded session rather than forking it: `--fork`
+    // would branch the conversation and leave the recorded id describing a
+    // session the attempt is no longer in.
+    let resumed = ahu::headless::batch_command(
+        "opencode",
+        &request(Permissions::Prompt),
+        &spec(Some("ses_f5cc153b6ffeNq1dwHoZGMECKw")),
+    )
+    .expect("a resumed opencode batch launch");
+    let session = resumed.args.iter().position(|a| a == "--session").unwrap();
+    assert_eq!(resumed.args[session + 1], "ses_f5cc153b6ffeNq1dwHoZGMECKw");
+    assert!(!resumed.args.iter().any(|a| a == "--fork"));
+
+    // The batch path refuses accept-edits for the reason the interactive
+    // adapter does, rather than quietly widening it to --auto.
+    let refused =
+        ahu::headless::batch_command("opencode", &request(Permissions::AcceptEdits), &spec(None))
+            .expect_err("accept-edits has no OpenCode mapping")
+            .to_string();
+    assert!(refused.contains("accept-edits"), "{refused}");
+    assert!(refused.contains("--auto"), "{refused}");
 }
 
-/// The same refusal through the command line, so the whole path is covered.
+/// The OpenCode event stream decides the outcome; the exit status never does.
+///
+/// Every shape asserted here was captured from OpenCode 1.18.30 on 2026-09-14.
+/// The load-bearing observation is the refused `write`: with no `--auto`, the
+/// tool call came back as an ordinary tool error, the turn ended on a
+/// `tool-calls` step with no `stop` after it, and the process still exited 0.
+/// A run scored on its exit status would have recorded that as success.
 #[test]
-fn a_registered_opencode_agent_cannot_be_launched_headless() {
+fn the_opencode_event_stream_is_terminal_only_when_a_step_stops() {
+    use ahu::headless::Events;
+
+    const SESSION: &str = "ses_f5cc153b6ffeNq1dwHoZGMECKw";
+    let observe = |lines: &[&str]| {
+        let mut events = Events::default();
+        for line in lines {
+            events.observe("opencode", line.as_bytes());
+        }
+        events
+    };
+    let step_start = format!(
+        r#"{{"type":"step_start","timestamp":1,"sessionID":"{SESSION}","part":{{"type":"step-start"}}}}"#
+    );
+    let tool_step = format!(
+        r#"{{"type":"step_finish","timestamp":2,"sessionID":"{SESSION}","part":{{"type":"step-finish","reason":"tool-calls"}}}}"#
+    );
+    let text = format!(
+        r#"{{"type":"text","timestamp":3,"sessionID":"{SESSION}","part":{{"type":"text","text":"the final answer"}}}}"#
+    );
+    let stop = format!(
+        r#"{{"type":"step_finish","timestamp":4,"sessionID":"{SESSION}","part":{{"type":"step-finish","reason":"stop"}}}}"#
+    );
+
+    let complete = observe(&[&step_start, &tool_step, &text, &stop]);
+    assert!(complete.terminal, "a stop step ends the turn");
+    assert!(!complete.failed);
+    assert_eq!(complete.session.as_deref(), Some(SESSION));
+    assert_eq!(complete.summary, "the final answer");
+    assert_eq!(complete.unknown_events, 0, "the stream is fully recognized");
+
+    // A tool-call boundary is where the model pauses to run tools; another step
+    // follows it. Treating it as terminal would score an assignment complete at
+    // its first tool call.
+    let unfinished = observe(&[&step_start, &tool_step]);
+    assert!(
+        !unfinished.terminal,
+        "only a stop step is terminal: {unfinished:?}"
+    );
+
+    // The refused `write`, in the shape OpenCode reported it: status "error",
+    // the refusal in `state.error`, and no terminal step anywhere in the run.
+    let refusal = format!(
+        r#"{{"type":"tool_use","timestamp":5,"sessionID":"{SESSION}","part":{{"type":"tool","tool":"write","callID":"call_fh9hm5l9","state":{{"status":"error","error":"The user rejected permission to use this specific tool call."}}}}}}"#
+    );
+    let denied = observe(&[&step_start, &refusal, &tool_step]);
+    assert!(denied.failed, "a refused tool call is a failure");
+    assert!(!denied.terminal, "and the run never reached a stop step");
+    assert!(
+        denied
+            .blockers
+            .iter()
+            .any(|b| b.contains("permission denials")),
+        "{:?}",
+        denied.blockers
+    );
+
+    // An ordinary tool error is not a permission refusal, and an agent that
+    // recovers from one has not failed.
+    let tool_error = format!(
+        r#"{{"type":"tool_use","timestamp":6,"sessionID":"{SESSION}","part":{{"type":"tool","tool":"read","state":{{"status":"error","error":"ENOENT: no such file"}}}}}}"#
+    );
+    let recovered = observe(&[&step_start, &tool_error, &tool_step, &text, &stop]);
+    assert!(!recovered.failed, "{:?}", recovered.blockers);
+    assert!(recovered.terminal);
+
+    // A step that ends for any other reason ended without the model saying it
+    // was done, so it is terminal and failed rather than silently incomplete.
+    let truncated = format!(
+        r#"{{"type":"step_finish","timestamp":7,"sessionID":"{SESSION}","part":{{"type":"step-finish","reason":"length"}}}}"#
+    );
+    let capped = observe(&[&step_start, &truncated]);
+    assert!(capped.terminal && capped.failed);
+    assert!(
+        capped.blockers.iter().any(|b| b.contains("length")),
+        "{:?}",
+        capped.blockers
+    );
+
+    // OpenCode's own error event, which carries the session id, so a failed
+    // attempt is still resumable.
+    let error = format!(
+        r#"{{"type":"error","timestamp":8,"sessionID":"{SESSION}","error":{{"name":"UnknownError","data":{{"message":"Unexpected server error."}}}}}}"#
+    );
+    let failed = observe(&[&error]);
+    assert!(failed.failed);
+    assert_eq!(failed.session.as_deref(), Some(SESSION));
+
+    // Two sessions inside one attempt is an identity change, not a resume.
+    let elsewhere = stop.replace(SESSION, "ses_someone_else");
+    let drifted = observe(&[&step_start, &elsewhere]);
+    assert!(drifted.failed);
+    assert!(
+        drifted
+            .blockers
+            .iter()
+            .any(|b| b.contains("session identity changed")),
+        "{:?}",
+        drifted.blockers
+    );
+}
+
+/// An unvalidated OpenCode refuses before anything is launched.
+///
+/// The batch surface is pinned to the versions whose `run` options were read
+/// off the CLI. OpenCode updates itself in place — the catalog entry names two
+/// versions for exactly that reason — so the version gate is what stops a
+/// renamed or re-meant option from changing behaviour silently.
+#[test]
+fn an_unvalidated_opencode_version_is_refused_by_the_headless_path() {
+    use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     f.repo
         .add_agent_on("oc", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
     f.repo.commit("an opencode agent");
+    // Its own stub, rather than whichever OpenCode the machine has installed:
+    // the refusal under test is about the version, so the version has to be the
+    // test's to choose.
+    let stub = f.bin.join("opencode");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\n[ \"$1\" = \"--version\" ] && echo 1.18.5 && exit 0\nexit 9\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
     let out = f
         .command()
         .args([
@@ -1232,19 +1398,97 @@ fn a_registered_opencode_agent_cannot_be_launched_headless() {
         .unwrap();
     assert!(
         !out.status.success(),
-        "a headless opencode launch must fail"
+        "an unvalidated version must not launch"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("unsupported headless harness \"opencode\""),
-        "the refusal must name the path and the harness that refused: {stderr}"
+        stderr.contains("unvalidated headless opencode version \"1.18.5\""),
+        "the refusal must name the harness and the version it found: {stderr}"
     );
     assert!(
-        stderr.contains("selected no fallback"),
+        stderr.contains("no fallback was selected"),
         "the refusal must say nothing was substituted: {stderr}"
     );
     assert!(
-        !stderr.contains("claude-code") && !stderr.contains("antigravity"),
+        !stderr.contains("claude") && !stderr.contains("antigravity"),
         "no other harness may be offered in its place: {stderr}"
+    );
+}
+
+/// A registered OpenCode agent runs the whole headless path end to end.
+///
+/// The stub replays the event stream captured from OpenCode 1.18.30, including
+/// the intermediate `tool-calls` step, and asserts the argv ahu built. Nothing
+/// here contacts a provider; the point is that ahu drives `run --format json`,
+/// reads the terminal step, and records the session it was told.
+#[test]
+fn a_registered_opencode_agent_runs_headless_and_records_its_session() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.repo
+        .add_agent_on("oc", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    f.repo.commit("an opencode agent");
+    let stub = f.bin.join("opencode");
+    std::fs::write(
+        &stub,
+        r#"#!/usr/bin/env python3
+import sys,os,json
+if '--version' in sys.argv:
+ print('1.18.30'); sys.exit(0)
+a=sys.argv[1:]
+assert a[0]=='run', a
+assert a[a.index('--format')+1]=='json', a
+assert a[a.index('--model')+1]=='ollama/glm-5.3:cloud', a
+assert a[-2]=='--', a
+assert '--auto' not in a, a
+assert '-i' not in a and '--interactive' not in a, a
+assert os.environ['AHU_EXECUTION_BACKEND']=='headless'
+assert 'ahu delegation contract (v2, headless)' in a[-1]
+session='ses_'+os.environ['AHU_PARENT_TASK']
+def emit(kind,part): print(json.dumps({'type':kind,'timestamp':1,'sessionID':session,'part':part}),flush=True)
+emit('step_start',{'type':'step-start'})
+emit('tool_use',{'type':'tool','tool':'write','callID':'call_1','state':{'status':'completed'}})
+emit('step_finish',{'type':'step-finish','reason':'tool-calls'})
+open('proof.txt','w').write('synthetic proof\n')
+emit('text',{'type':'text','text':'validated synthetic proof'})
+emit('step_finish',{'type':'step-finish','reason':'stop'})
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = f
+        .command()
+        .args([
+            "launch",
+            "@oc",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "perform synthetic task",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = Fixture::value(&out);
+    assert_eq!(v["outcome"], "succeeded");
+    // Still not an acceptance: a terminal event is the harness saying it
+    // stopped, not the assignment being judged done.
+    assert_eq!(v["completion_verified"], false);
+    assert_eq!(v["identity"]["harness"], "opencode");
+    let worktree = PathBuf::from(v["worktree"].as_str().unwrap());
+    assert!(worktree.join("proof.txt").exists());
+    assert_eq!(v["harness"]["summary"], "validated synthetic proof");
+    assert!(
+        v["harness"]["session"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("ses_")),
+        "the recorded session is the one OpenCode reported: {}",
+        v["harness"]
     );
 }
