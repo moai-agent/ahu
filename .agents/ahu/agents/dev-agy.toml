@@ -1,0 +1,13 @@
+schema_version = 1
+name = "dev-agy"
+version = "1.0.0"
+description = "Validates and remediates reported issues with regression coverage"
+harness = "antigravity"
+model = "gemini-3.1-pro-high"
+
+# This agent requests unattended tool use through the harness adapter.
+permissions = "auto"
+
+[source]
+format = "markdown"
+path = ".agents/ahu/instructions/dev-agy.md"
