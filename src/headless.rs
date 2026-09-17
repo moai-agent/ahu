@@ -5,7 +5,6 @@ use crate::util::{Error, Result, digest_bytes};
 use crate::{bail, state, task};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1357,14 +1356,13 @@ const WRITE_LIKE_TOOLS: [&str; 10] = [
     "strreplaceeditor",
     "strreplacebasededit",
 ];
-const WRITE_PATH_KEYS: [&str; 7] = [
+const WRITE_PATH_KEYS: [&str; 6] = [
     "filepath",
     "file",
     "path",
     "notebookpath",
     "abspath",
     "targetfile",
-    "content",
 ];
 const WRITE_NAME_KEYS: [&str; 3] = ["tool", "name", "toolname"];
 const WRITE_INPUT_KEYS: [&str; 2] = ["input", "arguments"];
@@ -1375,7 +1373,7 @@ fn normalize_token(token: &str) -> String {
     token
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
-        .flat_map(|c| c.to_ascii_lowercase())
+        .map(|c| c.to_ascii_lowercase())
         .collect()
 }
 
@@ -1404,9 +1402,9 @@ fn real_path(path: &Path) -> PathBuf {
     let mut tail = Vec::new();
     let mut current = path.to_path_buf();
     while !current.exists() {
-        let Some(file_name) = current.file_name().map(Path::to_path_buf) else {
+        let Some(file_name) = current.file_name().map(ToOwned::to_owned) else {
             break;
-        }
+        };
         current = current.parent().map(Path::to_path_buf).unwrap_or_default();
         tail.push(file_name);
         if current.as_os_str().is_empty() {
@@ -1423,60 +1421,55 @@ fn real_path(path: &Path) -> PathBuf {
     lexical_normalize(path)
 }
 
-/// Resolve a recorded write-path candidate against the worktree. The stub
-/// cwd is the worktree, so relative paths are worktree-relative by
-/// construction; absolute paths are kept as the harness named them.
-fn resolve_write_path(candidate: &str, worktree: &Path) -> Option<PathBuf> {
+/// Resolve a recorded write-path candidate. Only absolute paths are
+/// classified; relative paths cannot be attributed to the worktree
+/// confidently after the run ends.
+fn resolve_write_path(candidate: &str) -> Option<PathBuf> {
     if candidate.is_empty() {
         return None;
     }
     let raw: PathBuf = candidate.into();
-    let joined = if raw.is_absolute() {
-        raw
-    } else {
-        worktree.join(raw)
-    };
-    let resolved = lexical_normalize(&joined);
-    if resolved.as_os_str().is_empty() || !resolved.is_absolute() {
+    if !raw.is_absolute() {
+        return None;
+    }
+    let resolved = lexical_normalize(&raw);
+    if resolved.as_os_str().is_empty() {
         return None;
     }
     Some(resolved)
 }
 
 /// Walk a write-tool call's subtree, collecting path candidates and decoding
-/// string `input`/`arguments` payloads that embed JSON.
+/// string `input`/`arguments` payloads that embed JSON. Recursion is bounded
+/// by `MAX_EVENT_JSON_DEPTH`.
 fn collect_write_paths_within(value: &Value, depth: usize, candidates: &mut Vec<String>) {
-    let mut stack: Vec<(Cow<'_, Value>, usize)> = vec![(Cow::Borrowed(value), depth)];
-    while let Some((value, depth)) = stack.pop() {
-        if depth >= MAX_EVENT_JSON_DEPTH {
-            continue;
-        }
-        match value {
-            Value::Object(map) => {
-                for (key, child) in map.iter() {
-                    let key = normalize_token(key);
-                    if WRITE_PATH_KEYS.contains(&key.as_str()) {
-                        if let Some(path) = child.as_str() {
-                            candidates.push(path.to_string());
-                        }
-                    }
-                    if WRITE_INPUT_KEYS.contains(&key.as_str()) {
-                        if let Some(embedded) = child.as_str() {
-                            if let Ok(decoded) = serde_json::from_str::<Value>(embedded) {
-                                stack.push((Cow::Owned(decoded), depth + 1));
-                            }
-                        }
-                    }
-                    stack.push((Cow::Borrowed(child), depth + 1));
+    if depth >= MAX_EVENT_JSON_DEPTH {
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter() {
+                let key = normalize_token(key);
+                if WRITE_PATH_KEYS.contains(&key.as_str())
+                    && let Some(path) = child.as_str()
+                {
+                    candidates.push(path.to_string());
                 }
-            }
-            Value::Array(items) => {
-                for child in items.iter() {
-                    stack.push((Cow::Borrowed(child), depth + 1));
+                if WRITE_INPUT_KEYS.contains(&key.as_str())
+                    && let Some(embedded) = child.as_str()
+                    && let Ok(decoded) = serde_json::from_str::<Value>(embedded)
+                {
+                    collect_write_paths_within(&decoded, depth + 1, candidates);
                 }
+                collect_write_paths_within(child, depth + 1, candidates);
             }
-            _ => (),
         }
+        Value::Array(items) => {
+            for child in items.iter() {
+                collect_write_paths_within(child, depth + 1, candidates);
+            }
+        }
+        _ => (),
     }
 }
 
@@ -1494,11 +1487,11 @@ fn collect_write_paths(event: &Value) -> Vec<String> {
         match value {
             Value::Object(map) => {
                 let is_write_tool = map.iter().any(|(key, child)| {
-                    normalize_token(key) == "tool"
-                        || WRITE_NAME_KEYS.contains(&normalize_token(key).as_str())
-                        && child.as_str().map(normalize_token).is_some_and(|tool| {
-                            WRITE_LIKE_TOOLS.contains(&tool.as_str())
-                        })
+                    WRITE_NAME_KEYS.contains(&normalize_token(key).as_str())
+                        && child
+                            .as_str()
+                            .map(normalize_token)
+                            .is_some_and(|tool| WRITE_LIKE_TOOLS.contains(&tool.as_str()))
                 });
                 if is_write_tool {
                     collect_write_paths_within(value, depth, &mut candidates);
@@ -1556,7 +1549,7 @@ fn scan_writes_outside_worktree(events_path: &Path, worktree: &Path) -> Vec<Stri
     let mut seen: HashSet<String> = HashSet::new();
     let mut outside = Vec::new();
     for candidate in candidates {
-        let Some(resolved) = resolve_write_path(&candidate, &worktree_real) else {
+        let Some(resolved) = resolve_write_path(&candidate) else {
             continue;
         };
         let real = real_path(&resolved);
@@ -2074,13 +2067,15 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
     )
     .ok();
     let revision = crate::git::run_ok(&record.worktree, &["rev-parse", "HEAD"]).ok();
+    let writes_outside_worktree =
+        scan_writes_outside_worktree(&attempt.join("events.jsonl"), &record.worktree);
     let result = json!({"schema_version":1,"backend":"headless","task_id":record.task_id,"attempt":spec.attempt,"parent_task":spec.parent_task,"parent_attempt":spec.parent_attempt,"broker_request":spec.broker_request,"root_task":spec.root_task,
         "identity":record.identity,"policy_digest":record.policy_digest,"snapshot_digest":record.config_snapshot_digest,
         "delivery_digest":record.delivery.digest,"capabilities":spec,"outcome":outcome,"started_at":started,"ended_at":task::now_rfc3339(),
         "process":{"exit_code":status.code(),"signal":status.signal()},"harness":events,
         "agent_report":{"text":events.summary,"structured":agent_claim,"trusted":false},"acceptance":"not assessed","completion_verified":false,
         "worktree":record.worktree,"worktree_exists":record.worktree.exists(),"branch":record.branch,"base_commit":record.base_commit,
-        "current_revision":revision,"git_status":changes,"validation_evidence":"see agent report; not independently verified",
+        "current_revision":revision,"git_status":changes,"writes_outside_worktree":writes_outside_worktree,"validation_evidence":"see agent report; not independently verified",
         "artifacts":{"events":attempt.join("events.jsonl"),"stderr":attempt.join("stderr.log"),"final":summary},
         "descendant_cancellation":cancellation_results,"native_completeness":native_completeness,"ahu_children":ahu_children,"native_cleanup":"unknown for external/provider-managed processes","usage_child_accounting":"unknown","retention":"kept until explicit cleanup; native stores retain their own policies"});
     durable_json(&attempt.join("result.json"), &result)?;
