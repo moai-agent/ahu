@@ -686,7 +686,7 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
 /// Compare the task checkout to its launch base without staging or running diff helpers.
 pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32> {
     use std::io::IsTerminal;
-    let (_, record) = inspect_task(repo, id)?;
+    let (dir, record) = inspect_task(repo, id)?;
     let task_repo = git::discover(&record.worktree)?;
     if task_repo.identity() != repo.identity()
         || task_repo.root.canonicalize()? != record.worktree.canonicalize()?
@@ -719,10 +719,30 @@ pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32>
         "--",
     ])?;
     let untracked = run(&["ls-files", "--others", "--exclude-standard", "-z"])?;
-    for path in untracked.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+    let untracked: Vec<String> = untracked
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| display_safe(&String::from_utf8_lossy(p)))
+        .collect();
+    for path in &untracked {
+        eprintln!("Untracked (not included in diff): {path}");
+    }
+    if patch.is_empty()
+        && untracked.is_empty()
+        && let Some(outside) = crate::headless::recorded_writes_outside_worktree(&dir)
+    {
         eprintln!(
-            "Untracked (not included in diff): {}",
-            display_safe(&String::from_utf8_lossy(path))
+            "No changes in the task worktree, but write tool calls in the recorded event stream targeted paths outside it:"
+        );
+        for path in outside.iter().take(3) {
+            eprintln!("  {}", display_safe(path));
+        }
+        if outside.len() > 3 {
+            eprintln!("... and {} more", outside.len() - 3);
+        }
+        eprintln!(
+            "Run `ahu result {}` for the full recorded list.",
+            display_safe(&record.task_id)
         );
     }
     if std::io::stdout().is_terminal() {
