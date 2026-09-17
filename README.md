@@ -222,5 +222,29 @@ The explanation tests check diagram structure, not rendering. Full validation
 requires parsing the emitted blocks with Mermaid; `ahu explain --open` displays
 them in cmux.
 
+### Prose linting
+
+Documentation prose is checked with [Vale](https://vale.sh/), configured in
+[`.vale.ini`](.vale.ini). Install Vale (`brew install vale`, or see the
+[install guide](https://vale.sh/docs/install)), then:
+
+```sh
+scripts/lint-prose.sh
+```
+
+The first run downloads the Google, Microsoft, write-good, and proselint style
+packages into `.vale/styles`, which Git ignores; pass `--no-sync` to reuse an
+existing download, and pass paths to check files outside the default set
+(`README.md`, `AGENTS.md`, and `docs/`). Terms this project uses deliberately,
+such as `ahu`, `cmux`, and `worktree`, are accepted through the tracked
+vocabulary at
+[`.vale/styles/config/vocabularies/ahu/accept.txt`](.vale/styles/config/vocabularies/ahu/accept.txt).
+
+CI runs the same script in the `prose` job, which fails on any alert. The
+configuration turns off the rules that encode the Google and Microsoft editorial
+voice, such as required contractions and passive-voice warnings, along with the
+Oxford comma rules, which flag two-item conjunctions. The reasons are recorded
+beside each entry in `.vale.ini`.
+
 See the [0.2.0 preparation notes](docs/releases/0.2.0.md) for implemented behavior
 and validation limits. This version is not published as a release.

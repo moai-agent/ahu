@@ -27,13 +27,13 @@ task, without asking for separate permission or leaving it for the user.
   reference a commit or pull request only when it exists and is accessible to
   the intended readers. Do not claim local changes are available remotely.
 - Close resolved issues after their acceptance criteria and required delivery
-  steps are satisfied. If required tests, review, application of a patch, or
+  steps are satisfied. If required tests, review, applying a patch, or
   merging remain outstanding, comment on that status and leave the issue open.
   Do not close an issue merely because an agent finished its assignment.
 - For partial, blocked, or unreproduced work, comment with the evidence, remaining
   work, and blocker, and leave the issue open. A review that discovers a defect
   does not resolve the defect: keep the remediation issue open.
-- Close a parent story or epic only after checking all of its acceptance
+- Close a parent story or epic only after checking all its acceptance
   criteria and required child work. Completing one child does not close the
   parent. Keep unrelated issues out of the update.
 - When delegating, assign responsibility for issue updates explicitly. The

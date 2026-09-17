@@ -54,3 +54,32 @@ jobs:
       # install OKF 0.5.0 outside the checkout, then run
       # cargo run --locked -- knowledge lint. CI tests its fixture integration.
       # A required bundle check needs a reviewed, pinned OKF distribution first.
+
+  prose:
+    name: Prose
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      VALE_VERSION: 3.21.0
+      VALE_SHA256: 96997d19a4ca6981673b0d4c5ca7f3ede4a9f97964a96edc29fba9e28a328336
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Vale
+        run: |
+          archive="vale_${VALE_VERSION}_Linux_64-bit.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$archive" \
+            "https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/${archive}"
+          echo "${VALE_SHA256}  ${archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/vale"
+          tar -xzf "$archive" -C "${RUNNER_TEMP}/vale" vale
+          rm "$archive"
+          echo "${RUNNER_TEMP}/vale" >> "$GITHUB_PATH"
+      - name: Lint documentation prose
+        # Downloads the style packages named in .vale.ini.
+        run: scripts/lint-prose.sh

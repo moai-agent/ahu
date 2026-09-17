@@ -9,3 +9,8 @@
 !/.claude/skills/
 /.claude/skills/*
 !/.claude/skills/discover-requirements/
+
+# Vale downloads style packages into .vale/styles; only the project
+# vocabulary under .vale/styles/config/ is tracked.
+/.vale/styles/*
+!/.vale/styles/config/

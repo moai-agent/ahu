@@ -32,7 +32,7 @@ Discovery includes this external store. Worktree deletion retains headless
 results; supervisor loss reports an interrupted attempt without automatic replay.
 Process and harness outcomes remain separate from acceptance: agent reports and
 same-user editable records do not prove completion. The headless implementation
-in src/headless.rs defines this backend; interactive state rules below do not
+in src/headless.rs defines this state store; interactive state rules below do not
 relocate it through `AHU_STATE_DIR`.
 
 Headless child grants freeze registered identities and native policies at host
@@ -49,7 +49,7 @@ scope, rather than silently detaching the old task from its provenance. Same-use
 not isolated from supervisor records, and provider-side cleanup remains unknown.
 
 Explicit cleanup removes captured attempt artifacts after known termination,
-retaining structured results, frozen inputs, native stores, branches and worktrees.
+retaining structured results, frozen inputs, native stores, branches, and worktrees.
 It is not a full erasure of task content.
 
 Interactive task discovery scans sibling task worktrees under the primary checkout's
