@@ -5,7 +5,7 @@
 //! its quality rank. Which pair a project actually uses is decided by the
 //! project's own rankings in `.agents/ahu/config.toml`.
 //!
-//! The catalog is pinned by version in project configuration so that installing
+//! The catalog revision is fixed in project configuration so that installing
 //! a newer ahu cannot silently change a project's selection.
 
 use crate::bail;
@@ -13,6 +13,95 @@ use crate::util::Result;
 
 /// The catalog revision shipped with this ahu build.
 pub const CATALOG_VERSION: &str = "2026-09-13";
+
+/// One capability a harness adapter has actually been validated to deliver.
+///
+/// A feature is admitted only after live confirmation on a verified CLI
+/// version, never from documentation alone. It describes what the harness *can* do; the
+/// project decides what a launch uses, and harness configuration itself is a
+/// project-level matter ahu never writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    /// The adapter can start an interactive session.
+    InteractiveLaunch,
+    /// The adapter has a validated batch (`--headless`/`launch --headless`) mode.
+    HeadlessLaunch,
+    /// A finished batch session can be resumed by id.
+    HeadlessResume,
+    /// The harness can be told to ask for approval on tool use.
+    PromptApprovals,
+    /// The harness offers an accept-edits approval mode.
+    AcceptEditsApprovals,
+    /// The harness offers a mode that skips approvals entirely.
+    AutoApprovals,
+    /// ahu can enumerate the harness's hook configuration.
+    HookInventory,
+    /// ahu can enumerate plugin modules the harness installs at startup.
+    StartupPluginInventory,
+    /// Models are qualified by provider (for example `provider/model:tag`).
+    ProviderQualifiedModels,
+    /// The harness CLI supports a deterministic external log destination.
+    ExternalLogDestination,
+    /// The harness supports bounded native helper delegation.
+    BoundedNativeHelpers,
+}
+
+impl Feature {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Feature::InteractiveLaunch => "interactive-launch",
+            Feature::HeadlessLaunch => "headless-launch",
+            Feature::HeadlessResume => "headless-resume",
+            Feature::PromptApprovals => "prompt-approvals",
+            Feature::AcceptEditsApprovals => "accept-edits-approvals",
+            Feature::AutoApprovals => "auto-approvals",
+            Feature::HookInventory => "hook-inventory",
+            Feature::StartupPluginInventory => "startup-plugin-inventory",
+            Feature::ProviderQualifiedModels => "provider-qualified-models",
+            Feature::ExternalLogDestination => "external-log-destination",
+            Feature::BoundedNativeHelpers => "bounded-native-helpers",
+        }
+    }
+
+    /// What claiming the feature means, rendered beside it in the feature
+    /// matrix so the matrix never asserts a stronger claim than ahu makes.
+    pub fn gloss(self) -> &'static str {
+        match self {
+            Feature::InteractiveLaunch => "ahu can start an interactive session of this harness",
+            Feature::HeadlessLaunch => "ahu has a validated batch launch profile for this harness",
+            Feature::HeadlessResume => "a finished batch session can be resumed by id",
+            Feature::PromptApprovals => "the harness can be told to ask for approval on tool use",
+            Feature::AcceptEditsApprovals => "the harness offers an accept-edits approval mode",
+            Feature::AutoApprovals => "the harness offers a mode that skips approvals entirely",
+            Feature::HookInventory => "ahu can enumerate this harness's hook configuration",
+            Feature::StartupPluginInventory => {
+                "ahu can enumerate plugin modules this harness installs at startup"
+            }
+            Feature::ProviderQualifiedModels => "model identifiers are qualified by provider",
+            Feature::ExternalLogDestination => {
+                "the CLI supports a deterministic external log destination"
+            }
+            Feature::BoundedNativeHelpers => {
+                "the harness supports bounded native helper delegation"
+            }
+        }
+    }
+}
+
+/// All features in stable matrix order.
+pub const FEATURES: &[Feature] = &[
+    Feature::InteractiveLaunch,
+    Feature::HeadlessLaunch,
+    Feature::HeadlessResume,
+    Feature::PromptApprovals,
+    Feature::AcceptEditsApprovals,
+    Feature::AutoApprovals,
+    Feature::HookInventory,
+    Feature::StartupPluginInventory,
+    Feature::ProviderQualifiedModels,
+    Feature::ExternalLogDestination,
+    Feature::BoundedNativeHelpers,
+];
 
 /// A harness ahu can name. Only harnesses with a validated adapter can launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,10 +114,28 @@ pub struct HarnessEntry {
     pub executable: &'static str,
     /// Harness versions the adapter was verified against.
     pub verified_versions: &'static str,
+    /// Harness versions the headless (batch) profile was verified against.
+    pub headless_verified_versions: &'static [&'static str],
     /// Whether the adapter can hold the configured model for a whole session.
     pub enforces_model_for_session: bool,
+    /// Capabilities this harness's adapter has been validated to deliver.
+    pub features: &'static [Feature],
     /// What the adapter cannot control, shown with the reliability warning.
     pub enforcement_gaps: &'static [&'static str],
+}
+
+impl HarnessEntry {
+    pub fn supports(&self, feature: Feature) -> bool {
+        self.features.contains(&feature)
+    }
+}
+
+/// Whether a named harness supports a feature. `false` for an unknown harness:
+/// an unvalidated adapter supports nothing.
+pub fn supports(harness_id: &str, feature: Feature) -> bool {
+    harness(harness_id)
+        .map(|h| h.supports(feature))
+        .unwrap_or(false)
 }
 
 /// A verified harness/model pair.
@@ -54,7 +161,21 @@ pub const HARNESSES: &[HarnessEntry] = &[
         adapter_available: true,
         executable: "claude",
         verified_versions: "2.1.269",
+        // Interactive and headless surfaces were validated on different sets:
+        // the interactive adapter was checked on 2.1.269, the batch argument
+        // surface and event stream on both.
+        headless_verified_versions: &["2.1.269", "2.1.270"],
         enforces_model_for_session: false,
+        features: &[
+            Feature::InteractiveLaunch,
+            Feature::HeadlessLaunch,
+            Feature::HeadlessResume,
+            Feature::PromptApprovals,
+            Feature::AcceptEditsApprovals,
+            Feature::AutoApprovals,
+            Feature::HookInventory,
+            Feature::BoundedNativeHelpers,
+        ],
         enforcement_gaps: &[
             "the model is set at launch with --model, but an interactive session can change it with /model",
             "ahu cannot disable in-session model switching or provider-side routing",
@@ -67,7 +188,16 @@ pub const HARNESSES: &[HarnessEntry] = &[
         adapter_available: true,
         executable: "codex",
         verified_versions: "0.154.0",
+        headless_verified_versions: &["0.154.0"],
         enforces_model_for_session: false,
+        features: &[
+            Feature::InteractiveLaunch,
+            Feature::HeadlessLaunch,
+            Feature::HeadlessResume,
+            Feature::PromptApprovals,
+            Feature::AcceptEditsApprovals,
+            Feature::AutoApprovals,
+        ],
         enforcement_gaps: &[
             "the model is set at launch with -m, but ahu cannot stop an interactive session changing it",
             "Codex has no per-agent selection: no --agent flag and no instructions-file option, and -p/--profile layers model and sandbox config rather than instructions",
@@ -80,7 +210,17 @@ pub const HARNESSES: &[HarnessEntry] = &[
         adapter_available: true,
         executable: "agy",
         verified_versions: "1.2.2",
+        headless_verified_versions: &["1.2.2"],
         enforces_model_for_session: false,
+        features: &[
+            Feature::InteractiveLaunch,
+            Feature::HeadlessLaunch,
+            Feature::HeadlessResume,
+            Feature::PromptApprovals,
+            Feature::AcceptEditsApprovals,
+            Feature::AutoApprovals,
+            Feature::ExternalLogDestination,
+        ],
         enforcement_gaps: &[
             "the model is set at launch with --model, but ahu cannot stop an interactive session changing it",
             "the CLI accepts --agent but does not validate it: a nonexistent agent name produced a normal reply instead of an error, and a workspace agent whose instructions were unmistakable did not change the response, so the harness never confirms an identity was applied. ahu does not pass it",
@@ -93,8 +233,21 @@ pub const HARNESSES: &[HarnessEntry] = &[
         executable: "opencode",
         // Both were checked on 2026-09-13; the install updated itself in place
         // between the two probe runs, which is why the entry lists a pair.
-        verified_versions: "1.18.29, 1.18.30",
+        verified_versions: "1.18.29, 1.18.30, 1.18.31",
+        // The batch surface was inspected on 1.18.30; 1.18.29 carries the same
+        // `run` options and is the other version the catalog entry names.
+        // 1.18.31 was live-probed on 2026-09-15: a fresh `run --format json`
+        // turn and a `--session` resume that recalled context both behaved.
+        headless_verified_versions: &["1.18.29", "1.18.30", "1.18.31"],
         enforces_model_for_session: false,
+        features: &[
+            Feature::InteractiveLaunch,
+            Feature::HeadlessLaunch,
+            Feature::HeadlessResume,
+            Feature::AutoApprovals,
+            Feature::StartupPluginInventory,
+            Feature::ProviderQualifiedModels,
+        ],
         enforcement_gaps: &[
             "the model is set at launch with --model, but ahu cannot stop an interactive session changing it",
             "--agent <name> is accepted but not validated: a missing name only warns \"agent ... not found. Falling back to default agent\" and the run continues, so the flag can never confirm an identity was applied. It would also override the agent's own model and permissions, contradicting the model ahu pins. ahu does not pass it",
@@ -216,7 +369,7 @@ pub fn models_for(harness_id: &str) -> Vec<&'static ModelEntry> {
     found
 }
 
-/// Reject a project config pinned to a catalog this build does not ship.
+/// Reject a project config requiring a catalog this build does not ship.
 ///
 /// A mismatch is reported rather than silently upgraded: changing the catalog
 /// changes which model a project's automatic launches resolve to, and that is a

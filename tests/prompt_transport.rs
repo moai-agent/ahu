@@ -281,7 +281,7 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
     let task_dir = temp.path().join("task");
     write_task_record(&task_dir, &worktree, &prompt, &bin.join("claude"));
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["run-task", "--task-dir", &task_dir.to_string_lossy()])
         .env(
             "PATH",
@@ -371,7 +371,7 @@ fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
     assert_ne!(tampered, raw, "the fixture must actually be changed");
     std::fs::write(task_dir.join("task.json"), tampered).unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["run-task", "--task-dir", &task_dir.to_string_lossy()])
         .env(
             "PATH",

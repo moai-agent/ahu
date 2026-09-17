@@ -1,12 +1,11 @@
 mod common;
 
 use common::{HOSTILE_PROMPT, TestRepo};
-use std::process::Command;
 
 fn launch(repo: &TestRepo, name: &str, dry_run: bool) -> std::process::Output {
     let temp = repo.state_path();
     let bin = common::fake_harness(temp, &temp.join("argv"));
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ahu"));
+    let mut cmd = common::ahu();
     cmd.current_dir(repo.path())
         .args(["launch", name, "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
@@ -354,7 +353,7 @@ fn inline_and_piped_prompts_produce_clean_json_without_cmux() {
     let preview = launch(&repo, "@sable", true);
     assert!(preview.status.success());
     for source in ["inline", "stdin", "file"] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ahu"));
+        let mut command = common::ahu();
         command
             .current_dir(repo.path())
             .args([
@@ -463,10 +462,7 @@ fn launch_prompt_conflicts_and_terminal_stdin_are_usage_errors() {
             "hello",
         ],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
-            .args(args)
-            .output()
-            .unwrap();
+        let output = common::ahu().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2));
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(error.contains("--prompt") && error.contains("--prompt-file"));

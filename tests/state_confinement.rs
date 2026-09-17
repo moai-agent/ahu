@@ -85,7 +85,7 @@ fn repo_with_state() -> TestRepo {
 }
 
 fn ahu(repo: &TestRepo, args: &[&str]) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    common::ahu()
         .args(args)
         .current_dir(repo.path())
         .env_remove("AHU_STATE_DIR")
@@ -247,7 +247,7 @@ fn an_explicit_state_root_is_supported_and_its_descendants_are_still_confined() 
     let chosen = TempDir::new().unwrap();
     link(external.path(), chosen.path().join("repos"));
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["hygiene", "@chris"])
         .current_dir(repo.path())
         .env("AHU_STATE_DIR", chosen.path())
@@ -266,7 +266,7 @@ fn an_explicit_state_root_is_supported_and_its_descendants_are_still_confined() 
 
     // Without the link the same explicit root works normally.
     std::fs::remove_file(chosen.path().join("repos")).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["hygiene", "@chris"])
         .current_dir(repo.path())
         .env("AHU_STATE_DIR", chosen.path())
@@ -327,7 +327,7 @@ fn a_named_pipe_in_place_of_a_state_file_is_refused_without_blocking() {
         .expect("mkfifo runs");
     assert!(made.success(), "the fixture needs a named pipe");
 
-    let child = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let child = common::ahu()
         .args(["hygiene", "@chris"])
         .current_dir(repo.path())
         .env_remove("AHU_STATE_DIR")

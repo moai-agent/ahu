@@ -245,7 +245,7 @@ pub fn document() -> Vec<Section> {
                     "At launch ahu reads that file, records two digests of it — one over the whole",
                     "file, one over exactly the instruction text it will deliver — and puts the",
                     "instruction text into the harness's prompt, ahead of the task prompt. It passes",
-                    "no agent-selection flag on any harness. The harness and the model are pinned by",
+                    "no agent-selection flag on any harness. The harness and the model are fixed by",
                     "real flags; the identity is not, and ahu reports that as a gap rather than a",
                     "control.",
                 ]),
@@ -380,7 +380,7 @@ pub fn document() -> Vec<Section> {
                 "MCP and slash commands are excluded; settings and deny rules remain discoverable.",
                 "The model tool ceiling does not prove hooks cannot write or spawn processes.",
                 "Known successful helper joins are required. Provider-side cleanup stays unknown.",
-                "Codex 0.154.0, Antigravity 1.2.2 and OpenCode 1.18.29/1.18.30 admit ordinary",
+                "Codex 0.154.0, Antigravity 1.2.2 and OpenCode 1.18.29/1.18.31 admit ordinary",
                 "headless execution, but refuse bounded helpers. Claude 2.1.269 also admits only",
                 "the disabled profile.",
                 "Same-user code is not isolated from broker state. Hooks and arbitrary shell",
@@ -470,7 +470,7 @@ pub fn document() -> Vec<Section> {
             title: "Compatibility",
             blocks: vec![
                 Block::Para(vec![format!(
-                    "Compatibility catalog {} ships with this build and is pinned by project",
+                    "Compatibility catalog {} ships with this build and is fixed by project",
                     catalog::CATALOG_VERSION
                 ),
                 "configuration, so installing a newer ahu cannot silently change which model your".to_string(),
@@ -507,11 +507,11 @@ const FOUR_RULES: &[&[&str]] = &[
         "Fixed identity. A named agent's harness, model, and instructions are used",
         "as configured. No fallback model, no availability-based substitution, no",
         "task-driven prompt rewriting. Invalid configuration fails before a task starts.",
-        "The harness and model are pinned by flags; the instructions are delivered as",
+        "The harness and model are fixed by flags; the instructions are delivered as",
         "prompt text, which ahu reports as a gap rather than as enforcement.",
     ],
     &[
-        "One project policy. Rankings, cadence, and the pinned catalog are the same",
+        "One project policy. Rankings, cadence, and the fixed catalog revision are the same",
         "for every ahu user in the project. There are no personal profiles and no",
         "command-line switches that change them. A machine that cannot meet the policy",
         "reports a diagnostic; it does not get different behaviour.",

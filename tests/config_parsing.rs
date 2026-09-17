@@ -471,7 +471,7 @@ fn a_relative_path_entry_never_resolves_a_harness() {
 
     // Resolution reads the process environment, so drive it through a child
     // process rather than mutating this test binary's own PATH.
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .arg("doctor")
         .current_dir(repo.path())
         .env("AHU_STATE_DIR", repo.state_path())

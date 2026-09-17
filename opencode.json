@@ -13,7 +13,7 @@
           "name": "GLM 5.3 (Ollama cloud)",
           "limit": {
             "context": 65536,
-            "output": 8192
+            "output": 32768
           }
         }
       }

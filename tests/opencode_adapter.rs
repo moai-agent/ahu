@@ -341,9 +341,9 @@ fn the_catalog_entry_and_the_adapter_agree() {
         command_for(Permissions::Prompt).unwrap().program
     );
     assert!(entry.adapter_available);
-    // Both were checked live; the install moved under the probes on the review
-    // date, which is why the entry names two.
-    assert_eq!(entry.verified_versions, "1.18.29, 1.18.30");
+    // All three were checked live; the install moved under the probes on the
+    // review date, which is why the entry names a range.
+    assert_eq!(entry.verified_versions, "1.18.29, 1.18.30, 1.18.31");
 
     let model = ahu::catalog::model("opencode", MODEL).expect("catalog model");
     assert_eq!(model.display_name, "GLM 5.3 (Ollama cloud)");

@@ -301,16 +301,22 @@ pub fn plan(
             found_hooks.mcp_servers.len()
         ));
     }
-    // A plugin entry names a module OpenCode installs and runs at startup. The
+    // A plugin entry names a module a harness installs and runs at startup. The
     // snapshot carries and digests the file that declares it, but the digest
     // describes the declaration, not the code it resolves to, and an npm
     // specifier is not a file the executable-bit scan can see. Counting the
     // names is what makes the trust decision visible on the launch preview.
     //
-    // Gated on the selected harness: `opencode.json` travels into every task
-    // worktree, but only OpenCode reads it, and telling a Claude Code or Codex
-    // launch that it executes these modules would be false.
-    if pair.harness == "opencode" && !found_hooks.declared_plugins.is_empty() {
+    // Gated through the feature matrix: `opencode.json` travels into every
+    // task worktree, but only OpenCode reads it, and telling a launch of
+    // another harness that it executes these modules would be false.
+    // A harness with no catalog entry claims no feature, so the lookup and the
+    // feature test are one step: an absent entry simply leaves the gap unsaid
+    // rather than panicking the preview on a cross-module invariant.
+    if let Some(entry) = crate::catalog::harness(&pair.harness)
+        .filter(|entry| entry.supports(crate::catalog::Feature::StartupPluginInventory))
+        && !found_hooks.declared_plugins.is_empty()
+    {
         let modules: Vec<String> = found_hooks
             .declared_plugins
             .iter()
@@ -318,10 +324,11 @@ pub fn plan(
             .collect();
         enforcement.gaps.push(format!(
             "{} plugin module(s) declared by this repository ({}) are installed and executed by \
-             OpenCode at startup; ahu carries the declaration into the task worktree but \
+             {} at startup; ahu carries the declaration into the task worktree but \
              neither resolves, pins, nor sandboxes what it fetches.",
             modules.len(),
-            modules.join(", ")
+            modules.join(", "),
+            entry.display_name
         ));
     }
     // A wrapper between ahu and the harness can add flags ahu refuses to pass.

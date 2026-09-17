@@ -41,7 +41,7 @@ fn child_repo() -> PathBuf {
 /// `env_remove` rather than a pointed-at temporary directory: these tests are
 /// about ordinary operation, where nothing sets that variable.
 fn ahu_in(dir: &Path, args: &[&str]) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    common::ahu()
         .args(args)
         .current_dir(dir)
         .env_remove("AHU_STATE_DIR")
@@ -767,7 +767,7 @@ fn an_explicit_store_still_sees_live_worktree_tasks() {
     .unwrap();
 
     let chosen = tempfile::TempDir::new().unwrap();
-    let listed = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let listed = common::ahu()
         .args(["tasks"])
         .current_dir(repo.path())
         .env("AHU_STATE_DIR", chosen.path())

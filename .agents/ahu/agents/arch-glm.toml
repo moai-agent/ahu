@@ -1,0 +1,11 @@
+schema_version = 1
+name = "arch-glm"
+version = "1.0.0"
+description = "Plans implementation with code-grounded designs, dependencies, and verifiable work increments"
+harness = "opencode"
+model = "ollama/glm-5.3:cloud"
+permissions = "prompt"
+
+[source]
+format = "markdown"
+path = ".agents/ahu/instructions/arch-glm.md"

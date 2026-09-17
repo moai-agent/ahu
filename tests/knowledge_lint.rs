@@ -10,7 +10,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use common::TestRepo;
 
@@ -178,7 +178,7 @@ impl Run {
 
 /// Run ahu in `cwd` with the stub okf first on PATH.
 fn run(repo: &TestRepo, stub: &StubOkf, cwd: &Path, args: &[&str]) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .current_dir(cwd)
         .args(args)
         .env("NO_COLOR", "1")
@@ -314,7 +314,7 @@ fn a_missing_okf_is_a_prerequisite_and_nothing_is_checked() {
     #[cfg(unix)]
     std::os::unix::fs::symlink("/usr/bin/git", bare.path().join("git")).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .current_dir(repo.path())
         .args(["knowledge", "lint"])
         .env("NO_COLOR", "1")
@@ -827,7 +827,7 @@ fn redirected_lint_preserves_plain_layout_and_json_values() {
         for json in [false, true] {
             let render = |color: &str| {
                 let stdout = tempfile::NamedTempFile::new().unwrap();
-                let mut command = Command::new(env!("CARGO_BIN_EXE_ahu"));
+                let mut command = common::ahu();
                 command.args([color, "knowledge", "lint"]);
                 if json {
                     command.args(["--output", "json"]);

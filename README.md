@@ -111,6 +111,10 @@ keep their branches, worktrees, and records after the harness exits.
 | `@defsec-opus` | Claude Code / `claude-opus-5` | Reviews and implements defensive programming and focused refactoring. |
 | `@dev-opus` | Claude Code / `claude-opus-5` | General-purpose ahu development and code review; product documentation belongs to docs-opus. |
 | `@docs-opus` | Claude Code / `claude-opus-5` | Maintains all tracked Markdown, specifications, knowledge formats, and current project context. |
+| `@arch-glm` | OpenCode / `ollama/glm-5.3:cloud` | Plans implementation with code-grounded designs, dependencies, and verifiable work increments. |
+| `@defsec-glm` | OpenCode / `ollama/glm-5.3:cloud` | Reviews and implements defensive programming and focused refactoring. |
+| `@dev-glm` | OpenCode / `ollama/glm-5.3:cloud` | Validates and remediates reported issues with regression coverage. |
+| `@docs-glm` | OpenCode / `ollama/glm-5.3:cloud` | Maintains all tracked Markdown, specifications, knowledge formats, and current project context. |
 
 [Manifests](.agents/ahu/agents/) reference versioned
 [instructions](.agents/ahu/instructions/). Named launches use their manifest's

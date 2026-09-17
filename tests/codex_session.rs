@@ -35,7 +35,7 @@ exit 7
     .unwrap();
     let nested = repo.path().join("subdirectory");
     std::fs::create_dir(&nested).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .arg("codex")
         .current_dir(&nested)
         .env(
@@ -110,7 +110,7 @@ exit 7
     .unwrap();
     let nested = repo.path().join("subdirectory");
     std::fs::create_dir(&nested).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .arg("claude")
         .current_dir(&nested)
         .env(
@@ -185,7 +185,7 @@ exit 7
     .unwrap();
     let nested = repo.path().join("subdirectory");
     std::fs::create_dir(&nested).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .arg("opencode")
         .current_dir(&nested)
         .env(

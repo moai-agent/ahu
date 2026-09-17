@@ -490,7 +490,7 @@ fn settings_files(repo_root: &Path, locations: &Locations) -> Vec<SettingsFile> 
 /// Only Claude Code settings are enumerated. Other harnesses need an explicit
 /// unknown-coverage report rather than a misleading empty inventory.
 pub fn hook_surface_is_implemented(harness_id: &str) -> bool {
-    harness_id == "claude-code"
+    crate::catalog::supports(harness_id, crate::catalog::Feature::HookInventory)
 }
 
 /// Read every hook ahu can see for a launch of `harness_id` from `repo_root`.

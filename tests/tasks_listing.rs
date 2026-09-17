@@ -480,7 +480,7 @@ fn a_launch_says_when_drift_could_not_read_earlier_records() {
     write_schema_1(&dir, "006aa50000000000i1");
 
     let bin = common::fake_harness(repo.state_path(), &repo.state_path().join("argv"));
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .current_dir(repo.path())
         .args(["launch", "@chris", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))

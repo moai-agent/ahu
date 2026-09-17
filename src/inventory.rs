@@ -545,5 +545,56 @@ pub fn render(inventory: &Inventory) -> String {
         "\nThis inventory is not complete. `available` means a source is discoverable by the\n\
          harness, not that its contents reached the model.\n",
     );
+    out.push_str(&render_feature_matrix());
+    out
+}
+
+/// Render the harness feature matrix: which adapter capabilities each catalog
+/// harness has actually been validated to deliver.
+///
+/// The matrix is a record of validation, not a comparison for shopping: an
+/// unmarked feature is an unvalidated adapter surface, not a claim about the
+/// harness itself.
+pub fn render_feature_matrix() -> String {
+    use crate::style::{self, Role};
+    let style = style::stdout();
+    let mut out = String::new();
+    out.push_str("\nHarness feature matrix\n");
+    out.push_str("=====================\n");
+    // A header row keyed by display name, so each mark can be read back to its
+    // column. The names are catalog constants, so the row is deterministic.
+    // Every column is padded to its harness's name, which is never shorter
+    // than a mark, so the marks line up under their headers.
+    let names: Vec<&str> = crate::catalog::HARNESSES
+        .iter()
+        .map(|h| h.display_name)
+        .collect();
+    let header = names
+        .iter()
+        .map(|n| format!("{n:<width$}  ", width = n.len()))
+        .collect::<String>();
+    out.push_str(&format!("  {:<28} {}\n", "", header));
+    for feature in crate::catalog::FEATURES {
+        let marks: Vec<String> = crate::catalog::HARNESSES
+            .iter()
+            .map(|h| {
+                let mark = if h.supports(*feature) {
+                    style.paint(Role::Success, "yes")
+                } else {
+                    String::from("-")
+                };
+                format!("{mark:<width$}  ", width = h.display_name.len())
+            })
+            .collect();
+        out.push_str(&format!("  {:<28} {}\n", feature.as_str(), marks.join("")));
+    }
+    out.push('\n');
+    out.push_str(
+        "Each `yes` is a live-validated adapter surface. A `-` is an unvalidated adapter\n\
+                  surface, not a claim about the harness itself:\n",
+    );
+    for feature in crate::catalog::FEATURES {
+        out.push_str(&format!("  {}: {}\n", feature.as_str(), feature.gloss()));
+    }
     out
 }

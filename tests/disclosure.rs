@@ -833,6 +833,42 @@ fn declared_opencode_plugins_are_named_on_the_preview() {
     }
 }
 
+/// A harness that does not read `opencode.json` is neither told it runs the
+/// plugins nor allowed to take the preview down looking them up.
+///
+/// The snapshot carries `opencode.json` into every task worktree, so the
+/// declarations are present on a Claude Code launch too. The gap is gated on
+/// the feature, and the harness entry that names the harness in it comes from
+/// the same lookup as the gate -- one `Option`, not a feature test followed by
+/// an unwrap of a second table that a future catalog edit could falsify.
+#[test]
+fn a_harness_that_does_not_run_declared_plugins_is_not_told_that_it_does() {
+    let repo = repo_on("claude-code", "claude-sonnet-5");
+    repo.write(
+        "opencode.json",
+        r#"{"plugin":["some-remote-plugin","@scope/another@1.2.3"]}"#,
+    );
+    repo.commit("fixture");
+
+    let (_discovered, plan) = plan_for(&repo, "claude-code", "claude-sonnet-5");
+
+    assert_eq!(
+        plan.hooks.declared_plugins.len(),
+        2,
+        "the file is inherited"
+    );
+    let named: Vec<&String> = plan
+        .enforcement
+        .gaps
+        .iter()
+        .filter(|gap| gap.contains("are installed and executed by"))
+        .collect();
+    assert!(
+        named.is_empty(),
+        "a Claude Code launch must not be told it executes these modules: {named:?}"
+    );
+}
+
 /// A `.jsonc` ahu cannot parse is reported as unknown, never as "no plugins".
 #[test]
 fn an_unparseable_opencode_config_is_unknown_rather_than_empty() {
@@ -946,4 +982,115 @@ fn declared_plugins_do_not_suppress_the_unscanned_settings_disclosure() {
              settings files:\n{preview}"
         );
     }
+}
+
+// --- the feature matrix ---
+
+/// A feature is admitted to a harness entry only after live validation, so the
+/// catalog is the single table that answers "can ahu do X on harness Y".
+///
+/// These assertions restate the validation record the adapters were built from.
+/// They exist so a future catalog edit that flips a mark changes a test, not
+/// just a rendered table nobody reads.
+#[test]
+fn the_catalog_records_the_validated_feature_surface_of_each_harness() {
+    use ahu::catalog::{self, Feature};
+
+    let expectations: &[(&str, Feature, bool)] = &[
+        // Interactive adapters exist for all four harnesses.
+        ("claude-code", Feature::InteractiveLaunch, true),
+        ("codex", Feature::InteractiveLaunch, true),
+        ("antigravity", Feature::InteractiveLaunch, true),
+        ("opencode", Feature::InteractiveLaunch, true),
+        // Headless launch and resume were validated on all four.
+        ("claude-code", Feature::HeadlessLaunch, true),
+        ("codex", Feature::HeadlessLaunch, true),
+        ("antigravity", Feature::HeadlessLaunch, true),
+        ("opencode", Feature::HeadlessLaunch, true),
+        ("claude-code", Feature::HeadlessResume, true),
+        ("codex", Feature::HeadlessResume, true),
+        ("antigravity", Feature::HeadlessResume, true),
+        ("opencode", Feature::HeadlessResume, true),
+        // Approval modes: claude, codex, and antigravity accept prompt,
+        // accept-edits, and auto; OpenCode only has an auto mode ahu passes.
+        ("claude-code", Feature::PromptApprovals, true),
+        ("codex", Feature::PromptApprovals, true),
+        ("antigravity", Feature::PromptApprovals, true),
+        ("opencode", Feature::PromptApprovals, false),
+        ("claude-code", Feature::AcceptEditsApprovals, true),
+        ("codex", Feature::AcceptEditsApprovals, true),
+        ("antigravity", Feature::AcceptEditsApprovals, true),
+        ("opencode", Feature::AcceptEditsApprovals, false),
+        ("claude-code", Feature::AutoApprovals, true),
+        ("codex", Feature::AutoApprovals, true),
+        ("antigravity", Feature::AutoApprovals, true),
+        ("opencode", Feature::AutoApprovals, true),
+        // Hook settings enumeration exists only for Claude Code.
+        ("claude-code", Feature::HookInventory, true),
+        ("codex", Feature::HookInventory, false),
+        ("antigravity", Feature::HookInventory, false),
+        ("opencode", Feature::HookInventory, false),
+        // `opencode.json` plugin entries are startup code only OpenCode runs.
+        ("opencode", Feature::StartupPluginInventory, true),
+        ("claude-code", Feature::StartupPluginInventory, false),
+        // OpenCode model identifiers are provider-qualified.
+        ("opencode", Feature::ProviderQualifiedModels, true),
+        ("claude-code", Feature::ProviderQualifiedModels, false),
+        // agy's CLI supports a deterministic external log destination.
+        ("antigravity", Feature::ExternalLogDestination, true),
+        ("claude-code", Feature::ExternalLogDestination, false),
+        // Bounded native helpers were validated live on Claude Code only.
+        ("claude-code", Feature::BoundedNativeHelpers, true),
+        ("codex", Feature::BoundedNativeHelpers, false),
+    ];
+    for (harness, feature, expected) in expectations {
+        assert_eq!(
+            catalog::supports(harness, *feature),
+            *expected,
+            "{harness} / {:?}",
+            feature
+        );
+    }
+    // An unknown harness supports nothing: an unvalidated adapter makes no
+    // claims, and a `true` here would turn every future gate into a bypass.
+    assert!(!catalog::supports(
+        "does-not-exist",
+        Feature::HeadlessLaunch
+    ));
+    assert!(!catalog::supports("", Feature::InteractiveLaunch));
+}
+
+/// The matrix is rendered where the context inventory is read, and every mark
+/// and gloss is present, so the report is the matrix rather than a summary of
+/// it. The glosses are the part that keeps a mark from reading as a stronger
+/// claim than the adapter validation made.
+#[test]
+fn the_feature_matrix_is_rendered_with_every_feature_and_gloss() {
+    use ahu::catalog::FEATURES;
+
+    let rendered = ahu::inventory::render_feature_matrix();
+    assert!(rendered.contains("Harness feature matrix"), "{rendered}");
+    for feature in FEATURES {
+        assert!(
+            rendered.contains(feature.as_str()),
+            "{:?} must be a row in the matrix:\n{rendered}",
+            feature
+        );
+        assert!(
+            rendered.contains(feature.gloss()),
+            "{:?} must carry its gloss so a mark cannot read as a stronger claim:\n{rendered}",
+            feature
+        );
+    }
+    for harness in ahu::catalog::HARNESSES {
+        assert!(
+            rendered.contains(harness.display_name),
+            "{} must be a column:\n{rendered}",
+            harness.display_name
+        );
+    }
+    assert!(
+        rendered.contains("live-validated adapter surface"),
+        "the matrix must say what a mark is:\n{rendered}"
+    );
 }

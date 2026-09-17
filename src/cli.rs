@@ -528,7 +528,9 @@ fn value_for(flag: &str, rest: &[String], index: &mut usize) -> Result<String> {
 }
 
 fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Command> {
-    let inherited = std::env::var("AHU_EXECUTION_BACKEND").ok().as_deref() == Some("headless");
+    // Only an in-process broker dispatch implicitly selects the headless
+    // profile; the broker always dispatches children with explicit --headless.
+    let inherited = std::env::var_os("AHU_BROKER_DISPATCH").is_some();
     let mut options = crate::headless::Options::default();
     let mut headless = inherited;
     let mut filtered = Vec::new();

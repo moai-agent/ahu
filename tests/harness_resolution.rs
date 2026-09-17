@@ -18,7 +18,6 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use common::TestRepo;
 
@@ -73,7 +72,7 @@ fn make_executable(path: &Path) {
 }
 
 fn run(fixture: &PlantedRepo, path: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ahu"))
+    common::ahu()
         .args(args)
         .current_dir(fixture.repo.path())
         .env("AHU_STATE_DIR", fixture.repo.state_path())
@@ -270,4 +269,35 @@ fn a_registered_repository_excludes_binaries_under_it() {
     );
     // And so is a relative one.
     assert!(ahu::selection::probe_version("claude").is_none());
+}
+
+/// The shared fake-harness fixture survives a checkout path containing a quote.
+///
+/// The fixture generates `/bin/sh` source with the record path inside it. A
+/// path is chosen by `tempfile` and by wherever the developer keeps their
+/// checkouts, not by the test, so a single quote in it must stay data: an
+/// unescaped interpolation would end the quoting early and make the remainder
+/// of the path shell code. Asserting on the recorded argv proves the script
+/// both parsed and wrote where it was told.
+#[test]
+fn the_fake_harness_records_argv_from_a_path_containing_a_quote() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let hostile = temp.path().join("it's a checkout; echo pwned");
+    std::fs::create_dir_all(&hostile).expect("create hostile dir");
+    let record = hostile.join("argv");
+
+    let bin = common::fake_harnesses(&hostile, &["claude"], |_| record.clone());
+    let output = std::process::Command::new(bin.join("claude"))
+        .args(["--model", "claude-sonnet-5"])
+        .output()
+        .expect("the fake harness runs");
+
+    assert!(output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "the path must not be executed as shell source: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let recorded = std::fs::read_to_string(&record).expect("the record was written");
+    assert_eq!(recorded, "--model\nclaude-sonnet-5\n");
 }

@@ -1,0 +1,13 @@
+schema_version = 1
+name = "defsec-glm"
+version = "1.0.1"
+description = "Reviews and implements defensive programming and focused refactoring"
+harness = "opencode"
+model = "ollama/glm-5.3:cloud"
+
+# This agent requests unattended tool use through the harness adapter.
+permissions = "auto"
+
+[source]
+format = "markdown"
+path = ".agents/ahu/instructions/defsec-glm.md"

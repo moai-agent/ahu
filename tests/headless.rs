@@ -52,7 +52,7 @@ if scenario in ('child','mailbox'):
   time.sleep(0.3)
  child=os.environ['CHILD_PROMPT']
  env=dict(os.environ,SCENARIO='success')
- r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--background','--output','json','--prompt-file',child],env=env,capture_output=True,text=True)
+ r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--headless','--background','--output','json','--prompt-file',child],env=env,capture_output=True,text=True)
  assert r.returncode==0, r.stderr
  child_id=json.loads(r.stdout)['task_id']
  r=subprocess.run([os.environ['AHU_BIN'],'wait',child_id,'--output','json'],env=env,capture_output=True,text=True)
@@ -88,7 +88,7 @@ if scenario=='nonzero': sys.exit(7)
         }
     }
     fn command(&self) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_ahu"));
+        let mut c = common::ahu();
         c.current_dir(self.repo.path())
             .env("AHU_RUNTIME_DIR", self.external.path().join("runtime"))
             .env("AHU_STATE_DIR", self.external.path().join("state"))
@@ -561,12 +561,23 @@ fn cancelled_parent_refuses_later_child_admission() {
         .output()
         .unwrap();
     assert!(out.status.success());
+    // The child launch is a registered child of the cancelled parent: the
+    // headless profile routes it to the broker, which refuses admission
+    // because the parent is already cancelled.
     let out = f
         .command()
         .current_dir(v["worktree"].as_str().unwrap())
         .env("AHU_PARENT_TASK", id)
         .env("AHU_EXECUTION_BACKEND", "headless")
-        .args(["launch", "@worker", "--prompt", "child", "--output", "json"])
+        .args([
+            "launch",
+            "@worker",
+            "--headless",
+            "--prompt",
+            "child",
+            "--output",
+            "json",
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -577,6 +588,56 @@ fn cancelled_parent_refuses_later_child_admission() {
         .output()
         .unwrap();
     assert_eq!(Fixture::value(&out)["tasks"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn batch_options_without_headless_refuse_ambient_execution_backend() {
+    // AHU_EXECUTION_BACKEND records how this process was launched; it must
+    // not silently select the headless profile for a new launch that omits
+    // the explicit --headless flag.
+    let f = Fixture::new();
+    let out = f
+        .command()
+        .env("AHU_EXECUTION_BACKEND", "headless")
+        .args([
+            "launch",
+            "@worker",
+            "--background",
+            "--prompt",
+            "x",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("batch options require --headless"));
+}
+
+#[test]
+fn ambient_broker_dispatch_admits_batch_options() {
+    // A broker-dispatched child inherits AHU_BROKER_DISPATCH, so batch
+    // options parse without the explicit --headless flag: the refusal
+    // below comes from identity resolution, not the batch-option gate.
+    let f = Fixture::new();
+    let out = f
+        .command()
+        .env("AHU_BROKER_DISPATCH", "1111111111111111")
+        .args([
+            "launch",
+            "@missing",
+            "--background",
+            "--prompt",
+            "x",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("batch options require --headless"));
+    assert!(stderr.contains("no agent named"));
 }
 
 #[test]
@@ -837,7 +898,7 @@ if '--version' in sys.argv: print('2.1.270');sys.exit(0)
 print(json.dumps({'type':'system','subtype':'init','session_id':os.environ['AHU_PARENT_TASK']}),flush=True)
 if sys.argv[-1].endswith('parent-shutdown'):
  time.sleep(1)
- r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--background','--timeout','6','--prompt','slow-child','--output','json'],capture_output=True,text=True)
+ r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--headless','--background','--timeout','6','--prompt','slow-child','--output','json'],capture_output=True,text=True)
  assert r.returncode==0,r.stderr
  open(os.environ['CHILD_ID_FILE'],'w').write(json.loads(r.stdout)['task_id'])
  if os.environ['STOP_MODE']=='capture_failed': print('x'*(1024*1024+1),flush=True)
@@ -1491,4 +1552,157 @@ emit('step_finish',{'type':'step-finish','reason':'stop'})
         "the recorded session is the one OpenCode reported: {}",
         v["harness"]
     );
+}
+
+/// A probe output with decoration after the version must be admitted.
+///
+/// `--version` output is not a stable contract: tools append build tags, commit
+/// hashes, and channel suffixes after whitespace. The compatibility table
+/// records plain versions, so the gate must compare the first whitespace token
+/// rather than the whole line — otherwise every decorated build of a validated
+/// version is refused as unvalidated.
+#[test]
+fn a_decorated_version_token_is_admitted_by_the_headless_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.repo.add_agent("stubbed", "1.0.0", "claude-sonnet-5");
+    f.repo.commit("agent");
+    // Replaces the fixture's `claude`: same launch flow, but `--version`
+    // decorates the validated token instead of printing it bare.
+    let stub = f.bin.join("claude");
+    std::fs::write(
+        &stub,
+        r#"#!/usr/bin/env python3
+import sys,json
+if '--version' in sys.argv:
+ print('2.1.270 (Claude Code, linux-x64)'); sys.exit(0)
+assert '--print' in sys.argv, sys.argv
+print(json.dumps({'type':'system','subtype':'init','session_id':'stub-session'}),flush=True)
+print(json.dumps({'type':'result','subtype':'success','result':'validated synthetic proof','session_id':'stub-session','is_error':False,'permission_denials':[]}),flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = f
+        .command()
+        .args(["launch", "@stubbed", "--headless", "--prompt", "ok"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "a validated version with trailing decoration must launch: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A probe output whose first token is not validated must be refused, however
+/// validated a later token looks.
+///
+/// The inverse of the decorated-token test: `any`-token matching admitted
+/// `1.0.0 (Claude Code 2.1.270)` because a supported version appeared inside
+/// the parenthetical. Compatibility is a property of the first token — the
+/// actual CLI the user has installed — not of any string the probe emits.
+#[test]
+fn a_parenthetical_version_token_is_refused_by_the_headless_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.repo.add_agent("stubbed", "1.0.0", "claude-sonnet-5");
+    f.repo.commit("agent");
+    let stub = f.bin.join("claude");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\n[ \"$1\" = \"--version\" ] && echo '1.0.0 (Claude Code, profile 2.1.270)' && exit 0\nexit 9\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = f
+        .command()
+        .args(["launch", "@stubbed", "--headless", "--prompt", "ok"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "an unvalidated first token must not launch"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unvalidated headless claude-code version"),
+        "the refusal must name the harness and version: {stderr}"
+    );
+}
+
+/// Cleanup unlinks a mailbox symlink where it stands; it never follows one.
+///
+/// The inbox is writable by the worker, so what cleanup finds there is not
+/// necessarily what ahu wrote. Removal goes through a handle on the validated
+/// directory, and unlinks the entry rather than its target, so a link planted
+/// at an inbox name costs the link and nothing else.
+#[test]
+fn cleanup_unlinks_a_mailbox_symlink_without_following_it() {
+    let f = Fixture::new();
+    let value = Fixture::value(&f.launch("success", &[]));
+    let id = value["task_id"].as_str().unwrap();
+    let task = PathBuf::from(value["artifacts"]["events"].as_str().unwrap())
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    let decoy = f.external.path().join("decoy-outside-the-runtime-root");
+    std::fs::write(&decoy, "keep me").unwrap();
+    let planted = task.join("requests").join("0000000000000001.json");
+    std::os::unix::fs::symlink(&decoy, &planted).unwrap();
+
+    let out = f
+        .command()
+        .args(["cleanup", id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!planted.exists() && planted.symlink_metadata().is_err());
+    assert_eq!(std::fs::read_to_string(&decoy).unwrap(), "keep me");
+}
+
+/// An artifact name occupied by something ahu did not write stops cleanup.
+///
+/// The five captured logs are regular files ahu created. A symlink standing at
+/// one of those names is not an artifact whose removal is cleanup's business,
+/// so the kind is read through the pinned directory and the run refuses rather
+/// than deleting anything at that name.
+#[test]
+fn cleanup_refuses_an_artifact_name_that_is_not_a_regular_file() {
+    let f = Fixture::new();
+    let value = Fixture::value(&f.launch("success", &[]));
+    let id = value["task_id"].as_str().unwrap();
+    let attempt = PathBuf::from(value["artifacts"]["events"].as_str().unwrap())
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    let decoy = f.external.path().join("decoy-behind-an-artifact-name");
+    std::fs::write(&decoy, "keep me").unwrap();
+    let planted = attempt.join("final.txt");
+    let _ = std::fs::remove_file(&planted);
+    std::os::unix::fs::symlink(&decoy, &planted).unwrap();
+
+    let out = f
+        .command()
+        .args(["cleanup", id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refusing runtime artifact") && stderr.contains("final.txt"),
+        "the refusal must name the artifact: {stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&decoy).unwrap(), "keep me");
+    assert!(planted.symlink_metadata().unwrap().file_type().is_symlink());
 }

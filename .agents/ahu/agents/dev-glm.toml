@@ -1,0 +1,13 @@
+schema_version = 1
+name = "dev-glm"
+version = "1.0.1"
+description = "Validates and remediates reported issues with regression coverage"
+harness = "opencode"
+model = "ollama/glm-5.3:cloud"
+
+# This agent requests unattended tool use through the harness adapter.
+permissions = "auto"
+
+[source]
+format = "markdown"
+path = ".agents/ahu/instructions/dev-glm.md"

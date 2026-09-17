@@ -1,0 +1,11 @@
+schema_version = 1
+name = "docs-glm"
+version = "1.1.1"
+description = "Maintains all tracked Markdown, specifications, knowledge formats, and current project context"
+harness = "opencode"
+model = "ollama/glm-5.3:cloud"
+permissions = "auto"
+
+[source]
+format = "markdown"
+path = ".agents/ahu/instructions/docs-glm.md"

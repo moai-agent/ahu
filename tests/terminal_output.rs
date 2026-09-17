@@ -17,7 +17,7 @@ fn doctor_shows_project_harness_readiness_without_executable_paths() {
         scratch.path().join(format!("{name}-probed"))
     });
     std::fs::write(bin.join("claude"), "#!/bin/sh\nprintf '2.1.269\\n'\n").unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .arg("doctor")
         .current_dir(repo.path())
         .env(
@@ -61,7 +61,7 @@ fn normal_harness_capabilities_are_not_warnings_but_failures_still_surface() {
             "json",
         ],
     ] {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+        let output = common::ahu()
             .args(&args)
             .current_dir(repo.path())
             .env(
@@ -197,7 +197,7 @@ fn a_hostile_file_name_in_an_error_cannot_repaint_the_terminal() {
         "this is not valid toml\n",
     );
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .arg("agents")
         .current_dir(repo.path())
         .env("AHU_STATE_DIR", repo.state_path())
@@ -236,7 +236,7 @@ fn doctor_cannot_be_used_to_repaint_the_terminal() {
          \"claude-code\" = [\"claude-opus-5\"]\n",
     );
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .arg("doctor")
         .current_dir(repo.path())
         .env("AHU_STATE_DIR", repo.state_path())
@@ -302,7 +302,7 @@ fn forced_styling_contains_hostile_descriptions() {
         ".agents/ahu/agents/fixture.toml",
         &toml::to_string(&manifest).unwrap(),
     );
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["agents", "--color=always"])
         .current_dir(repo.path())
         .env("NO_COLOR", "")
@@ -336,7 +336,7 @@ fn forced_styling_keeps_invalid_identity_fields_safe_in_errors() {
             ".agents/ahu/agents/fixture.toml",
             &toml::to_string(&manifest).unwrap(),
         );
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+        let output = common::ahu()
             .args(["--color=always", "agents"])
             .current_dir(repo.path())
             .output()
@@ -356,7 +356,7 @@ fn forced_styling_keeps_invalid_identity_fields_safe_in_errors() {
 
 #[test]
 fn redirected_commands_match_explicit_plain_output() {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent_on("fixture", "1.0.0", "codex", "gpt-6-astra");
@@ -393,7 +393,7 @@ fn redirected_commands_match_explicit_plain_output() {
             std::fs::remove_dir_all(repo.state_path()).unwrap();
             std::fs::create_dir(repo.state_path()).unwrap();
             let out = tempfile::NamedTempFile::new().unwrap();
-            let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+            let output = common::ahu()
                 .arg(color)
                 .args(*args)
                 .current_dir(repo.path())
@@ -500,10 +500,7 @@ fn bad_color_options_are_usage_errors() {
         vec!["--color"],
         vec!["--color=always", "--color=never"],
     ] {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
-            .args(args)
-            .output()
-            .unwrap();
+        let output = common::ahu().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2));
     }
 }

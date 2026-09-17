@@ -186,10 +186,11 @@ pub fn fake_harnesses(
             &script,
             format!(
                 "#!/bin/sh\n\
-                 : > '{record}'\n\
-                 for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> '{record}'; done\n\
+                 record={record}\n\
+                 : > \"$record\"\n\
+                 for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$record\"; done\n\
                  exit 0\n",
-                record = record.display()
+                record = shell_quoted(&record.to_string_lossy())
             ),
         )
         .expect("write fake harness");
@@ -203,11 +204,69 @@ pub fn fake_harnesses(
     bin
 }
 
+/// Quote a value for `/bin/sh` so the shell reads it as one literal word.
+///
+/// A fixture path is chosen by `tempfile`, not by the test, and a checkout can
+/// live under a directory whose name contains a quote. Interpolating such a
+/// path straight into generated shell source ends the quoting early and turns
+/// the rest of the path into code, so the fixture would fail — or run — for a
+/// reason that has nothing to do with what the test is asserting.
+pub fn shell_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// A prompt built to break anything that treats it as shell input.
 pub const HOSTILE_PROMPT: &str = "Fix $(touch /tmp/ahu-pwned) and `rm -rf /` now\n\
 second line with 'single' and \"double\" quotes && a pipe | and ; a semicolon\n\
 third line with a trailing backslash \\\n\
 --not-a-flag";
+
+/// The environment an ahu worker session exports into its children.
+///
+/// When `cargo test` itself runs from inside an ahu session, these variables
+/// are ambient in every test process. A test that spawns `ahu` without
+/// removing them does not measure its fixture: it measures the developer's
+/// live session, whose resume guard then refuses, and whose state and runtime
+/// directories are the real ones.
+const WORKER_ENV: &[&str] = &[
+    "AHU_EXECUTION_BACKEND",
+    "AHU_PARENT_TASK",
+    "AHU_PARENT_ATTEMPT",
+    "AHU_BROKER_TOKEN",
+    "AHU_BROKER_DISPATCH",
+    "AHU_FROZEN_CHILD_GRANTS",
+    "AHU_EXPECTED_DIGEST",
+    "AHU_EXPECTED_CHILD_IDENTITY",
+    "AHU_EXPECTED_CHILD_SNAPSHOT",
+    "AHU_EXPECTED_CHILD_HOOKS",
+    "AHU_RUNTIME_DIR",
+    "AHU_BIN",
+    "AHU_STATE_DIR",
+    "AHU_CMUX_BIN",
+];
+
+/// Strip the ambient worker environment from a command.
+///
+/// A variable removed here can still be set afterwards — `.env` overrides an
+/// earlier `.env_remove` — so a test that deliberately simulates worker context
+/// configures its own variables on top.
+pub fn clear_worker_env(command: &mut Command) {
+    for var in WORKER_ENV {
+        command.env_remove(var);
+    }
+}
+
+/// An `ahu` process free of the worker environment this test binary may itself
+/// be running under.
+///
+/// Every test that runs the built `ahu` starts here, so a session running the
+/// test suite cannot leak its own dispatch credentials, parent task, or state
+/// locations into the process under test.
+pub fn ahu() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ahu"));
+    clear_worker_env(&mut command);
+    command
+}
 
 /// The environment variable that tells a re-run of this test binary which case
 /// it is standing in for.
@@ -236,6 +295,7 @@ pub fn run_child_case(name: &str, configure: impl FnOnce(&mut Command)) -> std::
         .args([name, "--exact", "--nocapture", "--test-threads=1"])
         .env(CHILD_CASE, name)
         .env("RUST_BACKTRACE", "1");
+    clear_worker_env(&mut command);
     configure(&mut command);
     command.output().expect("the child test runs")
 }

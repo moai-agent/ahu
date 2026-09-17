@@ -4,7 +4,7 @@ use common::{TestRepo, git};
 use std::path::Path;
 
 fn review(checkout: &Path, old_state: &Path) {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["hygiene", "@chris"])
         .current_dir(checkout)
         .env_remove("AHU_STATE_DIR")

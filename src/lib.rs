@@ -5,7 +5,7 @@
 //!
 //!   - a named agent's harness, model, and instructions come from the
 //!     repository and are used exactly as configured, or the launch fails. The
-//!     harness and model are pinned by real flags; the instructions are
+//!     harness and model are fixed by real flags; the instructions are
 //!     delivered as prompt text, because no harness offers ahu an instruction
 //!     channel it can verify, and ahu reports that as a gap rather than as
 //!     enforcement;

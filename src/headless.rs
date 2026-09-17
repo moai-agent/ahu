@@ -241,18 +241,17 @@ fn build_native_profile(harness: &str, model: &str, spec: &Spec) -> Result<crate
 }
 
 /// Only CLI versions whose argument surface was inspected are admitted.
+///
+/// The validated sets live in the catalog's `headless_verified_versions`, one
+/// table instead of a second opinion in this module.
 fn check_version(harness: &str, version: &str) -> Result<()> {
-    let supported: &[&str] = match harness {
-        "codex" => &["0.154.0"],
-        "claude-code" => &["2.1.269", "2.1.270"],
-        "antigravity" => &["1.2.2"],
-        // The batch surface was inspected on 1.18.30; 1.18.29 carries the same
-        // `run` options and is the other version the catalog entry names.
-        "opencode" => &["1.18.29", "1.18.30"],
-        _ => &[],
-    };
-    let found = version.split_whitespace().any(|v| supported.contains(&v));
-    if !found {
+    let supported = crate::catalog::harness(harness)
+        .map(|h| h.headless_verified_versions)
+        .unwrap_or(&[]);
+    // Probe output is `VERSION` plus optional decoration after whitespace; the
+    // token is what got inspected, so the whole output must start with it.
+    let token = version.split_whitespace().next().unwrap_or("");
+    if !supported.contains(&token) {
         bail!(
             "unvalidated headless {harness} version {version:?}; supported CLI profiles: {supported:?}. Update the compatibility validation before launching; no fallback was selected."
         );
@@ -366,6 +365,123 @@ pub(crate) fn confined(path: &Path, create: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A runtime directory held open, so removals below it resolve against the
+/// inode that was validated rather than against its name.
+///
+/// `confined` validates a path, and a path is a name another process can
+/// re-point. A same-user process that renames a validated attempt directory
+/// away and drops a symlink in its place turns a later `remove_file` on
+/// `<attempt>/<file>` into a deletion somewhere else entirely. Opening the
+/// directory `O_NOFOLLOW | O_DIRECTORY` pins what was checked: every removal
+/// here goes through this descriptor, so the swap has nothing left to redirect.
+///
+/// It does not make cleanup atomic. What happens *inside* the pinned directory
+/// between the stat and the unlink is still a race -- but both halves run
+/// against the same descriptor, and `unlinkat` without `AT_REMOVEDIR` removes
+/// the entry itself, never what a symlink at that name points to.
+struct ConfinedDir {
+    path: PathBuf,
+    handle: std::fs::File,
+}
+
+impl ConfinedDir {
+    fn open(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        confined(path, false)?;
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(|e| {
+                Error::new(format!(
+                    "refusing runtime directory {}: {e}",
+                    path.display()
+                ))
+            })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            handle,
+        })
+    }
+
+    /// The kind of `name` in this directory, without following a symlink at it.
+    /// `None` when nothing is there.
+    fn kind(&self, name: &std::ffi::CStr) -> Result<Option<libc::mode_t>> {
+        use std::os::unix::io::AsRawFd;
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: the descriptor is owned and open, the name is NUL-terminated,
+        // and the buffer is sized by its own type.
+        let probed = unsafe {
+            libc::fstatat(
+                self.handle.as_raw_fd(),
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if probed != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(self.io_error("inspect", name, error));
+        }
+        // SAFETY: `fstatat` returned success, so the buffer is initialised.
+        Ok(Some(unsafe { stat.assume_init() }.st_mode & libc::S_IFMT))
+    }
+
+    /// Remove one entry by name. Reports whether anything was there.
+    fn unlink(&self, name: &std::ffi::CStr) -> Result<bool> {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: as in `kind`. No `AT_REMOVEDIR`, so this removes the entry
+        // itself rather than a directory or a symlink's target.
+        if unsafe { libc::unlinkat(self.handle.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(false);
+            }
+            return Err(self.io_error("remove", name, error));
+        }
+        Ok(true)
+    }
+
+    /// Remove an artifact ahu wrote. Anything that is not a regular file at
+    /// that name did not come from ahu, and is refused rather than deleted.
+    fn remove_artifact(&self, name: &str) -> Result<bool> {
+        let c_name = Self::entry_name(name)?;
+        match self.kind(&c_name)? {
+            None => Ok(false),
+            Some(libc::S_IFREG) => self.unlink(&c_name),
+            Some(_) => bail!(
+                "refusing runtime artifact {}: expected a regular file.",
+                self.path.join(name).display()
+            ),
+        }
+    }
+
+    /// Remove one mailbox entry. Directories are left alone; everything else,
+    /// including a symlink left at the name, is unlinked where it stands.
+    fn remove_mailbox_entry(&self, name: &std::ffi::OsStr) -> Result<bool> {
+        let c_name = Self::entry_name(&name.to_string_lossy())?;
+        match self.kind(&c_name)? {
+            None | Some(libc::S_IFDIR) => Ok(false),
+            Some(_) => self.unlink(&c_name),
+        }
+    }
+
+    fn entry_name(name: &str) -> Result<std::ffi::CString> {
+        std::ffi::CString::new(name)
+            .map_err(|_| Error::new("runtime entry name contains an interior NUL"))
+    }
+
+    fn io_error(&self, action: &str, name: &std::ffi::CStr, error: std::io::Error) -> Error {
+        Error::new(format!(
+            "cannot {action} runtime entry {}: {error}",
+            self.path.join(name.to_string_lossy().as_ref()).display()
+        ))
+    }
 }
 
 pub fn discover(repo: &crate::git::Repo) -> Result<Vec<PathBuf>> {
@@ -482,19 +598,21 @@ pub fn launch(
             "manifest approval widening requires --allow-widened-approvals for headless launches too"
         );
     }
-    let program = match pair.harness.as_str() {
-        "codex" => "codex",
-        "claude-code" => "claude",
-        "antigravity" => "agy",
-        "opencode" => "opencode",
-        // Named, because the caller's next question is always "which one?" and
-        // the only correct answer to this refusal is to report it. A harness
-        // with an interactive adapter still needs its batch argument surface
-        // and event stream validated separately before it can run here.
-        other => bail!(
-            "unsupported headless harness {other:?}; ahu has no validated batch profile for it and selected no fallback."
-        ),
-    };
+    // The catalog is the one table of which harnesses have a validated batch
+    // profile and which executable to probe for them. A harness with an
+    // interactive adapter still needs its batch argument surface and event
+    // stream validated separately before it can run here, so the refusal below
+    // is named: the caller's next question is always "which one?", and the only
+    // correct answer to it is to report the refusal.
+    let entry = crate::catalog::harness(&pair.harness)
+        .filter(|h| h.supports(crate::catalog::Feature::HeadlessLaunch))
+        .ok_or_else(|| {
+            crate::util::Error::new(format!(
+                "unsupported headless harness {:?}; ahu has no validated batch profile for it and selected no fallback.",
+                pair.harness
+            ))
+        })?;
+    let program = entry.executable;
     let candidate = crate::selection::resolve_executable(program)
         .ok_or_else(|| Error::new("harness executable unavailable"))?;
     validate_executable(Path::new(&candidate), repo)?;
@@ -1421,8 +1539,12 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
         .env("AHU_EXECUTION_BACKEND", "headless")
         .env("AHU_PARENT_TASK", &record.task_id)
         .env("AHU_RUNTIME_DIR", runtime_root()?);
-    // agy's generic CLI log supports a deterministic external destination.
-    if record.identity.harness == "antigravity" {
+    // The feature matrix decides whether the harness's generic CLI log can be
+    // pointed at a deterministic external destination.
+    if crate::catalog::supports(
+        &record.identity.harness,
+        crate::catalog::Feature::ExternalLogDestination,
+    ) {
         command.arg("--log-file").arg(attempt.join("native.log"));
     }
     let mut broker = crate::broker::Broker::new(&dir.join("requests"), &record, spec)?;
@@ -1878,7 +2000,7 @@ pub fn control(
                 {
                     continue;
                 }
-                confined(&entry.path(), false)?;
+                let attempt = ConfinedDir::open(&entry.path())?;
                 for file in [
                     "events.jsonl",
                     "stderr.log",
@@ -1886,10 +2008,8 @@ pub fn control(
                     "native.log",
                     "final.txt",
                 ] {
-                    let path = entry.path().join(file);
-                    if state::confine_file(&path)?.is_some() {
-                        std::fs::remove_file(&path)?;
-                        removed.push(path);
+                    if attempt.remove_artifact(file)? {
+                        removed.push(entry.path().join(file));
                     }
                 }
                 durable_json(
@@ -1899,11 +2019,14 @@ pub fn control(
             }
             let inbox = dir.join("requests");
             if inbox.exists() {
-                confined(&inbox, false)?;
+                // The listing is read by name and the removals go through the
+                // pinned handle, so a directory swapped in mid-scan can only
+                // name entries the validated inbox does not have: they are
+                // reported as absent instead of deleted somewhere else.
+                let mailbox = ConfinedDir::open(&inbox)?;
                 for entry in std::fs::read_dir(&inbox)?.take(4097) {
                     let entry = entry?;
-                    if !entry.file_type()?.is_dir() {
-                        std::fs::remove_file(entry.path())?;
+                    if mailbox.remove_mailbox_entry(&entry.file_name())? {
                         removed.push(entry.path());
                     }
                 }

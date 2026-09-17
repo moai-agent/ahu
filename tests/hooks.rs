@@ -58,7 +58,7 @@ fn doctor_only_summarizes_hooks_for_harnesses_used_by_the_project() {
             },
         )
         .unwrap();
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+        let output = common::ahu()
             .arg("doctor")
             .current_dir(repo.path())
             .env("HOME", home.path())

@@ -7,8 +7,6 @@
 
 mod common;
 
-use std::process::Command;
-
 use common::TestRepo;
 
 // --- `ahu launch` and approval widening ---
@@ -16,7 +14,7 @@ use common::TestRepo;
 fn launch(repo: &TestRepo, extra: &[&str]) -> std::process::Output {
     let temp = repo.state_path();
     let bin = common::fake_harness(temp, &temp.join("argv"));
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ahu"));
+    let mut cmd = common::ahu();
     cmd.current_dir(repo.path())
         .args(["launch", "@deploy", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
@@ -100,7 +98,7 @@ fn launch_still_needs_no_opt_in_for_an_agent_that_widens_nothing() {
 
     let temp = repo.state_path();
     let bin = common::fake_harness(temp, &temp.join("argv"));
-    let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .current_dir(repo.path())
         .args(["launch", "@sable", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
@@ -386,7 +384,7 @@ fn an_empty_prompt_digest_refuses_the_session() {
         },
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["run-task", "--task-dir", &task_dir.to_string_lossy()])
         .env(
             "PATH",
@@ -434,7 +432,7 @@ fn editing_the_recorded_agent_instructions_refuses_the_session() {
         },
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["run-task", "--task-dir", &task_dir.to_string_lossy()])
         .env(
             "PATH",

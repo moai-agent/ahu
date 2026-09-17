@@ -1,8 +1,8 @@
 //! Project configuration: `.agents/ahu/config.toml`.
 //!
 //! One policy per project. The file holds the project-agreed harness order, the
-//! project-agreed model order within each harness, the pinned compatibility
-//! catalog, and the context-hygiene cadence. There are deliberately no personal
+//! project-agreed model order within each harness, the required compatibility
+//! catalog revision, and the context-hygiene cadence. There are deliberately no personal
 //! profiles, environment overrides, or command-line switches that change any of
 //! these for one user.
 
@@ -60,7 +60,7 @@ pub struct ProjectConfig {
     pub harness_preferences: Vec<String>,
     /// The supported selection policy is `project-ranked`.
     pub model_selection: String,
-    /// Pinned compatibility catalog revision.
+    /// Required compatibility catalog revision.
     pub catalog_version: String,
     /// Project-agreed model order per harness, best first.
     #[serde(default)]

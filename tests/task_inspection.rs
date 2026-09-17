@@ -1,6 +1,6 @@
 mod common;
 use common::{TestRepo, git};
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn record(repo: &TestRepo, id: &str) -> std::path::PathBuf {
     let discovered = ahu::git::discover(repo.path()).unwrap();
@@ -70,7 +70,7 @@ fn record(repo: &TestRepo, id: &str) -> std::path::PathBuf {
 }
 
 fn run(repo: &TestRepo, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ahu"))
+    common::ahu()
         .args(args)
         .current_dir(repo.path())
         .env("AHU_STATE_DIR", repo.state_path())

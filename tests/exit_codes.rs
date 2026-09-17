@@ -1,7 +1,7 @@
 mod common;
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use common::TestRepo;
 
@@ -44,7 +44,7 @@ fn setup_and_registration_classify_actionable_errors() {
     ];
     let mut failures = Vec::new();
     for (args, expected, diagnostic) in cases {
-        let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+        let output = common::ahu()
             .current_dir(repo.path())
             .args(*args)
             .env("NO_COLOR", "1")
@@ -111,7 +111,7 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
         ),
     ];
     for (label, cwd, args, input, expected) in cases {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ahu"))
+        let mut child = common::ahu()
             .current_dir(cwd)
             .args(*args)
             .env("NO_COLOR", "1")

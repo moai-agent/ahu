@@ -76,7 +76,7 @@ impl Fixture {
     }
 
     fn command(&self, cwd: &Path, path: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ahu"));
+        let mut command = common::ahu();
         command
             .current_dir(cwd)
             .env("PATH", path)
@@ -371,7 +371,7 @@ fn a_multi_version_catalog_entry_matches_any_version_it_lists() {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .collect();
-    assert_eq!(verified, vec!["1.18.29", "1.18.30"]);
+    assert_eq!(verified, vec!["1.18.29", "1.18.30", "1.18.31"]);
 
     // Whatever this machine has, a note appears only for a version the entry
     // does not list — never for one it does.

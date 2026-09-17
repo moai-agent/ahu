@@ -26,7 +26,7 @@ and the selected harness, but no cmux session. It launches no task. Actual
 interactive execution requires cmux; `--headless` uses a separate supervisor.
 Manifests that widen approvals require the
 explicit `--allow-widened-approvals` flag for both previews and execution, as in
-the examples above. Interactive launch JSON requires `--dry-run`; headless
+the preceding examples. Interactive launch JSON requires `--dry-run`; headless
 launches also support JSON execution results.
 
 The interactive preview has `schema_version: 1` and these fields:
@@ -71,7 +71,7 @@ identity, capabilities, gaps, timeout, and external runtime path without launchi
 Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
 The admitted CLI profiles are Codex 0.154.0, Claude Code 2.1.269/2.1.270,
-Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.30. Other versions fail before
+Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.31. Other versions fail before
 worktree creation, with no fallback harness or model. OpenCode's batch form is
 `opencode run --format json`; its permission mapping is the interactive one, so
 a manifest declaring `permissions = "accept-edits"` is refused here too. See
@@ -193,12 +193,12 @@ Inside the owning task, request the child through the launching executable:
 The child request still needs `--allow-widened-approvals` when its manifest
 requires it. ahu sends a bounded request to the owning supervisor's broker; the
 supervisor starts the real registered child outside the worker sandbox with
-that child's configured harness, model, sandbox and approval mapping. It does
+that child's configured harness, model, sandbox, and approval mapping. It does
 not run a replacement harness inside the parent sandbox. Codex workspace-write
 receives the task's request directory as a narrow additional write root;
 read-only Codex broker transport is refused.
 
-Requests bind to a live parent attempt. Invalid, replayed, stale or cancelled
+Requests bind to a live parent attempt. Invalid, replayed, stale, or cancelled
 requests are refused; configuration changes also refuse dispatch. Request and
 dispatch capture are limited to 2 MiB, dispatch to 30 seconds. A lost
 acknowledgement does not justify replay: inspect recorded child tasks first.
@@ -223,7 +223,7 @@ requests must retain the policy frozen in their host grant.
 | Claude Code 2.1.270 | Admitted | Read-only profile |
 | Codex 0.154.0 | Admitted | Refused: incomplete helper identity/join event visibility |
 | Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
-| OpenCode 1.18.29/1.18.30 | Admitted | Refused: no validated native tool switch |
+| OpenCode 1.18.29/1.18.31 | Admitted | Refused: no validated native tool switch |
 
 The Claude bounded profile restricts the **entire attempt, including the owner**,
 to the model tools `Read`, `Grep`, `Glob`, and the parent's `Task` delegation tool.
@@ -255,13 +255,14 @@ profile's tool ceiling or model pin. The ceiling does not establish that
 settings-defined hooks cannot spawn processes or write files; review those
 settings separately before relying on a read-only execution environment.
 
-`native_completeness` records joins, unjoined helpers, violations and unknowns.
+`native_completeness` records joins, unjoined helpers, violations, and unknowns.
 A parent's final message is insufficient: bounded attempts require known,
 successful helper completion. Provider-side cancellation and child usage
-accounting remain unknown. Disabled mode withholds Claude's `Task` tool and
-sets Codex `agents.enabled=false`; Antigravity has no validated native-disable
-control. ahu's headless path does not invoke cmux, but arbitrary hooks, native
-configuration and shell commands still require a vetted environment. Neither
+accounting remain unknown. The `disabled` mode withholds Claude's `Task` tool and
+sets Codex `agents.enabled=false`; Antigravity has no validated native
+control for turning them off. ahu's headless path does not invoke cmux, but
+arbitrary hooks, native configuration and shell commands still require a vetted
+environment. Neither
 these controls nor local records establish a universal sandbox or independently
 verified assignment acceptance.
 
@@ -300,7 +301,7 @@ bundle must contain at least one concept Markdown file: an empty directory, a
 directory containing only non-Markdown files, or one containing only `index.md`
 and/or `log.md` fails with exit `5`.
 
-With `--output json`, stdout contains the completed report and stderr carries
+With `--output json`, stdout contains the completed report, and stderr carries
 human-readable diagnostics. Its `schema_version` is `1`; fields include `command`,
 `okf`, `fail_on_warnings`, total `errors` and `warnings`, `passed`, and `bundles`.
 Each bundle has its configured `path`, counts, and `findings`; findings carry
@@ -339,12 +340,12 @@ previews and directory/branch rows through its own preferences.
 
 Use `--color=auto`, `--color=always`, or `--color=never` with any command.
 `always` and `never` override environment detection. Under `auto` (the default),
-styling is disabled when `NO_COLOR` is set to any value, `TERM=dumb`, or stdout
+styling is turned off when `NO_COLOR` is set to any value, `TERM=dumb`, or stdout
 is not a terminal. Redirected output is therefore plain by default. JSON stdout
 never contains styling, even with `--color=always`.
 
 Agent identity, harness/model, warnings, enforcement gaps, drift, and hints have
-distinct styles. Labels and layout retain their meaning with color disabled.
+distinct styles. Labels and layout retain their meaning with color turned off.
 Repository-controlled strings are escaped before styling so they cannot inject
 terminal controls. The composer remains line-oriented: color does not change
 the `.` sentinel, `.cancel`, or the confirmation code required for submission.
@@ -353,13 +354,13 @@ the `.` sentinel, `.cancel`, or the confirmation code required for submission.
 
 `ahu` launches an agent only when `.agents/ahu/agents/<name>.toml` registers it.
 Definitions found elsewhere are onboarding candidates, never implicit
-registrations — a skill is not an agent, and `AGENTS.md` is not an agent
+registrations—a skill is not an agent, and `AGENTS.md` is not an agent
 registry.
 
-`onboard` offers registration for Claude Code and OpenCode Markdown definitions
-— `.claude/agents/<name>.md` and `.opencode/agent/<name>.md`, each one file per
-agent with YAML frontmatter. A declared `model` is checked against the catalog
-rows for that definition's own harness, so an OpenCode agent naming a Claude
+`onboard` offers registration for Claude Code and OpenCode Markdown
+definitions—`.claude/agents/<name>.md` and `.opencode/agent/<name>.md`, each
+one file per agent with YAML frontmatter. A declared `model` is checked against
+the catalog rows for that definition's own harness, so an OpenCode agent naming a Claude
 model is a blocker rather than a re-targeted launch. It lists
 Codex TOML and Antigravity native definitions with blockers even though both
 harness adapters exist; this native-onboarding path cannot register them.
@@ -403,14 +404,14 @@ Registration and removal ask for confirmation; neither edits the native file.
 
 `harness` and `model` are required, explicit values. If the native definition
 has parsed frontmatter declaring a nonempty model other than `inherit`,
-the two must agree; `ahu` will not rewrite either file or
+the two must agree; `ahu` does not rewrite either file or
 pick one silently. A model identifier is written exactly as its harness expects
 it: OpenCode's `-m` takes `provider/model`, so an OpenCode manifest pins the
 provider prefix too, as in
 [OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models).
 
 Every named agent needs a semantic version. `ahu` does not manage releases for
-you, but it will tell you when a version label has stopped matching its inputs:
+you, but it reports when a version label has stopped matching its inputs:
 if `chris@1.2.0` launches with different instructions or a different repository
 configuration than the last `chris@1.2.0` launch, that drift is reported as a
 pending behavior change for the next version bump.
@@ -425,13 +426,13 @@ configuration, and holds no provider credentials.
 
 `glm-5.3:cloud` is an Ollama **cloud** model. Registering an agent on it selects
 a remote inference provider: the prompts, repository file contents, and tool
-output that the model sees leave the machine and are processed by Ollama's hosted
+output that reaches the model leave the machine and are processed by Ollama's hosted
 service. The Ollama process on the machine is the endpoint and router; it is not
 where inference happens. Decide whether this repository's contents may leave the
 machine before registering the agent, not after.
 
 Check it yourself. `ollama list` shows a cloud model with an empty size column,
-because there is no local weight file — on 2026-09-13 `glm-5.3:cloud` listed
+because there is no local weight file—on 2026-09-13 `glm-5.3:cloud` listed
 digest `8477dab3e25b` and no size. A model whose weights are on disk shows a size.
 
 A `:cloud` tag is also a moving alias: the digest behind the name can change
@@ -453,7 +454,7 @@ curl -sS http://localhost:11434/v1/models
 the OpenAI-compatible endpoint serves without running inference; a connection
 error there means Ollama is not running or is not listening on that address.
 
-More than one OpenCode installation can sit on `PATH` at once — a package-manager
+More than one OpenCode installation can sit on `PATH` at once—a package-manager
 copy and the installer's copy under your home directory, often at different
 versions. ahu resolves `opencode` on the submitting shell's `PATH` and reports the
 resolved executable path in the launch preview. To see which one that is:
@@ -536,11 +537,11 @@ before launching an agent in it.
 ### Register an OpenCode agent
 
 `harness = "opencode"` accepts `permissions = "prompt"` and `permissions = "auto"`;
-`accept-edits` is refused. On this harness `prompt` is not an approval gate — see
+`accept-edits` is refused. On this harness `prompt` is not an approval gate—see
 [delegation and approval boundaries](#delegation-and-approval-boundaries) for the
 mapping and the reason.
 
-Write the instructions the agent will be given:
+Write the instructions the agent receives:
 
 ```sh
 mkdir -p .agents/ahu/agents .agents/ahu/instructions
@@ -610,8 +611,8 @@ to decide, and the only flag that would change them widens them.
 ### Troubleshooting
 
 ahu's own preflight covers Git, project configuration, the manifest, and the
-`opencode` executable on `PATH`. Everything past launch — endpoint reachability,
-provider resolution, model availability, authentication, and context limits — is
+`opencode` executable on `PATH`. Everything past launch—endpoint reachability,
+provider resolution, model availability, authentication, and context limits—is
 between OpenCode and Ollama.
 
 | Symptom | Your check | What ahu does |
@@ -651,14 +652,14 @@ includes `task_id`, `agent`, `harness`, `model`, `branch`, `base_commit`,
 JSON remains unstyled even with `--color=always` and omits prompt text and titles.
 Consumers should tolerate additional fields and check `schema_version`.
 
-The interactive task list labels states as `session running`, `session exited`, and so on.
+The interactive task list labels states such as `session running` and `session exited`.
 A running session may be awaiting input; a process exit does not verify success.
 
 `ahu diff` compares the launch base to the current task worktree, including
 committed, staged, and unstaged tracked changes, including inherited agent
 configuration. Untracked files are listed on stderr and are not included in the
 patch; ignored files are omitted. Git external diff helpers and text conversion
-are disabled. Terminal output escapes control characters; redirected stdout
+are turned off. Terminal output escapes control characters; redirected stdout
 preserves the patch bytes. The command fails if the checkout is missing or belongs
 to another repository. Neither command stages, commits, or applies changes.
 
@@ -672,7 +673,7 @@ to another repository. Neither command stages, commits, or applies changes.
   copied at their native paths, including uncommitted and Git-ignored files, and
   configuration you have deleted locally stays deleted. Unrelated dirty source
   files stay in your original checkout. Some of this is executable
-  configuration — hooks, and OpenCode `plugin` modules — so it travels with the
+  configuration—hooks, and OpenCode `plugin` modules—so it travels with the
   same trust consequences as the rest of the repository.
 - **The configured harness and model at launch.** The preview records the
   executable found on the submitting shell's `PATH`. For interactive startup, `run-task`
@@ -691,17 +692,17 @@ to another repository. Neither command stages, commits, or applies changes.
 A source file and the text ahu delivers from it are not the same bytes when the
 format has YAML frontmatter, so `ahu` records and shows both, always labelled:
 
-- **file digest** — SHA-256 of the complete file at `source.path`, exactly as it
+- **file digest**—SHA-256 of the complete file at `source.path`, exactly as it
   is on disk, frontmatter included. This is the one to compare against the
   repository.
-- **instructions digest** — SHA-256 of exactly the text `ahu` puts in the prompt:
+- **instructions digest**—SHA-256 of exactly the text `ahu` puts in the prompt:
   the same file with its frontmatter stripped, byte-for-byte identical to what
   lands inside the `<<<ahu-agent-...>>>` fence.
 
 For a format with no frontmatter the two cover the same bytes and come out equal.
-Both are folded into the agent's identity digest, so a change to either is drift —
-and drift says which one moved, because an edit to frontmatter alone changes the
-file without changing anything the model was given.
+Both are folded into the agent's identity digest, so a change to either is
+drift—and drift says which one moved, because an edit to frontmatter alone
+changes the file without changing anything the model was given.
 
 Exiting the harness keeps the worktree, the branch, and the task record. A
 process exit is not evidence that the task succeeded, and `ahu` never deletes
@@ -709,7 +710,7 @@ your work for you.
 
 ## Prompts are data
 
-A task prompt can contain anything — `$(...)`, backticks, pipes, newlines. `ahu`
+A task prompt can contain anything—`$(...)`, backticks, pipes, newlines. `ahu`
 never puts a prompt into a shell command. The cmux startup command contains only
 `ahu`'s own executable path and task directory, both shell-quoted; the prompt is
 written to a file and handed to the harness as a single argument.
@@ -733,10 +734,10 @@ under skipped paths still arrive through Git; local edits there are not copied.
 
 Hooks run on harness lifecycle events and can affect tool calls or context.
 ahu inventories Claude Code hook settings and reports Codex, Antigravity, and
-OpenCode hook coverage as unknown. It does not add, edit, remove, or disable hooks.
+OpenCode hook coverage as unknown. It does not add, edit, remove, or turn off hooks.
 
 Only a hook's program is shown, never its arguments, and only its digest is
-stored in the task record — hook commands routinely carry tokens, and an
+stored in the task record—hook commands routinely carry tokens, and an
 inventory must not leak a credential merely to describe a hook.
 
 For Claude Code, `ahu inventory` lists hooks ahu can read from
@@ -773,9 +774,9 @@ repository instructions, skills, hooks, memory sources, MCP configuration,
 personal configuration from your home directory, managed policy, and the task
 prompt.
 Sources are marked `loaded`, `available`, `disabled`, `opaque`, or `absent`, and
-the report ends with what `ahu` cannot see. It is never labelled complete —
-`available` means the harness can discover a source, not that its contents
-reached the model.
+the report ends with what `ahu` cannot see. It is never labelled
+complete—`available` means the harness can discover a source, not that its
+contents reached the model.
 
 On an agent's first load, and then on the project's cadence
 (`context_hygiene.review_interval_days`, a project-wide setting), `ahu` reviews
@@ -786,7 +787,7 @@ a global deletion as a local one.
 
 ## State and compatibility
 
-Headless tasks use the external runtime store described above. `tasks`, `task`,
+Headless tasks use the external runtime store described in the preceding section. `tasks`, `task`,
 and `diff` include those records alongside interactive and legacy records.
 `focus` is for interactive cmux sessions. The following worktree-local layout
 and `AHU_STATE_DIR` rules describe interactive tasks and compatible legacy state;
@@ -842,7 +843,7 @@ stores. The value must name a checkout root's `.ahu/state`; a store under a
 subdirectory is a separate explicit selection. This holds even when the variable
 names a sibling's store. Other values
 select their own coordination and legacy store instead of those default stores.
-In either case, discovery still scans task worktrees and interactive task records and
+In either case, discovery still scans task worktrees, and interactive task records and
 prompts still go inside their own worktree. The launched harness receives
 `AHU_STATE_DIR` set to its own worktree's `.ahu/state`, replacing any inherited
 override. Harness configuration and credentials retain their native handling.
@@ -879,7 +880,7 @@ keeps its canonical path across calls on the discovered client. `AHU_CMUX_BIN`
 is a deliberate user selection and retains normal command semantics: a bare name
 uses command lookup, and relative or absolute paths are accepted without the
 default working-tree exclusion. These are executable selection checks, not a
-sandbox or a guarantee against later replacement by a host process.
+sandbox, and they do not prevent later replacement by a host process.
 
 The catalog in `src/catalog.rs` records, per adapter, the CLI version its
 behavior was verified against and the enforcement gaps ahu discloses for it.
@@ -903,8 +904,8 @@ ahu does not reinterpret their digests or delete their worktrees.
 Outside ahu, delegation belongs to the current harness. Registered assignments
 inside ahu use registered ahu agents running their configured
 harnesses and models in separate worktrees. Interactive tasks use cmux workspaces;
-headless descendants inherit the headless backend and external runtime root.
-Headless child grants and bounded native helpers follow the policies above.
+headless descendants inherit the headless state store and external runtime root.
+Headless child grants and bounded native helpers follow the preceding policies.
 The supplied contract requires
 `ahu agents`, a complete UTF-8 assignment file, and `ahu launch @name
 --prompt-file assignment.txt`. `AHU_BIN` points to the launching ahu executable.
@@ -931,8 +932,8 @@ happens next is the harness's own default, and the harnesses do not agree:
 | Manifest `permissions` | OpenCode | Effect |
 | --- | --- | --- |
 | `prompt` | no flag passed | OpenCode's own permission configuration decides. Its defaults allow most tools outright, so an OpenCode agent can edit files and run commands without asking. The built-in `build` agent's only `deny` rules are `question`, `plan_enter` and `plan_exit`; reads of `*.env` and `*.env.*` default to `ask`, not `deny`, and so do `doom_loop` and `external_directory`. |
-| `auto` | `--auto` | Auto-approves every permission that is not explicitly denied. An `ask` rule is not a denial, so `--auto` approves it silently: with OpenCode's defaults that includes reading `*.env` and `*.env.*`, and reaching outside the project directory. If you need those refused rather than merely prompted, write a `deny` rule in your own OpenCode `permission` configuration; ahu does not add one. Still requires `--allow-widened-approvals`. |
-| `accept-edits` | rejected | OpenCode has no accept-edits flag and its permission actions are static configuration, so ahu refuses the manifest instead of approximating the mode. There is no fallback to `prompt` or `auto`. |
+| `auto` | `--auto` | Approves every permission that is not explicitly denied. An `ask` rule is not a denial, so `--auto` approves it silently: with OpenCode's defaults that includes reading `*.env` and `*.env.*`, and reaching outside the project directory. If you need those refused rather than merely prompted, write a `deny` rule in your own OpenCode `permission` configuration; ahu does not add one. Still requires `--allow-widened-approvals`. |
+| `accept-edits` | rejected | OpenCode has no accept-edits flag and its permission actions are static configuration, so ahu refuses the manifest instead of approximating the mode. No fallback to `prompt` or `auto` exists. |
 
 Readers arriving from Claude Code or Codex should not carry over the assumption
 that `prompt` gates edits and commands: on OpenCode it does not. Express finer
@@ -945,7 +946,7 @@ OpenCode reports that the agent was not found and continues with its default
 agent, so the flag cannot confirm that an identity was applied. `--agent` would
 also override the agent's own model and permissions, contradicting the exact
 model the manifest pins. As on every other harness, the agent's instructions and
-ahu's delegation contract travel as prompt text — delivery, not enforcement.
+ahu's delegation contract travel as prompt text—delivery, not enforcement.
 
 `ahu codex` opens Codex in the current Git checkout with `--sandbox
 workspace-write --ask-for-approval on-request` and Codex's configured model. It
@@ -956,12 +957,12 @@ Start it from a terminal; an existing outer sandbox still applies.
 and permission behavior. It passes no model or permission overrides and accepts
 no additional arguments. Like `ahu codex`, it preserves the invoking directory
 and terminal, sets `AHU_BIN` and checkout-local `AHU_STATE_DIR`, and creates no
-task, worktree or cmux session.
+task, worktree, or cmux session.
 
 `ahu opencode` does the same for OpenCode, and passes no arguments either.
 Unlike `ahu codex`, it names no sandbox or approval mode: OpenCode's permission
 actions are static configuration, and its one permission flag, `--auto`,
-auto-approves everything not explicitly denied. A coordinating session that
+approves everything not explicitly denied without prompting. A coordinating session that
 passed it would widen the user's own boundary on their behalf, which is the
 opposite of what the adapter does when an agent asks. `--pure` is not passed
 either, so the user's own plugins load exactly as they do outside ahu.
