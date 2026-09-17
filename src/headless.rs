@@ -5,7 +5,9 @@ use crate::util::{Error, Result, digest_bytes};
 use crate::{bail, state, task};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::{Read, Write};
+use std::borrow::Cow;
+use std::collections::HashSet;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -1341,6 +1343,249 @@ impl Events {
 
 const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 const LINE_LIMIT: usize = 1024 * 1024;
+
+const MAX_EVENT_JSON_DEPTH: usize = 64;
+const WRITE_LIKE_TOOLS: [&str; 10] = [
+    "write",
+    "edit",
+    "multiedit",
+    "notebookedit",
+    "applypatch",
+    "editfile",
+    "writefile",
+    "createfile",
+    "strreplaceeditor",
+    "strreplacebasededit",
+];
+const WRITE_PATH_KEYS: [&str; 7] = [
+    "filepath",
+    "file",
+    "path",
+    "notebookpath",
+    "abspath",
+    "targetfile",
+    "content",
+];
+const WRITE_NAME_KEYS: [&str; 3] = ["tool", "name", "toolname"];
+const WRITE_INPUT_KEYS: [&str; 2] = ["input", "arguments"];
+
+/// Lowercase ASCII alphanumerics only: `file_path` and `filePath` both
+/// normalize to `filepath`, `_` separators vanish.
+fn normalize_token(token: &str) -> String {
+    token
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Lexically collapse `.` and `..` without touching the filesystem.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => (),
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+/// Canonicalize, or resolve via the nearest existing ancestor so paths the
+/// harness named but never created are still classified. Lexical fallback
+/// only when even the ancestor cannot be canonicalized (e.g. CWD removed).
+fn real_path(path: &Path) -> PathBuf {
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    let mut tail = Vec::new();
+    let mut current = path.to_path_buf();
+    while !current.exists() {
+        let Some(file_name) = current.file_name().map(Path::to_path_buf) else {
+            break;
+        }
+        current = current.parent().map(Path::to_path_buf).unwrap_or_default();
+        tail.push(file_name);
+        if current.as_os_str().is_empty() {
+            break;
+        }
+    }
+    if let Ok(base) = current.canonicalize() {
+        let mut real = base;
+        for file_name in tail.iter().rev() {
+            real.push(file_name);
+        }
+        return real;
+    }
+    lexical_normalize(path)
+}
+
+/// Resolve a recorded write-path candidate against the worktree. The stub
+/// cwd is the worktree, so relative paths are worktree-relative by
+/// construction; absolute paths are kept as the harness named them.
+fn resolve_write_path(candidate: &str, worktree: &Path) -> Option<PathBuf> {
+    if candidate.is_empty() {
+        return None;
+    }
+    let raw: PathBuf = candidate.into();
+    let joined = if raw.is_absolute() {
+        raw
+    } else {
+        worktree.join(raw)
+    };
+    let resolved = lexical_normalize(&joined);
+    if resolved.as_os_str().is_empty() || !resolved.is_absolute() {
+        return None;
+    }
+    Some(resolved)
+}
+
+/// Walk a write-tool call's subtree, collecting path candidates and decoding
+/// string `input`/`arguments` payloads that embed JSON.
+fn collect_write_paths_within(value: &Value, depth: usize, candidates: &mut Vec<String>) {
+    let mut stack: Vec<(Cow<'_, Value>, usize)> = vec![(Cow::Borrowed(value), depth)];
+    while let Some((value, depth)) = stack.pop() {
+        if depth >= MAX_EVENT_JSON_DEPTH {
+            continue;
+        }
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map.iter() {
+                    let key = normalize_token(key);
+                    if WRITE_PATH_KEYS.contains(&key.as_str()) {
+                        if let Some(path) = child.as_str() {
+                            candidates.push(path.to_string());
+                        }
+                    }
+                    if WRITE_INPUT_KEYS.contains(&key.as_str()) {
+                        if let Some(embedded) = child.as_str() {
+                            if let Ok(decoded) = serde_json::from_str::<Value>(embedded) {
+                                stack.push((Cow::Owned(decoded), depth + 1));
+                            }
+                        }
+                    }
+                    stack.push((Cow::Borrowed(child), depth + 1));
+                }
+            }
+            Value::Array(items) => {
+                for child in items.iter() {
+                    stack.push((Cow::Borrowed(child), depth + 1));
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+/// Walk one event, collecting write-path candidates from any object whose
+/// name-ish key names a write-like tool. The main walk does not decode
+/// embedded JSON in string `input`/`arguments` values; the within-walk
+/// triggered by a matching tool name does.
+fn collect_write_paths(event: &Value) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut stack: Vec<(&Value, usize)> = vec![(event, 0)];
+    while let Some((value, depth)) = stack.pop() {
+        if depth >= MAX_EVENT_JSON_DEPTH {
+            continue;
+        }
+        match value {
+            Value::Object(map) => {
+                let is_write_tool = map.iter().any(|(key, child)| {
+                    normalize_token(key) == "tool"
+                        || WRITE_NAME_KEYS.contains(&normalize_token(key).as_str())
+                        && child.as_str().map(normalize_token).is_some_and(|tool| {
+                            WRITE_LIKE_TOOLS.contains(&tool.as_str())
+                        })
+                });
+                if is_write_tool {
+                    collect_write_paths_within(value, depth, &mut candidates);
+                }
+                for (_, child) in map.iter() {
+                    stack.push((child, depth + 1));
+                }
+            }
+            Value::Array(items) => {
+                for child in items.iter() {
+                    stack.push((child, depth + 1));
+                }
+            }
+            _ => (),
+        }
+    }
+    candidates
+}
+
+/// Post-run, disclose-only scan: read the captured event stream and list
+/// write-tool call paths that resolve outside the task worktree. Never
+/// fails; a missing or unreadable stream scans as empty.
+fn scan_writes_outside_worktree(events_path: &Path, worktree: &Path) -> Vec<String> {
+    let Ok(file) = std::fs::File::open(events_path) else {
+        return Vec::new();
+    };
+    let mut reader = BufReader::new(file);
+    let mut total = 0u64;
+    let mut line = Vec::new();
+    let mut candidates: Vec<String> = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => total += read as u64,
+        }
+        if total > CAPTURE_LIMIT {
+            break;
+        }
+        if line.len() > LINE_LIMIT {
+            continue;
+        }
+        while matches!(line.last(), Some(b'\n') | Some(b'\r')) {
+            line.pop();
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        candidates.extend(collect_write_paths(&event));
+    }
+    let worktree_real = real_path(worktree);
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut outside = Vec::new();
+    for candidate in candidates {
+        let Some(resolved) = resolve_write_path(&candidate, &worktree_real) else {
+            continue;
+        };
+        let real = real_path(&resolved);
+        if !real.starts_with(&worktree_real) {
+            let recorded = real.to_string_lossy().into_owned();
+            if seen.insert(recorded.clone()) {
+                outside.push(recorded);
+            }
+        }
+    }
+    outside.truncate(128);
+    outside
+}
+
+/// Recorded `writes_outside_worktree` from a finished attempt's result
+/// envelope, if it exists and is non-empty. Never fails the caller.
+pub(crate) fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>> {
+    let spec: Spec = read_json(&dir.join("headless.json")).ok()?;
+    let result_path = attempt_dir(dir, &spec).join("result.json");
+    let result: Value = read_json(&result_path).ok()?;
+    let paths: Vec<String> = result
+        .get("writes_outside_worktree")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    (!paths.is_empty()).then_some(paths)
+}
 
 /// Pipe readers never wait for EOF from an escaped descendant: the supervisor
 /// polls process completion independently and bounds the final drain.
