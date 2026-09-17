@@ -318,33 +318,56 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         }
     }
 
-    if let Ok(repo) = repo
-        && project_harnesses.contains("claude-code")
-    {
-        match hooks::collect(&repo.root, "claude-code") {
-            Ok(found) => {
-                console.say(&format!(
-                    "hooks        Claude Code: {} configured\n",
-                    found.hooks.len()
-                ))?;
-                for hook in &found.hooks {
-                    console.say(&format!("  {:<12} {}\n", hook.scope.as_str(), hook.label()))?;
+    if let Ok(repo) = repo {
+        for harness in &project_harnesses {
+            if hooks::hook_surface_is_implemented(harness) {
+                match hooks::collect(&repo.root, harness) {
+                    Ok(found) => {
+                        let display_name = catalog::harness(harness)
+                            .map(|h| h.display_name)
+                            .unwrap_or(harness);
+                        let count = found.hooks.len() + found.declared_plugins.len();
+                        console.say(&format!(
+                            "hooks        {display_name}: {count} configured\n",
+                        ))?;
+                        for hook in &found.hooks {
+                            console.say(&format!(
+                                "  {:<12} {}\n",
+                                hook.scope.as_str(),
+                                hook.label()
+                            ))?;
+                        }
+                        for plugin in &found.declared_plugins {
+                            let scope = if plugin.source.starts_with('/')
+                                || plugin.source.starts_with('~')
+                            {
+                                "user"
+                            } else {
+                                "project"
+                            };
+                            console.say(&format!(
+                                "  {:<12} plugin → {}\n",
+                                scope,
+                                display_safe(&plugin.module)
+                            ))?;
+                        }
+                        for unreadable in &found.unreadable {
+                            warnings += 1;
+                            console.say(&format!(
+                                "  {} {}\n",
+                                style::stdout().paint(Role::Warning, "unreadable"),
+                                display_safe(unreadable)
+                            ))?;
+                        }
+                    }
+                    Err(e) => {
+                        problems += 1;
+                        console.say(&format!(
+                            "hooks        could not be read for {harness}: {}\n",
+                            display_safe_block(&e.to_string())
+                        ))?;
+                    }
                 }
-                for unreadable in &found.unreadable {
-                    warnings += 1;
-                    console.say(&format!(
-                        "  {} {}\n",
-                        style::stdout().paint(Role::Warning, "unreadable"),
-                        display_safe(unreadable)
-                    ))?;
-                }
-            }
-            Err(e) => {
-                problems += 1;
-                console.say(&format!(
-                    "hooks        could not be read: {}\n",
-                    display_safe_block(&e.to_string())
-                ))?;
             }
         }
     }

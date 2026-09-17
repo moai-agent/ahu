@@ -251,6 +251,7 @@ fn the_preview_claims_no_tool_denial_on_any_harness() {
 #[test]
 fn hooks_are_reported_as_unknown_for_a_harness_ahu_does_not_scan() {
     assert!(hooks::hook_surface_is_implemented("claude-code"));
+    assert!(hooks::hook_surface_is_implemented("opencode"));
     assert!(!hooks::hook_surface_is_implemented("codex"));
     assert!(!hooks::hook_surface_is_implemented("antigravity"));
 
@@ -260,12 +261,14 @@ fn hooks_are_reported_as_unknown_for_a_harness_ahu_does_not_scan() {
     // decide whether this repository's launch has hooks.
     let home = tempfile::TempDir::new().unwrap();
 
-    let claude = hooks::collect_for(repo.path(), "claude-code", &locations(home.path())).unwrap();
-    assert!(claude.unscanned_harness.is_none());
-    assert!(
-        hooks::render_for_preview(&claude, 0).contains("none found in the settings files"),
-        "a scanned harness with no hooks still says none found"
-    );
+    for harness in ["claude-code", "opencode"] {
+        let found = hooks::collect_for(repo.path(), harness, &locations(home.path())).unwrap();
+        assert!(found.unscanned_harness.is_none());
+        assert!(
+            hooks::render_for_preview(&found, 0).contains("none found in the settings files"),
+            "a scanned harness with no hooks still says none found"
+        );
+    }
 
     for harness in ["codex", "antigravity"] {
         let found = hooks::collect_for(repo.path(), harness, &locations(home.path())).unwrap();
@@ -964,15 +967,15 @@ fn declared_plugins_do_not_suppress_the_unscanned_settings_disclosure() {
         ("no plugin", r#"{"model":"ollama/glm-5.3:cloud"}"#),
         ("one plugin", r#"{"plugin":["some-remote-plugin"]}"#),
     ] {
-        let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
+        let repo = repo_on("codex", "gpt-6-astra");
         repo.write("opencode.json", contents);
         repo.commit("fixture");
 
-        let (discovered, plan) = plan_for(&repo, "opencode", "ollama/glm-5.3:cloud");
+        let (discovered, plan) = plan_for(&repo, "codex", "gpt-6-astra");
         let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
 
         assert!(
-            preview.contains("did not read opencode's settings"),
+            preview.contains("did not read codex's settings"),
             "with {name}, the preview must still say the harness's settings were \
              not read:\n{preview}"
         );
@@ -982,6 +985,27 @@ fn declared_plugins_do_not_suppress_the_unscanned_settings_disclosure() {
              settings files:\n{preview}"
         );
     }
+}
+
+/// For OpenCode, settings and plugins are scanned, so the preview reads the
+/// files rather than reporting them unread.
+#[test]
+fn opencode_settings_and_plugins_are_scanned_without_unscanned_disclosure() {
+    let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
+    repo.write("opencode.json", r#"{"plugin":["some-remote-plugin"]}"#);
+    repo.commit("fixture");
+
+    let (discovered, plan) = plan_for(&repo, "opencode", "ollama/glm-5.3:cloud");
+    let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+
+    assert!(
+        !preview.contains("did not read opencode's settings"),
+        "OpenCode settings are now scanned:\n{preview}"
+    );
+    assert!(
+        preview.contains("ahu reads these files;"),
+        "OpenCode preview must state that ahu reads its settings files:\n{preview}"
+    );
 }
 
 // --- the feature matrix ---
@@ -1025,11 +1049,11 @@ fn the_catalog_records_the_validated_feature_surface_of_each_harness() {
         ("codex", Feature::AutoApprovals, true),
         ("antigravity", Feature::AutoApprovals, true),
         ("opencode", Feature::AutoApprovals, true),
-        // Hook settings enumeration exists only for Claude Code.
+        // Hook settings enumeration exists for Claude Code and OpenCode.
         ("claude-code", Feature::HookInventory, true),
         ("codex", Feature::HookInventory, false),
         ("antigravity", Feature::HookInventory, false),
-        ("opencode", Feature::HookInventory, false),
+        ("opencode", Feature::HookInventory, true),
         // `opencode.json` plugin entries are startup code only OpenCode runs.
         ("opencode", Feature::StartupPluginInventory, true),
         ("claude-code", Feature::StartupPluginInventory, false),

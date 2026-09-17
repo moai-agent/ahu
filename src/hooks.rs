@@ -487,8 +487,9 @@ fn settings_files(repo_root: &Path, locations: &Locations) -> Vec<SettingsFile> 
 
 /// Whether ahu has an implementation of a harness's hook configuration.
 ///
-/// Only Claude Code settings are enumerated. Other harnesses need an explicit
-/// unknown-coverage report rather than a misleading empty inventory.
+/// Harnesses without an implemented hook inventory (e.g. Codex, Antigravity)
+/// produce an explicit unknown-coverage report rather than a misleading empty
+/// inventory.
 pub fn hook_surface_is_implemented(harness_id: &str) -> bool {
     crate::catalog::supports(harness_id, crate::catalog::Feature::HookInventory)
 }
@@ -517,15 +518,36 @@ pub fn collect_for(
     // travels into the task worktree either way. Whether a declared server
     // starts depends on the selected harness.
     collect_mcp_servers(repo_root, &mut inventory);
-    // `opencode.json` likewise travels into the task worktree whatever the
-    // harness is, and its `plugin` entries are modules OpenCode installs and
+    // Repository OpenCode plugins and configuration travel into the task worktree whatever
+    // the harness is, and its plugin entries are modules OpenCode installs and
     // executes at startup.
-    collect_opencode_plugins(repo_root, &mut inventory);
+    collect_opencode_plugins_in_repo(repo_root, &mut inventory);
     if !hook_surface_is_implemented(harness_id) {
         inventory.unscanned_harness = Some(harness_id.to_string());
         return Ok(inventory);
     }
 
+    if harness_id == "claude-code" {
+        collect_claude_settings(repo_root, locations, &mut inventory);
+    } else if harness_id == "opencode" {
+        collect_opencode_user_config(locations, &mut inventory);
+    }
+
+    inventory
+        .hooks
+        .sort_by(|a, b| (a.scope, &a.event, &a.matcher).cmp(&(b.scope, &b.event, &b.matcher)));
+    inventory
+        .declared_plugins
+        .sort_by(|a, b| (&a.source, &a.module).cmp(&(&b.source, &b.module)));
+    inventory.declared_plugins.dedup();
+    inventory.checked.sort();
+    inventory.checked.dedup();
+    inventory.unreadable.sort();
+    inventory.unreadable.dedup();
+    Ok(inventory)
+}
+
+fn collect_claude_settings(repo_root: &Path, locations: &Locations, inventory: &mut HookInventory) {
     for SettingsFile {
         scope,
         path,
@@ -564,7 +586,7 @@ pub fn collect_for(
             inventory.unreadable.push(display);
             continue;
         };
-        let facts = parse_settings(&value, scope, &display);
+        let facts = parse_claude_settings(&value, scope, &display);
         if !facts.is_empty() {
             inventory.settings.push(facts);
         }
@@ -573,18 +595,10 @@ pub fn collect_for(
             None => inventory.unreadable.push(display),
         }
     }
-
-    inventory
-        .hooks
-        .sort_by(|a, b| (a.scope, &a.event, &a.matcher).cmp(&(b.scope, &b.event, &b.matcher)));
-    Ok(inventory)
 }
 
-/// Read the repository's `.mcp.json`, naming the command of each server.
-///
-/// Use the same no-follow resolver as hook settings so repository symlinks
-/// cannot redirect the read.
-/// Record the plugin modules an `opencode.json` or `opencode.jsonc` declares.
+/// Record the plugin modules an `opencode.json` or `opencode.jsonc` declares,
+/// as well as local `.opencode/plugin/*` modules in the repository.
 ///
 /// These are named, not resolved: OpenCode installs them itself, from wherever
 /// the specifier points. Reporting the names is the whole point — the snapshot
@@ -594,8 +608,14 @@ pub fn collect_for(
 ///
 /// A `.jsonc` with comments will not parse as JSON. That is recorded as
 /// unreadable rather than as "no plugins", because the difference matters.
-fn collect_opencode_plugins(repo_root: &Path, inventory: &mut HookInventory) {
-    for source in ["opencode.json", "opencode.jsonc"] {
+fn collect_opencode_plugins_in_repo(repo_root: &Path, inventory: &mut HookInventory) {
+    let project_files = [
+        ("opencode.json", Scope::Project),
+        ("opencode.jsonc", Scope::Project),
+        (".opencode/opencode.json", Scope::Project),
+        (".opencode/opencode.jsonc", Scope::Project),
+    ];
+    for (source, scope) in project_files {
         let path = match crate::util::resolve_existing_within(repo_root, source) {
             Ok(Some(path)) => path,
             Ok(None) => continue,
@@ -618,24 +638,180 @@ fn collect_opencode_plugins(repo_root: &Path, inventory: &mut HookInventory) {
             ));
             continue;
         };
-        let Some(plugins) = value.get("plugin") else {
+        inventory.checked.push(source.to_string());
+        let facts = parse_opencode_settings(&value, scope, source);
+        if !facts.is_empty() {
+            inventory.settings.push(facts);
+        }
+        collect_mcp_from_value(&value, source, inventory);
+        if let Some(plugins) = value.get("plugin").or_else(|| value.get("plugins")) {
+            if let Some(plugins) = plugins.as_array() {
+                for module in plugins {
+                    inventory.declared_plugins.push(DeclaredPlugin {
+                        source: source.to_string(),
+                        module: module
+                            .as_str()
+                            .unwrap_or("(non-string plugin entry)")
+                            .to_string(),
+                    });
+                }
+            } else {
+                inventory.unreadable.push(format!(
+                    "{source} (its plugin key is not a shape ahu understands, so its plugins are \
+                     unknown rather than absent)"
+                ));
+            }
+        }
+    }
+
+    // Repository local plugin directories and files:
+    for dir in [".opencode/plugin", ".opencode/plugins"] {
+        let resolved = match crate::util::resolve_existing_within(repo_root, dir) {
+            Ok(Some(path)) => path,
+            Ok(None) => continue,
+            Err(_) => {
+                inventory.unreadable.push(format!(
+                    "{dir} (not read: it or one of its parent directories is a symlink, so \
+                     its plugins are not this repository's)"
+                ));
+                continue;
+            }
+        };
+        if resolved.is_dir() {
+            match std::fs::read_dir(&resolved) {
+                Ok(entries) => {
+                    let mut files = Vec::new();
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            let rel = path
+                                .strip_prefix(repo_root)
+                                .unwrap_or(&path)
+                                .to_string_lossy()
+                                .to_string();
+                            files.push(rel);
+                        }
+                    }
+                    files.sort();
+                    for file in files {
+                        inventory.checked.push(file.clone());
+                        inventory.declared_plugins.push(DeclaredPlugin {
+                            source: file.clone(),
+                            module: file,
+                        });
+                    }
+                }
+                Err(_) => {
+                    inventory.unreadable.push(dir.to_string());
+                }
+            }
+        } else if resolved.is_file() {
+            inventory.checked.push(dir.to_string());
+            inventory.declared_plugins.push(DeclaredPlugin {
+                source: dir.to_string(),
+                module: dir.to_string(),
+            });
+        }
+    }
+
+    for single in [
+        ".opencode/plugin.js",
+        ".opencode/plugin.ts",
+        ".opencode/plugins.js",
+        ".opencode/plugins.ts",
+    ] {
+        if let Ok(Some(path)) = crate::util::resolve_existing_within(repo_root, single) {
+            if !path.is_file() {
+                continue;
+            }
+            inventory.checked.push(single.to_string());
+            inventory.declared_plugins.push(DeclaredPlugin {
+                source: single.to_string(),
+                module: single.to_string(),
+            });
+        }
+    }
+}
+
+/// User-level OpenCode configuration and plugins.
+fn collect_opencode_user_config(locations: &Locations, inventory: &mut HookInventory) {
+    let Some(home) = &locations.home else {
+        return;
+    };
+    let user_configs = [
+        home.join(".config/opencode/opencode.json"),
+        home.join(".config/opencode/opencode.jsonc"),
+        home.join(".opencode/opencode.json"),
+        home.join(".opencode/opencode.jsonc"),
+    ];
+    for path in user_configs {
+        if !path.exists() {
+            continue;
+        }
+        let display = path.to_string_lossy().to_string();
+        let Ok(bytes) = std::fs::read(&path) else {
+            inventory.unreadable.push(display);
             continue;
         };
-        let Some(plugins) = plugins.as_array() else {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
             inventory.unreadable.push(format!(
-                "{source} (its plugin key is not a shape ahu understands, so its plugins are \
-                 unknown rather than absent)"
+                "{display} (not valid JSON to ahu, so its plugin declarations are unknown rather \
+                 than absent; JSONC comments are not parsed)"
             ));
             continue;
         };
-        for module in plugins {
-            inventory.declared_plugins.push(DeclaredPlugin {
-                source: source.to_string(),
-                module: module
-                    .as_str()
-                    .unwrap_or("(non-string plugin entry)")
-                    .to_string(),
-            });
+        inventory.checked.push(display.clone());
+        let facts = parse_opencode_settings(&value, Scope::User, &display);
+        if !facts.is_empty() {
+            inventory.settings.push(facts);
+        }
+        collect_mcp_from_value(&value, &display, inventory);
+        if let Some(plugins) = value.get("plugin").or_else(|| value.get("plugins")) {
+            if let Some(plugins) = plugins.as_array() {
+                for module in plugins {
+                    inventory.declared_plugins.push(DeclaredPlugin {
+                        source: display.clone(),
+                        module: module
+                            .as_str()
+                            .unwrap_or("(non-string plugin entry)")
+                            .to_string(),
+                    });
+                }
+            } else {
+                inventory.unreadable.push(format!(
+                    "{display} (its plugin key is not a shape ahu understands, so its plugins are \
+                     unknown rather than absent)"
+                ));
+            }
+        }
+    }
+
+    let user_plugin_dirs = [
+        home.join(".config/opencode/plugin"),
+        home.join(".config/opencode/plugins"),
+        home.join(".opencode/plugin"),
+        home.join(".opencode/plugins"),
+    ];
+    for dir in user_plugin_dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut files = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    files.push(path.to_string_lossy().to_string());
+                }
+            }
+            files.sort();
+            for file in files {
+                inventory.checked.push(file.clone());
+                inventory.declared_plugins.push(DeclaredPlugin {
+                    source: file.clone(),
+                    module: file,
+                });
+            }
         }
     }
 }
@@ -661,14 +837,26 @@ fn collect_mcp_servers(repo_root: &Path, inventory: &mut HookInventory) {
         inventory.unreadable.push(SOURCE.to_string());
         return;
     };
-    let Some(servers) = value.get("mcpServers") else {
-        return;
-    };
-    let Some(servers) = servers.as_object() else {
+    if value
+        .get("mcpServers")
+        .or_else(|| value.get("mcp"))
+        .is_some_and(|servers| !servers.is_object())
+    {
         inventory.unreadable.push(format!(
             "{SOURCE} (its mcpServers key is not a shape ahu understands, so its servers are \
              unknown rather than absent)"
         ));
+        return;
+    }
+    collect_mcp_from_value(&value, SOURCE, inventory);
+}
+
+fn collect_mcp_from_value(value: &serde_json::Value, source: &str, inventory: &mut HookInventory) {
+    let servers = value
+        .get("mcpServers")
+        .or_else(|| value.get("mcp"))
+        .and_then(|s| s.as_object());
+    let Some(servers) = servers else {
         return;
     };
     for (name, server) in servers {
@@ -687,7 +875,7 @@ fn collect_mcp_servers(repo_root: &Path, inventory: &mut HookInventory) {
             })
             .unwrap_or_default();
         inventory.mcp_servers.push(McpServer {
-            source: SOURCE.to_string(),
+            source: source.to_string(),
             name: name.clone(),
             command: if args.is_empty() {
                 command.to_string()
@@ -698,8 +886,8 @@ fn collect_mcp_servers(repo_root: &Path, inventory: &mut HookInventory) {
     }
 }
 
-/// Top-level settings keys ahu interprets. Anything else is named as unknown.
-const INTERPRETED_KEYS: &[&str] = &[
+/// Top-level Claude Code settings keys ahu interprets. Anything else is named as unknown.
+const CLAUDE_INTERPRETED_KEYS: &[&str] = &[
     "hooks",
     "permissions",
     "enabledPlugins",
@@ -708,14 +896,14 @@ const INTERPRETED_KEYS: &[&str] = &[
     "env",
 ];
 
-/// Pull the approval-relevant keys out of one settings document.
-fn parse_settings(value: &serde_json::Value, scope: Scope, source: &str) -> SettingsFacts {
+/// Pull the approval-relevant keys out of one Claude Code settings document.
+fn parse_claude_settings(value: &serde_json::Value, scope: Scope, source: &str) -> SettingsFacts {
     let mut facts = SettingsFacts::new(source, scope);
     let Some(object) = value.as_object() else {
         return facts;
     };
     for key in object.keys() {
-        if !INTERPRETED_KEYS.contains(&key.as_str()) {
+        if !CLAUDE_INTERPRETED_KEYS.contains(&key.as_str()) {
             facts.uninterpreted_keys.push(key.clone());
         }
     }
@@ -736,6 +924,65 @@ fn parse_settings(value: &serde_json::Value, scope: Scope, source: &str) -> Sett
     facts.enabled_mcpjson_servers = string_list(object.get("enabledMcpjsonServers"));
     // Names only: a settings `env` block is a common place for an API token, and
     // an inventory must not leak a credential to describe a setting.
+    if let Some(env) = object.get("env").and_then(|e| e.as_object()) {
+        facts.env_names = env.keys().cloned().collect();
+    }
+    facts
+}
+
+/// Top-level OpenCode settings keys ahu interprets. Anything else is named as unknown.
+const OPENCODE_INTERPRETED_KEYS: &[&str] = &[
+    "plugin",
+    "plugins",
+    "permission",
+    "permissions",
+    "mcp",
+    "mcpServers",
+    "env",
+    "model",
+    "provider",
+    "agent",
+    "mode",
+    "command",
+    "$schema",
+    "username",
+];
+
+/// Pull the approval-relevant keys out of one OpenCode settings document.
+fn parse_opencode_settings(value: &serde_json::Value, scope: Scope, source: &str) -> SettingsFacts {
+    let mut facts = SettingsFacts::new(source, scope);
+    let Some(object) = value.as_object() else {
+        return facts;
+    };
+    for key in object.keys() {
+        if !OPENCODE_INTERPRETED_KEYS.contains(&key.as_str()) {
+            facts.uninterpreted_keys.push(key.clone());
+        }
+    }
+    if let Some(permissions) = object
+        .get("permissions")
+        .or_else(|| object.get("permission"))
+    {
+        facts.default_mode = permissions
+            .get("defaultMode")
+            .and_then(|m| m.as_str())
+            .map(str::to_string);
+        facts.allow = string_list(permissions.get("allow"));
+        facts.deny = string_list(permissions.get("deny"));
+        facts.ask = string_list(permissions.get("ask"));
+        facts.additional_directories = string_list(permissions.get("additionalDirectories"));
+        if let Some(map) = permissions.as_object() {
+            for (action, val) in map {
+                match val.as_str() {
+                    Some("allow") => facts.allow.push(action.clone()),
+                    Some("deny") => facts.deny.push(action.clone()),
+                    Some("ask") => facts.ask.push(action.clone()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    facts.enabled_plugins = string_list(object.get("enabledPlugins"));
     if let Some(env) = object.get("env").and_then(|e| e.as_object()) {
         facts.env_names = env.keys().cloned().collect();
     }

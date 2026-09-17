@@ -245,6 +245,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
             Feature::HeadlessLaunch,
             Feature::HeadlessResume,
             Feature::AutoApprovals,
+            Feature::HookInventory,
             Feature::StartupPluginInventory,
             Feature::ProviderQualifiedModels,
         ],

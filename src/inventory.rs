@@ -431,48 +431,176 @@ fn classify(path: &str) -> Category {
 /// Sources outside the repository that can still influence a session.
 fn personal_sources(harness: &str) -> Vec<(PathBuf, Category, &'static str, &'static str)> {
     let mut found = Vec::new();
-    if harness != "claude-code" {
-        return found;
-    }
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return found;
     };
-    found.push((
-        home.join(".claude/CLAUDE.md"),
-        Category::PersonalInstructions,
-        "user",
-        "personal instructions; they apply to every project on this machine and are not part of project policy",
-    ));
-    found.push((
-        home.join(".claude/settings.json"),
-        Category::PersonalInstructions,
-        "user",
-        "personal Claude Code settings; may set a model, permissions, or hooks",
-    ));
-    found.push((
-        home.join(".claude/agents"),
-        Category::PersonalInstructions,
-        "user",
-        "personal agent definitions; they are discoverable alongside the project's",
-    ));
-    found.push((
-        home.join(".claude/skills"),
-        Category::Skill,
-        "user",
-        "personal skills; available in every project on this machine and shared between agents",
-    ));
-    found.push((
-        home.join(".claude/plugins"),
-        Category::Skill,
-        "user",
-        "personal plugins; may add skills, hooks, MCP servers, and agents",
-    ));
-    found.push((
-        PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"),
-        Category::Managed,
-        "machine",
-        "managed policy settings; required, not optional, and not removable by ahu",
-    ));
+    match harness {
+        "claude-code" => {
+            found.push((
+                home.join(".claude/CLAUDE.md"),
+                Category::PersonalInstructions,
+                "user",
+                "personal instructions; they apply to every project on this machine and are not part of project policy",
+            ));
+            found.push((
+                home.join(".claude/settings.json"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Claude Code settings; may set a model, permissions, or hooks",
+            ));
+            found.push((
+                home.join(".claude/agents"),
+                Category::PersonalInstructions,
+                "user",
+                "personal agent definitions; they are discoverable alongside the project's",
+            ));
+            found.push((
+                home.join(".claude/skills"),
+                Category::Skill,
+                "user",
+                "personal skills; available in every project on this machine and shared between agents",
+            ));
+            found.push((
+                home.join(".claude/plugins"),
+                Category::Skill,
+                "user",
+                "personal plugins; may add skills, hooks, MCP servers, and agents",
+            ));
+            found.push((
+                PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"),
+                Category::Managed,
+                "machine",
+                "managed policy settings; required, not optional, and not removable by ahu",
+            ));
+        }
+        "opencode" => {
+            found.push((
+                home.join(".config/opencode/opencode.json"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode configuration; may declare plugins, providers, or permissions",
+            ));
+            found.push((
+                home.join(".config/opencode/opencode.jsonc"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode configuration; may declare plugins, providers, or permissions",
+            ));
+            found.push((
+                home.join(".config/opencode/agent"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode agent definitions; discoverable alongside the project's",
+            ));
+            found.push((
+                home.join(".config/opencode/skills"),
+                Category::Skill,
+                "user",
+                "personal OpenCode skills; available in every project on this machine and shared between agents",
+            ));
+            found.push((
+                home.join(".config/opencode/plugins"),
+                Category::Skill,
+                "user",
+                "personal OpenCode plugins; installed modules that execute at startup",
+            ));
+            found.push((
+                home.join(".config/opencode/plugin"),
+                Category::Skill,
+                "user",
+                "personal OpenCode plugins; installed modules that execute at startup",
+            ));
+            found.push((
+                home.join(".opencode/opencode.json"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode configuration; may declare plugins, providers, or permissions",
+            ));
+            found.push((
+                home.join(".opencode/opencode.jsonc"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode configuration; may declare plugins, providers, or permissions",
+            ));
+            found.push((
+                home.join(".opencode/agent"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode agent definitions; discoverable alongside the project's",
+            ));
+            found.push((
+                home.join(".opencode/skills"),
+                Category::Skill,
+                "user",
+                "personal OpenCode skills; available in every project on this machine and shared between agents",
+            ));
+            found.push((
+                home.join(".opencode/plugins"),
+                Category::Skill,
+                "user",
+                "personal OpenCode plugins; installed modules that execute at startup",
+            ));
+            found.push((
+                home.join(".opencode/plugin"),
+                Category::Skill,
+                "user",
+                "personal OpenCode plugins; installed modules that execute at startup",
+            ));
+        }
+        "codex" => {
+            found.push((
+                home.join(".codex/config.toml"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Codex configuration; may set model or sandbox options",
+            ));
+            found.push((
+                home.join(".codex/instructions.md"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Codex instructions; apply to sessions outside project policy",
+            ));
+            found.push((
+                home.join(".codex/agents"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Codex agent configurations",
+            ));
+            found.push((
+                home.join(".codex/skills"),
+                Category::Skill,
+                "user",
+                "personal Codex skills; available in every project on this machine and shared between agents",
+            ));
+        }
+        "antigravity" => {
+            found.push((
+                home.join(".gemini/antigravity-cli/config.toml"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Antigravity configuration; may set model or tool settings",
+            ));
+            found.push((
+                home.join(".gemini/antigravity-cli/skills"),
+                Category::Skill,
+                "user",
+                "personal Antigravity skills; available in every project on this machine and shared between agents",
+            ));
+            found.push((
+                home.join(".gemini/GEMINI.md"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Antigravity instructions; apply to sessions outside project policy",
+            ));
+            found.push((
+                home.join(".agents"),
+                Category::PersonalInstructions,
+                "user",
+                "personal agent definitions; discoverable alongside the project's",
+            ));
+        }
+        _ => {}
+    }
     found
 }
 
