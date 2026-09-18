@@ -1570,9 +1570,9 @@ emit('step_finish',{'type':'step-finish','reason':'stop'})
 ///
 /// `--version` output is not a stable contract: tools append build tags, commit
 /// hashes, and channel suffixes after whitespace. The compatibility table
-/// records plain versions, so the gate must compare the first whitespace token
-/// rather than the whole line — otherwise every decorated build of a validated
-/// version is refused as unvalidated.
+/// records plain versions, so the gate must compare the first token that
+/// parses as a version rather than the whole line — otherwise every decorated
+/// build of a validated version is refused as unvalidated.
 #[test]
 fn a_decorated_version_token_is_admitted_by_the_headless_path() {
     use std::os::unix::fs::PermissionsExt;
@@ -1642,6 +1642,88 @@ fn a_parenthetical_version_token_is_refused_by_the_headless_path() {
     assert!(
         stderr.contains("unvalidated headless claude-code version"),
         "the refusal must name the harness and version: {stderr}"
+    );
+}
+
+/// A probe output with a CLI-name prefix before the version must be admitted.
+///
+/// Codex prints `codex-cli 0.154.0` from `--version`: the first whitespace
+/// token names the CLI and the second is the version. First-token matching
+/// refused every installed codex as unvalidated; compatibility is a property
+/// of the version the probe reports, not of the name in front of it.
+#[test]
+fn a_cli_name_prefixed_version_token_is_admitted_by_the_headless_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.repo.add_agent_on("cx", "1.0.0", "codex", "gpt-6-astra");
+    f.repo.commit("a codex agent");
+    let stub = f.bin.join("codex");
+    std::fs::write(
+        &stub,
+        r#"#!/usr/bin/env python3
+import sys,os,json
+if '--version' in sys.argv:
+ print('codex-cli 0.154.0'); sys.exit(0)
+a=sys.argv[1:]
+assert a[0]=='exec', a
+assert a[1]!='resume', a
+assert a[a.index('--model')+1]=='gpt-6-astra', a
+assert '--json' in a, a
+i=0
+cfg={}
+while i+1 < len(a):
+ if a[i]=='-c': cfg[a[i+1]]=cfg.get(a[i+1],0)+1; i+=2; continue
+ i+=1
+assert cfg.get('agents.enabled=false')==1, cfg
+assert cfg.get('approval_policy="never"')==1, cfg
+assert cfg.get('sandbox_mode="read-only"')==1, cfg
+assert '--approve-for-me' not in a, a
+assert a[a.index('--color')+1]=='never', a
+assert a[-2]=='--', a
+assert 'ahu delegation contract (v2, headless)' in a[-1], a[-1][:200]
+assert os.environ['AHU_EXECUTION_BACKEND']=='headless'
+assert sys.stdin.read()==''
+session='thr_'+os.environ['AHU_PARENT_TASK']
+print(json.dumps({'type':'thread.started','thread_id':session}),flush=True)
+open('proof.txt','w').write('synthetic proof\n')
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'validated synthetic proof'}}),flush=True)
+print(json.dumps({'type':'turn.completed'}),flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = f
+        .command()
+        .args([
+            "launch",
+            "@cx",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "perform synthetic task",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "a validated version behind a CLI-name prefix must launch: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = Fixture::value(&out);
+    assert_eq!(v["outcome"], "succeeded");
+    assert_eq!(v["identity"]["harness"], "codex");
+    let worktree = PathBuf::from(v["worktree"].as_str().unwrap());
+    assert!(worktree.join("proof.txt").exists());
+    assert_eq!(v["harness"]["summary"], "validated synthetic proof");
+    assert!(
+        v["harness"]["session"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("thr_")),
+        "the recorded session is the one Codex reported: {}",
+        v["harness"]
     );
 }
 

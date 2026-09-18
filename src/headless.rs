@@ -249,9 +249,15 @@ fn check_version(harness: &str, version: &str) -> Result<()> {
     let supported = crate::catalog::harness(harness)
         .map(|h| h.headless_verified_versions)
         .unwrap_or(&[]);
-    // Probe output is `VERSION` plus optional decoration after whitespace; the
-    // token is what got inspected, so the whole output must start with it.
-    let token = version.split_whitespace().next().unwrap_or("");
+    // Probe output may carry a CLI-name prefix (codex prints
+    // `codex-cli 0.154.0`) and trailing decoration after whitespace. The
+    // first token that parses as a version is the one whose argument surface
+    // got inspected; a leading name token is not a version, and empty probe
+    // output is refused rather than silently admitted.
+    let token = version
+        .split_whitespace()
+        .find(|v| crate::util::is_semver(v))
+        .unwrap_or_else(|| version.split_whitespace().next().unwrap_or(""));
     if !supported.contains(&token) {
         bail!(
             "unvalidated headless {harness} version {version:?}; supported CLI profiles: {supported:?}. Update the compatibility validation before launching; no fallback was selected."
