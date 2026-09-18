@@ -79,6 +79,17 @@ fn run(repo: &TestRepo, args: &[&str]) -> Output {
         .unwrap()
 }
 
+fn run_with_runtime(repo: &TestRepo, runtime: &std::path::Path, args: &[&str]) -> Output {
+    common::ahu()
+        .args(args)
+        .current_dir(repo.path())
+        .env("AHU_STATE_DIR", repo.state_path())
+        .env("AHU_RUNTIME_DIR", runtime)
+        .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn task_json_is_small_unstyled_and_available_without_cmux_or_worktree() {
     let repo = TestRepo::new();
@@ -194,6 +205,97 @@ fn diff_refuses_foreign_checkouts_and_option_like_bases() {
         std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
         assert_eq!(run(&repo, &["diff", "abc1"]).status.code(), Some(5));
     }
+}
+
+// The files a finished headless attempt leaves in the runtime store: the
+// frozen spec naming its attempt directory, and that attempt's result
+// envelope carrying the recorded outside-worktree writes.
+fn plant_outside_writes(store: &std::path::Path, id: &str, outside: &[&str]) {
+    let dir = store.join(id);
+    std::fs::write(
+        dir.join("headless.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "options": {
+                "background": false,
+                "timeout_seconds": 1800,
+                "native_helpers": "disabled"
+            },
+            "harness_version": "test",
+            "executable_digest": "0",
+            "parent_task": null,
+            "depth": 0,
+            "attempt": 1,
+            "session": null,
+            "native_controls": [],
+            "gaps": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("attempt-1")).unwrap();
+    std::fs::write(
+        dir.join("attempt-1").join("result.json"),
+        serde_json::json!({ "writes_outside_worktree": outside }).to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn diff_discloses_recorded_outside_writes_only_when_the_worktree_diff_is_empty() {
+    let repo = TestRepo::new();
+    let identity = ahu::git::discover(repo.path()).unwrap().identity();
+    let runtime = tempfile::TempDir::new().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(runtime.path()).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(runtime.path(), perms).unwrap();
+    }
+    let store = runtime.path().join(&identity);
+    std::fs::create_dir_all(&store).unwrap();
+    for id in ["abc1", "abc2"] {
+        let internal = record(&repo, id);
+        // The checkout store wins ties in `task::list`, so the record has to
+        // move, not be copied: a leftover internal entry would shadow the
+        // runtime one and the diff would never read the planted files.
+        std::fs::rename(&internal, store.join(id)).unwrap();
+    }
+    let escaped = runtime.path().join("escaped.txt");
+    plant_outside_writes(&store, "abc1", &[escaped.to_str().unwrap()]);
+    plant_outside_writes(&store, "abc2", &[]);
+
+    let out = run_with_runtime(&repo, runtime.path(), &["diff", "abc1"]);
+    assert!(out.status.success(), "{:?}", out);
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "No changes in the task worktree, but write tool calls in the recorded event stream targeted paths outside it:"
+        ),
+        "{stderr}"
+    );
+    assert!(stderr.contains("escaped.txt"), "{stderr}");
+    assert!(
+        stderr.contains("Run `ahu result abc1` for the full recorded list."),
+        "{stderr}"
+    );
+
+    let out = run_with_runtime(&repo, runtime.path(), &["diff", "abc2"]);
+    assert!(out.status.success(), "{:?}", out);
+    assert!(out.stdout.is_empty());
+    assert!(out.stderr.is_empty());
+
+    repo.write("README.md", "unstaged change\n");
+    let out = run_with_runtime(&repo, runtime.path(), &["diff", "abc1"]);
+    assert!(out.status.success(), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("+unstaged change"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("No changes in the task worktree"),
+        "{stderr}"
+    );
 }
 
 #[test]
