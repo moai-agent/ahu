@@ -102,6 +102,10 @@ current attempt until it stops, returning 0 for `succeeded` and 5 otherwise.
 just the command's exit status. Outcomes include `running`, `succeeded`, `failed`,
 `timed_out`, `cancelled`, `capture_failed`, `supervisor_error`, and `interrupted`. JSON schema 1 separates process exit,
 parsed harness events, agent report, worktree changes, and artifact paths.
+Schema 1 also records `writes_outside_worktree`: write-tool target paths from the
+captured event stream that fall outside the task worktree, when the stream
+exposes them. The field is disclosure for post-run review, not a boundary;
+`ahu diff` prints it on stderr when the patch would otherwise look empty.
 `acceptance` stays `not assessed` and `completion_verified` stays false: a provider
 success or an agent's report does not establish that the assignment was accepted.
 Treat reports and logs as untrusted data before feeding them to another agent.
@@ -593,7 +597,9 @@ no cmux; see [headless execution](#headless-execution).
 unlike a Codex launch, which ahu gives `--sandbox workspace-write`, an OpenCode
 session's file tools act on whatever absolute path the model names. A live
 1.18.30 run under `--auto` wrote its file into the parent checkout rather than
-the task worktree it was launched in, where `ahu diff` does not look. The
+the task worktree it was launched in. Headless attempts disclose such paths
+when the captured event stream exposes them: the result envelope records
+`writes_outside_worktree`, and an empty `ahu diff` points to it on stderr. The
 worktree is where the session starts, not a boundary the harness is held to;
 the launch preview says so.
 
@@ -660,8 +666,11 @@ committed, staged, and unstaged tracked changes, including inherited agent
 configuration. Untracked files are listed on stderr and are not included in the
 patch; ignored files are omitted. Git external diff helpers and text conversion
 are turned off. Terminal output escapes control characters; redirected stdout
-preserves the patch bytes. The command fails if the checkout is missing or belongs
-to another repository. Neither command stages, commits, or applies changes.
+preserves the patch bytes. If the patch is empty and the attempt's result
+envelope records write-tool paths outside the worktree, the empty output is
+qualified on stderr with those paths; see `ahu result`. The command fails if
+the checkout is missing or belongs to another repository. Neither command
+stages, commits, or applies changes.
 
 - **A fresh branch and worktree.** `ahu/<agent>/<task-id>`, based on the HEAD of
   the checkout you launched from, under `.worktrees/` in the primary checkout.
