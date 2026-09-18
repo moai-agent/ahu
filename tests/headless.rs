@@ -71,6 +71,18 @@ if scenario.startswith('native_'):
  print(json.dumps({'type':'system','subtype':'task_started','task_id':'helper','subagent_type':'ahu-reader','spawn_depth':1,'is_backgrounded':False}),flush=True)
  if scenario!='native_unjoined':
   print(json.dumps({'type':'system','subtype':'task_notification','task_id':'helper','status':('failed' if scenario=='native_failed' else 'completed'),'summary':'synthetic read evidence'}),flush=True)
+elif scenario=='outside_write':
+ target=os.path.join(os.path.dirname(os.getcwd()),'escape.txt')
+ print(json.dumps({'type':'tool_use','name':'Write','input':{'file_path':target}}),flush=True)
+ open(target,'w').write('escaped\n')
+elif scenario=='outside_event':
+ target=os.environ['OUTSIDE_PATH']
+ print(json.dumps({'type':'assistant','message':{'content':[{'type':'tool_use','name':'Edit','input':{'file_path':target}}]}}),flush=True)
+elif scenario=='inside_write':
+ print(json.dumps({'type':'tool_use','name':'Write','input':{'file_path':'inside.txt'}}),flush=True)
+ print(json.dumps({'type':'tool_use','name':'Write','input':{'file_path':os.path.join(os.getcwd(),'kept.txt')}}),flush=True)
+elif scenario=='outside_bad_input':
+ print(json.dumps({'type':'tool_use','name':'Write','input':'not json{'}),flush=True)
 else: open('proof.txt','w').write('synthetic proof\n')
 print(json.dumps({'type':'result','subtype':'success','result':'validated synthetic proof','session_id':session,'is_error':False,'permission_denials':([{'tool':'Bash'}] if scenario=='denied' else [])}),flush=True)
 if scenario=='nonzero': sys.exit(7)
@@ -1705,4 +1717,107 @@ fn cleanup_refuses_an_artifact_name_that_is_not_a_regular_file() {
     );
     assert_eq!(std::fs::read_to_string(&decoy).unwrap(), "keep me");
     assert!(planted.symlink_metadata().unwrap().file_type().is_symlink());
+}
+
+/// A write tool call that escapes the task worktree is disclosed in the
+/// result envelope, next to the evidence that the worktree itself stayed
+/// clean. The classification is a disclosure, not a gate: the attempt still
+/// succeeds and the escaped file is left exactly where the harness put it.
+#[test]
+fn writes_outside_worktree_are_disclosed_in_the_result_envelope() {
+    let f = Fixture::new();
+    let out = f.launch("outside_write", &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = Fixture::value(&out);
+    assert_eq!(v["outcome"], "succeeded");
+    let worktree = PathBuf::from(v["worktree"].as_str().unwrap());
+    let escaped = worktree
+        .parent()
+        .unwrap()
+        .join("escape.txt")
+        .canonicalize()
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&escaped).unwrap(), "escaped\n");
+    let recorded = v["writes_outside_worktree"].as_array().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(PathBuf::from(recorded[0].as_str().unwrap()), escaped);
+}
+
+/// A write tool call nested inside an assistant message is found the same as
+/// a top-level one, and a path that never became a file is still recorded via
+/// nearest-existing-ancestor resolution. The scenario never creates the file,
+/// proving the disclosure comes from the event stream alone.
+#[test]
+fn a_planned_write_outside_the_worktree_is_disclosed_without_the_file() {
+    let f = Fixture::new();
+    // The planned file never exists, so resolve the real path through the
+    // existing parent the same way the supervisor does.
+    let planned = f
+        .external
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("planned-escape.txt");
+    let out = f
+        .command()
+        .env("SCENARIO", "outside_event")
+        .env("OUTSIDE_PATH", &planned)
+        .args([
+            "launch",
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "perform synthetic task",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = Fixture::value(&out);
+    assert_eq!(v["outcome"], "succeeded");
+    assert!(!planned.exists());
+    let recorded = v["writes_outside_worktree"].as_array().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(PathBuf::from(recorded[0].as_str().unwrap()), planned);
+}
+
+/// Writes that stay inside the worktree — relative, or absolute under it —
+/// are not disclosed as escapes.
+#[test]
+fn writes_inside_the_worktree_are_not_disclosed() {
+    let f = Fixture::new();
+    let out = f.launch("inside_write", &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = Fixture::value(&out);
+    assert_eq!(v["outcome"], "succeeded");
+    assert_eq!(v["writes_outside_worktree"].as_array().unwrap().len(), 0);
+}
+
+/// A write tool call whose `input` is not a JSON object yields no path
+/// candidates; the malformed input is skipped rather than fatal.
+#[test]
+fn unparseable_write_input_yields_no_disclosed_paths() {
+    let f = Fixture::new();
+    let out = f.launch("outside_bad_input", &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = Fixture::value(&out);
+    assert_eq!(v["outcome"], "succeeded");
+    assert_eq!(v["writes_outside_worktree"].as_array().unwrap().len(), 0);
 }
