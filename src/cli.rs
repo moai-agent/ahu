@@ -57,6 +57,7 @@ Commands:
                                   Resume a root task from the host using its recorded native session;
                                   child/worker resume unsupported: submit a new registered assignment
   focus <task-id>       Bring a task's cmux session to the front
+  remove <task-id>      Remove a terminal task's record, worktree, and branch
   doctor                Check repository, configuration, harness, and cmux
   agy                   Open the Antigravity CLI here using its configured model
                         and permissions (ahu passes no --mode and no
@@ -206,6 +207,9 @@ pub enum Command {
         task_id: String,
     },
     Focus {
+        task_id: String,
+    },
+    Remove {
         task_id: String,
     },
     Doctor,
@@ -414,6 +418,15 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 .ok_or_else(|| crate::util::Error::new("`ahu focus` needs a task id."))?;
             expect_no_more(&args[2..])?;
             Ok(Command::Focus { task_id })
+        }
+        "remove" => {
+            let task_id = args
+                .get(1)
+                .filter(|id| !id.is_empty() && !id.starts_with('-'))
+                .cloned()
+                .ok_or_else(|| crate::util::Error::new("`ahu remove` needs a task id."))?;
+            expect_no_more(&args[2..])?;
+            Ok(Command::Remove { task_id })
         }
         "inventory" => Ok(Command::Inventory {
             agent: optional_agent(&args[1..])?,
