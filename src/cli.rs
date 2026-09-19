@@ -58,6 +58,9 @@ Commands:
                                   child/worker resume unsupported: submit a new registered assignment
   focus <task-id>       Bring a task's cmux session to the front
   doctor                Check repository, configuration, harness, and cmux
+  agy                   Open the Antigravity CLI here using its configured model
+                        and permissions (ahu passes no --mode and no
+                        --dangerously-skip-permissions)
   claude                Open Claude here using its configured model and permissions
   codex                 Open Codex here with workspace-write sandboxing and
                         on-request approvals (uses Codex's configured model)
@@ -209,6 +212,7 @@ pub enum Command {
     Codex,
     Claude,
     OpenCode,
+    Antigravity,
     RunTask {
         task_dir: PathBuf,
     },
@@ -377,6 +381,10 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         "opencode" => {
             expect_no_more(&args[1..])?;
             Ok(Command::OpenCode)
+        }
+        "agy" => {
+            expect_no_more(&args[1..])?;
+            Ok(Command::Antigravity)
         }
         "task" | "diff" => {
             let task_id = args
