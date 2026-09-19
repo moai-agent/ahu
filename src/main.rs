@@ -90,11 +90,12 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         Command::TasksJson => {
             let repo = commands::repo_from_cwd()?;
             let listing = ahu::task::list(&repo)?;
+            let workspaces = commands::liveness_workspaces(&listing.records);
             println!(
                 "{}",
                 serde_json::to_string(&serde_json::json!({
                     "schema_version": 1,
-                    "tasks": listing.records.iter().map(|(dir,r)| commands::task_summary(dir,r)).collect::<ahu::util::Result<Vec<_>>>()?,
+                    "tasks": listing.records.iter().map(|(dir,r)| commands::task_summary(dir,r,workspaces.as_ref())).collect::<ahu::util::Result<Vec<_>>>()?,
                     "unreadable": listing.unreadable.iter().map(|row| serde_json::json!({"task_id":row.task_id,"reason":row.reason})).collect::<Vec<_>>(),
                     "notes":listing.notes,
                 }))?

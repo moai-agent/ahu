@@ -49,6 +49,42 @@ impl TaskState {
     }
 }
 
+/// What a task's session signal showed at the moment ahu looked.
+///
+/// This is an observation, not a recorded state and never an acceptance of
+/// work: `live` means the signal was held, `stale` means it was not, and
+/// `unknown` means ahu could not read it. Nothing in ahu mutates a task
+/// record based on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservedLiveness {
+    Live,
+    Stale,
+    Unknown,
+}
+
+impl ObservedLiveness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ObservedLiveness::Live => "live",
+            ObservedLiveness::Stale => "stale",
+            ObservedLiveness::Unknown => "unknown",
+        }
+    }
+}
+
+/// Interpret a session-ownership probe for display.
+///
+/// `None` means the probe could not be made at all -- no signal applies to
+/// this task, or reading it failed -- which is `unknown`, never `stale`: a
+/// failed read must not be presented as a held-or-released verdict.
+pub fn observed_liveness(owner: Option<bool>) -> ObservedLiveness {
+    match owner {
+        Some(true) => ObservedLiveness::Live,
+        Some(false) => ObservedLiveness::Stale,
+        None => ObservedLiveness::Unknown,
+    }
+}
+
 /// The frozen identity of one launch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LaunchIdentity {
@@ -758,4 +794,38 @@ fn scan_worktrees(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn held_signal_is_live() {
+        assert_eq!(observed_liveness(Some(true)), ObservedLiveness::Live);
+    }
+
+    #[test]
+    fn unheld_signal_is_stale() {
+        assert_eq!(observed_liveness(Some(false)), ObservedLiveness::Stale);
+    }
+
+    #[test]
+    fn unreadable_signal_is_unknown() {
+        assert_eq!(observed_liveness(None), ObservedLiveness::Unknown);
+    }
+
+    #[test]
+    fn as_str_values() {
+        assert_eq!(ObservedLiveness::Live.as_str(), "live");
+        assert_eq!(ObservedLiveness::Stale.as_str(), "stale");
+        assert_eq!(ObservedLiveness::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn states_are_distinct() {
+        assert_ne!(ObservedLiveness::Live, ObservedLiveness::Stale);
+        assert_ne!(ObservedLiveness::Live, ObservedLiveness::Unknown);
+        assert_ne!(ObservedLiveness::Stale, ObservedLiveness::Unknown);
+    }
 }

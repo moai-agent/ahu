@@ -2450,3 +2450,13 @@ pub fn inspection(dir: &Path) -> Result<Value> {
         "captured_artifacts_removed":attempt_dir(dir, &spec).join("artifacts-removed.json").exists()}),
     )
 }
+
+/// Whether a live supervisor holds this attempt's ownership lock.
+///
+/// A read-only probe of `owner.lock`: neither this function nor anything it
+/// calls creates or writes the file, so a listing never disturbs a running
+/// task. An unreadable signal is the caller's `unknown`, not a claim that no
+/// supervisor is running.
+pub(crate) fn supervisor_owns_attempt(dir: &Path) -> Result<bool> {
+    Lock::is_owned(&dir.join("owner.lock"))
+}

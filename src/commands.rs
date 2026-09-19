@@ -1,11 +1,12 @@
 //! Command implementations.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::agent::{self, ResolvedAgent};
 use crate::bail;
 use crate::catalog;
-use crate::cmux::Cmux;
+use crate::cmux::{self, Cmux};
 use crate::config::{self, LoadedConfig};
 use crate::drift;
 use crate::git::{self, Repo};
@@ -458,6 +459,55 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
 /// a false claim that no tasks exist.
 pub const NO_TASKS: &str = "No ahu tasks have been launched from this repository.";
 
+/// Whether this task's liveness would be read from the cmux surface.
+///
+/// Headless tasks carry their signal in `owner.lock` inside the task
+/// directory; everything else is interactive and, when a workspace id was
+/// recorded, is read from the cmux workspace list.
+fn cmux_liveness_needed(dir: &Path, record: &task::TaskRecord) -> bool {
+    !dir.join("headless.json").exists() && record.cmux_workspace_id.is_some()
+}
+
+/// The cmux workspace list, if any record being shown needs it.
+///
+/// Fetched once per listing instead of once per row, and not at all when no
+/// row can use it. An unreachable cmux is `None`, so liveness degrades to
+/// `unknown` rather than failing the listing.
+fn cmux_workspaces() -> Option<BTreeMap<String, cmux::WorkspaceInfo>> {
+    Cmux::discover().ok()?.workspaces().ok()
+}
+
+/// Read the cmux workspace list once, if the records being listed need it.
+pub fn liveness_workspaces(
+    records: &[(PathBuf, task::TaskRecord)],
+) -> Option<BTreeMap<String, cmux::WorkspaceInfo>> {
+    if records
+        .iter()
+        .any(|(dir, record)| cmux_liveness_needed(dir, record))
+    {
+        cmux_workspaces()
+    } else {
+        None
+    }
+}
+
+/// Whether the task's session signal is held, if ahu could read one.
+///
+/// The answer is an observation for display, never a recorded state, and
+/// this function writes nothing: neither the lock file it probes nor the
+/// cmux surface it lists is modified.
+fn session_owner(
+    dir: &Path,
+    record: &task::TaskRecord,
+    workspaces: Option<&BTreeMap<String, cmux::WorkspaceInfo>>,
+) -> Option<bool> {
+    if dir.join("headless.json").exists() {
+        return crate::headless::supervisor_owns_attempt(dir).ok();
+    }
+    let id = record.cmux_workspace_id.as_deref()?;
+    workspaces.map(|list| list.contains_key(id))
+}
+
 /// `ahu tasks`
 pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
     let listing = if std::env::var("AHU_EXECUTION_BACKEND").ok().as_deref() == Some("headless")
@@ -479,12 +529,13 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         console.say(&format!("{NO_TASKS}\n"))?;
         return Ok(0);
     }
+    let workspaces = liveness_workspaces(&listing.records);
     for (dir, record) in &listing.records {
         // Every field here comes out of task.json, which was built from the
         // prompt and from repository configuration. `tasks` is as much a
         // disclosure surface as the launch preview, so it escapes the same way.
         console.say(&format!(
-            "{} [session {}] {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n",
+            "{} [session {}] {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n  liveness  {}\n",
             display_safe(&record.task_id),
             record.state.as_str(),
             display_safe(&record.title),
@@ -494,6 +545,7 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
             display_safe(&record.branch),
             display_path(&record.worktree),
             display_path(dir),
+            task::observed_liveness(session_owner(dir, record, workspaces.as_ref())).as_str(),
         ))?;
         if let Some(workspace) = &record.cmux_workspace_id {
             console.say(&format!("  cmux      {}\n", display_safe(workspace)))?;
@@ -510,7 +562,10 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         console.say(
             "\nSession state does not indicate whether the agent is working or awaiting input.\n\
              `exited` means the harness process ended. It is not a claim that the task \
-             succeeded.\n",
+             succeeded.\n\
+             Liveness is observed at listing time, not recorded: `live` means the session's \
+             signal is held, `stale` means it is not, `unknown` means ahu could not read it. \
+             It is not a claim of progress or success.\n",
         )?;
     }
     console.say("Worktrees and branches are kept until you remove them yourself.\n")?;
@@ -658,7 +713,11 @@ fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
     })
 }
 
-pub fn task_summary(dir: &Path, record: &task::TaskRecord) -> Result<serde_json::Value> {
+pub fn task_summary(
+    dir: &Path,
+    record: &task::TaskRecord,
+    workspaces: Option<&BTreeMap<String, cmux::WorkspaceInfo>>,
+) -> Result<serde_json::Value> {
     let mut value = serde_json::json!({
         "schema_version": 1,
         "task_id": record.task_id,
@@ -674,6 +733,7 @@ pub fn task_summary(dir: &Path, record: &task::TaskRecord) -> Result<serde_json:
         "cmux_window_id": record.cmux_window_id,
         "session_state": record.state.as_str(),
         "state_source": "record",
+        "liveness": task::observed_liveness(session_owner(dir, record, workspaces)).as_str(),
         "completion_verified": false,
     });
     value["execution_backend"] = if dir.join("headless.json").exists() {
@@ -690,17 +750,23 @@ pub fn task_summary(dir: &Path, record: &task::TaskRecord) -> Result<serde_json:
 /// A small, versioned inspection contract; never expose the full launch record.
 pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) -> Result<i32> {
     let (dir, record) = inspect_task(repo, id)?;
+    let workspaces = if cmux_liveness_needed(&dir, &record) {
+        cmux_workspaces()
+    } else {
+        None
+    };
     if json {
-        let value = task_summary(&dir, &record)?;
+        let value = task_summary(&dir, &record, workspaces.as_ref())?;
         console.say(&format!("{}\n", serde_json::to_string(&value)?))?;
     } else {
         console.say(&format!(
-            "{} [session {}]\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  base      {}\n  worktree  {}\n  exists    {}\n  record    {}\n  cmux      {}\n\nState is recorded, not a live activity check. Task completion is not verified.\n",
+            "{} [session {}]\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  base      {}\n  worktree  {}\n  exists    {}\n  record    {}\n  cmux      {}\n  liveness  {}\n\nState is recorded, not a live activity check. Task completion is not verified. Liveness is observed at this moment, not a verdict; `unknown` means ahu could not read the signal.\n",
             display_safe(&record.task_id), record.state.as_str(), display_safe(&record.agent_label()),
             display_safe(&record.identity.harness), display_safe(&record.identity.model),
             display_safe(&record.branch), display_safe(record.base_commit.as_deref().unwrap_or("unknown")),
             display_path(&record.worktree), record.worktree.is_dir(), display_path(&dir.join("task.json")),
             display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none")),
+            task::observed_liveness(session_owner(&dir, &record, workspaces.as_ref())).as_str(),
         ))?;
     }
     Ok(0)
