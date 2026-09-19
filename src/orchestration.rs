@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::bail;
-use crate::util::{Result, digest_bytes};
+use crate::util::{Error, ErrorKind, Result, digest_bytes};
 
 pub const INSTRUCTIONS: &str = r#"ahu delegation contract (v1)
 You are running an ahu-assigned task in a cmux workspace.
@@ -153,28 +153,48 @@ pub struct Delivery {
     pub digest: String,
 }
 
-/// A fence nonce: unpredictable, and short enough to read in a preview.
+/// A fence nonce: unpredictable before launch, or there is no launch.
 ///
 /// The point is only that a task prompt — written before the launch — cannot
-/// contain it. `/dev/urandom` supplies the entropy where it exists; the time,
-/// pid and a counter are mixed in unconditionally so the value is still distinct
-/// per launch if that read fails.
-pub fn new_nonce() -> String {
-    use std::io::Read;
+/// contain it. ahu draws 128 bits from `/dev/urandom` and refuses the launch
+/// when it cannot: a nonce minted without entropy would be guessable, and the
+/// fence would claim authority it does not have. The time, pid, and a counter
+/// are mixed into the digest so that distinct launches get distinct nonces,
+/// but they cannot make an unguessable one, which is why the entropy draw is
+/// a hard requirement and not a best effort. A source that reports success
+/// while returning predictable bytes is a threat ahu cannot detect with the
+/// standard library alone, and no claim is made about it.
+pub fn new_nonce() -> Result<String> {
+    let mut source = std::fs::File::open("/dev/urandom").map_err(entropy_refusal)?;
+    mint_nonce(&mut source)
+}
+
+/// Refuse the launch, naming the entropy failure that caused the refusal.
+fn entropy_refusal(error: std::io::Error) -> Error {
+    Error::new(format!(
+        "ahu cannot draw 128 bits of fresh entropy from /dev/urandom ({error}); a fence nonce \
+         minted without it would be guessable, so nothing was launched."
+    ))
+    .with_kind(ErrorKind::Prerequisite)
+}
+
+/// Mint a nonce from `source`: 128 bits of entropy, mixed with the time, the
+/// pid, and a counter, digested down to 16 hex characters.
+fn mint_nonce(source: &mut dyn std::io::Read) -> Result<String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let mut seed = [0u8; 32];
-    if let Ok(mut source) = std::fs::File::open("/dev/urandom") {
-        let _ = source.read_exact(&mut seed[..16]);
-    }
+    source
+        .read_exact(&mut seed[..16])
+        .map_err(entropy_refusal)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     seed[16..24].copy_from_slice(&(now.as_nanos() as u64).to_le_bytes());
     seed[24..28].copy_from_slice(&std::process::id().to_le_bytes());
     seed[28..32].copy_from_slice(&(COUNTER.fetch_add(1, Ordering::Relaxed) as u32).to_le_bytes());
-    digest_bytes(&seed)[..16].to_string()
+    Ok(digest_bytes(&seed)[..16].to_string())
 }
 
 /// Opening tag of an ahu fence.
@@ -273,7 +293,7 @@ pub fn fence_body<'a>(delivered: &'a str, section: &str, nonce: &str) -> Option<
 
 /// Compose the delivered prompt and record what it took to build it.
 pub fn deliver(agent_instructions: Option<&str>, task_prompt: &str) -> Result<(String, Delivery)> {
-    let nonce = new_nonce();
+    let nonce = new_nonce()?;
     let text = compose_prompt(&nonce, agent_instructions, task_prompt)?;
     let delivery = Delivery {
         nonce,
@@ -314,4 +334,71 @@ pub fn delivery_summary(nonce: &str, has_agent_instructions: bool) -> String {
         "the ahu delegation contract, then the task prompt"
     };
     format!("{sections}; ahu's sections are fenced with the tag nonce {nonce}")
+}
+
+#[cfg(test)]
+mod nonce_tests {
+    use super::*;
+
+    /// An entropy source that answers every read with an error.
+    struct Refusing;
+
+    impl std::io::Read for Refusing {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the device is closed to us",
+            ))
+        }
+    }
+
+    /// An entropy source that halves every read, so `read_exact` starves.
+    struct Starved;
+
+    impl std::io::Read for Starved {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(buf.len() / 2)
+        }
+    }
+
+    /// A source that refuses to yield entropy answers the refusal the
+    /// delivery contract requires: no nonce, named cause, nothing launched.
+    #[test]
+    fn a_refusing_entropy_source_refuses_the_nonce() {
+        let error = mint_nonce(&mut Refusing).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Prerequisite);
+        assert!(error.to_string().contains("/dev/urandom"));
+        assert!(error.to_string().contains("nothing was launched"));
+    }
+
+    /// A source that never fills the request is a short read, and a short
+    /// read of entropy is no entropy at all: the nonce is refused.
+    #[test]
+    fn a_starved_entropy_source_refuses_the_nonce() {
+        let error = mint_nonce(&mut Starved).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Prerequisite);
+        assert!(error.to_string().contains("/dev/urandom"));
+        assert!(error.to_string().contains("nothing was launched"));
+    }
+
+    /// Even a source returning all zeros yields distinct nonces across
+    /// launches: the mixed-in time and counter carry distinctness, which is
+    /// all they are claimed to carry.
+    #[test]
+    fn a_degenerate_but_successful_source_yields_distinct_nonces() {
+        let first = mint_nonce(&mut std::io::repeat(0)).unwrap();
+        let second = mint_nonce(&mut std::io::repeat(0)).unwrap();
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(second.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+    }
+
+    /// The real source is expected to be available wherever ahu runs; this
+    /// guards the shape of its output so a formatting change is caught.
+    #[test]
+    fn the_real_entropy_source_mints_a_sixteen_hex_char_nonce() {
+        let nonce = new_nonce().unwrap();
+        assert_eq!(nonce.len(), 16);
+        assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }

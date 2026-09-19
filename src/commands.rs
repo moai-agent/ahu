@@ -1446,7 +1446,7 @@ fn submit(
 
     // Generated here, after the prompt has been read and after the plan is
     // built, so nothing in the prompt can have contained it.
-    let code = confirmation_code();
+    let code = confirmation_code()?;
     if dry_run {
         console.say(&render_preview(
             repo,
@@ -1679,8 +1679,8 @@ pub fn render_launch_notes(notes: &[String]) -> String {
 ///
 /// Six hex characters: enough that a prompt written before the launch cannot
 /// contain it, short enough to retype.
-fn confirmation_code() -> String {
-    crate::orchestration::new_nonce()[..6].to_string()
+fn confirmation_code() -> Result<String> {
+    Ok(crate::orchestration::new_nonce()?[..6].to_string())
 }
 
 /// The submission preview: identity, Git effects, and every warning.
