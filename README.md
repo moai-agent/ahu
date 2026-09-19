@@ -19,6 +19,9 @@ or OpenCode (`opencode`). An OpenCode agent also needs the model's provider
 configured in your own OpenCode configuration; see
 [OpenCode with Ollama-hosted models](docs/reference.md#opencode-with-ollama-hosted-models).
 Interactive sessions also require cmux. Headless tasks need no cmux connection.
+Projects that configure knowledge bundles also require the `okf` binary for
+[knowledge checks](docs/reference.md#knowledge-checks). Repository agents use
+the GitHub CLI (`gh`) for issue tracking; ahu itself never invokes it.
 ahu installs none of these and holds no provider credentials. Read-only help and
 launch previews do not require a cmux connection. Git and default cmux lookup
 require executables outside Git working trees; see the
