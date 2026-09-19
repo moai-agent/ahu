@@ -85,7 +85,11 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             json,
         } => {
             let repo = commands::repo_from_cwd()?;
-            ahu::headless::control(&repo, &action, &task_id, prompt.as_deref(), json)
+            if action == "cancel" {
+                commands::cancel_cmd(&repo, &task_id, json)
+            } else {
+                ahu::headless::control(&repo, &action, &task_id, prompt.as_deref(), json)
+            }
         }
         Command::TasksJson => {
             let repo = commands::repo_from_cwd()?;

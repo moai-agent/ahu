@@ -1667,7 +1667,7 @@ pub(crate) fn child_exited(pid: u32) -> std::io::Result<bool> {
     Ok(unsafe { info.si_pid() } != 0)
 }
 
-fn signal_group(pid: u32, signal: i32) {
+pub(crate) fn signal_group(pid: u32, signal: i32) {
     // The caller owns a live/reaped child in this fresh process group. No PID
     // from a persisted record is ever used as signal authority.
     if let Ok(pid) = i32::try_from(pid) {
