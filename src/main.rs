@@ -146,6 +146,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             let repo = commands::repo_from_cwd()?;
             commands::opencode(&repo)
         }
+        Command::Antigravity => {
+            let repo = commands::repo_from_cwd()?;
+            commands::antigravity(&repo)
+        }
         Command::Launch {
             agent,
             prompt,
@@ -225,6 +229,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Claude
                 | Command::Codex
                 | Command::OpenCode
+                | Command::Antigravity
                 | Command::Launch { .. }
                 | Command::KnowledgeLint { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),

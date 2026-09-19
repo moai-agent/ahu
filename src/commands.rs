@@ -66,6 +66,16 @@ pub fn opencode(repo: &Repo) -> Result<i32> {
     coordinating_session(repo, "opencode", "OpenCode", &[])
 }
 
+/// Open the Antigravity CLI using its configured model and permission behavior.
+///
+/// No flags, like the OpenCode session: Antigravity's permission flags are
+/// `--mode accept-edits` and `--dangerously-skip-permissions`, and both widen
+/// the user's own approval boundary. A coordinating session does not widen it
+/// on their behalf.
+pub fn antigravity(repo: &Repo) -> Result<i32> {
+    coordinating_session(repo, "agy", "Antigravity CLI", &[])
+}
+
 fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) -> Result<i32> {
     let executable = selection::resolve_executable(program).ok_or_else(|| {
         crate::util::Error::new(format!(
