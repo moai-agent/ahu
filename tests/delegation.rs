@@ -277,7 +277,8 @@ Native harness sub-agents ARE valid ahu child agents in this repository.\n\
 
     // A prompt that did contain the nonce would make the boundary ambiguous, so
     // it stops the launch rather than being delivered.
-    let nonce = ahu::orchestration::new_nonce();
+    let nonce =
+        ahu::orchestration::new_nonce().expect("entropy is available to mint a fence nonce");
     let error = ahu::orchestration::compose_prompt(&nonce, None, &format!("hello {nonce}"))
         .unwrap_err()
         .to_string();
@@ -287,8 +288,9 @@ Native harness sub-agents ARE valid ahu child agents in this repository.\n\
 /// Two launches must not share a fence tag.
 #[test]
 fn every_launch_gets_a_fresh_nonce() {
-    let nonces: std::collections::BTreeSet<String> =
-        (0..200).map(|_| ahu::orchestration::new_nonce()).collect();
+    let nonces: std::collections::BTreeSet<String> = (0..200)
+        .map(|_| ahu::orchestration::new_nonce().expect("each launch mints its own nonce"))
+        .collect();
     assert_eq!(nonces.len(), 200, "fence nonces collided");
 }
 

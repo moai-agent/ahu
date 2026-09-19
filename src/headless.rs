@@ -521,7 +521,7 @@ pub(crate) fn durable_json(path: &Path, value: &impl serde::Serialize) -> Result
         .ok_or_else(|| Error::new("runtime file needs a parent"))?;
     confined(parent, true)?;
     state::confine_file(path)?;
-    let temp = parent.join(format!(".write-{}", crate::orchestration::new_nonce()));
+    let temp = parent.join(format!(".write-{}", crate::orchestration::new_nonce()?));
     let mut file = state::create_new_private_file(&temp)?;
     let result = (|| -> Result<()> {
         serde_json::to_writer(&mut file, value).map_err(|e| Error::new(e.to_string()))?;

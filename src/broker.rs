@@ -101,7 +101,7 @@ impl Broker {
         Ok(Self {
             private_dir,
             dir: dir.into(),
-            token: crate::orchestration::new_nonce(),
+            token: crate::orchestration::new_nonce()?,
             owner: owner.clone(),
             spec: spec.clone(),
             pending: Vec::new(),
@@ -340,7 +340,7 @@ pub fn request(
             .then(|| options.native_helpers.clone()),
         allow_widened_approvals: allow,
     };
-    let nonce = crate::orchestration::new_nonce();
+    let nonce = crate::orchestration::new_nonce()?;
     let requests = dir.join("requests");
     let input = requests.join(format!("{nonce}.request.json"));
     let parent_spec: headless::Spec = headless::read_json(&dir.join("headless.json"))?;
