@@ -22,7 +22,7 @@ use crate::onboard;
 use crate::selection::{self, ResolvedPair};
 use crate::style::{self, Role};
 use crate::task;
-use crate::util::{Result, display_path, display_safe, display_safe_block};
+use crate::util::{Error, Result, display_path, display_safe, display_safe_block};
 
 /// Locate the repository ahu was invoked from.
 ///
@@ -890,6 +890,141 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
         display_safe(&record.title),
         display_path(&record.worktree)
     ))?;
+    Ok(0)
+}
+
+/// `ahu remove <task-id>`
+///
+/// Removes a terminal task's record, worktree, and branch in one explicit
+/// action. Every gate runs before anything is removed: a live task is a
+/// cancellation, not a removal, and a dirty worktree or a branch holding
+/// unmerged commits keeps its work for review.
+pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i32> {
+    let (record_dir, record) = inspect_task(repo, task_id)?;
+    if record.state.is_live() {
+        bail!(
+            "task {} is {} — not a terminal state; nothing was removed.\n\
+             Stop it with `ahu cancel {}` first; removal only takes tasks that have finished.",
+            display_safe(task_id),
+            record.state.as_str(),
+            display_safe(task_id)
+        );
+    }
+    let worktree_present = record.worktree.is_dir();
+    let branch_present = git::branch_exists(repo, &record.branch)?;
+    if worktree_present {
+        let discovered = git::discover(&record.worktree).map_err(|e| {
+            Error::new(format!(
+                "the task worktree {} cannot be inspected: {e}\n\
+                 Nothing was removed.",
+                display_path(&record.worktree)
+            ))
+        })?;
+        if discovered.identity() != repo.identity()
+            || discovered.root.canonicalize()? != record.worktree.canonicalize()?
+        {
+            bail!("task worktree does not belong to this repository or is not a checkout root.");
+        }
+        if discovered.root.canonicalize()? == repo.root.canonicalize()? {
+            bail!(
+                "this command is running inside the worktree being removed. Run `ahu remove {}` \
+                 from another checkout of the repository.",
+                display_safe(task_id)
+            );
+        }
+        if let Err(e) = git::is_dirty(&discovered) {
+            bail!(
+                "cannot tell whether the worktree for task {} is clean: {e}\n\
+                 Nothing was removed.",
+                display_safe(task_id)
+            );
+        }
+        if git::is_dirty(&discovered)? {
+            bail!(
+                "the worktree for task {} has uncommitted changes; nothing was removed.\n\
+                 Uncommitted changes are reviewable work. Inspect {}, commit or discard what you \
+                 find there, then run `ahu remove {}` again.",
+                display_safe(task_id),
+                display_path(&record.worktree),
+                display_safe(task_id)
+            );
+        }
+    }
+    if branch_present && !git::branch_merged_into_primary_head(repo, &record.branch)? {
+        bail!(
+            "branch {} has commits that are not in the primary checkout's current branch; nothing \
+             was removed.\n\
+             Removal never deletes work that exists only on that branch. Merge or apply it first, \
+             then run `ahu remove {}` again.",
+            display_safe(&record.branch),
+            display_safe(task_id)
+        );
+    }
+    let mut completed: Vec<(&str, String)> = Vec::new();
+    let mut not_removed: Vec<(&str, String)> = Vec::new();
+    let mut worktree_removed = false;
+    if worktree_present {
+        match git::remove_task_worktree(repo, &record.worktree) {
+            Ok(()) => {
+                completed.push(("worktree", "removed".to_string()));
+                worktree_removed = true;
+            }
+            Err(e) => not_removed.push(("worktree", format!("{e}"))),
+        }
+    } else {
+        completed.push(("worktree", "already absent".to_string()));
+    }
+    if record_dir.exists() {
+        let record_result = crate::state::confine_existing_dir(&record_dir)
+            .and_then(|()| std::fs::remove_dir_all(&record_dir).map_err(Error::from));
+        match record_result {
+            Ok(()) => completed.push(("record", "removed".to_string())),
+            Err(e) => not_removed.push(("record", format!("{e}"))),
+        }
+    } else if worktree_removed {
+        completed.push(("record", "removed with its worktree".to_string()));
+    } else {
+        completed.push(("record", "already absent".to_string()));
+    }
+    if branch_present {
+        match git::delete_task_branch(repo, &record.branch) {
+            Ok(()) => completed.push(("branch", "deleted".to_string())),
+            Err(e) => not_removed.push(("branch", format!("{e}"))),
+        }
+    } else {
+        completed.push(("branch", "already absent".to_string()));
+    }
+    if !not_removed.is_empty() {
+        let mut message = format!(
+            "task {} was only partly removed.\n\
+             Completed:\n",
+            display_safe(task_id)
+        );
+        for (label, status) in &completed {
+            message.push_str(&format!("  {label:<8}  {status}\n"));
+        }
+        message.push_str("Not removed:\n");
+        for (label, status) in &not_removed {
+            message.push_str(&format!("  {label:<8}  {status}\n"));
+        }
+        if record_dir.exists() {
+            message.push_str(&format!(
+                "Fix the problem, then run `ahu remove {}` again.",
+                display_safe(task_id)
+            ));
+        } else {
+            message.push_str(
+                "Delete the branch yourself once you are sure its commits are not needed.",
+            );
+        }
+        bail!("{message}");
+    }
+    let mut said = format!("removed task {}\n", display_safe(task_id));
+    said.push_str(&format!(
+        "  worktree  {}\n  branch    {}\n  record    {}\n",
+        completed[0].1, completed[2].1, completed[1].1
+    ));
+    console.say(&said)?;
     Ok(0)
 }
 
