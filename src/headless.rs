@@ -576,24 +576,27 @@ pub fn launch(
         .ok_or_else(|| Error::new("project configuration is missing; run ahu init"))?;
     let (agent, pair) = crate::commands::resolve_identity(repo, &loaded, Some(agent))?;
     if !options.native_helpers_explicit {
-        let project: toml::Value = toml::from_str(&std::fs::read_to_string(&loaded.path)?)
-            .map_err(|e| Error::new(e.to_string()))?;
-        let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(
-            &agent
-                .as_ref()
-                .ok_or_else(|| Error::new("named agent required"))?
-                .manifest_path,
-        )?)
-        .map_err(|e| Error::new(e.to_string()))?;
-        if let Some(value) = manifest.get("native_helpers").or_else(|| {
-            project
-                .get("execution")
-                .and_then(|v| v.get("native_helpers"))
-        }) {
-            options.native_helpers = value
-                .as_str()
-                .ok_or_else(|| Error::new("native_helpers must be disabled or bounded"))?
-                .into();
+        match agent
+            .as_ref()
+            .ok_or_else(|| Error::new("named agent required"))?
+            .manifest
+            .native_helpers
+            .clone()
+        {
+            Some(policy) => options.native_helpers = policy,
+            None => {
+                let project: toml::Value = toml::from_str(&std::fs::read_to_string(&loaded.path)?)
+                    .map_err(|e| Error::new(e.to_string()))?;
+                if let Some(value) = project
+                    .get("execution")
+                    .and_then(|v| v.get("native_helpers"))
+                {
+                    options.native_helpers = value
+                        .as_str()
+                        .ok_or_else(|| Error::new("native_helpers must be disabled or bounded"))?
+                        .into();
+                }
+            }
         }
     }
     let permissions = agent

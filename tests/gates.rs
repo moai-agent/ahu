@@ -40,17 +40,25 @@ fn repo_with_widened_agent(permissions: &str) -> TestRepo {
         "---\nname: deploy\nmodel: claude-opus-5\n---\n\nYou are deploy.\n",
     );
     repo.write(
-        ".agents/ahu/agents/deploy.toml",
+        ".agents/ahu/agents/deploy.md",
         &format!(
-            "schema_version = 1\n\
-             name = \"deploy\"\n\
-             version = \"1.0.0\"\n\
-             harness = \"claude-code\"\n\
-             model = \"claude-opus-5\"\n\
-             permissions = {permissions:?}\n\
-             \n[source]\n\
-             format = \"claude-agent\"\n\
-             path = \".claude/agents/deploy.md\"\n"
+            "---\n\
+             okf_version: 0.2\n\
+             type: ahu:agent\n\
+             title: deploy\n\
+             description: fixture agent\n\
+             status: stable\n\
+             tags: [agents]\n\
+             harness: claude-code\n\
+             model: claude-opus-5\n\
+             permissions: {permissions}\n\
+             version: 1.0.0\n\
+             source_format: claude-agent\n\
+             source_path: .claude/agents/deploy.md\n\
+             \n\
+             ---\n\
+             \n\
+             Instructions live in the native definition at `.claude/agents/deploy.md`, referenced in place and never edited.\n"
         ),
     );
     repo.write("assignment.txt", "deploy it\n");

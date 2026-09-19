@@ -156,8 +156,8 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         console.say(&style.paint(
             Role::Hint,
             "No ahu agents are registered.\n\
-             Only .agents/ahu/agents/*.toml makes an agent launchable through ahu; native\n\
-             definitions elsewhere are onboarding candidates. Run `ahu onboard` to see them.\n",
+              Only .agents/ahu/agents/*.md makes an agent launchable through ahu; native\n\
+              definitions elsewhere are onboarding candidates. Run `ahu onboard` to see them.\n",
         ))?;
         return Ok(0);
     }
@@ -175,7 +175,12 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
                     .unwrap_or(&agent.source_path)
                     .to_string_lossy()
             ),
-            agent.manifest.source.format.as_str(),
+            agent
+                .manifest
+                .source
+                .as_ref()
+                .map(|s| s.format.as_str())
+                .unwrap_or("manifest"),
             &agent.identity_digest()[..12],
         ))?;
         if !agent.manifest.description.is_empty() {
@@ -250,10 +255,7 @@ pub fn onboard_cmd(
         ),
     };
     console.say("The following file will be created. Nothing else is touched:\n\n")?;
-    console.say(&format!(
-        ".agents/ahu/agents/{}.toml\n\n",
-        display_safe(name)
-    ))?;
+    console.say(&format!(".agents/ahu/agents/{}.md\n\n", display_safe(name)))?;
     console.say(&onboard::proposed_manifest(candidate, &model, version))?;
     if !launcher::confirm(console, "\nCreate it? [y/N]: ")? {
         console.say("Cancelled. Nothing was written.\n")?;
@@ -1748,7 +1750,13 @@ pub fn render_preview(
         out.push_str(&format!(
             "             instructions digest {} ({})\n",
             &agent.instructions_digest[..12],
-            if agent.manifest.source.format.has_frontmatter() {
+            if agent
+                .manifest
+                .source
+                .as_ref()
+                .map(|s| s.format.has_frontmatter())
+                .unwrap_or(true)
+            {
                 "the body ahu delivers, YAML frontmatter read as metadata and not delivered"
             } else {
                 "the text ahu delivers; this format has no frontmatter, so it is the whole file"

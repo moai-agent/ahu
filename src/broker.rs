@@ -35,18 +35,17 @@ pub fn freeze_grants(
                 "child @{name} requires explicit --allow-child-widened @{name} at host submission"
             );
         }
-        let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(&agent.manifest_path)?)
-            .map_err(|e| Error::new(e.to_string()))?;
-        let value = manifest.get("native_helpers").or_else(|| {
-            project
+        let policy = match &agent.manifest.native_helpers {
+            Some(policy) => policy.as_str(),
+            None => match project
                 .get("execution")
                 .and_then(|v| v.get("native_helpers"))
-        });
-        let policy = match value {
-            None => "disabled",
-            Some(value) => value
-                .as_str()
-                .ok_or_else(|| Error::new("child native_helpers must be disabled or bounded"))?,
+            {
+                None => "disabled",
+                Some(value) => value.as_str().ok_or_else(|| {
+                    Error::new("child native_helpers must be disabled or bounded")
+                })?,
+            },
         };
         if !matches!(policy, "disabled" | "bounded") {
             bail!("child native_helpers must be disabled or bounded");

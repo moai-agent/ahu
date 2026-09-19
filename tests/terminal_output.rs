@@ -190,11 +190,11 @@ fn launch_notes_are_escaped_before_they_reach_the_terminal() {
 fn a_hostile_file_name_in_an_error_cannot_repaint_the_terminal() {
     let repo = TestRepo::new();
     // An unparseable manifest whose *name* carries a screen-clearing sequence.
-    // `ahu agents` reads every `.toml` here, so this is reached with no race
+    // `ahu agents` reads every `.md` here, so this is reached with no race
     // and no user action beyond running ahu in the checkout.
     repo.write(
-        ".agents/ahu/agents/x\u{1b}[2J\u{1b}[1;31mSAFE.toml",
-        "this is not valid toml\n",
+        ".agents/ahu/agents/x\u{1b}[2J\u{1b}[1;31mSAFE.md",
+        "not an okf manifest\n",
     );
 
     let output = common::ahu()
@@ -295,13 +295,11 @@ fn forced_styling_contains_hostile_descriptions() {
     let repo = TestRepo::new();
     repo.add_agent_on("fixture", "1.0.0", "codex", "gpt-6-astra");
     let hostile = format!("BEGIN{}\x1b[2JEND", INVISIBLE.iter().collect::<String>());
-    let mut manifest: toml::Value =
-        toml::from_str(&repo.read(".agents/ahu/agents/fixture.toml")).unwrap();
-    manifest["description"] = toml::Value::String(hostile.clone());
-    repo.write(
-        ".agents/ahu/agents/fixture.toml",
-        &toml::to_string(&manifest).unwrap(),
+    let manifest = repo.read(".agents/ahu/agents/fixture.md").replace(
+        "description: fixture agent",
+        &format!("description: {hostile}"),
     );
+    repo.write(".agents/ahu/agents/fixture.md", &manifest);
     let output = common::ahu()
         .args(["agents", "--color=always"])
         .current_dir(repo.path())
@@ -326,16 +324,19 @@ fn forced_styling_contains_hostile_descriptions() {
 
 #[test]
 fn forced_styling_keeps_invalid_identity_fields_safe_in_errors() {
-    for field in ["name", "version", "harness", "model"] {
+    for (field, value) in [
+        ("title", "fixture"),
+        ("version", "1.0.0"),
+        ("harness", "codex"),
+        ("model", "gpt-6-astra"),
+    ] {
         let repo = TestRepo::new();
         repo.add_agent_on("fixture", "1.0.0", "codex", "gpt-6-astra");
-        let mut manifest: toml::Value =
-            toml::from_str(&repo.read(".agents/ahu/agents/fixture.toml")).unwrap();
-        manifest[field] = toml::Value::String("BEGIN\x1b[2J\u{202e}END".into());
-        repo.write(
-            ".agents/ahu/agents/fixture.toml",
-            &toml::to_string(&manifest).unwrap(),
+        let manifest = repo.read(".agents/ahu/agents/fixture.md").replace(
+            &format!("{field}: {value}"),
+            &format!("{field}: BEGIN\x1b[2J\u{202e}END"),
         );
+        repo.write(".agents/ahu/agents/fixture.md", &manifest);
         let output = common::ahu()
             .args(["--color=always", "agents"])
             .current_dir(repo.path())

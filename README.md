@@ -119,8 +119,8 @@ keep their branches, worktrees, and records after the harness exits.
 | `@dev-glm` | OpenCode / `ollama/glm-5.3:cloud` | Validates and remediates reported issues with regression coverage. |
 | `@docs-glm` | OpenCode / `ollama/glm-5.3:cloud` | Maintains all tracked Markdown, specifications, knowledge formats, and current project context. |
 
-[Manifests](.agents/ahu/agents/) reference versioned
-[instructions](.agents/ahu/instructions/). Named launches use their manifest's
+[Manifests](.agents/ahu/agents/) are OKF Markdown documents that pair each
+agent's identity with its instructions. Named launches use their manifest's
 pair independently of automatic project selection. This repository's automatic
 choice is Codex / `gpt-6-astra`; it does not select a named agent.
 

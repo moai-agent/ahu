@@ -507,7 +507,7 @@ fn onboarding_is_additive_idempotent_and_reversible() {
     assert_eq!(code, 0, "{text}");
     assert!(text.contains("Nothing has been written"), "{text}");
     assert!(text.contains("can be registered"), "{text}");
-    assert!(!repo.path().join(".agents/ahu/agents/sam.toml").exists());
+    assert!(!repo.path().join(".agents/ahu/agents/sam.md").exists());
 
     // Registering adds exactly one file and leaves the native definition alone.
     let (code, text) = with_state(&repo, || {
@@ -540,7 +540,7 @@ fn onboarding_is_additive_idempotent_and_reversible() {
         })
     });
     assert_eq!(code, 0);
-    assert!(!repo.path().join(".agents/ahu/agents/sam.toml").exists());
+    assert!(!repo.path().join(".agents/ahu/agents/sam.md").exists());
     assert_eq!(repo.read(".claude/agents/sam.md"), native_before);
 }
 

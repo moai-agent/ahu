@@ -19,10 +19,12 @@ sources:
 
 # Named agent identity
 
-A named agent is registered by a manifest under `.agents/ahu/agents/`. Its manifest
-specifies the version, harness, model, permission mode, and source definition.
+A named agent is registered by a manifest under `.agents/ahu/agents/`. A manifest
+is OKF Markdown with `type: ahu:agent` frontmatter declaring the version, harness,
+model, permission mode, and optional source definition; the body carries the
+agent's instructions, or a pointer to a native definition referenced in place.
 Native definitions found elsewhere are candidates for onboarding, not implicit
-registrations. A Markdown source supplies instructions without changing the
+registrations. A referenced source supplies instructions without changing the
 manifest's harness or model selection.[^agent]
 
 The delivered prompt contains the delegation contract, then a named agent's

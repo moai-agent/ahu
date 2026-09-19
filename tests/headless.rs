@@ -436,7 +436,7 @@ fn execution_rechecks_snapshot_and_user_hooks_before_spawning() {
             std::fs::write(settings.join("settings.json"),r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo synthetic"}]}]}}"#).unwrap();
         } else {
             std::fs::write(
-                worktree.join(".agents/ahu/instructions/worker.md"),
+                worktree.join(".agents/ahu/agents/worker.md"),
                 "Changed instructions\n",
             )
             .unwrap();
@@ -699,11 +699,11 @@ fn host_grants_reject_implicit_approval_widening_before_execution() {
     let f = Fixture::new();
     f.repo
         .add_agent_on("writer", "1.0.0", "claude-code", "claude-opus-5");
-    let path = f.repo.path().join(".agents/ahu/agents/writer.toml");
+    let path = f.repo.path().join(".agents/ahu/agents/writer.md");
     let source = std::fs::read_to_string(&path).unwrap();
     std::fs::write(
         &path,
-        source.replace("[source]", "permissions = \"auto\"\n[source]"),
+        source.replace("permissions: prompt", "permissions: auto"),
     )
     .unwrap();
     let out = f.launch("success", &["--allow-child", "@writer"]);

@@ -356,8 +356,12 @@ the `.` sentinel, `.cancel`, or the confirmation code required for submission.
 
 ## Registering an agent
 
-`ahu` launches an agent only when `.agents/ahu/agents/<name>.toml` registers it.
-Definitions found elsewhere are onboarding candidates, never implicit
+`ahu` launches an agent only when `.agents/ahu/agents/<name>.md` registers it.
+A manifest is an OKF Markdown document whose YAML frontmatter declares
+`okf_version: 0.2` and `type: ahu:agent`, followed by a body. The body is the agent's
+instructions when no `source_format`/`source_path` pair selects a native
+definition, and a short pointer for human readers when one does. Definitions
+found elsewhere are onboarding candidates, never implicit
 registrations—a skill is not an agent, and `AGENTS.md` is not an agent
 registry.
 
@@ -383,17 +387,25 @@ printf '%s\n' 'Help implement repository tasks.' > .claude/agents/chris.md
 
 A manifest references that definition in place:
 
-```toml
-schema_version = 1
-name = "chris"
-version = "1.2.0"
-description = "Helps implement repository tasks"
-harness = "claude-code"
-model = "claude-opus-5"
+```markdown
+---
+okf_version: 0.2
+type: ahu:agent
+title: chris
+description: "Helps implement repository tasks"
+status: stable
+tags: [agents]
+harness: claude-code
+model: claude-opus-5
+permissions: prompt
+version: 1.2.0
+source_format: claude-agent
+source_path: .claude/agents/chris.md
 
-[source]
-format = "claude-agent"
-path = ".claude/agents/chris.md"
+---
+
+Instructions live in the native definition at `.claude/agents/chris.md`,
+referenced in place and never edited.
 ```
 
 Use the CLI to preview, register, or remove this example:
@@ -545,28 +557,25 @@ before launching an agent in it.
 [delegation and approval boundaries](#delegation-and-approval-boundaries) for the
 mapping and the reason.
 
-Write the instructions the agent receives:
+Write the manifest as `.agents/ahu/agents/glm-reviewer.md`, instructions in the
+body:
 
-```sh
-mkdir -p .agents/ahu/agents .agents/ahu/instructions
-printf '%s\n' 'Review the assigned changes and report findings with file and line references.' \
-  > .agents/ahu/instructions/glm-reviewer.md
-```
+```markdown
+---
+okf_version: 0.2
+type: ahu:agent
+title: glm-reviewer
+description: Reviews assigned changes and reports findings
+status: stable
+tags: [agents]
+harness: opencode
+model: ollama/glm-5.3:cloud
+permissions: prompt
+version: 1.0.0
 
-Register it as `.agents/ahu/agents/glm-reviewer.toml`:
+---
 
-```toml
-schema_version = 1
-name = "glm-reviewer"
-version = "1.0.0"
-description = "Reviews assigned changes and reports findings"
-harness = "opencode"
-model = "ollama/glm-5.3:cloud"
-permissions = "prompt"
-
-[source]
-format = "markdown"
-path = ".agents/ahu/instructions/glm-reviewer.md"
+Review the assigned changes and report findings with file and line references.
 ```
 
 Preview before launching anything:

@@ -203,10 +203,10 @@ fn a_named_agent_without_a_semantic_version_is_refused() {
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    let manifest = repo.read(".agents/ahu/agents/chris.toml");
+    let manifest = repo.read(".agents/ahu/agents/chris.md");
     repo.write(
-        ".agents/ahu/agents/chris.toml",
-        &manifest.replace("version = \"1.0.0\"", "version = \"latest\""),
+        ".agents/ahu/agents/chris.md",
+        &manifest.replace("version: 1.0.0", "version: latest"),
     );
     let error = agent::find(repo.path(), "chris").unwrap_err().to_string();
     assert!(error.contains("not a semantic version"), "{error}");
@@ -217,8 +217,8 @@ fn manifest_stem_and_name_must_match() {
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    let manifest = repo.read(".agents/ahu/agents/chris.toml");
-    repo.write(".agents/ahu/agents/sam.toml", &manifest);
+    let manifest = repo.read(".agents/ahu/agents/chris.md");
+    repo.write(".agents/ahu/agents/sam.md", &manifest);
     let error = agent::load_all(repo.path()).unwrap_err().to_string();
     assert!(error.contains("does not match the file stem"), "{error}");
 }
@@ -228,7 +228,7 @@ fn a_model_outside_the_catalog_is_refused_rather_than_substituted() {
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    for file in [".agents/ahu/agents/chris.toml", ".claude/agents/chris.md"] {
+    for file in [".agents/ahu/agents/chris.md", ".claude/agents/chris.md"] {
         let text = repo.read(file);
         repo.write(file, &text.replace("claude-opus-5", "claude-imaginary-9"));
     }
@@ -244,15 +244,24 @@ fn a_source_path_outside_the_repository_is_refused() {
     let repo = TestRepo::new();
     repo.init_config();
     repo.write(
-        ".agents/ahu/agents/escape.toml",
-        "schema_version = 1\n\
-         name = \"escape\"\n\
-         version = \"0.1.0\"\n\
-         harness = \"claude-code\"\n\
-         model = \"claude-opus-5\"\n\
-         \n[source]\n\
-         format = \"markdown\"\n\
-         path = \"../outside.md\"\n",
+        ".agents/ahu/agents/escape.md",
+        "---\n\
+         okf_version: 0.2\n\
+         type: ahu:agent\n\
+         title: escape\n\
+         description: fixture agent\n\
+         status: stable\n\
+         tags: [agents]\n\
+         harness: claude-code\n\
+         model: claude-opus-5\n\
+         permissions: prompt\n\
+         version: 0.1.0\n\
+         source_format: claude-agent\n\
+         source_path: ../outside.md\n\
+         \n\
+         ---\n\
+         \n\
+         Instructions live in the native definition at `../outside.md`, referenced in place and never edited.\n",
     );
     let error = agent::load_all(repo.path()).unwrap_err().to_string();
     assert!(error.contains("escapes the repository root"), "{error}");
@@ -285,15 +294,24 @@ fn a_manifest_may_not_point_at_another_harnesss_definition_format() {
     repo.init_config();
     repo.write(".codex/agents/sam.toml", "model = \"something\"\n");
     repo.write(
-        ".agents/ahu/agents/sam.toml",
-        "schema_version = 1\n\
-         name = \"sam\"\n\
-         version = \"0.1.0\"\n\
-         harness = \"claude-code\"\n\
-         model = \"claude-opus-5\"\n\
-         \n[source]\n\
-         format = \"codex-agent\"\n\
-         path = \".codex/agents/sam.toml\"\n",
+        ".agents/ahu/agents/sam.md",
+        "---\n\
+         okf_version: 0.2\n\
+         type: ahu:agent\n\
+         title: sam\n\
+         description: fixture agent\n\
+         status: stable\n\
+         tags: [agents]\n\
+         harness: claude-code\n\
+         model: claude-opus-5\n\
+         permissions: prompt\n\
+         version: 0.1.0\n\
+         source_format: codex-agent\n\
+         source_path: .codex/agents/sam.toml\n\
+         \n\
+         ---\n\
+         \n\
+         Instructions live in the native definition at `.codex/agents/sam.toml`, referenced in place and never edited.\n",
     );
     let error = agent::load_all(repo.path()).unwrap_err().to_string();
     assert!(
@@ -307,17 +325,23 @@ fn each_supported_harness_pins_models_from_its_own_catalog_entry() {
     // A model belonging to another harness is refused rather than substituted.
     let repo = TestRepo::new();
     repo.init_config();
-    repo.write(".agents/ahu/instructions/sam.md", "You are sam.\n");
     repo.write(
-        ".agents/ahu/agents/sam.toml",
-        "schema_version = 1\n\
-         name = \"sam\"\n\
-         version = \"0.1.0\"\n\
-         harness = \"codex\"\n\
-         model = \"claude-opus-5\"\n\
-         \n[source]\n\
-         format = \"markdown\"\n\
-         path = \".agents/ahu/instructions/sam.md\"\n",
+        ".agents/ahu/agents/sam.md",
+        "---\n\
+         okf_version: 0.2\n\
+         type: ahu:agent\n\
+         title: sam\n\
+         description: fixture agent\n\
+         status: stable\n\
+         tags: [agents]\n\
+         harness: codex\n\
+         model: claude-opus-5\n\
+         permissions: prompt\n\
+         version: 0.1.0\n\
+         \n\
+         ---\n\
+         \n\
+         You are sam. Fixture instructions.\n",
     );
     let error = agent::load_all(repo.path()).unwrap_err().to_string();
     assert!(
@@ -385,10 +409,10 @@ fn semantic_version_validation_accepts_and_rejects_the_expected_forms() {
 ///
 /// Every *write* inside a repository goes through `util::resolve_within`, which
 /// refuses a symlinked component. The read side did not, so a committed
-/// `.agents/ahu/agents/<name>.toml` symlink pointed anywhere made
-/// `agent::load_all` open that file — and `toml`'s parse error quotes the
-/// offending source line verbatim, so the contents were printed. `load_all`
-/// runs on plain `ahu` before any prompt is typed, and on `ahu agents`.
+/// `.agents/ahu/agents/<name>.md` symlink pointed anywhere made
+/// `agent::load_all` open that file and surface its contents in a parse
+/// error. `load_all` runs on plain `ahu` before any prompt is typed, and on
+/// `ahu agents`.
 #[test]
 fn a_symlinked_manifest_is_refused_rather_than_read_through() {
     let repo = TestRepo::new();
@@ -397,7 +421,7 @@ fn a_symlinked_manifest_is_refused_rather_than_read_through() {
     let secret = repo.path().join("outside-the-repo.txt");
     std::fs::write(&secret, "SYNTHETIC_TOKEN = \"not-a-real-credential\"\n").unwrap();
     std::fs::create_dir_all(repo.path().join(".agents/ahu/agents")).unwrap();
-    std::os::unix::fs::symlink(&secret, repo.path().join(".agents/ahu/agents/leak.toml")).unwrap();
+    std::os::unix::fs::symlink(&secret, repo.path().join(".agents/ahu/agents/leak.md")).unwrap();
 
     let error = agent::load_all(repo.path()).expect_err("a symlinked manifest must be refused");
     let message = error.to_string();
@@ -436,7 +460,7 @@ fn a_symlinked_agents_directory_is_refused() {
     repo.init_config();
     let elsewhere = repo.path().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
-    std::fs::write(elsewhere.join("x.toml"), "SYNTHETIC = 1\n").unwrap();
+    std::fs::write(elsewhere.join("x.md"), "SYNTHETIC = 1\n").unwrap();
 
     // Replace `.agents/ahu/agents` with a link to a directory ahu never vetted.
     let agents = repo.path().join(".agents/ahu/agents");
@@ -528,13 +552,13 @@ fn hooks_are_not_read_through_a_symlinked_claude_directory() {
 
 /// A proposed manifest must be parseable by the loader that will read it back.
 ///
-/// `proposed_manifest` built its TOML with Rust's `{:?}`, which escapes a
-/// non-printable character as `\u{XXXX}`; TOML's escape is `\uXXXX`. So a
-/// `description:` in a native definition's frontmatter carrying a bidi
-/// override, an ESC, or a zero-width character made `onboard --register` write
-/// a manifest `agent::load_all` could not parse — and one unparseable manifest
-/// fails the entire registry load, so `ahu agents`, `ahu onboard` and the
-/// launcher's agent list all stayed broken until the file was deleted by hand.
+/// `proposed_manifest` quotes candidate-derived values as YAML double-quoted
+/// strings, escaping control and display-hostile characters. A `description:` in
+/// a native definition's frontmatter carrying a bidi override, an ESC, or a
+/// zero-width character must still yield a manifest `agent::load_all` can
+/// parse — and one unparseable manifest fails the entire registry load, so
+/// `ahu agents`, `ahu onboard` and the launcher's agent list all stay broken
+/// until the file is deleted by hand.
 #[test]
 fn a_proposed_manifest_round_trips_through_the_loader() {
     let repo = TestRepo::new();
@@ -561,15 +585,16 @@ fn a_proposed_manifest_round_trips_through_the_loader() {
             .expect("probe is a candidate");
 
         let body = ahu::onboard::proposed_manifest(candidate, "claude-opus-5", "0.1.0");
-        let parsed: Result<toml::Value, _> = toml::from_str(&body);
+        let probe_path = repo.path().join(".agents/ahu/agents/probe.md");
+        let parsed = agent::parse_manifest(&body, &probe_path);
         assert!(
             parsed.is_ok(),
-            "proposed manifest is not valid TOML for description {hostile:?}:\n{body}\n{:?}",
+            "proposed manifest does not parse for description {hostile:?}:\n{body}\n{:?}",
             parsed.err().map(|e| e.to_string())
         );
 
-        // And it must survive the real loader, not just a generic TOML parse.
-        let written = repo.path().join(".agents/ahu/agents/probe.toml");
+        // And it must survive the real loader, not just a single parse.
+        let written = repo.path().join(".agents/ahu/agents/probe.md");
         std::fs::create_dir_all(written.parent().unwrap()).unwrap();
         std::fs::write(&written, &body).unwrap();
         let loaded = agent::load_all(repo.path());
@@ -634,17 +659,20 @@ fn a_project_pinned_to_the_previous_catalog_is_stopped_not_upgraded() {
 fn an_opencode_agent_keeps_its_own_harness_and_model() {
     let repo = TestRepo::new();
     repo.init_config();
-    repo.write(".agents/ahu/instructions/oc.md", "You are oc.\n");
-    let manifest = "schema_version = 1\n\
-         name = \"oc\"\n\
-         version = \"1.0.0\"\n\
-         description = \"fixture opencode agent\"\n\
-         harness = \"opencode\"\n\
-         model = \"ollama/glm-5.3:cloud\"\n\
-         \n[source]\n\
-         format = \"markdown\"\n\
-         path = \".agents/ahu/instructions/oc.md\"\n";
-    repo.write(".agents/ahu/agents/oc.toml", manifest);
+    let manifest = "---\n\
+         okf_version: 0.2\n\
+         type: ahu:agent\n\
+         title: oc\n\
+         description: fixture opencode agent\n\
+         status: stable\n\
+         tags: [agents]\n\
+         harness: opencode\n\
+         model: ollama/glm-5.3:cloud\n\
+         permissions: prompt\n\
+         version: 1.0.0\n\
+         \n---\n\
+         \nYou are oc. Fixture instructions.\n";
+    repo.write(".agents/ahu/agents/oc.md", manifest);
 
     let agents = agent::load_all(repo.path()).unwrap();
     let loaded = agents
@@ -656,7 +684,7 @@ fn an_opencode_agent_keeps_its_own_harness_and_model() {
 
     // The bare Ollama tag is not a catalog model for this harness.
     repo.write(
-        ".agents/ahu/agents/oc.toml",
+        ".agents/ahu/agents/oc.md",
         &manifest.replace("ollama/glm-5.3:cloud", "glm-5.3:cloud"),
     );
     let error = agent::load_all(repo.path()).unwrap_err().to_string();
@@ -745,15 +773,17 @@ fn an_opencode_agent_definition_is_a_registrable_onboarding_candidate() {
     assert!(inheriting.registrable(), "{:?}", inheriting.blockers);
 
     // The proposed manifest pins OpenCode, not the format's default harness.
+    // Candidate-derived values are YAML-quoted so hostile text cannot forge
+    // keys in the written file.
     let body = ahu::onboard::proposed_manifest(reviewer, "ollama/glm-5.3:cloud", "1.0.0");
-    assert!(body.contains("harness = \"opencode\""), "{body}");
-    assert!(body.contains("format = \"opencode-agent\""), "{body}");
+    assert!(body.contains("harness: \"opencode\""), "{body}");
+    assert!(body.contains("source_format: \"opencode-agent\""), "{body}");
     assert!(
-        body.contains("path = \".opencode/agent/reviewer.md\""),
+        body.contains("source_path: \".opencode/agent/reviewer.md\""),
         "{body}"
     );
 
-    let written = repo.path().join(".agents/ahu/agents/reviewer.toml");
+    let written = repo.path().join(".agents/ahu/agents/reviewer.md");
     std::fs::create_dir_all(written.parent().unwrap()).unwrap();
     std::fs::write(&written, &body).unwrap();
     let agents = agent::load_all(repo.path()).expect("the registry still loads");

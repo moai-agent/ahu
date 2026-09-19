@@ -435,10 +435,7 @@ fn the_preview_attributes_the_instructions_to_the_file_ahu_digested() {
     let agent = plan.agent.as_ref().unwrap();
     let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
 
-    assert!(
-        preview.contains(".agents/ahu/instructions/sable.md"),
-        "{preview}"
-    );
+    assert!(preview.contains(".agents/ahu/agents/sable.md"), "{preview}");
     assert!(preview.contains(&agent.source_digest[..12]), "{preview}");
     // And what ahu delivered really is what it read from that file.
     assert_eq!(
@@ -492,16 +489,15 @@ fn the_instructions_digest_covers_exactly_the_delivered_fence_body() {
         ".claude/agents/sable.md",
         "---\nname: sable\nmodel: claude-opus-5\ntools: Read, Edit\n---\n\nYou are sable. Never run shell commands.\n",
     );
+    // Overwrite the body-mode fixture with a source-mode manifest: the
+    // instructions live in the claude-agent definition, referenced in place.
     repo.write(
-        ".agents/ahu/agents/sable.toml",
-        "schema_version = 1\n\
-         name = \"sable\"\n\
-         version = \"1.0.0\"\n\
-         harness = \"claude-code\"\n\
-         model = \"claude-opus-5\"\n\
-         \n[source]\n\
-         format = \"claude-agent\"\n\
-         path = \".claude/agents/sable.md\"\n",
+        ".agents/ahu/agents/sable.md",
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: sable\ndescription: fixture agent\n\
+         status: stable\ntags: [agents]\nharness: claude-code\nmodel: claude-opus-5\n\
+         permissions: prompt\nversion: 1.0.0\nsource_format: claude-agent\n\
+         source_path: .claude/agents/sable.md\n\n---\n\nInstructions live in the native \
+         definition at `.claude/agents/sable.md`, referenced in place and never edited.\n",
     );
     repo.commit("fixture");
 
@@ -574,6 +570,9 @@ fn the_instructions_digest_covers_exactly_the_delivered_fence_body() {
 
 /// A format with no frontmatter has nothing to strip, so the two digests cover
 /// the same bytes — computed the same way, not special-cased to be absent.
+///
+/// Codex definitions are raw TOML with no frontmatter fence: whatever the file
+/// holds is the verbatim instruction text.
 #[test]
 fn a_frontmatterless_source_has_two_equal_digests_not_one_missing_one() {
     if !common::in_harness_fixture(
@@ -581,11 +580,31 @@ fn a_frontmatterless_source_has_two_equal_digests_not_one_missing_one() {
     ) {
         return;
     }
-    let repo = repo_on("claude-code", "claude-opus-5");
+    let repo = repo_on("codex", "gpt-6-astra");
+    // A codex-agent source with no frontmatter for ahu to strip.
+    repo.write(
+        ".codex/agents/sable.toml",
+        "You are sable. Answer from the repository only.\n",
+    );
+    // Overwrite the body-mode fixture with a source-mode manifest pointing at
+    // that definition.
+    repo.write(
+        ".agents/ahu/agents/sable.md",
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: sable\ndescription: fixture agent\n\
+         status: stable\ntags: [agents]\nharness: codex\nmodel: gpt-6-astra\n\
+         permissions: prompt\nversion: 1.0.0\nsource_format: codex-agent\n\
+         source_path: .codex/agents/sable.toml\n\n---\n\nInstructions live in the native \
+         definition at `.codex/agents/sable.toml`, referenced in place and never edited.\n",
+    );
     repo.commit("fixture");
     let agent = agent::find(repo.path(), "sable").unwrap();
 
-    assert!(!agent.manifest.source.format.has_frontmatter());
+    let source = agent
+        .manifest
+        .source
+        .as_ref()
+        .expect("the source-mode manifest names its source");
+    assert!(!source.format.has_frontmatter());
     let on_disk = std::fs::read(&agent.source_path).unwrap();
     assert_eq!(agent.source_digest, ahu::util::digest_bytes(&on_disk));
     assert_eq!(
@@ -594,7 +613,7 @@ fn a_frontmatterless_source_has_two_equal_digests_not_one_missing_one() {
     );
     assert!(!agent.instructions_digest.is_empty());
 
-    let (discovered, plan) = plan_for(&repo, "claude-code", "claude-opus-5");
+    let (discovered, plan) = plan_for(&repo, "codex", "gpt-6-astra");
     let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
     // Equal is not the same as interchangeable: the preview still says which is
     // which, and why they match here.
@@ -617,16 +636,15 @@ fn a_frontmatter_only_edit_is_drift_and_is_named_as_a_file_change() {
         ".claude/agents/sable.md",
         "---\nname: sable\nmodel: claude-opus-5\ntools: Read\n---\n\nYou are sable.\n",
     );
+    // Overwrite the body-mode fixture with a source-mode manifest: the
+    // instructions live in the claude-agent definition, referenced in place.
     repo.write(
-        ".agents/ahu/agents/sable.toml",
-        "schema_version = 1\n\
-         name = \"sable\"\n\
-         version = \"1.0.0\"\n\
-         harness = \"claude-code\"\n\
-         model = \"claude-opus-5\"\n\
-         \n[source]\n\
-         format = \"claude-agent\"\n\
-         path = \".claude/agents/sable.md\"\n",
+        ".agents/ahu/agents/sable.md",
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: sable\ndescription: fixture agent\n\
+         status: stable\ntags: [agents]\nharness: claude-code\nmodel: claude-opus-5\n\
+         permissions: prompt\nversion: 1.0.0\nsource_format: claude-agent\n\
+         source_path: .claude/agents/sable.md\n\n---\n\nInstructions live in the native \
+         definition at `.claude/agents/sable.md`, referenced in place and never edited.\n",
     );
     repo.commit("fixture");
     let before = agent::find(repo.path(), "sable").unwrap();
@@ -748,16 +766,15 @@ fn the_inventory_labels_both_digests() {
         ".claude/agents/sable.md",
         "---\nname: sable\nmodel: claude-opus-5\n---\n\nYou are sable.\n",
     );
+    // Overwrite the body-mode fixture with a source-mode manifest pointing at
+    // the claude-agent definition.
     repo.write(
-        ".agents/ahu/agents/sable.toml",
-        "schema_version = 1\n\
-         name = \"sable\"\n\
-         version = \"1.0.0\"\n\
-         harness = \"claude-code\"\n\
-         model = \"claude-opus-5\"\n\
-         \n[source]\n\
-         format = \"claude-agent\"\n\
-         path = \".claude/agents/sable.md\"\n",
+        ".agents/ahu/agents/sable.md",
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: sable\ndescription: fixture agent\n\
+         status: stable\ntags: [agents]\nharness: claude-code\nmodel: claude-opus-5\n\
+         permissions: prompt\nversion: 1.0.0\nsource_format: claude-agent\n\
+         source_path: .claude/agents/sable.md\n\n---\n\nInstructions live in the native \
+         definition at `.claude/agents/sable.md`, referenced in place and never edited.\n",
     );
     repo.commit("fixture");
 

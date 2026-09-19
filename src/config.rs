@@ -17,7 +17,6 @@ use crate::util::{Error, Result, digest_bytes};
 pub const CONFIG_DIR: &str = ".agents/ahu";
 pub const CONFIG_RELATIVE_PATH: &str = ".agents/ahu/config.toml";
 pub const AGENTS_RELATIVE_DIR: &str = ".agents/ahu/agents";
-pub const INSTRUCTIONS_RELATIVE_DIR: &str = ".agents/ahu/instructions";
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 

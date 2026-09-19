@@ -1,9 +1,11 @@
-//! Named agent manifests: `.agents/ahu/agents/<name>.toml`.
+//! Named agent manifests: `.agents/ahu/agents/<name>.md`.
 //!
-//! A manifest is the only thing that makes an agent launchable through ahu.
-//! Native agent files found elsewhere are onboarding candidates, never implicit
-//! registrations. The manifest references a native definition in place rather
-//! than copying or rewriting it.
+//! A manifest is an OKF Markdown document whose frontmatter carries
+//! `type: ahu:agent` and the fields that make an agent launchable through ahu.
+//! The body is either the agent's instructions themselves, or a short pointer
+//! to a native definition the manifest references in place — never a copy or
+//! a rewrite. Native agent files found elsewhere are onboarding candidates,
+//! never implicit registrations.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,29 +14,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::bail;
 use crate::catalog;
-use crate::config::{AGENTS_RELATIVE_DIR, SUPPORTED_SCHEMA_VERSION};
+use crate::config::AGENTS_RELATIVE_DIR;
 use crate::util::{Error, Result, digest_bytes, is_safe_name, is_semver};
 
+/// The OKF envelope version every manifest this build reads must declare.
+pub const OKF_VERSION: &str = "0.2";
+
 /// Where an agent's instructions and harness-specific settings actually live.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceFormat {
     /// `.claude/agents/<name>.md`, YAML frontmatter plus a Markdown body.
-    #[serde(rename = "claude-agent")]
     ClaudeAgent,
-    /// Plain Markdown instructions explicitly selected by the project.
-    #[serde(rename = "markdown")]
-    Markdown,
-    /// `.codex/agents/<name>.toml`. Explicit manifests deliver its text verbatim;
-    /// native TOML fields are not interpreted as instruction metadata.
-    #[serde(rename = "codex-agent")]
+    /// `.codex/agents/<name>.toml`. The source file's text is delivered
+    /// verbatim; native TOML fields are not interpreted as instruction
+    /// metadata.
     CodexAgent,
-    /// `.agents/agents/<name>/agent.md`, YAML frontmatter plus Markdown instructions.
-    #[serde(rename = "antigravity-agent")]
+    /// `.agents/agents/<name>/agent.md`, YAML frontmatter plus Markdown
+    /// instructions.
     AntigravityAgent,
-    /// `.opencode/agent/<name>.md`, YAML frontmatter plus Markdown instructions.
-    /// Its `model` is provider-qualified, the shape OpenCode's own `--model`
-    /// takes, so a declared model is a catalog identifier rather than a bare name.
-    #[serde(rename = "opencode-agent")]
+    /// `.opencode/agent/<name>.md`, YAML frontmatter plus Markdown
+    /// instructions. Its `model` is provider-qualified, the shape OpenCode's
+    /// own `--model` takes, so a declared model is a catalog identifier
+    /// rather than a bare name.
     OpenCodeAgent,
 }
 
@@ -42,10 +43,20 @@ impl SourceFormat {
     pub fn as_str(self) -> &'static str {
         match self {
             SourceFormat::ClaudeAgent => "claude-agent",
-            SourceFormat::Markdown => "markdown",
             SourceFormat::CodexAgent => "codex-agent",
             SourceFormat::AntigravityAgent => "antigravity-agent",
             SourceFormat::OpenCodeAgent => "opencode-agent",
+        }
+    }
+
+    /// Parse a `source_format` value from manifest frontmatter.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "claude-agent" => Some(SourceFormat::ClaudeAgent),
+            "codex-agent" => Some(SourceFormat::CodexAgent),
+            "antigravity-agent" => Some(SourceFormat::AntigravityAgent),
+            "opencode-agent" => Some(SourceFormat::OpenCodeAgent),
+            _ => None,
         }
     }
 
@@ -71,16 +82,40 @@ impl SourceFormat {
             SourceFormat::CodexAgent => Some("codex"),
             SourceFormat::AntigravityAgent => Some("antigravity"),
             SourceFormat::OpenCodeAgent => Some("opencode"),
-            SourceFormat::Markdown => None,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// A native definition a manifest references in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSource {
     pub format: SourceFormat,
     /// Repository-root-relative path to the native definition.
     pub path: String,
+}
+
+/// An agent manifest's publication state, declared by its author.
+///
+/// `status` is information for the humans reading the registry: it records
+/// intent and never gates launching. A draft can be launched deliberately,
+/// and a deprecated agent keeps running for the worktrees that still need it.
+/// Absent means `stable`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Status {
+    Draft,
+    #[default]
+    Stable,
+    Deprecated,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Draft => "draft",
+            Status::Stable => "stable",
+            Status::Deprecated => "deprecated",
+        }
+    }
 }
 
 /// How much the agent may do without stopping to ask.
@@ -136,22 +171,208 @@ impl Permissions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// The fields ahu validates and uses from an OKF agent manifest.
+///
+/// `okf_version` and `type` are the OKF envelope: checked while parsing and
+/// not stored, because they describe the document, not the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentManifest {
-    pub schema_version: u32,
+    /// The agent's name and selector, taken from the document title.
     pub name: String,
     /// Required. A named agent without a semantic version cannot be released,
     /// compared, or reported as drifted.
     pub version: String,
-    #[serde(default)]
     pub description: String,
     pub harness: String,
     /// Exact model identifier. No aliases, no `inherit`.
     pub model: String,
     /// Opt-in approval widening. Absent means the harness's own defaults.
-    #[serde(default)]
     pub permissions: Permissions,
-    pub source: AgentSource,
+    /// The native definition this manifest references in place. `None` means
+    /// the manifest body is the agent's instructions.
+    pub source: Option<AgentSource>,
+    /// Publication state declared by the author. Never gates launching.
+    pub status: Status,
+    /// Whether the harness's native helper tools are available to the agent,
+    /// when the manifest opts in or out explicitly. `None` means the harness's
+    /// own default applies; the two declared values are `disabled` and
+    /// `bounded`.
+    pub native_helpers: Option<String>,
+}
+
+/// Parse an ahu agent manifest: OKF frontmatter plus a Markdown body.
+///
+/// Returns the manifest and its body. The body is the agent's instructions
+/// when no `source_format`/`source_path` pair selects a native definition, and
+/// a pointer paragraph for human readers when one does. Unknown frontmatter
+/// fields are ignored so a manifest stays an OKF document first and an ahu
+/// manifest second.
+pub fn parse_manifest(text: &str, path: &Path) -> Result<(AgentManifest, String)> {
+    let Some(rest) = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))
+    else {
+        bail!(
+            "{}: not an ahu agent manifest: expected YAML frontmatter opening with `---` on the \
+             first line.",
+            path.display()
+        );
+    };
+    let Some((front_end, delimiter_len)) = find_frontmatter_end(rest) else {
+        bail!(
+            "{}: frontmatter opened with `---` but never closed with a `---` line.",
+            path.display()
+        );
+    };
+    let (front, body) = rest.split_at(front_end);
+    let body = body[delimiter_len..].trim_start_matches('\n').to_string();
+
+    let mut okf_version = String::new();
+    let mut kind = String::new();
+    let mut name = String::new();
+    let mut version = String::new();
+    let mut description = String::new();
+    let mut harness = String::new();
+    let mut model = String::new();
+    let mut permissions = String::new();
+    let mut status = String::new();
+    let mut source_format = String::new();
+    let mut source_path = String::new();
+    let mut native_helpers = String::new();
+
+    for line in front.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            bail!(
+                "{}: frontmatter line {:?} is not a `key: value` pair.",
+                path.display(),
+                trimmed
+            );
+        };
+        let key = key.trim();
+        let value = value
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+        match key {
+            "okf_version" => okf_version = value,
+            "type" => kind = value,
+            "title" => name = value,
+            "version" => version = value,
+            "description" => description = value,
+            "harness" => harness = value,
+            "model" => model = value,
+            "permissions" => permissions = value,
+            "status" => status = value,
+            "source_format" => source_format = value,
+            "source_path" => source_path = value,
+            "native_helpers" => native_helpers = value,
+            _ => {}
+        }
+    }
+
+    if okf_version != OKF_VERSION {
+        bail!(
+            "{}: okf_version {okf_version:?} is not supported by this ahu build (expected \
+             {OKF_VERSION}).",
+            path.display()
+        );
+    }
+    if kind != "ahu:agent" {
+        bail!(
+            "{}: type {kind:?} is not an ahu agent manifest (expected \"ahu:agent\").",
+            path.display()
+        );
+    }
+    if name.is_empty() || version.is_empty() || harness.is_empty() || model.is_empty() {
+        bail!(
+            "{}: title, version, harness, and model are all required in an ahu agent manifest.",
+            path.display()
+        );
+    }
+    let status = match status.as_str() {
+        "" | "stable" => Status::Stable,
+        "draft" => Status::Draft,
+        "deprecated" => Status::Deprecated,
+        other => bail!(
+            "{}: status {other:?} is not one of: stable, draft, deprecated.",
+            path.display()
+        ),
+    };
+    let permissions = match permissions.as_str() {
+        "" | "prompt" => Permissions::Prompt,
+        "accept-edits" => Permissions::AcceptEdits,
+        "auto" => Permissions::Auto,
+        other => bail!(
+            "{}: permissions {other:?} is not one of: prompt, accept-edits, auto.",
+            path.display()
+        ),
+    };
+    let native_helpers = match native_helpers.as_str() {
+        "" => None,
+        "disabled" | "bounded" => Some(native_helpers.clone()),
+        other => bail!(
+            "{}: native_helpers {other:?} is not one of: disabled, bounded.",
+            path.display()
+        ),
+    };
+    let source = match (source_format.is_empty(), source_path.is_empty()) {
+        (false, false) => {
+            let format = SourceFormat::parse(&source_format).ok_or_else(|| {
+                Error::new(format!(
+                    "{}: source_format {source_format:?} is not one of: {}.",
+                    path.display(),
+                    "claude-agent, codex-agent, antigravity-agent, opencode-agent"
+                ))
+            })?;
+            Some(AgentSource {
+                format,
+                path: source_path,
+            })
+        }
+        (true, true) => None,
+        _ => bail!(
+            "{}: source_format and source_path must appear together — the format ahu reads and \
+             the native file to read it from.",
+            path.display()
+        ),
+    };
+
+    if body.trim().is_empty() {
+        match source {
+            None => bail!(
+                "{}: the manifest body is empty. The body is this agent's instructions; write \
+                 them below the frontmatter, or reference a native definition with source_format \
+                 and source_path.",
+                path.display()
+            ),
+            Some(_) => bail!(
+                "{}: the manifest body is empty. When source_format and source_path select a \
+                 native definition, the body must still tell a human reader where the \
+                 instructions live.",
+                path.display()
+            ),
+        }
+    }
+
+    Ok((
+        AgentManifest {
+            name,
+            version,
+            description,
+            harness,
+            model,
+            permissions,
+            source,
+            status,
+            native_helpers,
+        },
+        body,
+    ))
 }
 
 /// A manifest that has been validated against the catalog and the working tree.
@@ -160,9 +381,11 @@ pub struct ResolvedAgent {
     pub manifest: AgentManifest,
     pub manifest_path: PathBuf,
     pub manifest_digest: String,
-    /// Absolute path to the native definition inside the repository.
+    /// Absolute path to the file the instructions are read from: the native
+    /// definition for a manifest that references one, and the manifest itself
+    /// when the body is the instructions.
     pub source_path: PathBuf,
-    /// SHA-256 of the complete file at `source.path`, bytes exactly as they are
+    /// SHA-256 of the complete file at `source_path`, bytes exactly as they are
     /// on disk — frontmatter included.
     ///
     /// This is what a reviewer compares against the repository, and what
@@ -171,11 +394,11 @@ pub struct ResolvedAgent {
     pub source_digest: String,
     /// SHA-256 of exactly the text ahu delivers, byte for byte.
     ///
-    /// That is `instructions` below: the file with its YAML frontmatter
-    /// stripped, when the format has any. It is identical to the bytes that land
-    /// inside the `<<<ahu-agent-...>>>` fence in the delivered prompt.
+    /// That is `instructions` below: the file at `source_path` with its YAML
+    /// frontmatter stripped when it has any. It is identical to the bytes that
+    /// land inside the `<<<ahu-agent-...>>>` fence in the delivered prompt.
     ///
-    /// For a format with no frontmatter this covers the same bytes as
+    /// For a source file with no frontmatter this covers the same bytes as
     /// `source_digest`, and it is computed the same way rather than being left
     /// absent — a digest that is sometimes missing is a digest a reader has to
     /// reason about, and the point of having two is that neither needs
@@ -243,7 +466,17 @@ pub fn load_all(repo_root: &Path) -> Result<Vec<ResolvedAgent>> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        // `index.md` and `log.md` are reserved document names in ahu
+        // knowledge, and the registry directory is a knowledge bundle; neither
+        // is ever an agent manifest.
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if file_name == "index.md" || file_name == "log.md" {
             continue;
         }
         let meta = std::fs::symlink_metadata(&path)
@@ -312,27 +545,15 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
     let manifest_digest = digest_bytes(&bytes);
     let text = String::from_utf8(bytes)
         .map_err(|_| Error::new(format!("{} is not valid UTF-8", path.display())))?;
-    let manifest: AgentManifest = toml::from_str(&text).map_err(|e| {
-        Error::new(format!(
-            "{} is not a valid ahu agent manifest: {e}",
-            path.display()
-        ))
-    })?;
+    let (manifest, body) = parse_manifest(&text, path)?;
 
-    if manifest.schema_version != SUPPORTED_SCHEMA_VERSION {
-        bail!(
-            "{}: schema_version {} is not supported by this ahu build (expected {SUPPORTED_SCHEMA_VERSION}).",
-            path.display(),
-            manifest.schema_version
-        );
-    }
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or_default();
     if stem != manifest.name {
         bail!(
-            "{}: manifest name {:?} does not match the file stem {stem:?}.",
+            "{}: manifest title {:?} does not match the file stem {stem:?}.",
             path.display(),
             manifest.name
         );
@@ -386,48 +607,70 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
                 .join(", ")
         );
     }
-    if let Some(native) = manifest.source.format.native_harness()
+    if let Some(source) = &manifest.source
+        && let Some(native) = source.format.native_harness()
         && native != manifest.harness
     {
         bail!(
             "{}: source format {:?} belongs to harness {native:?}, but the manifest selects {:?}.\n\
              ahu does not translate an agent from one harness to another.",
             path.display(),
-            manifest.source.format.as_str(),
+            source.format.as_str(),
             manifest.harness
         );
     }
 
-    let source_path = resolve_source_path(repo_root, &manifest.source.path, path)?;
-    let source_bytes = std::fs::read(&source_path).map_err(|e| {
-        Error::new(format!(
-            "{}: cannot read the agent's source {}: {e}",
-            path.display(),
-            source_path.display()
-        ))
-    })?;
-    let source_digest = digest_bytes(&source_bytes);
-    let source_text = String::from_utf8(source_bytes).map_err(|_| {
-        Error::new(format!(
-            "{}: agent source {} is not valid UTF-8",
-            path.display(),
-            source_path.display()
-        ))
-    })?;
-
-    // The instruction text is what ahu delivers in the prompt, so how a format
-    // is parsed determines how it is delivered: frontmatter is metadata ahu
-    // reads (for the model-conflict check and the native-settings disclosure)
-    // and does not put in front of the model, and the body is the instructions.
-    let (instructions, native_model, native_settings) = if manifest.source.format.has_frontmatter()
+    // The instruction text is what ahu delivers in the prompt, so where it is
+    // read from determines what is delivered: the manifest body when the
+    // manifest carries its own instructions, or the native definition it
+    // references in place. Frontmatter is metadata ahu reads (for the
+    // model-conflict check and the native-settings disclosure) and does not
+    // put in front of the model; the body is the instructions.
+    let (source_path, source_digest, instructions, native_model, native_settings) = match &manifest
+        .source
     {
-        parse_frontmatter(&source_text)
-    } else {
-        (source_text.clone(), None, BTreeMap::new())
+        Some(source) => {
+            let source_path = resolve_source_path(repo_root, &source.path, path)?;
+            let source_bytes = std::fs::read(&source_path).map_err(|e| {
+                Error::new(format!(
+                    "{}: cannot read the agent's source {}: {e}",
+                    path.display(),
+                    source_path.display()
+                ))
+            })?;
+            let source_digest = digest_bytes(&source_bytes);
+            let source_text = String::from_utf8(source_bytes).map_err(|_| {
+                Error::new(format!(
+                    "{}: agent source {} is not valid UTF-8",
+                    path.display(),
+                    source_path.display()
+                ))
+            })?;
+            let (instructions, native_model, native_settings) = if source.format.has_frontmatter() {
+                parse_frontmatter(&source_text)
+            } else {
+                (source_text.clone(), None, BTreeMap::new())
+            };
+            (
+                source_path,
+                source_digest,
+                instructions,
+                native_model,
+                native_settings,
+            )
+        }
+        None => (
+            path.to_path_buf(),
+            manifest_digest.clone(),
+            body,
+            None,
+            BTreeMap::new(),
+        ),
     };
     // Computed the same way as `source_digest`, over the bytes ahu will actually
-    // deliver. For a frontmatter-less format the two cover identical bytes and
-    // come out equal, which is the correct answer rather than a special case.
+    // deliver. For a source file without frontmatter the two cover identical
+    // bytes and come out equal, which is the correct answer rather than a
+    // special case.
     let instructions_digest = digest_bytes(instructions.as_bytes());
 
     if let Some(native) = native_model.as_deref()
@@ -457,7 +700,7 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
     })
 }
 
-/// Resolve a manifest `source.path` to a real file inside the repository.
+/// Resolve a manifest `source_path` to a real file inside the repository.
 ///
 /// Repository-root-relative only. Absolute paths, parent traversal, and links
 /// leaving the repository are rejected: the source has to travel into a task
@@ -468,12 +711,12 @@ pub fn resolve_source_path(
     manifest_path: &Path,
 ) -> Result<PathBuf> {
     if relative.is_empty() {
-        bail!("{}: source.path is empty.", manifest_path.display());
+        bail!("{}: source_path is empty.", manifest_path.display());
     }
     let candidate = Path::new(relative);
     if candidate.is_absolute() {
         bail!(
-            "{}: source.path {relative:?} is absolute. Use a repository-root-relative path so the \
+            "{}: source_path {relative:?} is absolute. Use a repository-root-relative path so the \
              definition travels into task worktrees.",
             manifest_path.display()
         );
@@ -483,7 +726,7 @@ pub fn resolve_source_path(
             std::path::Component::Normal(_) => {}
             std::path::Component::CurDir => {}
             _ => bail!(
-                "{}: source.path {relative:?} escapes the repository root.",
+                "{}: source_path {relative:?} escapes the repository root.",
                 manifest_path.display()
             ),
         }
@@ -494,13 +737,13 @@ pub fn resolve_source_path(
         .map_err(|e| Error::new(format!("cannot resolve {}: {e}", repo_root.display())))?;
     let canonical = joined.canonicalize().map_err(|e| {
         Error::new(format!(
-            "{}: cannot resolve source.path {relative:?} ({e}).",
+            "{}: cannot resolve source_path {relative:?} ({e}).",
             manifest_path.display()
         ))
     })?;
     if !canonical.starts_with(&canonical_root) {
         bail!(
-            "{}: source.path {relative:?} resolves outside the repository ({}).\n\
+            "{}: source_path {relative:?} resolves outside the repository ({}).\n\
              ahu cannot carry an external file into a task worktree.",
             manifest_path.display(),
             canonical.display()
@@ -508,7 +751,7 @@ pub fn resolve_source_path(
     }
     if !canonical.is_file() {
         bail!(
-            "{}: source.path {relative:?} is not a file.",
+            "{}: source_path {relative:?} is not a file.",
             manifest_path.display()
         );
     }

@@ -146,8 +146,10 @@ pub fn redeliver_headless(delivery: &Delivery, prompt: &str) -> Result<String> {
 pub struct Delivery {
     /// Fence tag nonce, generated fresh for this launch.
     pub nonce: String,
-    /// The resolved agent's instruction text, as parsed from its `source.path`.
-    /// `None` for an automatic launch, which has no named identity.
+    /// The resolved agent's instruction text: the manifest body for an agent
+    /// that carries its own instructions, or the body parsed from the native
+    /// file it references. `None` for an automatic launch, which has no named
+    /// identity.
     pub agent_instructions: Option<String>,
     /// Digest of the complete delivered prompt.
     pub digest: String,
