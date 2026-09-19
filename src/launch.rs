@@ -5,6 +5,7 @@
 //! or something the user is told about.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::agent::ResolvedAgent;
 use crate::bail;
@@ -959,7 +960,57 @@ pub(crate) fn verify_task(
     Ok((record, rebuilt, executable))
 }
 
-pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
+/// What happened to an interactive task's harness process, from the run-task
+/// parent that spawned it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessOutcome {
+    /// The harness process ended on its own, successfully or not.
+    Exited(std::process::ExitStatus),
+    /// ahu terminated the harness process tree because a cancellation was
+    /// requested.
+    Cancelled,
+}
+
+/// Poll a spawned interactive harness, terminating its process tree when a
+/// cancellation is requested in the task directory.
+fn supervise_harness(child: &mut std::process::Child, task_dir: &Path) -> HarnessOutcome {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return HarnessOutcome::Exited(status),
+            Ok(None) => {}
+            Err(_) => {
+                // A wait error is not evidence the child stopped; keep
+                // supervising rather than abandoning a live process tree.
+                continue;
+            }
+        }
+        if task_dir.join("cancel.json").exists() {
+            terminate_group(child);
+            return HarnessOutcome::Cancelled;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Terminate the harness process group this parent created: SIGTERM, a short
+/// grace period, then SIGKILL and reaping.
+fn terminate_group(child: &mut std::process::Child) {
+    let pid = child.id();
+    crate::headless::signal_group(pid, libc::SIGTERM);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(_) => return,
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    crate::headless::signal_group(pid, libc::SIGKILL);
+    let _ = child.wait();
+}
+
+pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     let (record, rebuilt, executable) = verify_task(task_dir, None)?;
     eprintln!(
         "ahu task {} — {} on {} / {}",
@@ -983,37 +1034,73 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         );
     }
 
-    let status = std::process::Command::new(&executable)
-        .args(&rebuilt.args)
-        .env("AHU_BIN", std::env::current_exe()?)
-        .env("AHU_STATE_DIR", &session_state)
-        .current_dir(&record.worktree)
-        .status()
-        .map_err(|e| {
-            Error::new(format!(
-                "cannot start {}: {e}\nThe worktree and task record are preserved at {} and {}.",
-                executable.display(),
-                record.worktree.display(),
-                task_dir.display()
-            ))
-        })?;
+    // A cancellation that arrived before the harness started must not be
+    // lost to the spawn that follows.
+    if task_dir.join("cancel.json").exists() {
+        let _ = task::set_state(task_dir, TaskState::Cancelled);
+        eprintln!(
+            "ahu: the task was cancelled before the harness started. The worktree {} and its \
+             branch {} are kept.",
+            record.worktree.display(),
+            record.branch
+        );
+        return Ok(HarnessOutcome::Cancelled);
+    }
 
-    // A process exit is not evidence the task succeeded, so the state says only
-    // that the harness stopped.
-    let final_state = if status.success() {
-        TaskState::Exited
-    } else {
-        TaskState::Failed
+    let mut child = {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new(&executable)
+            .args(&rebuilt.args)
+            .env("AHU_BIN", std::env::current_exe()?)
+            .env("AHU_STATE_DIR", &session_state)
+            .current_dir(&record.worktree)
+            // The run-task parent owns the harness's fresh process group, so
+            // cancellation can terminate the whole tree without signalling
+            // this parent or the pane it lives in.
+            .process_group(0)
+            .spawn()
+            .map_err(|e| {
+                Error::new(format!(
+                    "cannot start {}: {e}\nThe worktree and task record are preserved at {} and {}.",
+                    executable.display(),
+                    record.worktree.display(),
+                    task_dir.display()
+                ))
+            })?
     };
-    let _ = task::set_state(task_dir, final_state);
-    eprintln!(
-        "\nahu: the harness exited ({}). The worktree {} and its branch {} are kept.\n\
-         Exiting does not mean the task succeeded, and ahu does not delete either for you.",
-        final_state.as_str(),
-        record.worktree.display(),
-        record.branch
-    );
-    Ok(status)
+
+    match supervise_harness(&mut child, task_dir) {
+        HarnessOutcome::Exited(status) => {
+            // A process exit is not evidence the task succeeded, so the state
+            // says only that the harness stopped.
+            let final_state = if status.success() {
+                TaskState::Exited
+            } else {
+                TaskState::Failed
+            };
+            let _ = task::set_state(task_dir, final_state);
+            eprintln!(
+                "\nahu: the harness exited ({}). The worktree {} and its branch {} are kept.\n\
+                 Exiting does not mean the task succeeded, and ahu does not delete either for you.",
+                final_state.as_str(),
+                record.worktree.display(),
+                record.branch
+            );
+            Ok(HarnessOutcome::Exited(status))
+        }
+        HarnessOutcome::Cancelled => {
+            let _ = task::set_state(task_dir, TaskState::Cancelled);
+            eprintln!(
+                "\nahu: the task was cancelled. The harness process tree was terminated and the \
+                 cmux workspace is being closed.\n\
+                 The worktree {} and its branch {} are kept; cancelling does not delete either \
+                 for you.",
+                record.worktree.display(),
+                record.branch
+            );
+            Ok(HarnessOutcome::Cancelled)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1051,5 +1138,40 @@ mod group_recovery_tests {
         );
         assert!(recover_group(&[], None).unwrap().is_none());
         assert!(repository_group_candidates(&groups, "different", |_| true).is_empty());
+    }
+
+    fn spawn_sleep(seconds: &str) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new("sleep")
+            .arg(seconds)
+            .process_group(0)
+            .spawn()
+            .expect("POSIX sleep is available in the test environment")
+    }
+
+    #[test]
+    fn supervise_returns_exit_when_child_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_sleep("0.1");
+        match supervise_harness(&mut child, dir.path()) {
+            HarnessOutcome::Exited(status) => assert!(status.success()),
+            HarnessOutcome::Cancelled => panic!("no cancellation was requested"),
+        }
+    }
+
+    #[test]
+    fn supervise_cancels_child_on_cancel_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_sleep("30");
+        let _ = child.try_wait().expect("child has not exited");
+        std::fs::write(dir.path().join("cancel.json"), b"").unwrap();
+        match supervise_harness(&mut child, dir.path()) {
+            HarnessOutcome::Cancelled => {}
+            HarnessOutcome::Exited(_) => panic!("cancellation was requested"),
+        }
+        assert!(
+            child.try_wait().expect("child is reaped").is_some(),
+            "the cancelled child must be reaped"
+        );
     }
 }

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::agent::{self, ResolvedAgent};
 use crate::bail;
@@ -999,15 +1000,127 @@ pub fn knowledge_lint(console: &mut Console<'_>, repo: &Repo, json: bool) -> Res
     ))
 }
 
+/// `ahu cancel <task-id>` — request cancellation of a running task.
+///
+/// A headless task is delegated to the headless supervisor's cancel flow
+/// unchanged. An interactive (cmux) task is stopped by its run-task parent,
+/// which owns the harness process tree, and its cmux workspace is closed
+/// afterwards. The worktree, branch and record are never deleted.
+pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
+    let (dir, record) = inspect_task(repo, id)?;
+    if dir.join("headless.json").exists() {
+        return crate::headless::control(repo, "cancel", &record.task_id, None, json_output);
+    }
+    if !record.state.is_live() {
+        eprintln!(
+            "ahu: task {} already stopped ({}); there is nothing to cancel. The worktree, \
+             branch and record are kept.",
+            record.task_id,
+            record.state.as_str()
+        );
+        return crate::headless::emit(
+            &serde_json::json!({
+                "schema_version": 1,
+                "task_id": record.task_id,
+                "cancellation": "already-terminal",
+                "state": record.state.as_str(),
+                "workspace": "left open",
+                "retention": "the worktree, branch and record are kept",
+            }),
+            json_output,
+        )
+        .map(|()| 0);
+    }
+
+    // The run-task parent supervises this directory and does the terminating;
+    // this request is the only signal it needs.
+    let request = serde_json::json!({
+        "requested_at": task::now_rfc3339(),
+        "reason": "cancelled",
+    });
+    crate::state::write_private_file(
+        &dir.join("cancel.json"),
+        serde_json::to_string(&request)
+            .unwrap_or_default()
+            .as_bytes(),
+    )?;
+
+    let mut cancellation = "requested-unconfirmed";
+    let mut state = record.state;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match task::load(&dir) {
+            Ok(current) if !current.state.is_live() => {
+                state = current.state;
+                if state == task::TaskState::Cancelled {
+                    cancellation = "confirmed";
+                } else {
+                    cancellation = "finished-on-its-own";
+                }
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Closing the pane would not stop the harness process tree, so
+    // cancellation is only allowed to skip the close when the session
+    // finished on its own: a live pane should not be torn down while its
+    // harness may still be writing to it, and a stopped session keeps its
+    // workspace for review.
+    let mut workspace = "absent";
+    if let Some(workspace_id) = record.cmux_workspace_id.as_deref() {
+        workspace = match cancellation {
+            "finished-on-its-own" => "left open",
+            _ => {
+                let close =
+                    Cmux::discover().and_then(|client| client.close_workspace(workspace_id));
+                match close {
+                    Ok(()) => "closed",
+                    Err(e) if cancellation == "requested-unconfirmed" => {
+                        // The run-task parent may be wedged or dead; the
+                        // request stands and the workspace is left as-is.
+                        let _ = e;
+                        eprintln!("ahu: cmux is not reachable; the task workspace was not closed.");
+                        "unreachable"
+                    }
+                    Err(e) => {
+                        bail!("cancellation {cancellation}, but cmux workspace close failed: {e}")
+                    }
+                }
+            }
+        };
+    }
+
+    crate::headless::emit(
+        &serde_json::json!({
+            "schema_version": 1,
+            "task_id": record.task_id,
+            "cancellation": cancellation,
+            "state": state.as_str(),
+            "workspace": workspace,
+            "retention": "the worktree, branch and record are kept",
+        }),
+        json_output,
+    )?;
+    Ok(0)
+}
+
 /// `ahu run-task --task-dir <dir>` — the fixed entrypoint cmux starts.
 pub fn run_task(task_dir: &Path) -> Result<i32> {
-    let status = launch::run_task(task_dir)?;
-    if status.success() {
-        Ok(0)
-    } else {
-        Err(crate::util::Error::new(format!(
+    match launch::run_task(task_dir)? {
+        launch::HarnessOutcome::Exited(status) if status.success() => Ok(0),
+        launch::HarnessOutcome::Exited(status) => Err(crate::util::Error::new(format!(
             "the harness exited unsuccessfully ({status})."
-        )))
+        ))),
+        // The harness was terminated on request; the pane reports the
+        // cancellation itself rather than an unsuccessful exit.
+        launch::HarnessOutcome::Cancelled => Ok(1),
     }
 }
 

@@ -28,7 +28,9 @@ pub enum LaunchMode {
 /// Life cycle of a task session, as far as ahu can actually observe it.
 ///
 /// `Exited` means the harness process ended. It is not a claim that the task
-/// was completed successfully.
+/// was completed successfully. `Cancelled` means ahu terminated the harness
+/// process tree on request; like `Exited`, it is terminal and is not a claim
+/// of success.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskState {
@@ -36,6 +38,7 @@ pub enum TaskState {
     Running,
     Exited,
     Failed,
+    Cancelled,
 }
 
 impl TaskState {
@@ -45,7 +48,15 @@ impl TaskState {
             TaskState::Running => "running",
             TaskState::Exited => "exited",
             TaskState::Failed => "failed",
+            TaskState::Cancelled => "cancelled",
         }
+    }
+
+    /// A state whose session may still be doing work. Only these states can
+    /// meaningfully be cancelled; the rest describe sessions that already
+    /// stopped for some reason.
+    pub fn is_live(self) -> bool {
+        matches!(self, TaskState::Starting | TaskState::Running)
     }
 }
 
@@ -827,5 +838,28 @@ mod tests {
         assert_ne!(ObservedLiveness::Live, ObservedLiveness::Stale);
         assert_ne!(ObservedLiveness::Live, ObservedLiveness::Unknown);
         assert_ne!(ObservedLiveness::Stale, ObservedLiveness::Unknown);
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_state_strings_and_serde() {
+        assert_eq!(TaskState::Cancelled.as_str(), "cancelled");
+        let value = serde_json::to_value(TaskState::Cancelled).unwrap();
+        assert_eq!(value, serde_json::json!("cancelled"));
+        let round: TaskState = serde_json::from_value(value).unwrap();
+        assert_eq!(round, TaskState::Cancelled);
+    }
+
+    #[test]
+    fn live_states_are_starting_and_running_only() {
+        assert!(TaskState::Starting.is_live());
+        assert!(TaskState::Running.is_live());
+        assert!(!TaskState::Exited.is_live());
+        assert!(!TaskState::Failed.is_live());
+        assert!(!TaskState::Cancelled.is_live());
     }
 }

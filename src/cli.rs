@@ -50,7 +50,9 @@ Commands:
   result <task-id> [--output json]  Read durable process and harness outcomes
   cleanup <task-id>                Remove captured logs after a recorded terminal result;
                                   retain results, native sessions, branches and worktrees
-  cancel <task-id>                 Request cancellation of task and ahu descendants
+  cancel <task-id>                Request cancellation of the task and ahu descendants;
+                                  an interactive task is stopped and its cmux workspace closed,
+                                  while the worktree, branch and record are kept
   resume <task-id> --prompt-file PATH [--output json]
                                   Resume a root task from the host using its recorded native session;
                                   child/worker resume unsupported: submit a new registered assignment
