@@ -992,10 +992,74 @@ fn supervise_harness(child: &mut std::process::Child, task_dir: &Path) -> Harnes
     }
 }
 
+/// Terminal foreground ownership handed to a spawned harness, and given back
+/// when supervision ends.
+///
+/// The harness runs in its own process group so cancellation can signal the
+/// whole tree. A full-screen TUI also needs the terminal's foreground: without
+/// it, the first stdin read stops the harness with SIGTTIN while the run-task
+/// parent keeps foreground and never reads. Hand foreground over right after
+/// the spawn, and restore the previous owner before this parent prints again.
+struct Foreground {
+    fd: Option<(i32, libc::pid_t)>,
+}
+
+impl Foreground {
+    /// Give the terminal foreground at `fd` to `pgid`, ignoring the job-control
+    /// signals that the transfer itself can raise in this parent. Returns a
+    /// guard that restores the previous owner on drop or explicit take-back,
+    /// or `None` when nothing changed (no terminal, or the transfer failed).
+    fn hand_to(fd: i32, pgid: libc::pid_t) -> Option<Self> {
+        // Only a real terminal has a foreground to hand over. Piped runs
+        // (tests, headless dispatch) stay untouched.
+        if unsafe { libc::isatty(fd) } != 1 {
+            return None;
+        }
+        // The parent does not read stdin while supervising, so raising either
+        // job-control signal there is harmless; ignoring them keeps the
+        // tcsetpgrp race from stopping this parent too.
+        unsafe {
+            libc::signal(libc::SIGTTIN, libc::SIG_IGN);
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        }
+        let previous = unsafe { libc::tcgetpgrp(fd) };
+        if previous < 0 {
+            return None;
+        }
+        if unsafe { libc::tcsetpgrp(fd, pgid) } != 0 {
+            eprintln!(
+                "ahu: cannot give the terminal to the harness process group ({pgid}); \
+                 it may stop with SIGTTIN. Continuing anyway."
+            );
+            return None;
+        }
+        // The harness may have read stdin before this transfer and already be
+        // stopped; resuming the group revives it, and is a no-op otherwise.
+        unsafe { libc::kill(-pgid, libc::SIGCONT) };
+        Some(Foreground {
+            fd: Some((fd, previous)),
+        })
+    }
+
+    /// Restore the terminal foreground this guard captured, if any.
+    fn take_back(mut self) {
+        if let Some((fd, previous)) = self.fd.take()
+            && unsafe { libc::tcsetpgrp(fd, previous) } != 0
+        {
+            // Best effort only: a failed restore leaves the harness's
+            // group owning the pane, which the shell reclaims on the
+            // next prompt anyway.
+            eprintln!("ahu: could not restore terminal foreground to this pane.");
+        }
+    }
+}
+
 /// Terminate the harness process group this parent created: SIGTERM, a short
 /// grace period, then SIGKILL and reaping.
 fn terminate_group(child: &mut std::process::Child) {
     let pid = child.id();
+    // A stopped harness holds SIGTERM; resume it so the signal lands.
+    crate::headless::signal_group(pid, libc::SIGCONT);
     crate::headless::signal_group(pid, libc::SIGTERM);
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
@@ -1069,6 +1133,11 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             })?
     };
 
+    // The TUI harness needs the terminal's foreground or its first stdin read
+    // stops it with SIGTTIN; hand it over now and take it back when the
+    // harness is done.
+    let foreground = Foreground::hand_to(libc::STDIN_FILENO, child.id() as libc::pid_t);
+
     match supervise_harness(&mut child, task_dir) {
         HarnessOutcome::Exited(status) => {
             // A process exit is not evidence the task succeeded, so the state
@@ -1079,6 +1148,9 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
                 TaskState::Failed
             };
             let _ = task::set_state(task_dir, final_state);
+            if let Some(foreground) = foreground {
+                foreground.take_back();
+            }
             eprintln!(
                 "\nahu: the harness exited ({}). The worktree {} and its branch {} are kept.\n\
                  Exiting does not mean the task succeeded, and ahu does not delete either for you.",
@@ -1090,6 +1162,9 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
         }
         HarnessOutcome::Cancelled => {
             let _ = task::set_state(task_dir, TaskState::Cancelled);
+            if let Some(foreground) = foreground {
+                foreground.take_back();
+            }
             eprintln!(
                 "\nahu: the task was cancelled. The harness process tree was terminated and the \
                  cmux workspace is being closed.\n\
@@ -1173,5 +1248,14 @@ mod group_recovery_tests {
             child.try_wait().expect("child is reaped").is_some(),
             "the cancelled child must be reaped"
         );
+    }
+
+    #[test]
+    fn foreground_handover_is_a_noop_without_a_terminal() {
+        use std::os::fd::AsRawFd;
+        // Cargo runs tests with piped stdio, so /dev/null stands in for any
+        // non-terminal fd: the handover must leave it alone.
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert!(Foreground::hand_to(file.as_raw_fd(), 12345).is_none());
     }
 }
