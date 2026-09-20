@@ -527,8 +527,8 @@ fn cmux_liveness_needed(dir: &Path, record: &task::TaskRecord) -> bool {
 
 /// The cmux workspace list, if any record being shown needs it.
 ///
-/// Fetched once per listing instead of once per row, and not at all when no
-/// row can use it. An unreachable cmux is `None`, so liveness degrades to
+/// Each window is fetched once per listing instead of once per row, and not at
+/// all when no row can use it. An unreachable cmux is `None`, so liveness degrades to
 /// `unknown` rather than failing the listing.
 fn cmux_workspaces() -> Option<BTreeMap<String, cmux::WorkspaceInfo>> {
     Cmux::discover().ok()?.workspaces().ok()

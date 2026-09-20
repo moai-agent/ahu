@@ -2,6 +2,77 @@ mod common;
 use common::{TestRepo, git};
 use std::process::Output;
 
+#[test]
+#[cfg(unix)]
+fn cross_window_liveness_requires_complete_enumeration_before_reconciliation() {
+    use std::os::unix::fs::PermissionsExt;
+    for case in ["live", "closed", "unreadable", "malformed"] {
+        let repo = TestRepo::new();
+        let dir = record(&repo, "crosswindow");
+        let path = dir.join("task.json");
+        let mut saved: ahu::task::TaskRecord =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        saved.cmux_workspace_id = Some("task-in-b".into());
+        saved.cmux_window_id = Some("window-b".into());
+        ahu::state::write_json(&path, &saved).unwrap();
+        let cmux = repo.state_path().join("cmux");
+        std::fs::write(&cmux, r#"#!/usr/bin/env python3
+import json,os,sys
+if sys.argv[1] == 'ping': print('PONG'); sys.exit(0)
+method,params = sys.argv[2],json.loads(sys.argv[3])
+case = os.environ['AHU_TEST_WINDOW_CASE']
+if method == 'window.list': print(json.dumps({'windows':[{'id':'window-a'},{'id':'window-b'}]}))
+elif method == 'workspace.list':
+ if params['window_id'] == 'window-b' and case == 'unreadable': sys.exit(1)
+ if params['window_id'] == 'window-b' and case == 'malformed': print('{}')
+ else: print(json.dumps({'workspaces':[{'id':'task-in-b','current_directory':'/tmp'}] if params['window_id']=='window-b' and case=='live' else []}))
+else: raise AssertionError(method)
+"#).unwrap();
+        std::fs::set_permissions(&cmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let run = |args: &[&str]| {
+            common::ahu()
+                .args(args)
+                .current_dir(repo.path())
+                .env("CMUX_WORKSPACE_ID", "caller-in-a")
+                .env("AHU_CMUX_BIN", &cmux)
+                .env("AHU_TEST_WINDOW_CASE", case)
+                .output()
+                .unwrap()
+        };
+        let listed = run(&["tasks"]);
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        let persisted: ahu::task::TaskRecord =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            persisted.state,
+            if case == "closed" {
+                ahu::task::TaskState::Exited
+            } else {
+                ahu::task::TaskState::Running
+            }
+        );
+        let detail = run(&["task", "crosswindow", "--output", "json"]);
+        assert!(
+            detail.status.success(),
+            "{}",
+            String::from_utf8_lossy(&detail.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&detail.stdout).unwrap();
+        assert_eq!(
+            value["liveness"],
+            match case {
+                "live" => "live",
+                "closed" => "stale",
+                _ => "unknown",
+            }
+        );
+    }
+}
+
 fn record(repo: &TestRepo, id: &str) -> std::path::PathBuf {
     let discovered = ahu::git::discover(repo.path()).unwrap();
     let record_source = repo.path().to_path_buf();

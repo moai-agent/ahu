@@ -639,7 +639,7 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
     // earlier ahu invocation saved a different group after losing its state.
     let groups = client.list_groups(current_window.as_deref())?;
     let current_workspace = client.current_workspace()?;
-    let workspaces = client.workspaces()?;
+    let workspaces = client.workspaces_in_window(current_window.as_deref())?;
     let candidates = repository_group_candidates(&groups, &repo.display_name(), |id| {
         workspaces.get(id).is_some_and(|workspace| {
             git::discover(Path::new(&workspace.directory))
@@ -788,7 +788,10 @@ pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
     let Ok(client) = Cmux::discover() else {
         return Ok(tasks);
     };
-    let live = client.workspaces()?;
+    let Ok(live) = client.workspaces() else {
+        // Partial or unreadable window coverage cannot prove a session exited.
+        return Ok(tasks);
+    };
     for (dir, record) in tasks.records.iter_mut() {
         let Some(workspace_id) = record.cmux_workspace_id.as_deref() else {
             continue;

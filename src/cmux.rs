@@ -466,7 +466,7 @@ impl Cmux {
                 _ => {
                     // Someone else added a workspace to this group at the same
                     // moment. Pick the one sitting in this task's worktree.
-                    let listed = self.workspaces()?;
+                    let listed = self.workspaces_in_window(window_id)?;
                     let mine: Vec<String> = added
                         .into_iter()
                         .filter(|id| {
@@ -548,34 +548,57 @@ impl Cmux {
         Ok(())
     }
 
-    /// Which workspaces currently exist, by id.
+    /// All windows must be inspected before absence can mean a stale session.
     pub fn workspaces(&self) -> Result<BTreeMap<String, WorkspaceInfo>> {
-        let window = self.current_window()?;
+        let value = self.rpc("window.list", serde_json::json!({}))?;
+        let windows = value
+            .get("windows")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| Error::new("cmux window.list returned no windows array"))?;
+        let mut found = BTreeMap::new();
+        for window in windows {
+            let id = window
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::new("cmux window.list returned a window without an id"))?;
+            found.extend(self.workspaces_in_window(Some(id))?);
+        }
+        Ok(found)
+    }
+
+    /// Explicit window scope for repository discovery and task identification.
+    pub fn workspaces_in_window(
+        &self,
+        window: Option<&str>,
+    ) -> Result<BTreeMap<String, WorkspaceInfo>> {
         let value = self.rpc("workspace.list", serde_json::json!({ "window_id": window }))?;
         let mut found = BTreeMap::new();
-        if let Some(items) = value.get("workspaces").and_then(|w| w.as_array()) {
-            for item in items {
-                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                    found.insert(
-                        id.to_string(),
-                        WorkspaceInfo {
-                            directory: item
-                                .get("current_directory")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            title: item
-                                .get("custom_title")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string),
-                            description: item
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string),
-                        },
-                    );
-                }
-            }
+        let items = value
+            .get("workspaces")
+            .and_then(|w| w.as_array())
+            .ok_or_else(|| Error::new("cmux workspace.list returned no workspaces array"))?;
+        for item in items {
+            let id = item.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+                Error::new("cmux workspace.list returned a workspace without an id")
+            })?;
+            found.insert(
+                id.to_string(),
+                WorkspaceInfo {
+                    directory: item
+                        .get("current_directory")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    title: item
+                        .get("custom_title")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    description: item
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                },
+            );
         }
         Ok(found)
     }
@@ -651,6 +674,48 @@ pub fn workspace_identity(agent: &str, model: &str) -> String {
 #[cfg(test)]
 mod presentation_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_task_creation_identifies_the_workspace_in_the_target_window() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("cmux");
+        let marker = temp.path().join("created");
+        std::fs::write(&executable, format!(r#"#!/usr/bin/env python3
+import json,sys
+from pathlib import Path
+marker = Path({marker})
+if sys.argv[1] == 'new-workspace':
+ assert sys.argv[sys.argv.index('--window')+1] == 'window-b'
+ marker.touch(); sys.exit(0)
+method,params = sys.argv[2],json.loads(sys.argv[3])
+assert params['window_id'] == 'window-b'
+if method == 'workspace.group.list':
+ print(json.dumps({{'groups':[{{'id':'group-b','anchor_workspace_id':'anchor','member_workspace_ids':['anchor']+(['other','mine'] if marker.exists() else [])}}]}}))
+elif method == 'workspace.list':
+ print(json.dumps({{'workspaces':[{{'id':'other','current_directory':'/elsewhere'}},{{'id':'mine','current_directory':{cwd}}}]}}))
+else: raise AssertionError(method)
+"#, marker=serde_json::to_string(&marker).unwrap(), cwd=serde_json::to_string(temp.path()).unwrap())).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let client = Cmux {
+            executable,
+            socket_path: None,
+        };
+        let created = client
+            .create_task_workspace(
+                "group-b",
+                Some("window-b"),
+                "Task",
+                "",
+                temp.path(),
+                "true",
+                false,
+            )
+            .unwrap();
+        assert_eq!(created.workspace_id, "mine");
+        assert_eq!(created.window_id, "window-b");
+    }
 
     #[test]
     fn title_budget_belongs_to_the_task() {
