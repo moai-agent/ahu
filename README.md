@@ -134,6 +134,8 @@ worktrees, and records after the harness exits.
 | `@defsec-astra` | Codex / `gpt-6-astra` | Reviews and implements defensive programming and focused refactoring. |
 | `@dev-astra` | Codex / `gpt-6-astra` | Validates and remediates reported issues with regression coverage. |
 | `@docs-astra` | Codex / `gpt-6-astra` | Maintains all tracked Markdown, specifications, knowledge formats, and current project context. |
+| `@roadmap-product-manager` | Codex / `gpt-6-astra` | Turns product ideas and feedback into verifiable roadmap increments. |
+| `@roadmap-architect` | Codex / `gpt-6-astra` | Turns roadmap outcomes into code-grounded technical increments. |
 | `@arch-opus` | Claude Code / `claude-opus-5` | Plans implementation with code-grounded designs, dependencies, and verifiable work increments. |
 | `@defsec-opus` | Claude Code / `claude-opus-5` | Reviews and implements defensive programming and focused refactoring. |
 | `@dev-opus` | Claude Code / `claude-opus-5` | General-purpose ahu development and code review; product documentation belongs to docs-opus. |
