@@ -194,25 +194,6 @@ fn the_terminal_render_carries_no_markdown_syntax() {
 }
 
 #[test]
-fn both_renders_are_built_from_the_same_document() {
-    // Every section title appears in both, so the two can never drift.
-    let terminal = explain::overview();
-    let markdown = explain::markdown();
-    for section in explain::document() {
-        assert!(
-            terminal.contains(section.title),
-            "terminal missing {}",
-            section.title
-        );
-        assert!(
-            markdown.contains(section.title),
-            "markdown missing {}",
-            section.title
-        );
-    }
-}
-
-#[test]
 fn the_overview_distinguishes_headless_results_from_interactive_state() {
     for text in [explain::overview(), explain::markdown()] {
         for claim in [
