@@ -159,7 +159,8 @@ Use [discover-requirements](.agents/skills/discover-requirements/SKILL.md) when 
 request needs clearer outcomes, scope, or acceptance criteria. Ask to use
 `discover-requirements` with your idea; it gathers facts and proposes choices in
 your preferred channel, keeping discovery records private. Specified tasks proceed
-without a mandatory interview. Repository copies are provided for Codex and Claude.
+without a mandatory interview. The canonical repository skill tree is
+`.agents/skills/`, which Claude can load directly as well.
 
 ## What travels with a task
 
@@ -213,8 +214,8 @@ their workspace in the repository's group before starting. See
 
 The initial MCP integration is local and repository-scoped. `ahu mcp serve`
 provides read-only agent and task inspection over stdio; `ahu mcp setup` copies
-the bundled skills into `.agents/skills/` and `.claude/skills/` as ordinary files
-that the project can review and commit. The skill bundle ships with ahu for now.
+the bundled skills into `.agents/skills/` as ordinary files that the project can
+review and commit. The skill bundle ships with ahu for now.
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON
 contracts, prompt transport, hooks, state, and delegation boundaries.

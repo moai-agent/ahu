@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that repository skill copies match their canonical source."""
+"""Check that the repository's canonical skill tree is valid."""
 
 from pathlib import Path
 import sys
@@ -24,20 +24,11 @@ def files(root: Path) -> dict[str, bytes]:
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     try:
-        canonical = files(root / ".agents/skills")
-        deployed = files(root / ".claude/skills")
-        differences = [
-            name for name in sorted(canonical.keys() | deployed.keys())
-            if canonical.get(name) != deployed.get(name)
-        ]
-        if differences:
-            for name in differences:
-                print(f"skill copy mismatch: {name!r}", file=sys.stderr)
-            return 1
+        files(root / ".agents/skills")
     except (OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 1
-    print("Repository skill copies match .agents/skills.")
+    print("Repository skills in .agents/skills are valid.")
     return 0
 
 

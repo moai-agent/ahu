@@ -76,9 +76,9 @@ development agents own code and tests and hand prose needs to their documentatio
 counterpart on the same harness. Preserve existing delegation and approval
 boundaries.
 
-Maintain the canonical `.agents/skills/discover-requirements/SKILL.md` and the
-repo-local `.claude/skills/discover-requirements/SKILL.md` as identical regular
-files through a separately authorized edit; no symlinks, global sync, or installs.
+Maintain `.agents/skills/discover-requirements/SKILL.md` as the canonical
+repository skill file. Claude loads the same `.agents/skills/` tree directly;
+do not create a duplicate `.claude/skills/` copy, symlink, global sync, or install.
 
-After skill edits, run `python3 scripts/check-skills.py` to check the repository
-copies byte-for-byte. Keep all metadata identical in both copies.
+After skill edits, run `python3 scripts/check-skills.py` to validate the
+canonical repository skill tree.

@@ -76,9 +76,10 @@ repository ownership and task-resolution rules. It does not create a second
 identity, task store, permission path, or harness adapter.
 
 `ahu mcp setup` materializes the skill bundle shipped with this ahu build into
-`.agents/skills/` and `.claude/skills/`. The files are ordinary project files
-for review and commit. Setup refuses to overwrite a changed file, so local
-skill edits cannot be silently replaced. This is the temporary delivery path
+`.agents/skills/`. Claude can load that canonical tree directly; ahu does not
+duplicate it into `.claude/skills/`. The files are ordinary project files for
+review and commit. Setup refuses to overwrite a changed file, so local skill
+edits cannot be silently replaced. This is the temporary delivery path
 while installed harnesses lack verified native Skills-over-MCP support; the
 bundle can move to an independent repository later without changing the MCP
 task boundary.

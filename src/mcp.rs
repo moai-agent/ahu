@@ -185,21 +185,19 @@ pub fn setup(repo: &Repo) -> Result<i32> {
         include_str!("../.agents/skills/discover-requirements/SKILL.md"),
     )];
     for (name, content) in files {
-        for root in [".agents/skills", ".claude/skills"] {
-            let path = repo.root.join(root).join(name).join("SKILL.md");
-            if let Ok(existing) = std::fs::read_to_string(&path) {
-                if existing != content {
-                    return Err(Error::new(format!(
-                        "refusing to overwrite changed skill {}",
-                        path.display()
-                    )));
-                }
-                continue;
+        let path = repo.root.join(".agents/skills").join(name).join("SKILL.md");
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            if existing != content {
+                return Err(Error::new(format!(
+                    "refusing to overwrite changed skill {}",
+                    path.display()
+                )));
             }
-            std::fs::create_dir_all(path.parent().expect("skill path has parent"))?;
-            std::fs::write(&path, content)?;
-            println!("Wrote {}", path.display());
+            continue;
         }
+        std::fs::create_dir_all(path.parent().expect("skill path has parent"))?;
+        std::fs::write(&path, content)?;
+        println!("Wrote {}", path.display());
     }
     Ok(0)
 }

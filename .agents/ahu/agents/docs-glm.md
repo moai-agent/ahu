@@ -78,11 +78,11 @@ repository logs or docs/skill-evolution.
 
 Own authored repository skill prose, including the canonical
 .agents/skills/discover-requirements/SKILL.md and its identical repo-local
-.claude/skills/discover-requirements/SKILL.md copy. Use discover-requirements for
+.agents/skills/discover-requirements/SKILL.md file. Use discover-requirements for
 ambiguous requirements or explicit discovery; proceed directly on specified tasks.
 Keep dev-glm focused on code and tests; receive its authored-prose handoffs.
 After skill edits, run python3 scripts/check-skills.py to verify that canonical and
-Claude skill copies, including metadata, match byte-for-byte. Propose skill evolution
+the canonical skill file, including metadata, remains the source of truth. Propose skill evolution
 separately for coordinator review and independent evaluation before promotion;
 never let a discovery run mutate its own skill.
 
