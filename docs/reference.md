@@ -581,6 +581,14 @@ included; `antigravity-agent` also reads a Markdown body after frontmatter. An e
 as native model or instruction metadata. Plain Markdown makes the delivered
 instructions explicit.
 
+Each resolved registration also has an immutable repository-scoped reference in
+the form `ahu:agent:<uuid>`. The UUID identifies the registered name, version,
+harness, model, source digest, and delivered-instructions digest together. A
+reference is valid only in its repository's primary coordination store. When
+the registration or either source changes, resolution fails as stale instead of
+silently retargeting the reference; native harness session identifiers remain
+provider-owned and are not agent references.
+
 For the registration example below, first create the matching definition:
 
 ```sh

@@ -191,7 +191,8 @@ fn agents(repo: &Repo) -> Result<Value> {
     let rows = crate::agent::load_all(&repo.root)?
         .into_iter()
         .map(|agent| {
-            json!({
+            let agent_ref = crate::agent_ref::ensure(repo, &agent)?;
+            Ok::<_, crate::util::Error>(json!({
                 "name": format!("@{}", agent.manifest.name),
                 "version": agent.manifest.version,
                 "description": agent.manifest.description,
@@ -201,9 +202,10 @@ fn agents(repo: &Repo) -> Result<Value> {
                 "status": agent.manifest.status.as_str(),
                 "source": agent.source_path.strip_prefix(&repo.root).unwrap_or(&agent.source_path),
                 "identity_digest": agent.identity_digest(),
-            })
+                "agent_ref": agent_ref,
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     Ok(json!({"schema_version":1,"repository":repo.identity(),"agents":rows}))
 }
 

@@ -17,6 +17,7 @@
 //!     papered over.
 
 pub mod agent;
+pub mod agent_ref;
 pub mod catalog;
 pub mod cli;
 pub mod cmux;

@@ -178,7 +178,7 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
     }
     for agent in &agents {
         console.say(&format!(
-            "@{} {}\n  harness  {}\n  model    {}\n  source   {} [{}]\n  identity {}\n",
+            "@{} {}\n  harness  {}\n  model    {}\n  source   {} [{}]\n  identity {}\n  reference {}\n",
             style.paint(Role::Agent, &display_safe(&agent.manifest.name)),
             style.paint(Role::Hint, &display_safe(&agent.manifest.version)),
             style.paint(Role::Runtime, &display_safe(&agent.manifest.harness)),
@@ -197,6 +197,7 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
                 .map(|s| s.format.as_str())
                 .unwrap_or("manifest"),
             &agent.identity_digest()[..12],
+            crate::agent_ref::ensure(repo, agent)?,
         ))?;
         if !agent.manifest.description.is_empty() {
             console.say(&format!(
