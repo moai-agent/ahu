@@ -66,6 +66,13 @@ name can acquire a suffix at submission if another task claimed it meanwhile.
 Registered agent names and task handles may share text; the command supplies
 their distinct meaning. Names locate tasks and do not grant authority.
 
+The `@` sigil is interpreted by command context: agent-selection positions such
+as `ahu launch @dev-astra` select a registered agent, while task-reference
+positions such as `ahu task @storage-cleanup` select an immutable task handle.
+The canonical task reference is `ahu:task:<uuid>`. Provider-owned native session
+IDs remain labeled locators in inspection output; they do not become ahu task
+references or grant permission to retrieve provider history.
+
 ## MCP integration
 
 `ahu mcp serve` starts a local newline-delimited JSON request/response server on stdin and

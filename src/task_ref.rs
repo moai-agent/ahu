@@ -15,6 +15,14 @@ pub fn resolve(repo: &crate::git::Repo, input: &str) -> Result<String> {
 pub fn normalize(input: &str) -> Result<String> {
     let lower = input.to_ascii_lowercase();
     let id = if let Some(reference) = lower.strip_prefix("ahu:") {
+        if let Some((kind, _)) = reference.split_once(':')
+            && kind == "agent"
+        {
+            crate::bail!(
+                kind: crate::util::ErrorKind::Usage,
+                "expected a task reference (ahu:task:<id>), not an agent reference (ahu:agent:...)"
+            );
+        }
         reference.strip_prefix("task:").ok_or_else(|| {
             crate::util::Error::new("expected a task reference: ahu:task:<id>")
                 .with_kind(crate::util::ErrorKind::Usage)

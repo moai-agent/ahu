@@ -970,6 +970,7 @@ pub fn task_summary(
         "task_id": record.task_id,
         "task_ref": crate::task_ref::display(&record.task_id),
         "task_handle": crate::task_handles::at(dir, &record.task_id),
+        "repo_identity": record.repo_identity,
         "agent": record.agent_label(),
         "harness": record.identity.harness,
         "model": record.identity.model,
@@ -984,6 +985,7 @@ pub fn task_summary(
         "state_source": "record",
         "liveness": task::observed_liveness(session_owner(dir, record, workspaces)).as_str(),
         "completion_verified": false,
+        "harness_executable": record.harness_executable,
     });
     value["execution_backend"] = if crate::headless::review::is_headless(dir) {
         "headless".into()

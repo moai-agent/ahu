@@ -193,6 +193,8 @@ print('{}')
     assert_eq!(value["task_id"], id);
     assert_eq!(value["task_ref"], format!("ahu:task:{id}"));
     assert_eq!(value["task_handle"], "@review");
+    assert_eq!(value["repo_identity"], discovered.identity());
+    assert_eq!(value["harness_executable"], "claude");
     let human = run(&repo, &["task", "@review"]);
     assert!(String::from_utf8_lossy(&human.stdout).contains(&format!("@review (ahu:task:{id})")));
 }

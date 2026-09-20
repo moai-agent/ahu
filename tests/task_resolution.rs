@@ -562,4 +562,14 @@ fn unrecognized_forms_are_usage_errors() {
     let text = text_of(&out);
     assert_eq!(out.status.code(), Some(2), "{text}");
     assert!(text.contains("a task id must not be empty."), "{text}");
+
+    let out = ahu_at(&scenario, c.path(), &["task", "ahu:agent:abc1"]);
+    let text = text_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{text}");
+    assert!(
+        text.contains(
+            "expected a task reference (ahu:task:<id>), not an agent reference (ahu:agent:...)"
+        ),
+        "{text}"
+    );
 }
