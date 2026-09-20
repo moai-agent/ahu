@@ -42,6 +42,7 @@ pub mod storage;
 pub mod style;
 pub mod task;
 pub mod task_index;
+pub mod task_ref;
 pub mod util;
 
 pub mod headless;

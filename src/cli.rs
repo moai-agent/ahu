@@ -11,7 +11,7 @@ Launch repository-defined agents in fresh Git worktrees and organise their
 interactive sessions in cmux. Use --headless for unattended execution with
 external results and optional detached supervision.
 
-Usage: ahu [COMMAND]
+Usage: ahu [--repo <path>] [COMMAND]
 
 Running `ahu` with no command opens the interactive launcher: pick an agent with
 `@name` (or leave it blank for the project's automatic selection), paste a task,
@@ -72,9 +72,17 @@ Commands:
                         permissions (ahu passes no --auto and no --pure)
   run-task              Internal: run a prepared task (used by cmux)
 
+Task references:
+  Use ahu:task:<id> to identify a task explicitly. Bare IDs and unique ID
+  prefixes remain accepted. Agent names such as @worker select agents when
+  launching; they are not task references.
+
 Options:
   -h, --help            Print this help message
   -V, --version         Print the version
+  --repo <path>         Select a repository checkout before the command.
+                        Also accepts --repo=<path>; paths in the command are
+                        relative to this checkout. No environment override.
   --color <choice>      auto, always, or never (also --color=<choice>).
                         Always/never override NO_COLOR. Auto honors any
                         NO_COLOR value and requires stdout to be a
@@ -723,9 +731,46 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     })
 }
 
-/// Remove global color options while leaving command option values intact.
-/// Keeping value-taking options together prevents an inline prompt that happens
-/// to say `--color=always` from being interpreted as application configuration.
+/// Read the repository selector only before the command, so literal prompts,
+/// messages, and native arguments can never change the lookup scope.
+pub fn extract_repository(args: Vec<String>) -> Result<(Vec<String>, Option<PathBuf>)> {
+    let mut remaining = Vec::new();
+    let mut repository = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let value = if arg == "--repo" {
+            Some(args.next().ok_or_else(|| {
+                crate::util::Error::new("--repo needs a checkout path.")
+                    .with_kind(crate::util::ErrorKind::Usage)
+            })?)
+        } else {
+            arg.strip_prefix("--repo=").map(str::to_string)
+        };
+        if let Some(value) = value {
+            if value.is_empty() || value.starts_with("--") {
+                bail!(kind: crate::util::ErrorKind::Usage, "--repo needs a checkout path; prefix a path beginning with '--' with './'.");
+            }
+            if repository.replace(PathBuf::from(value)).is_some() {
+                bail!(kind: crate::util::ErrorKind::Usage, "--repo may only be supplied once.");
+            }
+        } else if arg == "--color" {
+            remaining.push(arg);
+            if let Some(value) = args.next() {
+                remaining.push(value);
+            }
+        } else if arg.starts_with("--color=") {
+            remaining.push(arg);
+        } else {
+            remaining.push(arg);
+            remaining.extend(args);
+            break;
+        }
+    }
+    Ok((remaining, repository))
+}
+
+/// Remove global color options while leaving command option values and inbox
+/// messages intact. A literal payload never changes application configuration.
 pub fn extract_color(
     args: Vec<String>,
 ) -> Result<(Vec<String>, Option<crate::style::ColorChoice>)> {
@@ -734,6 +779,11 @@ pub fn extract_color(
     let mut choice = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
+        if remaining.first().map(String::as_str) == Some("message") && remaining.len() >= 2 {
+            remaining.push(arg);
+            remaining.extend(args);
+            break;
+        }
         let value = if arg == "--color" {
             Some(args.next().ok_or_else(|| {
                 crate::util::Error::new("--color needs auto, always, or never.")

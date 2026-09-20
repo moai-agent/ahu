@@ -977,7 +977,9 @@ pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
         let review = &value["review"];
         println!(
             "{} [headless; recorded state {}]",
-            review::safe(review["task_id"].as_str().unwrap_or("unknown")),
+            review::safe(&crate::task_ref::display(
+                review["task_id"].as_str().unwrap_or("unknown")
+            )),
             review::safe(review["session_state"].as_str().unwrap_or("unknown"))
         );
         print!("{}", review::render(review, false));
@@ -2158,6 +2160,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
 }
 
 pub(crate) fn lookup(repo: &crate::git::Repo, id: &str) -> Result<PathBuf> {
+    let id = crate::task_ref::normalize(id)?;
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         bail!("invalid headless task id");
     }
@@ -2165,7 +2168,7 @@ pub(crate) fn lookup(repo: &crate::git::Repo, id: &str) -> Result<PathBuf> {
         .into_iter()
         .filter(|p| {
             p.file_name()
-                .is_some_and(|s| s.to_string_lossy().starts_with(id))
+                .is_some_and(|s| s.to_string_lossy().starts_with(&id))
         })
         .collect();
     if found.len() != 1 {

@@ -550,7 +550,7 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         // disclosure surface as the launch preview, so it escapes the same way.
         console.say(&format!(
             "{} [session {}] {}\n  backend   {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n  liveness  {}\n",
-            display_safe(&record.task_id),
+            display_safe(&crate::task_ref::display(&record.task_id)),
             record.state.as_str(),
             display_safe(&record.title),
             if review.is_some() { "headless" } else { "cmux" },
@@ -636,7 +636,7 @@ pub fn render_unreadable_tasks(repo: &Repo, unreadable: &[task::UnreadableTask])
         for found in members {
             out.push_str(&format!(
                 "\n     {} [unreadable]\n",
-                display_safe(&found.task_id)
+                display_safe(&crate::task_ref::display(&found.task_id))
             ));
             out.push_str(&format!("       record    {}\n", display_path(&found.dir)));
 
@@ -697,19 +697,6 @@ fn strip_record_path(reason: &str, dir: &Path) -> String {
         .unwrap_or_else(|| reason.to_string())
 }
 
-/// Normalize a task id the way ahu prints them: the `ahu:task:` prefix is
-/// optional, and case is not significant. The bare id is the storage form.
-fn normalize_task_id(id: &str) -> Result<String> {
-    let mut normalized = id.to_ascii_lowercase();
-    if let Some(rest) = normalized.strip_prefix("ahu:task:") {
-        normalized = rest.to_string();
-    }
-    if normalized.is_empty() {
-        bail!(kind: crate::util::ErrorKind::Usage, "a task id must not be empty.");
-    }
-    Ok(normalized)
-}
-
 /// The shared wording for a task whose record exists but cannot be read.
 fn unreadable_record(blocked: &task::UnreadableTask) -> Error {
     Error::new(format!(
@@ -736,7 +723,7 @@ fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task:
         bail!(
             "the task index records task {} at {}, but that checkout no longer exists; the entry \
              is stale and the task cannot be reached from here.",
-            display_safe(&entry.task_id),
+            display_safe(&crate::task_ref::display(&entry.task_id)),
             display_path(&entry.checkout)
         );
     }
@@ -754,7 +741,7 @@ fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task:
         bail!(
             "the task index records task {} at {}, but its task directory {} no longer exists; the \
              entry is stale.",
-            display_safe(&entry.task_id),
+            display_safe(&crate::task_ref::display(&entry.task_id)),
             display_path(&entry.checkout),
             display_path(&dir)
         );
@@ -763,7 +750,7 @@ fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task:
         Error::new(format!(
             "task {} has an unreadable record at {}: {}\nThe task index records its checkout as \
              {}.",
-            display_safe(&entry.task_id),
+            display_safe(&crate::task_ref::display(&entry.task_id)),
             display_path(&dir),
             strip_record_path(&e.to_string(), &dir),
             display_path(&entry.checkout)
@@ -783,7 +770,7 @@ fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task:
         bail!(
             "the task index records task {} at checkout {}, but the record ahu found there \
              describes a different task. Nothing was done; re-check the task id.",
-            display_safe(&entry.task_id),
+            display_safe(&crate::task_ref::display(&entry.task_id)),
             display_path(&entry.checkout)
         );
     }
@@ -794,7 +781,7 @@ fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task:
 /// The task index is consulted for ids that are not local records, so a task is
 /// reachable from any checkout of the repository that launched it.
 fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
-    let id = normalize_task_id(input)?;
+    let id = crate::task_ref::normalize(input)?;
     // Inspection needs no live cmux connection and does not rewrite records.
     let listing = task::list(repo)?;
     if let Some((dir, record)) = listing.records.iter().find(|(_, r)| r.task_id == id) {
@@ -868,7 +855,7 @@ fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
 
 /// Resolve exact IDs before unique prefixes, including unreadable candidates.
 fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
-    let normalized = normalize_task_id(id)?;
+    let normalized = crate::task_ref::normalize(id)?;
     let id: &str = &normalized;
     // Inspection needs no live cmux connection and does not rewrite records.
     let listing = task::list(repo)?;
@@ -910,6 +897,7 @@ pub fn task_summary(
     let mut value = serde_json::json!({
         "schema_version": 1,
         "task_id": record.task_id,
+        "task_ref": crate::task_ref::display(&record.task_id),
         "agent": record.agent_label(),
         "harness": record.identity.harness,
         "model": record.identity.model,
@@ -957,7 +945,7 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
     } else {
         console.say(&format!(
             "{} [session {}]\n  backend   {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  base      {}\n  worktree  {}\n  exists    {}\n  record    {}\n  liveness  {}\n\nState is recorded, not a live activity check. Task completion is not verified. Liveness is observed at this moment, not a verdict; `unknown` means ahu could not read the signal.\n",
-            display_safe(&record.task_id), record.state.as_str(), value["execution_backend"].as_str().unwrap_or("unknown"), display_safe(&record.agent_label()),
+            display_safe(&crate::task_ref::display(&record.task_id)), record.state.as_str(), value["execution_backend"].as_str().unwrap_or("unknown"), display_safe(&record.agent_label()),
             display_safe(&record.identity.harness), display_safe(&record.identity.model),
             display_safe(&record.branch), display_safe(record.base_commit.as_deref().unwrap_or("unknown")),
             display_path(&record.worktree), record.worktree.is_dir(), display_path(&dir.join("task.json")),
@@ -1071,7 +1059,7 @@ pub fn message_cmd(
     let entry = deliver_inbox_message(&dir, text)?;
     console.say(&format!(
         "delivered inbox message {entry:04} to task {}.\n",
-        display_safe(&record.task_id)
+        display_safe(&crate::task_ref::display(&record.task_id))
     ))?;
     Ok(0)
 }
@@ -1281,7 +1269,7 @@ pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32>
         }
         eprintln!(
             "Run `ahu result {}` for the full recorded list.",
-            display_safe(&record.task_id)
+            display_safe(&crate::task_ref::display(&record.task_id))
         );
     }
     if std::io::stdout().is_terminal() {
@@ -1305,7 +1293,7 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
             bail!(
                 "task {} exists but ahu cannot read its record, so it cannot find its cmux \
                  session.\n{}\nThe record is at {}. Run `ahu tasks` for its worktree and branch.",
-                display_safe(&blocked.task_id),
+                display_safe(&crate::task_ref::display(&blocked.task_id)),
                 display_safe_block(&blocked.reason),
                 display_path(&blocked.dir)
             );
@@ -1351,7 +1339,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
                     Error::new(format!(
                         "the task index records task {} at {}, but that checkout cannot be \
                      inspected: {e}\nNothing was removed.",
-                        display_safe(&entry.task_id),
+                        display_safe(&crate::task_ref::display(&entry.task_id)),
                         display_path(&entry.checkout)
                     ))
                 })?;
@@ -1498,7 +1486,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     if let Err(e) = crate::task_index::remove(&record.task_id) {
         eprintln!(
             "warning: could not remove the task index entry for {}: {e}",
-            display_safe(&record.task_id)
+            display_safe(&crate::task_ref::display(&record.task_id))
         );
     }
     let mut said = format!("removed task {}\n", display_safe(task_id));
@@ -1636,13 +1624,14 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
         );
         return crate::headless::emit(
             &serde_json::json!({
-                "schema_version": 1,
-                "task_id": record.task_id,
-                "cancellation": "already-terminal",
-                "state": record.state.as_str(),
-                "workspace": "left open",
-                "retention": "the worktree, branch and record are kept",
-            }),
+                    "schema_version": 1,
+                    "task_id": record.task_id,
+            "task_ref": crate::task_ref::display(&record.task_id),
+                    "cancellation": "already-terminal",
+                    "state": record.state.as_str(),
+                    "workspace": "left open",
+                    "retention": "the worktree, branch and record are kept",
+                }),
             json_output,
         )
         .map(|()| 0);
@@ -1717,6 +1706,7 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
         &serde_json::json!({
             "schema_version": 1,
             "task_id": record.task_id,
+            "task_ref": crate::task_ref::display(&record.task_id),
             "cancellation": cancellation,
             "state": state.as_str(),
             "workspace": workspace,
@@ -1950,9 +1940,9 @@ fn submit(
     console.say(&format!(
         "\nStarted @{} in cmux.\n  task       {}\n  worktree   {}\n\nOpen session: ahu focus {}\nList tasks:   ahu tasks\n",
         display_safe(&launched.record.identity.agent),
-        display_safe(&launched.record.task_id),
+        display_safe(&crate::task_ref::display(&launched.record.task_id)),
         display_path(launched.record.worktree.strip_prefix(&repo.root).unwrap_or(&launched.record.worktree)),
-        display_safe(&launched.record.task_id),
+        display_safe(&crate::task_ref::display(&launched.record.task_id)),
     ))?;
     console.say(&style::stdout().paint(Role::Warning, &render_launch_notes(&launched.notes)))?;
     Ok(0)

@@ -164,7 +164,9 @@ fn delivered_messages_are_numbered_and_kept_verbatim() {
     let text = text_of(&out);
     assert_eq!(out.status.code(), Some(0), "{text}");
     assert!(
-        text.contains(&format!("delivered inbox message 0001 to task {id}.")),
+        text.contains(&format!(
+            "delivered inbox message 0001 to task ahu:task:{id}."
+        )),
         "{text}"
     );
     assert_eq!(
@@ -176,12 +178,24 @@ fn delivered_messages_are_numbered_and_kept_verbatim() {
     let text = text_of(&out);
     assert_eq!(out.status.code(), Some(0), "{text}");
     assert!(
-        text.contains(&format!("delivered inbox message 0002 to task {id}.")),
+        text.contains(&format!(
+            "delivered inbox message 0002 to task ahu:task:{id}."
+        )),
         "{text}"
     );
     assert_eq!(
         std::fs::read_to_string(inbox.join("0002.md")).unwrap(),
         "second message"
+    );
+
+    let out = ahu_in(
+        repo.path(),
+        &["message", id, "--color=always", "--repo=elsewhere"],
+    );
+    assert!(out.status.success(), "{}", text_of(&out));
+    assert_eq!(
+        std::fs::read_to_string(inbox.join("0003.md")).unwrap(),
+        "--color=always --repo=elsewhere"
     );
 }
 
@@ -202,7 +216,9 @@ fn the_inbox_refuses_the_hundred_and_first_entry() {
     let text = text_of(&out);
     assert_eq!(out.status.code(), Some(0), "{text}");
     assert!(
-        text.contains(&format!("delivered inbox message 0100 to task {id}.")),
+        text.contains(&format!(
+            "delivered inbox message 0100 to task ahu:task:{id}."
+        )),
         "{text}"
     );
 

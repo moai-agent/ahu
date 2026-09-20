@@ -25,10 +25,19 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Vec<String>) -> ahu::util::Result<i32> {
+    let (args, repository) = cli::extract_repository(args)?;
     let (args, color) =
         cli::extract_color(args).map_err(|error| error.with_kind(ahu::util::ErrorKind::Usage))?;
     style::configure(color);
     let command = cli::parse_with_stdin(args, !std::io::stdin().is_terminal())?;
+    if let Some(repository) = repository {
+        std::env::set_current_dir(&repository).map_err(|error| {
+            ahu::util::Error::new(format!(
+                "cannot select repository {}: {error}",
+                repository.display()
+            ))
+        })?;
+    }
     match command {
         Command::Help => {
             println!("{}", cli::HELP);

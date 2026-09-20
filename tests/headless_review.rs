@@ -141,6 +141,25 @@ fn snapshot(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 #[test]
+fn headless_controls_share_typed_task_reference_resolution() {
+    let f = Fixture::new();
+    f.terminal("succeeded");
+    let before = snapshot(&f.dir);
+    for command in ["task", "result", "wait"] {
+        for reference in ["abc1", "ahu:task:abc1", "AHU:TASK:ABC1", "ahu:task:abc"] {
+            let output = f.run(&[command, reference, "--output", "json"]);
+            assert!(output.status.success(), "{command} {reference}: {output:?}");
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["task_id"], "abc1");
+        }
+        let output = f.run(&[command, "ahu:agent:abc1", "--output", "json"]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("expected a task reference"));
+    }
+    assert_eq!(snapshot(&f.dir), before);
+}
+
+#[test]
 fn running_and_interrupted_are_observations_with_string_ids_and_read_only_inspection() {
     use std::os::fd::AsRawFd;
     let f = Fixture::new();
@@ -174,7 +193,7 @@ fn running_and_interrupted_are_observations_with_string_ids_and_read_only_inspec
     assert_eq!(f.json("task")["session_state"], "running");
     let out = text(f.run(&["result", "abc1"]));
     assert!(out.contains("no live supervisor"));
-    assert!(out.contains("ahu diff abc1"));
+    assert!(out.contains("ahu diff ahu:task:abc1"));
     assert!(out.contains("not verified"));
     assert_eq!(snapshot(&f.dir), before);
 }
@@ -207,7 +226,7 @@ fn terminal_outcomes_show_known_session_locations_and_never_accept_work() {
                 "native-session-1",
                 "result.json",
                 "result.md",
-                "ahu result abc1",
+                "ahu result ahu:task:abc1",
                 "not assessed",
             ] {
                 assert!(out.contains(expected), "{expected}: {out}");

@@ -161,17 +161,17 @@ pub(super) fn projection(
     // Commands are offered only for identifiers accepted by headless lookup.
     let commands = if !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         vec![
-            format!("ahu task {id}"),
-            format!("ahu result {id} --output json"),
-            format!("ahu diff {id}"),
-            format!("ahu wait {id} --output json"),
+            format!("ahu task ahu:task:{id}"),
+            format!("ahu result ahu:task:{id} --output json"),
+            format!("ahu diff ahu:task:{id}"),
+            format!("ahu wait ahu:task:{id} --output json"),
         ]
     } else {
         Vec::new()
     };
     let attempt = spec.map(|s| super::attempt_dir(dir, s));
     json!({
-        "backend":"headless", "task_id":id, "number":spec.map(|s| s.attempt),
+        "backend":"headless", "task_id":id, "task_ref":crate::task_ref::display(&id), "number":spec.map(|s| s.attempt),
         "outcome":result.map(|v| &v["outcome"]).cloned().unwrap_or(json!("unavailable")),
         "outcome_source":if error.is_some() {"unavailable"} else if result.is_some_and(|v| v["outcome"] == "running" || v["outcome"] == "interrupted") {"ownership observation"} else {"result.json"},
         "liveness":liveness, "ownership_source":"owner.lock observation", "supervisor_owned":ownership,
