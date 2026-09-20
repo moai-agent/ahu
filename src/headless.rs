@@ -1,4 +1,4 @@
-//! Unattended attempts with external artifacts and an ahu-owned supervisor.
+//! Unattended attempts with minimal primary-owned state and an ahu supervisor.
 //! Process and harness outcomes are evidence, never work acceptance.
 pub(crate) mod review;
 
@@ -7,8 +7,7 @@ use crate::util::{Error, Result, digest_bytes};
 use crate::{bail, state, task};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -40,6 +39,7 @@ impl Default for Options {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Spec {
+    #[serde(deserialize_with = "read_spec_version")]
     pub schema_version: u32,
     pub options: Options,
     pub harness_version: String,
@@ -62,6 +62,19 @@ pub struct Spec {
     pub native_profile: Option<crate::native::Profile>,
     pub native_controls: Vec<String>,
     pub gaps: Vec<String>,
+}
+
+fn read_spec_version<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u32, D::Error> {
+    let version = u32::deserialize(deserializer)?;
+    if matches!(version, 1 | 2) {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom(
+            "unsupported headless schema version",
+        ))
+    }
 }
 
 impl Spec {
@@ -308,61 +321,109 @@ fn validate_executable(path: &Path, repo: &crate::git::Repo) -> Result<PathBuf> 
     Ok(real)
 }
 
-/// Resolve existing ancestors first, then refuse redirected runtime components.
-/// The caller-selected root may be outside the default home, but never in Git.
+/// Conventional legacy store, used only to locate existing records.
 pub fn runtime_root() -> Result<PathBuf> {
-    let raw = std::env::var_os("AHU_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state/ahu/runtime"))
-        })
-        .ok_or_else(|| {
-            Error::new("set AHU_RUNTIME_DIR to a private directory outside repositories")
-        })?;
-    if !raw.is_absolute()
-        || raw
-            .components()
-            .any(|p| matches!(p, std::path::Component::ParentDir))
-    {
-        bail!("runtime root must be an absolute path without '..'");
-    }
-    let mut existing = raw.as_path();
-    let mut tail = Vec::new();
-    while !existing.exists() {
-        if std::fs::symlink_metadata(existing).is_ok() {
-            bail!("runtime root contains a dangling symlink");
-        }
-        tail.push(
-            existing
-                .file_name()
-                .ok_or_else(|| Error::new("invalid runtime root"))?
-                .to_os_string(),
-        );
-        existing = existing
-            .parent()
-            .ok_or_else(|| Error::new("invalid runtime root"))?;
-    }
-    let mut root = existing.canonicalize()?;
-    for component in tail.into_iter().rev() {
-        root.push(component);
-    }
-    if root.ancestors().any(|p| p.join(".git").exists()) {
-        bail!("runtime and artifacts must be outside every repository checkout");
-    }
-    Ok(root)
+    let home = std::env::var_os("HOME").ok_or_else(|| Error::new("legacy home unavailable"))?;
+    crate::storage::external_root(&PathBuf::from(home).join(".local/state/ahu/runtime"))
 }
 
 pub fn store(repo: &crate::git::Repo) -> Result<PathBuf> {
-    Ok(crate::storage::RuntimeStorage::new(runtime_root()?).repo_dir(&repo.identity()))
+    Ok(crate::storage::HeadlessStore::for_repo(repo)?.directory)
+}
+
+pub(crate) fn stores(repo: &crate::git::Repo) -> Result<Vec<PathBuf>> {
+    let mut stores = vec![store(repo)?];
+    stores.extend(
+        crate::storage::legacy_runtime_roots(repo)?
+            .into_iter()
+            .map(|p| p.join(repo.identity())),
+    );
+    Ok(stores)
+}
+
+pub(crate) fn confined_in(repo: &crate::git::Repo, path: &Path, create: bool) -> Result<()> {
+    if let Some(store) = crate::storage::HeadlessStore::containing(path)? {
+        if store
+            .directory
+            .parent()
+            .and_then(Path::file_name)
+            .is_none_or(|n| n != repo.identity().as_str())
+        {
+            bail!("headless store belongs to another repository");
+        }
+        return confined_at(&store.directory, path, create);
+    }
+    let root = crate::storage::legacy_runtime_roots(repo)?
+        .into_iter()
+        .find(|root| path.starts_with(root))
+        .ok_or_else(|| {
+            Error::new("task path is outside this repository's configured legacy roots")
+        })?;
+    confined_at(&root, path, create)
 }
 
 pub(crate) fn confined(path: &Path, create: bool) -> Result<()> {
-    let root = runtime_root()?;
-    if !path.starts_with(&root) {
-        bail!("task path is outside the external runtime root");
+    if let Some(store) = crate::storage::HeadlessStore::containing(path)? {
+        return confined_at(&store.directory, path, create);
     }
-    let mut cursor = root.clone();
-    if let Ok(meta) = std::fs::symlink_metadata(&root) {
+    if let Ok(root) = runtime_root()
+        && path.starts_with(&root)
+    {
+        return confined_at(&root, path, create);
+    }
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(repo) = crate::git::discover(&cwd)
+        && crate::storage::legacy_runtime_roots(&repo)?
+            .iter()
+            .any(|root| path.starts_with(root))
+    {
+        return confined_in(&repo, path, create);
+    }
+    // An exact old task reference can identify its owner. The record is evidence
+    // only: its repository must explicitly configure this external root before
+    // any access is accepted. Never infer a custom store from retired selectors.
+    for dir in path.ancestors() {
+        let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !(task::is_canonical_task_uuid(id)
+            || (!id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit())))
+        {
+            continue;
+        }
+        let Some(root) = dir.parent().and_then(Path::parent) else {
+            continue;
+        };
+        if crate::storage::external_root(root).ok().as_deref() != Some(root) {
+            continue;
+        }
+        confined_at(root, dir, false)?;
+        let record_path = dir.join("task.json");
+        if state::confine_file(&record_path)?.is_none_or(|m| m.len() > 1024 * 1024) {
+            continue;
+        }
+        let record = task::load(dir)?;
+        let repo = crate::git::discover(&record.repo_root)?;
+        if record.task_id != id
+            || record.repo_identity != repo.identity()
+            || dir
+                .parent()
+                .and_then(Path::file_name)
+                .is_none_or(|n| n != record.repo_identity.as_str())
+        {
+            bail!("legacy task reference has inconsistent ownership");
+        }
+        return confined_in(&repo, path, create);
+    }
+    bail!("task path is outside verified primary coordination and configured legacy roots")
+}
+
+fn confined_at(root: &Path, path: &Path, create: bool) -> Result<()> {
+    if !path.starts_with(root) {
+        bail!("task path is outside its verified store");
+    }
+    let mut cursor = root.to_path_buf();
+    if let Ok(meta) = std::fs::symlink_metadata(root) {
         use std::os::unix::fs::MetadataExt;
         // SAFETY: geteuid has no preconditions.
         if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
@@ -375,7 +436,7 @@ pub(crate) fn confined(path: &Path, create: bool) -> Result<()> {
         state::create_private_dir_all(&cursor)?;
     }
     for part in path
-        .strip_prefix(&root)
+        .strip_prefix(root)
         .map_err(|e| Error::new(e.to_string()))?
         .components()
     {
@@ -517,20 +578,24 @@ impl ConfinedDir {
 }
 
 pub fn discover(repo: &crate::git::Repo) -> Result<Vec<PathBuf>> {
-    let dir = store(repo)?;
-    confined(&dir, false)?;
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if crate::task::is_canonical_task_uuid(&name) || name.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            confined(&entry.path(), false)?;
-            if entry.path().join("task.json").exists() {
-                out.push(entry.path());
+    for dir in stores(repo)? {
+        confined_in(repo, &dir, false)?;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if crate::task::is_canonical_task_uuid(&name)
+                || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
+                confined_in(repo, &entry.path(), false)?;
+                if entry.path().join("task.json").exists() {
+                    out.push(entry.path());
+                }
             }
         }
     }
@@ -637,6 +702,7 @@ pub fn launch(
     let candidate = crate::selection::resolve_executable(program)
         .ok_or_else(|| Error::new("harness executable unavailable"))?;
     validate_executable(Path::new(&candidate), repo)?;
+    confined(&store(repo)?, false)?;
     let mut plan = crate::launch::plan(repo, agent, pair, prompt)?;
     plan.apply_display(display)?;
     // cmux integration environment is removed before supervisor and worker execution.
@@ -695,11 +761,16 @@ pub fn launch(
     }
     let root_task = if let Some(parent) = &parent_task {
         let parent_spec: Spec = read_json(&lookup(repo, parent)?.join("headless.json"))?;
+        if parent_spec.schema_version != 2 {
+            bail!(
+                "legacy dispatch is unsupported; use the original runner and its owning supervisor"
+            );
+        }
         parent_spec.root_task.unwrap_or_else(|| parent.clone())
     } else {
         plan.task_id.clone()
     };
-    let mut spec = Spec { schema_version: 1, options, harness_version: version, executable_digest: digest_bytes(&std::fs::read(&executable)?),
+    let mut spec = Spec { schema_version: 2, options, harness_version: version, executable_digest: digest_bytes(&std::fs::read(&executable)?),
         root_task: Some(root_task),
         parent_attempt: std::env::var("AHU_PARENT_ATTEMPT").ok().and_then(|v| v.parse().ok()),
         broker_request: std::env::var("AHU_BROKER_DISPATCH").ok(),
@@ -718,7 +789,7 @@ pub fn launch(
             "Native session stores use existing external harness homes and credentials; their retention and disk limits are not owned by ahu.".into()],
     };
     spec.gaps.extend([
-        "Stderr classification recognizes a bounded set of permission/authentication/quota signatures conservatively; other stderr is preserved with explicit diagnostic uncertainty. Authenticated agy denial coverage remains unvalidated.".into(),
+        "Stderr classification recognizes a bounded set of permission/authentication/quota signatures conservatively; other stderr is discarded with explicit diagnostic uncertainty. Authenticated agy denial coverage remains unvalidated.".into(),
         "Automatic timeout/capture failure and explicit cancellation stop registered descendants of the current attempt; results record bounded reconciliation and unknown cleanup. Supervisor crash and provider-managed work remain outside guaranteed cleanup.".into(),
         "Broker scans at most 32 entries per tick, retains at most 256 consumed requests per attempt, and stops admission above 4096 entries per scan. Cleanup removes at most 4097 inbox entries per call while retaining private claims/responses; arbitrary worker filesystem writes require external disk quotas.".into(),
         "Child resume and worker-originated resume are unsupported: submit a new registered assignment through the broker or a new root from the host with explicit grants.".into(),
@@ -767,6 +838,9 @@ pub fn launch(
     plan.harness_executable = executable;
     plan.task_dir = store(repo)?.join(&plan.task_id);
     confined(&plan.task_dir, false)?;
+    if !dry_run {
+        confined(plan.task_dir.parent().expect("store"), true)?;
+    }
     crate::commands::preflight(console, repo, &loaded, &plan, prompt, dry_run)?;
     let preview = json!({"schema_version":1,"backend":"headless","task_id":plan.task_id,"worktree":plan.worktree,
         "branch":plan.branch,"command":plan.command.redacted(),"executable":plan.harness_executable,"capabilities":spec,
@@ -1076,18 +1150,19 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let attempt = attempt_dir(dir, spec);
     confined(&attempt, true)?;
-    let stderr = state::create_new_private_file(&attempt.join("supervisor.log"))?;
+
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(["supervise", "--task-dir"])
         .arg(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(stderr);
+        .stderr(Stdio::null());
     sanitize(&mut command, None);
     command
-        .env("AHU_RUNTIME_DIR", runtime_root()?)
-        .env("AHU_EXPECTED_DIGEST", frozen_digest(dir)?);
+        .env("AHU_EXPECTED_DIGEST", frozen_digest(dir)?)
+        .env_remove("AHU_RUNTIME_DIR")
+        .env_remove("AHU_TASK_INDEX_DIR");
     // SAFETY: setsid is async-signal-safe and accesses no Rust state after fork.
     unsafe {
         command.pre_exec(|| {
@@ -1104,12 +1179,9 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
-            let detail =
-                std::fs::read_to_string(attempt.join("supervisor.log")).unwrap_or_default();
             bail!(
-                "supervisor exited before startup acknowledgement ({status}); inspect {}: {}",
-                attempt.display(),
-                detail
+                "supervisor exited before startup acknowledgement ({status}); inspect {}",
+                attempt.display()
             );
         }
         if Instant::now() >= deadline {
@@ -1127,6 +1199,7 @@ pub struct Events {
     pub session: Option<String>,
     pub terminal: bool,
     pub failed: bool,
+    #[serde(skip_serializing)]
     pub summary: String,
     pub blockers: Vec<String>,
     pub unknown_events: u64,
@@ -1134,9 +1207,15 @@ pub struct Events {
     pub stderr_diagnostics: Vec<String>,
     #[serde(default)]
     pub stderr_unclassified_lines: u64,
+    #[serde(skip_serializing)]
     pub native_observations: Vec<Value>,
     #[serde(default)]
+    #[serde(skip_serializing)]
     pub native: crate::native::Observations,
+    #[serde(default, skip_serializing)]
+    pub writes_outside_worktree: Vec<String>,
+    #[serde(skip)]
+    native_event_count: usize,
 }
 impl Events {
     fn observe_stderr(&mut self, line: &[u8]) {
@@ -1185,10 +1264,7 @@ impl Events {
         if let Some(category) = category {
             self.failed = true;
             if self.stderr_diagnostics.len() < 32 {
-                self.stderr_diagnostics.push(format!(
-                    "{category}: {}",
-                    text.chars().take(512).collect::<String>()
-                ));
+                self.stderr_diagnostics.push(category.into());
             }
         } else {
             self.stderr_unclassified_lines += 1;
@@ -1204,7 +1280,28 @@ impl Events {
                 return;
             }
         };
-        self.native.observe(harness, &event);
+        if self.native_event_count < 256 {
+            let mut metadata = event.clone();
+            strip_native_text(&mut metadata);
+            if bounded_native_metadata(&metadata) {
+                self.native.observe(harness, &metadata);
+            } else {
+                self.failed = true;
+                self.blockers
+                    .push("native metadata evaluation bound exceeded".into());
+            }
+            if event
+                .get("subtype")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.starts_with("task_"))
+            {
+                self.native_event_count += 1;
+            }
+        } else {
+            self.failed = true;
+            self.blockers
+                .push("native helper evaluation limit exceeded".into());
+        }
         let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
         let session = event
             .get("session_id")
@@ -1214,7 +1311,9 @@ impl Events {
             // error events, which is what makes its errors resumable at all.
             .or_else(|| event.get("sessionID"))
             .and_then(Value::as_str);
-        if let Some(session) = session {
+        if let Some(session) =
+            session.filter(|s| !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control))
+        {
             if let Some(previous) = &self.session {
                 if previous != session {
                     self.failed = true;
@@ -1225,26 +1324,13 @@ impl Events {
                 self.session = Some(session.into());
             }
         }
-        if let Some(errors) = event.get("errors").and_then(Value::as_array) {
-            for error in errors.iter().take(128) {
-                self.blockers.push(
-                    error
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| error.to_string()),
-                );
-            }
-            if !errors.is_empty() {
-                self.failed = true;
-            }
-        }
-        if let Some(error) = event.get("error").filter(|v| !v.is_null()) {
-            self.blockers.push(
-                error
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| error.to_string()),
-            );
+        if event
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|v| !v.is_empty())
+            || event.get("error").is_some_and(|v| !v.is_null())
+        {
+            self.blockers.push("harness reported an error".into());
             self.failed = true;
         }
         if kind.contains("denied")
@@ -1255,15 +1341,7 @@ impl Events {
         {
             self.failed = true;
             self.blockers
-                .push("harness reported permission denials; inspect captured events".into());
-        }
-        if (event
-            .get("parent_tool_use_id")
-            .is_some_and(|v| !v.is_null())
-            || kind.contains("collab"))
-            && self.native_observations.len() < 256
-        {
-            self.native_observations.push(event.clone());
+                .push("harness reported permission denials".into());
         }
         match (harness, kind) {
             ("codex", "thread.started") | ("claude-code", "system") | ("antigravity", "init") => (),
@@ -1344,9 +1422,8 @@ impl Events {
                     });
                 if refused {
                     self.failed = true;
-                    self.blockers.push(
-                        "harness reported permission denials; inspect captured events".into(),
-                    );
+                    self.blockers
+                        .push("harness reported permission denials".into());
                 }
             }
             ("opencode", "step_finish") => {
@@ -1359,9 +1436,9 @@ impl Events {
                     // Anything else — a token ceiling, an abort — ends the turn
                     // without the model having said it is done. Recorded as a
                     // terminal failure rather than left to look like silence.
-                    Some(other) => {
+                    Some(_) => {
                         self.blockers
-                            .push(format!("harness ended the step for reason {other:?}"));
+                            .push("harness ended the step without a stop reason".into());
                         self.finish(true);
                     }
                 }
@@ -1384,7 +1461,7 @@ impl Events {
     }
 }
 
-const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
+const STREAM_EVALUATION_LIMIT: u64 = 64 * 1024 * 1024;
 const LINE_LIMIT: usize = 1024 * 1024;
 
 const MAX_EVENT_JSON_DEPTH: usize = 64;
@@ -1555,57 +1632,80 @@ fn collect_write_paths(event: &Value) -> Vec<String> {
     candidates
 }
 
-/// Post-run, disclose-only scan: read the captured event stream and list
-/// write-tool call paths that resolve outside the task worktree. Never
-/// fails; a missing or unreadable stream scans as empty.
-fn scan_writes_outside_worktree(events_path: &Path, worktree: &Path) -> Vec<String> {
-    let Ok(file) = std::fs::File::open(events_path) else {
-        return Vec::new();
-    };
-    let mut reader = BufReader::new(file);
-    let mut total = 0u64;
-    let mut line = Vec::new();
-    let mut candidates: Vec<String> = Vec::new();
-    loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(read) => total += read as u64,
+/// Remove response bodies before feeding helper bookkeeping. Identifiers and
+/// reported resource references are bounded, and never dereferenced.
+fn strip_native_text(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for key in [
+                "summary",
+                "result",
+                "response",
+                "text",
+                "description",
+                "content",
+            ] {
+                map.remove(key);
+            }
+            for value in map.values_mut() {
+                strip_native_text(value);
+            }
         }
-        if total > CAPTURE_LIMIT {
-            break;
+        Value::Array(items) => {
+            for value in items.iter_mut().take(4096) {
+                strip_native_text(value);
+            }
+            items.truncate(4096);
         }
-        if line.len() > LINE_LIMIT {
-            continue;
-        }
-        while matches!(line.last(), Some(b'\n') | Some(b'\r')) {
-            line.pop();
-        }
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(event) = serde_json::from_slice::<Value>(&line) else {
-            continue;
-        };
-        candidates.extend(collect_write_paths(&event));
+        _ => (),
     }
-    let worktree_real = real_path(worktree);
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut outside = Vec::new();
-    for candidate in candidates {
+}
+
+fn bounded_native_metadata(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.len() <= 256
+                && map
+                    .iter()
+                    .all(|(key, value)| key.len() <= 4096 && bounded_native_metadata(value))
+        }
+        Value::Array(items) => items.len() <= 256 && items.iter().all(bounded_native_metadata),
+        Value::String(text) => text.len() <= 4096,
+        // Native refusal accounting adds three provider-supplied counters.
+        // Reject values outside the safe evaluation range before that parser.
+        Value::Number(number) => number.as_u64().is_none_or(|n| n <= u64::MAX / 3),
+        _ => true,
+    }
+}
+
+fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
+    let Ok(event) = serde_json::from_slice::<Value>(line) else {
+        return;
+    };
+    let worktree = real_path(worktree);
+    for candidate in collect_write_paths(&event) {
+        if candidate.len() > 4096 {
+            events.failed = true;
+            continue;
+        }
         let Some(resolved) = resolve_write_path(&candidate) else {
             continue;
         };
         let real = real_path(&resolved);
-        if !real.starts_with(&worktree_real) {
-            let recorded = real.to_string_lossy().into_owned();
-            if seen.insert(recorded.clone()) {
-                outside.push(recorded);
+        if !real.starts_with(&worktree) {
+            let path = real.to_string_lossy().into_owned();
+            if !events.writes_outside_worktree.contains(&path) {
+                if events.writes_outside_worktree.len() >= 128 {
+                    events.failed = true;
+                    events
+                        .blockers
+                        .push("reported write target limit exceeded".into());
+                    break;
+                }
+                events.writes_outside_worktree.push(path);
             }
         }
     }
-    outside.truncate(128);
-    outside
 }
 
 /// Recorded `writes_outside_worktree` from a finished attempt's result
@@ -1628,49 +1728,60 @@ pub(crate) fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>
 /// polls process completion independently and bounds the final drain.
 fn capture(
     mut pipe: impl Read + Send + 'static,
-    path: PathBuf,
+    checkpoint: PathBuf,
+    worktree: PathBuf,
     harness: Option<String>,
-    tx: std::sync::mpsc::Sender<std::result::Result<Events, String>>,
+    events: std::sync::Arc<std::sync::Mutex<Events>>,
+    tx: std::sync::mpsc::Sender<std::result::Result<(), String>>,
 ) {
     std::thread::spawn(move || {
-        let mut run = || -> Result<Events> {
-            let mut file = state::create_new_private_file(&path)?;
+        let run = || -> Result<()> {
             let mut total = 0u64;
             let mut chunk = [0u8; 8192];
             let mut line = Vec::new();
-            let mut events = Events::default();
             loop {
                 let n = pipe.read(&mut chunk)?;
                 if n == 0 {
                     break;
                 }
                 total += n as u64;
-                if total > CAPTURE_LIMIT {
-                    bail!("capture exceeded 64 MiB; attempt stopped to preserve reviewability");
+                if total > STREAM_EVALUATION_LIMIT {
+                    bail!("stream evaluation exceeded 64 MiB");
                 }
-                file.write_all(&chunk[..n])?;
-                {
-                    for byte in &chunk[..n] {
-                        if *byte == b'\n' {
-                            if !line.is_empty() {
-                                if let Some(harness) = &harness {
-                                    events.observe(harness, &line);
-                                } else {
-                                    events.observe_stderr(&line);
+                for byte in &chunk[..n] {
+                    if *byte == b'\n' {
+                        if !line.is_empty() {
+                            let mut events = events
+                                .lock()
+                                .map_err(|_| Error::new("stream evaluator unavailable"))?;
+                            if let Some(harness) = &harness {
+                                let had_session = events.session.is_some();
+                                events.observe(harness, &line);
+                                observe_writes(&mut events, &line, &worktree);
+                                if !had_session && events.session.is_some() {
+                                    durable_json(
+                                        &checkpoint,
+                                        &json!({"schema_version":1,"session":events.session,"source":"harness event stream","native_data_location":null}),
+                                    )?;
                                 }
-                                events.blockers.truncate(128);
+                            } else {
+                                events.observe_stderr(&line);
                             }
-                            line.clear();
-                        } else {
-                            if line.len() >= LINE_LIMIT {
-                                bail!("event exceeds 1 MiB");
-                            }
-                            line.push(*byte);
+                            events.blockers.truncate(128);
                         }
+                        line.clear();
+                    } else {
+                        if line.len() >= LINE_LIMIT {
+                            bail!("event exceeds 1 MiB");
+                        }
+                        line.push(*byte);
                     }
                 }
             }
             if !line.is_empty() {
+                let mut events = events
+                    .lock()
+                    .map_err(|_| Error::new("stream evaluator unavailable"))?;
                 if harness.is_none() {
                     events.observe_stderr(&line);
                 } else {
@@ -1678,10 +1789,10 @@ fn capture(
                     events.blockers.push("unterminated event stream".into());
                 }
             }
-            file.sync_all()?;
-            Ok(events)
+            Ok(())
         };
-        let _ = tx.send(run().map_err(|e| e.to_string()));
+        let mut run = run;
+        let _ = tx.send(run().map_err(|_| "stream evaluation failed or exceeded its bound".into()));
     });
 }
 
@@ -1764,29 +1875,35 @@ fn supervise_authorized(dir: &Path, expected: &str) -> Result<i32> {
     }
     let _owner = Lock::acquire(&dir.join("owner.lock"))?;
     let spec: Spec = read_json(&dir.join("headless.json"))?;
-    if spec.schema_version != 1 {
-        bail!("unsupported headless schema");
+    if spec.schema_version != 2 {
+        bail!(
+            "legacy or unsupported headless execution: use the original runner for this task; this binary only starts schema 2 attempts"
+        );
     }
     let attempt = attempt_dir(dir, &spec);
     confined(&attempt, false)?;
     if attempt.join("result.json").exists() || attempt.join("started.json").exists() {
         bail!("attempt already started; implicit replay refused");
     }
-    let outcome = run_attempt(dir, &attempt, &spec);
+    let mut phase = "frozen_execution_validation";
+    let outcome = run_attempt(dir, &attempt, &spec, &mut phase);
     if let Err(error) = &outcome {
         let _ = durable_json(
             &attempt.join("result.json"),
-            &json!({"schema_version":1,"task_id":dir.file_name(),"attempt":spec.attempt,
-            "outcome":"supervisor_error","blockers":[error.to_string()],"acceptance":"not assessed","worktree_preserved":true}),
+            &json!({"schema_version":2,"task_id":dir.file_name().unwrap_or_default().to_string_lossy(),"attempt":spec.attempt,
+            "outcome":"supervisor_error","failure_phase":phase,"failure_category":format!("{:?}",error.kind()),"blockers":["supervisor execution failed"],"acceptance":"not assessed","worktree_preserved":true}),
         );
         let _ = task::set_state(dir, task::TaskState::Failed);
     }
     outcome
 }
 
-fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
+fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str) -> Result<i32> {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     let (record, rebuilt, executable) = crate::launch::verify_task(dir, Some(spec))?;
+    if record.delivery.layout_version != 3 {
+        bail!("primary-owned execution requires delivery layout 3; submit a new assignment");
+    }
     let repo = crate::git::discover(&record.repo_root)?;
     let real = validate_executable(&executable, &repo)?;
     if real != record.harness_executable
@@ -1817,18 +1934,11 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
         .env("AHU_BIN", std::env::current_exe()?)
         .env("AHU_EXECUTION_BACKEND", "headless")
         .env("AHU_PARENT_TASK", &record.task_id)
-        .env("AHU_RUNTIME_DIR", runtime_root()?)
         .env("AHU_WORKER_SESSION", "headless")
         .env("AHU_TASK_ID", &record.task_id)
-        .env("AHU_TASK_DIR", dir);
-    // The feature matrix decides whether the harness's generic CLI log can be
-    // pointed at a deterministic external destination.
-    if crate::catalog::supports(
-        &record.identity.harness,
-        crate::catalog::Feature::ExternalLogDestination,
-    ) {
-        command.arg("--log-file").arg(attempt.join("native.log"));
-    }
+        .env("AHU_TASK_DIR", dir)
+        .env_remove("AHU_RUNTIME_DIR")
+        .env_remove("AHU_TASK_INDEX_DIR");
     let mut broker = crate::broker::Broker::new(&dir.join("requests"), &record, spec)?;
     broker.configure_worker(&mut command);
     if let Some(profile) = &spec.native_profile {
@@ -1849,6 +1959,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
         &attempt.join("spawn-intent.json"),
         &json!({"at":task::now_rfc3339(),"attempt":spec.attempt}),
     )?;
+    *phase = "worker_spawn";
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -1869,6 +1980,9 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
         }
     }
     let mut guard = Guard(pid);
+    *phase = "stream_evaluation_and_lifecycle";
+    let stdout_events = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+    let stderr_events = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
     let (out_tx, out_rx) = std::sync::mpsc::channel();
     let (err_tx, err_rx) = std::sync::mpsc::channel();
     capture(
@@ -1876,8 +1990,10 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
             .stdout
             .take()
             .ok_or_else(|| Error::new("missing stdout"))?,
-        attempt.join("events.jsonl"),
+        attempt.join("native-session.json"),
+        record.worktree.clone(),
         Some(record.identity.harness.clone()),
+        stdout_events.clone(),
         out_tx,
     );
     capture(
@@ -1885,8 +2001,10 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
             .stderr
             .take()
             .ok_or_else(|| Error::new("missing stderr"))?,
-        attempt.join("stderr.log"),
+        attempt.join("native-session.json"),
+        record.worktree.clone(),
         None,
+        stderr_events.clone(),
         err_tx,
     );
     durable_json(
@@ -1961,39 +2079,52 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
     if errors.is_none() {
         errors = err_rx.recv_timeout(Duration::from_secs(2)).ok();
     }
-    let mut events = match output {
-        Some(Ok(events)) => events,
-        Some(Err(e)) => Events {
-            failed: true,
-            blockers: vec![e],
-            ..Events::default()
-        },
-        None => Events {
-            failed: true,
-            blockers: vec!["stdout drain incomplete; escaped descendant cleanup unknown".into()],
-            ..Events::default()
-        },
-    };
-    match errors {
-        Some(Ok(stderr)) => {
-            events.failed |= stderr.failed;
-            events.stderr_diagnostics = stderr.stderr_diagnostics;
-            events.stderr_unclassified_lines = stderr.stderr_unclassified_lines;
-            if !events.stderr_diagnostics.is_empty() {
-                events.blockers.push("recognized failure diagnostic on stderr; inspect stderr_diagnostics and the raw stderr artifact".into());
-            }
-            if events.stderr_unclassified_lines > 0 {
-                events.blockers.push("stderr contains unclassified diagnostics; their effect on harness completion is unknown; inspect the raw stderr artifact".into());
-            }
-        }
-        Some(Err(e)) => {
+    let mut events = std::mem::take(
+        &mut *stdout_events
+            .lock()
+            .map_err(|_| Error::new("stdout evaluator unavailable"))?,
+    );
+    match output {
+        Some(Ok(())) => (),
+        Some(Err(error)) => {
             events.failed = true;
-            events.blockers.push(e);
+            events.blockers.push(error);
+        }
+        None => {
+            events.failed = true;
+            events
+                .blockers
+                .push("stdout drain incomplete; escaped descendant cleanup unknown".into());
+        }
+    }
+    let stderr = std::mem::take(
+        &mut *stderr_events
+            .lock()
+            .map_err(|_| Error::new("stderr evaluator unavailable"))?,
+    );
+    events.failed |= stderr.failed;
+    events.stderr_diagnostics = stderr.stderr_diagnostics;
+    events.stderr_unclassified_lines = stderr.stderr_unclassified_lines;
+    if !events.stderr_diagnostics.is_empty() {
+        events
+            .blockers
+            .push("recognized failure diagnostic on stderr".into());
+    }
+    match errors {
+        Some(Ok(())) => (),
+        Some(Err(error)) => {
+            events.failed = true;
+            events.blockers.push(error);
         }
         None => {
             events.failed = true;
             events.blockers.push("stderr drain incomplete".into());
         }
+    }
+    if events.stderr_unclassified_lines > 0 {
+        events
+            .blockers
+            .push("stderr contained unclassified diagnostics; effect on completion unknown".into());
     }
     if !events.terminal {
         events.failed = true;
@@ -2038,10 +2169,11 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
             }
         }
     }
+    *phase = "child_reconciliation";
     broker.finish()?;
-    if let Some(error) = broker_failure {
+    if broker_failure.is_some() {
         events.failed = true;
-        events.blockers.push(error);
+        events.blockers.push("broker dispatch failed".into());
     }
     let mut cancellation_results = Vec::new();
     let reconcile_deadline = Instant::now() + Duration::from_secs(5);
@@ -2051,8 +2183,9 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
         }
         let child_dir = lookup(&repo, id)?;
         let value = loop {
-            let value = result(&child_dir)
-                .unwrap_or_else(|e| json!({"outcome":"unknown","error":e.to_string()}));
+            let value = result(&child_dir).unwrap_or_else(
+                |_| json!({"outcome":"unknown","error":"child result unavailable"}),
+            );
             if value["outcome"] != "running" || Instant::now() >= reconcile_deadline {
                 break value;
             }
@@ -2103,25 +2236,25 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
     } else {
         "succeeded"
     };
-    let summary = attempt.join("final.txt");
-    state::write_private_file(&summary, events.summary.as_bytes())?;
-    let changes = crate::git::run_ok(
-        &record.worktree,
-        &["status", "--porcelain=v1", "--untracked-files=all"],
-    )
-    .ok();
-    let revision = crate::git::run_ok(&record.worktree, &["rev-parse", "HEAD"]).ok();
-    let writes_outside_worktree =
-        scan_writes_outside_worktree(&attempt.join("events.jsonl"), &record.worktree);
-    let result = json!({"schema_version":1,"backend":"headless","task_id":record.task_id,"attempt":spec.attempt,"parent_task":spec.parent_task,"parent_attempt":spec.parent_attempt,"broker_request":spec.broker_request,"root_task":spec.root_task,
-        "identity":record.identity,"policy_digest":record.policy_digest,"snapshot_digest":record.config_snapshot_digest,
-        "delivery_digest":record.delivery.digest,"capabilities":spec,"outcome":outcome,"started_at":started,"ended_at":task::now_rfc3339(),
+    let helpers: Vec<Value> = events.native.helpers().iter().map(|h| json!({
+        "task_id":h.task_id,"role":h.role,"depth":h.depth,"backgrounded":h.backgrounded,"status":h.status,
+        "output_reference":{"location":h.output_file,"source":"harness event stream","verified_exists":false},"total_tokens":h.total_tokens
+    })).collect();
+    events.blockers.truncate(128);
+    let result = json!({"schema_version":2,"backend":"headless","task_id":record.task_id,"attempt":spec.attempt,
+        "parent_task":spec.parent_task,"parent_attempt":spec.parent_attempt,"broker_request":spec.broker_request,"root_task":spec.root_task,
+        "identity":record.identity,"worktree":record.worktree,"branch":record.branch,
+        "outcome":outcome,"started_at":started,"finished_at":task::now_rfc3339(),
         "process":{"exit_code":status.code(),"signal":status.signal()},"harness":events,
-        "agent_report":{"text":events.summary,"structured":agent_claim,"trusted":false},"acceptance":"not assessed","completion_verified":false,
-        "worktree":record.worktree,"worktree_exists":record.worktree.exists(),"branch":record.branch,"base_commit":record.base_commit,
-        "current_revision":revision,"git_status":changes,"writes_outside_worktree":writes_outside_worktree,"validation_evidence":"see agent report; not independently verified",
-        "artifacts":{"events":attempt.join("events.jsonl"),"stderr":attempt.join("stderr.log"),"final":summary},
-        "descendant_cancellation":cancellation_results,"native_completeness":native_completeness,"ahu_children":ahu_children,"native_cleanup":"unknown for external/provider-managed processes","usage_child_accounting":"unknown","retention":"kept until explicit cleanup; native stores retain their own policies"});
+        "native_reference":{"session":events.session,"source":"harness event stream","harness":record.identity.harness,"harness_version":spec.harness_version,"data_location":null,"location_status":"unknown; harness-owned"},
+        "native_helpers":helpers,"native_shell_tasks":events.native.shell_tasks(),"native_refusals":events.native.refusals(),"acceptance":"not assessed","completion_verified":false,
+        "writes_outside_worktree":events.writes_outside_worktree,"write_evidence":"reported tool targets; not proof of writes",
+        "descendant_cancellation":cancellation_results,"native_completeness":native_completeness,"ahu_children":ahu_children,
+        "native_cleanup":"unknown for external/provider-managed processes"});
+    *phase = "result_persistence";
+    if serde_json::to_vec(&result)?.len() > 1024 * 1024 {
+        bail!("coordination result exceeded its 1 MiB evaluation bound");
+    }
     durable_json(&attempt.join("result.json"), &result)?;
     task::set_state(
         dir,
@@ -2139,7 +2272,19 @@ pub(crate) fn lookup(repo: &crate::git::Repo, id: &str) -> Result<PathBuf> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         bail!("invalid headless task id");
     }
-    let found: Vec<_> = discover(repo)?
+    let inventory = discover(repo)?;
+    let exact: Vec<_> = inventory
+        .iter()
+        .filter(|p| p.file_name().is_some_and(|s| s == id.as_str()))
+        .collect();
+    if exact.len() == 1 {
+        let record = task::load(exact[0])?;
+        if record.repo_identity != repo.identity() || record.task_id != id {
+            bail!("headless task ownership mismatch");
+        }
+        return Ok(exact[0].clone());
+    }
+    let found: Vec<_> = inventory
         .into_iter()
         .filter(|p| {
             p.file_name()
@@ -2148,6 +2293,14 @@ pub(crate) fn lookup(repo: &crate::git::Repo, id: &str) -> Result<PathBuf> {
         .collect();
     if found.len() != 1 {
         bail!("headless task id is missing or ambiguous: {id}");
+    }
+    let record = task::load(&found[0])?;
+    if record.repo_identity != repo.identity()
+        || found[0]
+            .file_name()
+            .is_none_or(|s| s != record.task_id.as_str())
+    {
+        bail!("headless task ownership mismatch");
     }
     Ok(found[0].clone())
 }
@@ -2161,14 +2314,23 @@ fn result(dir: &Path) -> Result<Value> {
 fn result_attempt(dir: &Path, spec: &Spec) -> Result<Value> {
     let path = attempt_dir(dir, spec).join("result.json");
     if path.exists() {
-        return read_json(&path);
+        let value: Value = read_json(&path)?;
+        review::validate_result(
+            &value,
+            &dir.file_name().unwrap_or_default().to_string_lossy(),
+            spec.attempt,
+        )?;
+        if value["schema_version"] != spec.schema_version {
+            bail!("result schema does not match its owning spec");
+        }
+        return Ok(value);
     }
     let active = Lock::is_owned(&dir.join("owner.lock")).map_err(|error| {
         Error::new(format!(
             "cannot inspect supervisor ownership; liveness unknown: {error}"
         ))
     })?;
-    Ok(json!({"schema_version":1,
+    Ok(json!({"schema_version":spec.schema_version,
         "task_id":dir.file_name().unwrap_or_default().to_string_lossy(),"attempt":spec.attempt,
         "outcome":if active {"running"} else {"interrupted"},"acceptance":"not assessed",
         "completion_verified":false,
@@ -2180,7 +2342,7 @@ fn review_attempt(
     spec: &Spec,
     read_result: impl FnOnce(&Path) -> Result<Value>,
 ) -> Result<Value> {
-    if spec.schema_version != 1 || spec.attempt == 0 {
+    if !matches!(spec.schema_version, 1 | 2) || spec.attempt == 0 {
         bail!("unsupported headless attempt metadata");
     }
     let id = dir.file_name().unwrap_or_default().to_string_lossy();
@@ -2196,6 +2358,9 @@ fn review_attempt(
                 value["task_id"] = json!(id);
             }
             review::validate_result(&value, &id, spec.attempt)?;
+            if value["schema_version"] != spec.schema_version {
+                bail!("result schema does not match its owning spec");
+            }
             value
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2204,7 +2369,7 @@ fn review_attempt(
                     "cannot inspect supervisor ownership; liveness unknown: {error}"
                 ))
             })?;
-            json!({"schema_version":1,"task_id":id,"attempt":spec.attempt,
+            json!({"schema_version":spec.schema_version,"task_id":id,"attempt":spec.attempt,
                 "outcome":if active {"running"} else {"interrupted"},"acceptance":"not assessed",
                 "completion_verified":false,
                 "blockers":if active {Vec::<String>::new()} else {vec!["no live supervisor owns this attempt; process cleanup unknown, no automatic replay".into()]}})
@@ -2212,6 +2377,7 @@ fn review_attempt(
         Err(error) => return Err(error.into()),
     };
     value["review"] = review::projection(dir, Some(spec), Some(&value), None);
+    value["capabilities"] = serde_json::to_value(spec)?;
     Ok(value)
 }
 fn wait(dir: &Path, json_output: bool) -> Result<i32> {
@@ -2235,7 +2401,10 @@ fn wait(dir: &Path, json_output: bool) -> Result<i32> {
 
 /// Close admission and cancel registered descendants without signalling recorded PIDs.
 fn cancel_tree(repo: &crate::git::Repo, dir: &Path, reason: &str) -> Result<Vec<String>> {
-    let admission_path = store(repo)?.join("launch.lock");
+    let admission_path = dir
+        .parent()
+        .ok_or_else(|| Error::new("task store missing"))?
+        .join("launch.lock");
     let deadline = Instant::now() + Duration::from_secs(2);
     let _admission = loop {
         if let Some(lock) = Lock::try_acquire(&admission_path)? {
@@ -2252,6 +2421,7 @@ fn cancel_tree(repo: &crate::git::Repo, dir: &Path, reason: &str) -> Result<Vec<
     // Parse the inventory once; never cancel descendants of an older owner attempt.
     let all = discover(repo)?
         .into_iter()
+        .filter(|path| path.parent() == dir.parent())
         .map(|path| {
             let spec: Spec = read_json(&path.join("headless.json"))?;
             let id = task::load(&path)?.task_id;
@@ -2369,6 +2539,11 @@ pub fn control(
         }
         "resume" => {
             let frozen: Spec = read_json(&dir.join("headless.json"))?;
+            if frozen.schema_version != 2 {
+                bail!(
+                    "legacy resume is unsupported by this binary; use the original runner and its legacy store, or submit a new assignment"
+                );
+            }
             if frozen.parent_task.is_some()
                 || std::env::var_os("AHU_PARENT_TASK").is_some()
                 || std::env::var_os("AHU_BROKER_TOKEN").is_some()
@@ -2534,7 +2709,7 @@ fn recover_resume(dir: &Path) -> Result<()> {
 
 pub fn inspection(dir: &Path) -> Result<Value> {
     let spec = match review::read::<Spec>(&dir.join("headless.json")) {
-        Ok(spec) if spec.schema_version == 1 && spec.attempt > 0 => spec,
+        Ok(spec) if matches!(spec.schema_version, 1 | 2) && spec.attempt > 0 => spec,
         _ => {
             return Ok(review::projection(
                 dir,

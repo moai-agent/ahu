@@ -91,6 +91,11 @@ pub struct Broker {
 }
 impl Broker {
     pub fn new(dir: &Path, owner: &task::TaskRecord, spec: &headless::Spec) -> Result<Self> {
+        if spec.schema_version != 2 {
+            bail!(
+                "legacy dispatch is unsupported; use the original runner and its owning supervisor"
+            );
+        }
         headless::confined(dir, true)?;
         let private_dir = dir
             .parent()
@@ -160,11 +165,11 @@ impl Broker {
             self.consumed.insert(stem.to_string());
             let request = match read_request(&path) {
                 Ok(request) => request,
-                Err(error) => {
+                Err(_) => {
                     headless::durable_json(&claim, &json!({"state":"refused"}))?;
                     headless::durable_json(
                         &response,
-                        &json!({"ok":false,"error":error.to_string()}),
+                        &json!({"ok":false,"error":"invalid or unreadable broker request"}),
                     )?;
                     continue;
                 }
@@ -234,6 +239,8 @@ impl Broker {
                 .env("AHU_BROKER_DISPATCH", stem)
                 .env_remove("AHU_BROKER_TOKEN")
                 .env_remove("AHU_EXPECTED_DIGEST")
+                .env_remove("AHU_RUNTIME_DIR")
+                .env_remove("AHU_TASK_INDEX_DIR")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -259,7 +266,6 @@ impl Broker {
             if let Some(summary) = request.summary {
                 command.arg("--summary").arg(summary);
             }
-            let log = self.private_dir.join(format!("{stem}.dispatch.log"));
             let closed = self
                 .private_dir
                 .parent()
@@ -273,12 +279,11 @@ impl Broker {
             self.pending.push(std::thread::spawn(move || {
                 let result=(||->Result<Value>{
                     let output=bounded_dispatch(&mut command, &closed, &cancelled)?;
-                    crate::state::write_private_file(&log,&output.stderr)?;
-                    if !output.status.success() { return Ok(json!({"ok":false,"error":String::from_utf8_lossy(&output.stderr),"exit_code":output.status.code()})); }
+                    if !output.status.success() { return Ok(json!({"ok":false,"error":"child dispatch failed","exit_code":output.status.code()})); }
                     let launch:Value=serde_json::from_slice(&output.stdout).map_err(|e|Error::new(e.to_string()))?;
-                    Ok(json!({"ok":true,"launch":launch}))
+                    Ok(json!({"ok":true,"launch":{"schema_version":2,"backend":"headless","task_id":launch["task_id"],"runtime":launch["runtime"],"worktree":launch["worktree"],"acceptance":"not assessed"}}))
                 })();
-                let value=result.unwrap_or_else(|e|json!({"ok":false,"error":e.to_string()}));
+                let value=result.unwrap_or_else(|_|json!({"ok":false,"error":"child dispatch unavailable"}));
                 let _=headless::durable_json(&response,&value);
             }));
             if self.pending.len() >= 8 {
@@ -309,7 +314,13 @@ pub fn request(
 ) -> Result<i32> {
     let parent =
         std::env::var("AHU_PARENT_TASK").map_err(|_| Error::new("missing broker parent"))?;
-    let dir = headless::lookup(repo, &parent)?;
+    let dir = headless::lookup(repo, &parent).map_err(|_| Error::new("owning broker is unavailable in this repository; legacy workers must use their original runner and legacy store"))?;
+    let spec: headless::Spec = headless::read_json(&dir.join("headless.json"))?;
+    if spec.schema_version != 2 {
+        bail!(
+            "legacy dispatch is unsupported by this binary; use the original runner and its owning supervisor"
+        );
+    }
     let record = task::load(&dir)?;
     if record.worktree.canonicalize()? != repo.root.canonicalize()? {
         bail!("broker request must originate in its owning worktree");

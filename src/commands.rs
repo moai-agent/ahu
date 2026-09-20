@@ -769,9 +769,13 @@ fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task:
             .join(&entry.repo_identity)
             .join("tasks")
             .join(&entry.task_id),
-        crate::task_index::StoreKind::Headless => crate::headless::runtime_root()?
-            .join(&entry.repo_identity)
-            .join(&entry.task_id),
+        crate::task_index::StoreKind::Headless => {
+            let repo = crate::git::discover(&entry.checkout)?;
+            if repo.identity() != entry.repo_identity {
+                bail!("task index repository identity mismatch");
+            }
+            crate::headless::lookup(&repo, &entry.task_id)?
+        }
     };
     if !dir.exists() {
         bail!(
@@ -838,7 +842,7 @@ fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
         .filter(|u| u.task_id.starts_with(&id))
         .collect();
     let entries = if task::is_canonical_task_uuid(&id) {
-        match crate::task_index::lookup(&id)? {
+        match crate::task_index::lookup_in(repo, &id)? {
             Some(entry) => {
                 let (dir, record) = load_indexed_task(&entry)?;
                 return Ok(Located::Pointer(entry, dir, record));
@@ -846,7 +850,7 @@ fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
             None => Vec::new(),
         }
     } else {
-        let mut entries = crate::task_index::lookup_prefix(&id)?;
+        let mut entries = crate::task_index::lookup_prefix_in(repo, &id)?;
         entries.retain(|e| {
             !records.iter().any(|(_, r)| r.task_id == e.task_id)
                 && !unreadable.iter().any(|u| u.task_id == e.task_id)
@@ -1519,7 +1523,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
         }
         bail!("{message}");
     }
-    if let Err(e) = crate::task_index::remove(&record.task_id) {
+    if let Err(e) = crate::task_index::remove_in(repo, &record.task_id) {
         eprintln!(
             "warning: could not remove the task index entry for {}: {e}",
             display_safe(&crate::task_ref::display(&record.task_id))

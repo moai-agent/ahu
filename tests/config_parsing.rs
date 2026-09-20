@@ -488,26 +488,39 @@ fn a_symlinked_agents_directory_is_refused() {
 #[test]
 fn a_relative_path_entry_never_resolves_a_harness() {
     let repo = TestRepo::new();
+    repo.init_config();
     let planted = repo.path().join("claude");
-    std::fs::write(&planted, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(&planted, "#!/bin/sh\necho executed > planted-ran\nexit 0\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = scratch.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/git", bin.join("git")).unwrap();
 
     // Resolution reads the process environment, so drive it through a child
     // process rather than mutating this test binary's own PATH.
     let output = common::ahu()
         .arg("doctor")
         .current_dir(repo.path())
-        .env("PATH", format!("{}:", std::env::var("PATH").unwrap()))
+        .env("PATH", format!(":{}:", bin.display()))
+        .env("HOME", scratch.path().canonicalize().unwrap())
+        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .output()
         .expect("ahu runs");
     let combined = String::from_utf8_lossy(&output.stdout).to_string();
 
-    // `doctor` prints the resolved path for each harness. Whatever it found, it
-    // must not be the repository's own file.
+    // Native integration guidance may name Claude; it must never execute the
+    // repository's planted binary through an empty or relative PATH entry.
+    assert!(!repo.path().join("planted-ran").exists());
     assert!(
-        !combined.contains(&format!("{}/claude", repo.path().display()))
-            && !combined.contains(" claude "),
+        combined
+            .lines()
+            .any(|line| line.starts_with("harness ") && line.contains("claude-code")),
+        "the initialized fixture must check its configured harness: {combined}"
+    );
+    assert!(
+        !combined.contains(&format!("{}/claude", repo.path().display())),
         "a harness was resolved from the repository: {combined}"
     );
 }

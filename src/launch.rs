@@ -456,7 +456,7 @@ pub(crate) fn prepared_record(
 fn rollback_worktree(repo: &Repo, plan: &LaunchPlan, cause: Error) -> Error {
     // A dead pointer in the task index degrades into a lead at resolution
     // time, but removing it here keeps the index honest about live tasks.
-    let _ = crate::task_index::remove(&plan.task_id);
+    let _ = crate::task_index::remove_in(repo, &plan.task_id);
     // The record lives inside the worktree, so removing the worktree takes it.
     // If Git refuses, the record is removed on its own so no half-prepared
     // task is left claiming to be one.
@@ -896,6 +896,14 @@ pub(crate) fn verify_task(
             expected_worktree.display(),
             record.worktree.display()
         );
+    }
+
+    if batch.is_some_and(|spec| spec.schema_version == 2) {
+        let expected = crate::headless::store(&discovered)?.join(&record.task_id);
+        if task_dir != expected {
+            bail!("headless task is not held by its primary-owned coordination store");
+        }
+        crate::headless::confined(task_dir, false)?;
     }
 
     // A record kept inside a task worktree must be that worktree's own. Records

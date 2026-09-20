@@ -493,7 +493,7 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let record = match crate::headless::review::record(&dir) {
+        let record = match crate::headless::review::record(repo, &dir) {
             Ok(record) if record.repo_identity == identity && record.task_id == task_id => record,
             result => {
                 let reason = match result {

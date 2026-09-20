@@ -77,6 +77,11 @@ impl Fixture {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let root = runtime.path().canonicalize().unwrap();
+        ahu::state::write_json(
+            &repo.path().join(".ahu/state/legacy-lookup.json"),
+            &json!({"schema_version":1,"runtime_roots":[root]}),
+        )
+        .unwrap();
         let identity = ahu::git::discover(repo.path()).unwrap().identity();
         let dir = record(&repo, root.join(identity).join("abc1"), "abc1");
         std::fs::create_dir_all(dir.join("attempt-1")).unwrap();
@@ -479,4 +484,30 @@ fn review_inventory_refuses_redirected_or_non_directory_task_paths() {
     let out = text(f.run(&["tasks"]));
     assert!(out.contains("abc1") && out.contains("abc2") && out.contains("unreadable"));
     assert_eq!(std::fs::read(&other).unwrap(), b"not a directory");
+}
+
+#[test]
+fn legacy_resume_refuses_without_rewriting_or_migrating_records() {
+    let f = Fixture::new();
+    f.terminal("succeeded");
+    let prompt = f.runtime.path().join("followup.txt");
+    std::fs::write(&prompt, "synthetic continuation").unwrap();
+    let before = snapshot(f.runtime.path());
+    let out = f.run(&[
+        "resume",
+        "abc1",
+        "--prompt-file",
+        prompt.to_str().unwrap(),
+        "--output",
+        "json",
+    ]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("original runner"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(snapshot(f.runtime.path()), before);
+    let repo = ahu::git::discover(f.repo.path()).unwrap();
+    assert!(!ahu::headless::store(&repo).unwrap().exists());
 }

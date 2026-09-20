@@ -1,10 +1,6 @@
-//! A task id is global: any checkout that can see the task index can reach
-//! any task recorded in it, while the records a checkout owns still resolve
-//! first.
-//!
-//! These scenarios cross checkouts on purpose. One repository holds the
-//! task, another issues the command, and the task index is the only thing
-//! that carries the id between them.
+//! Repository-scoped task pointers remain usable from sibling checkouts.
+//! Explicit synthetic legacy roots are read in place; independent repositories
+//! do not share an ambient index.
 
 mod common;
 
@@ -29,6 +25,36 @@ fn fixture() -> TestRepo {
     repo
 }
 
+fn sibling(repo: &TestRepo) -> TestRepo {
+    let dir = tempfile::tempdir().unwrap();
+    common::git(
+        repo.path(),
+        &["worktree", "add", "--detach", dir.path().to_str().unwrap()],
+    );
+    TestRepo {
+        dir,
+        state: tempfile::tempdir().unwrap(),
+    }
+}
+
+/// Deliberately stale pointers are fixtures, not registrations of live tasks.
+fn pointer(repo: &TestRepo, id: &str, checkout: &Path) {
+    let repo = git::discover(repo.path()).unwrap();
+    state::write_json(
+        &task_index::root_for(&repo)
+            .unwrap()
+            .join(format!("{id}.json")),
+        &task_index::Entry {
+            schema_version: 2,
+            task_id: id.into(),
+            repo_identity: repo.identity(),
+            checkout: checkout.into(),
+            store: StoreKind::Worktree,
+        },
+    )
+    .unwrap();
+}
+
 /// The task index and the headless runtime one scenario runs against,
 /// pointing every child process and every in-process call at the same
 /// private state.
@@ -47,8 +73,6 @@ impl Scenario {
         let dir = tempfile::tempdir().expect("tempdir");
         let index = private_dir(dir.path().join("index"));
         let runtime = private_dir(dir.path().join("runtime"));
-        // In-process helpers read the same index the child ahu is pointed at.
-        unsafe { std::env::set_var("AHU_TASK_INDEX_DIR", &index) };
         Scenario {
             _dir: dir,
             index,
@@ -73,6 +97,7 @@ fn ahu_at(scenario: &Scenario, dir: &Path, args: &[&str]) -> std::process::Outpu
         .args(args)
         .current_dir(dir)
         .env_remove("AHU_STATE_DIR")
+        .env("HOME", scenario.path())
         .env("AHU_TASK_INDEX_DIR", &scenario.index)
         .env("AHU_RUNTIME_DIR", &scenario.runtime)
         // Nothing here is about cmux; no reachable session may leak in.
@@ -91,7 +116,7 @@ fn text_of(output: &std::process::Output) -> String {
 
 /// The worktree ahu would create for `task_id` in this repository.
 fn worktree_of(repo: &TestRepo, task_id: &str) -> PathBuf {
-    state::worktree_dir(&git::discover(repo.path()).unwrap().root, task_id).unwrap()
+    repo.state.path().canonicalize().unwrap().join(task_id)
 }
 
 /// The branch ahu would create for `task_id`.
@@ -180,8 +205,17 @@ fn prepare_task_in_state(repo: &TestRepo, task_id: &str, task_state: task::TaskS
 /// A finished task under `repo`, registered in the task index at its
 /// worktree.
 fn prepare_registered_task(repo: &TestRepo, task_id: &str) -> PathBuf {
-    let record_dir = prepare_task_in_state(repo, task_id, task::TaskState::Exited);
-    let identity = git::discover(repo.path()).unwrap().identity();
+    let discovered = git::discover(repo.path()).unwrap();
+    let worktree = worktree_of(repo, task_id);
+    git::add_worktree(&discovered, &worktree, &branch_of(task_id), "HEAD").unwrap();
+    let identity = discovered.identity();
+    let record_dir = state::worktree_task_dir(&worktree, &identity, task_id);
+    task::save(
+        &record_dir,
+        &record_for(repo, task_id, &worktree),
+        "current work",
+    )
+    .unwrap();
     task_index::register(
         &identity,
         task_id,
@@ -192,14 +226,14 @@ fn prepare_registered_task(repo: &TestRepo, task_id: &str) -> PathBuf {
     record_dir
 }
 
-/// A registered task resolves from its own checkout, from an unrelated one,
+/// A registered task resolves from its own checkout, from a sibling,
 /// and from a bare worktree of the repository, in every accepted form.
 #[test]
-fn a_registered_task_is_reachable_from_any_checkout() {
+fn a_registered_task_is_reachable_from_primary_and_sibling_checkouts() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa900-1234-7e5f-8a9b-0c1d2e3f4a5b";
     prepare_registered_task(&a, id);
 
@@ -238,7 +272,7 @@ fn unique_prefix_resolves_through_the_task_index() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa911-2222-7e5f-8a9b-0c1d2e3f4a5c";
     prepare_registered_task(&a, id);
 
@@ -254,17 +288,10 @@ fn ambiguous_prefix_names_every_match() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let c = fixture();
-    let identity = git::discover(c.path()).unwrap().identity();
     let base = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5";
     for suffix in ["b", "c"] {
         let checkout = scenario.path().join(format!("no-such-checkout-{suffix}"));
-        task_index::register(
-            &identity,
-            &format!("{base}{suffix}"),
-            &checkout,
-            StoreKind::Worktree,
-        )
-        .unwrap();
+        pointer(&c, &format!("{base}{suffix}"), &checkout);
     }
 
     let out = ahu_at(&scenario, c.path(), &["task", base]);
@@ -281,7 +308,7 @@ fn local_records_and_index_entries_compete_for_a_prefix() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa900-1234-7e5f-8a9b-0c1d2e3f4a5b";
     prepare_registered_task(&a, id);
     let local = "006aa50000000000ab";
@@ -311,7 +338,7 @@ fn stale_checkout_entry_reports_the_missing_checkout() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa550-1234-7e5f-8a9b-0c1d2e3f4a5d";
     prepare_registered_task(&a, id);
     std::fs::remove_dir_all(worktree_of(&a, id)).unwrap();
@@ -334,11 +361,10 @@ fn missing_task_directory_reports_the_stale_entry() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa560-1234-7e5f-8a9b-0c1d2e3f4a5e";
-    let identity = git::discover(a.path()).unwrap().identity();
     let checkout = private_dir(scenario.path().join("checkout"));
-    task_index::register(&identity, id, &checkout, StoreKind::Worktree).unwrap();
+    pointer(&a, id, &checkout);
 
     let out = ahu_at(&scenario, c.path(), &["task", id]);
     let text = text_of(&out);
@@ -353,7 +379,7 @@ fn unreadable_record_reports_the_entrys_checkout() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa570-1234-7e5f-8a9b-0c1d2e3f4a5f";
     let record_dir = prepare_registered_task(&a, id);
     std::fs::write(record_dir.join("task.json"), "not json").unwrap();
@@ -375,7 +401,7 @@ fn a_record_describing_another_task_is_refused() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let stored = "006aa800-1234-7e5f-8a9b-0c1d2e3f4a5b";
     let claimed = "006aa811-1234-7e5f-8a9b-0c1d2e3f4a5c";
     let discovered = git::discover(a.path()).unwrap();
@@ -394,13 +420,13 @@ fn a_record_describing_another_task_is_refused() {
     assert!(text.contains("Nothing was done"), "{text}");
 }
 
-/// `ahu focus` resolves a registered task from an unrelated checkout.
+/// `ahu focus` resolves a registered task from a sibling checkout.
 #[test]
 fn focus_resolves_through_the_task_index() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa590-1234-7e5f-8a9b-0c1d2e3f4a51";
     prepare_registered_task(&a, id);
 
@@ -410,14 +436,14 @@ fn focus_resolves_through_the_task_index() {
     assert!(text.contains("has no recorded cmux session"), "{text}");
 }
 
-/// `ahu diff` resolves a registered task from an unrelated checkout and
+/// `ahu diff` resolves a registered task from a sibling checkout and
 /// writes the bare patch to stdout.
 #[test]
 fn diff_resolves_through_the_task_index() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa5a0-1234-7e5f-8a9b-0c1d2e3f4a52";
     prepare_registered_task(&a, id);
 
@@ -427,14 +453,14 @@ fn diff_resolves_through_the_task_index() {
     assert!(out.stdout.is_empty(), "{text}");
 }
 
-/// `ahu remove` resolves a registered task from an unrelated checkout and
+/// `ahu remove` resolves a registered task from a sibling checkout and
 /// clears the record, the worktree, the branch and the index entry.
 #[test]
 fn remove_resolves_through_the_task_index_and_cleans_up() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa5b0-1234-7e5f-8a9b-0c1d2e3f4a53";
     let record_dir = prepare_registered_task(&a, id);
     let worktree = worktree_of(&a, id);
@@ -458,21 +484,24 @@ fn remove_resolves_through_the_task_index_and_cleans_up() {
         "the branch outlived removal"
     );
     assert!(
-        task_index::lookup(id).unwrap().is_none(),
+        task_index::lookup_in(&git::discover(a.path()).unwrap(), id)
+            .unwrap()
+            .is_none(),
         "the index entry outlived removal"
     );
 }
 
-/// A headless entry resolves from an unrelated checkout through the
+/// A headless entry resolves from a sibling checkout through the
 /// runtime directory it names.
 #[test]
-fn headless_entry_resolves_from_an_unrelated_checkout() {
+fn legacy_headless_entry_resolves_from_a_sibling_checkout() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa700-1234-7e5f-8a9b-0c1d2e3f4a54";
     let identity = git::discover(a.path()).unwrap().identity();
+    state::write_json(&a.path().join(".ahu/state/legacy-lookup.json"), &serde_json::json!({"schema_version":1,"runtime_roots":[scenario.runtime.canonicalize().unwrap()]})).unwrap();
     let dir = scenario.runtime.join(&identity).join(id);
     task::save(&dir, &record_for(&a, id, a.path()), "current work").unwrap();
     task_index::register(&identity, id, a.path(), StoreKind::Headless).unwrap();
@@ -520,7 +549,7 @@ fn unrecognized_forms_are_usage_errors() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
-    let c = fixture();
+    let c = sibling(&a);
     let id = "006aa900-1234-7e5f-8a9b-0c1d2e3f4a5b";
     prepare_registered_task(&a, id);
 

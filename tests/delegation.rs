@@ -604,7 +604,7 @@ fn saved_xml_deliveries_freeze_facts_and_refuse_future_or_altered_layouts() {
             .to_string()
             .contains("fence nonce")
     );
-    for version in [0, 3, u32::MAX] {
+    for version in [0, LAYOUT_VERSION + 1, u32::MAX] {
         let mut future = saved.clone();
         future.layout_version = version;
         assert!(

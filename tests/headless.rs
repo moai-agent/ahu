@@ -30,7 +30,7 @@ assert '--print' in a and '--permission-prompts' in a and 'none' in a
 assert a[a.index('--model')+1]=='claude-opus-5'
 assert os.environ['AHU_EXECUTION_BACKEND']=='headless'
 assert not any(k.startswith('CMUX_') for k in os.environ)
-assert 'ahu delegation contract (v2, headless)' in a[-1]
+assert 'ahu delegation contract (v3, headless)' in a[-1]
 assert sys.stdin.read()==''
 scenario=os.environ.get('SCENARIO','success')
 if scenario in ('child','mailbox') and '\ndelegate synthetic task</ahu-request-' not in a[-1]: scenario='success'
@@ -45,7 +45,7 @@ if scenario in ('child','mailbox'):
  import subprocess
  if scenario=='mailbox':
   from pathlib import Path
-  inbox=next(Path(os.environ['AHU_RUNTIME_DIR']).glob('*/'+os.environ['AHU_PARENT_TASK']+'/requests'))
+  inbox=Path(os.environ['AHU_TASK_DIR'])/'requests'
   bad=inbox/'1111111111111111.request.json'; bad.write_text('{'); bad.chmod(0o600)
   bad=inbox/'2222222222222222.request.json'; bad.symlink_to('/dev/null')
   bad=inbox/'3333333333333333.request.json'; bad.write_text('{"executable":"forbidden"}'); bad.chmod(0o600)
@@ -103,7 +103,14 @@ if scenario=='nonzero': sys.exit(7)
         let mut c = common::ahu();
         c.current_dir(self.repo.path())
             .env("AHU_RUNTIME_DIR", self.external.path().join("runtime"))
-            .env("HOME", self.external.path().join("home"))
+            .env(
+                "AHU_TASK_INDEX_DIR",
+                self.external.path().join("retired-index"),
+            )
+            .env(
+                "HOME",
+                self.external.path().join("home").canonicalize().unwrap(),
+            )
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin:/opt/homebrew/bin", self.bin.display()),
@@ -143,7 +150,7 @@ if scenario=='nonzero': sys.exit(7)
 }
 
 #[test]
-fn foreground_preserves_external_evidence_and_identity_without_terminal() {
+fn foreground_keeps_primary_coordination_and_identity_without_native_copies() {
     let f = Fixture::new();
     let out = f.launch("success", &[]);
     assert!(
@@ -158,9 +165,18 @@ fn foreground_preserves_external_evidence_and_identity_without_terminal() {
     let worktree = PathBuf::from(v["worktree"].as_str().unwrap());
     assert!(worktree.join("proof.txt").exists());
     assert!(!worktree.join(".ahu/state").exists());
-    let artifacts = PathBuf::from(v["artifacts"]["events"].as_str().unwrap());
+    let artifacts = PathBuf::from(v["review"]["result_path"].as_str().unwrap());
     assert!(artifacts.exists());
-    assert!(!artifacts.starts_with(f.repo.path()));
+    assert!(artifacts.starts_with(f.repo.path().canonicalize().unwrap()));
+    for name in [
+        "events.jsonl",
+        "stderr.log",
+        "final.txt",
+        "supervisor.log",
+        "native.log",
+    ] {
+        assert!(!artifacts.parent().unwrap().join(name).exists());
+    }
     let id = v["task_id"].as_str().unwrap();
     let listed = f
         .command()
@@ -272,7 +288,7 @@ fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     let next = Fixture::value(&result);
     assert_eq!(next["attempt"], 2);
     assert_eq!(next["harness"]["session"], v["harness"]["session"]);
-    let events = PathBuf::from(next["artifacts"]["events"].as_str().unwrap());
+    let events = PathBuf::from(next["review"]["result_path"].as_str().unwrap());
     let dir = events.parent().unwrap().parent().unwrap();
     let record = ahu::task::load(dir).unwrap();
     let spec: ahu::headless::Spec =
@@ -443,7 +459,7 @@ fn execution_rechecks_snapshot_and_user_hooks_before_spawning() {
         assert!(out.status.success());
         let v = Fixture::value(&out);
         let worktree = PathBuf::from(v["worktree"].as_str().unwrap());
-        let events = PathBuf::from(v["artifacts"]["events"].as_str().unwrap());
+        let events = PathBuf::from(v["review"]["result_path"].as_str().unwrap());
         let dir = events.parent().unwrap().parent().unwrap();
         let mut spec: Value =
             serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
@@ -551,7 +567,7 @@ fn oversized_event_stops_capture_and_preserves_evidence() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|v| v.as_str().unwrap().contains("1 MiB"))
+            .any(|v| v.as_str().unwrap().contains("stream evaluation"))
     );
 }
 #[test]
@@ -561,7 +577,7 @@ fn explicit_resume_recovers_a_pre_spawn_interrupted_metadata_transition() {
     assert!(out.status.success());
     let v = Fixture::value(&out);
     let id = v["task_id"].as_str().unwrap();
-    let events = PathBuf::from(v["artifacts"]["events"].as_str().unwrap());
+    let events = PathBuf::from(v["review"]["result_path"].as_str().unwrap());
     let dir = events.parent().unwrap().parent().unwrap();
     let record: Value =
         serde_json::from_slice(&std::fs::read(dir.join("task.json")).unwrap()).unwrap();
@@ -721,7 +737,7 @@ fn malformed_mailbox_requests_are_isolated_and_consumed_ids_do_not_replay() {
     );
     let value = Fixture::value(&out);
     assert_eq!(value["ahu_children"].as_array().unwrap().len(), 1);
-    let events = PathBuf::from(value["artifacts"]["events"].as_str().unwrap());
+    let events = PathBuf::from(value["review"]["result_path"].as_str().unwrap());
     let attempt = events.parent().unwrap();
     assert!(attempt.join("broker/1111111111111111.claim.json").exists());
     assert!(
@@ -814,7 +830,7 @@ fn cleanup_removes_capture_but_preserves_result_and_worktree() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(!PathBuf::from(value["artifacts"]["events"].as_str().unwrap()).exists());
+    assert!(PathBuf::from(value["review"]["result_path"].as_str().unwrap()).exists());
     assert!(
         PathBuf::from(value["worktree"].as_str().unwrap())
             .join("proof.txt")
@@ -864,7 +880,7 @@ fn ownership_inspection_never_confuses_invalid_locks_with_live_owners() {
     let out = f.launch("success", &[]);
     let value = Fixture::value(&out);
     let id = value["task_id"].as_str().unwrap();
-    let events = PathBuf::from(value["artifacts"]["events"].as_str().unwrap());
+    let events = PathBuf::from(value["review"]["result_path"].as_str().unwrap());
     let attempt = events.parent().unwrap();
     let lock = attempt.parent().unwrap().join("owner.lock");
     std::fs::remove_file(attempt.join("result.json")).unwrap();
@@ -1059,7 +1075,7 @@ if '--version' in sys.argv:
  print('2.1.270');sys.exit(0)
 print(json.dumps({'type':'system','subtype':'init','session_id':os.environ['AHU_PARENT_TASK']}),flush=True)
 if os.environ['MAILBOX_MODE']=='noise':
- inbox=next(Path(os.environ['AHU_RUNTIME_DIR']).glob('*/'+os.environ['AHU_PARENT_TASK']+'/requests'))
+ inbox=Path(os.environ['AHU_TASK_DIR'])/'requests'
  for i in range(3000): (inbox/('invalid-'+str(i))).touch()
 else:
  # The host dispatch inherits the supervisor environment; the parent version
@@ -1190,14 +1206,19 @@ fn terminal_only_native_work_fails_and_a_refused_helper_is_not_started_work() {
 fn mailbox_request_limit_bounds_private_retention_and_cleanup_removes_inbox() {
     let f = Fixture::new();
     let original = std::fs::read_to_string(f.bin.join("claude")).unwrap();
-    let script = original.replace("if scenario=='sleep': time.sleep(60)", r#"if scenario=='sleep':
+    let script = original.replace(
+        "if scenario=='sleep': time.sleep(60)",
+        r#"if scenario=='sleep':
  from pathlib import Path
- inbox=next(Path(os.environ['AHU_RUNTIME_DIR']).glob('*/'+os.environ['AHU_PARENT_TASK']+'/requests'))
+ inbox=Path(os.environ['AHU_TASK_DIR'])/'requests'
  for i in range(270):
   p=inbox/(format(i,'016x')+'.request.json');p.write_text('{');p.chmod(0o600)
- time.sleep(60)"#);
+ time.sleep(60)"#,
+    );
     std::fs::write(f.bin.join("claude"), script).unwrap();
-    let out = f.launch("sleep", &["--timeout", "10"]);
+    // This checks retention admission, not the attempt timeout. Hundreds of
+    // durable claim writes need headroom under a concurrent full-suite load.
+    let out = f.launch("sleep", &["--timeout", "30"]);
     let value = Fixture::value(&out);
     assert_eq!(value["outcome"], "capture_failed", "{value}");
     assert!(
@@ -1205,9 +1226,9 @@ fn mailbox_request_limit_bounds_private_retention_and_cleanup_removes_inbox() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|v| v.as_str().unwrap().contains("broker request limit"))
+            .any(|v| v.as_str().unwrap().contains("broker dispatch failed"))
     );
-    let events = PathBuf::from(value["artifacts"]["events"].as_str().unwrap());
+    let events = PathBuf::from(value["review"]["result_path"].as_str().unwrap());
     let attempt = events.parent().unwrap();
     let claims = std::fs::read_dir(attempt.join("broker"))
         .unwrap()
@@ -1445,7 +1466,10 @@ fn the_opencode_event_stream_is_terminal_only_when_a_step_stops() {
     let capped = observe(&[&step_start, &truncated]);
     assert!(capped.terminal && capped.failed);
     assert!(
-        capped.blockers.iter().any(|b| b.contains("length")),
+        capped
+            .blockers
+            .iter()
+            .any(|b| b.contains("without a stop reason")),
         "{:?}",
         capped.blockers
     );
@@ -1555,7 +1579,7 @@ assert a[-2]=='--', a
 assert '--auto' not in a, a
 assert '-i' not in a and '--interactive' not in a, a
 assert os.environ['AHU_EXECUTION_BACKEND']=='headless'
-assert 'ahu delegation contract (v2, headless)' in a[-1]
+assert 'ahu delegation contract (v3, headless)' in a[-1]
 session='ses_'+os.environ['AHU_PARENT_TASK']
 def emit(kind,part): print(json.dumps({'type':kind,'timestamp':1,'sessionID':session,'part':part}),flush=True)
 emit('step_start',{'type':'step-start'})
@@ -1595,7 +1619,7 @@ emit('step_finish',{'type':'step-finish','reason':'stop'})
     assert_eq!(v["identity"]["harness"], "opencode");
     let worktree = PathBuf::from(v["worktree"].as_str().unwrap());
     assert!(worktree.join("proof.txt").exists());
-    assert_eq!(v["harness"]["summary"], "validated synthetic proof");
+    assert!(v["harness"].get("summary").is_none());
     assert!(
         v["harness"]["session"]
             .as_str()
@@ -1719,7 +1743,7 @@ assert cfg.get('sandbox_mode="read-only"')==1, cfg
 assert '--approve-for-me' not in a, a
 assert a[a.index('--color')+1]=='never', a
 assert a[-2]=='--', a
-assert 'ahu delegation contract (v2, headless)' in a[-1], a[-1][:200]
+assert 'ahu delegation contract (v3, headless)' in a[-1], a[-1][:200]
 assert os.environ['AHU_EXECUTION_BACKEND']=='headless'
 assert sys.stdin.read()==''
 session='thr_'+os.environ['AHU_PARENT_TASK']
@@ -1756,7 +1780,7 @@ print(json.dumps({'type':'turn.completed'}),flush=True)
     assert_eq!(v["identity"]["harness"], "codex");
     let worktree = PathBuf::from(v["worktree"].as_str().unwrap());
     assert!(worktree.join("proof.txt").exists());
-    assert_eq!(v["harness"]["summary"], "validated synthetic proof");
+    assert!(v["harness"].get("summary").is_none());
     assert!(
         v["harness"]["session"]
             .as_str()
@@ -1777,7 +1801,7 @@ fn cleanup_unlinks_a_mailbox_symlink_without_following_it() {
     let f = Fixture::new();
     let value = Fixture::value(&f.launch("success", &[]));
     let id = value["task_id"].as_str().unwrap();
-    let task = PathBuf::from(value["artifacts"]["events"].as_str().unwrap())
+    let task = PathBuf::from(value["review"]["result_path"].as_str().unwrap())
         .parent()
         .unwrap()
         .parent()
@@ -1814,7 +1838,7 @@ fn cleanup_refuses_an_artifact_name_that_is_not_a_regular_file() {
     let f = Fixture::new();
     let value = Fixture::value(&f.launch("success", &[]));
     let id = value["task_id"].as_str().unwrap();
-    let attempt = PathBuf::from(value["artifacts"]["events"].as_str().unwrap())
+    let attempt = PathBuf::from(value["review"]["result_path"].as_str().unwrap())
         .parent()
         .unwrap()
         .to_path_buf();
@@ -2086,4 +2110,193 @@ fn composed_batch_launch_and_continuation_freeze_identity_session_and_grants() {
             );
         }
     }
+}
+
+#[test]
+fn native_response_sentinels_never_persist_in_primary_coordination() {
+    let f = Fixture::new();
+    let sentinel = "NATIVE_RESPONSE_MUST_STAY_NATIVE_6b2e9c";
+    let executable = f.bin.join("claude");
+    let script = std::fs::read_to_string(&executable).unwrap()
+        .replace("synthetic read evidence", sentinel)
+        .replace("validated synthetic proof", sentinel)
+        .replace("scenario=os.environ", &format!("sys.stderr.write('permission denied: {sentinel}\\n');sys.stderr.flush()\nscenario=os.environ"));
+    std::fs::write(executable, script).unwrap();
+    let output = f.launch("native_joined", &["--native-helpers", "bounded"]);
+    let value = Fixture::value(&output);
+    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["outcome"], "failed");
+    assert_eq!(value["native_helpers"][0]["status"], "completed");
+    assert!(value["harness"].get("summary").is_none());
+    assert!(value["harness"].get("native_observations").is_none());
+    assert!(value.get("agent_report").is_none());
+    assert_eq!(value["native_reference"]["source"], "harness event stream");
+    assert!(value["native_reference"]["data_location"].is_null());
+    fn inspect(path: &std::path::Path, sentinel: &str) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                inspect(&path, sentinel);
+            } else {
+                let name = entry.file_name();
+                let name = name.to_str().unwrap();
+                assert!(
+                    ![
+                        "events.jsonl",
+                        "stderr.log",
+                        "final.txt",
+                        "native.log",
+                        "supervisor.log",
+                        "result.md"
+                    ]
+                    .contains(&name),
+                    "{}",
+                    path.display()
+                );
+                assert!(!name.ends_with(".dispatch.log"));
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(
+                    !bytes
+                        .windows(sentinel.len())
+                        .any(|b| b == sentinel.as_bytes()),
+                    "native text persisted at {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    inspect(&f.repo.path().join(".ahu/state"), sentinel);
+    assert!(!f.external.path().join("runtime").exists());
+    assert!(!f.external.path().join("retired-index").exists());
+}
+
+#[test]
+fn session_checkpoint_survives_stream_evaluation_failure() {
+    let f = Fixture::new();
+    let output = f.launch("oversized", &[]);
+    let value = Fixture::value(&output);
+    let result_path = PathBuf::from(value["review"]["result_path"].as_str().unwrap());
+    let checkpoint: Value = serde_json::from_slice(
+        &std::fs::read(result_path.parent().unwrap().join("native-session.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(checkpoint["session"], value["task_id"]);
+    assert_eq!(value["harness"]["session"], value["task_id"]);
+    assert!(checkpoint["native_data_location"].is_null());
+    assert_ne!(value["outcome"], "succeeded");
+}
+
+#[test]
+fn linked_checkout_reads_primary_headless_records_and_independent_repo_does_not() {
+    let f = Fixture::new();
+    let output = f.launch("success", &[]);
+    let value = Fixture::value(&output);
+    let id = value["task_id"].as_str().unwrap();
+    let sibling = f.external.path().join("sibling");
+    common::git(
+        f.repo.path(),
+        &["worktree", "add", "--detach", sibling.to_str().unwrap()],
+    );
+    for command in ["task", "result", "wait"] {
+        let out = f
+            .command()
+            .current_dir(&sibling)
+            .args([command, id, "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(Fixture::value(&out)["task_id"], id);
+    }
+    let independent = TestRepo::new();
+    let out = f
+        .command()
+        .current_dir(independent.path())
+        .args(["result", id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+}
+
+#[test]
+fn primary_store_redirect_is_refused_before_creating_a_task_worktree() {
+    let f = Fixture::new();
+    let repo = ahu::git::discover(f.repo.path()).unwrap();
+    let storage = ahu::storage::RepositoryStorage::new(&repo).unwrap();
+    ahu::state::create_private_dir_all(&storage.coordination_dir().unwrap()).unwrap();
+    let decoy = f.external.path().join("unrelated");
+    std::fs::create_dir(&decoy).unwrap();
+    std::os::unix::fs::symlink(&decoy, ahu::headless::store(&repo).unwrap()).unwrap();
+    let out = f.launch("success", &[]);
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read_dir(&decoy).unwrap().count(), 0);
+    assert!(!f.repo.path().join(".worktrees").exists());
+}
+
+#[test]
+fn excessive_native_counters_are_rejected_before_helper_accounting() {
+    let mut events = ahu::headless::Events::default();
+    events.observe("claude-code", br#"{"type":"result","subtype":"success","is_error":false,"result":"synthetic","subagent_stats":{"refused":{"depth_limit":18446744073709551615,"concurrency_limit":1,"budget":1}}}"#);
+    assert!(events.failed);
+    assert!(
+        events
+            .blockers
+            .iter()
+            .any(|b| b.contains("evaluation bound"))
+    );
+}
+
+#[test]
+fn primary_records_remain_readable_after_submitting_sibling_is_removed() {
+    let f = Fixture::new();
+    let sibling = f.external.path().join("submitting-sibling");
+    common::git(
+        f.repo.path(),
+        &["worktree", "add", "--detach", sibling.to_str().unwrap()],
+    );
+    let out = f
+        .command()
+        .current_dir(&sibling)
+        .args([
+            "launch",
+            "@worker",
+            "--headless",
+            "--prompt",
+            "synthetic",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value = Fixture::value(&out);
+    let id = value["task_id"].as_str().unwrap();
+    common::git(
+        f.repo.path(),
+        &["worktree", "remove", sibling.to_str().unwrap()],
+    );
+    for action in ["task", "wait", "result"] {
+        let out = f
+            .command()
+            .args([action, id, "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(Fixture::value(&out)["task_id"], id);
+    }
+    let repo = ahu::git::discover(f.repo.path()).unwrap();
+    let entry = ahu::task_index::lookup_in(&repo, id).unwrap().unwrap();
+    assert_eq!(entry.checkout, repo.primary_root().unwrap());
 }

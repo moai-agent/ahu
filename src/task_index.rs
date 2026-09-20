@@ -1,20 +1,11 @@
-//! The cross-checkout task index: pointers, not records.
-//!
-//! The index holds one small entry per task — its id, the repository identity
-//! it belongs to, the checkout it lives in, and which store kind holds it —
-//! and nothing else. It is user state that lives outside every repository
-//! checkout, so it is never migrated in place and never rewritten to match
-//! records it cannot read. An entry whose checkout has disappeared degrades
-//! into a lead about where a task used to live, not an authority about where
-//! one is now.
+//! Primary-owned task pointers. Legacy external entries remain read-only.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::util::{Error, Result};
 use crate::{bail, state, task};
 
-pub const INDEX_SCHEMA_VERSION: u32 = 1;
+pub const INDEX_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -32,89 +23,61 @@ pub struct Entry {
     pub store: StoreKind,
 }
 
-/// Resolve existing ancestors first, then refuse redirected index components.
-/// The caller-selected root may be outside the default home, but never in Git.
+/// The selected repository supplies scope; ambient index overrides are retired.
 pub fn index_root() -> Result<PathBuf> {
-    let raw = std::env::var_os("AHU_TASK_INDEX_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state/ahu/task-index"))
-        })
-        .ok_or_else(|| {
-            Error::new("set AHU_TASK_INDEX_DIR to a private directory outside repositories")
-        })?;
-    if !raw.is_absolute()
-        || raw
-            .components()
-            .any(|p| matches!(p, std::path::Component::ParentDir))
-    {
-        bail!("task index root must be an absolute path without '..'");
-    }
-    let mut existing = raw.as_path();
-    let mut tail = Vec::new();
-    while !existing.exists() {
-        if std::fs::symlink_metadata(existing).is_ok() {
-            bail!("task index root contains a dangling symlink");
-        }
-        tail.push(
-            existing
-                .file_name()
-                .ok_or_else(|| Error::new("invalid task index root"))?
-                .to_os_string(),
-        );
-        existing = existing
-            .parent()
-            .ok_or_else(|| Error::new("invalid task index root"))?;
-    }
-    let mut root = existing.canonicalize()?;
-    for component in tail.into_iter().rev() {
-        root.push(component);
-    }
-    if root.ancestors().any(|p| p.join(".git").exists()) {
-        bail!("task index must be outside every repository checkout");
-    }
-    Ok(root)
+    let repo = crate::git::discover(&std::env::current_dir()?)?;
+    root_for(&repo)
+}
+
+pub fn root_for(repo: &crate::git::Repo) -> Result<PathBuf> {
+    Ok(crate::storage::RepositoryStorage::new(repo)?
+        .primary
+        .state_root()?
+        .join("task-index"))
 }
 
 fn confined(path: &Path, create: bool) -> Result<()> {
-    let root = index_root()?;
-    if !path.starts_with(&root) {
-        bail!("task index path is outside the task index root");
+    use std::os::unix::fs::MetadataExt;
+    let primary = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| Error::new("invalid task index root"))?;
+    let repo = crate::git::discover(primary)?;
+    if root_for(&repo)? != path || repo.primary_root()? != primary {
+        bail!("task index must belong to the selected primary checkout");
     }
-    let mut cursor = root.clone();
-    if let Ok(meta) = std::fs::symlink_metadata(&root) {
-        use std::os::unix::fs::MetadataExt;
+    state::confine_existing_dir(path)?;
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
         // SAFETY: geteuid has no preconditions.
         if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
-            bail!(
-                "existing task index root must be an owner-only directory owned by the current user"
-            );
+            bail!("task index must be an owner-only directory owned by the current user");
         }
     }
-    if create && !cursor.exists() {
-        state::create_private_dir_all(&cursor)?;
+    if create {
+        state::create_private_dir_all(path)?;
     }
-    for part in path
-        .strip_prefix(&root)
-        .map_err(|e| Error::new(e.to_string()))?
-        .components()
-    {
-        if !matches!(part, std::path::Component::Normal(_)) {
-            bail!("invalid task index component");
-        }
-        cursor.push(part);
-        match std::fs::symlink_metadata(&cursor) {
-            Ok(m) if m.file_type().is_symlink() || !m.is_dir() => bail!(
-                "task index directory is redirected or not a directory: {}",
-                cursor.display()
-            ),
-            Ok(_) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
-                state::create_private_dir_all(&cursor)?
+    Ok(())
+}
+
+fn legacy_confined(root: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if crate::storage::external_root(root)? != root {
+        bail!("legacy index root is redirected");
+    }
+    match std::fs::symlink_metadata(root) {
+        Ok(meta) => {
+            // SAFETY: geteuid has no preconditions.
+            if !meta.is_dir()
+                || meta.file_type().is_symlink()
+                || meta.uid() != unsafe { libc::geteuid() }
+                || meta.mode() & 0o077 != 0
+            {
+                bail!("legacy index must be an owner-only directory owned by the current user");
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(e.into()),
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(e.into()),
     }
     Ok(())
 }
@@ -129,20 +92,9 @@ fn durable_write(path: &Path, value: &impl serde::Serialize) -> Result<()> {
         .ok_or_else(|| Error::new("task index file needs a parent"))?;
     confined(parent, true)?;
     state::confine_file(path)?;
-    let temp = parent.join(format!(".write-{}", crate::orchestration::new_nonce()?));
-    let mut file = state::create_new_private_file(&temp)?;
-    let result = (|| -> Result<()> {
-        serde_json::to_writer(&mut file, value).map_err(|e| Error::new(e.to_string()))?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        std::fs::rename(&temp, path)?;
-        std::fs::File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(temp);
-    }
-    result
+    let mut body = serde_json::to_vec(value)?;
+    body.push(b'\n');
+    crate::private_io::atomic_write(path, &body, crate::private_io::Durability::Durable)
 }
 
 fn read_entry(root: &Path, task_id: &str) -> Result<Option<Entry>> {
@@ -150,10 +102,29 @@ fn read_entry(root: &Path, task_id: &str) -> Result<Option<Entry>> {
     if state::confine_file(&path)?.is_none() {
         return Ok(None);
     }
-    let bytes = state::read_private_file(&path)?;
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)?;
+    let meta = file.metadata()?;
+    // SAFETY: geteuid has no preconditions.
+    if !meta.is_file()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.nlink() != 1
+        || meta.len() > 65536
+    {
+        bail!("task index entry must be an owned regular file within 64 KiB");
+    }
+    let mut bytes = Vec::new();
+    file.take(65537).read_to_end(&mut bytes)?;
+    if bytes.len() > 65536 {
+        bail!("task index entry exceeds 64 KiB");
+    }
     let entry: Entry = serde_json::from_slice(&bytes)
         .map_err(|e| Error::new(format!("invalid {}: {e}", path.display())))?;
-    if entry.schema_version != INDEX_SCHEMA_VERSION {
+    if !matches!(entry.schema_version, 1 | INDEX_SCHEMA_VERSION) {
         bail!(
             "task index entry {} has schema version {}; this ahu expects {}",
             path.display(),
@@ -187,13 +158,21 @@ pub fn register(
             checkout.display()
         );
     }
+    let repo = crate::git::discover(checkout)?;
+    if repo.identity() != repo_identity {
+        bail!("index registration repository identity mismatch");
+    }
     durable_write(
-        &entry_path(&index_root()?, task_id),
+        &entry_path(&root_for(&repo)?, task_id),
         &Entry {
             schema_version: INDEX_SCHEMA_VERSION,
             task_id: task_id.to_string(),
             repo_identity: repo_identity.to_string(),
-            checkout: checkout.to_path_buf(),
+            checkout: if store == StoreKind::Headless {
+                repo.primary_root()?
+            } else {
+                checkout.to_path_buf()
+            },
             store,
         },
     )
@@ -205,7 +184,15 @@ pub fn remove(task_id: &str) -> Result<()> {
     if !task::is_canonical_task_uuid(task_id) {
         return Ok(());
     }
-    let root = index_root()?;
+    let repo = crate::git::discover(&std::env::current_dir()?)?;
+    remove_in(&repo, task_id)
+}
+
+pub fn remove_in(repo: &crate::git::Repo, task_id: &str) -> Result<()> {
+    if !task::is_canonical_task_uuid(task_id) {
+        return Ok(());
+    }
+    let root = root_for(repo)?;
     confined(&root, false)?;
     let path = entry_path(&root, task_id);
     match std::fs::remove_file(&path) {
@@ -225,9 +212,31 @@ pub fn lookup(task_id: &str) -> Result<Option<Entry>> {
     if !task::is_canonical_task_uuid(task_id) {
         return Ok(None);
     }
-    let root = index_root()?;
+    let repo = crate::git::discover(&std::env::current_dir()?)?;
+    lookup_in(&repo, task_id)
+}
+
+pub fn lookup_in(repo: &crate::git::Repo, task_id: &str) -> Result<Option<Entry>> {
+    if !task::is_canonical_task_uuid(task_id) {
+        return Ok(None);
+    }
+    let root = root_for(repo)?;
     confined(&root, false)?;
-    read_entry(&root, task_id)
+    if let Some(entry) = read_entry(&root, task_id)? {
+        if entry.repo_identity != repo.identity() {
+            bail!("primary task index entry belongs to another repository");
+        }
+        return Ok(Some(entry));
+    }
+    for root in crate::storage::legacy_index_roots(repo)? {
+        legacy_confined(&root)?;
+        if let Some(entry) = read_entry(&root, task_id)?
+            && entry.repo_identity == repo.identity()
+        {
+            return Ok(Some(entry));
+        }
+    }
+    Ok(None)
 }
 
 fn is_uuid_text_prefix(prefix: &str) -> bool {
@@ -244,29 +253,52 @@ pub fn lookup_prefix(prefix: &str) -> Result<Vec<Entry>> {
     if !is_uuid_text_prefix(prefix) {
         return Ok(Vec::new());
     }
-    let root = index_root()?;
-    confined(&root, false)?;
-    let mut out = Vec::new();
-    match std::fs::read_dir(&root) {
-        Ok(entries) => {
-            for dirent in entries {
-                let dirent = dirent?;
-                let name = dirent.file_name();
-                let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".json")) else {
-                    continue;
-                };
-                if !stem.starts_with(prefix) {
-                    continue;
-                }
-                match read_entry(&root, stem) {
-                    Ok(Some(entry)) => out.push(entry),
-                    Ok(None) => continue,
-                    Err(e) => return Err(e),
-                }
+    let repo = crate::git::discover(&std::env::current_dir()?)?;
+    lookup_prefix_in(&repo, prefix)
+}
+
+pub fn lookup_prefix_in(repo: &crate::git::Repo, prefix: &str) -> Result<Vec<Entry>> {
+    if !is_uuid_text_prefix(prefix) {
+        return Ok(Vec::new());
+    }
+    let primary = root_for(repo)?;
+    confined(&primary, false)?;
+    let mut roots = vec![primary];
+    roots.extend(crate::storage::legacy_index_roots(repo)?);
+    let mut out: Vec<Entry> = Vec::new();
+    for (index, root) in roots.iter().enumerate() {
+        if index != 0 {
+            legacy_confined(root)?;
+        }
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        for dirent in entries {
+            let dirent = dirent?;
+            let name = dirent.file_name();
+            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".json")) else {
+                continue;
+            };
+            if !stem.starts_with(prefix) {
+                continue;
+            }
+            let entry = read_entry(root, stem)?;
+            if index == 0
+                && entry
+                    .as_ref()
+                    .is_some_and(|e| e.repo_identity != repo.identity())
+            {
+                bail!("primary task index entry belongs to another repository");
+            }
+            if let Some(entry) = entry
+                && entry.repo_identity == repo.identity()
+                && !out.iter().any(|old| old.task_id == entry.task_id)
+            {
+                out.push(entry);
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
     }
     out.sort_by(|a, b| a.task_id.cmp(&b.task_id));
     Ok(out)
@@ -275,166 +307,88 @@ pub fn lookup_prefix(prefix: &str) -> Result<Vec<Entry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `tempfile` creates world-readable directories, and the index root must
-    /// be owner-only, so scenario roots are tightened before use.
-    fn owner_only_dir(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(path, perms).unwrap();
+    fn repo() -> (tempfile::TempDir, crate::git::Repo) {
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let repo = crate::git::discover(dir.path()).unwrap();
+        (dir, repo)
+    }
+    #[test]
+    fn primary_index_is_scoped_private_and_refuses_redirects() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let (_dir, repo) = repo();
+        let root = root_for(&repo).unwrap();
+        let id = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b";
+        register(&repo.identity(), id, &repo.root, StoreKind::Headless).unwrap();
+        let entry = read_entry(&root, id).unwrap().unwrap();
+        assert_eq!(entry.schema_version, 2);
+        assert_eq!(entry.repo_identity, repo.identity());
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(entry_path(&root, id))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let (_other_dir, other) = super::tests::repo();
+        assert!(
+            read_entry(&root_for(&other).unwrap(), id)
+                .unwrap()
+                .is_none()
+        );
+        let path = entry_path(&root, id);
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(read_entry(&root, id).is_err());
+        std::fs::remove_file(&path).unwrap();
+        symlink("/dev/null", &path).unwrap();
+        assert!(read_entry(&root, id).is_err());
+        assert!(register(&repo.identity(), id, &repo.root, StoreKind::Headless).is_err());
     }
 
     #[test]
-    fn index_scenarios() {
+    fn old_entries_remain_readable_and_unknown_versions_are_refused() {
+        let (_dir, repo) = repo();
+        let root = root_for(&repo).unwrap();
+        confined(&root, true).unwrap();
         let id = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b";
-        let id2 = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5c";
-        let id3 = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5d";
-        let stranger = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5e";
-        let repo_identity = "0123456789abcdef";
-        let checkout = std::env::temp_dir().join("ahu-task-index-checkout");
-        let common_prefix: String = id.chars().take(35).collect();
-
-        // Registration and lookup.
-        {
-            let root = tempfile::tempdir().unwrap();
-            owner_only_dir(root.path());
-            unsafe { std::env::set_var("AHU_TASK_INDEX_DIR", root.path()) };
-            register(repo_identity, id, &checkout, StoreKind::Worktree).unwrap();
-            let entry = lookup(id).unwrap().unwrap();
-            assert_eq!(entry.task_id, id);
-            assert_eq!(entry.repo_identity, repo_identity);
-            assert_eq!(entry.checkout, checkout);
-            assert_eq!(entry.store, StoreKind::Worktree);
-            assert_eq!(entry.schema_version, INDEX_SCHEMA_VERSION);
-
-            // Grammar, uppercase, and legacy forms are not looked up.
-            assert!(lookup(&format!("ahu:task:{id}")).unwrap().is_none());
-            assert!(
-                lookup("018F1A2B-3C4D-7E5F-8A9B-0C1D2E3F4A5B")
-                    .unwrap()
-                    .is_none()
-            );
-            assert!(lookup("006aaec1fb360df8a1").unwrap().is_none());
-
-            // Removing a legacy id is a no-op; registering one is refused.
-            assert!(remove("006aaec1fb360df8a1").is_ok());
-            let refused = register(
-                repo_identity,
-                "006aaec1fb360df8a1",
-                &checkout,
-                StoreKind::Worktree,
-            )
-            .unwrap_err();
-            assert!(refused.to_string().contains("canonical task ids only"));
-            let relative = std::path::PathBuf::from("relative/checkout");
-            let refused = register(repo_identity, id, &relative, StoreKind::Worktree).unwrap_err();
-            assert!(refused.to_string().contains("absolute checkout paths only"));
-        }
-
-        // Prefix lookup over two entries with different stores.
-        {
-            let root = tempfile::tempdir().unwrap();
-            owner_only_dir(root.path());
-            unsafe { std::env::set_var("AHU_TASK_INDEX_DIR", root.path()) };
-            register(repo_identity, id, &checkout, StoreKind::Worktree).unwrap();
-            register(repo_identity, id2, &checkout, StoreKind::Headless).unwrap();
-            let entries = lookup_prefix(&common_prefix).unwrap();
-            assert_eq!(entries.len(), 2);
-            assert_eq!(entries[0].task_id, id);
-            assert_eq!(entries[1].task_id, id2);
-            assert_eq!(entries[0].store, StoreKind::Worktree);
-            assert_eq!(entries[1].store, StoreKind::Headless);
-            assert_eq!(lookup_prefix("018f1a2b").unwrap().len(), 2);
-            assert!(lookup_prefix("ffffffff").unwrap().is_empty());
-            assert!(lookup_prefix("").unwrap().is_empty());
-            assert!(lookup_prefix("not-a-prefix!").unwrap().is_empty());
-        }
-
-        // Removal forgets an entry and tolerates a missing one.
-        {
-            let root = tempfile::tempdir().unwrap();
-            owner_only_dir(root.path());
-            unsafe { std::env::set_var("AHU_TASK_INDEX_DIR", root.path()) };
-            register(repo_identity, id, &checkout, StoreKind::Worktree).unwrap();
-            register(repo_identity, id2, &checkout, StoreKind::Headless).unwrap();
-            remove(id2).unwrap();
-            assert!(lookup(id2).unwrap().is_none());
-            assert_eq!(lookup_prefix("018f1a2b").unwrap().len(), 1);
-            remove(id2).unwrap();
-        }
-
-        // Corrupt entries fail closed.
-        {
-            let root = tempfile::tempdir().unwrap();
-            owner_only_dir(root.path());
-            unsafe { std::env::set_var("AHU_TASK_INDEX_DIR", root.path()) };
-            let path = root.path().join(format!("{id3}.json"));
-            std::fs::write(
-                &path,
-                format!(
-                    "{{\"schema_version\":99,\"task_id\":\"{id3}\",\
-                     \"repo_identity\":\"{repo_identity}\",\
-                     \"checkout\":\"/tmp\",\"store\":\"worktree\"}}\n"
-                ),
-            )
-            .unwrap();
-            assert!(
-                lookup(id3)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("schema version")
-            );
-            std::fs::write(
-                &path,
-                format!(
-                    "{{\"schema_version\":1,\"task_id\":\"{stranger}\",\
-                     \"repo_identity\":\"{repo_identity}\",\
-                     \"checkout\":\"/tmp\",\"store\":\"worktree\"}}\n"
-                ),
-            )
-            .unwrap();
-            assert!(
-                lookup(id3)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("different task")
-            );
-            std::fs::write(&path, "not json\n").unwrap();
-            assert!(lookup(id3).unwrap_err().to_string().contains("invalid"));
-        }
-
-        // The root must stay outside repositories.
-        {
-            let base = tempfile::tempdir().unwrap();
-            std::fs::create_dir(base.path().join(".git")).unwrap();
-            unsafe { std::env::set_var("AHU_TASK_INDEX_DIR", base.path().join("idx")) };
-            let refused = register(repo_identity, id, &checkout, StoreKind::Worktree).unwrap_err();
-            assert!(
-                refused
-                    .to_string()
-                    .contains("outside every repository checkout")
-            );
-            unsafe { std::env::remove_var("AHU_TASK_INDEX_DIR") };
-        }
-
-        // The root must stay owner-only and owned by the current user.
-        {
-            let base = tempfile::tempdir().unwrap();
-            std::fs::create_dir(base.path().join("idx")).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(base.path().join("idx"))
-                    .unwrap()
-                    .permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(base.path().join("idx"), perms).unwrap();
-            }
-            unsafe { std::env::set_var("AHU_TASK_INDEX_DIR", base.path().join("idx")) };
-            let refused = register(repo_identity, id, &checkout, StoreKind::Worktree).unwrap_err();
-            assert!(refused.to_string().contains("owner-only"));
-            unsafe { std::env::remove_var("AHU_TASK_INDEX_DIR") };
-        }
+        let mut entry = Entry {
+            schema_version: 1,
+            task_id: id.into(),
+            repo_identity: repo.identity(),
+            checkout: repo.root,
+            store: StoreKind::Headless,
+        };
+        let path = entry_path(&root, id);
+        state::write_json(&path, &entry).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert_eq!(read_entry(&root, id).unwrap(), Some(entry.clone()));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        entry.schema_version = 99;
+        state::write_json(&path, &entry).unwrap();
+        assert!(
+            read_entry(&root, id)
+                .unwrap_err()
+                .to_string()
+                .contains("schema version")
+        );
+        entry.schema_version = 2;
+        entry.task_id = "another".into();
+        state::write_json(&path, &entry).unwrap();
+        assert!(
+            read_entry(&root, id)
+                .unwrap_err()
+                .to_string()
+                .contains("different task")
+        );
     }
 }

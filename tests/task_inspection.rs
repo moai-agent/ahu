@@ -79,10 +79,14 @@ fn run(repo: &TestRepo, args: &[&str]) -> Output {
 }
 
 fn run_with_runtime(repo: &TestRepo, runtime: &std::path::Path, args: &[&str]) -> Output {
+    ahu::state::write_json(
+        &repo.path().join(".ahu/state/legacy-lookup.json"),
+        &serde_json::json!({"schema_version":1,"runtime_roots":[runtime.canonicalize().unwrap()]}),
+    )
+    .unwrap();
     common::ahu()
         .args(args)
         .current_dir(repo.path())
-        .env("AHU_RUNTIME_DIR", runtime)
         .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
         .output()
         .unwrap()

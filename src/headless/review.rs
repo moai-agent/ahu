@@ -9,38 +9,36 @@ const LIMIT: u64 = 1024 * 1024;
 
 /// Include external tasks whose headless spec has gone missing or is a bad link.
 pub(crate) fn is_headless(dir: &Path) -> bool {
-    dir.join("headless.json").symlink_metadata().is_ok()
-        || super::runtime_root()
-            .ok()
-            .is_some_and(|root| dir.parent().and_then(Path::parent) == Some(root.as_path()))
+    dir.join("headless.json").symlink_metadata().is_ok() || super::confined(dir, false).is_ok()
 }
 
 /// Review keeps incomplete or unreadable external task directories visible.
 /// Lifecycle discovery still requires a record and retains its fail-closed policy.
 pub(crate) fn directories(repo: &crate::git::Repo) -> Result<Vec<std::path::PathBuf>> {
-    let store = super::store(repo)?;
-    super::confined(&store, false)?;
-    let entries = match std::fs::read_dir(&store) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
     let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if crate::task::is_canonical_task_uuid(&name)
-            || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_hexdigit()))
-        {
-            paths.push(entry.path());
+    for store in super::stores(repo)? {
+        super::confined_in(repo, &store, false)?;
+        let entries = match std::fs::read_dir(&store) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if crate::task::is_canonical_task_uuid(&name)
+                || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
+                paths.push(entry.path());
+            }
         }
     }
     Ok(paths)
 }
 
 /// Preserve the runtime backend's directory checks before generic record loading.
-pub(crate) fn record(dir: &Path) -> Result<crate::task::TaskRecord> {
-    super::confined(dir, false)?;
+pub(crate) fn record(repo: &crate::git::Repo, dir: &Path) -> Result<crate::task::TaskRecord> {
+    super::confined_in(repo, dir, false)?;
     crate::task::load(dir)
 }
 
@@ -87,7 +85,7 @@ pub(super) fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 
 pub(super) fn validate_result(value: &Value, id: &str, attempt: u32) -> Result<()> {
     let outcome = value["outcome"].as_str();
-    if value["schema_version"] != 1
+    if !matches!(value["schema_version"].as_u64(), Some(1 | 2))
         || value["task_id"] != id
         || value["attempt"] != attempt
         || !matches!(
@@ -145,11 +143,15 @@ pub(super) fn projection(
     if ownership.is_none() {
         blockers.push("supervisor ownership unavailable; liveness unknown".into());
     }
+    let checkpoint = spec
+        .and_then(|s| read::<Value>(&super::attempt_dir(dir, s).join("native-session.json")).ok());
     let session = result
         .and_then(|v| v["harness"]["session"].as_str())
         .filter(|s| !s.is_empty());
     let (session, source) = if let Some(session) = session {
         (Some(session), "result.json harness.session")
+    } else if let Some(session) = checkpoint.as_ref().and_then(|c| c["session"].as_str()) {
+        (Some(session), "checkpoint; harness event stream")
     } else if let Some(session) = spec
         .and_then(|s| s.session.as_deref())
         .filter(|s| !s.is_empty())
@@ -181,7 +183,7 @@ pub(super) fn projection(
         "blockers":blockers, "runtime":dir, "record_path":dir.join("task.json"),
         "result_path":attempt.as_ref().map(|p| p.join("result.json")),
         "result_metadata":if error.is_some() {"unavailable"} else if result.is_some_and(|v| v["outcome"] == "running" || v["outcome"] == "interrupted") {"missing"} else {"available"},
-        "agent_report_path":dir.join("result.md"), "final_path":attempt.as_ref().map(|p| p.join("final.txt")), "attempt_path":attempt,
+        "agent_report_path":spec.filter(|s| s.schema_version == 1).map(|_|dir.join("result.md")), "final_path":attempt.as_ref().filter(|_| spec.is_some_and(|s| s.schema_version == 1)).map(|p| p.join("final.txt")), "attempt_path":attempt,
         "parent_task":spec.and_then(|s| s.parent_task.as_deref()),
         "native_helpers":spec.map(|s| &s.options.native_helpers),
         "timeout_seconds":spec.map(|s| s.options.timeout_seconds),

@@ -113,7 +113,7 @@ const BOUNDED_HEADLESS_INSTRUCTIONS: &str = headless_contract!(
 /// Layout 1 is the original bracket fences and unfenced request. Its contract
 /// bytes remain frozen here for replay. Layout 2 adds XML-shaped section names
 /// and frozen factual context. Neither layout claims harness enforcement.
-pub const LAYOUT_VERSION: u32 = 2;
+pub const LAYOUT_VERSION: u32 = 3;
 
 const SECTION_GUIDANCE: &str = "\nahu sections: contract is advisory delegation guidance; agent contains the selected\nagent's instructions; request is the assignment supplied by the requester. Metadata\nand state contain frozen ahu execution facts and references, not enforced authority.\nNative session references locate harness-owned data; they do not import its history.\nThe nonce-bearing tags delimit raw text, not an escaped XML document.\n";
 
@@ -211,7 +211,7 @@ impl Delivery {
     pub fn verify_composition(&self, expected: &Composition) -> Result<()> {
         match self.layout_version {
             1 if self.composition.is_none() => Ok(()),
-            LAYOUT_VERSION
+            2 | LAYOUT_VERSION
                 if self.composition.as_ref().is_some_and(|frozen| {
                     frozen.mode == expected.mode
                         && frozen
@@ -226,7 +226,7 @@ impl Delivery {
             {
                 Ok(())
             }
-            1 | LAYOUT_VERSION => {
+            1 | 2 | LAYOUT_VERSION => {
                 bail!("delivery composition differs from the frozen execution facts")
             }
             version => bail!("unsupported delivery layout version {version}; re-submit the task"),
@@ -306,14 +306,20 @@ fn render(
     request: &str,
     composition: &Composition,
 ) -> Result<String> {
-    if !matches!(version, 1 | LAYOUT_VERSION) {
+    if !matches!(version, 1 | 2 | LAYOUT_VERSION) {
         bail!("unsupported delivery layout version {version}; re-submit the task");
     }
     if nonce.is_empty() || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("ahu will not deliver an invalid fence nonce");
     }
     let mut contract = composition.mode.contract();
-    if version == LAYOUT_VERSION {
+    if version >= 3 && composition.mode != Mode::Interactive {
+        contract = contract.replace("ahu delegation contract (v2, headless)", "ahu delegation contract (v3, headless)")
+            .replace("Write child prompts and reports outside every repository, then launch:", "Write child assignment prompts in your task coordination directory, then launch:")
+            .replace("Read actual reports and diffs before accepting work.", "Read native session evidence and diffs before accepting work.")
+            .replace("Your task directory is $AHU_TASK_DIR (ahu's state directory, not a checkout) and\nyour task id is $AHU_TASK_ID. Write your final report as result.md in that\ndirectory; ahu will not display a report larger than 1 MiB. If you need the\noperator to answer a question first, write it to question.md in the same\ndirectory; replace that file when the question changes and remove it once\nanswered.", "Your task directory is $AHU_TASK_DIR (primary-owned coordination state) and\nyour task id is $AHU_TASK_ID. Return your final report in the native response;\ndo not write a duplicate result.md or copy native histories into ahu state.\nIf you need the operator to answer a question first, write question.md in\nyour task directory; replace it when the question changes and remove it once answered.");
+    }
+    if version >= 2 {
         contract.push_str(SECTION_GUIDANCE);
     }
     let metadata = composition
@@ -442,7 +448,7 @@ fn replay(delivery: &Delivery, prompt: &str, mode: Mode) -> Result<String> {
     };
     let composition = match delivery.layout_version {
         1 if delivery.composition.is_none() => &legacy,
-        LAYOUT_VERSION => delivery
+        2 | LAYOUT_VERSION => delivery
             .composition
             .as_ref()
             .filter(|c| c.mode == mode)
@@ -497,6 +503,45 @@ pub fn delivery_summary(nonce: &str, has_agent_instructions: bool) -> String {
 #[cfg(test)]
 mod nonce_tests {
     use super::*;
+
+    #[test]
+    fn legacy_headless_layouts_replay_the_original_report_policy() {
+        for version in [1, 2] {
+            let composition = Composition {
+                mode: Mode::HeadlessDisabled,
+                metadata: None,
+                state: None,
+            };
+            let text = render(
+                version,
+                "abcdef1234",
+                None,
+                "synthetic assignment",
+                &composition,
+            )
+            .unwrap();
+            assert!(text.contains("Write your final report as result.md"));
+            let delivery = Delivery {
+                layout_version: version,
+                composition: if version == 1 {
+                    None
+                } else {
+                    Some(composition)
+                },
+                nonce: "abcdef1234".into(),
+                agent_instructions: None,
+                digest: digest_bytes(text.as_bytes()),
+            };
+            assert_eq!(
+                redeliver_headless(&delivery, "synthetic assignment").unwrap(),
+                text
+            );
+        }
+        let (text, delivery) = deliver_headless(None, "synthetic assignment").unwrap();
+        assert_eq!(delivery.layout_version, 3);
+        assert!(!text.contains("Write your final report as result.md"));
+        assert!(text.contains("Return your final report in the native response"));
+    }
 
     #[test]
     fn assignment_is_inside_nonce_bearing_xml_request_fence() {
