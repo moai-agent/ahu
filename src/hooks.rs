@@ -427,11 +427,10 @@ impl Locations {
             managed: Some(PathBuf::from(
                 "/Library/Application Support/ClaudeCode/managed-settings.json",
             )),
-            // The installed cmux states that its Claude wrapper injects Claude
-            // Code hooks automatically. ahu launches Claude through cmux, so
-            // inside one this source is always present and never readable.
-            cmux_wrapper: std::env::var_os("CMUX_CLAUDE_WRAPPER_SHIM").is_some()
-                || std::env::var_os("CMUX_SOCKET_PATH").is_some(),
+            // Environment routing is not proof that a wrapper ran. Keep this
+            // legacy frozen field for digest compatibility; new inspection
+            // reports wrapper availability and activation separately.
+            cmux_wrapper: false,
         }
     }
 }
@@ -511,7 +510,7 @@ pub fn collect_for(
     locations: &Locations,
 ) -> Result<HookInventory> {
     let mut inventory = HookInventory {
-        wrapper_injected: locations.cmux_wrapper,
+        wrapper_injected: harness_id == "claude-code" && locations.cmux_wrapper,
         ..HookInventory::default()
     };
     // `.mcp.json` is read for every harness: it is repository configuration that

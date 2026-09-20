@@ -67,6 +67,36 @@ fn repo_on(harness: &str, model: &str) -> TestRepo {
 
 // --- the settings file that actually sets the approval boundary ---
 
+#[test]
+fn human_and_json_previews_share_the_planned_integration_evidence() {
+    if !common::in_harness_fixture("human_and_json_previews_share_the_planned_integration_evidence")
+    {
+        return;
+    }
+    let repo = repo_on("claude-code", "claude-opus-5");
+    repo.commit("fixture");
+    let (discovered, plan) = plan_for(&repo, "claude-code", "claude-opus-5");
+    let before = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+    let json: serde_json::Value =
+        serde_json::from_str(&launch::render_json(&plan, "review it").unwrap()).unwrap();
+    let expected = serde_json::to_value(&plan.cmux_integration).unwrap();
+    assert_eq!(json["cmux_integration"], expected);
+
+    // A later read must not silently replace one renderer's planned evidence.
+    // Execution performs its own configuration and admission rechecks.
+    repo.write(".claude/settings.json", "malformed settings");
+    let live =
+        serde_json::to_value(ahu::cmux::integration::inspect(repo.path(), "claude-code")).unwrap();
+    assert_ne!(live, expected);
+    assert_eq!(
+        ahu::commands::render_preview(&discovered, &plan, "review it", None),
+        before
+    );
+    let after: serde_json::Value =
+        serde_json::from_str(&launch::render_json(&plan, "review it").unwrap()).unwrap();
+    assert_eq!(after["cmux_integration"], expected);
+}
+
 /// `.claude/settings.json` decides the session's approval boundary, and ahu
 /// copies it into the task worktree. It used to read one key of it — `hooks` —
 /// and then print an Approvals block derived entirely from ahu's own manifest.

@@ -389,13 +389,49 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             "not installed".to_string()
         } else if let Some(version) = &prerequisite.version {
             let version = version.strip_prefix("codex-cli ").unwrap_or(version);
-            format!("{} — ready", display_safe(version))
+            format!("{} — executable ready", display_safe(version))
         } else {
             "installed (version unavailable)".to_string()
         };
         console.say(&format!(
             "harness      {} {status}\n",
             display_safe(harness)
+        ))?;
+    }
+
+    let integration_root = repo
+        .as_ref()
+        .map(|r| r.root.clone())
+        .unwrap_or(std::env::current_dir()?);
+    let native_cli = cmux::integration::NativeCli::discover();
+    console.say(&format!(
+        "cmux CLI     {}\n",
+        display_safe(
+            native_cli
+                .version
+                .as_deref()
+                .unwrap_or("unavailable or version unknown")
+        )
+    ))?;
+    for harness in ["claude-code", "codex", "opencode", "antigravity"] {
+        let status = cmux::integration::inspect(&integration_root, harness);
+        if status
+            .components
+            .iter()
+            .any(|c| c.registration != cmux::integration::Registration::Installed)
+        {
+            warnings += 1;
+        }
+        console.say(&cmux::integration::render(&status))?;
+        let installer = cmux::integration::installation_plan(harness, &native_cli)?;
+        console.say(&format!(
+            "  installer  {}: {}\n",
+            if installer.available {
+                "available"
+            } else {
+                "unavailable/unknown"
+            },
+            installer.detail
         ))?;
     }
 
@@ -2090,6 +2126,7 @@ pub fn render_launch_preview(
             ),
         ));
     }
+    out.push_str(&cmux::integration::render_summary(&plan.cmux_integration));
     out
 }
 
@@ -2350,6 +2387,7 @@ pub fn render_preview(
         ));
         out.push_str("It was generated after your prompt was read, so no pasted text can have supplied it.\n");
     }
+    out.push_str(&cmux::integration::render(&plan.cmux_integration));
     out
 }
 

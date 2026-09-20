@@ -190,6 +190,16 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 commands::knowledge_lint(console, &repo, output_json)
             })
         }
+        Command::CmuxStatus { output_json } => {
+            let cwd = std::env::current_dir()?;
+            let root = commands::repo_from_cwd().map(|r| r.root).unwrap_or(cwd);
+            ahu::cmux::integration::status_command(&root, output_json)
+        }
+        Command::CmuxInstall { harness, dry_run } => {
+            let cwd = std::env::current_dir()?;
+            let root = commands::repo_from_cwd().map(|r| r.root).unwrap_or(cwd);
+            ahu::cmux::integration::install_command(&root, &harness, dry_run)
+        }
         // `doctor` reports on a missing repository rather than failing on one.
         Command::Doctor => {
             let repo = commands::repo_from_cwd();
@@ -239,6 +249,8 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Version
                 | Command::Explain { .. }
                 | Command::Doctor
+                | Command::CmuxStatus { .. }
+                | Command::CmuxInstall { .. }
                 | Command::Claude
                 | Command::Codex
                 | Command::OpenCode

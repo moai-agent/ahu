@@ -60,6 +60,8 @@ pub struct LaunchPlan {
     pub snapshot: ConfigSnapshot,
     /// Every hook ahu can see that will be in effect for this task.
     pub hooks: HookInventory,
+    /// Bounded native integration evidence shared by human and JSON previews.
+    pub cmux_integration: crate::cmux::integration::Status,
     pub base_commit: Option<String>,
     pub parent_dirty: bool,
     pub task_id: String,
@@ -174,6 +176,7 @@ pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
         "selection_basis": plan.pair.basis,
         "policy_digest": plan.pair.policy_digest,
         "catalog_version": plan.pair.catalog_version,
+        "cmux_integration": plan.cmux_integration,
         "permissions": plan.permissions.as_str(),
         "argv": argv,
         "prompt_digest": crate::util::digest_bytes(prompt.as_bytes()),
@@ -347,6 +350,7 @@ pub fn plan(
         enforcement.gaps.push(note);
     }
 
+    let cmux_integration = crate::cmux::integration::inspect(&repo.root, &pair.harness);
     Ok(LaunchPlan {
         mode: if agent.is_some() {
             LaunchMode::Named
@@ -358,6 +362,7 @@ pub fn plan(
         enforcement,
         snapshot,
         hooks: found_hooks,
+        cmux_integration,
         base_commit,
         parent_dirty,
         task_id,
@@ -1237,19 +1242,12 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     };
 
     let outcome = supervise_harness(&mut child, task_dir)?;
-    if let Some(foreground) = foreground {
-        foreground.take_back()?;
-    }
+    let restoration = foreground.map_or(Ok(()), Foreground::take_back);
+    let final_state = record_harness_outcome(outcome, restoration, |state| {
+        task::set_state(task_dir, state)
+    })?;
     match outcome {
         HarnessOutcome::Exited(status) => {
-            // A process exit is not evidence the task succeeded, so the state
-            // says only that the harness stopped.
-            let final_state = if status.success() {
-                TaskState::Exited
-            } else {
-                TaskState::Failed
-            };
-            task::set_state(task_dir, final_state)?;
             eprintln!(
                 "\nahu: the harness exited ({}). The worktree {} and its branch {} are kept.\n\
                  Exiting does not mean the task succeeded, and ahu does not delete either for you.",
@@ -1260,7 +1258,6 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             Ok(HarnessOutcome::Exited(status))
         }
         HarnessOutcome::Cancelled => {
-            task::set_state(task_dir, TaskState::Cancelled)?;
             eprintln!(
                 "\nahu: cancellation of the owned harness process group completed.\n\
                  The worktree {} and its branch {} are kept; cancelling does not delete either \
@@ -1271,6 +1268,24 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             Ok(HarnessOutcome::Cancelled)
         }
     }
+}
+
+/// Persist an observed process outcome independently of terminal restoration.
+fn record_harness_outcome(
+    outcome: HarnessOutcome,
+    restoration: Result<()>,
+    persist: impl FnOnce(TaskState) -> Result<()>,
+) -> Result<TaskState> {
+    // Exited records process exit, not successful completion of the task.
+    let state = match outcome {
+        HarnessOutcome::Exited(status) if status.success() => TaskState::Exited,
+        HarnessOutcome::Exited(_) => TaskState::Failed,
+        HarnessOutcome::Cancelled => TaskState::Cancelled,
+    };
+    persist(state)?;
+    // A terminal restore error must not erase an already observed outcome.
+    restoration?;
+    Ok(state)
 }
 
 #[cfg(test)]
@@ -1342,6 +1357,48 @@ mod group_recovery_tests {
         assert!(
             child.try_wait().expect("child is reaped").is_some(),
             "the cancelled child must be reaped"
+        );
+    }
+
+    #[test]
+    fn terminal_outcome_is_persisted_when_foreground_restoration_fails() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::ExitStatusExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let mut lost = Vec::new();
+        for (outcome, expected) in [
+            (
+                HarnessOutcome::Exited(std::process::ExitStatus::from_raw(0)),
+                TaskState::Exited,
+            ),
+            (
+                HarnessOutcome::Exited(std::process::ExitStatus::from_raw(1 << 8)),
+                TaskState::Failed,
+            ),
+            (HarnessOutcome::Cancelled, TaskState::Cancelled),
+        ] {
+            state::write_json(&path, &TaskState::Running).unwrap();
+            // Inject a real tcsetpgrp failure without changing this runner's
+            // terminal: the captured descriptor no longer names a terminal.
+            let foreground = Foreground {
+                fd: Some((file.as_raw_fd(), unsafe { libc::getpgrp() })),
+            };
+            let restoration = foreground.take_back();
+            let restoration_error = restoration.as_ref().unwrap_err().to_string();
+            let result = record_harness_outcome(outcome, restoration, |state| {
+                state::write_json(&path, &state)
+            });
+            assert_eq!(result.unwrap_err().to_string(), restoration_error);
+            let saved: TaskState = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if saved != expected {
+                lost.push((expected, saved));
+            }
+        }
+        assert!(
+            lost.is_empty(),
+            "terminal states lost on restore failure: {lost:?}"
         );
     }
 
@@ -1504,6 +1561,8 @@ mod pty_tests {
     fn pty_foreground_restores_on_drop() {
         pty_case("drop");
     }
+    extern "C" fn job_control_handler(_: libc::c_int) {}
+
     #[test]
     fn pty_handover_preserves_signal_dispositions() {
         pty_case("signals");
@@ -1620,20 +1679,30 @@ mod pty_tests {
         let mut child = shell("read line; test \"$line\" = input");
         // Force the real read-before-handoff race rather than relying on timing.
         stopped(&child.0, libc::SIGTTIN);
+        if case == "signals" {
+            // Preserve caller-installed handlers as well as ignored signals.
+            // Install after the child stops so its read still tests SIGTTIN.
+            unsafe {
+                assert_ne!(
+                    libc::signal(libc::SIGTTIN, job_control_handler as *const () as usize),
+                    libc::SIG_ERR
+                );
+                assert_ne!(libc::signal(libc::SIGTTOU, libc::SIG_IGN), libc::SIG_ERR);
+            }
+        }
         let foreground = Foreground::hand_to(0, child.0.id() as _).unwrap().unwrap();
         assert_eq!(unsafe { libc::tcgetpgrp(0) }, child.0.id() as i32);
         if case == "signals" {
-            for signal in [libc::SIGTTIN, libc::SIGTTOU] {
+            for (signal, expected) in [
+                (libc::SIGTTIN, job_control_handler as *const () as usize),
+                (libc::SIGTTOU, libc::SIG_IGN),
+            ] {
                 let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
                 assert_eq!(
                     unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) },
                     0
                 );
-                assert_eq!(
-                    action.sa_sigaction,
-                    libc::SIG_DFL,
-                    "signal disposition leaked"
-                );
+                assert_eq!(action.sa_sigaction, expected, "signal disposition leaked");
             }
         }
         let dir = tempfile::tempdir().unwrap();

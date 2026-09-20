@@ -12,6 +12,8 @@
 //! reserved for repository context and never used for an agent task — otherwise
 //! that task would have no visible row of its own.
 
+pub mod integration;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,6 +61,28 @@ pub struct Cmux {
     socket_path: Option<String>,
 }
 
+/// Resolve the native CLI independently of application/socket reachability.
+pub fn resolve_executable() -> Result<PathBuf> {
+    match std::env::var_os("AHU_CMUX_BIN") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                Ok(path)
+            } else if path.components().count() > 1 {
+                Ok(std::env::current_dir()?.join(path))
+            } else {
+                crate::selection::resolve_utility(&path.to_string_lossy())
+            }
+        }
+        None => crate::selection::resolve_utility("cmux").map_err(|error| {
+            Error::new(format!(
+                "{error}\nInstall cmux, or set AHU_CMUX_BIN to its executable."
+            ))
+            .with_kind(crate::util::ErrorKind::Prerequisite)
+        }),
+    }
+}
+
 impl Cmux {
     /// Locate cmux, preferring the socket cmux itself told us about.
     ///
@@ -67,16 +91,7 @@ impl Cmux {
     /// never hard-coded: it comes from `CMUX_SOCKET_PATH` when ahu is running
     /// inside a cmux terminal, and otherwise from cmux's own resolver.
     pub fn discover() -> Result<Self> {
-        let executable = match std::env::var("AHU_CMUX_BIN") {
-            // An explicit override intentionally retains its normal command semantics.
-            Ok(executable) => PathBuf::from(executable),
-            Err(_) => crate::selection::resolve_utility("cmux").map_err(|error| {
-                Error::new(format!(
-                    "{error}\nInstall cmux, or set AHU_CMUX_BIN to its executable."
-                ))
-                .with_kind(crate::util::ErrorKind::Prerequisite)
-            })?,
-        };
+        let executable = resolve_executable()?;
         let socket_path = std::env::var("CMUX_SOCKET_PATH")
             .ok()
             .filter(|s| !s.is_empty());

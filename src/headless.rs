@@ -726,7 +726,7 @@ pub fn launch(
     let profile = build_native_profile(&plan.pair.harness, &plan.pair.model, &spec)?;
     spec.native_controls = profile.control_ids();
     spec.gaps.extend(profile.gaps.clone());
-    spec.gaps.push("Integration inventory is incomplete for Codex and agy. ahu itself never invokes cmux in this backend; arbitrary native configuration/hooks and shell commands require a vetted cmux-free environment. Same-UID code is not isolated from supervisor state.".into());
+    spec.gaps.push("Native integration evidence is bounded; unsupported configuration and hooks are refused. ahu itself never invokes cmux in this backend; arbitrary shell commands remain outside integration inspection. Same-UID code is not isolated from supervisor state.".into());
     if !spec.child_grants.is_empty() {
         spec.gaps.push("Broker grants approve only frozen registered identities and profiles. Codex workspace-write receives the task's requests directory as a narrow additional write root; read-only Codex transport is refused. Limits: 128 tasks per root grant, depth 8, 16 active/interrupted tasks per repository, no hidden queue or global token cap.".into());
     }
@@ -735,7 +735,9 @@ pub fn launch(
         spec.gaps.push("The ENTIRE assignment has a read-only MODEL TOOL ceiling: parent and helpers have no model tools for editing, building, shell commands or shell-launching registered children. Settings-defined hooks are outside that tool ceiling and their side effects are not proven read-only. MCP tools and slash commands are disabled; repository settings remain discoverable. Roles are requested/observed, not an allowlist; total helper count is not capped. Budget is 5 USD per attempt, concurrency 1, depth 1, helper model equals manifest model.".into());
     }
     spec.native_profile = Some(profile);
-    validate_environment(repo, &plan.hooks)?;
+    let cmux_integration = validate_environment(repo, &repo.root, &plan.pair.harness)?;
+    plan.cmux_integration = cmux_integration.clone();
+    spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", cmux_integration.headless.evidence_digest));
     let (delivered, delivery) = crate::orchestration::deliver_composed(
         plan.agent.as_ref().map(|a| a.instructions.as_str()),
         prompt,
@@ -769,7 +771,7 @@ pub fn launch(
     let preview = json!({"schema_version":1,"backend":"headless","task_id":plan.task_id,"worktree":plan.worktree,
         "branch":plan.branch,"command":plan.command.redacted(),"executable":plan.harness_executable,"capabilities":spec,
         "runtime":plan.task_dir,"identity": {"agent":plan.agent_label(),"harness":plan.pair.harness,"model":plan.pair.model},
-        "acceptance":"not assessed"});
+        "acceptance":"not assessed", "cmux_integration":cmux_integration});
     if dry_run {
         emit(&preview, json_output)?;
         return Ok(0);
@@ -919,8 +921,9 @@ fn resolve_missing_path(raw: &Path) -> Result<PathBuf> {
 
 fn validate_environment(
     repo: &crate::git::Repo,
-    hooks: &crate::hooks::HookInventory,
-) -> Result<()> {
+    config_root: &Path,
+    harness: &str,
+) -> Result<crate::cmux::integration::Status> {
     for variable in [
         "HOME",
         "CODEX_HOME",
@@ -948,28 +951,7 @@ fn validate_environment(
             }
         }
     }
-    for hook in &hooks.hooks {
-        if hook.command.as_deref().is_some_and(|s| s.contains("cmux")) {
-            bail!(
-                "a configured lifecycle hook references cmux; remove that dependency before using headless execution"
-            );
-        }
-    }
-    // Snapshot covers repository-local configuration; inspect only integration files.
-    for file in [
-        ".mcp.json",
-        ".claude/settings.json",
-        ".claude/settings.local.json",
-        ".codex/config.toml",
-        ".agents/settings.json",
-    ] {
-        if let Ok(body) = std::fs::read_to_string(repo.root.join(file))
-            && body.contains("cmux")
-        {
-            bail!("{file} references cmux; headless execution requires cmux-free integrations");
-        }
-    }
-    Ok(())
+    crate::cmux::integration::enforce(config_root, harness)
 }
 
 pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
@@ -1077,12 +1059,8 @@ impl Drop for Lock {
     }
 }
 
-fn sanitize(command: &mut Command) {
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("CMUX_") {
-            command.env_remove(key);
-        }
-    }
+fn sanitize(command: &mut Command, policy: Option<&crate::cmux::integration::HeadlessPolicy>) {
+    crate::cmux::integration::sanitize(command, policy);
     if let Some(path) = std::env::var_os("PATH") {
         let paths = std::env::split_paths(&path)
             .filter(|p| !p.to_string_lossy().contains("cmux-cli-shims"))
@@ -1106,7 +1084,7 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
-    sanitize(&mut command);
+    sanitize(&mut command, None);
     command
         .env("AHU_RUNTIME_DIR", runtime_root()?)
         .env("AHU_EXPECTED_DIGEST", frozen_digest(dir)?);
@@ -1819,10 +1797,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
     check_version(&record.identity.harness, &spec.harness_version)?;
     validate_parent_attempt(&repo, spec)?;
     validate_frozen_configuration(&record)?;
-    validate_environment(
-        &repo,
-        &crate::hooks::collect(&record.worktree, &record.identity.harness)?,
-    )?;
+    let cmux_integration = validate_environment(&repo, &record.worktree, &record.identity.harness)?;
     if let Some(parent) = &spec.parent_task {
         let parent_dir = lookup(&repo, parent)?;
         if parent_dir.join("cancel.json").exists() {
@@ -1837,7 +1812,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    sanitize(&mut command);
+    sanitize(&mut command, Some(&cmux_integration.headless));
     command
         .env("AHU_BIN", std::env::current_exe()?)
         .env("AHU_EXECUTION_BACKEND", "headless")
@@ -2443,10 +2418,7 @@ pub fn control(
             {
                 bail!("harness executable changed; previous attempt preserved, resume refused");
             }
-            validate_environment(
-                repo,
-                &crate::hooks::collect(&record.worktree, &record.identity.harness)?,
-            )?;
+            validate_environment(repo, &record.worktree, &record.identity.harness)?;
             let original_spec = spec.clone();
             let original_record = record.clone();
             let original_prompt = task::load_prompt(&dir)?;

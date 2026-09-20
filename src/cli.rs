@@ -227,6 +227,13 @@ pub enum Command {
         task_id: String,
         text: String,
     },
+    CmuxStatus {
+        output_json: bool,
+    },
+    CmuxInstall {
+        harness: String,
+        dry_run: bool,
+    },
     Doctor,
     Codex,
     Claude,
@@ -385,6 +392,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             expect_no_more(&args[1..])?;
             Ok(Command::Tasks)
         }
+        "cmux" => parse_cmux(&args[1..]),
         "doctor" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Doctor)
@@ -829,6 +837,43 @@ pub fn extract_color(
         }
     }
     Ok((remaining, choice))
+}
+
+fn parse_cmux(args: &[String]) -> Result<Command> {
+    match args.first().map(String::as_str) {
+        Some("status") => {
+            let output_json = match &args[1..] {
+                [] => false,
+                [flag, value] if flag == "--output" && value == "json" => true,
+                _ => bail!("expected ahu cmux status [--output json]"),
+            };
+            Ok(Command::CmuxStatus { output_json })
+        }
+        Some("install") => {
+            let mut harness = None;
+            let mut dry_run = false;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--harness" if harness.is_none() => {
+                        harness = Some(value_for("--harness", args, &mut index)?.to_string());
+                    }
+                    "--dry-run" if !dry_run => dry_run = true,
+                    _ => bail!("expected ahu cmux install --harness ID [--dry-run]"),
+                }
+                index += 1;
+            }
+            let harness =
+                harness.ok_or_else(|| crate::util::Error::new("--harness ID required"))?;
+            if !["claude-code", "codex", "opencode", "antigravity"].contains(&harness.as_str()) {
+                bail!("unsupported harness; use claude-code, codex, opencode, or antigravity");
+            }
+            Ok(Command::CmuxInstall { harness, dry_run })
+        }
+        _ => bail!(
+            "expected ahu cmux status [--output json] or ahu cmux install --harness ID [--dry-run]"
+        ),
+    }
 }
 
 #[cfg(test)]

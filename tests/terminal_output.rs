@@ -33,7 +33,10 @@ fn doctor_shows_project_harness_readiness_without_executable_paths() {
         .lines()
         .filter(|line| line.starts_with("harness "))
         .collect();
-    assert_eq!(harness_lines, ["harness      claude-code 2.1.269 — ready"]);
+    assert_eq!(
+        harness_lines,
+        ["harness      claude-code 2.1.269 — executable ready"]
+    );
     assert!(!text.contains("adapter available"), "{text}");
     assert!(!text.contains(&bin.display().to_string()), "{text}");
     assert!(!scratch.path().join("codex-probed").exists());
