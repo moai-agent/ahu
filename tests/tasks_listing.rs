@@ -77,7 +77,7 @@ fn write_schema_1(tasks_dir: &Path, task_id: &str) -> PathBuf {
     dir
 }
 
-/// A valid schema-2 record, written the way a launch writes one.
+/// A valid current-schema record, written the way a launch writes one.
 fn write_current(tasks_dir: &Path, repo: &TestRepo, task_id: &str) -> PathBuf {
     let discovered = ahu::git::discover(repo.path()).unwrap();
     let adapter = ahu::harness::adapter_for("claude-code").unwrap();
@@ -218,7 +218,7 @@ fn tasks_lists_the_readable_record_and_reports_the_unreadable_one() {
         "{text}"
     );
     assert!(
-        text.contains("schema version (1)") && text.contains("reads 2"),
+        text.contains("schema version (1)") && text.contains("reads schema 3"),
         "the reason must say why, not just that: {text}"
     );
     assert!(

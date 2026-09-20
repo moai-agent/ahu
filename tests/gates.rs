@@ -545,8 +545,12 @@ fn write_record(
 fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
     assert_eq!(
         ahu::task::TASK_SCHEMA_VERSION,
-        2,
-        "the digest split is a schema change and must be versioned as one"
+        3,
+        "the digest split and the task id change are schema changes and must be versioned as one"
+    );
+    assert!(
+        ahu::task::READABLE_SCHEMA_VERSIONS.contains(&2),
+        "schema 2 is this build's immediate predecessor and must stay readable"
     );
 
     let temp = tempfile::TempDir::new().unwrap();

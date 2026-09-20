@@ -172,7 +172,8 @@ fn task_ids_are_unique_across_rapid_repeated_launches() {
     if !common::in_harness_fixture("task_ids_are_unique_across_rapid_repeated_launches") {
         return;
     }
-    let ids: std::collections::BTreeSet<String> = (0..500).map(|_| task::new_task_id()).collect();
+    let ids: std::collections::BTreeSet<String> =
+        (0..500).map(|_| task::new_task_id().unwrap()).collect();
     assert_eq!(ids.len(), 500, "task ids collided");
 }
 

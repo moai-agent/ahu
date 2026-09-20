@@ -253,6 +253,9 @@ const WORKER_ENV: &[&str] = &[
     "AHU_BIN",
     "AHU_STATE_DIR",
     "AHU_CMUX_BIN",
+    "AHU_WORKER_SESSION",
+    "AHU_TASK_ID",
+    "AHU_TASK_DIR",
 ];
 
 /// Strip the ambient worker environment from a command.
