@@ -185,7 +185,8 @@ require explicit user permission.
 `ahu codex` passes `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
 passes `--dangerously-skip-permissions`. Both disclose the flag and retain the
 harness's configured model. Registered child agents keep their own manifest
-permissions and launch requirements. See
+permissions and launch requirements. Inside cmux, coordinator shortcuts place
+their workspace in the repository's group before starting. See
 [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON

@@ -1,6 +1,105 @@
 mod common;
 
 #[test]
+#[cfg(unix)]
+fn coordinator_shortcuts_group_the_caller_before_starting_and_refuse_failed_grouping() {
+    use std::os::unix::fs::PermissionsExt;
+    for (shortcut, program) in [
+        ("codex", "codex"),
+        ("claude", "claude"),
+        ("opencode", "opencode"),
+        ("agy", "agy"),
+    ] {
+        for failure in ["none", "add", "verify", "identify"] {
+            let fixture = common::TestRepo::new();
+            let scratch = tempfile::tempdir().unwrap();
+            let repo = ahu::git::discover(fixture.path()).unwrap();
+            let cmux = scratch.path().join("cmux");
+            std::fs::write(&cmux, r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+base = Path(os.environ['AHU_TEST_COORDINATOR'])
+failure = os.environ['AHU_TEST_GROUP_FAILURE']
+args = sys.argv[1:]
+if args[0] == 'ping': print('PONG'); sys.exit(0)
+if args[0] == 'capabilities':
+ print(json.dumps({'capabilities':['workspace.groups.v1','workspace.group_create.v1','workspace.create_in_group.v1']})); sys.exit(0)
+method, params = args[1], json.loads(args[2])
+with (base/'calls').open('a') as f: f.write(json.dumps([method,params])+'\n')
+if method == 'system.identify':
+ assert params == {'caller':{'workspace_id':'caller'}}
+ print(json.dumps({'caller':{'window_id':None if failure == 'identify' else ('target-window' if (base/'moved').exists() else 'caller-window')}}))
+elif method == 'workspace.group.list':
+ assert params['window_id'] in ['target-window','caller-window']
+ members = ['anchor'] + (['caller'] if (base/'added').exists() and failure != 'verify' else [])
+ print(json.dumps({'groups':[{'id':'saved-group','name':'renamed repository','anchor_workspace_id':'anchor','member_workspace_ids':members}] if params['window_id']=='target-window' else []}))
+elif method == 'workspace.list': print(json.dumps({'workspaces':[]}))
+elif method == 'workspace.move_to_window':
+ assert params == {'workspace_id':'caller','window_id':'target-window'}
+ (base/'moved').touch(); print('{}')
+elif method == 'workspace.group.add':
+ assert params == {'workspace_id':'caller','window_id':'target-window','group_id':'saved-group'}
+ assert (base/'moved').exists()
+ if failure == 'add': sys.exit(1)
+ (base/'added').touch(); print('{}')
+elif method == 'workspace.group.expand':
+ assert params == {'group_id':'saved-group'}
+ (base/'expanded').touch(); print('{}')
+else: raise AssertionError(method)
+"#).unwrap();
+            std::fs::set_permissions(&cmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let bin = common::fake_harnesses(scratch.path(), &[program], |_| {
+                scratch.path().join("unused")
+            });
+            std::fs::write(bin.join(program), "#!/bin/sh\ntest -f \"$AHU_TEST_COORDINATOR/expanded\" || exit 99\ntouch \"$AHU_TEST_COORDINATOR/started\"\nexit 7\n").unwrap();
+            let mapping = ahu::state::coordination_dir(&repo)
+                .unwrap()
+                .join("cmux.json");
+            ahu::state::write_json(
+                &mapping,
+                &ahu::launch::GroupMapping {
+                    group_id: Some("saved-group".into()),
+                    window_id: Some("target-window".into()),
+                    anchor_workspace_id: Some("anchor".into()),
+                },
+            )
+            .unwrap();
+            let result = common::ahu()
+                .arg(shortcut)
+                .current_dir(fixture.path())
+                .env("CMUX_WORKSPACE_ID", "caller")
+                .env("AHU_CMUX_BIN", &cmux)
+                .env("AHU_TEST_COORDINATOR", scratch.path())
+                .env("AHU_TEST_GROUP_FAILURE", failure)
+                .env(
+                    "PATH",
+                    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+                )
+                .output()
+                .unwrap();
+            assert_eq!(
+                scratch.path().join("started").exists(),
+                failure == "none",
+                "{shortcut}/{failure}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            if failure == "none" {
+                assert_eq!(result.status.code(), Some(7));
+            } else {
+                assert!(!result.status.success());
+            }
+            assert!(
+                !ahu::state::coordination_dir(&repo)
+                    .unwrap()
+                    .join("launch.lock")
+                    .exists()
+            );
+            assert!(!fixture.path().join(".worktrees").exists());
+        }
+    }
+}
+
+#[test]
 fn codex_shortcut_has_fixed_yolo_options() {
     assert_eq!(
         ahu::cli::parse(["codex"]).unwrap(),
@@ -38,6 +137,7 @@ exit 7
     std::fs::create_dir(&nested).unwrap();
     let output = common::ahu()
         .arg("codex")
+        .env_remove("CMUX_WORKSPACE_ID")
         .current_dir(&nested)
         .env(
             "PATH",
@@ -120,6 +220,7 @@ exit 7
     std::fs::create_dir(&nested).unwrap();
     let output = common::ahu()
         .arg("claude")
+        .env_remove("CMUX_WORKSPACE_ID")
         .current_dir(&nested)
         .env(
             "PATH",
@@ -202,6 +303,7 @@ exit 7
     std::fs::create_dir(&nested).unwrap();
     let output = common::ahu()
         .arg("opencode")
+        .env_remove("CMUX_WORKSPACE_ID")
         .current_dir(&nested)
         .env(
             "PATH",
@@ -285,6 +387,7 @@ exit 7
     std::fs::create_dir(&nested).unwrap();
     let output = common::ahu()
         .arg("agy")
+        .env_remove("CMUX_WORKSPACE_ID")
         .current_dir(&nested)
         .env(
             "PATH",

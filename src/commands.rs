@@ -77,6 +77,9 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
     crate::state::ensure_checkout_state(&repo.root)?;
+    for note in launch::group_coordinator(repo)? {
+        eprintln!("ahu: {}", display_safe(&note));
+    }
     if !args.is_empty() {
         eprintln!("{label} coordinator: {}", args.join(" "));
     }

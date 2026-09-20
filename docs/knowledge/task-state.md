@@ -106,6 +106,9 @@ external roots and explicit `legacy-lookup.json` roots are read in place without
 migration.[^state][^storage][^task][^launch]
 
 Coordinator shortcuts preserve the invoking directory and configured model.
+Inside cmux they join the repository's group before starting the harness,
+using the same primary-owned mapping as task launches. A grouping failure
+prevents startup. Outside cmux they retain the current terminal.
 `ahu codex` requests `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
 requests `--dangerously-skip-permissions`. Each discloses its flag. These sessions
 create no task or worktree; registered children keep their own manifest

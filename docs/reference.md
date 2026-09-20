@@ -1159,8 +1159,12 @@ the harness's configured model. These shortcuts explicitly request the harness
 permission bypass; any outer sandbox still applies.
 
 Coordinator shortcuts accept no additional arguments, preserve the invoking
-directory and terminal, and set `AHU_BIN`. They create no task, worktree, or cmux
-session and need no project configuration. ahu does not inject `AHU_STATE_DIR`;
+directory and terminal, and set `AHU_BIN`. Inside cmux they place the invoking
+workspace in the repository's group before starting the harness, reusing the
+same group across linked checkouts and moving the workspace to its saved window
+when needed. Grouping errors prevent harness startup. Outside cmux they run in
+the current terminal. They create no task or worktree and need no project
+configuration. ahu does not inject `AHU_STATE_DIR`;
 subsequent commands discover checkout and primary coordination paths explicitly.
 Registered child agents retain their own manifest permissions, harness, and
 model. A coordinator's bypass does not alter a child's mapping or replace the

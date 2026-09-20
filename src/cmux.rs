@@ -242,11 +242,64 @@ impl Cmux {
 
     /// The window ahu is currently being invoked from, when it is inside cmux.
     pub fn current_window(&self) -> Result<Option<String>> {
+        if let Ok(workspace) = std::env::var("CMUX_WORKSPACE_ID")
+            && !workspace.is_empty()
+        {
+            return self.window_for_workspace(&workspace).map(Some);
+        }
         let value = self.rpc("workspace.current", serde_json::json!({}))?;
         Ok(value
             .get("window_id")
             .and_then(|v| v.as_str())
             .map(str::to_string))
+    }
+
+    /// Resolve the caller's window rather than whichever window has focus.
+    pub fn window_for_workspace(&self, workspace_id: &str) -> Result<String> {
+        let value = self.rpc(
+            "system.identify",
+            serde_json::json!({ "caller": { "workspace_id": workspace_id } }),
+        )?;
+        value
+            .pointer("/caller/window_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| Error::new("cmux could not locate the invoking workspace's window"))
+    }
+
+    /// Keep an existing terminal session in its repository's window and group.
+    pub fn add_workspace_to_group(
+        &self,
+        group_id: &str,
+        workspace_id: &str,
+        window_id: &str,
+    ) -> Result<()> {
+        if self.window_for_workspace(workspace_id)? != window_id {
+            self.rpc(
+                "workspace.move_to_window",
+                serde_json::json!({
+                    "workspace_id": workspace_id, "window_id": window_id,
+                }),
+            )?;
+        }
+        self.rpc(
+            "workspace.group.add",
+            serde_json::json!({
+                "group_id": group_id, "workspace_id": workspace_id, "window_id": window_id,
+            }),
+        )?;
+        if !self
+            .find_group(group_id, Some(window_id))?
+            .is_some_and(|group| {
+                group
+                    .member_workspace_ids
+                    .iter()
+                    .any(|id| id == workspace_id)
+            })
+        {
+            bail!("cmux did not place the invoking workspace in its repository group");
+        }
+        Ok(())
     }
 
     pub fn current_workspace(&self) -> Result<Option<String>> {
@@ -294,9 +347,10 @@ impl Cmux {
     }
 
     pub fn create_group(&self, name: &str, cwd: &Path) -> Result<Group> {
+        let window = self.current_window()?;
         let value = self.rpc(
             "workspace.group.create",
-            serde_json::json!({ "name": name, "cwd": cwd.to_string_lossy() }),
+            serde_json::json!({ "name": name, "cwd": cwd.to_string_lossy(), "window_id": window }),
         )?;
         let group = value
             .get("group")
@@ -496,7 +550,8 @@ impl Cmux {
 
     /// Which workspaces currently exist, by id.
     pub fn workspaces(&self) -> Result<BTreeMap<String, WorkspaceInfo>> {
-        let value = self.rpc("workspace.list", serde_json::json!({}))?;
+        let window = self.current_window()?;
+        let value = self.rpc("workspace.list", serde_json::json!({ "window_id": window }))?;
         let mut found = BTreeMap::new();
         if let Some(items) = value.get("workspaces").and_then(|w| w.as_array()) {
             for item in items {

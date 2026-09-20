@@ -582,7 +582,7 @@ pub fn execute(
     let startup = cmux::startup_command(&executable, &plan.task_dir);
     let title = cmux::workspace_title(&plan.agent_label(), &plan.title);
 
-    let window = cmux_client.current_window().ok().flatten();
+    let window = state::read_json::<GroupMapping>(&mapping_path(repo)?)?.window_id;
     let created = match cmux_client.create_task_workspace(
         &group.id,
         window.as_deref(),
@@ -686,7 +686,7 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
                          dedicated one ({e}); one task may be hidden under the group header."
                     )),
                 }
-                mapping.window_id = current_window.clone().or(mapping.window_id.clone());
+                mapping.window_id = window.clone();
                 state::write_json(&path, &mapping)?;
                 if let Some(refreshed) = client.find_group(&group_id, window.as_deref())? {
                     return Ok(refreshed);
@@ -711,6 +711,33 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
     };
     state::write_json(&path, &mapping)?;
     Ok(group)
+}
+
+/// Coordinator shortcuts reuse their terminal and join the same primary-owned
+/// group as task launches. Outside cmux there is no workspace to arrange.
+pub fn group_coordinator(repo: &Repo) -> Result<Vec<String>> {
+    let Some(workspace) = std::env::var("CMUX_WORKSPACE_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(Vec::new());
+    };
+    let client = Cmux::discover()?;
+    client.check_capabilities()?;
+    // Validate the explicit caller before creating a group or changing state.
+    client.window_for_workspace(&workspace)?;
+    let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
+    let mut notes = Vec::new();
+    let group = ensure_group(&client, repo, &mut notes)?;
+    let mapping: GroupMapping = state::read_json(&mapping_path(repo)?)?;
+    let window = mapping
+        .window_id
+        .ok_or_else(|| Error::new("cmux repository group has no known window"))?;
+    if !group.member_workspace_ids.contains(&workspace) {
+        client.add_workspace_to_group(&group.id, &workspace, &window)?;
+    }
+    client.expand_group(&group.id)?;
+    Ok(notes)
 }
 
 fn repository_group_candidates<'a>(

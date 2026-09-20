@@ -187,6 +187,95 @@ fn a_repository_group_holds_one_child_workspace_per_task() {
 }
 
 #[test]
+fn coordinator_shortcuts_join_the_repository_group_from_primary_and_linked_checkouts() {
+    let _environment = TestEnvironment::new();
+    let Some(client) = client_or_skip() else {
+        return;
+    };
+    let fixture = common::TestRepo::new();
+    let repo = ahu::git::discover(fixture.path()).unwrap();
+    let linked = fixture.state_path().join("linked");
+    common::git(
+        fixture.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = common::fake_harnesses(
+        scratch.path(),
+        &["codex", "claude", "opencode", "agy"],
+        |_| scratch.path().join("unused"),
+    );
+    for program in ["codex", "claude", "opencode", "agy"] {
+        std::fs::write(
+            bin.join(program),
+            "#!/bin/sh\nprintf 'coordinator-started\\n'\nexit 7\n",
+        )
+        .unwrap();
+    }
+    let mut target = TempGroup::new(client, &repo.display_name(), fixture.path());
+    let mut source = TempGroup::new(
+        Cmux::discover().unwrap(),
+        "ahu-test-coordinator-source",
+        scratch.path(),
+    );
+    for (index, shortcut) in ["codex", "claude", "opencode", "agy"].iter().enumerate() {
+        let workspace = source
+            .client
+            .create_anchor_workspace(&source.group_id, "ahu-test-coordinator", scratch.path())
+            .unwrap();
+        source.created.push(workspace.clone());
+        let checkout = if index % 2 == 0 {
+            fixture.path()
+        } else {
+            &linked
+        };
+        let output = common::ahu()
+            .args(["--repo", checkout.to_str().unwrap(), shortcut])
+            .current_dir(scratch.path())
+            .env("CMUX_WORKSPACE_ID", &workspace)
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .output()
+            .unwrap();
+        target.created.push(workspace.clone());
+        assert_eq!(
+            output.status.code(),
+            Some(7),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "coordinator-started\n"
+        );
+        let group = target
+            .client
+            .find_group(&target.group_id, None)
+            .unwrap()
+            .unwrap();
+        assert!(group.member_workspace_ids.contains(&workspace));
+        assert_ne!(group.anchor_workspace_id, workspace);
+        let mapping: ahu::launch::GroupMapping = ahu::state::read_json(
+            &ahu::state::coordination_dir(&repo)
+                .unwrap()
+                .join("cmux.json"),
+        )
+        .unwrap();
+        assert_eq!(mapping.group_id.as_deref(), Some(target.group_id.as_str()));
+        assert!(!fixture.path().join(".worktrees").exists());
+    }
+}
+
+#[test]
 fn a_closed_anchor_is_replaced_so_no_task_is_hidden_under_the_header() {
     let _environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
