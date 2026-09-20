@@ -16,7 +16,14 @@ use crate::bail;
 use crate::util::{Error, Result, digest_bytes, digest_file};
 
 /// Directory names whose contents are agent configuration wherever they appear.
-const CONFIG_DIR_NAMES: &[&str] = &[".agents", ".claude", ".codex", ".agent", ".opencode", ".gemini"];
+const CONFIG_DIR_NAMES: &[&str] = &[
+    ".agents",
+    ".claude",
+    ".codex",
+    ".agent",
+    ".opencode",
+    ".gemini",
+];
 
 /// File names that are agent configuration wherever they appear.
 const CONFIG_FILE_NAMES: &[&str] = &[

@@ -20,7 +20,10 @@ fn the_snapshot_covers_native_paths_for_every_supported_harness() {
     repo.write(".claude/skills/review/SKILL.md", "review skill\n");
     repo.write(".claude/agents/chris.md", "---\nname: chris\n---\nbody\n");
     repo.write(".agents/skills/shared/SKILL.md", "shared skill\n");
-    repo.write(".gemini/antigravity-cli/skills/example/SKILL.md", "antigravity skill\n");
+    repo.write(
+        ".gemini/antigravity-cli/skills/example/SKILL.md",
+        "antigravity skill\n",
+    );
     repo.write(".mcp.json", "{\"mcpServers\":{}}\n");
     repo.write("docs/nested/CLAUDE.md", "nested guidance\n");
     repo.write("src/main.rs", "fn main() {}\n");
