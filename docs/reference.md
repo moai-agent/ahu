@@ -161,6 +161,25 @@ execution traces in a repository, even ignored directories. Runtime records and
 their digests remain editable by the same user: they are integrity checks, not
 authenticated evidence or an OS security boundary.
 
+Every task, interactive or headless, carries a globally unique ID: a UUID v7
+minted at launch, written in its bare hyphenated lowercase form. IDs sort by
+launch time as plain strings. Task resolution consults a cross-checkout index
+under `AHU_TASK_INDEX_DIR`, or `$HOME/.local/state/ahu/task-index` by default,
+so a task remains addressable from any checkout of the repository that launched
+it, not only from the checkout where it was launched. Resolution prefers an
+exact ID, then a unique ID prefix; an ambiguous prefix is an error listing the
+matching tasks, and an index entry whose checkout no longer exists is reported
+as stale and refused.
+
+`ahu message "$task_id" "text"` is the operator's delivery channel into a
+task's inbox. It writes a numbered message file under the task's private
+directory, capped at 100 entries and 1 MiB in total; delivery works from any
+checkout through the same resolution. Working agents cannot deliver inbox
+messages: ahu refuses when `AHU_WORKER_SESSION` is set, because delivery
+belongs to the operator or to a broker-bound child, never to the task itself.
+Tasks read inbox messages but never rewrite, renumber, or delete them, and a
+task ID grants no delivery into any other task's directory.
+
 Unattended approval mappings never grant extra authority merely to avoid a prompt.
 Claude denies unanswered permission requests; Codex uses explicit batch sandbox
 and approval flags; Antigravity preserves the manifest mapping (`auto` requests
@@ -647,7 +666,7 @@ task's branch, worktree, or record.
 
 ## What a task gets
 
-Inspect and review a task from the checkout that launched it:
+Inspect and review a task from any checkout of the repository that launched it:
 
 ```sh
 task_id=abc123  # replace with a task ID from ahu tasks
@@ -913,7 +932,9 @@ launches: OpenCode did so during this adapter's verification, moving from
 warned every user on the newer build that it was unverified when it was not.
 Project configuration pins catalog `2026-09-13`; a mismatch is an error.
 
-Persisted task records use schema 2; launch-preview and task-inspection JSON use
+Persisted task records use schema 3, whose IDs are hyphenated UUID v7 values;
+records written with schema 2 remain readable unchanged, keeping their 18-character
+hex IDs, and older schemas are refused. Launch-preview and task-inspection JSON use
 schema 1. Incompatible persisted records are refused and listed as unreadable;
 ahu does not reinterpret their digests or delete their worktrees.
 
