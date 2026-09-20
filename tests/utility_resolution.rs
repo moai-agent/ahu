@@ -81,7 +81,6 @@ impl Fixture {
             .current_dir(cwd)
             .env("PATH", path)
             .env("HOME", self.outside.path())
-            .env("AHU_STATE_DIR", self.repo.state_path())
             .env_remove("AHU_CMUX_BIN")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")

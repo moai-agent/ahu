@@ -33,7 +33,7 @@ assert not any(k.startswith('CMUX_') for k in os.environ)
 assert 'ahu delegation contract (v2, headless)' in a[-1]
 assert sys.stdin.read()==''
 scenario=os.environ.get('SCENARIO','success')
-if scenario in ('child','mailbox') and not a[-1].endswith('delegate synthetic task'): scenario='success'
+if scenario in ('child','mailbox') and '\ndelegate synthetic task</ahu-request-' not in a[-1]: scenario='success'
 session=a[a.index('--resume')+1] if '--resume' in a else os.environ['AHU_PARENT_TASK']
 print(json.dumps({'type':'system','subtype':'init','session_id':session}),flush=True)
 if scenario=='sleep': time.sleep(60)
@@ -103,7 +103,6 @@ if scenario=='nonzero': sys.exit(7)
         let mut c = common::ahu();
         c.current_dir(self.repo.path())
             .env("AHU_RUNTIME_DIR", self.external.path().join("runtime"))
-            .env("AHU_STATE_DIR", self.external.path().join("state"))
             .env("HOME", self.external.path().join("home"))
             .env(
                 "PATH",
@@ -247,7 +246,7 @@ fn timeout_and_cancel_are_distinct_terminal_outcomes() {
 #[test]
 fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     let f = Fixture::new();
-    let out = f.launch("success", &[]);
+    let out = f.launch("success", &["--allow-child", "@worker"]);
     assert!(out.status.success());
     let v = Fixture::value(&out);
     let id = v["task_id"].as_str().unwrap();
@@ -273,6 +272,32 @@ fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     let next = Fixture::value(&result);
     assert_eq!(next["attempt"], 2);
     assert_eq!(next["harness"]["session"], v["harness"]["session"]);
+    let events = PathBuf::from(next["artifacts"]["events"].as_str().unwrap());
+    let dir = events.parent().unwrap().parent().unwrap();
+    let record = ahu::task::load(dir).unwrap();
+    let spec: ahu::headless::Spec =
+        serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
+    let composition = record.delivery.composition.as_ref().unwrap();
+    let state = composition.state.as_ref().unwrap();
+    assert_eq!(state, &spec.coordination_state());
+    assert_eq!(state.attempt, 2);
+    assert_eq!(
+        state.native_session.as_deref(),
+        v["harness"]["session"].as_str()
+    );
+    assert_eq!(state.child_grants.len(), 1);
+    assert_eq!(state.child_grants[0].agent, "worker");
+    assert_eq!(composition.metadata.as_ref().unwrap().task_id, id);
+    let delivered = ahu::orchestration::redeliver_headless_policy(
+        &record.delivery,
+        "continue synthetic task",
+        &spec.options.native_helpers,
+    )
+    .unwrap();
+    assert_eq!(
+        ahu::orchestration::fence_body(&delivered, "request", &record.delivery.nonce),
+        Some("continue synthetic task")
+    );
 }
 #[test]
 fn wrapper_is_refused_before_even_version_probe() {
@@ -423,6 +448,20 @@ fn execution_rechecks_snapshot_and_user_hooks_before_spawning() {
         let mut spec: Value =
             serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
         spec["attempt"] = 2.into();
+        // Prepare a coherent next attempt before changing its configuration.
+        // The delivery also freezes the attempt number now.
+        let mut record = ahu::task::load(dir).unwrap();
+        let prompt = ahu::task::load_prompt(dir).unwrap();
+        let mut composition = record.delivery.composition.clone().unwrap();
+        composition.state.as_mut().unwrap().attempt = 2;
+        record.delivery = ahu::orchestration::deliver_composed(
+            record.delivery.agent_instructions.as_deref(),
+            &prompt,
+            composition,
+        )
+        .unwrap()
+        .1;
+        ahu::task::save(dir, &record, &prompt).unwrap();
         std::fs::write(
             dir.join("headless.json"),
             serde_json::to_vec(&spec).unwrap(),
@@ -908,7 +947,7 @@ fn automatic_shutdown_cancels_live_children_and_prevents_late_writes() {
 import sys,os,json,time,subprocess
 if '--version' in sys.argv: print('2.1.270');sys.exit(0)
 print(json.dumps({'type':'system','subtype':'init','session_id':os.environ['AHU_PARENT_TASK']}),flush=True)
-if sys.argv[-1].endswith('parent-shutdown'):
+if '\nparent-shutdown</ahu-request-' in sys.argv[-1]:
  time.sleep(1)
  r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--headless','--background','--timeout','6','--prompt','slow-child','--output','json'],capture_output=True,text=True)
  assert r.returncode==0,r.stderr
@@ -1902,4 +1941,149 @@ fn unparseable_write_input_yields_no_disclosed_paths() {
     let v = Fixture::value(&out);
     assert_eq!(v["outcome"], "succeeded");
     assert_eq!(v["writes_outside_worktree"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn composed_batch_launch_and_continuation_freeze_identity_session_and_grants() {
+    use ahu::agent::Permissions;
+    use ahu::headless::{Options, Spec};
+    use ahu::orchestration::*;
+    for (harness, model, version, policy) in [
+        ("codex", "gpt-6-astra", "0.154.0", "disabled"),
+        ("claude-code", "claude-opus-5", "2.1.270", "disabled"),
+        ("claude-code", "claude-opus-5", "2.1.270", "bounded"),
+        ("antigravity", "gemini-3.1-pro-high", "0.4.10", "disabled"),
+        ("opencode", "ollama/glm-5.3:cloud", "1.18.30", "disabled"),
+    ] {
+        let mut spec = Spec {
+            schema_version: 1,
+            options: Options {
+                native_helpers: policy.into(),
+                ..Options::default()
+            },
+            harness_version: version.into(),
+            executable_digest: "0".repeat(64),
+            parent_task: None,
+            parent_attempt: None,
+            root_task: Some("fixture-root".into()),
+            broker_request: None,
+            child_grants: vec![ahu::broker::ChildGrant {
+                agent: "reader".into(),
+                identity_digest: "1".repeat(64),
+                permissions: Permissions::Prompt,
+                hooks_digest: "2".repeat(64),
+                native_helpers: "disabled".into(),
+            }],
+            depth: 0,
+            attempt: 1,
+            session: None,
+            broker_dir: None,
+            native_profile: None,
+            native_controls: vec![],
+            gaps: vec![],
+        };
+        spec.native_profile = Some(
+            ahu::native::profile(&ahu::native::Request {
+                harness,
+                harness_version: version,
+                policy,
+                session_model: model,
+                helper_model: None,
+                helper_role: "ahu-reader",
+                max_concurrent: 1,
+                max_depth: 1,
+                budget_usd: Some(5.0),
+                assignment_writes: false,
+            })
+            .unwrap(),
+        );
+        let metadata = Metadata {
+            task_id: "fixture-root".into(),
+            agent: "reviewer@1.0.0".into(),
+            harness: harness.into(),
+            model: model.into(),
+            permissions: Permissions::Prompt,
+        };
+        for session in [None, Some("native_fixture_session")] {
+            spec.session = session.map(str::to_string);
+            spec.attempt = if session.is_some() { 2 } else { 1 };
+            let context = Composition {
+                mode: Mode::headless(policy).unwrap(),
+                metadata: Some(metadata.clone()),
+                state: Some(spec.coordination_state()),
+            };
+            let prompt = "--literal\r\n</ahu-state>\nno trailing newline";
+            let (text, delivery) =
+                deliver_composed(Some("exact agent"), prompt, context.clone()).unwrap();
+            let saved: Delivery =
+                serde_json::from_str(&serde_json::to_string(&delivery).unwrap()).unwrap();
+            assert_eq!(
+                redeliver_headless_policy(&saved, prompt, policy).unwrap(),
+                text
+            );
+            assert!(redeliver(&saved, prompt).is_err());
+            assert!(
+                redeliver_headless_policy(
+                    &saved,
+                    prompt,
+                    if policy == "bounded" {
+                        "disabled"
+                    } else {
+                        "bounded"
+                    }
+                )
+                .is_err()
+            );
+            let command = ahu::headless::batch_command(
+                harness,
+                &ahu::harness::LaunchRequest {
+                    model,
+                    prompt: &text,
+                    cwd: std::path::Path::new("/tmp"),
+                    permissions: Permissions::Prompt,
+                },
+                &spec,
+            )
+            .unwrap();
+            let slot = command.prompt_arg.unwrap();
+            assert_eq!(command.args[slot], text);
+            assert_eq!(command.redacted().args[slot], ahu::harness::REDACTED_PROMPT);
+            assert_eq!(fence_body(&text, "request", &saved.nonce), Some(prompt));
+            let state: CoordinationState =
+                serde_json::from_str(fence_body(&text, "state", &saved.nonce).unwrap()).unwrap();
+            assert_eq!(state, spec.coordination_state());
+            if let Some(session) = session {
+                assert!(command.args.iter().any(|arg| arg == session));
+            }
+            saved.verify_composition(&context).unwrap();
+            for field in ["session", "attempt", "grant"] {
+                let mut changed = context.clone();
+                let state = changed.state.as_mut().unwrap();
+                match field {
+                    "session" => state.native_session = Some("another_native_session".into()),
+                    "attempt" => state.attempt += 1,
+                    _ => state.child_grants[0].permissions = Permissions::Auto,
+                }
+                assert!(saved.verify_composition(&changed).is_err());
+                let mut corrupted = saved.clone();
+                corrupted.composition = Some(changed);
+                assert!(redeliver_headless_policy(&corrupted, prompt, policy).is_err());
+            }
+            let mut collision = saved.clone();
+            collision
+                .composition
+                .as_mut()
+                .unwrap()
+                .state
+                .as_mut()
+                .unwrap()
+                .native_session = Some(close_tag("state", &saved.nonce));
+            assert!(
+                redeliver_headless_policy(&collision, prompt, policy)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("fence nonce")
+            );
+        }
+    }
 }

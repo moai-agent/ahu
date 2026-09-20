@@ -198,8 +198,8 @@ impl TaskRecord {
     }
 }
 
-const TASK_FILE: &str = "task.json";
-const PROMPT_FILE: &str = "prompt.txt";
+pub(crate) const TASK_FILE: &str = "task.json";
+pub(crate) const PROMPT_FILE: &str = "prompt.txt";
 /// Schema 2 splits `LaunchIdentity`'s single instruction digest into
 /// `source_digest` (the whole file) and `instructions_digest` (the delivered
 /// text). A schema-1 record carries the whole-file digest under the *name*
@@ -304,12 +304,15 @@ pub fn save(dir: &Path, record: &TaskRecord, prompt: &str) -> Result<()> {
     state::create_private_dir_all(dir)?;
     // The record names the agent, the repository, and the task title. It is not
     // as sensitive as the prompt, but it has no reason to be world-readable.
-    state::write_json(&dir.join(TASK_FILE), record)?;
-    state::write_private_file(&dir.join(PROMPT_FILE), prompt.as_bytes())
+    state::write_json(&crate::storage::TaskStorage::new(dir).record(), record)?;
+    state::write_private_file(
+        &crate::storage::TaskStorage::new(dir).prompt(),
+        prompt.as_bytes(),
+    )
 }
 
 pub fn load(dir: &Path) -> Result<TaskRecord> {
-    let path = dir.join(TASK_FILE);
+    let path = crate::storage::TaskStorage::new(dir).record();
     let bytes = state::read_private_file(&path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
 
@@ -362,7 +365,7 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
 }
 
 pub fn load_prompt(dir: &Path) -> Result<String> {
-    let path = dir.join(PROMPT_FILE);
+    let path = crate::storage::TaskStorage::new(dir).prompt();
     let bytes = state::read_private_file(&path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
     String::from_utf8(bytes)
@@ -373,7 +376,7 @@ pub fn load_prompt(dir: &Path) -> Result<String> {
 pub fn set_state(dir: &Path, new_state: TaskState) -> Result<()> {
     let mut record = load(dir)?;
     record.state = new_state;
-    state::write_json(&dir.join(TASK_FILE), &record)
+    state::write_json(&crate::storage::TaskStorage::new(dir).record(), &record)
 }
 
 /// A task directory whose record ahu could not read.
@@ -448,24 +451,23 @@ impl TaskListing {
 /// * each task worktree under `.worktrees/`, which is where a task's own record
 ///   lives and where it goes away when the worktree is removed, and
 /// * the invoking checkout's own store, which holds records written before task
-///   state moved into worktrees, and records written under an explicit
-///   `AHU_STATE_DIR`.
+///   state moved into worktrees.
 ///
 /// A task found in both is reported from its worktree: that copy is the live
 /// one, and the other is a leftover of the older layout.
 pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
     let identity = repo.identity();
-    let primary_root = repo.primary_root()?;
+    let storage = crate::storage::RepositoryStorage::new(repo)?;
     let mut listing = TaskListing::default();
     let mut incomplete = Vec::new();
     scan_worktrees(
-        &state::worktrees_root_at(&primary_root),
+        &storage.worktrees_root(),
         &identity,
         &mut listing,
         &mut incomplete,
     )?;
 
-    for store in checkout_stores(repo, &primary_root, &identity)? {
+    for store in storage.legacy_task_stores()? {
         // Listing is a read of the store, so the path to it is confined the
         // same way a record read is: a link below the state root is refused,
         // not walked.
@@ -485,13 +487,29 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
         }
     }
 
-    for dir in crate::headless::discover(repo)? {
-        let record = load(&dir)?;
-        if record.repo_identity != identity
-            || record.task_id != dir.file_name().unwrap_or_default().to_string_lossy()
-        {
-            bail!("external task record has inconsistent repository/task identity");
-        }
+    for dir in crate::headless::review::directories(repo)? {
+        let task_id = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let record = match crate::headless::review::record(&dir) {
+            Ok(record) if record.repo_identity == identity && record.task_id == task_id => record,
+            result => {
+                let reason = match result {
+                    Err(error) => error.to_string(),
+                    Ok(_) => {
+                        "external task record has inconsistent repository/task identity".into()
+                    }
+                };
+                listing.unreadable.push(UnreadableTask {
+                    dir,
+                    task_id,
+                    reason,
+                });
+                continue;
+            }
+        };
         if listing
             .records
             .iter()
@@ -522,61 +540,6 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
         .sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
     listing.unreadable.sort_by(|a, b| b.task_id.cmp(&a.task_id));
     Ok(listing)
-}
-
-/// The per-checkout stores that can hold a task record for this repository.
-///
-/// The invoking checkout's store comes first, then the primary checkout's, so a
-/// record written before task state moved into worktrees is still found when
-/// `ahu tasks` runs from a sibling worktree rather than from the checkout that
-/// launched it. Both are derived from the repository passed in, not from the
-/// process working directory, so a caller holding a valid repository gets the
-/// same answer wherever it is standing.
-///
-/// A managed task worktree's store is deliberately absent from this list.
-/// [`scan_worktrees`] has already read it as that task's own store, under the
-/// rule that a task worktree holds only its own state. Reading it again here --
-/// as a checkout store, which may legitimately hold many tasks -- would take
-/// back exactly the records that rule refused, and would do so only when
-/// listing from inside that worktree.
-///
-/// An explicit `AHU_STATE_DIR` that is not simply one of this repository's own
-/// checkout stores replaces these default stores, and is then the only one read
-/// here. It changes nothing else: `list` scans task worktrees separately and
-/// always, so a task launched by an ordinary ahu is still found by a tool that
-/// sets one -- and `ahu tasks` may then update that task's recorded state
-/// inside its own worktree. An override is not a promise of isolation from live
-/// tasks, and nothing here should be read as one.
-fn checkout_stores(
-    repo: &crate::git::Repo,
-    primary_root: &Path,
-    identity: &str,
-) -> Result<Vec<PathBuf>> {
-    let tasks_under = |root: &Path| root.join("repos").join(identity).join("tasks");
-    if let Some(explicit) = state::isolated_store(repo)? {
-        return Ok(vec![tasks_under(&explicit)]);
-    }
-    let mut stores = Vec::new();
-    if !is_managed_worktree(&repo.root, primary_root) {
-        stores.push(tasks_under(&state::checkout_root(&repo.root)?));
-    }
-    let primary = tasks_under(&state::checkout_root(primary_root)?);
-    if !stores.contains(&primary) {
-        stores.push(primary);
-    }
-    Ok(stores)
-}
-
-/// Whether `root` is one of the task worktrees ahu creates.
-///
-/// Resolved before comparing: the same directory is reached one way through
-/// Git's answer and another through a path ahu built.
-fn is_managed_worktree(root: &Path, primary_root: &Path) -> bool {
-    let worktrees = state::worktrees_root_at(primary_root);
-    root.canonicalize()
-        .ok()
-        .zip(worktrees.canonicalize().ok())
-        .is_some_and(|(root, worktrees)| root.parent() == Some(worktrees.as_path()))
 }
 
 /// Which store a scan is reading, and therefore what it may contain.
@@ -790,7 +753,7 @@ fn scan_worktrees(
             }
             _ => continue,
         }
-        let state_root = match state::checkout_root(&worktree) {
+        let tasks = match crate::storage::CheckoutStorage::new(&worktree).tasks_dir(repo_identity) {
             Ok(root) => root,
             Err(e) => {
                 listing.unreadable.push(UnreadableTask {
@@ -801,7 +764,6 @@ fn scan_worktrees(
                 continue;
             }
         };
-        let tasks = state_root.join("repos").join(repo_identity).join("tasks");
         if let Err(e) = state::confine_existing_dir(&tasks) {
             listing.unreadable.push(UnreadableTask {
                 dir: tasks,

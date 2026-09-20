@@ -93,13 +93,16 @@ Inspect work from the primary checkout or a sibling task worktree:
 ```sh
 ahu tasks
 task_id=abc123  # replace with a full task ID from ahu tasks
-ahu task "$task_id" --output json
+ahu task "$task_id"
+ahu result "$task_id"  # headless tasks
 ahu diff "$task_id"
-ahu focus "$task_id"
+ahu focus "$task_id"  # interactive cmux tasks
 ```
 
-A process exit does not prove completion. Review the changes and findings. Tasks
-keep their branches, worktrees, and records after the harness exits.
+Headless inspection shows the attempt outcome, observed ownership, blockers,
+known native session reference, and artifact paths. A process exit does not
+prove completion. Review the changes and findings. Tasks keep their branches,
+worktrees, and records after the harness exits.
 
 ## This repository's agents
 
@@ -149,8 +152,9 @@ runtime directory and survive worktree deletion. See
 [state and compatibility](docs/reference.md#state-and-compatibility) for discovery,
 legacy records, overrides, and integrity limits.
 
-ahu delivers its delegation contract and agent instructions as prompt text.
-They are not an enforced system prompt. The harness controls the running session,
+ahu delivers its contract, available execution facts, agent instructions, and
+assignment in nonce-bearing sections with raw bodies. This is prompt text,
+not an enforced system prompt. The harness controls the running session,
 including model changes, approvals, and context loading. ahu reports visible
 settings and gaps, does not alter hooks, and never claims its inventory is complete.
 Private tracker material stays out of public files and reports; remote pushes
@@ -170,6 +174,12 @@ require explicit user permission.
 | `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
+
+`ahu codex` passes `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
+passes `--dangerously-skip-permissions`. Both disclose the flag and retain the
+harness's configured model. Registered child agents keep their own manifest
+permissions and launch requirements. See
+[coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON
 contracts, prompt transport, hooks, state, and delegation boundaries.

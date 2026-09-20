@@ -60,8 +60,8 @@ fn record(repo: &TestRepo, id: &str) -> std::path::PathBuf {
         state: ahu::task::TaskState::Running,
     };
     let dir = repo
-        .state_path()
-        .join("repos")
+        .path()
+        .join(".ahu/state/repos")
         .join(discovered.identity())
         .join("tasks")
         .join(id);
@@ -73,7 +73,6 @@ fn run(repo: &TestRepo, args: &[&str]) -> Output {
     common::ahu()
         .args(args)
         .current_dir(repo.path())
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
         .output()
         .unwrap()
@@ -83,7 +82,6 @@ fn run_with_runtime(repo: &TestRepo, runtime: &std::path::Path, args: &[&str]) -
     common::ahu()
         .args(args)
         .current_dir(repo.path())
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("AHU_RUNTIME_DIR", runtime)
         .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
         .output()

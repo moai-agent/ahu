@@ -1,7 +1,7 @@
 mod common;
 
 #[test]
-fn codex_shortcut_has_fixed_approval_and_sandbox_options() {
+fn codex_shortcut_has_fixed_yolo_options() {
     assert_eq!(
         ahu::cli::parse(["codex"]).unwrap(),
         ahu::cli::Command::Codex
@@ -28,7 +28,8 @@ fn codex_session_inherits_terminal_context_and_uses_local_state_without_cmux() {
         r#"#!/bin/sh
 printf '%s\n' "$@" > "$AHU_TEST_ARGS"
 pwd > "$AHU_TEST_CWD"
-printf '%s' "$AHU_STATE_DIR" > "$AHU_TEST_STATE"
+printf '%s' "${AHU_STATE_DIR-unset}" > "$AHU_TEST_STATE"
+"$AHU_BIN" tasks --output json > "$AHU_TEST_TASKS" || exit 99
 exit 7
 "#,
     )
@@ -47,6 +48,8 @@ exit 7
         .env("AHU_TEST_ARGS", scratch.path().join("args"))
         .env("AHU_TEST_CWD", scratch.path().join("cwd"))
         .env("AHU_TEST_STATE", scratch.path().join("state"))
+        .env("AHU_TEST_TASKS", scratch.path().join("tasks"))
+        .env("AHU_RUNTIME_DIR", scratch.path().join("runtime"))
         .output()
         .unwrap();
     assert_eq!(
@@ -57,7 +60,11 @@ exit 7
     );
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("args")).unwrap(),
-        "--sandbox\nworkspace-write\n--ask-for-approval\non-request\n"
+        "--dangerously-bypass-approvals-and-sandbox\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Codex coordinator: --dangerously-bypass-approvals-and-sandbox\n"
     );
     let cwd = std::fs::read_to_string(scratch.path().join("cwd")).unwrap();
     assert_eq!(
@@ -66,8 +73,8 @@ exit 7
     );
     let state = std::fs::read_to_string(scratch.path().join("state")).unwrap();
     assert_eq!(
-        std::path::Path::new(&state).canonicalize().unwrap(),
-        repo.path().join(".ahu/state").canonicalize().unwrap()
+        std::path::Path::new(&state),
+        scratch.path().join("parent-state")
     );
     assert!(output.stdout.is_empty());
     assert!(!repo.path().join(".agents").exists());
@@ -77,7 +84,7 @@ exit 7
 }
 
 #[test]
-fn claude_shortcut_preserves_native_defaults_and_rejects_overrides() {
+fn claude_shortcut_has_fixed_permission_bypass_and_rejects_overrides() {
     assert_eq!(
         ahu::cli::parse(["claude"]).unwrap(),
         ahu::cli::Command::Claude
@@ -103,7 +110,8 @@ fn claude_session_inherits_terminal_context_and_uses_local_state_without_cmux() 
         r#"#!/bin/sh
 printf '%s\n' "$@" > "$AHU_TEST_ARGS"
 pwd > "$AHU_TEST_CWD"
-printf '%s' "$AHU_STATE_DIR" > "$AHU_TEST_STATE"
+printf '%s' "${AHU_STATE_DIR-unset}" > "$AHU_TEST_STATE"
+"$AHU_BIN" tasks --output json > "$AHU_TEST_TASKS" || exit 99
 exit 7
 "#,
     )
@@ -122,6 +130,8 @@ exit 7
         .env("AHU_TEST_ARGS", scratch.path().join("args"))
         .env("AHU_TEST_CWD", scratch.path().join("cwd"))
         .env("AHU_TEST_STATE", scratch.path().join("state"))
+        .env("AHU_TEST_TASKS", scratch.path().join("tasks"))
+        .env("AHU_RUNTIME_DIR", scratch.path().join("runtime"))
         .output()
         .unwrap();
     assert_eq!(
@@ -132,7 +142,11 @@ exit 7
     );
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("args")).unwrap(),
-        "\n"
+        "--dangerously-skip-permissions\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Claude coordinator: --dangerously-skip-permissions\n"
     );
     let cwd = std::fs::read_to_string(scratch.path().join("cwd")).unwrap();
     assert_eq!(
@@ -141,8 +155,8 @@ exit 7
     );
     let state = std::fs::read_to_string(scratch.path().join("state")).unwrap();
     assert_eq!(
-        std::path::Path::new(&state).canonicalize().unwrap(),
-        repo.path().join(".ahu/state").canonicalize().unwrap()
+        std::path::Path::new(&state),
+        scratch.path().join("parent-state")
     );
     assert!(output.stdout.is_empty());
     assert!(!repo.path().join(".agents").exists());
@@ -178,7 +192,8 @@ fn opencode_session_inherits_terminal_context_and_uses_local_state_without_cmux(
         r#"#!/bin/sh
 printf '%s\n' "$@" > "$AHU_TEST_ARGS"
 pwd > "$AHU_TEST_CWD"
-printf '%s' "$AHU_STATE_DIR" > "$AHU_TEST_STATE"
+printf '%s' "${AHU_STATE_DIR-unset}" > "$AHU_TEST_STATE"
+"$AHU_BIN" tasks --output json > "$AHU_TEST_TASKS" || exit 99
 exit 7
 "#,
     )
@@ -197,6 +212,8 @@ exit 7
         .env("AHU_TEST_ARGS", scratch.path().join("args"))
         .env("AHU_TEST_CWD", scratch.path().join("cwd"))
         .env("AHU_TEST_STATE", scratch.path().join("state"))
+        .env("AHU_TEST_TASKS", scratch.path().join("tasks"))
+        .env("AHU_RUNTIME_DIR", scratch.path().join("runtime"))
         .output()
         .unwrap();
     assert_eq!(
@@ -218,8 +235,8 @@ exit 7
     );
     let state = std::fs::read_to_string(scratch.path().join("state")).unwrap();
     assert_eq!(
-        std::path::Path::new(&state).canonicalize().unwrap(),
-        repo.path().join(".ahu/state").canonicalize().unwrap()
+        std::path::Path::new(&state),
+        scratch.path().join("parent-state")
     );
     assert!(output.stdout.is_empty());
     assert!(!repo.path().join(".agents").exists());
@@ -258,7 +275,8 @@ fn antigravity_session_inherits_terminal_context_and_uses_local_state_without_cm
         r#"#!/bin/sh
 printf '%s\n' "$@" > "$AHU_TEST_ARGS"
 pwd > "$AHU_TEST_CWD"
-printf '%s' "$AHU_STATE_DIR" > "$AHU_TEST_STATE"
+printf '%s' "${AHU_STATE_DIR-unset}" > "$AHU_TEST_STATE"
+"$AHU_BIN" tasks --output json > "$AHU_TEST_TASKS" || exit 99
 exit 7
 "#,
     )
@@ -277,6 +295,8 @@ exit 7
         .env("AHU_TEST_ARGS", scratch.path().join("args"))
         .env("AHU_TEST_CWD", scratch.path().join("cwd"))
         .env("AHU_TEST_STATE", scratch.path().join("state"))
+        .env("AHU_TEST_TASKS", scratch.path().join("tasks"))
+        .env("AHU_RUNTIME_DIR", scratch.path().join("runtime"))
         .output()
         .unwrap();
     assert_eq!(
@@ -298,8 +318,8 @@ exit 7
     );
     let state = std::fs::read_to_string(scratch.path().join("state")).unwrap();
     assert_eq!(
-        std::path::Path::new(&state).canonicalize().unwrap(),
-        repo.path().join(".ahu/state").canonicalize().unwrap()
+        std::path::Path::new(&state),
+        scratch.path().join("parent-state")
     );
     assert!(output.stdout.is_empty());
     assert!(!repo.path().join(".agents").exists());

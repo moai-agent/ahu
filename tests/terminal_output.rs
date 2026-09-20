@@ -68,7 +68,6 @@ fn normal_harness_capabilities_are_not_warnings_but_failures_still_surface() {
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
             )
-            .env("AHU_STATE_DIR", repo.state_path())
             .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
             .output()
             .unwrap();
@@ -200,7 +199,6 @@ fn a_hostile_file_name_in_an_error_cannot_repaint_the_terminal() {
     let output = common::ahu()
         .arg("agents")
         .current_dir(repo.path())
-        .env("AHU_STATE_DIR", repo.state_path())
         .output()
         .expect("ahu runs");
 
@@ -239,7 +237,6 @@ fn doctor_cannot_be_used_to_repaint_the_terminal() {
     let output = common::ahu()
         .arg("doctor")
         .current_dir(repo.path())
-        .env("AHU_STATE_DIR", repo.state_path())
         .output()
         .expect("ahu runs");
 
@@ -391,14 +388,17 @@ fn redirected_commands_match_explicit_plain_output() {
     ];
     for args in cases {
         let run = |color: &str| {
-            std::fs::remove_dir_all(repo.state_path()).unwrap();
-            std::fs::create_dir(repo.state_path()).unwrap();
+            let state = ahu::storage::CheckoutStorage::new(repo.path())
+                .state_root()
+                .unwrap();
+            if state.exists() {
+                std::fs::remove_dir_all(state).unwrap();
+            }
             let out = tempfile::NamedTempFile::new().unwrap();
             let output = common::ahu()
                 .arg(color)
                 .args(*args)
                 .current_dir(repo.path())
-                .env("AHU_STATE_DIR", repo.state_path())
                 .env("AHU_CMUX_BIN", repo.state_path().join("absent-cmux"))
                 .env("PATH", "/usr/bin:/bin")
                 .env("TERM", "xterm-256color")
@@ -661,7 +661,6 @@ fn previews_contain_hostile_fields_and_preserve_plain_structure() {
                 .env("AHU_TEST_PREVIEW_COLOR", color)
                 .env("AHU_TEST_PREVIEW_KIND", kind)
                 .env("AHU_TEST_PREVIEW_REPO", repo.path())
-                .env("AHU_STATE_DIR", repo.state_path())
                 .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
                 .env("TERM", "xterm-256color")
                 .env_remove("NO_COLOR")

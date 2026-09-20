@@ -188,7 +188,9 @@ pub const HARNESSES: &[HarnessEntry] = &[
         adapter_available: true,
         executable: "codex",
         verified_versions: "0.154.0",
-        headless_verified_versions: &["0.154.0"],
+        // 0.155.1 retains the batch argv surface; a live JSON launch and
+        // native-session resume both emitted the expected identity and terminal events.
+        headless_verified_versions: &["0.154.0", "0.155.1"],
         enforces_model_for_session: false,
         features: &[
             Feature::InteractiveLaunch,

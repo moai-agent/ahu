@@ -19,7 +19,6 @@ fn launch(repo: &TestRepo, extra: &[&str]) -> std::process::Output {
         .args(["launch", "@deploy", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .args(extra)
-        .env("AHU_STATE_DIR", temp)
         // cmux is deliberately absent, so a launch that gets past the gate
         // fails at session creation rather than starting anything.
         .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
@@ -111,7 +110,6 @@ fn launch_still_needs_no_opt_in_for_an_agent_that_widens_nothing() {
         .args(["launch", "@sable", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .arg("--dry-run")
-        .env("AHU_STATE_DIR", temp)
         .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
         .env(
             "PATH",
@@ -398,7 +396,6 @@ fn an_empty_prompt_digest_refuses_the_session() {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .unwrap();
@@ -446,7 +443,6 @@ fn editing_the_recorded_agent_instructions_refuses_the_session() {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .unwrap();

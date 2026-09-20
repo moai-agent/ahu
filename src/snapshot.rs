@@ -166,8 +166,9 @@ fn is_config_path(relative: &Path) -> bool {
 
 /// Walk `root` and collect every agent-configuration file.
 pub fn collect(root: &Path) -> Result<ConfigSnapshot> {
+    let source = crate::storage::CheckoutStorage::new(root).configuration();
     let mut snapshot = ConfigSnapshot::default();
-    walk(root, root, 0, &mut snapshot)?;
+    walk(source.root(), source.root(), 0, &mut snapshot)?;
     snapshot.entries.sort_by(|a, b| a.path.cmp(&b.path));
     snapshot.skipped_directories.sort();
     snapshot.skipped_directories.dedup();

@@ -1,5 +1,7 @@
 //! Unattended attempts with external artifacts and an ahu-owned supervisor.
 //! Process and harness outcomes are evidence, never work acceptance.
+pub(crate) mod review;
+
 use crate::harness::{LaunchCommand, LaunchRequest};
 use crate::util::{Error, Result, digest_bytes};
 use crate::{bail, state, task};
@@ -60,6 +62,29 @@ pub struct Spec {
     pub native_profile: Option<crate::native::Profile>,
     pub native_controls: Vec<String>,
     pub gaps: Vec<String>,
+}
+
+impl Spec {
+    /// Only ahu-owned coordination facts cross the prompt boundary. Native
+    /// session identity is a locator, not permission to retrieve its history.
+    pub fn coordination_state(&self) -> crate::orchestration::CoordinationState {
+        crate::orchestration::CoordinationState {
+            root_task: self.root_task.clone(),
+            parent_task: self.parent_task.clone(),
+            attempt: self.attempt,
+            native_session: self.session.clone(),
+            child_grants: self
+                .child_grants
+                .iter()
+                .map(|grant| crate::orchestration::GrantedAgent {
+                    agent: grant.agent.clone(),
+                    identity_digest: grant.identity_digest.clone(),
+                    permissions: grant.permissions,
+                    native_helpers: grant.native_helpers.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Batch arguments are built separately: interactive and resume parsers differ.
@@ -328,7 +353,7 @@ pub fn runtime_root() -> Result<PathBuf> {
 }
 
 pub fn store(repo: &crate::git::Repo) -> Result<PathBuf> {
-    Ok(runtime_root()?.join(repo.identity()))
+    Ok(crate::storage::RuntimeStorage::new(runtime_root()?).repo_dir(&repo.identity()))
 }
 
 pub(crate) fn confined(path: &Path, create: bool) -> Result<()> {
@@ -518,20 +543,9 @@ pub(crate) fn durable_json(path: &Path, value: &impl serde::Serialize) -> Result
         .ok_or_else(|| Error::new("runtime file needs a parent"))?;
     confined(parent, true)?;
     state::confine_file(path)?;
-    let temp = parent.join(format!(".write-{}", crate::orchestration::new_nonce()?));
-    let mut file = state::create_new_private_file(&temp)?;
-    let result = (|| -> Result<()> {
-        serde_json::to_writer(&mut file, value).map_err(|e| Error::new(e.to_string()))?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        std::fs::rename(&temp, path)?;
-        std::fs::File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(temp);
-    }
-    result
+    let mut body = serde_json::to_vec(value).map_err(|e| Error::new(e.to_string()))?;
+    body.push(b'\n');
+    crate::private_io::atomic_write(path, &body, crate::private_io::Durability::Durable)
 }
 
 pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -722,10 +736,20 @@ pub fn launch(
     }
     spec.native_profile = Some(profile);
     validate_environment(repo, &plan.hooks)?;
-    let (delivered, delivery) = crate::orchestration::deliver_headless_policy(
+    let (delivered, delivery) = crate::orchestration::deliver_composed(
         plan.agent.as_ref().map(|a| a.instructions.as_str()),
         prompt,
-        &spec.options.native_helpers,
+        crate::orchestration::Composition {
+            mode: crate::orchestration::Mode::headless(&spec.options.native_helpers)?,
+            metadata: Some(crate::orchestration::Metadata {
+                task_id: plan.task_id.clone(),
+                agent: plan.agent_label(),
+                harness: plan.pair.harness.clone(),
+                model: plan.pair.model.clone(),
+                permissions,
+            }),
+            state: Some(spec.coordination_state()),
+        },
     )?;
     plan.delivery = delivery;
     plan.command = batch_command(
@@ -949,6 +973,34 @@ fn validate_environment(
 }
 
 pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
+    if !json_output && value["review"].is_object() {
+        let review = &value["review"];
+        println!(
+            "{} [headless; recorded state {}]",
+            review::safe(review["task_id"].as_str().unwrap_or("unknown")),
+            review::safe(review["session_state"].as_str().unwrap_or("unknown"))
+        );
+        print!("{}", review::render(review, false));
+        if let Some(summary) = value["harness"]["summary"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            println!("  report excerpt (untrusted) {}", review::safe(summary));
+        }
+        if let Some(paths) = value["writes_outside_worktree"]
+            .as_array()
+            .filter(|p| !p.is_empty())
+        {
+            println!("  writes outside worktree (recorded):");
+            for path in paths.iter().take(8).filter_map(Value::as_str) {
+                println!("    {}", review::safe(path));
+            }
+            if paths.len() > 8 {
+                println!("    additional entries omitted; inspect result JSON");
+            }
+        }
+        return Ok(());
+    }
     let text = serde_json::to_string_pretty(value).map_err(|e| Error::new(e.to_string()))?;
     if json_output {
         println!("{text}");
@@ -2126,6 +2178,8 @@ fn result(dir: &Path) -> Result<Value> {
     let spec: Spec = read_json(&dir.join("headless.json"))?;
     result_attempt(dir, &spec)
 }
+// Lifecycle consumers retain the existing result envelope semantics. Display limits
+// belong to inspection, never child reconciliation, resume, or cleanup.
 fn result_attempt(dir: &Path, spec: &Spec) -> Result<Value> {
     let path = attempt_dir(dir, spec).join("result.json");
     if path.exists() {
@@ -2136,16 +2190,58 @@ fn result_attempt(dir: &Path, spec: &Spec) -> Result<Value> {
             "cannot inspect supervisor ownership; liveness unknown: {error}"
         ))
     })?;
-    Ok(
-        json!({"schema_version":1,"task_id":dir.file_name(),"attempt":spec.attempt,
+    Ok(json!({"schema_version":1,
+        "task_id":dir.file_name().unwrap_or_default().to_string_lossy(),"attempt":spec.attempt,
         "outcome":if active {"running"} else {"interrupted"},"acceptance":"not assessed",
-        "blockers":if active {Vec::<String>::new()} else {vec!["no live supervisor owns this attempt; process cleanup unknown, no automatic replay".into()]}}),
-    )
+        "completion_verified":false,
+        "blockers":if active {Vec::<String>::new()} else {vec!["no live supervisor owns this attempt; process cleanup unknown, no automatic replay".into()]}}))
+}
+
+fn review_attempt(
+    dir: &Path,
+    spec: &Spec,
+    read_result: impl FnOnce(&Path) -> Result<Value>,
+) -> Result<Value> {
+    if spec.schema_version != 1 || spec.attempt == 0 {
+        bail!("unsupported headless attempt metadata");
+    }
+    let id = dir.file_name().unwrap_or_default().to_string_lossy();
+    let path = attempt_dir(dir, spec).join("result.json");
+    let mut value = match std::fs::symlink_metadata(&path) {
+        Ok(_) => {
+            let mut value = read_result(&path)?;
+            // Older supervisor-error envelopes serialized the directory OsStr.
+            // Normalize only the exact encoding of this task's own identifier.
+            if value["outcome"] == "supervisor_error"
+                && value["task_id"] == serde_json::to_value(dir.file_name())?
+            {
+                value["task_id"] = json!(id);
+            }
+            review::validate_result(&value, &id, spec.attempt)?;
+            value
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let active = Lock::is_owned(&dir.join("owner.lock")).map_err(|error| {
+                Error::new(format!(
+                    "cannot inspect supervisor ownership; liveness unknown: {error}"
+                ))
+            })?;
+            json!({"schema_version":1,"task_id":id,"attempt":spec.attempt,
+                "outcome":if active {"running"} else {"interrupted"},"acceptance":"not assessed",
+                "completion_verified":false,
+                "blockers":if active {Vec::<String>::new()} else {vec!["no live supervisor owns this attempt; process cleanup unknown, no automatic replay".into()]}})
+        }
+        Err(error) => return Err(error.into()),
+    };
+    value["review"] = review::projection(dir, Some(spec), Some(&value), None);
+    Ok(value)
 }
 fn wait(dir: &Path, json_output: bool) -> Result<i32> {
     let spec: Spec = read_json(&dir.join("headless.json"))?;
     loop {
-        let value = result_attempt(dir, &spec)?;
+        // Validate public review output without applying the interactive display-size
+        // limit to wait's existing full-envelope API.
+        let value = review_attempt(dir, &spec, read_json)?;
         if value["outcome"] != "running" {
             let code = if value["outcome"] == "succeeded" {
                 0
@@ -2221,7 +2317,8 @@ pub fn control(
     let dir = lookup(repo, id)?;
     match action {
         "result" => {
-            emit(&result(&dir)?, json_output)?;
+            let spec: Spec = review::read(&dir.join("headless.json"))?;
+            emit(&review_attempt(&dir, &spec, review::read)?, json_output)?;
             Ok(0)
         }
         "wait" => wait(&dir, json_output),
@@ -2360,10 +2457,20 @@ pub fn control(
             while attempt_dir(&dir, &spec).exists() {
                 spec.attempt += 1;
             }
-            let (delivered, delivery) = crate::orchestration::deliver_headless_policy(
+            let (delivered, delivery) = crate::orchestration::deliver_composed(
                 record.delivery.agent_instructions.as_deref(),
                 &prompt,
-                &spec.options.native_helpers,
+                crate::orchestration::Composition {
+                    mode: crate::orchestration::Mode::headless(&spec.options.native_helpers)?,
+                    metadata: Some(crate::orchestration::Metadata {
+                        task_id: record.task_id.clone(),
+                        agent: record.agent_label(),
+                        harness: record.identity.harness.clone(),
+                        model: record.identity.model.clone(),
+                        permissions: record.identity.permissions,
+                    }),
+                    state: Some(spec.coordination_state()),
+                },
             )?;
             let command = batch_command(
                 &record.identity.harness,
@@ -2451,13 +2558,30 @@ fn recover_resume(dir: &Path) -> Result<()> {
 }
 
 pub fn inspection(dir: &Path) -> Result<Value> {
-    let spec: Spec = read_json(&dir.join("headless.json"))?;
-    let value = result_attempt(dir, &spec)?;
-    Ok(
-        json!({"number":spec.attempt,"parent_task":spec.parent_task,"outcome":value["outcome"],
-        "native_helpers":spec.options.native_helpers,"runtime":dir,"timeout_seconds":spec.options.timeout_seconds,
-        "captured_artifacts_removed":attempt_dir(dir, &spec).join("artifacts-removed.json").exists()}),
-    )
+    let spec = match review::read::<Spec>(&dir.join("headless.json")) {
+        Ok(spec) if spec.schema_version == 1 && spec.attempt > 0 => spec,
+        _ => {
+            return Ok(review::projection(
+                dir,
+                None,
+                None,
+                Some(
+                    "headless.json unavailable: missing, unreadable, malformed, unsupported or beyond the inspection bound",
+                ),
+            ));
+        }
+    };
+    match review_attempt(dir, &spec, review::read) {
+        Ok(value) => Ok(value["review"].clone()),
+        Err(_) => Ok(review::projection(
+            dir,
+            Some(&spec),
+            None,
+            Some(
+                "attempt inspection unavailable: inspect headless.json, result.json and owner.lock; metadata may be missing, unreadable, malformed or beyond the inspection bound",
+            ),
+        )),
+    }
 }
 
 /// Whether a live supervisor holds this attempt's ownership lock.

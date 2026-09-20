@@ -88,8 +88,36 @@ impl LoadedConfig {
     }
 }
 
+/// Configuration source for one checkout. Snapshot policy stays separate from
+/// task persistence: these files remain repository inputs, not operational state.
+#[derive(Debug, Clone)]
+pub struct ProjectFiles {
+    root: PathBuf,
+}
+impl ProjectFiles {
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+        }
+    }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn config_path(&self) -> PathBuf {
+        self.root.join(CONFIG_RELATIVE_PATH)
+    }
+    fn existing_config(&self) -> Result<Option<PathBuf>> {
+        crate::util::resolve_existing_within(&self.root, CONFIG_RELATIVE_PATH)
+    }
+    fn new_config(&self) -> Result<PathBuf> {
+        crate::util::resolve_within(&self.root, CONFIG_RELATIVE_PATH, true)
+    }
+}
+
 pub fn config_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(CONFIG_RELATIVE_PATH)
+    crate::storage::CheckoutStorage::new(repo_root)
+        .configuration()
+        .config_path()
 }
 
 /// Load and validate the project configuration.
@@ -102,7 +130,10 @@ pub fn load(repo_root: &Path) -> Result<Option<LoadedConfig>> {
     // commit a symlink at `.agents`, `.agents/ahu`, or `config.toml` itself, and
     // reading through one would let it hand ahu any file the user can read —
     // whose contents the parse error below then quotes back.
-    let Some(path) = crate::util::resolve_existing_within(repo_root, CONFIG_RELATIVE_PATH)? else {
+    let Some(path) = crate::storage::CheckoutStorage::new(repo_root)
+        .configuration()
+        .existing_config()?
+    else {
         return Ok(None);
     };
     let bytes = match std::fs::read(&path) {
@@ -341,7 +372,9 @@ pub fn render(config: &ProjectConfig) -> String {
 pub fn write_new(repo_root: &Path, config: &ProjectConfig) -> Result<PathBuf> {
     // Component-by-component, so a symlinked `.agents` or `.agents/ahu` cannot
     // redirect where the project's configuration is created.
-    let path = crate::util::resolve_within(repo_root, CONFIG_RELATIVE_PATH, true)?;
+    let path = crate::storage::CheckoutStorage::new(repo_root)
+        .configuration()
+        .new_config()?;
     let body = render(config);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);

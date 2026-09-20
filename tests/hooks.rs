@@ -62,7 +62,6 @@ fn doctor_only_summarizes_hooks_for_harnesses_used_by_the_project() {
             .arg("doctor")
             .current_dir(repo.path())
             .env("HOME", home.path())
-            .env("AHU_STATE_DIR", repo.state_path())
             .env("AHU_CMUX_BIN", home.path().join("missing-cmux"))
             .output()
             .unwrap();

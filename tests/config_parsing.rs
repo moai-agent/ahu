@@ -498,7 +498,6 @@ fn a_relative_path_entry_never_resolves_a_harness() {
     let output = common::ahu()
         .arg("doctor")
         .current_dir(repo.path())
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("PATH", format!("{}:", std::env::var("PATH").unwrap()))
         .output()
         .expect("ahu runs");

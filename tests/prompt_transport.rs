@@ -109,7 +109,7 @@ fn file_inline_and_stdin_prompts_reach_the_argv_boundary_byte_for_byte() {
             .read(&mut Cursor::new(stdin.as_bytes()), false)
             .unwrap();
         assert_eq!(text.as_bytes(), prompt.as_bytes());
-        let (delivered, _) =
+        let (delivered, delivery) =
             ahu::orchestration::deliver(Some("Fixture instructions."), &text).unwrap();
         for (harness, model) in [
             ("claude-code", "claude-opus-5"),
@@ -128,7 +128,10 @@ fn file_inline_and_stdin_prompts_reach_the_argv_boundary_byte_for_byte() {
                 .unwrap();
             let index = command.prompt_arg.unwrap();
             assert_eq!(command.args[index], delivered);
-            assert!(command.args[index].ends_with(&prompt));
+            assert_eq!(
+                ahu::orchestration::fence_body(&command.args[index], "request", &delivery.nonce),
+                Some(prompt.as_str())
+            );
             assert_eq!(
                 command
                     .args
@@ -287,7 +290,6 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_STATE_DIR", repo.state_path())
         // Point cmux discovery at nothing so the test never touches a real session.
         .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
@@ -298,10 +300,7 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert_eq!(
-        std::fs::read_to_string(&state_capture).unwrap(),
-        worktree.join(".ahu/state").to_string_lossy()
-    );
+    assert_eq!(std::fs::read_to_string(&state_capture).unwrap(), "");
     assert!(worktree.join(".ahu/.gitignore").is_file());
     assert!(!worktree.join(".worktrees").exists());
     let recorded = std::fs::read_to_string(&recorder).expect("the harness ran");
@@ -326,12 +325,12 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
         !delivered.contains("tools: Read, Edit"),
         "frontmatter is metadata ahu reads, not instructions it delivers: {delivered}"
     );
-    assert!(
-        delivered.ends_with(&prompt),
-        "the task prompt is last and unmodified"
-    );
-    // ahu's sections are fenced and the task prompt is outside the fence.
     let record = ahu::task::load(&task_dir).unwrap();
+    assert_eq!(
+        ahu::orchestration::fence_body(&delivered, "request", &record.delivery.nonce),
+        Some(prompt.as_str())
+    );
+    // The request follows the agent's instructions in its own fence.
     let close = ahu::orchestration::close_tag("agent", &record.delivery.nonce);
     assert!(delivered.find(&close).unwrap() < delivered.find(&prompt).unwrap());
     assert!(
@@ -377,7 +376,6 @@ fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .expect("ahu runs");

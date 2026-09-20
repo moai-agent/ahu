@@ -75,7 +75,6 @@ fn run(fixture: &PlantedRepo, path: &str, args: &[&str]) -> std::process::Output
     common::ahu()
         .args(args)
         .current_dir(fixture.repo.path())
-        .env("AHU_STATE_DIR", fixture.repo.state_path())
         .env("AHU_CMUX_BIN", fixture.outside.path().join("missing-cmux"))
         // A throwaway home, so the developer's own settings cannot change this.
         .env("HOME", fixture.outside.path())

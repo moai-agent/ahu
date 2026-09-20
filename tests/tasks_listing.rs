@@ -140,40 +140,21 @@ fn write_current(tasks_dir: &Path, repo: &TestRepo, task_id: &str) -> PathBuf {
     dir
 }
 
-/// `AHU_STATE_DIR` is process-wide, and these tests run in parallel by default.
-///
-/// Every read and write of it in this binary goes through `with_state`, so the
-/// guard makes the mutation exclusive. Without it the suite passes under
-/// `--test-threads=1` and fails at random otherwise, which is a worse outcome
-/// than either result on its own.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Run `f` with `AHU_STATE_DIR` pointed at this repository's scratch state.
-fn with_state<T>(repo: &TestRepo, f: impl FnOnce() -> T) -> T {
-    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: the guard makes this binary the only mutator, and every reader
-    // here runs inside it.
-    unsafe { std::env::set_var("AHU_STATE_DIR", repo.state_path()) };
-    let result = f();
-    drop(guard);
-    result
-}
-
 /// Run a command against that state, capturing what it printed.
 fn scripted(
-    repo: &TestRepo,
+    _repo: &TestRepo,
     f: impl FnOnce(&mut ahu::launcher::Console<'_>) -> ahu::util::Result<i32>,
 ) -> (i32, String) {
     let mut input = std::io::Cursor::new(Vec::new());
     let mut output: Vec<u8> = Vec::new();
-    let code = with_state(repo, || {
+    let code = {
         let mut console = ahu::launcher::Console {
             input: &mut input,
             output: &mut output,
             interactive: false,
         };
         f(&mut console)
-    });
+    };
     let text = String::from_utf8_lossy(&output).to_string();
     match code {
         Ok(code) => (code, text),
@@ -184,11 +165,11 @@ fn scripted(
 /// The tasks directory for a repository, created.
 fn tasks_dir(repo: &TestRepo) -> PathBuf {
     let discovered = ahu::git::discover(repo.path()).unwrap();
-    with_state(repo, || {
-        let dir = ahu::state::tasks_dir(&discovered.identity()).unwrap();
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    })
+    let dir = ahu::storage::CheckoutStorage::new(repo.path())
+        .tasks_dir(&discovered.identity())
+        .unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 /// One readable record and one refused one: both are accounted for.
@@ -235,7 +216,7 @@ fn tasks_lists_the_readable_record_and_reports_the_unreadable_one() {
     );
 
     // And `task_dirs` accounts for both, so a helper cannot reintroduce the bug.
-    let dirs = with_state(&repo, || ahu::commands::task_dirs(&discovered).unwrap());
+    let dirs = ahu::commands::task_dirs(&discovered).unwrap();
     assert_eq!(dirs.len(), 2, "{dirs:?}");
 }
 
@@ -422,7 +403,7 @@ fn list_carries_what_it_could_not_read() {
     write_current(&dir, &repo, "006aa50000000000g2");
 
     let discovered = ahu::git::discover(repo.path()).unwrap();
-    let listing = with_state(&repo, || ahu::task::list(&discovered).unwrap());
+    let listing = ahu::task::list(&discovered).unwrap();
 
     assert_eq!(listing.records.len(), 1);
     assert_eq!(listing.unreadable.len(), 1);
@@ -485,7 +466,6 @@ fn a_launch_says_when_drift_could_not_read_earlier_records() {
         .args(["launch", "@chris", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .arg("--dry-run")
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
         .env(
             "PATH",

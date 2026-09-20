@@ -26,22 +26,24 @@ pub struct ReviewState {
     pub last_reviewed: BTreeMap<String, i64>,
 }
 
-fn state_path(repo_identity: &str) -> Result<std::path::PathBuf> {
-    Ok(state::repo_dir(repo_identity)?.join("hygiene.json"))
+fn state_path(repo: &crate::git::Repo) -> Result<std::path::PathBuf> {
+    Ok(crate::storage::CheckoutStorage::new(&repo.root)
+        .repo_dir(&repo.identity())?
+        .join("hygiene.json"))
 }
 
-pub fn load_state(repo_identity: &str) -> Result<ReviewState> {
-    state::read_json(&state_path(repo_identity)?)
+pub fn load_state(repo: &crate::git::Repo) -> Result<ReviewState> {
+    state::read_json(&state_path(repo)?)
 }
 
-pub fn record_review(repo_identity: &str, agent_key: &str) -> Result<()> {
-    let mut current = load_state(repo_identity)?;
+pub fn record_review(repo: &crate::git::Repo, agent_key: &str) -> Result<()> {
+    let mut current = load_state(repo)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
     current.last_reviewed.insert(agent_key.to_string(), now);
-    state::write_json(&state_path(repo_identity)?, &current)
+    state::write_json(&state_path(repo)?, &current)
 }
 
 /// Why a review is being shown now.

@@ -208,21 +208,18 @@ fn a_leaf_state_file_link_is_refused_rather_than_written_through() {
     external.assert_untouched();
 }
 
-/// The temporary file an atomic write creates is exclusive, so a link sitting
-/// at its name is not a write target either.
+/// Private exclusive creation refuses a symlink and can replace a stale file.
 #[test]
-fn the_atomic_write_refuses_a_link_at_its_temporary_name() {
+fn private_file_creation_refuses_a_link() {
     let repo = repo_with_state();
     let external = External::new();
     let state = repo.path().join(".ahu/state");
     let record = state.join("hygiene.json");
-    // `write_json` derives the temporary name from the process id, and this
-    // test is that process.
     let temp = record.with_extension(format!("tmp{}", std::process::id()));
     link(&external.path().join("keep.txt"), temp.clone());
 
-    let error = ahu::state::write_json(&record, &serde_json::json!({"written": true}))
-        .expect_err("a link at the temporary name must not be written through")
+    let error = ahu::state::create_new_private_file(&temp)
+        .expect_err("a link at a private file name must not be written through")
         .to_string();
     assert!(error.contains("refusing ahu state path"), "{error}");
     external.assert_untouched();
@@ -232,62 +229,39 @@ fn the_atomic_write_refuses_a_link_at_its_temporary_name() {
     // interference, so it is cleared and the write completes.
     std::fs::remove_file(&temp).unwrap();
     std::fs::write(&temp, b"leftover").unwrap();
-    ahu::state::write_json(&record, &serde_json::json!({"written": true})).unwrap();
-    assert!(record.is_file());
-    assert!(!temp.exists());
+    ahu::state::create_new_private_file(&temp).unwrap();
+    assert!(temp.is_file());
     external.assert_untouched();
 }
 
-/// An explicit `AHU_STATE_DIR` is still honoured, and its own descendants are
-/// still confined.
+/// An inherited legacy override cannot redirect checkout state.
 #[test]
-fn an_explicit_state_root_is_supported_and_its_descendants_are_still_confined() {
+fn an_inherited_state_override_cannot_redirect_state() {
     let repo = repo_with_state();
     let external = External::new();
     let chosen = TempDir::new().unwrap();
     link(external.path(), chosen.path().join("repos"));
-
     let output = common::ahu()
         .args(["hygiene", "@chris"])
         .current_dir(repo.path())
         .env("AHU_STATE_DIR", chosen.path())
-        .env("XDG_STATE_HOME", repo.state_path())
         .env("PATH", "/usr/bin:/bin")
         .output()
-        .expect("ahu runs");
-    let message = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!output.status.success(), "{message}");
-    assert!(message.contains("refusing ahu state path"), "{message}");
-    external.assert_untouched();
-
-    // Without the link the same explicit root works normally.
-    std::fs::remove_file(chosen.path().join("repos")).unwrap();
-    let output = common::ahu()
-        .args(["hygiene", "@chris"])
-        .current_dir(repo.path())
-        .env("AHU_STATE_DIR", chosen.path())
-        .env("XDG_STATE_HOME", repo.state_path())
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .expect("ahu runs");
+        .unwrap();
     assert!(
         output.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
+        "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        chosen
-            .path()
-            .join("repos")
+        repo.path()
+            .join(".ahu/state/repos")
             .join(identity(&repo))
             .join("hygiene.json")
             .is_file()
     );
+    external.assert_untouched();
+    assert_eq!(std::fs::read_dir(chosen.path()).unwrap().count(), 1);
 }
 
 /// Wait for a child with a deadline, killing it rather than blocking forever.
@@ -402,48 +376,9 @@ fn a_state_file_is_created_owner_only() {
     );
 }
 
-/// A `.ahu/state` pair further down a path is not a new boundary.
-///
-/// The confinement root is the outermost one that applies. If a nested marker
-/// could reset it, a link *above* that marker would never be inspected — and
-/// the whole point of the boundary is that a repository-reachable link cannot
-/// move ahu's files somewhere else.
-///
-/// Split in two so the environment is set by the process that starts the case,
-/// never by this one: the harness runs tests on threads, and mutating the
-/// environment under them is unsound whatever the writers agree among
-/// themselves.
+/// A nested marker cannot reset the checkout confinement boundary.
 #[test]
 fn a_nested_state_marker_does_not_move_the_confinement_boundary() {
-    let chosen = TempDir::new().unwrap();
-    let output = common::run_child_case("nested_marker_under_a_chosen_store", |command| {
-        command.env("AHU_STATE_DIR", chosen.path());
-    });
-    common::assert_child_passed("nested_marker_under_a_chosen_store", &output);
-
-    let output = common::run_child_case("nested_marker_under_a_checkout_store", |command| {
-        command.env_remove("AHU_STATE_DIR");
-    });
-    common::assert_child_passed("nested_marker_under_a_checkout_store", &output);
-}
-
-/// The chosen-store half: `AHU_STATE_DIR` names the store this runs in.
-#[test]
-fn nested_marker_under_a_chosen_store() {
-    if !common::is_child_case("nested_marker_under_a_chosen_store") {
-        return;
-    }
-    let store = PathBuf::from(std::env::var_os("AHU_STATE_DIR").expect("the parent sets it"));
-    refuse_through_a_nested_marker(&store);
-}
-
-/// The checkout-store half, with no override in this process's environment.
-#[test]
-fn nested_marker_under_a_checkout_store() {
-    if !common::is_child_case("nested_marker_under_a_checkout_store") {
-        return;
-    }
-    assert!(std::env::var_os("AHU_STATE_DIR").is_none());
     let repo = repo_with_state();
     refuse_through_a_nested_marker(&repo.path().join(".ahu/state"));
 }

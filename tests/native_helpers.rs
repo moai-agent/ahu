@@ -1395,3 +1395,24 @@ fn disabled_makes_no_delegation_claim_for_opencode() {
     .expect_err("bounded must be refused for opencode");
     assert!(error.to_string().contains("opencode"), "{error}");
 }
+
+#[test]
+fn bounded_delivery_selects_contract_policy_without_rewriting_agent_or_request() {
+    use ahu::orchestration::*;
+    // Content resembling ahu's own policy is still literal authored text.
+    let body = "Native helper policy is disabled. Do not spawn native helpers, teams, native\nbackground sessions or worktrees.";
+    for policy in ["disabled", "bounded"] {
+        let (text, saved) = deliver_headless_policy(Some(body), body, policy).unwrap();
+        assert_eq!(fence_body(&text, "agent", &saved.nonce), Some(body));
+        assert_eq!(fence_body(&text, "request", &saved.nonce), Some(body));
+        let contract = fence_body(&text, "contract", &saved.nonce).unwrap();
+        assert!(contract.contains(&format!("Native helper policy is {policy}.")));
+        assert!(contract.contains("not an enforced system role"));
+        assert_eq!(contract.contains("ENTIRE assignment"), policy == "bounded");
+        assert_eq!(
+            redeliver_headless_policy(&saved, body, policy).unwrap(),
+            text
+        );
+    }
+    assert!(deliver_headless_policy(None, body, "unknown").is_err());
+}

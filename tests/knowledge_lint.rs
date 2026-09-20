@@ -182,7 +182,6 @@ fn run(repo: &TestRepo, stub: &StubOkf, cwd: &Path, args: &[&str]) -> Run {
         .current_dir(cwd)
         .args(args)
         .env("NO_COLOR", "1")
-        .env("AHU_STATE_DIR", repo.state_path())
         // Nothing here may need cmux or a harness, so both are pointed at
         // paths that do not exist.
         .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
@@ -318,7 +317,6 @@ fn a_missing_okf_is_a_prerequisite_and_nothing_is_checked() {
         .current_dir(repo.path())
         .args(["knowledge", "lint"])
         .env("NO_COLOR", "1")
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("PATH", bare.path())
         .stdin(Stdio::null())
         .output()
@@ -834,7 +832,6 @@ fn redirected_lint_preserves_plain_layout_and_json_values() {
                 }
                 let result = command
                     .current_dir(repo.path())
-                    .env("AHU_STATE_DIR", repo.state_path())
                     .env("STUB_OKF_FIXTURES", stub.fixtures())
                     .env("PATH", format!("{}:/usr/bin:/bin", stub.bin().display()))
                     .env("TERM", "xterm-256color")

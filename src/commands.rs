@@ -41,37 +41,30 @@ pub fn codex(repo: &Repo) -> Result<i32> {
         repo,
         "codex",
         "Codex",
-        &[
-            "--sandbox",
-            "workspace-write",
-            "--ask-for-approval",
-            "on-request",
-        ],
+        &["--dangerously-bypass-approvals-and-sandbox"],
     )
 }
 
-/// Open Claude using its configured model and permission behavior.
+/// Open Claude using its configured model with permission checks bypassed.
 pub fn claude(repo: &Repo) -> Result<i32> {
-    coordinating_session(repo, "claude", "Claude", &[])
+    coordinating_session(
+        repo,
+        "claude",
+        "Claude",
+        &["--dangerously-skip-permissions"],
+    )
 }
 
 /// Open OpenCode using its configured model and permission behavior.
 ///
-/// No flags, unlike the Codex session: OpenCode's permission actions are static
-/// configuration, and its one permission flag is `--auto`, which auto-approves
-/// everything not explicitly denied. A coordinating session that widened the
-/// user's own boundary on their behalf would be the opposite of the adapter's
-/// rule, which refuses to widen even when an agent asks for it.
+/// This shortcut retains native permission settings and plugin loading.
 pub fn opencode(repo: &Repo) -> Result<i32> {
     coordinating_session(repo, "opencode", "OpenCode", &[])
 }
 
 /// Open the Antigravity CLI using its configured model and permission behavior.
 ///
-/// No flags, like the OpenCode session: Antigravity's permission flags are
-/// `--mode accept-edits` and `--dangerously-skip-permissions`, and both widen
-/// the user's own approval boundary. A coordinating session does not widen it
-/// on their behalf.
+/// This shortcut retains native permission settings.
 pub fn antigravity(repo: &Repo) -> Result<i32> {
     coordinating_session(repo, "agy", "Antigravity CLI", &[])
 }
@@ -83,12 +76,12 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
         ))
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
-    let state = crate::state::ensure_checkout_state(&repo.root)?;
+    crate::state::ensure_checkout_state(&repo.root)?;
+    if !args.is_empty() {
+        eprintln!("{label} coordinator: {}", args.join(" "));
+    }
     let mut command = std::process::Command::new(executable);
-    command
-        .args(args)
-        .env("AHU_BIN", std::env::current_exe()?)
-        .env("AHU_STATE_DIR", state);
+    command.args(args).env("AHU_BIN", std::env::current_exe()?);
     // Inherit the terminal and cwd. Replacing ahu gives the harness terminal signals
     // directly and preserves its exit status, including signal termination.
     #[cfg(unix)]
@@ -429,7 +422,10 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         }
     }
 
-    let state_root = crate::state::root()?;
+    let state_root = match repo {
+        Ok(repo) => crate::storage::CheckoutStorage::new(&repo.root).state_root()?,
+        Err(_) => crate::state::root()?,
+    };
     let state_display = repo
         .as_ref()
         .ok()
@@ -544,22 +540,31 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
     }
     let workspaces = liveness_workspaces(&listing.records);
     for (dir, record) in &listing.records {
+        let review = if crate::headless::review::is_headless(dir) {
+            Some(crate::headless::inspection(dir)?)
+        } else {
+            None
+        };
         // Every field here comes out of task.json, which was built from the
         // prompt and from repository configuration. `tasks` is as much a
         // disclosure surface as the launch preview, so it escapes the same way.
         console.say(&format!(
-            "{} [session {}] {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n  liveness  {}\n",
+            "{} [session {}] {}\n  backend   {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n  liveness  {}\n",
             display_safe(&record.task_id),
             record.state.as_str(),
             display_safe(&record.title),
+            if review.is_some() { "headless" } else { "cmux" },
             style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
             style::stdout().paint(Role::Runtime, &display_safe(&record.identity.harness)),
             style::stdout().paint(Role::Runtime, &display_safe(&record.identity.model)),
             display_safe(&record.branch),
             display_path(&record.worktree),
             display_path(dir),
-            task::observed_liveness(session_owner(dir, record, workspaces.as_ref())).as_str(),
+            review.as_ref().and_then(|v| v["liveness"].as_str()).unwrap_or_else(|| task::observed_liveness(session_owner(dir, record, workspaces.as_ref())).as_str()),
         ))?;
+        if let Some(review) = &review {
+            console.say(&crate::headless::review::render(review, true))?;
+        }
         if let Some(workspace) = &record.cmux_workspace_id {
             console.say(&format!("  cmux      {}\n", display_safe(workspace)))?;
         }
@@ -920,13 +925,14 @@ pub fn task_summary(
         "liveness": task::observed_liveness(session_owner(dir, record, workspaces)).as_str(),
         "completion_verified": false,
     });
-    value["execution_backend"] = if dir.join("headless.json").exists() {
+    value["execution_backend"] = if crate::headless::review::is_headless(dir) {
         "headless".into()
     } else {
         "cmux".into()
     };
-    if dir.join("headless.json").exists() {
+    if crate::headless::review::is_headless(dir) {
         value["attempt"] = crate::headless::inspection(dir)?;
+        value["liveness"] = value["attempt"]["liveness"].clone();
     }
     Ok(value)
 }
@@ -945,19 +951,26 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
     } else {
         None
     };
+    let value = task_summary(&dir, &record, workspaces.as_ref())?;
     if json {
-        let value = task_summary(&dir, &record, workspaces.as_ref())?;
         console.say(&format!("{}\n", serde_json::to_string(&value)?))?;
     } else {
         console.say(&format!(
-            "{} [session {}]\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  base      {}\n  worktree  {}\n  exists    {}\n  record    {}\n  cmux      {}\n  liveness  {}\n\nState is recorded, not a live activity check. Task completion is not verified. Liveness is observed at this moment, not a verdict; `unknown` means ahu could not read the signal.\n",
-            display_safe(&record.task_id), record.state.as_str(), display_safe(&record.agent_label()),
+            "{} [session {}]\n  backend   {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  base      {}\n  worktree  {}\n  exists    {}\n  record    {}\n  liveness  {}\n\nState is recorded, not a live activity check. Task completion is not verified. Liveness is observed at this moment, not a verdict; `unknown` means ahu could not read the signal.\n",
+            display_safe(&record.task_id), record.state.as_str(), value["execution_backend"].as_str().unwrap_or("unknown"), display_safe(&record.agent_label()),
             display_safe(&record.identity.harness), display_safe(&record.identity.model),
             display_safe(&record.branch), display_safe(record.base_commit.as_deref().unwrap_or("unknown")),
             display_path(&record.worktree), record.worktree.is_dir(), display_path(&dir.join("task.json")),
-            display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none")),
-            task::observed_liveness(session_owner(&dir, &record, workspaces.as_ref())).as_str(),
+            value["liveness"].as_str().unwrap_or("unknown"),
         ))?;
+        if value["execution_backend"] == "headless" {
+            console.say(&crate::headless::review::render(&value["attempt"], false))?;
+        } else {
+            console.say(&format!(
+                "  cmux      {}\n",
+                display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none"))
+            ))?;
+        }
         if let Some(body) = read_artifact(&dir, "result.md") {
             match body {
                 ArtifactBody::Content(body) => {
@@ -1567,15 +1580,14 @@ pub fn hygiene_cmd(
         .as_ref()
         .map(|a| a.label())
         .unwrap_or_else(|| "auto".to_string());
-    let identity = repo.identity();
-    let review_state = hygiene::load_state(&identity)?;
+    let review_state = hygiene::load_state(repo)?;
     let review = hygiene::review(&key, &built, &enforcement, &loaded, &review_state);
     console.say(&hygiene::render(
         &review,
         hygiene::Trigger::Requested,
         &loaded,
     ))?;
-    hygiene::record_review(&identity, &key)?;
+    hygiene::record_review(repo, &key)?;
     Ok(0)
 }
 
@@ -1955,9 +1967,8 @@ pub(crate) fn preflight(
     dry_run: bool,
 ) -> Result<()> {
     // First-load and overdue context hygiene review, before submission.
-    let identity = repo.identity();
     let key = plan.agent_label();
-    let review_state = hygiene::load_state(&identity)?;
+    let review_state = hygiene::load_state(repo)?;
     let trigger = hygiene::due(loaded, &review_state, &key);
     if trigger != hygiene::Trigger::NotDue {
         let built = inventory::build(&inventory::Subject {
@@ -1975,7 +1986,7 @@ pub(crate) fn preflight(
         console.say("\n")?;
         console.say(&hygiene::render(&review, trigger, loaded))?;
         if !dry_run {
-            hygiene::record_review(&identity, &key)?;
+            hygiene::record_review(repo, &key)?;
         }
     }
 

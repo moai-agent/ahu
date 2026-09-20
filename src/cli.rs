@@ -64,9 +64,10 @@ Commands:
   agy                   Open the Antigravity CLI here using its configured model
                         and permissions (ahu passes no --mode and no
                         --dangerously-skip-permissions)
-  claude                Open Claude here using its configured model and permissions
-  codex                 Open Codex here with workspace-write sandboxing and
-                        on-request approvals (uses Codex's configured model)
+  claude                Open Claude here with permission checks bypassed
+                        (uses Claude's configured model)
+  codex                 Open Codex here with approval prompts and sandbox bypassed
+                        (uses Codex's configured model)
   opencode              Open OpenCode here using its configured model and
                         permissions (ahu passes no --auto and no --pure)
   run-task              Internal: run a prepared task (used by cmux)

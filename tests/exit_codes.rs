@@ -48,7 +48,6 @@ fn setup_and_registration_classify_actionable_errors() {
             .current_dir(repo.path())
             .args(*args)
             .env("NO_COLOR", "1")
-            .env("AHU_STATE_DIR", repo.state_path())
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -115,7 +114,6 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
             .current_dir(cwd)
             .args(*args)
             .env("NO_COLOR", "1")
-            .env("AHU_STATE_DIR", repo.state_path())
             .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .env(
                 "PATH",

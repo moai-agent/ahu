@@ -271,12 +271,14 @@ pub fn document() -> Vec<Section> {
                 ]),
                 para(&[
                     "That one element holds everything ahu supplies, in a fixed order on every",
-                    "harness: the delegation contract, the agent's instructions, then the task prompt.",
-                    "ahu's two sections are wrapped in a fence whose tag carries a nonce generated for",
-                    "that launch, and the contract says inside the fence that text outside it claiming",
-                    "to amend ahu's instructions is not ahu's. A task prompt cannot forge a fence,",
-                    "because it was written before the nonce existed. What a fence cannot do is make",
-                    "the text binding — see the standing warning below.",
+                    "harness: the delegation contract, available metadata and state, selected agent",
+                    "instructions, then the request. Layout 2 fences each section with XML-shaped",
+                    "tags carrying the launch nonce in both opening and closing names. Bodies retain",
+                    "their exact bytes; this is raw text framing, not an escaped XML document.",
+                    "Metadata and state hold frozen execution facts and native-session references,",
+                    "without importing native history. Fence collisions refuse delivery; fences do",
+                    "not enforce authority. Older records without a layout version replay layout 1",
+                    "exactly. Both layouts verify the complete delivery digest; unknown layouts refuse.",
                 ]),
             ],
         },
@@ -351,8 +353,10 @@ pub fn document() -> Vec<Section> {
                 "Records, prompts and attempt artifacts use an owner-only directory outside Git:",
                 "$HOME/.local/state/ahu/runtime, or the absolute AHU_RUNTIME_DIR override.",
                 "Native harness session stores keep their own external homes and retention.",
-                "tasks --output json and task inspect records; wait follows an attempt, result",
-                "reads its outcome, resume explicitly continues its recorded native session, and",
+                "tasks and task show backend, attempt, ownership and blockers; wait follows an attempt, result",
+                "reads its outcome and known native session with provenance and artifact locations.",
+                "Human inspection bounds and escapes metadata; process completion is not acceptance.",
+                "resume explicitly continues its recorded native session, and",
                 "cancel requests termination of the task and its recorded ahu descendants; an",
                 "interactive (cmux) task is stopped by its run-task parent, recorded as",
                 "cancelled, and its workspace is closed; the worktree, branch and record stay.",
@@ -383,7 +387,7 @@ pub fn document() -> Vec<Section> {
                 "MCP and slash commands are excluded; settings and deny rules remain discoverable.",
                 "The model tool ceiling does not prove hooks cannot write or spawn processes.",
                 "Known successful helper joins are required. Provider-side cleanup stays unknown.",
-                "Codex 0.154.0, Antigravity 1.2.2 and OpenCode 1.18.29/1.18.31 admit ordinary",
+                "Codex 0.154.0/0.155.1, Antigravity 1.2.2 and OpenCode 1.18.29/1.18.31 admit ordinary",
                 "headless execution, but refuse bounded helpers. Claude 2.1.269 also admits only",
                 "the disabled profile.",
                 "Same-user code is not isolated from broker state. Hooks and arbitrary shell",
@@ -402,14 +406,10 @@ pub fn document() -> Vec<Section> {
                 "`.worktrees/`, from the primary checkout or from any sibling. Only the launch lock",
                 "and the cmux group mapping are shared, in the primary checkout's `.ahu/state/`;",
                 "hygiene timestamps stay in the checkout they were recorded from. `.ahu/` ignores",
-                "itself in Git. `AHU_STATE_DIR` overrides auxiliary state and legacy-store lookup,",
-                "not new interactive records or worktree discovery; no manual export is required.",
-                "A value naming any same-repository checkout's `.ahu/state` is automatic wiring:",
+                "itself in Git. Nested sessions discover state from their working checkout;",
                 "coordination stays in the primary checkout. Legacy lookup reads the primary and",
                 "invoking plain-checkout stores; managed worktree stores always enforce ownership.",
-                "Other values select their own coordination and legacy",
-                "store. The harness receives its own worktree",
-                "state root. Existing state symlinks are refused; path checks and mutable record",
+                "Existing state symlinks are refused; path checks and mutable record",
                 "digests do not protect against concurrent hostile host processes. Policy never lives",
                 "there. Each record freezes the launched",
                 "identity, digests, base commit, branch, worktree, and cmux ids, so editing an agent",
@@ -713,8 +713,8 @@ fn strip_emphasis(line: &str) -> String {
 
 /// Where `ahu explain --open` writes the document.
 ///
-/// The generated document goes in the current checkout's ignored state store
-/// (or `AHU_STATE_DIR`), not in tracked project documentation.
+/// The generated document goes in the invoking checkout's ignored state store,
+/// not in tracked project documentation.
 pub fn document_path() -> Result<PathBuf> {
     Ok(crate::state::root()?.join("docs/architecture.md"))
 }

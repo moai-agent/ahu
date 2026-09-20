@@ -4,6 +4,7 @@ title: Task communication
 description: Operator-only inbox delivery and the task artifacts ahu reads back for display.
 tags: [worktrees, state, security]
 status: draft
+generated: { by: docs-astra/1.1.1, at: 2026-09-20T03:22:38Z }
 sources:
   - id: commands
     resource: ../../src/commands.rs
@@ -57,6 +58,14 @@ directory, replaces that file when the question changes, and removes it
 once answered; `ahu tasks` shows a `question` line for such a task, carrying
 its first line capped at 60 characters, and reporting unreadable, oversize,
 or empty states rather than their contents.[^orchestration][^commands]
+
+For headless attempts, human `task` and `result` output includes known native
+session provenance and runtime, attempt, result, report, and captured-final
+locations. Reports are optional and captured files may have been removed by
+cleanup. Recorded attempt outcomes and observed ownership remain separate;
+blockers and unavailable metadata are disclosed. Inspection reads bounded
+metadata and escapes display fields; it does not scan native
+transcripts.[^commands][^headless]
 
 Everything a task writes is untrusted data. ahu sanitizes artifacts for
 display and never treats their contents as its own words; a report is read

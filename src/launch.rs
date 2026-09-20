@@ -233,12 +233,23 @@ pub fn plan(
         .as_ref()
         .map(|a| a.manifest.permissions)
         .unwrap_or_default();
-    // Everything ahu supplies is composed here, once, for every harness: the
-    // fenced delegation contract, then the resolved agent's fenced instructions,
-    // then the task prompt. Adapters receive the finished text and have no say
-    // in its construction, so a per-harness difference cannot reappear.
-    let (delivered, delivery) =
-        crate::orchestration::deliver(agent.as_ref().map(|a| a.instructions.as_str()), prompt)?;
+    // Adapters transport the fully composed text literally. All rendered facts
+    // are frozen now, rather than reconstructed from the runtime environment.
+    let metadata = crate::orchestration::Metadata {
+        task_id: task_id.clone(),
+        agent: agent
+            .as_ref()
+            .map(|a| a.label())
+            .unwrap_or_else(|| "auto".into()),
+        harness: pair.harness.clone(),
+        model: pair.model.clone(),
+        permissions,
+    };
+    let (delivered, delivery) = crate::orchestration::deliver_composed(
+        agent.as_ref().map(|a| a.instructions.as_str()),
+        prompt,
+        crate::orchestration::Composition::interactive(Some(metadata)),
+    )?;
     let command = adapter.launch_command(&LaunchRequest {
         model: &pair.model,
         prompt: &delivered,
@@ -261,10 +272,9 @@ pub fn plan(
     // Delivering text is something ahu did; the model heeding it is not, and the
     // gap below says so in the same block.
     enforcement.applied_controls.push(format!(
-        "the ahu delegation contract v1 (digest {}) is delivered as prompt text, fenced with this \
-         launch's nonce {}",
-        &crate::util::digest_bytes(crate::orchestration::INSTRUCTIONS.as_bytes())[..12],
-        delivery.nonce
+        "the ahu delegation contract is delivered as prompt text using layout {}; both fence \
+         tag names carry the delivery's nonce",
+        delivery.layout_version
     ));
     enforcement
         .gaps
@@ -824,6 +834,21 @@ pub(crate) fn verify_task(
     // contract, the agent's instructions and the prompt all live in the one argv
     // element that redaction replaces. `redeliver` rebuilds that element from
     // the frozen delivery and refuses if its digest has moved.
+    let expected_composition = crate::orchestration::Composition {
+        mode: match batch {
+            Some(spec) => crate::orchestration::Mode::headless(&spec.options.native_helpers)?,
+            None => crate::orchestration::Mode::Interactive,
+        },
+        metadata: Some(crate::orchestration::Metadata {
+            task_id: record.task_id.clone(),
+            agent: record.agent_label(),
+            harness: record.identity.harness.clone(),
+            model: record.identity.model.clone(),
+            permissions: record.identity.permissions,
+        }),
+        state: batch.map(crate::headless::Spec::coordination_state),
+    };
+    record.delivery.verify_composition(&expected_composition)?;
     let delivered = if let Some(spec) = batch {
         crate::orchestration::redeliver_headless_policy(
             &record.delivery,
@@ -1098,9 +1123,8 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     eprintln!("branch   {}", record.branch);
     eprintln!();
 
-    // A session's nested ahu commands belong to the checkout it edits, even
-    // when the launcher inherited an explicit state override from its caller.
-    let session_state = state::ensure_checkout_state(&record.worktree)?;
+    // Nested commands discover the checkout the session edits.
+    state::ensure_checkout_state(&record.worktree)?;
     let _ = task::set_state(task_dir, TaskState::Running);
     if let (Ok(client), Some(workspace)) = (Cmux::discover(), record.cmux_workspace_id.as_deref()) {
         let _ = client.set_status(
@@ -1127,7 +1151,6 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
         std::process::Command::new(&executable)
             .args(&rebuilt.args)
             .env("AHU_BIN", std::env::current_exe()?)
-            .env("AHU_STATE_DIR", &session_state)
             .env("AHU_WORKER_SESSION", "cmux")
             .env("AHU_TASK_ID", &record.task_id)
             .env("AHU_TASK_DIR", task_dir)

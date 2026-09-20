@@ -469,7 +469,7 @@ fn hook_scope_reporting_is_unchanged_by_the_settings_scan() {
 // --- two digests, each named, each covering what it says it covers ---
 
 /// The invariant the whole split exists for: `instructions_digest` covers
-/// exactly the bytes that land inside the `<<<ahu-agent-...>>>` fence, and
+/// exactly the bytes that land inside the `<ahu-agent-...>` fence, and
 /// `source_digest` does not.
 ///
 /// A single value could only ever be right about one of the two questions a
@@ -1134,4 +1134,36 @@ fn the_feature_matrix_is_rendered_with_every_feature_and_gloss() {
         rendered.contains("live-validated adapter surface"),
         "the matrix must say what a mark is:\n{rendered}"
     );
+}
+
+#[test]
+fn delivery_layout_and_nonce_changes_are_not_agent_version_drift() {
+    let repo = repo_on("claude-code", "claude-opus-5");
+    let agent = agent::find(repo.path(), "sable").unwrap();
+    let mut record = record_for(&repo, &agent);
+    let original = record.delivery.digest.clone();
+    // Delivery integrity is per submission, while drift compares authored
+    // identity/configuration inputs. Neither nonce nor layout is an agent edit.
+    record.delivery = ahu::orchestration::deliver(Some(&agent.instructions), "another request")
+        .unwrap()
+        .1;
+    assert_ne!(record.delivery.digest, original);
+    for layout in [1, 2] {
+        record.delivery.layout_version = layout;
+        assert!(
+            ahu::drift::detect(
+                &record.agent_label(),
+                Some(ahu::drift::AgentDigests {
+                    identity: &agent.identity_digest(),
+                    source: &agent.source_digest,
+                    instructions: &agent.instructions_digest
+                }),
+                &record.config_snapshot_digest,
+                &record.policy_digest,
+                &record.hooks_digest,
+                &[(std::path::PathBuf::from("/nonexistent"), record.clone())],
+            )
+            .is_none()
+        );
+    }
 }

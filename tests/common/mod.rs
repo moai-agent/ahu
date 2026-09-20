@@ -1,7 +1,7 @@
 //! Shared fixtures: throwaway Git repositories and a fake harness executable.
 //!
 //! Every test that touches the filesystem works inside a `tempfile::TempDir` and
-//! points `AHU_STATE_DIR` at it, so no test can read or write a developer's real
+//! resolves state from its checkout, so no test can read or write a developer's real
 //! ahu state, cmux session, or checkouts.
 
 #![allow(dead_code)]
@@ -343,10 +343,8 @@ pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy", "opencode"];
 /// configures a child instead.
 ///
 /// The child gets fake harness executables ahead of everything else on `PATH`,
-/// a private `HOME` so no developer's `~/.claude` is read, a private state
-/// directory, and an `AHU_CMUX_BIN` that is not there. `configure` runs last and
-/// can change any of it — a test about ahu's behaviour with no state override
-/// removes that variable.
+/// a private `HOME` so no developer's `~/.claude` is read, a throwaway checkout
+/// for local state, and an `AHU_CMUX_BIN` that is not there. `configure` runs last.
 ///
 /// Returns `true` in the child, where the body should run, and `false` in the
 /// parent, which has by then run the child and asserted it passed.
@@ -367,15 +365,13 @@ pub fn in_child_fixture(test_name: &str, configure: impl FnOnce(&mut Command)) -
         path.push(inherited);
     }
     let home = fixtures.path().join("home");
-    let state = fixtures.path().join("state");
-    for directory in [&home, &state] {
-        std::fs::create_dir_all(directory).expect("fixture directory");
-    }
+    let checkout = TestRepo::new();
+    std::fs::create_dir_all(&home).expect("fixture directory");
     let output = run_child_case(test_name, |command| {
         command
             .env("PATH", &path)
             .env("HOME", &home)
-            .env("AHU_STATE_DIR", &state)
+            .current_dir(checkout.path())
             .env("AHU_CMUX_BIN", fixtures.path().join("no-such-cmux"));
         configure(command);
     });
