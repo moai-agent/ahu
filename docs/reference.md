@@ -994,7 +994,7 @@ Execution admission, reconciliation, and cancellation stay within their owning
 storage domain. Malformed records in unrelated legacy stores cannot fail a new
 execution. Session checkpoint schema 2 binds native session evidence to task,
 attempt, and harness. Invalid checkpoints remain unavailable; invalid ownership
-metadata produces unknown liveness. Opened metadata files must have a single hard
+metadata produces unknown `liveness`. Opened metadata files must have a single hard
 link, the current user as owner, and safe permissions. New coordination records
 and ownership locks require owner-only permissions.
 

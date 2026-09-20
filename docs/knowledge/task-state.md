@@ -118,7 +118,7 @@ reads and escaped display fields are bounded; unavailable metadata and unknown
 ownership remain explicit. Session checkpoint schema 2 binds evidence to the task,
 attempt, and harness; invalid checkpoints remain unavailable. Lock inspection
 checks the opened file’s owner, permissions, and link count before reporting
-liveness. Inspection does not scan native transcripts or infer
+`liveness`. Inspection does not scan native transcripts or infer
 assignment acceptance. `wait` validates result envelopes, refusing malformed
 values and results for another task or attempt, without imposing the 1 MiB
 inspection limit on its full-envelope API. Internal lifecycle result reading
