@@ -67,8 +67,7 @@ Commands:
                         Preview or explicitly delegate a native cmux installation
   doctor                Check repository, configuration, harness, and cmux
   agy                   Open the Antigravity CLI here using its configured model
-                        and permissions (ahu passes no --mode and no
-                        --dangerously-skip-permissions)
+                        in YOLO mode (--dangerously-skip-permissions)
   claude                Open Claude here with permission checks bypassed
                         (uses Claude's configured model)
   codex                 Open Codex here with approval prompts and sandbox bypassed

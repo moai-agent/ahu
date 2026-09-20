@@ -348,14 +348,12 @@ exit 7
 }
 
 #[test]
-fn antigravity_shortcut_preserves_native_defaults_and_rejects_overrides() {
+fn antigravity_shortcut_uses_yolo_mode_and_rejects_overrides() {
     assert_eq!(
         ahu::cli::parse(["agy"]).unwrap(),
         ahu::cli::Command::Antigravity
     );
-    // `--mode accept-edits` and `--dangerously-skip-permissions` both widen the
-    // user's own approval boundary, which is not ahu's call to make on a
-    // coordinating session, so neither is accepted here.
+    // The shortcut owns the fixed YOLO flag; callers cannot replace its mode.
     for flag in [
         "--model",
         "--mode",
@@ -408,11 +406,10 @@ exit 7
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // No arguments at all: the session is whatever the user's own Antigravity
-    // configuration makes it.
+    // YOLO mode is fixed by the coordinator shortcut.
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("args")).unwrap(),
-        "\n"
+        "--dangerously-skip-permissions\n"
     );
     let cwd = std::fs::read_to_string(scratch.path().join("cwd")).unwrap();
     assert_eq!(

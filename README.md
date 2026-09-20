@@ -202,7 +202,8 @@ require explicit user permission.
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
 
 `ahu codex` passes `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
-passes `--dangerously-skip-permissions`. Both disclose the flag and retain the
+and `ahu agy` pass `--dangerously-skip-permissions`. All three disclose the
+flag and retain the
 harness's configured model. Registered child agents keep their own manifest
 permissions and launch requirements. Inside cmux, coordinator shortcuts place
 their workspace in the repository's group before starting. See

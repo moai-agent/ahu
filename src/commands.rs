@@ -62,11 +62,14 @@ pub fn opencode(repo: &Repo) -> Result<i32> {
     coordinating_session(repo, "opencode", "OpenCode", &[])
 }
 
-/// Open the Antigravity CLI using its configured model and permission behavior.
-///
-/// This shortcut retains native permission settings.
+/// Open the Antigravity CLI in its unattended (YOLO) permission mode.
 pub fn antigravity(repo: &Repo) -> Result<i32> {
-    coordinating_session(repo, "agy", "Antigravity CLI", &[])
+    coordinating_session(
+        repo,
+        "agy",
+        "Antigravity CLI",
+        &["--dangerously-skip-permissions"],
+    )
 }
 
 fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) -> Result<i32> {

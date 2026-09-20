@@ -1220,6 +1220,8 @@ Registered child agents retain their own manifest permissions, harness, and
 model. A coordinator's bypass does not alter a child's mapping or replace the
 child's required approval-widening flag or headless host grant.
 
-`ahu opencode` and `ahu agy` open their harnesses without arguments,
-retaining native model and permission settings. OpenCode's plugins retain their
-native loading behavior; ahu passes neither `--auto` nor `--pure` here.
+`ahu agy` opens Antigravity with `--dangerously-skip-permissions`, its YOLO
+mode, while retaining the configured model. `ahu opencode` opens OpenCode
+without arguments, retaining native model and permission settings. OpenCode's
+plugins retain their native loading behavior; ahu passes neither `--auto` nor
+`--pure` here.
