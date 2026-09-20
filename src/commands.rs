@@ -1617,7 +1617,7 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
     }
     if !record.state.is_live() {
         eprintln!(
-            "ahu: task {} already stopped ({}); there is nothing to cancel. The worktree, \
+            "ahu: task {} is recorded as terminal ({}); no new cancellation was requested. The worktree, \
              branch and record are kept.",
             record.task_id,
             record.state.as_str()
@@ -1673,34 +1673,22 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // Closing the pane would not stop the harness process tree, so
-    // cancellation is only allowed to skip the close when the session
-    // finished on its own: a live pane should not be torn down while its
-    // harness may still be writing to it, and a stopped session keeps its
-    // workspace for review.
-    let mut workspace = "absent";
-    if let Some(workspace_id) = record.cmux_workspace_id.as_deref() {
-        workspace = match cancellation {
-            "finished-on-its-own" => "left open",
-            _ => {
-                let close =
-                    Cmux::discover().and_then(|client| client.close_workspace(workspace_id));
-                match close {
-                    Ok(()) => "closed",
-                    Err(e) if cancellation == "requested-unconfirmed" => {
-                        // The run-task parent may be wedged or dead; the
-                        // request stands and the workspace is left as-is.
-                        let _ = e;
-                        eprintln!("ahu: cmux is not reachable; the task workspace was not closed.");
-                        "unreachable"
-                    }
-                    Err(e) => {
-                        bail!("cancellation {cancellation}, but cmux workspace close failed: {e}")
-                    }
-                }
-            }
-        };
-    }
+    // Only the spawning supervisor can confirm termination. A timeout or a
+    // read failure preserves the pane; closing it is not process supervision.
+    let workspace = match record.cmux_workspace_id.as_deref() {
+        None => "absent",
+        Some(workspace_id) if cancellation == "confirmed" => {
+            Cmux::discover()
+                .and_then(|client| client.close_workspace(workspace_id))
+                .map_err(|error| {
+                    crate::util::Error::new(format!(
+                        "cancellation confirmed, but cmux workspace close failed: {error}"
+                    ))
+                })?;
+            "closed"
+        }
+        Some(_) => "left open",
+    };
 
     crate::headless::emit(
         &serde_json::json!({

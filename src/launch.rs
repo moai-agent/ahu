@@ -1009,105 +1009,159 @@ pub enum HarnessOutcome {
 
 /// Poll a spawned interactive harness, terminating its process tree when a
 /// cancellation is requested in the task directory.
-fn supervise_harness(child: &mut std::process::Child, task_dir: &Path) -> HarnessOutcome {
+fn supervise_harness(child: &mut std::process::Child, task_dir: &Path) -> Result<HarnessOutcome> {
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return HarnessOutcome::Exited(status),
-            Ok(None) => {}
-            Err(_) => {
-                // A wait error is not evidence the child stopped; keep
-                // supervising rather than abandoning a live process tree.
-                continue;
-            }
+        if let Some(status) = child.try_wait()? {
+            return Ok(HarnessOutcome::Exited(status));
         }
         if task_dir.join("cancel.json").exists() {
-            terminate_group(child);
-            return HarnessOutcome::Cancelled;
+            terminate_group(child)?;
+            return Ok(HarnessOutcome::Cancelled);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// Terminal foreground ownership handed to a spawned harness, and given back
-/// when supervision ends.
-///
-/// The harness runs in its own process group so cancellation can signal the
-/// whole tree. A full-screen TUI also needs the terminal's foreground: without
-/// it, the first stdin read stops the harness with SIGTTIN while the run-task
-/// parent keeps foreground and never reads. Hand foreground over right after
-/// the spawn, and restore the previous owner before this parent prints again.
+/// Terminal ownership borrowed by a harness. Drop also restores it on errors.
 struct Foreground {
     fd: Option<(i32, libc::pid_t)>,
 }
 
 impl Foreground {
-    /// Give the terminal foreground at `fd` to `pgid`, ignoring the job-control
-    /// signals that the transfer itself can raise in this parent. Returns a
-    /// guard that restores the previous owner on drop or explicit take-back,
-    /// or `None` when nothing changed (no terminal, or the transfer failed).
-    fn hand_to(fd: i32, pgid: libc::pid_t) -> Option<Self> {
-        // Only a real terminal has a foreground to hand over. Piped runs
-        // (tests, headless dispatch) stay untouched.
+    /// Piped stdin needs no transfer; a terminal transfer must succeed before
+    /// supervision starts. `pgid` is the unreaped harness child's PID in its
+    /// fresh process group. Never change process-wide job-control dispositions.
+    fn hand_to(fd: i32, pgid: libc::pid_t) -> Result<Option<Self>> {
         if unsafe { libc::isatty(fd) } != 1 {
-            return None;
-        }
-        // The parent does not read stdin while supervising, so raising either
-        // job-control signal there is harmless; ignoring them keeps the
-        // tcsetpgrp race from stopping this parent too.
-        unsafe {
-            libc::signal(libc::SIGTTIN, libc::SIG_IGN);
-            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            return Ok(None);
         }
         let previous = unsafe { libc::tcgetpgrp(fd) };
         if previous < 0 {
-            return None;
+            return Err(std::io::Error::last_os_error().into());
         }
-        if unsafe { libc::tcsetpgrp(fd, pgid) } != 0 {
-            eprintln!(
-                "ahu: cannot give the terminal to the harness process group ({pgid}); \
-                 it may stop with SIGTTIN. Continuing anyway."
-            );
-            return None;
-        }
-        // The harness may have read stdin before this transfer and already be
-        // stopped; resuming the group revives it, and is a no-op otherwise.
-        unsafe { libc::kill(-pgid, libc::SIGCONT) };
-        Some(Foreground {
+        let foreground = Self {
             fd: Some((fd, previous)),
-        })
+        };
+        Self::set(fd, pgid)?;
+        // Recover a stdin read that raced the transfer and stopped the group.
+        if let Err(error) = signal_owned_group(pgid as u32, libc::SIGCONT)
+            && !crate::headless::child_exited(pgid as u32)?
+        {
+            return Err(error);
+        }
+        Ok(Some(foreground))
     }
 
-    /// Restore the terminal foreground this guard captured, if any.
-    fn take_back(mut self) {
-        if let Some((fd, previous)) = self.fd.take()
-            && unsafe { libc::tcsetpgrp(fd, previous) } != 0
-        {
-            // Best effort only: a failed restore leaves the harness's
-            // group owning the pane, which the shell reclaims on the
-            // next prompt anyway.
-            eprintln!("ahu: could not restore terminal foreground to this pane.");
+    fn set(fd: i32, pgid: libc::pid_t) -> Result<()> {
+        // POSIX permits tcsetpgrp from a background group when SIGTTOU is
+        // blocked. Scope the mask to this thread and this syscall, including
+        // failure paths, rather than leaving SIGTTIN/SIGTTOU ignored globally.
+        let mut block: libc::sigset_t = unsafe { std::mem::zeroed() };
+        let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut block);
+            libc::sigaddset(&mut block, libc::SIGTTOU);
+        }
+        let error = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &block, &mut previous) };
+        if error != 0 {
+            return Err(std::io::Error::from_raw_os_error(error).into());
+        }
+        let result = loop {
+            if unsafe { libc::tcsetpgrp(fd, pgid) } == 0 {
+                break Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                break Err(error);
+            }
+        };
+        let restored =
+            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()) };
+        result.map_err(|error| {
+            Error::new(format!(
+                "cannot set terminal foreground to process group {pgid}: {error}"
+            ))
+        })?;
+        if restored != 0 {
+            return Err(std::io::Error::from_raw_os_error(restored).into());
+        }
+        Ok(())
+    }
+
+    fn take_back(mut self) -> Result<()> {
+        self.restore()
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if let Some((fd, previous)) = self.fd {
+            Self::set(fd, previous)?;
+            self.fd = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Foreground {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            eprintln!("ahu: could not restore terminal foreground: {error}");
         }
     }
 }
 
-/// Terminate the harness process group this parent created: SIGTERM, a short
-/// grace period, then SIGKILL and reaping.
-fn terminate_group(child: &mut std::process::Child) {
+/// Only for a fresh group whose unreaped child this supervisor owns.
+fn signal_owned_group(pid: u32, signal: i32) -> Result<()> {
+    let pid = i32::try_from(pid).map_err(|_| Error::new("invalid owned process group"))?;
+    if pid <= 0 {
+        bail!("invalid owned process group");
+    }
+    if unsafe { libc::kill(-pid, signal) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+/// Resume and terminate the owned group, then reap its leader. Keep the leader
+/// unreaped until the final group signal so its PID cannot be reused first.
+fn terminate_group(child: &mut std::process::Child) -> Result<()> {
     let pid = child.id();
-    // A stopped harness holds SIGTERM; resume it so the signal lands.
-    crate::headless::signal_group(pid, libc::SIGCONT);
-    crate::headless::signal_group(pid, libc::SIGTERM);
+    crate::headless::child_exited(pid)?;
+    let graceful = signal_owned_group(pid, libc::SIGCONT)
+        .and_then(|()| signal_owned_group(pid, libc::SIGTERM));
+    if let Err(error) = graceful
+        && !crate::headless::child_exited(pid)?
+    {
+        return Err(error);
+    }
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => {}
-            Err(_) => return,
+        if crate::headless::child_exited(pid)? {
+            break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    crate::headless::signal_group(pid, libc::SIGKILL);
-    let _ = child.wait();
+    // Even a cooperative leader can leave TERM-ignoring descendants behind.
+    let killed = signal_owned_group(pid, libc::SIGKILL);
+    // Do not wait indefinitely after a denied signal to a still-live leader.
+    if killed.is_err() && !crate::headless::child_exited(pid)? {
+        return killed;
+    }
+    child.wait()?;
+    if let Err(error) = killed {
+        // Darwin can return EPERM for a group containing only zombies. Reap
+        // our leader, then accept that error only if the group is now absent.
+        // This is a read-only probe: never send another signal after reaping,
+        // when the identifier could refer to an unrelated new process group.
+        let absent = unsafe { libc::kill(-(pid as i32), 0) } < 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if !absent {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
@@ -1173,9 +1227,20 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     // The TUI harness needs the terminal's foreground or its first stdin read
     // stops it with SIGTTIN; hand it over now and take it back when the
     // harness is done.
-    let foreground = Foreground::hand_to(libc::STDIN_FILENO, child.id() as libc::pid_t);
+    let foreground = match Foreground::hand_to(libc::STDIN_FILENO, child.id() as libc::pid_t) {
+        Ok(foreground) => foreground,
+        Err(error) => {
+            terminate_group(&mut child)?;
+            task::set_state(task_dir, TaskState::Failed)?;
+            return Err(error);
+        }
+    };
 
-    match supervise_harness(&mut child, task_dir) {
+    let outcome = supervise_harness(&mut child, task_dir)?;
+    if let Some(foreground) = foreground {
+        foreground.take_back()?;
+    }
+    match outcome {
         HarnessOutcome::Exited(status) => {
             // A process exit is not evidence the task succeeded, so the state
             // says only that the harness stopped.
@@ -1184,10 +1249,7 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             } else {
                 TaskState::Failed
             };
-            let _ = task::set_state(task_dir, final_state);
-            if let Some(foreground) = foreground {
-                foreground.take_back();
-            }
+            task::set_state(task_dir, final_state)?;
             eprintln!(
                 "\nahu: the harness exited ({}). The worktree {} and its branch {} are kept.\n\
                  Exiting does not mean the task succeeded, and ahu does not delete either for you.",
@@ -1198,13 +1260,9 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             Ok(HarnessOutcome::Exited(status))
         }
         HarnessOutcome::Cancelled => {
-            let _ = task::set_state(task_dir, TaskState::Cancelled);
-            if let Some(foreground) = foreground {
-                foreground.take_back();
-            }
+            task::set_state(task_dir, TaskState::Cancelled)?;
             eprintln!(
-                "\nahu: the task was cancelled. The harness process tree was terminated and the \
-                 cmux workspace is being closed.\n\
+                "\nahu: cancellation of the owned harness process group completed.\n\
                  The worktree {} and its branch {} are kept; cancelling does not delete either \
                  for you.",
                 record.worktree.display(),
@@ -1265,7 +1323,7 @@ mod group_recovery_tests {
     fn supervise_returns_exit_when_child_finishes() {
         let dir = tempfile::tempdir().unwrap();
         let mut child = spawn_sleep("0.1");
-        match supervise_harness(&mut child, dir.path()) {
+        match supervise_harness(&mut child, dir.path()).unwrap() {
             HarnessOutcome::Exited(status) => assert!(status.success()),
             HarnessOutcome::Cancelled => panic!("no cancellation was requested"),
         }
@@ -1277,7 +1335,7 @@ mod group_recovery_tests {
         let mut child = spawn_sleep("30");
         let _ = child.try_wait().expect("child has not exited");
         std::fs::write(dir.path().join("cancel.json"), b"").unwrap();
-        match supervise_harness(&mut child, dir.path()) {
+        match supervise_harness(&mut child, dir.path()).unwrap() {
             HarnessOutcome::Cancelled => {}
             HarnessOutcome::Exited(_) => panic!("cancellation was requested"),
         }
@@ -1293,6 +1351,308 @@ mod group_recovery_tests {
         // Cargo runs tests with piped stdio, so /dev/null stands in for any
         // non-terminal fd: the handover must leave it alone.
         let file = std::fs::File::open("/dev/null").unwrap();
-        assert!(Foreground::hand_to(file.as_raw_fd(), 12345).is_none());
+        assert!(
+            Foreground::hand_to(file.as_raw_fd(), 12345)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod pty_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command, Stdio};
+
+    // Each case runs in a separate session with a disposable controlling PTY.
+    // Neither job-control signals nor terminal settings touch the test runner.
+    fn pty_case(case: &str) {
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                0
+            );
+        }
+        let output = tempfile::tempfile().unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "launch::pty_tests::pty_child_entry",
+                "--nocapture",
+            ])
+            .env("AHU_TEST_PTY_CASE", case)
+            .stdin(slave)
+            .stdout(output.try_clone().unwrap())
+            .stderr(output.try_clone().unwrap());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        master.write_all(b"input\n").unwrap();
+        unsafe {
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let status = loop {
+            // Drain terminal echo: Darwin can wait for pending PTY output when
+            // the controlling session exits, even with stdout redirected.
+            let mut echo = [0; 256];
+            let _ = master.read(&mut echo);
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                eprintln!("PTY {case}: timeout");
+                use std::os::unix::fs::FileExt;
+                let mut debug = vec![0; output.metadata().unwrap().len() as usize];
+                output.read_at(&mut debug, 0).unwrap();
+                eprintln!("{}", String::from_utf8_lossy(&debug));
+                // Closing the master also releases a session stuck in tty exit.
+                drop(master);
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("PTY case {case} timed out");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        use std::os::unix::fs::FileExt;
+        let mut bytes = vec![0; output.metadata().unwrap().len() as usize];
+        output.read_at(&mut bytes, 0).unwrap();
+        assert!(
+            status.success(),
+            "PTY case {case}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    fn shell(script: &str) -> OwnedChild {
+        OwnedChild(
+            Command::new("/bin/sh")
+                .args(["-c", script])
+                .process_group(0)
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    fn stopped(child: &Child, signal: i32) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let mut status = 0;
+            let result = unsafe {
+                libc::waitpid(
+                    child.id() as _,
+                    &mut status,
+                    libc::WUNTRACED | libc::WNOHANG,
+                )
+            };
+            assert!(result >= 0);
+            if result > 0 {
+                assert!(
+                    libc::WIFSTOPPED(status),
+                    "expected a stopped child: {status}"
+                );
+                assert_eq!(libc::WSTOPSIG(status), signal);
+                return;
+            }
+            assert!(Instant::now() < deadline, "child did not stop");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn pty_stdin_recovers_from_sigttin_and_restores_on_exit() {
+        pty_case("read");
+    }
+    #[test]
+    fn pty_foreground_restores_on_drop() {
+        pty_case("drop");
+    }
+    #[test]
+    fn pty_handover_preserves_signal_dispositions() {
+        pty_case("signals");
+    }
+    #[test]
+    fn pty_cancellation_resumes_stopped_group_and_cleans_descendants() {
+        pty_case("cancel");
+    }
+
+    #[test]
+    fn pty_fast_exit_during_handover_is_not_a_failure() {
+        pty_case("fast-exit");
+    }
+    #[test]
+    fn pty_handover_failure_restores_owner_and_signal_mask() {
+        pty_case("failure");
+    }
+    #[test]
+    fn pty_foreground_restores_during_unwind() {
+        pty_case("unwind");
+    }
+    #[test]
+    fn pty_cancellation_escalates_for_stopped_term_ignoring_leader() {
+        pty_case("kill");
+    }
+
+    #[test]
+    fn pty_child_entry() {
+        let Ok(case) = std::env::var("AHU_TEST_PTY_CASE") else {
+            return;
+        };
+        let parent = unsafe { libc::tcgetpgrp(0) };
+        assert_eq!(parent, unsafe { libc::getpgrp() });
+        if case == "fast-exit" {
+            let mut child = shell("exit 0");
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !crate::headless::child_exited(child.0.id()).unwrap() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let foreground = Foreground::hand_to(0, child.0.id() as _).unwrap().unwrap();
+            assert!(child.0.wait().unwrap().success());
+            foreground.take_back().unwrap();
+            assert_eq!(unsafe { libc::tcgetpgrp(0) }, parent);
+            return;
+        }
+        if case == "failure" {
+            let mut before: libc::sigset_t = unsafe { std::mem::zeroed() };
+            let mut after: libc::sigset_t = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut before) },
+                0
+            );
+            assert!(Foreground::hand_to(0, -1).is_err());
+            assert_eq!(unsafe { libc::tcgetpgrp(0) }, parent);
+            assert_eq!(
+                unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut after) },
+                0
+            );
+            for signal in [libc::SIGTTIN, libc::SIGTTOU] {
+                assert_eq!(unsafe { libc::sigismember(&before, signal) }, unsafe {
+                    libc::sigismember(&after, signal)
+                });
+            }
+            return;
+        }
+        if case == "cancel" || case == "kill" {
+            // The leader cooperates with TERM; its descendant deliberately does
+            // not. An inherited pipe proves the whole group stopped, not just
+            // the leader. No persisted PID is used as signal authority.
+            let mut unrelated = shell("exec sleep 30");
+            let script = if case == "kill" {
+                "trap '' TERM; echo ready; exec sleep 30"
+            } else {
+                "trap 'exit 0' TERM; /bin/sh -c 'trap \"\" TERM; echo ready; for i in 1 2 3 4 5 6; do sleep 1; done' & wait"
+            };
+            let mut child = shell(script);
+            let mut pipe = child.0.stdout.take().unwrap();
+            let mut ready = [0; 6];
+            pipe.read_exact(&mut ready).unwrap();
+            assert_eq!(&ready, b"ready\n");
+            let foreground = Foreground::hand_to(0, child.0.id() as _).unwrap().unwrap();
+            crate::headless::signal_group(child.0.id(), libc::SIGSTOP);
+            stopped(&child.0, libc::SIGSTOP);
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("cancel.json"), b"{}").unwrap();
+            assert_eq!(
+                supervise_harness(&mut child.0, dir.path()).unwrap(),
+                HarnessOutcome::Cancelled
+            );
+            let status = child.0.try_wait().unwrap().unwrap();
+            if case == "cancel" {
+                assert!(status.success(), "stopped leader did not handle TERM");
+            } else {
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(status.signal(), Some(libc::SIGKILL));
+            }
+            assert!(unrelated.0.try_wait().unwrap().is_none());
+            foreground.take_back().unwrap();
+            assert_eq!(unsafe { libc::tcgetpgrp(0) }, parent);
+            let mut poll = libc::pollfd {
+                fd: pipe.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLHUP,
+                revents: 0,
+            };
+            assert_eq!(
+                unsafe { libc::poll(&mut poll, 1, 1500) },
+                1,
+                "descendant still holds its output pipe"
+            );
+            assert_eq!(pipe.read(&mut [0; 1]).unwrap(), 0);
+            return;
+        }
+        let mut child = shell("read line; test \"$line\" = input");
+        // Force the real read-before-handoff race rather than relying on timing.
+        stopped(&child.0, libc::SIGTTIN);
+        let foreground = Foreground::hand_to(0, child.0.id() as _).unwrap().unwrap();
+        assert_eq!(unsafe { libc::tcgetpgrp(0) }, child.0.id() as i32);
+        if case == "signals" {
+            for signal in [libc::SIGTTIN, libc::SIGTTOU] {
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                assert_eq!(
+                    unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) },
+                    0
+                );
+                assert_eq!(
+                    action.sa_sigaction,
+                    libc::SIG_DFL,
+                    "signal disposition leaked"
+                );
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            matches!(supervise_harness(&mut child.0, dir.path()).unwrap(), HarnessOutcome::Exited(status) if status.success())
+        );
+        if case == "drop" {
+            drop(foreground);
+        } else if case == "unwind" {
+            assert!(
+                std::panic::catch_unwind(move || {
+                    let _foreground = foreground;
+                    panic!("synthetic unwind");
+                })
+                .is_err()
+            );
+        } else {
+            foreground.take_back().unwrap();
+        }
+        assert_eq!(unsafe { libc::tcgetpgrp(0) }, parent);
     }
 }

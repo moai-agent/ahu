@@ -275,7 +275,7 @@ fn diff_discloses_recorded_outside_writes_only_when_the_worktree_diff_is_empty()
     );
     assert!(stderr.contains("escaped.txt"), "{stderr}");
     assert!(
-        stderr.contains("Run `ahu result abc1` for the full recorded list."),
+        stderr.contains("Run `ahu result ahu:task:abc1` for the full recorded list."),
         "{stderr}"
     );
 
@@ -310,4 +310,119 @@ fn old_records_without_summary_remain_readable_and_new_summaries_round_trip() {
     loaded.summary = "Useful summary".into();
     ahu::task::save(&dir, &loaded, "secret prompt").unwrap();
     assert_eq!(ahu::task::load(&dir).unwrap().summary, "Useful summary");
+}
+
+// Exercise the real CLI against a disposable cmux executable. Changes to a
+// record model the supervisor acknowledgement; these are protocol tests, not
+// proof of OS liveness or protection against a same-user record writer.
+fn interactive_cancel_case(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+    let repo = TestRepo::new();
+    let dir = record(&repo, "cancel-fixture");
+    let mut saved = ahu::task::load(&dir).unwrap();
+    saved.cmux_workspace_id = Some("owned-fixture".into());
+    if case == "terminal" {
+        saved.state = ahu::task::TaskState::Cancelled;
+    }
+    ahu::task::save(&dir, &saved, "synthetic input").unwrap();
+    let cmux = repo.state_path().join("cmux");
+    let calls = repo.state_path().join("calls");
+    std::fs::write(&cmux, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AHU_TEST_CMUX_CALLS\"\nprintf '{\"ok\":true,\"result\":{}}\\n'\n").unwrap();
+    std::fs::set_permissions(&cmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let transition = match case {
+        "confirmed" => Some(ahu::task::TaskState::Cancelled),
+        "finished" => Some(ahu::task::TaskState::Exited),
+        _ => None,
+    };
+    let writer = if transition.is_some() || case == "unreadable" {
+        let dir = dir.clone();
+        Some(std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !dir.join("cancel.json").exists() {
+                assert!(Instant::now() < deadline, "cancel request never arrived");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if let Some(state) = transition {
+                ahu::task::set_state(&dir, state).unwrap();
+            } else {
+                std::fs::write(dir.join("task.json"), b"invalid").unwrap();
+            }
+        }))
+    } else {
+        None
+    };
+    let output = common::ahu()
+        .args(["cancel", "cancel-fixture", "--output", "json"])
+        .current_dir(repo.path())
+        .env("AHU_CMUX_BIN", &cmux)
+        .env("AHU_TEST_CMUX_CALLS", &calls)
+        .output()
+        .unwrap();
+    if let Some(writer) = writer {
+        writer.join().unwrap();
+    }
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let cancellation = match case {
+        "confirmed" => "confirmed",
+        "finished" => "finished-on-its-own",
+        "terminal" => "already-terminal",
+        _ => "requested-unconfirmed",
+    };
+    assert_eq!(value["cancellation"], cancellation);
+    if case == "confirmed" {
+        assert_eq!(value["workspace"], "closed");
+        let calls = std::fs::read_to_string(calls).unwrap();
+        let close: Vec<_> = calls
+            .lines()
+            .filter(|line| line.contains("workspace.close"))
+            .collect();
+        assert_eq!(close.len(), 1, "{calls}");
+        assert!(close[0].contains("owned-fixture"), "{calls}");
+    } else {
+        assert_eq!(value["workspace"], "left open");
+        assert!(
+            !calls.exists(),
+            "unconfirmed or completed task contacted cmux"
+        );
+    }
+    assert_eq!(dir.join("cancel.json").exists(), case != "terminal");
+    assert!(dir.join("task.json").exists());
+    assert!(saved.worktree.exists());
+    if case == "timeout" {
+        assert_eq!(
+            ahu::task::load(&dir).unwrap().state,
+            ahu::task::TaskState::Running
+        );
+    }
+}
+
+#[test]
+fn interactive_cancel_without_supervisor_confirmation_preserves_workspace() {
+    interactive_cancel_case("timeout");
+}
+
+#[test]
+fn interactive_cancel_record_read_failure_preserves_workspace() {
+    interactive_cancel_case("unreadable");
+}
+
+#[test]
+fn interactive_cancel_acknowledgement_closes_only_its_workspace() {
+    interactive_cancel_case("confirmed");
+}
+
+#[test]
+fn interactive_cancel_natural_exit_preserves_workspace() {
+    interactive_cancel_case("finished");
+}
+
+#[test]
+fn interactive_cancel_terminal_record_does_not_claim_new_termination() {
+    interactive_cancel_case("terminal");
 }
