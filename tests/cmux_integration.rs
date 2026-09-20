@@ -401,11 +401,7 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
             "{\"local\":true}\n",
             "ignored native configuration must reach the task worktree"
         );
-        assert!(
-            plan.worktree
-                .join(".agents/ahu/agents/chris.toml")
-                .is_file()
-        );
+        assert!(plan.worktree.join(".agents/ahu/agents/chris.md").is_file());
 
         // The task record froze the identity that was launched.
         assert_eq!(launched.record.identity.model, "claude-opus-5");

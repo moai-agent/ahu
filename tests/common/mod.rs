@@ -113,44 +113,54 @@ impl TestRepo {
             ),
         );
         self.write(
-            &format!(".agents/ahu/agents/{name}.toml"),
+            &format!(".agents/ahu/agents/{name}.md"),
             &format!(
-                "schema_version = 1\n\
-                 name = \"{name}\"\n\
-                 version = \"{version}\"\n\
-                 description = \"fixture agent\"\n\
-                 harness = \"claude-code\"\n\
-                 model = \"{model}\"\n\
-                 \n[source]\n\
-                 format = \"claude-agent\"\n\
-                 path = \".claude/agents/{name}.md\"\n"
+                "---\n\
+                 okf_version: 0.2\n\
+                 type: ahu:agent\n\
+                 title: {name}\n\
+                 description: fixture agent\n\
+                 status: stable\n\
+                 tags: [agents]\n\
+                 harness: claude-code\n\
+                 model: {model}\n\
+                 permissions: prompt\n\
+                 version: {version}\n\
+                 source_format: claude-agent\n\
+                 source_path: .claude/agents/{name}.md\n\
+                 \n\
+                 ---\n\
+                 \n\
+                 Instructions live in the native definition at `.claude/agents/{name}.md`, referenced in place and never edited.\n"
             ),
         );
     }
 
     /// A registered agent pinned to an arbitrary harness and model.
     ///
-    /// `add_agent` always writes `harness = "claude-code"`. A launch test that
+    /// `add_agent` always writes `harness: claude-code`. A launch test that
     /// has to prove two agents keep *different* configured harnesses needs a
-    /// second manifest that names another one, with an instructions file the
-    /// non-Claude source format accepts.
+    /// second manifest that names another one, with the instructions in the
+    /// manifest body.
     pub fn add_agent_on(&self, name: &str, version: &str, harness: &str, model: &str) {
         self.write(
-            &format!(".agents/ahu/instructions/{name}.md"),
-            &format!("You are {name}. Fixture instructions.\n"),
-        );
-        self.write(
-            &format!(".agents/ahu/agents/{name}.toml"),
+            &format!(".agents/ahu/agents/{name}.md"),
             &format!(
-                "schema_version = 1\n\
-                 name = \"{name}\"\n\
-                 version = \"{version}\"\n\
-                 description = \"fixture agent\"\n\
-                 harness = \"{harness}\"\n\
-                 model = \"{model}\"\n\
-                 \n[source]\n\
-                 format = \"markdown\"\n\
-                 path = \".agents/ahu/instructions/{name}.md\"\n"
+                "---\n\
+                 okf_version: 0.2\n\
+                 type: ahu:agent\n\
+                 title: {name}\n\
+                 description: fixture agent\n\
+                 status: stable\n\
+                 tags: [agents]\n\
+                 harness: {harness}\n\
+                 model: {model}\n\
+                 permissions: prompt\n\
+                 version: {version}\n\
+                 \n\
+                 ---\n\
+                 \n\
+                 You are {name}. Fixture instructions.\n"
             ),
         );
     }
@@ -243,6 +253,9 @@ const WORKER_ENV: &[&str] = &[
     "AHU_BIN",
     "AHU_STATE_DIR",
     "AHU_CMUX_BIN",
+    "AHU_WORKER_SESSION",
+    "AHU_TASK_ID",
+    "AHU_TASK_DIR",
 ];
 
 /// Strip the ambient worker environment from a command.

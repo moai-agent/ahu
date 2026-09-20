@@ -215,7 +215,7 @@ pub fn plan(
     let parent_dirty = git::is_dirty(repo)?;
     // Refuse early if `.worktrees` is a symlink, before anything is created.
     state::ensure_worktrees_root(&repo.root)?;
-    let task_id = task::new_task_id();
+    let task_id = task::new_task_id()?;
     let agent_segment = match &agent {
         Some(agent) => agent.manifest.name.clone(),
         None => "auto".to_string(),
@@ -439,6 +439,9 @@ pub(crate) fn prepared_record(
 /// stay, so the failure that is reported has to name them: they are the user's
 /// to inspect, and nothing else is going to mention them.
 fn rollback_worktree(repo: &Repo, plan: &LaunchPlan, cause: Error) -> Error {
+    // A dead pointer in the task index degrades into a lead at resolution
+    // time, but removing it here keeps the index honest about live tasks.
+    let _ = crate::task_index::remove(&plan.task_id);
     // The record lives inside the worktree, so removing the worktree takes it.
     // If Git refuses, the record is removed on its own so no half-prepared
     // task is left claiming to be one.
@@ -542,6 +545,14 @@ pub fn execute(
     let mut record = prepared_record(repo, loaded, plan, prompt, materialize);
 
     if let Err(e) = task::save(&plan.task_dir, &record, prompt) {
+        return Err(rollback_worktree(repo, plan, e));
+    }
+    if let Err(e) = crate::task_index::register(
+        &repo.identity(),
+        &plan.task_id,
+        &plan.worktree,
+        crate::task_index::StoreKind::Worktree,
+    ) {
         return Err(rollback_worktree(repo, plan, e));
     }
 
@@ -1117,6 +1128,9 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             .args(&rebuilt.args)
             .env("AHU_BIN", std::env::current_exe()?)
             .env("AHU_STATE_DIR", &session_state)
+            .env("AHU_WORKER_SESSION", "cmux")
+            .env("AHU_TASK_ID", &record.task_id)
+            .env("AHU_TASK_DIR", task_dir)
             .current_dir(&record.worktree)
             // The run-task parent owns the harness's fresh process group, so
             // cancellation can terminate the whole tree without signalling

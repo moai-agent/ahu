@@ -500,11 +500,8 @@ pub fn discover(repo: &crate::git::Repo) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit())
+        let name = entry.file_name().to_string_lossy().to_string();
+        if crate::task::is_canonical_task_uuid(&name) || name.bytes().all(|b| b.is_ascii_hexdigit())
         {
             confined(&entry.path(), false)?;
             if entry.path().join("task.json").exists() {
@@ -576,24 +573,27 @@ pub fn launch(
         .ok_or_else(|| Error::new("project configuration is missing; run ahu init"))?;
     let (agent, pair) = crate::commands::resolve_identity(repo, &loaded, Some(agent))?;
     if !options.native_helpers_explicit {
-        let project: toml::Value = toml::from_str(&std::fs::read_to_string(&loaded.path)?)
-            .map_err(|e| Error::new(e.to_string()))?;
-        let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(
-            &agent
-                .as_ref()
-                .ok_or_else(|| Error::new("named agent required"))?
-                .manifest_path,
-        )?)
-        .map_err(|e| Error::new(e.to_string()))?;
-        if let Some(value) = manifest.get("native_helpers").or_else(|| {
-            project
-                .get("execution")
-                .and_then(|v| v.get("native_helpers"))
-        }) {
-            options.native_helpers = value
-                .as_str()
-                .ok_or_else(|| Error::new("native_helpers must be disabled or bounded"))?
-                .into();
+        match agent
+            .as_ref()
+            .ok_or_else(|| Error::new("named agent required"))?
+            .manifest
+            .native_helpers
+            .clone()
+        {
+            Some(policy) => options.native_helpers = policy,
+            None => {
+                let project: toml::Value = toml::from_str(&std::fs::read_to_string(&loaded.path)?)
+                    .map_err(|e| Error::new(e.to_string()))?;
+                if let Some(value) = project
+                    .get("execution")
+                    .and_then(|v| v.get("native_helpers"))
+                {
+                    options.native_helpers = value
+                        .as_str()
+                        .ok_or_else(|| Error::new("native_helpers must be disabled or bounded"))?
+                        .into();
+                }
+            }
         }
     }
     let permissions = agent
@@ -815,6 +815,12 @@ pub fn launch(
     let record = crate::launch::prepared_record(repo, &loaded, &plan, prompt, materialize);
     task::save(&plan.task_dir, &record, prompt)?;
     durable_json(&plan.task_dir.join("headless.json"), &spec)?;
+    crate::task_index::register(
+        &repo.identity(),
+        &plan.task_id,
+        &repo.root,
+        crate::task_index::StoreKind::Headless,
+    )?;
     drop(_lock);
     if spec.options.background {
         start(&plan.task_dir, &spec)?;
@@ -1782,7 +1788,10 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
         .env("AHU_BIN", std::env::current_exe()?)
         .env("AHU_EXECUTION_BACKEND", "headless")
         .env("AHU_PARENT_TASK", &record.task_id)
-        .env("AHU_RUNTIME_DIR", runtime_root()?);
+        .env("AHU_RUNTIME_DIR", runtime_root()?)
+        .env("AHU_WORKER_SESSION", "headless")
+        .env("AHU_TASK_ID", &record.task_id)
+        .env("AHU_TASK_DIR", dir);
     // The feature matrix decides whether the harness's generic CLI log can be
     // pointed at a deterministic external destination.
     if crate::catalog::supports(
@@ -2097,7 +2106,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec) -> Result<i32> {
 }
 
 pub(crate) fn lookup(repo: &crate::git::Repo, id: &str) -> Result<PathBuf> {
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         bail!("invalid headless task id");
     }
     let found: Vec<_> = discover(repo)?

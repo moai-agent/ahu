@@ -662,7 +662,7 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
         assert!(preview.contains("ahu inventory"), "{preview}");
         // And it must still say where the instructions came from.
         assert!(
-            preview.contains(".agents/ahu/instructions/vela.md"),
+            preview.contains(".agents/ahu/agents/vela.md"),
             "the attribution must survive: {preview}"
         );
     }
@@ -679,23 +679,28 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
 fn a_source_format_only_decides_how_its_file_is_parsed() {
     use ahu::agent::SourceFormat;
 
+    // A codex definition holds no frontmatter: whatever the file holds is the
+    // verbatim instruction text, frontmatter-looking text and all.
     assert!(SourceFormat::ClaudeAgent.has_frontmatter());
     assert!(SourceFormat::AntigravityAgent.has_frontmatter());
-    assert!(!SourceFormat::Markdown.has_frontmatter());
+    assert!(!SourceFormat::CodexAgent.has_frontmatter());
+    assert!(SourceFormat::OpenCodeAgent.has_frontmatter());
 
     // The parse is what ahu delivers: frontmatter is metadata, the body is the
     // instruction text.
     let repo = TestRepo::new();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
     repo.write(
-        ".agents/ahu/instructions/plain.md",
+        ".codex/agents/plain.toml",
         "---\nnot: frontmatter\n---\nplain body\n",
     );
     repo.write(
-        ".agents/ahu/agents/plain.toml",
-        "schema_version = 1\nname = \"plain\"\nversion = \"1.0.0\"\n\
-         harness = \"claude-code\"\nmodel = \"claude-opus-5\"\n\
-         \n[source]\nformat = \"markdown\"\npath = \".agents/ahu/instructions/plain.md\"\n",
+        ".agents/ahu/agents/plain.md",
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: plain\ndescription: fixture agent\n\
+         status: stable\ntags: [agents]\nharness: codex\nmodel: gpt-6-astra\n\
+         permissions: prompt\nversion: 1.0.0\nsource_format: codex-agent\n\
+         source_path: .codex/agents/plain.toml\n\n---\n\nInstructions live in the native \
+         definition at `.codex/agents/plain.toml`, referenced in place and never edited.\n",
     );
     repo.commit("fixture");
 
@@ -711,9 +716,10 @@ fn a_source_format_only_decides_how_its_file_is_parsed() {
         "frontmatter is still read, just not delivered"
     );
 
-    // Plain Markdown is used as-is, frontmatter-looking text and all.
-    let markdown = ahu::agent::find(repo.path(), "plain").unwrap();
-    assert!(markdown.instructions.contains("not: frontmatter"));
+    // The codex-agent parse is verbatim: nothing is stripped, so the
+    // frontmatter-looking text is delivered as instruction text.
+    let plain = ahu::agent::find(repo.path(), "plain").unwrap();
+    assert!(plain.instructions.contains("not: frontmatter"));
 
     // And no adapter has anywhere to put a name even if one were derived.
     for harness_id in ["claude-code", "codex", "antigravity"] {

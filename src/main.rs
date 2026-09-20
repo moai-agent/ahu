@@ -219,6 +219,9 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 Command::Diff { task_id } => commands::diff_cmd(console, &repo, &task_id),
                 Command::Focus { task_id } => commands::focus(console, &repo, &task_id),
                 Command::Remove { task_id } => commands::remove_cmd(console, &repo, &task_id),
+                Command::Message { task_id, text } => {
+                    commands::message_cmd(console, &repo, &task_id, &text)
+                }
                 Command::Help
                 | Command::HeadlessLaunch { .. }
                 | Command::BatchControl { .. }

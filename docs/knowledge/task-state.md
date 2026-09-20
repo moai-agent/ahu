@@ -11,6 +11,9 @@ sources:
   - id: task
     resource: ../../src/task.rs
     title: Record storage and discovery
+  - id: index
+    resource: ../../src/task_index.rs
+    title: Cross-checkout pointer index
   - id: launch
     resource: ../../src/launch.rs
     title: Task planning and runtime checks
@@ -22,9 +25,14 @@ sources:
 # Task state
 
 Each interactive task's `task.json` and `prompt.txt` live under its own worktree at
-`.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Launch derives this path
-without an environment override. Removing the worktree removes its state;
-records include session status, which does not prove task completion.[^state][^launch][^tests]
+`.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Task directories are named by
+the task's UUID v7 identifier; record schema 3 writes these identifiers, while
+records written by schema 2 keep their original 18-character hex identifiers and
+load unchanged. Launch derives this path without an environment override, and
+registers the task in the cross-checkout index once durable state exists. Removing
+the worktree removes its state and its index entry; records include session
+status, which does not prove task
+completion.[^state][^task][^index][^launch][^tests]
 
 Headless tasks instead store records, prompts and per-attempt results outside Git
 checkouts, under the default home runtime directory or `AHU_RUNTIME_DIR`.
@@ -53,13 +61,16 @@ retaining structured results, frozen inputs, native stores, branches, and worktr
 It is not a full erasure of task content.
 
 Interactive task discovery scans sibling task worktrees under the primary checkout's
-`.worktrees/`, then compatible legacy checkout stores. Worktree records take
+`.worktrees/`, then compatible legacy checkout stores. Discovery then consults the
+cross-checkout index for task IDs no local record holds, which makes tasks
+reachable from any checkout of the repository that launched them. Worktree records
+take
 precedence for duplicate IDs. The primary checkout and siblings can discover
 these tasks. Every scan of a managed worktree store enforces its owner's task ID,
 repository identity and canonical worktree path. It is not rescanned as a legacy
 store. Primary, invoking plain-checkout and explicit external legacy stores
 remain readable; older child records in a parent task worktree are reported as
-misplaced, without automatic acceptance or migration.[^task][^tests]
+misplaced, without automatic acceptance or migration.[^task][^index][^tests]
 
 Misplaced entries in managed stores produce warning notes, not task rows; files
 remain untouched. Unreadable owner records and identity mismatches in legacy
@@ -91,10 +102,13 @@ writer able to alter records and digests can alter both; these checks are not
 authentication or OS isolation.[^state][^launch]
 
 The state reference in docs/reference.md at the repository root details override
-path semantics. [Configuration inheritance](task-configuration-inheritance.md)
+path semantics. [Task identity](task-identity.md) records the identifier grammar,
+the index, and global resolution; [Task communication](task-communication.md)
+records the operator inbox and task artifacts. [Configuration inheritance](task-configuration-inheritance.md)
 explains what enters a worktree through the launch snapshot.
 
 [^state]: State path derivation, coordination and confinement in src/state.rs.
 [^task]: Record storage and discovery in src/task.rs.
+[^index]: Cross-checkout pointer entries in src/task_index.rs.
 [^launch]: Planning, execution and runtime checks in src/launch.rs.
 [^tests]: Automatic placement, discovery, deletion and refusal cases in tests/task_state_lifecycle.rs.

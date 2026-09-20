@@ -39,6 +39,7 @@ pub mod snapshot;
 pub mod state;
 pub mod style;
 pub mod task;
+pub mod task_index;
 pub mod util;
 
 pub mod headless;

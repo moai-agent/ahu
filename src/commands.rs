@@ -156,8 +156,8 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         console.say(&style.paint(
             Role::Hint,
             "No ahu agents are registered.\n\
-             Only .agents/ahu/agents/*.toml makes an agent launchable through ahu; native\n\
-             definitions elsewhere are onboarding candidates. Run `ahu onboard` to see them.\n",
+              Only .agents/ahu/agents/*.md makes an agent launchable through ahu; native\n\
+              definitions elsewhere are onboarding candidates. Run `ahu onboard` to see them.\n",
         ))?;
         return Ok(0);
     }
@@ -175,7 +175,12 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
                     .unwrap_or(&agent.source_path)
                     .to_string_lossy()
             ),
-            agent.manifest.source.format.as_str(),
+            agent
+                .manifest
+                .source
+                .as_ref()
+                .map(|s| s.format.as_str())
+                .unwrap_or("manifest"),
             &agent.identity_digest()[..12],
         ))?;
         if !agent.manifest.description.is_empty() {
@@ -250,10 +255,7 @@ pub fn onboard_cmd(
         ),
     };
     console.say("The following file will be created. Nothing else is touched:\n\n")?;
-    console.say(&format!(
-        ".agents/ahu/agents/{}.toml\n\n",
-        display_safe(name)
-    ))?;
+    console.say(&format!(".agents/ahu/agents/{}.md\n\n", display_safe(name)))?;
     console.say(&onboard::proposed_manifest(candidate, &model, version))?;
     if !launcher::confirm(console, "\nCreate it? [y/N]: ")? {
         console.say("Cancelled. Nothing was written.\n")?;
@@ -561,6 +563,9 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         if let Some(workspace) = &record.cmux_workspace_id {
             console.say(&format!("  cmux      {}\n", display_safe(workspace)))?;
         }
+        if let Some(question) = question_excerpt(dir) {
+            console.say(&format!("  question  {question}\n"))?;
+        }
         console.say("\n")?;
     }
     console.say(&style::stdout().paint(
@@ -687,11 +692,179 @@ fn strip_record_path(reason: &str, dir: &Path) -> String {
         .unwrap_or_else(|| reason.to_string())
 }
 
-/// Resolve exact IDs before unique prefixes, including unreadable candidates.
-fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
-    if id.is_empty() {
+/// Normalize a task id the way ahu prints them: the `ahu:task:` prefix is
+/// optional, and case is not significant. The bare id is the storage form.
+fn normalize_task_id(id: &str) -> Result<String> {
+    let mut normalized = id.to_ascii_lowercase();
+    if let Some(rest) = normalized.strip_prefix("ahu:task:") {
+        normalized = rest.to_string();
+    }
+    if normalized.is_empty() {
         bail!(kind: crate::util::ErrorKind::Usage, "a task id must not be empty.");
     }
+    Ok(normalized)
+}
+
+/// The shared wording for a task whose record exists but cannot be read.
+fn unreadable_record(blocked: &task::UnreadableTask) -> Error {
+    Error::new(format!(
+        "task {} has an unreadable record at {}: {}",
+        blocked.task_id,
+        blocked.dir.display(),
+        blocked.reason
+    ))
+}
+
+/// Where a task id resolved from. The listing and pointer forms both carry a
+/// readable record; the pointer records which checkout advertised it.
+enum Located {
+    Listing(PathBuf, task::TaskRecord),
+    Pointer(crate::task_index::Entry, PathBuf, task::TaskRecord),
+    Unreadable(task::UnreadableTask),
+    NoMatch { unreadable_in_repo: usize },
+}
+
+/// Load the record behind a task index entry, refusing stale or hostile
+/// entries instead of guessing.
+fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task::TaskRecord)> {
+    if !entry.checkout.is_dir() {
+        bail!(
+            "the task index records task {} at {}, but that checkout no longer exists; the entry \
+             is stale and the task cannot be reached from here.",
+            display_safe(&entry.task_id),
+            display_path(&entry.checkout)
+        );
+    }
+    let dir = match entry.store {
+        crate::task_index::StoreKind::Worktree => crate::state::checkout_root(&entry.checkout)?
+            .join("repos")
+            .join(&entry.repo_identity)
+            .join("tasks")
+            .join(&entry.task_id),
+        crate::task_index::StoreKind::Headless => crate::headless::runtime_root()?
+            .join(&entry.repo_identity)
+            .join(&entry.task_id),
+    };
+    if !dir.exists() {
+        bail!(
+            "the task index records task {} at {}, but its task directory {} no longer exists; the \
+             entry is stale.",
+            display_safe(&entry.task_id),
+            display_path(&entry.checkout),
+            display_path(&dir)
+        );
+    }
+    let record = task::load(&dir).map_err(|e| {
+        Error::new(format!(
+            "task {} has an unreadable record at {}: {}\nThe task index records its checkout as \
+             {}.",
+            display_safe(&entry.task_id),
+            display_path(&dir),
+            strip_record_path(&e.to_string(), &dir),
+            display_path(&entry.checkout)
+        ))
+    })?;
+    let hostile = match entry.store {
+        crate::task_index::StoreKind::Worktree => {
+            record.task_id != entry.task_id
+                || record.repo_identity != entry.repo_identity
+                || record.worktree.canonicalize().ok() != entry.checkout.canonicalize().ok()
+        }
+        crate::task_index::StoreKind::Headless => {
+            record.task_id != entry.task_id || record.repo_identity != entry.repo_identity
+        }
+    };
+    if hostile {
+        bail!(
+            "the task index records task {} at checkout {}, but the record ahu found there \
+             describes a different task. Nothing was done; re-check the task id.",
+            display_safe(&entry.task_id),
+            display_path(&entry.checkout)
+        );
+    }
+    Ok((dir, record))
+}
+
+/// Resolve exact IDs before unique prefixes, including unreadable candidates.
+/// The task index is consulted for ids that are not local records, so a task is
+/// reachable from any checkout of the repository that launched it.
+fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
+    let id = normalize_task_id(input)?;
+    // Inspection needs no live cmux connection and does not rewrite records.
+    let listing = task::list(repo)?;
+    if let Some((dir, record)) = listing.records.iter().find(|(_, r)| r.task_id == id) {
+        return Ok(Located::Listing(dir.clone(), record.clone()));
+    }
+    if let Some(blocked) = listing.unreadable.iter().find(|u| u.task_id == id) {
+        return Ok(Located::Unreadable(blocked.clone()));
+    }
+    let unreadable_in_repo = listing.unreadable.len();
+    let records: Vec<_> = listing
+        .records
+        .into_iter()
+        .filter(|(_, r)| r.task_id.starts_with(&id))
+        .collect();
+    let unreadable: Vec<task::UnreadableTask> = listing
+        .unreadable
+        .into_iter()
+        .filter(|u| u.task_id.starts_with(&id))
+        .collect();
+    let entries = if task::is_canonical_task_uuid(&id) {
+        match crate::task_index::lookup(&id)? {
+            Some(entry) => {
+                let (dir, record) = load_indexed_task(&entry)?;
+                return Ok(Located::Pointer(entry, dir, record));
+            }
+            None => Vec::new(),
+        }
+    } else {
+        let mut entries = crate::task_index::lookup_prefix(&id)?;
+        entries.retain(|e| {
+            !records.iter().any(|(_, r)| r.task_id == e.task_id)
+                && !unreadable.iter().any(|u| u.task_id == e.task_id)
+        });
+        entries
+    };
+    let total = records.len() + unreadable.len() + entries.len();
+    if total > 1 {
+        let mut message = format!(
+            "ambiguous task id {input:?}: it matches {total} tasks; use a full task id from \
+             `ahu tasks`.\n"
+        );
+        for (dir, _) in &records {
+            message.push_str(&format!("  record at {}\n", display_path(dir)));
+        }
+        for blocked in &unreadable {
+            message.push_str(&format!(
+                "  unreadable record at {}\n",
+                display_path(&blocked.dir)
+            ));
+        }
+        for entry in &entries {
+            message.push_str(&format!(
+                "  task index entry at {}\n",
+                display_path(&entry.checkout)
+            ));
+        }
+        return Err(Error::new(message).with_kind(crate::util::ErrorKind::Usage));
+    }
+    if let Some((dir, record)) = records.first() {
+        return Ok(Located::Listing(dir.clone(), record.clone()));
+    }
+    if let Some(blocked) = unreadable.first() {
+        return Ok(Located::Unreadable(blocked.clone()));
+    }
+    if let Some(entry) = entries.first() {
+        let (dir, record) = load_indexed_task(entry)?;
+        return Ok(Located::Pointer(entry.clone(), dir, record));
+    }
+    Ok(Located::NoMatch { unreadable_in_repo })
+}
+
+/// Resolve exact IDs before unique prefixes, including unreadable candidates.
+fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
+    let normalized = normalize_task_id(id)?;
+    let id: &str = &normalized;
     // Inspection needs no live cmux connection and does not rewrite records.
     let listing = task::list(repo)?;
     let exact = listing.records.iter().any(|(_, r)| r.task_id == id)
@@ -760,7 +933,13 @@ pub fn task_summary(
 
 /// A small, versioned inspection contract; never expose the full launch record.
 pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) -> Result<i32> {
-    let (dir, record) = inspect_task(repo, id)?;
+    let (dir, record) = match resolve_task(repo, id)? {
+        Located::Listing(dir, record) | Located::Pointer(_, dir, record) => (dir, record),
+        Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
+        Located::NoMatch { .. } => {
+            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {id:?}.")
+        }
+    };
     let workspaces = if cmux_liveness_needed(&dir, &record) {
         cmux_workspaces()
     } else {
@@ -779,18 +958,265 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
             display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none")),
             task::observed_liveness(session_owner(&dir, &record, workspaces.as_ref())).as_str(),
         ))?;
+        if let Some(body) = read_artifact(&dir, "result.md") {
+            match body {
+                ArtifactBody::Content(body) => {
+                    console.say(&format!("\nresult:\n{body}\n"))?;
+                }
+                ArtifactBody::Oversized => {
+                    console.say(&style::stdout().paint(
+                        Role::Warning,
+                        &format!(
+                            "\n!! result.md is larger than the 1 MiB display bound; ahu will not \
+                             print it. Read it at {}.\n",
+                            display_path(&dir.join("result.md"))
+                        ),
+                    ))?;
+                }
+                ArtifactBody::Unreadable => {
+                    console.say(&style::stdout().paint(
+                        Role::Warning,
+                        &format!(
+                            "\n!! ahu cannot safely read result.md; inspect it at {}.\n",
+                            display_path(&dir.join("result.md"))
+                        ),
+                    ))?;
+                }
+            }
+        }
+        if let Some(body) = read_artifact(&dir, "question.md") {
+            match body {
+                ArtifactBody::Content(body) => {
+                    console.say(&format!("\nquestion:\n{body}\n"))?;
+                }
+                ArtifactBody::Oversized => {
+                    console.say(&style::stdout().paint(
+                        Role::Warning,
+                        &format!(
+                            "\n!! question.md is larger than the 1 MiB display bound; ahu will \
+                             not print it. Read it at {}.\n",
+                            display_path(&dir.join("question.md"))
+                        ),
+                    ))?;
+                }
+                ArtifactBody::Unreadable => {
+                    console.say(&style::stdout().paint(
+                        Role::Warning,
+                        &format!(
+                            "\n!! ahu cannot safely read question.md; inspect it at {}.\n",
+                            display_path(&dir.join("question.md"))
+                        ),
+                    ))?;
+                }
+            }
+        }
     }
     Ok(0)
+}
+
+/// The most inbox entries a task directory accepts.
+const INBOX_MAX_ENTRIES: usize = 100;
+
+/// The byte budget all inbox entries in one task directory share.
+const INBOX_MAX_TOTAL_BYTES: u64 = 1024 * 1024;
+
+/// The largest task artifact ahu will read back for display.
+const TASK_ARTIFACT_LIMIT: u64 = 1024 * 1024;
+
+/// `ahu message <task-id> <text>`
+///
+/// Appends an operator message to the task's inbox. Delivery is the
+/// operator's exclusive right: a worker session inherits the environment
+/// marker below and is refused, so a task cannot message itself or another
+/// task. The inbox is size-bounded and confined to the task directory.
+pub fn message_cmd(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    task_id: &str,
+    text: &str,
+) -> Result<i32> {
+    if std::env::var_os("AHU_WORKER_SESSION").is_some() {
+        bail!(
+            "ahu message is an operator command. Working agents cannot deliver inbox messages; \
+             delivery belongs to the operator or to a broker-bound child."
+        );
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        bail!(
+            kind: crate::util::ErrorKind::Usage,
+            "`ahu message` needs a task id and a message text."
+        );
+    }
+    let (dir, record) = match resolve_task(repo, task_id)? {
+        Located::Listing(dir, record) | Located::Pointer(_, dir, record) => (dir, record),
+        Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
+        Located::NoMatch { .. } => {
+            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
+        }
+    };
+    let entry = deliver_inbox_message(&dir, text)?;
+    console.say(&format!(
+        "delivered inbox message {entry:04} to task {}.\n",
+        display_safe(&record.task_id)
+    ))?;
+    Ok(0)
+}
+
+/// The number of a numbered inbox entry file, when its name is one ahu wrote.
+fn parse_inbox_entry(name: &str) -> Option<u64> {
+    let stem = name.strip_suffix(".md")?;
+    let digits = stem.strip_prefix('0')?;
+    let digits = digits.strip_prefix('0').unwrap_or(digits);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let number: u64 = digits.parse().ok()?;
+    if number < 1 {
+        return None;
+    }
+    Some(number)
+}
+
+/// Append one operator message to the task's inbox, enforcing its bounds.
+///
+/// The scan fails closed: an inbox entry ahu does not recognize, or one it
+/// cannot inspect safely, stops delivery instead of writing next to it.
+fn deliver_inbox_message(dir: &Path, text: &str) -> Result<usize> {
+    let inbox = dir.join("inbox");
+    crate::state::create_private_dir_all(&inbox)?;
+    let mut highest = 0u64;
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(&inbox).map_err(|e| {
+        Error::new(format!(
+            "cannot scan the task inbox at {}: {e}",
+            display_path(&inbox)
+        ))
+    })? {
+        let entry = entry.map_err(|e| {
+            Error::new(format!(
+                "cannot scan the task inbox at {}: {e}",
+                display_path(&inbox)
+            ))
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(number) = parse_inbox_entry(&name) else {
+            bail!(
+                "the task inbox at {} holds an unrecognized entry {name:?}; ahu will not write \
+                 next to it.",
+                display_path(&inbox)
+            );
+        };
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|e| {
+            Error::new(format!(
+                "cannot inspect the task inbox entry {} at {}: {e}",
+                display_path(&entry.path()),
+                display_path(&inbox)
+            ))
+        })?;
+        if !metadata.is_file() {
+            bail!(
+                "the task inbox at {} holds an entry {name:?} that is not a regular file; ahu \
+                 will not write next to it.",
+                display_path(&inbox)
+            );
+        }
+        total = total.saturating_add(metadata.len());
+        highest = highest.max(number);
+    }
+    let next = highest
+        .checked_add(1)
+        .ok_or_else(|| Error::new("the task inbox is full."))?;
+    if highest >= INBOX_MAX_ENTRIES as u64 {
+        bail!(
+            "the task inbox at {} is full ({INBOX_MAX_ENTRIES} entries); no message was written.",
+            display_path(&inbox)
+        );
+    }
+    let bytes = text.len() as u64;
+    if total.saturating_add(bytes) > INBOX_MAX_TOTAL_BYTES {
+        bail!(
+            "the task inbox at {} holds more than {} bytes already; no message was written.",
+            display_path(&inbox),
+            INBOX_MAX_TOTAL_BYTES
+        );
+    }
+    crate::state::write_private_file(&inbox.join(format!("{next:04}.md")), text.as_bytes())?;
+    Ok(next as usize)
+}
+
+/// `ahu tasks`: the question.md line for one task, when one is on record.
+fn question_excerpt(dir: &Path) -> Option<String> {
+    let path = dir.join("question.md");
+    if !path.exists() {
+        return None;
+    }
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(_) => return Some("present, unreadable".to_string()),
+    };
+    if body.len() as u64 > TASK_ARTIFACT_LIMIT {
+        return Some("present, larger than the display bound".to_string());
+    }
+    let text = String::from_utf8_lossy(&body);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Some("present, empty".to_string());
+    }
+    let first = trimmed.lines().next().unwrap_or("");
+    let mut line: String = first.chars().take(60).collect();
+    if first.chars().count() > 60 {
+        line.push('…');
+    }
+    Some(display_safe(&line))
+}
+
+/// A task artifact read back for display, with the bounds that allow it.
+enum ArtifactBody {
+    Content(String),
+    Oversized,
+    Unreadable,
+}
+
+/// Read result.md or question.md under the display bound, never trusting it.
+fn read_artifact(dir: &Path, file: &str) -> Option<ArtifactBody> {
+    let path = dir.join(file);
+    if !path.exists() {
+        return None;
+    }
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(_) => return Some(ArtifactBody::Unreadable),
+    };
+    if body.len() as u64 > TASK_ARTIFACT_LIMIT {
+        return Some(ArtifactBody::Oversized);
+    }
+    Some(ArtifactBody::Content(display_safe_block(
+        &String::from_utf8_lossy(&body),
+    )))
 }
 
 /// Compare the task checkout to its launch base without staging or running diff helpers.
 pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32> {
     use std::io::IsTerminal;
-    let (dir, record) = inspect_task(repo, id)?;
+    let (dir, record, owner_identity, via_index) = match resolve_task(repo, id)? {
+        Located::Listing(dir, record) => (dir, record, repo.identity(), false),
+        Located::Pointer(entry, dir, record) => (dir, record, entry.repo_identity.clone(), true),
+        Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
+        Located::NoMatch { .. } => {
+            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {id:?}.")
+        }
+    };
     let task_repo = git::discover(&record.worktree)?;
-    if task_repo.identity() != repo.identity()
+    if task_repo.identity() != owner_identity
         || task_repo.root.canonicalize()? != record.worktree.canonicalize()?
     {
+        if via_index {
+            bail!(
+                "task worktree does not belong to the repository that launched it or is not a checkout root."
+            );
+        }
         bail!("task worktree does not belong to this repository or is not a checkout root.");
     }
     let base = record
@@ -856,22 +1282,13 @@ pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32>
 
 /// `ahu focus <task-id>`
 pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i32> {
-    let listing = task::list(repo)?;
-    let found = listing
-        .records
-        .iter()
-        .find(|(_, r)| r.task_id == task_id || r.task_id.starts_with(task_id));
-    let Some((_, record)) = found else {
-        // "no task matching" would be a claim that nothing here is that task.
-        // If a directory with that id exists and ahu simply could not read its
-        // record, saying so is the difference between a user looking for a
-        // typo and a user looking at a leftover worktree.
-        let unreadable: Vec<&task::UnreadableTask> = listing
-            .unreadable
-            .iter()
-            .filter(|u| u.task_id == task_id || u.task_id.starts_with(task_id))
-            .collect();
-        if let Some(blocked) = unreadable.first() {
+    let record = match resolve_task(repo, task_id)? {
+        Located::Listing(_, record) | Located::Pointer(_, _, record) => record,
+        Located::Unreadable(blocked) => {
+            // "no task matching" would be a claim that nothing here is that task.
+            // If a directory with that id exists and ahu simply could not read its
+            // record, saying so is the difference between a user looking for a
+            // typo and a user looking at a leftover worktree.
             bail!(
                 "task {} exists but ahu cannot read its record, so it cannot find its cmux \
                  session.\n{}\nThe record is at {}. Run `ahu tasks` for its worktree and branch.",
@@ -880,14 +1297,17 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
                 display_path(&blocked.dir)
             );
         }
-        if listing.unreadable.is_empty() {
-            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.");
+        Located::NoMatch {
+            unreadable_in_repo: 0,
+        } => {
+            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
         }
-        bail!(
-            "no readable task matching {task_id:?}. {} other task record(s) in this repository \
-             could not be read either; run `ahu tasks` to see them.",
-            listing.unreadable.len()
-        );
+        Located::NoMatch { unreadable_in_repo } => {
+            bail!(
+                "no readable task matching {task_id:?}. {unreadable_in_repo} other task record(s) \
+                 in this repository could not be read either; run `ahu tasks` to see them."
+            );
+        }
     };
     let Some(workspace) = record.cmux_workspace_id.as_deref() else {
         bail!("task {} has no recorded cmux session.", record.task_id);
@@ -910,7 +1330,26 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
 /// cancellation, not a removal, and a dirty worktree or a branch holding
 /// unmerged commits keeps its work for review.
 pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i32> {
-    let (record_dir, record) = inspect_task(repo, task_id)?;
+    let (record_dir, record, owner_identity, via_index, gate_discovered) =
+        match resolve_task(repo, task_id)? {
+            Located::Listing(dir, record) => (dir, record, repo.identity(), false, None),
+            Located::Pointer(entry, dir, record) => {
+                let gate = git::discover(&entry.checkout).map_err(|e| {
+                    Error::new(format!(
+                        "the task index records task {} at {}, but that checkout cannot be \
+                     inspected: {e}\nNothing was removed.",
+                        display_safe(&entry.task_id),
+                        display_path(&entry.checkout)
+                    ))
+                })?;
+                (dir, record, entry.repo_identity.clone(), true, Some(gate))
+            }
+            Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
+            Located::NoMatch { .. } => {
+                bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
+            }
+        };
+    let gate: &Repo = gate_discovered.as_ref().unwrap_or(repo);
     if record.state.is_live() {
         bail!(
             "task {} is {} — not a terminal state; nothing was removed.\n\
@@ -921,7 +1360,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
         );
     }
     let worktree_present = record.worktree.is_dir();
-    let branch_present = git::branch_exists(repo, &record.branch)?;
+    let branch_present = git::branch_exists(gate, &record.branch)?;
     if worktree_present {
         let discovered = git::discover(&record.worktree).map_err(|e| {
             Error::new(format!(
@@ -930,9 +1369,14 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
                 display_path(&record.worktree)
             ))
         })?;
-        if discovered.identity() != repo.identity()
+        if discovered.identity() != owner_identity
             || discovered.root.canonicalize()? != record.worktree.canonicalize()?
         {
+            if via_index {
+                bail!(
+                    "task worktree does not belong to the repository that launched it or is not a checkout root."
+                );
+            }
             bail!("task worktree does not belong to this repository or is not a checkout root.");
         }
         if discovered.root.canonicalize()? == repo.root.canonicalize()? {
@@ -960,7 +1404,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
             );
         }
     }
-    if branch_present && !git::branch_merged_into_primary_head(repo, &record.branch)? {
+    if branch_present && !git::branch_merged_into_primary_head(gate, &record.branch)? {
         bail!(
             "branch {} has commits that are not in the primary checkout's current branch; nothing \
              was removed.\n\
@@ -970,11 +1414,20 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
             display_safe(task_id)
         );
     }
+    // The branch deletion runs from the primary checkout, which must be
+    // resolved while the task's own worktree still exists: `primary_root`
+    // asks Git to run from `gate`'s root, and below this point that root may
+    // be the worktree being removed.
+    let branch_checkout = if branch_present {
+        Some(gate.primary_root()?)
+    } else {
+        None
+    };
     let mut completed: Vec<(&str, String)> = Vec::new();
     let mut not_removed: Vec<(&str, String)> = Vec::new();
     let mut worktree_removed = false;
     if worktree_present {
-        match git::remove_task_worktree(repo, &record.worktree) {
+        match git::remove_task_worktree(gate, &record.worktree) {
             Ok(()) => {
                 completed.push(("worktree", "removed".to_string()));
                 worktree_removed = true;
@@ -996,8 +1449,8 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     } else {
         completed.push(("record", "already absent".to_string()));
     }
-    if branch_present {
-        match git::delete_task_branch(repo, &record.branch) {
+    if let Some(primary) = &branch_checkout {
+        match git::delete_task_branch(primary, &record.branch) {
             Ok(()) => completed.push(("branch", "deleted".to_string())),
             Err(e) => not_removed.push(("branch", format!("{e}"))),
         }
@@ -1028,6 +1481,12 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
             );
         }
         bail!("{message}");
+    }
+    if let Err(e) = crate::task_index::remove(&record.task_id) {
+        eprintln!(
+            "warning: could not remove the task index entry for {}: {e}",
+            display_safe(&record.task_id)
+        );
     }
     let mut said = format!("removed task {}\n", display_safe(task_id));
     said.push_str(&format!(
@@ -1748,7 +2207,13 @@ pub fn render_preview(
         out.push_str(&format!(
             "             instructions digest {} ({})\n",
             &agent.instructions_digest[..12],
-            if agent.manifest.source.format.has_frontmatter() {
+            if agent
+                .manifest
+                .source
+                .as_ref()
+                .map(|s| s.format.has_frontmatter())
+                .unwrap_or(true)
+            {
                 "the body ahu delivers, YAML frontmatter read as metadata and not delivered"
             } else {
                 "the text ahu delivers; this format has no frontmatter, so it is the whole file"

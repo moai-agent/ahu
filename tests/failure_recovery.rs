@@ -172,7 +172,8 @@ fn task_ids_are_unique_across_rapid_repeated_launches() {
     if !common::in_harness_fixture("task_ids_are_unique_across_rapid_repeated_launches") {
         return;
     }
-    let ids: std::collections::BTreeSet<String> = (0..500).map(|_| task::new_task_id()).collect();
+    let ids: std::collections::BTreeSet<String> =
+        (0..500).map(|_| task::new_task_id().unwrap()).collect();
     assert_eq!(ids.len(), 500, "task ids collided");
 }
 
@@ -507,7 +508,7 @@ fn onboarding_is_additive_idempotent_and_reversible() {
     assert_eq!(code, 0, "{text}");
     assert!(text.contains("Nothing has been written"), "{text}");
     assert!(text.contains("can be registered"), "{text}");
-    assert!(!repo.path().join(".agents/ahu/agents/sam.toml").exists());
+    assert!(!repo.path().join(".agents/ahu/agents/sam.md").exists());
 
     // Registering adds exactly one file and leaves the native definition alone.
     let (code, text) = with_state(&repo, || {
@@ -540,7 +541,7 @@ fn onboarding_is_additive_idempotent_and_reversible() {
         })
     });
     assert_eq!(code, 0);
-    assert!(!repo.path().join(".agents/ahu/agents/sam.toml").exists());
+    assert!(!repo.path().join(".agents/ahu/agents/sam.md").exists());
     assert_eq!(repo.read(".claude/agents/sam.md"), native_before);
 }
 

@@ -50,7 +50,7 @@ pub const MERMAID_PROMPT: &str = r#"flowchart LR
     P["Pasted prompt<br/>$(...), backticks, newlines"] --> F["prompt.txt<br/>mode 0600"]
     F -.->|"read at start"| R["ahu run-task"]
     D["ahu delegation contract"] --> N["Compose, fenced with<br/>a per-launch nonce"]
-    A["Agent instructions<br/>from source.path"] --> N
+    A["Agent instructions<br/>manifest body or source.path"] --> N
     R --> N
     N -->|"one argv element"| C["configured harness<br/>contract + instructions + prompt"]
 
@@ -234,12 +234,13 @@ pub fn document() -> Vec<Section> {
             title: "Identity and selection",
             blocks: vec![
                 para(&[
-                    "Only `.agents/ahu/agents/<name>.toml` makes an agent launchable. Definitions found",
+                    "Only `.agents/ahu/agents/<name>.md` makes an agent launchable. Definitions found",
                     "anywhere else are onboarding candidates, never implicit registrations: a skill is",
                     "not an agent, and AGENTS.md is not an agent registry. A manifest names an explicit",
                     "harness, an exact model identifier (never an alias), and a semantic version, and",
-                    "points at an instruction source in place. A nonempty parsed frontmatter model",
-                    "other than inherit must match; ahu does not rewrite either file.",
+                    "either carries its instructions in its body or references a native definition in",
+                    "place. A nonempty parsed frontmatter model other than inherit must match; ahu",
+                    "does not rewrite either file.",
                 ]),
                 para(&[
                     "At launch ahu reads that file, records two digests of it — one over the whole",

@@ -40,17 +40,25 @@ fn repo_with_widened_agent(permissions: &str) -> TestRepo {
         "---\nname: deploy\nmodel: claude-opus-5\n---\n\nYou are deploy.\n",
     );
     repo.write(
-        ".agents/ahu/agents/deploy.toml",
+        ".agents/ahu/agents/deploy.md",
         &format!(
-            "schema_version = 1\n\
-             name = \"deploy\"\n\
-             version = \"1.0.0\"\n\
-             harness = \"claude-code\"\n\
-             model = \"claude-opus-5\"\n\
-             permissions = {permissions:?}\n\
-             \n[source]\n\
-             format = \"claude-agent\"\n\
-             path = \".claude/agents/deploy.md\"\n"
+            "---\n\
+             okf_version: 0.2\n\
+             type: ahu:agent\n\
+             title: deploy\n\
+             description: fixture agent\n\
+             status: stable\n\
+             tags: [agents]\n\
+             harness: claude-code\n\
+             model: claude-opus-5\n\
+             permissions: {permissions}\n\
+             version: 1.0.0\n\
+             source_format: claude-agent\n\
+             source_path: .claude/agents/deploy.md\n\
+             \n\
+             ---\n\
+             \n\
+             Instructions live in the native definition at `.claude/agents/deploy.md`, referenced in place and never edited.\n"
         ),
     );
     repo.write("assignment.txt", "deploy it\n");
@@ -537,8 +545,12 @@ fn write_record(
 fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
     assert_eq!(
         ahu::task::TASK_SCHEMA_VERSION,
-        2,
-        "the digest split is a schema change and must be versioned as one"
+        3,
+        "the digest split and the task id change are schema changes and must be versioned as one"
+    );
+    assert!(
+        ahu::task::READABLE_SCHEMA_VERSIONS.contains(&2),
+        "schema 2 is this build's immediate predecessor and must stay readable"
     );
 
     let temp = tempfile::TempDir::new().unwrap();

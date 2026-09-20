@@ -52,6 +52,13 @@ replacement harness yourself. Never replace a configured harness or model with
 the coordinator's harness/model, even if a launch fails. Report the blocker.
 If an agent is unregistered, unavailable, or cannot launch with its configured
 identity, stop that assignment and report the reason. Do not silently fall back.
+Your task directory is $AHU_TASK_DIR and your task id is $AHU_TASK_ID. Write your
+final report as result.md in that directory; ahu will not display a report larger
+than 1 MiB. If you need the operator to answer a question first, write it to
+question.md in the same directory; replace that file when the question changes and
+remove it once answered. inbox/ in the task directory holds numbered operator
+messages; read them, never rewrite, renumber or delete them. A task id grants no
+delivery into any other task's directory.
 These instructions apply recursively to every child launched through ahu.
 ahu supplied everything above inside the fence that encloses it. ahu does not
 use any system-prompt or agent-selection flag on any harness, so nothing here is
@@ -76,6 +83,14 @@ controls and their limits are recorded separately in the launch capabilities.
 Do not invoke cmux. Keep all execution output and reports outside checkouts.
 Report denials, missing credentials, incomplete work and missing evidence honestly.
 Do not substitute harnesses or models after a failure. These rules apply recursively.
+Your task directory is $AHU_TASK_DIR (ahu's state directory, not a checkout) and
+your task id is $AHU_TASK_ID. Write your final report as result.md in that
+directory; ahu will not display a report larger than 1 MiB. If you need the
+operator to answer a question first, write it to question.md in the same
+directory; replace that file when the question changes and remove it once
+answered. inbox/ in the task directory holds numbered operator messages; read
+them, never rewrite, renumber or delete them. A task id grants no delivery into
+any other task's directory.
 ahu supplied this fenced text as prompt instructions, not an enforced system role.
 "#;
 
@@ -146,11 +161,27 @@ pub fn redeliver_headless(delivery: &Delivery, prompt: &str) -> Result<String> {
 pub struct Delivery {
     /// Fence tag nonce, generated fresh for this launch.
     pub nonce: String,
-    /// The resolved agent's instruction text, as parsed from its `source.path`.
-    /// `None` for an automatic launch, which has no named identity.
+    /// The resolved agent's instruction text: the manifest body for an agent
+    /// that carries its own instructions, or the body parsed from the native
+    /// file it references. `None` for an automatic launch, which has no named
+    /// identity.
     pub agent_instructions: Option<String>,
     /// Digest of the complete delivered prompt.
     pub digest: String,
+}
+
+/// Draw fresh entropy from the operating system, or refuse.
+///
+/// Everything ahu mints that must be unpredictable — fence nonces, task ids —
+/// draws it from `/dev/urandom` here, and a draw that cannot be completed in
+/// full is a draw that did not happen: the caller refuses the operation it
+/// was about to perform. A source that reports success while returning
+/// predictable bytes is a threat ahu cannot detect with the standard library
+/// alone, and no claim is made about it.
+pub fn os_entropy(out: &mut [u8]) -> Result<()> {
+    use std::io::Read;
+    let mut source = std::fs::File::open("/dev/urandom").map_err(entropy_refusal)?;
+    source.read_exact(out).map_err(entropy_refusal)
 }
 
 /// A fence nonce: unpredictable before launch, or there is no launch.
@@ -161,40 +192,35 @@ pub struct Delivery {
 /// fence would claim authority it does not have. The time, pid, and a counter
 /// are mixed into the digest so that distinct launches get distinct nonces,
 /// but they cannot make an unguessable one, which is why the entropy draw is
-/// a hard requirement and not a best effort. A source that reports success
-/// while returning predictable bytes is a threat ahu cannot detect with the
-/// standard library alone, and no claim is made about it.
+/// a hard requirement and not a best effort.
 pub fn new_nonce() -> Result<String> {
-    let mut source = std::fs::File::open("/dev/urandom").map_err(entropy_refusal)?;
-    mint_nonce(&mut source)
+    let mut seed = [0u8; 32];
+    os_entropy(&mut seed[..16])?;
+    Ok(mint_nonce(&mut seed))
 }
 
-/// Refuse the launch, naming the entropy failure that caused the refusal.
+/// Refuse the operation, naming the entropy failure that caused the refusal.
 fn entropy_refusal(error: std::io::Error) -> Error {
     Error::new(format!(
-        "ahu cannot draw 128 bits of fresh entropy from /dev/urandom ({error}); a fence nonce \
-         minted without it would be guessable, so nothing was launched."
+        "ahu cannot draw fresh entropy from /dev/urandom ({error}); anything minted without it \
+         would be guessable, so nothing was launched."
     ))
     .with_kind(ErrorKind::Prerequisite)
 }
 
-/// Mint a nonce from `source`: 128 bits of entropy, mixed with the time, the
+/// Mint a nonce from 16 bytes of fresh entropy, mixed with the time, the
 /// pid, and a counter, digested down to 16 hex characters.
-fn mint_nonce(source: &mut dyn std::io::Read) -> Result<String> {
+fn mint_nonce(seed: &mut [u8; 32]) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let mut seed = [0u8; 32];
-    source
-        .read_exact(&mut seed[..16])
-        .map_err(entropy_refusal)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     seed[16..24].copy_from_slice(&(now.as_nanos() as u64).to_le_bytes());
     seed[24..28].copy_from_slice(&std::process::id().to_le_bytes());
     seed[28..32].copy_from_slice(&(COUNTER.fetch_add(1, Ordering::Relaxed) as u32).to_le_bytes());
-    Ok(digest_bytes(&seed)[..16].to_string())
+    digest_bytes(seed)[..16].to_string()
 }
 
 /// Opening tag of an ahu fence.
@@ -340,54 +366,33 @@ pub fn delivery_summary(nonce: &str, has_agent_instructions: bool) -> String {
 mod nonce_tests {
     use super::*;
 
-    /// An entropy source that answers every read with an error.
-    struct Refusing;
-
-    impl std::io::Read for Refusing {
-        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "the device is closed to us",
-            ))
-        }
-    }
-
-    /// An entropy source that halves every read, so `read_exact` starves.
-    struct Starved;
-
-    impl std::io::Read for Starved {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            Ok(buf.len() / 2)
-        }
+    /// os_entropy draws exactly what it is asked for, or refuses.
+    #[test]
+    fn os_entropy_fills_the_requested_bytes() {
+        let mut drawn = [0u8; 16];
+        os_entropy(&mut drawn).unwrap();
     }
 
     /// A source that refuses to yield entropy answers the refusal the
-    /// delivery contract requires: no nonce, named cause, nothing launched.
+    /// delivery contract requires: named cause, nothing launched.
     #[test]
-    fn a_refusing_entropy_source_refuses_the_nonce() {
-        let error = mint_nonce(&mut Refusing).unwrap_err();
+    fn an_entropy_failure_refuses_with_named_cause() {
+        let error = entropy_refusal(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the device is closed to us",
+        ));
         assert_eq!(error.kind(), ErrorKind::Prerequisite);
         assert!(error.to_string().contains("/dev/urandom"));
         assert!(error.to_string().contains("nothing was launched"));
     }
 
-    /// A source that never fills the request is a short read, and a short
-    /// read of entropy is no entropy at all: the nonce is refused.
+    /// Even a degenerate seed yields distinct nonces across launches: the
+    /// mixed-in time and counter carry distinctness, which is all they are
+    /// claimed to carry.
     #[test]
-    fn a_starved_entropy_source_refuses_the_nonce() {
-        let error = mint_nonce(&mut Starved).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Prerequisite);
-        assert!(error.to_string().contains("/dev/urandom"));
-        assert!(error.to_string().contains("nothing was launched"));
-    }
-
-    /// Even a source returning all zeros yields distinct nonces across
-    /// launches: the mixed-in time and counter carry distinctness, which is
-    /// all they are claimed to carry.
-    #[test]
-    fn a_degenerate_but_successful_source_yields_distinct_nonces() {
-        let first = mint_nonce(&mut std::io::repeat(0)).unwrap();
-        let second = mint_nonce(&mut std::io::repeat(0)).unwrap();
+    fn a_degenerate_but_successful_seed_yields_distinct_nonces() {
+        let first = mint_nonce(&mut [0u8; 32]);
+        let second = mint_nonce(&mut [0u8; 32]);
         assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(second.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(first, second);

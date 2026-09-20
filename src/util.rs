@@ -372,7 +372,7 @@ pub fn resolve_within(root: &Path, relative: &str, create_missing_dirs: bool) ->
 ///
 /// [`resolve_within`] guards every path ahu writes to. Reads need the same
 /// guard for the same reason — a repository can commit a symlink at
-/// `.agents/ahu/config.toml` or `.agents/ahu/agents/x.toml`, and reading
+/// `.agents/ahu/config.toml` or `.agents/ahu/agents/x.md`, and reading
 /// through one lets the repository choose which file ahu opens and then quotes
 /// back in a parse error. That is an arbitrary-file read with the contents
 /// disclosed, from nothing more than checking out a repository.

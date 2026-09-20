@@ -14,5 +14,5 @@ review_on_first_load = true
 review_interval_days = 7
 
 [knowledge]
-bundles = ["docs/knowledge", "docs/plans"]
+bundles = ["docs/knowledge", ".agents/ahu/agents"]
 fail_on_warnings = false

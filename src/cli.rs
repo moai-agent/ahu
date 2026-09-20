@@ -58,6 +58,8 @@ Commands:
                                   child/worker resume unsupported: submit a new registered assignment
   focus <task-id>       Bring a task's cmux session to the front
   remove <task-id>      Remove a terminal task's record, worktree, and branch
+  message <task-id> <text>
+                        Append an operator message to the task's inbox
   doctor                Check repository, configuration, harness, and cmux
   agy                   Open the Antigravity CLI here using its configured model
                         and permissions (ahu passes no --mode and no
@@ -211,6 +213,10 @@ pub enum Command {
     },
     Remove {
         task_id: String,
+    },
+    Message {
+        task_id: String,
+        text: String,
     },
     Doctor,
     Codex,
@@ -427,6 +433,17 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 .ok_or_else(|| crate::util::Error::new("`ahu remove` needs a task id."))?;
             expect_no_more(&args[2..])?;
             Ok(Command::Remove { task_id })
+        }
+        "message" => {
+            let task_id = args
+                .get(1)
+                .filter(|id| !id.is_empty() && !id.starts_with('-'))
+                .cloned()
+                .ok_or_else(|| {
+                    crate::util::Error::new("`ahu message` needs a task id and a message text.")
+                })?;
+            let text = args[2..].join(" ");
+            Ok(Command::Message { task_id, text })
         }
         "inventory" => Ok(Command::Inventory {
             agent: optional_agent(&args[1..])?,

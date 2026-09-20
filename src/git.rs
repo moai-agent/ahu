@@ -207,13 +207,16 @@ pub fn remove_task_worktree(repo: &Repo, path: &Path) -> Result<()> {
 /// `--` closes the option list: the name is treated as a branch name even when
 /// something has arranged for it to begin with a hyphen. Never `-D`, never
 /// `refs/heads/` spelling — `git branch -d` does not accept the fully-qualified
-/// form, and the gate on unmerged commits belongs to Git itself. Runs from the
-/// primary checkout so `-d`'s own merged-check judges the same HEAD that
-/// [`branch_merged_into_primary_head`] gates on, whatever checkout the command
-/// was invoked from.
-pub fn delete_task_branch(repo: &Repo, branch: &str) -> Result<()> {
-    let primary = repo.primary_root()?;
-    let out = run(&primary, &["branch", "-d", "--", branch])?;
+/// form, and the gate on unmerged commits belongs to Git itself.
+///
+/// `primary` must be the repository's primary checkout, resolved while the
+/// checkout that `remove` is tearing down still exists: `remove` deletes the
+/// task's worktree first, and resolving the primary afterwards would ask Git
+/// to run from a directory that is already gone. Running from the primary also
+/// keeps `-d`'s own merged-check judging the same HEAD that
+/// [`branch_merged_into_primary_head`] gates on.
+pub fn delete_task_branch(primary: &Path, branch: &str) -> Result<()> {
+    let out = run(primary, &["branch", "-d", "--", branch])?;
     if !out.status.success() {
         bail!(
             "could not delete branch {}: {}",

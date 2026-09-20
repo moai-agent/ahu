@@ -341,12 +341,12 @@ fn inline_and_piped_prompts_produce_clean_json_without_cmux() {
     repo.init_config();
     repo.add_agent("sable", "1.0.0", "claude-sonnet-5");
     let description = "fixture \u{1b}[31m literal metadata";
-    let manifest_path = ".agents/ahu/agents/sable.toml";
+    let manifest_path = ".agents/ahu/agents/sable.md";
     repo.write(
         manifest_path,
         &repo.read(manifest_path).replace(
-            "description = \"fixture agent\"",
-            "description = \"fixture \\u001b[31m literal metadata\"",
+            "description: fixture agent",
+            "description: fixture \u{1b}[31m literal metadata",
         ),
     );
     repo.write("assignment.txt", HOSTILE_PROMPT);

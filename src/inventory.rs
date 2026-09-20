@@ -195,7 +195,13 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
                 notes.push(format!(
                     "instructions digest {} covers exactly the text ahu delivers{}",
                     &agent.instructions_digest[..12],
-                    if agent.manifest.source.format.has_frontmatter() {
+                    if agent
+                        .manifest
+                        .source
+                        .as_ref()
+                        .map(|s| s.format.has_frontmatter())
+                        .unwrap_or(true)
+                    {
                         ", which is that file with its YAML frontmatter stripped"
                     } else {
                         "; this format has no frontmatter, so the two cover the same bytes"

@@ -205,25 +205,55 @@ const PROMPT_FILE: &str = "prompt.txt";
 /// text). A schema-1 record carries the whole-file digest under the *name*
 /// `instructions_digest`, so reading one as schema 2 would attribute file bytes
 /// to delivered bytes. `load` refuses it by version instead.
-pub const TASK_SCHEMA_VERSION: u32 = 2;
-
-/// A time-ordered, collision-resistant task identifier.
 ///
-/// Repeated and concurrent launches of the same agent must produce distinct
-/// tasks, so the identifier mixes a timestamp with process and counter entropy.
-pub fn new_task_id() -> String {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let now = std::time::SystemTime::now()
+/// Schema 3 changes the task identifier from 18 hex characters to a hyphenated
+/// UUID v7. The fields are otherwise identical, so schema-2 records still load
+/// unchanged; they keep their original ids.
+pub const TASK_SCHEMA_VERSION: u32 = 3;
+/// The schema versions this build can read: the current one and its immediate
+/// predecessor. `load` refuses everything else.
+pub const READABLE_SCHEMA_VERSIONS: [u32; 2] = [2, TASK_SCHEMA_VERSION];
+
+/// A time-ordered, collision-resistant task identifier: a UUID v7 whose random
+/// bits come from `os_entropy`. Fails closed rather than minting a guessable id.
+///
+/// The 48-bit timestamp is big-endian milliseconds, so ids sort by launch time
+/// as plain strings. The remaining 74 bits are random.
+pub fn new_task_id() -> Result<String> {
+    let mut rand = [0u8; 10];
+    crate::orchestration::os_entropy(&mut rand)?;
+    let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Ok(uuid_v7(now_ms, &rand))
+}
+
+/// Format a UUID v7 from a millisecond timestamp and 10 random bytes.
+fn uuid_v7(now_ms: u64, rand: &[u8; 10]) -> String {
+    let rand_a = ((rand[0] as u16) << 4) | ((rand[1] >> 4) as u16);
+    let mut tail: u64 = 0;
+    for byte in &rand[2..10] {
+        tail = (tail << 8) | u64::from(*byte);
+    }
+    let rand_b = (((rand[1] & 0x0f) as u64) << 58) | (tail >> 6);
     format!(
-        "{:010x}{:04x}{:04x}",
-        now.as_secs(),
-        (now.subsec_nanos() >> 8) & 0xffff,
-        (std::process::id() ^ counter) & 0xffff
+        "{:08x}-{:04x}-7{:03x}-{:04x}-{:012x}",
+        now_ms >> 16,
+        now_ms & 0xffff,
+        rand_a,
+        0x8000 | (rand_b >> 48) as u16,
+        rand_b & 0xffff_ffff_ffff
     )
+}
+
+/// True for a canonical task id: 36 lowercase hex digits hyphenated as a UUID.
+pub fn is_canonical_task_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| match (i, b) {
+            (8 | 13 | 18 | 23, b'-') => true,
+            (_, b) => b.is_ascii_hexdigit() && !b.is_ascii_uppercase(),
+        })
 }
 
 /// RFC 3339 UTC timestamp, computed without a date library.
@@ -292,14 +322,21 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
         .ok()
         .and_then(|value| value.get("schema_version")?.as_u64());
     if let Some(version) = version
-        && version != u64::from(TASK_SCHEMA_VERSION)
+        && !READABLE_SCHEMA_VERSIONS
+            .iter()
+            .any(|v| u64::from(*v) == version)
     {
+        let reason = if version == 1 {
+            "schema 1 recorded the whole file's digest under the name \
+             instructions_digest, which now means the delivered instruction text, \
+             so the same field would be read as covering bytes it does not cover."
+        } else {
+            "ahu does not know how to read records written by that version."
+        };
         bail!(
-            "{} was written by a different ahu schema version ({version}); this ahu build reads \
-             {TASK_SCHEMA_VERSION}.\n\
-             ahu will not reinterpret it: schema 1 recorded the whole file's digest under the \
-             name instructions_digest, which now means the delivered instruction text, so the \
-             same field would be read as covering bytes it does not cover.",
+            "{} was written by a different ahu schema version ({version}); this ahu \
+             build reads schema {TASK_SCHEMA_VERSION} and legacy schema 2 task records.\n\
+             ahu will not reinterpret it: {reason}",
             path.display()
         );
     }
@@ -313,9 +350,10 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
     // A record whose `schema_version` could not be read as a number at all --
     // absent, or not an integer -- still must not be accepted on the strength of
     // the struct happening to deserialize.
-    if record.schema_version != TASK_SCHEMA_VERSION {
+    if !READABLE_SCHEMA_VERSIONS.contains(&record.schema_version) {
         bail!(
-            "{} declares ahu schema version {}; this ahu build reads {TASK_SCHEMA_VERSION}.",
+            "{} declares ahu schema version {}; this ahu build reads \
+             {TASK_SCHEMA_VERSION} and legacy schema 2 task records.",
             path.display(),
             record.schema_version
         );
@@ -861,5 +899,75 @@ mod state_tests {
         assert!(!TaskState::Exited.is_live());
         assert!(!TaskState::Failed.is_live());
         assert!(!TaskState::Cancelled.is_live());
+    }
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::*;
+
+    #[test]
+    fn uuid_v7_extremes() {
+        assert_eq!(
+            uuid_v7(0, &[0u8; 10]),
+            "00000000-0000-7000-8000-000000000000"
+        );
+        assert_eq!(
+            uuid_v7(0xffff_ffff_ffff, &[0xff; 10]),
+            "ffffffff-ffff-7fff-bfff-ffffffffffff"
+        );
+    }
+
+    #[test]
+    fn uuid_v7_shape_and_timestamp() {
+        for now_ms in [0u64, 1, 0x0123_4567_89ab, 0xffff_ffff_ffff] {
+            let id = uuid_v7(now_ms, &[0xab; 10]);
+            assert_eq!(id.len(), 36);
+            assert_eq!(id.as_bytes()[8], b'-');
+            assert_eq!(id.as_bytes()[13], b'-');
+            assert_eq!(id.as_bytes()[18], b'-');
+            assert_eq!(id.as_bytes()[23], b'-');
+            assert!(is_canonical_task_uuid(&id));
+            assert_eq!(&id[14..15], "7");
+            assert_eq!(u16::from_str_radix(&id[19..23], 16).unwrap() >> 14, 0b10);
+            let recovered = (u64::from_str_radix(&id[0..8], 16).unwrap() << 16)
+                | u64::from_str_radix(&id[9..13], 16).unwrap();
+            assert_eq!(recovered, now_ms);
+        }
+    }
+
+    #[test]
+    fn distinct_random_bits_yield_distinct_ids() {
+        let a = uuid_v7(1, &[0u8; 10]);
+        let b = uuid_v7(1, &[1u8; 10]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn ids_sort_by_launch_time() {
+        assert!(uuid_v7(1, &[0u8; 10]) < uuid_v7(2, &[0xff; 10]));
+    }
+
+    #[test]
+    fn new_task_id_is_canonical() {
+        assert!(is_canonical_task_uuid(&new_task_id().unwrap()));
+    }
+
+    #[test]
+    fn is_canonical_task_uuid_rejects_malformed_ids() {
+        let canonical = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b";
+        assert!(is_canonical_task_uuid(canonical));
+        assert!(!is_canonical_task_uuid(""));
+        assert!(!is_canonical_task_uuid("018f1a2b3c4d7e5f8a9b0c1d2e3f4a5b"));
+        assert!(!is_canonical_task_uuid(
+            "018F1A2B-3C4D-7E5F-8A9B-0C1D2E3F4A5B"
+        ));
+        assert!(!is_canonical_task_uuid(
+            "018f1a2b-3c4d-ge5f-8a9b-0c1d2e3f4a5b"
+        ));
+        assert!(!is_canonical_task_uuid("006aa50000000000a1"));
+        assert!(!is_canonical_task_uuid(
+            "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b\u{fffd}"
+        ));
     }
 }
