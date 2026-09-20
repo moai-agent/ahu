@@ -13,6 +13,21 @@ With Rust and Cargo installed (this checkout pins Rust in
 cargo install --git https://github.com/moai-agent/ahu --locked
 ```
 
+On macOS, update an installed `ahu` with `cargo install` or by replacing the
+destination with a fresh file. Do not copy a new build over a path while an
+`ahu` process may still be running: in-place replacement can leave the path
+unable to execute because macOS caches code-signature validation by file identity.
+For a locally built release, remove the destination before copying:
+
+```sh
+rm /Users/you/.cargo/bin/ahu
+cp target/release/ahu /Users/you/.cargo/bin/ahu
+```
+
+The running process keeps its old file open, and new invocations use the fresh
+file. If an overwritten path already exits with status 137 and no output,
+replace it using one of these fresh-file procedures before troubleshooting ahu.
+
 Tasks require Git and the selected harness installed and
 authenticated: Claude Code (`claude`), Codex (`codex`), Antigravity CLI (`agy`),
 or OpenCode (`opencode`). An OpenCode agent also needs the model's provider

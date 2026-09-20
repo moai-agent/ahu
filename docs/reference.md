@@ -12,6 +12,24 @@ that checkout. Without this prefix, ahu uses the current directory. Ambient
 not select storage. See [state and compatibility](#state-and-compatibility) for
 explicit lookup of old stores.
 
+## Installing and updating ahu safely
+
+On macOS, use `cargo install` to update an installed ahu binary. Cargo replaces
+the destination with a fresh file. For a locally built release, remove the
+destination before copying the artifact:
+
+```sh
+rm /Users/you/.cargo/bin/ahu
+cp target/release/ahu /Users/you/.cargo/bin/ahu
+```
+
+Do not copy a new build over an installed path while an ahu process may still
+be running. In-place replacement can leave later executions killed by macOS
+code-signature validation, even though the file appears valid on disk. The
+running process keeps its old file open; new invocations need the fresh file.
+An overwritten path that exits with status 137 and produces no output should be
+replaced using one of the procedures described earlier before investigating another cause.
+
 Task commands accept exact `@name` handles, `ahu:task:<id>`, bare IDs, uppercase,
 and unambiguous ID prefixes. References to other resource kinds are refused.
 `ahu launch @name` selects a registered agent; `ahu task @name` selects a task.
