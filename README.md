@@ -254,8 +254,8 @@ validate the authored bundle. Workflow files alone do not establish hosted
 success or required-check enforcement.
 
 The [current-code knowledge bundle](docs/knowledge/index.md) uses OKF v0.2.
-Skill maintenance checks compare repository copies byte-for-byte; they do not
-install or sync skills globally. See [knowledge checks](docs/reference.md#knowledge-checks)
+Skill maintenance checks validate the skill tree contract and its compiled
+bundle; they do not install or sync skills globally. See [knowledge checks](docs/reference.md#knowledge-checks)
 for project configuration and machine-readable results.
 
 Tests use temporary repositories and stand-in harness executables. Live cmux

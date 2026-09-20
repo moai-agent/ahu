@@ -91,6 +91,25 @@ while installed harnesses lack verified native Skills-over-MCP support; the
 bundle can move to an independent repository later without changing the MCP
 task boundary.
 
+The canonical tree follows a strict contract so every harness can load it: one
+directory per skill directly under `.agents/skills/`, named after the skill,
+holding exactly one `SKILL.md`. The frontmatter carries only the portable keys
+`name` (equal to the directory name) and `description` (a one-line summary).
+Skill names use lowercase letters, digits, and hyphens. `scripts/check-skills.py`
+verifies the tree shape, the frontmatter, unique names, and that the compiled
+bundle in `src/mcp.rs` carries the same set of skills as the tree; CI runs it on
+every change.
+
+When the same skill name appears in more than one discovered location, each
+harness resolves the collision by its own discovery precedence, which ahu
+neither controls nor emulates: the harness picks its winner, and ahu reports
+what it finds rather than overriding that choice. The repository contract keeps
+collisions rare instead: `.agents/skills/` is the canonical location, `ahu mcp
+setup` never duplicates skills into harness-owned locations such as
+`.claude/skills/`, and any copy there is an ordinary file the operator can
+review and remove. `ahu inventory` lists skill sources, including duplicates,
+so a same-named skill outside the canonical tree stays visible.
+
 The modern path follows the [2026-07-28 Tasks extension](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks).
 Declare `io.modelcontextprotocol/tasks: {}` inside
 `params._meta["io.modelcontextprotocol/clientCapabilities"].extensions` on every
@@ -746,7 +765,9 @@ earlier ones for conflicting keys: remote `.well-known/opencode`, the global
 configuration files, and macOS MDM preferences. Rules come from `AGENTS.md`, with
 `CLAUDE.md` as a fallback when there is no `AGENTS.md`; the first match in each
 category wins. Skills are discovered on demand, including under
-`.opencode/skills/`, `.claude/skills/`, and `.agents/skills/`.
+`.opencode/skills/`, `.claude/skills/`, and `.agents/skills/`. The repository's
+canonical skill tree and collision rules are described in
+[MCP integration](#mcp-integration).
 
 ahu's configuration snapshot carries the invoking checkout's `.opencode/`,
 `opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md`, `.agents/`, and

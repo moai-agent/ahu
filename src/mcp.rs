@@ -264,7 +264,9 @@ pub fn setup(repo: &Repo) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::tools;
+    use std::collections::BTreeMap;
+
+    use super::{BUNDLED_SKILLS, skill_path, tools};
 
     #[test]
     fn read_only_tools_are_explicit_and_bounded() {
@@ -273,5 +275,70 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(names, ["ahu_agents_list", "ahu_tasks_list", "ahu_task_get"]);
+    }
+
+    #[test]
+    fn bundled_skills_match_the_skill_tree_contract() {
+        let mut seen = std::collections::BTreeSet::new();
+        for &(name, content) in BUNDLED_SKILLS {
+            assert!(seen.insert(name), "duplicate bundled skill name: {name}");
+            assert_eq!(skill_path(name), format!(".agents/skills/{name}/SKILL.md"));
+            assert!(!name.is_empty());
+            assert!(
+                name.chars().next().unwrap().is_ascii_lowercase()
+                    || name.chars().next().unwrap().is_ascii_digit()
+            );
+            assert!(
+                name.chars().last().unwrap().is_ascii_lowercase()
+                    || name.chars().last().unwrap().is_ascii_digit()
+            );
+            assert!(
+                name.chars()
+                    .all(|c| { c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' })
+            );
+            let lines: Vec<&str> = content.split('\n').collect();
+            assert_eq!(
+                lines.first(),
+                Some(&"---"),
+                "missing frontmatter opener: {name}"
+            );
+            let mut keys: BTreeMap<&str, &str> = BTreeMap::new();
+            let mut closed = false;
+            let mut body = 0;
+            for line in lines.iter().skip(1) {
+                if closed {
+                    if !line.is_empty() {
+                        body += 1;
+                    }
+                    continue;
+                }
+                if *line == "---" {
+                    closed = true;
+                    continue;
+                }
+                if let Some(value) = line.strip_prefix("name: ") {
+                    assert_eq!(value, name, "frontmatter name mismatch for {name}");
+                    assert!(
+                        keys.insert("name", value).is_none(),
+                        "duplicate name key: {name}"
+                    );
+                } else if let Some(value) = line.strip_prefix("description: ") {
+                    assert!(
+                        keys.insert("description", value).is_none(),
+                        "duplicate description key: {name}"
+                    );
+                } else {
+                    panic!("unsupported frontmatter line in {name}: {line:?}");
+                }
+            }
+            assert!(closed, "unterminated frontmatter: {name}");
+            assert_eq!(
+                keys.len(),
+                2,
+                "expected exactly name and description for {name}"
+            );
+            assert!(!keys["description"].is_empty(), "empty description: {name}");
+            assert!(body > 0, "empty skill body: {name}");
+        }
     }
 }
