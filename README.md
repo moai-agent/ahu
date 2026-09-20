@@ -64,6 +64,10 @@ ahu launch @dev-astra --prompt-file assignment.txt \
 ```
 
 `launch` submits without interactive confirmation and keeps focus on the caller.
+Each task receives a short handle derived from its displayed title, such as
+`@configuration-review`. Use `--name review` to choose one. Task commands accept
+the handle: `ahu task @review`, `ahu focus @review`, or `ahu cancel @review`.
+Names belong to the repository and remain reserved after removal; task IDs still work.
 The development, security, and documentation agents declare `permissions = "auto"`,
 so their launches require the explicit approval-widening flag, even for previews. The flag controls
 the child's requested settings; it grants no extra access to the caller.
@@ -90,7 +94,7 @@ mode when the coordinator needs to edit or run commands.
 
 Inspect work from the primary checkout or a sibling task worktree. Outside it,
 prefix the command with `ahu --repo /path/to/project`. Task commands accept
-`ahu:task:<id>`, bare IDs, and unique ID prefixes:
+exact `@name` handles, `ahu:task:<id>`, bare IDs, and unique ID prefixes:
 
 ```sh
 ahu tasks

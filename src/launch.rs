@@ -48,6 +48,7 @@ fn mapping_path(repo: &Repo) -> Result<PathBuf> {
 pub struct DisplayMetadata {
     pub title: Option<String>,
     pub summary: Option<String>,
+    pub name: Option<String>,
 }
 
 /// What a launch is going to do, shown before anything is created.
@@ -65,6 +66,7 @@ pub struct LaunchPlan {
     pub base_commit: Option<String>,
     pub parent_dirty: bool,
     pub task_id: String,
+    pub task_name: Option<String>,
     pub branch: String,
     pub worktree: PathBuf,
     pub task_dir: PathBuf,
@@ -82,6 +84,9 @@ pub struct LaunchPlan {
 
 impl LaunchPlan {
     pub fn apply_display(&mut self, display: &DisplayMetadata) -> Result<()> {
+        if let Some(name) = &display.name {
+            self.task_name = Some(crate::task_handles::name(name)?);
+        }
         for (flag, value) in [("--title", &display.title), ("--summary", &display.summary)] {
             if let Some(value) = value
                 && crate::util::sidebar_text(value, 160).is_empty()
@@ -170,6 +175,8 @@ pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
         "schema_version": 1,
         "agent": agent,
         "title": plan.title,
+        "task_handle_candidate": format!("@{}", plan.task_name.clone().unwrap_or_else(|| crate::task_handles::generated_name(&plan.title))),
+        "task_handle_reserved": false,
         "summary": plan.summary,
         "harness": plan.pair.harness,
         "model": plan.pair.model,
@@ -366,6 +373,7 @@ pub fn plan(
         base_commit,
         parent_dirty,
         task_id,
+        task_name: None,
         branch,
         worktree,
         task_dir,
@@ -532,6 +540,7 @@ pub fn execute(
         .base_commit
         .as_deref()
         .ok_or_else(|| Error::new("the launch plan has no base commit"))?;
+    crate::task_handles::reserve(repo, &plan.task_id, plan.task_name.as_deref(), &plan.title)?;
     // `.worktrees/` ignores itself, so task checkouts never show up in
     // `git status` and cannot be committed by accident.
     state::ensure_worktrees_root(&repo.root)?;

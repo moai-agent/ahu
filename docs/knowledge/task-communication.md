@@ -36,7 +36,9 @@ uses.[^commands][^launch][^headless]
 
 Arguments after the task reference are literal message payload; flag-like text
 does not change repository, color, or output options. Typed `ahu:task:<id>`
-references, bare IDs, and unique prefixes use the same resolver.[^commands]
+references, exact `@name` task handles, bare IDs, and unique ID prefixes use the
+same resolver. Handles resolve within the selected repository before delivery
+ownership checks.[^commands]
 
 The inbox is the `inbox` directory under the task directory. Entries are
 numbered files, the next message written as the four-digit successor of the

@@ -188,12 +188,16 @@ pub(super) fn projection(
         (None, "unknown")
     };
     // Commands are offered only for identifiers accepted by headless lookup.
+    let handle = crate::task_handles::at(dir, &id);
+    let reference = handle
+        .clone()
+        .unwrap_or_else(|| crate::task_ref::display(&id));
     let commands = if !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         vec![
-            format!("ahu task ahu:task:{id}"),
-            format!("ahu result ahu:task:{id} --output json"),
-            format!("ahu diff ahu:task:{id}"),
-            format!("ahu wait ahu:task:{id} --output json"),
+            format!("ahu task {reference}"),
+            format!("ahu result {reference} --output json"),
+            format!("ahu diff {reference}"),
+            format!("ahu wait {reference} --output json"),
         ]
     } else {
         Vec::new()
@@ -201,6 +205,7 @@ pub(super) fn projection(
     let attempt = spec.map(|s| super::attempt_dir(dir, s));
     json!({
         "backend":"headless", "task_id":id, "task_ref":crate::task_ref::display(&id), "number":spec.map(|s| s.attempt),
+        "task_handle":handle,
         "outcome":result.map(|v| &v["outcome"]).cloned().unwrap_or(json!("unavailable")),
         "outcome_source":if error.is_some() {"unavailable"} else if result.is_some_and(|v| v["outcome"] == "running" || v["outcome"] == "interrupted") {"ownership observation"} else {"result.json"},
         "liveness":liveness, "ownership_source":"owner.lock observation", "supervisor_owned":ownership,

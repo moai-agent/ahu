@@ -175,6 +175,34 @@ fn remove_clears_record_worktree_and_branch_together() {
     assert!(!text.contains(id), "{text}");
 }
 
+#[test]
+fn removed_task_handles_stay_reserved_and_cannot_retarget_a_new_task() {
+    let repo = fixture();
+    let id = ahu::task::new_task_id().unwrap();
+    prepare_task(&repo, &id);
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    ahu::task_handles::reserve(&discovered, &id, Some("old-task"), "").unwrap();
+    let output = ahu_in(repo.path(), &["remove", "@old-task"]);
+    assert!(output.status.success(), "{}", text_of(&output));
+    assert!(!worktree_of(&repo, &id).exists());
+    assert_eq!(
+        ahu::task_handles::resolve(&discovered, "@old-task").unwrap(),
+        id
+    );
+    let output = ahu_in(repo.path(), &["task", "@old-task"]);
+    assert!(!output.status.success());
+    assert!(text_of(&output).contains("no task matching"));
+    assert!(
+        ahu::task_handles::reserve(
+            &discovered,
+            &ahu::task::new_task_id().unwrap(),
+            Some("old-task"),
+            ""
+        )
+        .is_err()
+    );
+}
+
 /// A live task is a cancellation, not a removal, and is told so.
 #[test]
 fn remove_refuses_a_live_task_and_points_at_cancel() {

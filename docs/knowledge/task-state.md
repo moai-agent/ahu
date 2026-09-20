@@ -96,7 +96,7 @@ attempting removal, leaves redirected paths alone and can fail. A retained
 recordless worktree is visible as incomplete; listing does not delete it or
 prove its contents disposable.[^launch][^tests]
 
-The launch lock, cmux group mapping, headless coordination, and scoped task index
+The launch lock, cmux group mapping, task handle reservations, headless coordination, and scoped task index
 belong to the primary checkout’s state store. Hygiene and generated architecture text use the invoking
 checkout's store. Paths come from explicit checkout and repository discovery.
 ahu neither resolves state through `AHU_STATE_DIR` nor injects it into sessions.
@@ -104,6 +104,13 @@ The `--repo` prefix selects a checkout; `AHU_REPO_ROOT`, `AHU_STATE_DIR`,
 `AHU_RUNTIME_DIR`, and `AHU_TASK_INDEX_DIR` do not select stores. Conventional old
 external roots and explicit `legacy-lookup.json` roots are read in place without
 migration.[^state][^storage][^task][^launch]
+
+New tasks receive immutable `@name` handles. A launch can choose `--name`, or
+derive a short name from its title and add a numeric suffix on collision.
+Linked checkouts share the primary repository's bindings. Both directions of
+the name-to-ID binding must agree before lookup. Removal retains reservations;
+old handles cannot name newly created tasks. Existing task IDs and unique ID
+prefixes still resolve, and older tasks are not renamed.[^launch][^commands]
 
 Coordinator shortcuts preserve the invoking directory and configured model.
 Inside cmux they join the repository's group before starting the harness,

@@ -52,7 +52,8 @@ if scenario in ('child','mailbox'):
   time.sleep(0.3)
  child=os.environ['CHILD_PROMPT']
  env=dict(os.environ,SCENARIO='success')
- r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--headless','--background','--output','json','--prompt-file',child],env=env,capture_output=True,text=True)
+ extra=['--name',os.environ['CHILD_TASK_NAME']] if 'CHILD_TASK_NAME' in os.environ else []
+ r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--headless','--background','--output','json','--prompt-file',child]+extra,env=env,capture_output=True,text=True)
  assert r.returncode==0, r.stderr
  child_id=json.loads(r.stdout)['task_id']
  r=subprocess.run([os.environ['AHU_BIN'],'wait',child_id,'--output','json'],env=env,capture_output=True,text=True)
@@ -195,6 +196,128 @@ fn foreground_keeps_primary_coordination_and_identity_without_native_copies() {
         "{}",
         String::from_utf8_lossy(&inspect.stderr)
     );
+}
+
+#[test]
+fn task_handles_round_trip_through_controls_siblings_and_resume_without_reassignment() {
+    let f = Fixture::new();
+    let output = f.launch("success", &["--name", "@storage-cleanup"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = Fixture::value(&output);
+    let id = value["task_id"].as_str().unwrap();
+    assert_eq!(value["task_handle"], "@storage-cleanup");
+    assert_eq!(value["review"]["task_handle"], "@storage-cleanup");
+    let linked = f.external.path().join("linked");
+    common::git(
+        f.repo.path(),
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    );
+    for command in ["task", "result", "wait"] {
+        let output = f
+            .command()
+            .current_dir(&linked)
+            .args([command, "@STORAGE-CLEANUP", "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let inspected = Fixture::value(&output);
+        assert_eq!(inspected["task_id"], id);
+        assert_eq!(inspected["task_handle"], "@storage-cleanup");
+    }
+    for args in [
+        vec!["diff", "@storage-cleanup"],
+        vec!["message", "@storage-cleanup", "hello"],
+        vec!["cleanup", "@storage-cleanup"],
+        vec!["cancel", "@storage-cleanup"],
+    ] {
+        let output = f.command().args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let prompt = f.external.path().join("resume.txt");
+    std::fs::write(&prompt, "continue synthetic task").unwrap();
+    let output = f
+        .command()
+        .args([
+            "resume",
+            "@storage-cleanup",
+            "--prompt-file",
+            prompt.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let resumed = Fixture::value(&output);
+    assert_eq!(resumed["task_id"], id);
+    let output = f
+        .command()
+        .args(["wait", "@storage-cleanup", "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(Fixture::value(&output)["task_handle"], "@storage-cleanup");
+    let rejected = f.launch("success", &["--name", "storage-cleanup"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("already reserved"));
+    assert_eq!(
+        ahu::task_handles::resolve(
+            &ahu::git::discover(f.repo.path()).unwrap(),
+            "@storage-cleanup"
+        )
+        .unwrap(),
+        id
+    );
+}
+
+#[test]
+fn generated_handles_are_short_unique_and_dry_run_does_not_reserve_them() {
+    let f = Fixture::new();
+    let dry = f.launch("success", &["--title", "Parser cleanup", "--dry-run"]);
+    assert!(
+        dry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let preview = Fixture::value(&dry);
+    assert_eq!(preview["task_handle_candidate"], "@parser-cleanup");
+    assert_eq!(preview["task_handle_reserved"], false);
+    let repo = ahu::git::discover(f.repo.path()).unwrap();
+    assert!(
+        !ahu::state::coordination_dir(&repo)
+            .unwrap()
+            .join("task-handles")
+            .exists()
+    );
+    for expected in ["@parser-cleanup", "@parser-cleanup-2"] {
+        let out = f.launch("success", &["--title", "Parser cleanup"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(Fixture::value(&out)["task_handle"], expected);
+    }
 }
 
 #[test]
@@ -345,6 +468,7 @@ fn recursive_registered_child_inherits_headless_and_is_discoverable() {
     let out = f
         .command()
         .env("SCENARIO", "child")
+        .env("CHILD_TASK_NAME", "@nested-worker")
         .env("CHILD_PROMPT", prompt)
         .args([
             "launch",
@@ -373,6 +497,13 @@ fn recursive_registered_child_inherits_headless_and_is_discoverable() {
     assert_eq!(
         Fixture::value(&listed)["tasks"].as_array().unwrap().len(),
         2
+    );
+    assert!(
+        Fixture::value(&listed)["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["task_handle"] == "@nested-worker")
     );
 }
 #[test]

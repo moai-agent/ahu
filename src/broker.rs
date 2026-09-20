@@ -73,6 +73,7 @@ struct Request {
     prompt: String,
     title: Option<String>,
     summary: Option<String>,
+    name: Option<String>,
     timeout_seconds: u64,
     native_helpers: Option<String>,
     allow_widened_approvals: bool,
@@ -266,6 +267,9 @@ impl Broker {
             if let Some(summary) = request.summary {
                 command.arg("--summary").arg(summary);
             }
+            if let Some(name) = request.name {
+                command.arg("--name").arg(name);
+            }
             let closed = self
                 .private_dir
                 .parent()
@@ -281,7 +285,7 @@ impl Broker {
                     let output=bounded_dispatch(&mut command, &closed, &cancelled)?;
                     if !output.status.success() { return Ok(json!({"ok":false,"error":"child dispatch failed","exit_code":output.status.code()})); }
                     let launch:Value=serde_json::from_slice(&output.stdout).map_err(|e|Error::new(e.to_string()))?;
-                    Ok(json!({"ok":true,"launch":{"schema_version":2,"backend":"headless","task_id":launch["task_id"],"runtime":launch["runtime"],"worktree":launch["worktree"],"acceptance":"not assessed"}}))
+                    Ok(json!({"ok":true,"launch":{"schema_version":2,"backend":"headless","task_id":launch["task_id"],"task_handle":launch["task_handle"],"runtime":launch["runtime"],"worktree":launch["worktree"],"acceptance":"not assessed"}}))
                 })();
                 let value=result.unwrap_or_else(|_|json!({"ok":false,"error":"child dispatch unavailable"}));
                 let _=headless::durable_json(&response,&value);
@@ -344,6 +348,7 @@ pub fn request(
         prompt: prompt.into(),
         title: display.title.clone(),
         summary: display.summary.clone(),
+        name: display.name.clone(),
         timeout_seconds: options.timeout_seconds,
         native_helpers: options
             .native_helpers_explicit

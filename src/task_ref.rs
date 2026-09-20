@@ -2,6 +2,14 @@
 
 use crate::util::Result;
 
+pub fn resolve(repo: &crate::git::Repo, input: &str) -> Result<String> {
+    if input.starts_with('@') {
+        crate::task_handles::resolve(repo, input)
+    } else {
+        normalize(input)
+    }
+}
+
 /// Accept the existing bare identifier/prefix or its explicit task reference.
 /// Never reinterpret a reference to another resource kind as a task.
 pub fn normalize(input: &str) -> Result<String> {
@@ -16,6 +24,9 @@ pub fn normalize(input: &str) -> Result<String> {
     };
     if id.is_empty() {
         crate::bail!(kind: crate::util::ErrorKind::Usage, "a task id must not be empty.");
+    }
+    if id.starts_with('@') {
+        crate::bail!(kind: crate::util::ErrorKind::Usage, "use @name directly for a task handle, or ahu:task:<uuid> for a canonical reference");
     }
     Ok(id.to_string())
 }

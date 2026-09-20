@@ -37,6 +37,11 @@ accept it, the bare hyphenated form, uppercase, or an unambiguous prefix. The
 bare form is what records and stores hold. An empty ID after normalization is
 refused as a usage error.[^task][^commands]
 
+Task commands also resolve exact `@name` handles through immutable bindings
+owned by the primary checkout. Linked checkouts share the same repository names;
+removal retains the binding to its original task ID. Human handles are lookup
+references, not a replacement for task identity or delivery authority.[^commands]
+
 Record schema 3 writes these version-7 IDs; schema 2 wrote 18-character hex IDs.
 The fields are otherwise identical, so schema-2 records load unchanged and
 keep their original IDs. The build reads exactly schemas 2 and 3 and refuses

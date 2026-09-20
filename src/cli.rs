@@ -79,8 +79,8 @@ Commands:
 
 Task references:
   Use ahu:task:<id> to identify a task explicitly. Bare IDs and unique ID
-  prefixes remain accepted. Agent names such as @worker select agents when
-  launching; they are not task references.
+  prefixes remain accepted. Exact @name handles select tasks in this repository.
+  In `launch @name`, @name selects a registered agent instead.
 
 Options:
   -h, --help            Print this help message
@@ -114,6 +114,8 @@ launcher options:
   --no-focus            Do not switch to the new session after launching
 
 launch options:
+  --name <name>        Reserve an immutable @name for this task in the repository.
+                        By default, generate a short name from the displayed title.
   --prompt <text>       Use an inline prompt (conflicts with --prompt-file)
   --prompt-file <path>  Read a UTF-8 prompt file
                         With neither option, read non-terminal stdin to EOF.
@@ -645,7 +647,7 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
                 filtered.push(value.to_string());
                 if matches!(
                     value,
-                    "--prompt" | "--prompt-file" | "--title" | "--summary" | "--output"
+                    "--prompt" | "--prompt-file" | "--title" | "--summary" | "--name" | "--output"
                 ) {
                     filtered.push(value_for(value, rest, &mut i)?);
                 }
@@ -695,6 +697,11 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     let mut index = 1;
     while index < rest.len() {
         match rest[index].as_str() {
+            "--name" if display.name.is_none() => {
+                display.name = Some(crate::task_handles::name(&value_for(
+                    "--name", rest, &mut index,
+                )?)?);
+            }
             "--title" if display.title.is_none() => {
                 display.title = Some(value_for("--title", rest, &mut index)?);
             }

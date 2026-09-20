@@ -847,7 +847,8 @@ pub fn launch(
         confined(plan.task_dir.parent().expect("store"), true)?;
     }
     crate::commands::preflight(console, repo, &loaded, &plan, prompt, dry_run)?;
-    let preview = json!({"schema_version":1,"backend":"headless","task_id":plan.task_id,"worktree":plan.worktree,
+    let mut preview = json!({"schema_version":1,"backend":"headless","task_id":plan.task_id,"worktree":plan.worktree,
+        "task_handle_candidate":format!("@{}",plan.task_name.clone().unwrap_or_else(||crate::task_handles::generated_name(&plan.title))), "task_handle_reserved":false,
         "branch":plan.branch,"command":plan.command.redacted(),"executable":plan.harness_executable,"capabilities":spec,
         "runtime":plan.task_dir,"identity": {"agent":plan.agent_label(),"harness":plan.pair.harness,"model":plan.pair.model},
         "acceptance":"not assessed", "cmux_integration":cmux_integration});
@@ -907,6 +908,14 @@ pub fn launch(
         .base_commit
         .as_deref()
         .ok_or_else(|| Error::new("missing base commit"))?;
+    let handle =
+        crate::task_handles::reserve(repo, &plan.task_id, plan.task_name.as_deref(), &plan.title)?;
+    preview["task_handle"] = json!(handle);
+    preview["task_handle_reserved"] = json!(true);
+    console.say(&format!(
+        "Task {handle} ({})\n",
+        crate::task_ref::display(&plan.task_id)
+    ))?;
     crate::git::add_worktree(repo, &plan.worktree, &plan.branch, base)?;
     // Preserve preparation failures for review; never delete reviewable work.
     let materialize = crate::snapshot::materialize(&repo.root, &plan.snapshot, &plan.worktree)?;
@@ -1036,11 +1045,14 @@ fn validate_environment(
 pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
     if !json_output && value["review"].is_object() {
         let review = &value["review"];
+        let canonical = crate::task_ref::display(review["task_id"].as_str().unwrap_or("unknown"));
+        let label = match review["task_handle"].as_str() {
+            Some(handle) => format!("{handle} ({canonical})"),
+            None => canonical,
+        };
         println!(
             "{} [headless; recorded state {}]",
-            review::safe(&crate::task_ref::display(
-                review["task_id"].as_str().unwrap_or("unknown")
-            )),
+            review::safe(&label),
             review::safe(review["session_state"].as_str().unwrap_or("unknown"))
         );
         print!("{}", review::render(review, false));
@@ -2382,7 +2394,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
 }
 
 pub(crate) fn lookup(repo: &crate::git::Repo, id: &str) -> Result<PathBuf> {
-    let id = crate::task_ref::normalize(id)?;
+    let id = crate::task_ref::resolve(repo, id)?;
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         bail!("invalid headless task id");
     }
@@ -2491,6 +2503,7 @@ fn review_attempt(
         Err(error) => return Err(error.into()),
     };
     value["review"] = review::projection(dir, Some(spec), Some(&value), None);
+    value["task_handle"] = value["review"]["task_handle"].clone();
     value["capabilities"] = serde_json::to_value(spec)?;
     Ok(value)
 }

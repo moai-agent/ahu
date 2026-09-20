@@ -598,7 +598,7 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         // disclosure surface as the launch preview, so it escapes the same way.
         console.say(&format!(
             "{} [session {}] {}\n  backend   {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n  liveness  {}\n",
-            display_safe(&crate::task_ref::display(&record.task_id)),
+            display_safe(&crate::task_handles::label(repo, &record.task_id)),
             record.state.as_str(),
             display_safe(&record.title),
             if review.is_some() { "headless" } else { "cmux" },
@@ -833,7 +833,7 @@ fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task:
 /// The task index is consulted for ids that are not local records, so a task is
 /// reachable from any checkout of the repository that launched it.
 fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
-    let id = crate::task_ref::normalize(input)?;
+    let id = crate::task_ref::resolve(repo, input)?;
     // Inspection needs no live cmux connection and does not rewrite records.
     let listing = task::list(repo)?;
     if let Some((dir, record)) = listing.records.iter().find(|(_, r)| r.task_id == id) {
@@ -907,7 +907,7 @@ fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
 
 /// Resolve exact IDs before unique prefixes, including unreadable candidates.
 fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
-    let normalized = crate::task_ref::normalize(id)?;
+    let normalized = crate::task_ref::resolve(repo, id)?;
     let id: &str = &normalized;
     // Inspection needs no live cmux connection and does not rewrite records.
     let listing = task::list(repo)?;
@@ -950,6 +950,7 @@ pub fn task_summary(
         "schema_version": 1,
         "task_id": record.task_id,
         "task_ref": crate::task_ref::display(&record.task_id),
+        "task_handle": crate::task_handles::at(dir, &record.task_id),
         "agent": record.agent_label(),
         "harness": record.identity.harness,
         "model": record.identity.model,
@@ -997,7 +998,7 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
     } else {
         console.say(&format!(
             "{} [session {}]\n  backend   {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  base      {}\n  worktree  {}\n  exists    {}\n  record    {}\n  liveness  {}\n\nState is recorded, not a live activity check. Task completion is not verified. Liveness is observed at this moment, not a verdict; `unknown` means ahu could not read the signal.\n",
-            display_safe(&crate::task_ref::display(&record.task_id)), record.state.as_str(), value["execution_backend"].as_str().unwrap_or("unknown"), display_safe(&record.agent_label()),
+            display_safe(&crate::task_handles::label(repo, &record.task_id)), record.state.as_str(), value["execution_backend"].as_str().unwrap_or("unknown"), display_safe(&record.agent_label()),
             display_safe(&record.identity.harness), display_safe(&record.identity.model),
             display_safe(&record.branch), display_safe(record.base_commit.as_deref().unwrap_or("unknown")),
             display_path(&record.worktree), record.worktree.is_dir(), display_path(&dir.join("task.json")),
@@ -1111,7 +1112,7 @@ pub fn message_cmd(
     let entry = deliver_inbox_message(&dir, text)?;
     console.say(&format!(
         "delivered inbox message {entry:04} to task {}.\n",
-        display_safe(&crate::task_ref::display(&record.task_id))
+        display_safe(&crate::task_handles::label(repo, &record.task_id))
     ))?;
     Ok(0)
 }
@@ -1321,7 +1322,7 @@ pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32>
         }
         eprintln!(
             "Run `ahu result {}` for the full recorded list.",
-            display_safe(&crate::task_ref::display(&record.task_id))
+            display_safe(&crate::task_handles::reference(repo, &record.task_id))
         );
     }
     if std::io::stdout().is_terminal() {
@@ -1538,7 +1539,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     if let Err(e) = crate::task_index::remove_in(repo, &record.task_id) {
         eprintln!(
             "warning: could not remove the task index entry for {}: {e}",
-            display_safe(&crate::task_ref::display(&record.task_id))
+            display_safe(&crate::task_handles::label(repo, &record.task_id))
         );
     }
     let mut said = format!("removed task {}\n", display_safe(task_id));
@@ -1981,9 +1982,9 @@ fn submit(
     console.say(&format!(
         "\nStarted @{} in cmux.\n  task       {}\n  worktree   {}\n\nOpen session: ahu focus {}\nList tasks:   ahu tasks\n",
         display_safe(&launched.record.identity.agent),
-        display_safe(&crate::task_ref::display(&launched.record.task_id)),
+        display_safe(&crate::task_handles::label(repo, &launched.record.task_id)),
         display_path(launched.record.worktree.strip_prefix(&repo.root).unwrap_or(&launched.record.worktree)),
-        display_safe(&crate::task_ref::display(&launched.record.task_id)),
+        display_safe(&crate::task_handles::reference(repo, &launched.record.task_id)),
     ))?;
     console.say(&style::stdout().paint(Role::Warning, &render_launch_notes(&launched.notes)))?;
     Ok(0)

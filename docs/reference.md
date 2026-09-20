@@ -12,9 +12,41 @@ that checkout. Without this prefix, ahu uses the current directory. Ambient
 not select storage. See [state and compatibility](#state-and-compatibility) for
 explicit lookup of old stores.
 
-Task commands consistently accept `ahu:task:<id>`, bare IDs, uppercase, and
-unambiguous ID prefixes. References to other resource kinds are refused.
-`@name` selects an agent for launch. It is not a task reference.
+Task commands accept exact `@name` handles, `ahu:task:<id>`, bare IDs, uppercase,
+and unambiguous ID prefixes. References to other resource kinds are refused.
+`ahu launch @name` selects a registered agent; `ahu task @name` selects a task.
+
+### Task handles
+
+New tasks receive a short name derived from up to four words of their displayed
+title. Repeated titles add a numeric suffix: `@parser-cleanup`, then
+`@parser-cleanup-2`. `--name parser-cleanup` or `--name @parser-cleanup` chooses an
+explicit name instead; an existing reservation rejects the launch.
+
+Names start with a letter and contain at most 48 letters (`a-z`), digits, or
+single hyphens. They are case-insensitive and displayed in lowercase. A handle must match
+in full; `@parser` is not a prefix match for `@parser-cleanup`.
+
+Handles are immutable and scoped to the repository. Linked checkouts share them;
+use `ahu --repo <checkout>` for another repository. All task controls accept them,
+including `task`, `focus`, `diff`, `message`, `wait`, `result`, `cancel`, `resume`,
+`cleanup`, and `remove`. Resume retains the same task identity and handle.
+
+Reservations remain after removal or a failed launch. They are not recycled or
+renamed, so an old command cannot target a later task. A removed task's handle
+still names its original task ID and reports that its task is unavailable. Two
+owner-only bindings under the primary checkout's coordination store must agree
+before resolution; incomplete, corrupt or redirected bindings are refused.
+These checks do not isolate processes running as the same OS user.
+
+Existing tasks keep their canonical references and are not renamed automatically.
+Human output shows the handle alongside canonical identity. JSON retains
+`task_id` and `task_ref`; `task_handle` is an additive field and is null when no
+verified handle is available. Dry-run previews show `task_handle_candidate` and
+`task_handle_reserved: false`; they create no reservation. The actual generated
+name can acquire a suffix at submission if another task claimed it meanwhile.
+Registered agent names and task handles may share text; the command supplies
+their distinct meaning. Names locate tasks and do not grant authority.
 
 ## Scriptable launch previews
 

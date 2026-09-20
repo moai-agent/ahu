@@ -149,6 +149,54 @@ fn run(repo: &TestRepo, args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[test]
+#[cfg(unix)]
+fn focus_by_handle_selects_the_bound_workspace_and_json_keeps_canonical_identity() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = TestRepo::new();
+    let id = ahu::task::new_task_id().unwrap();
+    let dir = record(&repo, &id);
+    let path = dir.join("task.json");
+    let mut saved: ahu::task::TaskRecord =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved.cmux_workspace_id = Some("only-this-workspace".into());
+    ahu::state::write_json(&path, &saved).unwrap();
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    ahu::task_handles::reserve(&discovered, &id, Some("review"), "").unwrap();
+    let cmux = repo.state_path().join("cmux");
+    std::fs::write(
+        &cmux,
+        r#"#!/usr/bin/env python3
+import json,sys
+if sys.argv[1] == 'ping': print('PONG'); sys.exit(0)
+assert sys.argv[1:3] == ['rpc','workspace.select']
+assert json.loads(sys.argv[3]) == {'workspace_id':'only-this-workspace'}
+print('{}')
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let focused = common::ahu()
+        .args(["focus", "@review"])
+        .current_dir(repo.path())
+        .env("AHU_CMUX_BIN", &cmux)
+        .output()
+        .unwrap();
+    assert!(
+        focused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&focused.stderr)
+    );
+    let inspected = run(&repo, &["task", "@review", "--output", "json"]);
+    assert!(inspected.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(value["task_id"], id);
+    assert_eq!(value["task_ref"], format!("ahu:task:{id}"));
+    assert_eq!(value["task_handle"], "@review");
+    let human = run(&repo, &["task", "@review"]);
+    assert!(String::from_utf8_lossy(&human.stdout).contains(&format!("@review (ahu:task:{id})")));
+}
+
 fn run_with_runtime(repo: &TestRepo, runtime: &std::path::Path, args: &[&str]) -> Output {
     ahu::state::write_json(
         &repo.path().join(".ahu/state/legacy-lookup.json"),
