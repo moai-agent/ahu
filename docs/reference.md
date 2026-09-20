@@ -985,7 +985,18 @@ Listing does not remove it or establish that its contents are safe to delete.
 The primary checkout owns the launch lock, cmux group mapping, headless
 coordination, and scoped task index. Hygiene timestamps and generated architecture
 documents use the invoking checkout’s `.ahu/state/`. All locations derive from
-explicit repository discovery, not ambient storage selectors.
+explicit repository discovery, not ambient storage selectors. Ownership requires
+positive Git verification, with filesystem checks before reusing process-local
+evidence. Normal primary and linked checkouts are supported. Separate Git-directory
+layouts are refused when Git cannot identify a verifiable primary checkout.
+
+Execution admission, reconciliation, and cancellation stay within their owning
+storage domain. Malformed records in unrelated legacy stores cannot fail a new
+execution. Session checkpoint schema 2 binds native session evidence to task,
+attempt, and harness. Invalid checkpoints remain unavailable; invalid ownership
+metadata produces unknown liveness. Opened metadata files must have a single hard
+link, the current user as owner, and safe permissions. New coordination records
+and ownership locks require owner-only permissions.
 
 Conventional old stores under `$HOME/.local/state/ahu/runtime` and
 `$HOME/.local/state/ahu/task-index` remain lookup sources. Additional old roots

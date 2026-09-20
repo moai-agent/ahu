@@ -313,7 +313,7 @@ pub fn save(dir: &Path, record: &TaskRecord, prompt: &str) -> Result<()> {
 
 pub fn load(dir: &Path) -> Result<TaskRecord> {
     let path = crate::storage::TaskStorage::new(dir).record();
-    let bytes = state::read_private_file(&path)
+    let bytes = crate::storage::read_task_metadata(&path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
 
     // The schema version is read on its own, before the record is deserialized

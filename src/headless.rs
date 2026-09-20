@@ -578,8 +578,16 @@ impl ConfinedDir {
 }
 
 pub fn discover(repo: &crate::git::Repo) -> Result<Vec<PathBuf>> {
+    discover_stores(repo, stores(repo)?)
+}
+
+fn discover_domain(repo: &crate::git::Repo, domain: &Path) -> Result<Vec<PathBuf>> {
+    discover_stores(repo, vec![domain.to_path_buf()])
+}
+
+fn discover_stores(repo: &crate::git::Repo, domains: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    for dir in stores(repo)? {
+    for dir in domains {
         confined_in(repo, &dir, false)?;
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -614,19 +622,16 @@ pub(crate) fn durable_json(path: &Path, value: &impl serde::Serialize) -> Result
 }
 
 pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    confined(
-        path.parent().ok_or_else(|| Error::new("missing parent"))?,
-        false,
-    )?;
-    serde_json::from_slice(&state::read_private_file(path)?)
-        .map_err(|e| Error::new(format!("invalid {}: {e}", path.display())))
+    serde_json::from_slice(&review::read_bytes(path, None)?)
+        .map_err(|_| Error::new(format!("invalid metadata at {}", path.display())))
 }
+
 fn attempt_dir(dir: &Path, spec: &Spec) -> PathBuf {
     dir.join(format!("attempt-{}", spec.attempt))
 }
 fn frozen_digest(dir: &Path) -> Result<String> {
-    let mut bytes = state::read_private_file(&dir.join("task.json"))?;
-    bytes.extend(state::read_private_file(&dir.join("headless.json"))?);
+    let mut bytes = review::read_bytes(&dir.join("task.json"), None)?;
+    bytes.extend(review::read_bytes(&dir.join("headless.json"), None)?);
     Ok(digest_bytes(&bytes))
 }
 
@@ -868,7 +873,7 @@ pub fn launch(
         bail!("parent is cancelling; child admission refused");
     }
     validate_parent_attempt(repo, &spec)?;
-    let previous = discover(repo)?;
+    let previous = discover_domain(repo, &store(repo)?)?;
     let mut tree_count = 0;
     for dir in &previous {
         let recorded: Spec = read_json(&dir.join("headless.json"))?;
@@ -1086,9 +1091,7 @@ impl Lock {
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)?;
-        if !file.metadata()?.is_file() {
-            bail!("ownership lock is not a regular file");
-        }
+        crate::storage::validate_owned_metadata(&file.metadata()?, true)?;
         // SAFETY: file owns a valid descriptor; dropping it releases a successful probe.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok(false);
@@ -1110,8 +1113,9 @@ impl Lock {
             .read(true)
             .write(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(path)?;
+        crate::storage::validate_owned_metadata(&file.metadata()?, true)?;
         // SAFETY: file owns a valid descriptor for the duration of the call.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = std::io::Error::last_os_error();
@@ -1280,27 +1284,21 @@ impl Events {
                 return;
             }
         };
-        if self.native_event_count < 256 {
-            let mut metadata = event.clone();
-            strip_native_text(&mut metadata);
-            if bounded_native_metadata(&metadata) {
-                self.native.observe(harness, &metadata);
-            } else {
-                self.failed = true;
-                self.blockers
-                    .push("native metadata evaluation bound exceeded".into());
-            }
-            if event
-                .get("subtype")
-                .and_then(Value::as_str)
-                .is_some_and(|s| s.starts_with("task_"))
-            {
-                self.native_event_count += 1;
-            }
-        } else {
+        let metadata = native_metadata(harness, &event);
+        let helper_event = metadata["type"] == "system" || metadata["type"] == "collab";
+        if helper_event && self.native_event_count >= 256 {
             self.failed = true;
             self.blockers
                 .push("native helper evaluation limit exceeded".into());
+        } else if bounded_native_metadata(&metadata) {
+            self.native.observe(harness, &metadata);
+        } else {
+            self.failed = true;
+            self.blockers
+                .push("native metadata evaluation bound exceeded".into());
+        }
+        if helper_event {
+            self.native_event_count += 1;
         }
         let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
         let session = event
@@ -1311,9 +1309,7 @@ impl Events {
             // error events, which is what makes its errors resumable at all.
             .or_else(|| event.get("sessionID"))
             .and_then(Value::as_str);
-        if let Some(session) =
-            session.filter(|s| !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control))
-        {
+        if let Some(session) = session.filter(|s| valid_session(s)) {
             if let Some(previous) = &self.session {
                 if previous != session {
                     self.failed = true;
@@ -1632,33 +1628,94 @@ fn collect_write_paths(event: &Value) -> Vec<String> {
     candidates
 }
 
-/// Remove response bodies before feeding helper bookkeeping. Identifiers and
-/// reported resource references are bounded, and never dereferenced.
-fn strip_native_text(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            for key in [
-                "summary",
-                "result",
-                "response",
-                "text",
-                "description",
-                "content",
-            ] {
-                map.remove(key);
-            }
-            for value in map.values_mut() {
-                strip_native_text(value);
-            }
-        }
-        Value::Array(items) => {
-            for value in items.iter_mut().take(4096) {
-                strip_native_text(value);
-            }
-            items.truncate(4096);
-        }
-        _ => (),
+/// Project exactly the fields consumed by helper accounting. Ordinary tool
+/// payloads and native text use the stream bounds, not helper metadata bounds.
+fn native_metadata(harness: &str, event: &Value) -> Value {
+    let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
+    if harness != "claude-code" {
+        // The foreign observer only tests these two strings for this marker.
+        return if kind.contains("collab")
+            || event
+                .pointer("/item/type")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.contains("collab"))
+        {
+            json!({"type":"collab"})
+        } else {
+            json!({})
+        };
     }
+    let mut out = json!({});
+    let fields: &[&str] = match (kind, subtype) {
+        ("system", "task_started") => &[
+            "task_id",
+            "task_type",
+            "subagent_type",
+            "spawn_depth",
+            "is_backgrounded",
+        ],
+        ("system", "task_progress") => &["task_id"],
+        ("system", "task_notification") => &["task_id", "status", "output_file"],
+        ("result", _) => &[],
+        _ => return out,
+    };
+    out["type"] = json!(kind);
+    // Only the three known system subtypes are consumed; terminal subtypes
+    // and arbitrary payload strings must not enter helper accounting.
+    if kind == "system" {
+        out["subtype"] = json!(subtype);
+    }
+    for field in fields {
+        let value = event.get(field).filter(|v| match *field {
+            "spawn_depth" => v.is_u64(),
+            "is_backgrounded" => v.is_boolean(),
+            _ => v.is_string(),
+        });
+        if let Some(value) = value {
+            out[field] = value.clone();
+        }
+    }
+    if matches!(
+        (kind, subtype),
+        ("system", "task_progress" | "task_notification")
+    ) && let Some(tokens) = event.pointer("/usage/total_tokens").and_then(Value::as_u64)
+    {
+        out["usage"] = json!({"total_tokens":tokens});
+    }
+    if kind == "result"
+        && let Some(stats) = event.get("subagent_stats")
+    {
+        let mut selected = json!({});
+        for field in ["spawned", "completed", "max_depth"] {
+            if let Some(value) = stats.get(field).and_then(Value::as_u64) {
+                selected[field] = json!(value);
+            }
+        }
+        for field in ["depth_limit", "concurrency_limit", "budget"] {
+            if let Some(value) = stats
+                .get("refused")
+                .and_then(|v| v.get(field))
+                .and_then(Value::as_u64)
+            {
+                if selected["refused"].is_null() {
+                    selected["refused"] = json!({});
+                }
+                selected["refused"][field] = json!(value);
+            }
+        }
+        if let Some(roles) = stats.get("by_type").and_then(Value::as_object) {
+            selected["by_type"] = Value::Object(
+                roles
+                    .iter()
+                    .filter(|(_, count)| count.is_u64())
+                    .map(|(role, count)| (role.clone(), count.clone()))
+                    .collect(),
+            );
+        }
+        out["subagent_stats"] = selected;
+    }
+    out
 }
 
 fn bounded_native_metadata(value: &Value) -> bool {
@@ -1724,13 +1781,52 @@ pub(crate) fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>
     (!paths.is_empty()).then_some(paths)
 }
 
+/// A session locator is observed evidence only for its exact owning attempt.
+/// Native data remains harness-owned; this schema records no inferred location.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionCheckpoint {
+    schema_version: u32,
+    task_id: String,
+    attempt: u32,
+    harness: String,
+    session: String,
+    native_data_location: Option<String>,
+}
+impl SessionCheckpoint {
+    fn validate(&self, record: &task::TaskRecord, spec: &Spec, id: &str) -> Result<()> {
+        if self.schema_version != 2
+            || self.task_id != id
+            || record.task_id != id
+            || !matches!(record.schema_version, 2 | 3)
+            || self.attempt == 0
+            || self.attempt != spec.attempt
+            || self.harness != record.identity.harness
+            || self.harness.is_empty()
+            || !valid_session(&self.session)
+            || self.native_data_location.is_some()
+        {
+            bail!("native session checkpoint does not belong to this supported attempt");
+        }
+        Ok(())
+    }
+}
+fn valid_session(session: &str) -> bool {
+    !session.trim().is_empty() && session.len() <= 4096 && !session.chars().any(char::is_control)
+}
+struct SessionOwner {
+    task_id: String,
+    attempt: u32,
+    harness: String,
+}
+
 /// Pipe readers never wait for EOF from an escaped descendant: the supervisor
 /// polls process completion independently and bounds the final drain.
 fn capture(
     mut pipe: impl Read + Send + 'static,
     checkpoint: PathBuf,
     worktree: PathBuf,
-    harness: Option<String>,
+    owner: Option<SessionOwner>,
     events: std::sync::Arc<std::sync::Mutex<Events>>,
     tx: std::sync::mpsc::Sender<std::result::Result<(), String>>,
 ) {
@@ -1754,14 +1850,24 @@ fn capture(
                             let mut events = events
                                 .lock()
                                 .map_err(|_| Error::new("stream evaluator unavailable"))?;
-                            if let Some(harness) = &harness {
+                            if let Some(owner) = &owner {
                                 let had_session = events.session.is_some();
-                                events.observe(harness, &line);
+                                events.observe(&owner.harness, &line);
                                 observe_writes(&mut events, &line, &worktree);
                                 if !had_session && events.session.is_some() {
                                     durable_json(
                                         &checkpoint,
-                                        &json!({"schema_version":1,"session":events.session,"source":"harness event stream","native_data_location":null}),
+                                        &SessionCheckpoint {
+                                            schema_version: 2,
+                                            task_id: owner.task_id.clone(),
+                                            attempt: owner.attempt,
+                                            harness: owner.harness.clone(),
+                                            session: events
+                                                .session
+                                                .clone()
+                                                .expect("session was just observed"),
+                                            native_data_location: None,
+                                        },
                                     )?;
                                 }
                             } else {
@@ -1782,7 +1888,7 @@ fn capture(
                 let mut events = events
                     .lock()
                     .map_err(|_| Error::new("stream evaluator unavailable"))?;
-                if harness.is_none() {
+                if owner.is_none() {
                     events.observe_stderr(&line);
                 } else {
                     events.failed = true;
@@ -1992,7 +2098,11 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             .ok_or_else(|| Error::new("missing stdout"))?,
         attempt.join("native-session.json"),
         record.worktree.clone(),
-        Some(record.identity.harness.clone()),
+        Some(SessionOwner {
+            task_id: record.task_id.clone(),
+            attempt: spec.attempt,
+            harness: record.identity.harness.clone(),
+        }),
         stdout_events.clone(),
         out_tx,
     );
@@ -2203,7 +2313,11 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             .push(json!({"task_id":id,"outcome":value["outcome"],"error":value["error"]}));
     }
     let mut ahu_children = Vec::new();
-    for child_dir in discover(&repo)? {
+    for child_dir in discover_domain(
+        &repo,
+        dir.parent()
+            .ok_or_else(|| Error::new("missing owning store"))?,
+    )? {
         let child_spec: Spec = read_json(&child_dir.join("headless.json"))?;
         if child_spec.parent_task.as_deref() == Some(record.task_id.as_str())
             && child_spec.parent_attempt == Some(spec.attempt)
@@ -2419,15 +2533,18 @@ fn cancel_tree(repo: &crate::git::Repo, dir: &Path, reason: &str) -> Result<Vec<
     let current: Spec = read_json(&dir.join("headless.json"))?;
     let mut selected = vec![(record.task_id, current.attempt, dir.to_path_buf())];
     // Parse the inventory once; never cancel descendants of an older owner attempt.
-    let all = discover(repo)?
-        .into_iter()
-        .filter(|path| path.parent() == dir.parent())
-        .map(|path| {
-            let spec: Spec = read_json(&path.join("headless.json"))?;
-            let id = task::load(&path)?.task_id;
-            Ok((id, spec, path))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let all = discover_domain(
+        repo,
+        dir.parent()
+            .ok_or_else(|| Error::new("missing owning store"))?,
+    )?
+    .into_iter()
+    .map(|path| {
+        let spec: Spec = read_json(&path.join("headless.json"))?;
+        let id = task::load(&path)?.task_id;
+        Ok((id, spec, path))
+    })
+    .collect::<Result<Vec<_>>>()?;
     let mut i = 0;
     while i < selected.len() {
         for (id, spec, path) in &all {
@@ -2742,4 +2859,35 @@ pub fn inspection(dir: &Path) -> Result<Value> {
 /// supervisor is running.
 pub(crate) fn supervisor_owns_attempt(dir: &Path) -> Result<bool> {
     Lock::is_owned(&dir.join("owner.lock"))
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::Lock;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn review_regression_hardlinked_lock_never_borrows_live_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.lock");
+        let _held = Lock::acquire(&path).unwrap();
+        let alias = dir.path().join("alias.lock");
+        std::fs::hard_link(&path, &alias).unwrap();
+        assert!(Lock::is_owned(&alias).is_err());
+        assert!(Lock::try_acquire(&alias).is_err());
+    }
+
+    #[test]
+    fn review_regression_lock_modes_checked_on_both_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.lock");
+        drop(Lock::acquire(&path).unwrap());
+        for mode in [0o640, 0o666] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(Lock::is_owned(&path).is_err());
+            assert!(Lock::try_acquire(&path).is_err());
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(!Lock::is_owned(&path).unwrap());
+    }
 }

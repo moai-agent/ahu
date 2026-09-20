@@ -45,8 +45,17 @@ pub(crate) fn record(repo: &crate::git::Repo, dir: &Path) -> Result<crate::task:
 /// Pin the parent and refuse links, devices and oversized files before parsing.
 /// Parsing errors deliberately omit values from private records.
 pub(super) fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    serde_json::from_slice(&read_bytes(path, Some(LIMIT))?)
+        .map_err(|_| Error::new("metadata is malformed or has an unsupported shape"))
+}
+
+/// Lifecycle reads preserve the legacy unbounded result API; inspection passes
+/// a bound. Both paths pin and validate the actual descriptor identically.
+pub(super) fn read_bytes(path: &Path, limit: Option<u64>) -> Result<Vec<u8>> {
     use std::os::fd::{AsRawFd, FromRawFd};
-    let parent = ConfinedDir::open(path.parent().ok_or_else(|| Error::new("missing parent"))?)?;
+    let directory = path.parent().ok_or_else(|| Error::new("missing parent"))?;
+    let parent = ConfinedDir::open(directory)?;
+    let private = crate::storage::HeadlessStore::containing(directory)?.is_some();
     let name = ConfinedDir::entry_name(
         path.file_name()
             .and_then(|n| n.to_str())
@@ -68,19 +77,20 @@ pub(super) fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     }
     // SAFETY: openat returned a new, owned descriptor.
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > LIMIT {
-        return Err(Error::new(
-            "metadata is not a regular file within the 1 MiB inspection bound",
-        ));
-    }
+    crate::storage::validate_owned_metadata(&file.metadata()?, private)?;
     let mut bytes = Vec::new();
-    file.take(LIMIT + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > LIMIT {
-        return Err(Error::new("metadata exceeds the 1 MiB inspection bound"));
+    if let Some(limit) = limit {
+        if file.metadata()?.len() > limit {
+            return Err(Error::new("metadata exceeds the inspection bound"));
+        }
+        file.take(limit + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > limit {
+            return Err(Error::new("metadata exceeds the inspection bound"));
+        }
+    } else {
+        (&file).read_to_end(&mut bytes)?;
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|_| Error::new("metadata is malformed or has an unsupported shape"))
+    Ok(bytes)
 }
 
 pub(super) fn validate_result(value: &Value, id: &str, attempt: u32) -> Result<()> {
@@ -143,14 +153,31 @@ pub(super) fn projection(
     if ownership.is_none() {
         blockers.push("supervisor ownership unavailable; liveness unknown".into());
     }
-    let checkpoint = spec
-        .and_then(|s| read::<Value>(&super::attempt_dir(dir, s).join("native-session.json")).ok());
+    let checkpoint = spec.and_then(|spec| {
+        let path = super::attempt_dir(dir, spec).join("native-session.json");
+        if matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+            return None;
+        }
+        let validated = (|| -> Result<super::SessionCheckpoint> {
+            let checkpoint: super::SessionCheckpoint = read(&path)?;
+            let record: crate::task::TaskRecord = read(&dir.join("task.json"))?;
+            checkpoint.validate(&record, spec, &id)?;
+            Ok(checkpoint)
+        })();
+        match validated {
+            Ok(checkpoint) => Some(checkpoint),
+            Err(_) => {
+                blockers.push("native session checkpoint unavailable: unreadable, unsupported, invalid session or mismatched task/attempt/harness ownership".into());
+                None
+            }
+        }
+    });
     let session = result
         .and_then(|v| v["harness"]["session"].as_str())
         .filter(|s| !s.is_empty());
     let (session, source) = if let Some(session) = session {
         (Some(session), "result.json harness.session")
-    } else if let Some(session) = checkpoint.as_ref().and_then(|c| c["session"].as_str()) {
+    } else if let Some(session) = checkpoint.as_ref().map(|c| c.session.as_str()) {
         (Some(session), "checkpoint; harness event stream")
     } else if let Some(session) = spec
         .and_then(|s| s.session.as_deref())

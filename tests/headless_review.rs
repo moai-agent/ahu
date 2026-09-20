@@ -93,7 +93,7 @@ impl Fixture {
                 "depth":0,"attempt":1,"session":null,"native_controls":[],"gaps":[]
             }),
         );
-        std::fs::write(dir.join("owner.lock"), "").unwrap();
+        ahu::state::write_private_file(&dir.join("owner.lock"), b"").unwrap();
         Self { repo, runtime, dir }
     }
     fn run(&self, args: &[&str]) -> Output {
@@ -510,4 +510,108 @@ fn legacy_resume_refuses_without_rewriting_or_migrating_records() {
     assert_eq!(snapshot(f.runtime.path()), before);
     let repo = ahu::git::discover(f.repo.path()).unwrap();
     assert!(!ahu::headless::store(&repo).unwrap().exists());
+}
+
+#[test]
+fn review_regression_session_checkpoint_requires_bound_supported_evidence() {
+    let f = Fixture::new();
+    let valid = json!({"schema_version":2,"task_id":"abc1","attempt":1,"harness":"claude-code","session":"native-session","native_data_location":null});
+    for (field, invalid) in [
+        ("schema_version", json!(999)),
+        ("schema_version", json!(1)),
+        ("task_id", json!("another-task")),
+        ("attempt", json!(2)),
+        ("harness", json!("codex")),
+        ("session", json!("")),
+        ("session", json!("   ")),
+        ("session", json!(42)),
+        ("unexpected", json!("field")),
+        ("session", json!("x".repeat(4097))),
+        ("session", json!("bad\nsession")),
+    ] {
+        let mut checkpoint = valid.clone();
+        checkpoint[field] = invalid;
+        write_json(&f.dir.join("attempt-1/native-session.json"), &checkpoint);
+        let out = f.json("result");
+        assert!(out["review"]["native_session"].is_null(), "{field}: {out}");
+        assert!(
+            out["review"]["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b.as_str().unwrap_or("").contains("checkpoint unavailable")),
+            "{out}"
+        );
+    }
+    write_json(&f.dir.join("attempt-1/native-session.json"), &valid);
+    let out = f.json("result");
+    assert_eq!(out["review"]["native_session"], "native-session");
+}
+
+#[test]
+fn review_regression_hardlinked_metadata_is_unavailable() {
+    let f = Fixture::new();
+    f.terminal("succeeded");
+    let result = f.dir.join("attempt-1/result.json");
+    std::fs::hard_link(&result, f.dir.join("copied-result.json")).unwrap();
+    let out = f.run(&["result", "abc1", "--output", "json"]);
+    assert!(!out.status.success(), "{out:?}");
+    let out = f.json("task");
+    assert_eq!(out["attempt"]["outcome"], "unavailable", "{out}");
+}
+
+#[test]
+fn hardlinked_live_lock_is_unknown_and_wait_exits_promptly() {
+    use std::os::fd::AsRawFd;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let f = Fixture::new();
+    let held = f.runtime.path().join("live-owner.lock");
+    ahu::state::write_private_file(&held, b"").unwrap();
+    let file = std::fs::File::open(&held).unwrap();
+    // SAFETY: file owns a valid descriptor for the duration of the test.
+    assert_eq!(
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    std::fs::remove_file(f.dir.join("owner.lock")).unwrap();
+    std::fs::hard_link(&held, f.dir.join("owner.lock")).unwrap();
+    let value = f.json("task");
+    assert_eq!(value["attempt"]["liveness"], "unknown");
+    assert!(value["attempt"]["supervisor_owned"].is_null());
+    let mut child = common::ahu()
+        .current_dir(f.repo.path())
+        .args(["wait", "abc1", "--output", "json"])
+        .env("AHU_EXECUTION_BACKEND", "headless")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("wait borrowed another task's lock indefinitely");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("liveness unknown"));
+}
+
+#[test]
+fn task_record_and_spec_hardlinks_are_refused_without_rewriting_legacy_data() {
+    for name in ["task.json", "headless.json"] {
+        let f = Fixture::new();
+        let before = std::fs::read(f.dir.join(name)).unwrap();
+        std::fs::hard_link(f.dir.join(name), f.dir.join("alias.json")).unwrap();
+        assert!(
+            !f.run(&["result", "abc1", "--output", "json"])
+                .status
+                .success()
+        );
+        assert_eq!(std::fs::read(f.dir.join(name)).unwrap(), before);
+    }
 }

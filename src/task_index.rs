@@ -132,6 +132,7 @@ fn read_entry(root: &Path, task_id: &str) -> Result<Option<Entry>> {
             INDEX_SCHEMA_VERSION
         );
     }
+    crate::storage::validate_owned_metadata(&meta, entry.schema_version == INDEX_SCHEMA_VERSION)?;
     if entry.task_id != task_id {
         bail!(
             "task index entry {} names a different task: {}",

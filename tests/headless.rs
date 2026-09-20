@@ -584,12 +584,9 @@ fn explicit_resume_recovers_a_pre_spawn_interrupted_metadata_transition() {
     let spec: Value =
         serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
     let prompt = std::fs::read_to_string(dir.join("prompt.txt")).unwrap();
-    std::fs::write(
-        dir.join("resume-journal.json"),
-        serde_json::to_vec(
-            &serde_json::json!({"record":record,"spec":spec,"prompt":prompt,"next_attempt":2}),
-        )
-        .unwrap(),
+    ahu::state::write_json(
+        &dir.join("resume-journal.json"),
+        &serde_json::json!({"record":record,"spec":spec,"prompt":prompt,"next_attempt":2}),
     )
     .unwrap();
     std::fs::write(dir.join("prompt.txt"), "partially transitioned prompt").unwrap();
@@ -2181,6 +2178,10 @@ fn session_checkpoint_survives_stream_evaluation_failure() {
         &std::fs::read(result_path.parent().unwrap().join("native-session.json")).unwrap(),
     )
     .unwrap();
+    assert_eq!(checkpoint["schema_version"], 2);
+    assert_eq!(checkpoint["task_id"], value["task_id"]);
+    assert_eq!(checkpoint["attempt"], 1);
+    assert_eq!(checkpoint["harness"], "claude-code");
     assert_eq!(checkpoint["session"], value["task_id"]);
     assert_eq!(value["harness"]["session"], value["task_id"]);
     assert!(checkpoint["native_data_location"].is_null());
@@ -2299,4 +2300,159 @@ fn primary_records_remain_readable_after_submitting_sibling_is_removed() {
     let repo = ahu::git::discover(f.repo.path()).unwrap();
     let entry = ahu::task_index::lookup_in(&repo, id).unwrap().unwrap();
     assert_eq!(entry.checkout, repo.primary_root().unwrap());
+}
+
+#[test]
+fn review_regression_ordinary_payloads_do_not_use_helper_bounds() {
+    use ahu::headless::Events;
+    use serde_json::json;
+    for (harness, payload, terminal) in [
+        (
+            "codex",
+            json!({"type":"item.completed","item":{"type":"command_execution","aggregated_output":"x".repeat(4097)}}),
+            json!({"type":"turn.completed"}),
+        ),
+        (
+            "codex",
+            json!({"type":"item.completed","item":{"type":"function_call","arguments":"x".repeat(4097)}}),
+            json!({"type":"turn.completed"}),
+        ),
+        (
+            "claude-code",
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","input":{"command":"x".repeat(4097)}}]},"unused":"x".repeat(4097)}),
+            json!({"type":"result","subtype":"success","is_error":false,"result":"done"}),
+        ),
+    ] {
+        let mut events = Events::default();
+        events.observe(harness, &serde_json::to_vec(&payload).unwrap());
+        events.observe(harness, &serde_json::to_vec(&terminal).unwrap());
+        assert!(events.terminal && !events.failed, "{harness}: {events:?}");
+    }
+}
+
+#[test]
+fn review_regression_helper_identifiers_still_bounded() {
+    let mut events = ahu::headless::Events::default();
+    events.observe("claude-code", &serde_json::to_vec(&serde_json::json!({
+        "type":"system","subtype":"task_started","task_id":"x".repeat(4097),"subagent_type":"reader"
+    })).unwrap());
+    assert!(events.failed);
+}
+
+fn malformed_spec_domain_probe(during_execution: bool, own_domain: bool) {
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+    for malformed in [false, true] {
+        let f = Fixture::new();
+        let first = f.launch("success", &[]);
+        assert!(first.status.success(), "{first:?}");
+        let discovered = ahu::git::discover(f.repo.path()).unwrap();
+        let primary = ahu::storage::HeadlessStore::for_repo(&discovered)
+            .unwrap()
+            .directory;
+        let first_id = Fixture::value(&first)["task_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut record: Value = serde_json::from_slice(
+            &std::fs::read(primary.join(first_id).join("task.json")).unwrap(),
+        )
+        .unwrap();
+        record["task_id"] = json!("abc123");
+        let legacy = f.external.path().canonicalize().unwrap().join("legacy");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o700)).unwrap();
+        ahu::state::write_json(
+            &f.repo.path().join(".ahu/state/legacy-lookup.json"),
+            &json!({"schema_version":1,"runtime_roots":[legacy]}),
+        )
+        .unwrap();
+        let old = if own_domain {
+            primary.join("abc123")
+        } else {
+            legacy.join(discovered.identity()).join("abc123")
+        };
+        let seed = f.external.path().join("seed.json");
+        std::fs::write(&seed, record.to_string()).unwrap();
+        let script = format!(
+            "\nfrom pathlib import Path\np=Path({})\np.mkdir(parents=True,exist_ok=True)\n(p/'task.json').write_text(Path({}).read_text())\n(p/'task.json').chmod(0o600)\n{}\n",
+            json!(old),
+            json!(seed),
+            if malformed {
+                "(p/'headless.json').write_text('{broken')\n(p/'headless.json').chmod(0o600)"
+            } else {
+                ""
+            }
+        );
+        if during_execution {
+            let harness = f.bin.join("claude");
+            let text = std::fs::read_to_string(&harness).unwrap();
+            std::fs::write(
+                &harness,
+                text.replace(
+                    "if scenario=='nonzero':",
+                    &(script + "\nif scenario=='nonzero':"),
+                ),
+            )
+            .unwrap();
+        } else {
+            std::fs::create_dir_all(&old).unwrap();
+            ahu::state::write_private_file(&old.join("task.json"), record.to_string().as_bytes())
+                .unwrap();
+            if malformed {
+                ahu::state::write_private_file(&old.join("headless.json"), b"{broken").unwrap();
+            }
+        }
+        let out = f.launch("success", &[]);
+        if own_domain {
+            assert!(
+                !out.status.success(),
+                "malformed metadata in the owning domain must remain fatal"
+            );
+            if during_execution {
+                assert_eq!(Fixture::value(&out)["outcome"], "supervisor_error");
+            }
+        } else {
+            assert!(out.status.success(), "{out:?}");
+            assert_eq!(Fixture::value(&out)["outcome"], "succeeded");
+        }
+        assert_eq!(
+            std::fs::read_to_string(old.join("task.json")).unwrap(),
+            record.to_string()
+        );
+        if malformed {
+            assert_eq!(
+                std::fs::read_to_string(old.join("headless.json")).unwrap(),
+                "{broken"
+            );
+        } else {
+            assert!(!old.join("headless.json").exists());
+        }
+    }
+}
+
+#[test]
+fn review_regression_admission_ignores_unrelated_legacy_specs() {
+    malformed_spec_domain_probe(false, false);
+}
+
+#[test]
+fn review_regression_reconciliation_ignores_unrelated_legacy_specs() {
+    malformed_spec_domain_probe(true, false);
+}
+
+#[test]
+fn owning_domain_malformed_specs_still_fail_closed() {
+    malformed_spec_domain_probe(false, true);
+    malformed_spec_domain_probe(true, true);
+}
+
+#[test]
+fn ordinary_event_subtypes_do_not_consume_helper_budget() {
+    let mut events = ahu::headless::Events::default();
+    for _ in 0..300 {
+        events.observe("codex", br#"{"type":"item.completed","subtype":"task_payload","item":{"type":"command_execution"}}"#);
+    }
+    events.observe("codex", br#"{"type":"turn.completed"}"#);
+    assert!(events.terminal && !events.failed);
 }
