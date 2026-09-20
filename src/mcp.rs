@@ -15,6 +15,31 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "ahu";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub const CONTEXT_HYGIENE_SKILL: &str = "context-hygiene";
+
+pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
+    (
+        "discover-requirements",
+        include_str!("../.agents/skills/discover-requirements/SKILL.md"),
+    ),
+    (
+        "direct-agents",
+        include_str!("../.agents/skills/direct-agents/SKILL.md"),
+    ),
+    (
+        CONTEXT_HYGIENE_SKILL,
+        include_str!("../.agents/skills/context-hygiene/SKILL.md"),
+    ),
+    (
+        "ahu-architecture",
+        include_str!("../.agents/skills/ahu-architecture/SKILL.md"),
+    ),
+];
+
+pub fn skill_path(name: &str) -> String {
+    format!(".agents/skills/{name}/SKILL.md")
+}
+
 /// Serve newline-delimited JSON-RPC messages on stdin/stdout.
 pub fn serve(repo: &Repo) -> Result<i32> {
     let stdin = std::io::stdin();
@@ -180,11 +205,7 @@ fn task_get(repo: &Repo, arguments: &Value) -> Result<Value> {
 
 /// Copy the bundled skill set into a repository for review and commit.
 pub fn setup(repo: &Repo) -> Result<i32> {
-    let files = [(
-        "discover-requirements",
-        include_str!("../.agents/skills/discover-requirements/SKILL.md"),
-    )];
-    for (name, content) in files {
+    for &(name, content) in BUNDLED_SKILLS {
         let path = repo.root.join(".agents/skills").join(name).join("SKILL.md");
         if let Ok(existing) = std::fs::read_to_string(&path) {
             if existing != content {

@@ -679,6 +679,14 @@ pub fn render(inventory: &Inventory) -> String {
         "\nThis inventory is not complete. `available` means a source is discoverable by the\n\
          harness, not that its contents reached the model.\n",
     );
+    // The inventory reports what was found; deciding what to do about a source
+    // is the bundled skill's subject, so the reader is pointed at it rather
+    // than handed a recommendation here.
+    out.push_str(&format!(
+        "How to read these labels and what to do about a source: the `{}` skill at {}.\n",
+        crate::mcp::CONTEXT_HYGIENE_SKILL,
+        crate::mcp::skill_path(crate::mcp::CONTEXT_HYGIENE_SKILL)
+    ));
     out.push_str(&render_feature_matrix());
     out
 }

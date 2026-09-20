@@ -58,6 +58,8 @@ fn setup_materializes_the_bundled_skill_trees_without_overwriting_changes() {
     let agents = repo.read(".agents/skills/discover-requirements/SKILL.md");
     assert!(!repo.path().join(".claude/skills").exists());
     assert!(agents.contains("# Discover requirements"));
+    let hygiene = repo.read(".agents/skills/context-hygiene/SKILL.md");
+    assert!(hygiene.contains("# Context hygiene"), "{hygiene}");
 
     repo.write(
         ".agents/skills/discover-requirements/SKILL.md",

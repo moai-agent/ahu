@@ -95,17 +95,17 @@ pub fn overview() -> String {
         } else if in_mermaid {
             out.push_str(line);
             out.push('\n');
-        } else if line.starts_with("> **") {
+        } else if let Some(stripped) = line.strip_prefix("> **") {
             out.push_str("  !! ");
-            out.push_str(&line[4..].replace("**", ""));
+            out.push_str(&stripped.replace("**", ""));
             out.push('\n');
-        } else if line.starts_with("> ") {
+        } else if let Some(stripped) = line.strip_prefix("> ") {
             out.push_str("     ");
-            out.push_str(&line[2..].replace("**", ""));
+            out.push_str(&stripped.replace("**", ""));
             out.push('\n');
-        } else if line.starts_with("- ") {
+        } else if let Some(stripped) = line.strip_prefix("- ") {
             out.push_str("  - ");
-            out.push_str(&line[2..].replace("**", ""));
+            out.push_str(&stripped.replace("**", ""));
             out.push('\n');
         } else {
             out.push_str(&line.replace("**", ""));
@@ -158,8 +158,8 @@ pub fn mermaid_only() -> String {
     let mut in_mermaid = false;
     let mut last_header = "";
     for line in content.lines() {
-        if line.starts_with("## ") {
-            last_header = &line[3..];
+        if let Some(stripped) = line.strip_prefix("## ") {
+            last_header = stripped;
         } else if line.starts_with("```mermaid") {
             in_mermaid = true;
             out.push_str(&format!("\n## {}\n\n```mermaid\n", last_header));

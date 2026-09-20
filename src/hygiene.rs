@@ -1,10 +1,13 @@
 //! Project-scheduled context hygiene.
 //!
 //! On an agent's first load, and then on the project's cadence, ahu inspects the
-//! memory and skills that could influence the agent and offers a concrete
-//! cleanup proposal. It never deletes or disables anything on its own, and the
-//! cadence is a project setting: there is no personal interval and no permanent
-//! personal dismissal.
+//! memory and skills that could influence the agent and reports what it found:
+//! each source, its category and scope, whether it is shared, and which kind of
+//! per-agent control exists for it. What to do about any of that is the
+//! `context-hygiene` skill's subject, not this module's — the review names the
+//! skill instead of carrying its prose. ahu never deletes or disables anything
+//! on its own, and the cadence is a project setting: there is no personal
+//! interval and no permanent personal dismissal.
 
 use std::collections::BTreeMap;
 
@@ -81,31 +84,82 @@ pub fn due(loaded: &LoadedConfig, review_state: &ReviewState, agent_key: &str) -
     }
 }
 
-/// A cleanup suggestion. Nothing here has happened yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Suggestion {
-    pub what: String,
-    pub location: Option<String>,
-    pub scope: String,
-    pub shared: bool,
-    pub supported_action: String,
+/// The kind of per-agent control that exists for a source, as a stable key.
+///
+/// A key names an operation's availability, not a recommendation to perform it.
+/// What each key means for the reader, and when it should be acted on, is
+/// documented in the bundled `context-hygiene` skill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Control {
+    /// ahu can list every skill and memory source it can see.
+    InventoryListing,
+    /// An exact cleanup scope can be previewed before anything changes.
+    CleanupPreview,
+    /// The source is repository-scoped: an ordinary Git change.
+    RepositoryEdit,
+    /// The source is shared beyond this project; the harness's own settings
+    /// are what detach it.
+    HarnessSetting,
+    /// Disabling one skill for one agent.
+    SkillDisable,
+    /// Switching memory reading or writing per agent.
+    MemoryToggle,
+    /// Clearing a source shared with other agents or projects.
+    SharedSourceClear,
+    /// No per-agent control exists for this source.
+    None,
 }
 
-/// The review ahu presents. It is a proposal, not an action log.
+impl Control {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Control::InventoryListing => "inventory-listing",
+            Control::CleanupPreview => "cleanup-preview",
+            Control::RepositoryEdit => "repository-edit",
+            Control::HarnessSetting => "harness-setting",
+            Control::SkillDisable => "skill-disable",
+            Control::MemoryToggle => "memory-toggle",
+            Control::SharedSourceClear => "shared-source-clear",
+            Control::None => "none",
+        }
+    }
+}
+
+fn keys(controls: &[Control]) -> String {
+    controls
+        .iter()
+        .map(|control| control.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One source found, with the facts about it. Nothing here has happened yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub what: String,
+    pub location: Option<String>,
+    pub category: Category,
+    pub scope: String,
+    pub shared: bool,
+    pub control: Control,
+}
+
+/// The review ahu presents. It is a report of what was found, not an action log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Review {
     pub agent_key: String,
-    pub suggestions: Vec<Suggestion>,
-    /// Per-agent operations this adapter genuinely supports, and their scope.
-    pub supported_controls: Vec<String>,
+    pub findings: Vec<Finding>,
+    /// Per-agent operations this adapter genuinely supports.
+    pub supported_controls: Vec<Control>,
     /// Operations the harness does not expose per agent.
-    pub unsupported_controls: Vec<String>,
+    pub unsupported_controls: Vec<Control>,
     pub next_due: Option<String>,
 }
 
 impl Review {
     pub fn is_empty(&self) -> bool {
-        self.suggestions.is_empty()
+        self.findings.is_empty()
     }
 }
 
@@ -117,50 +171,31 @@ pub fn review(
     loaded: &LoadedConfig,
     review_state: &ReviewState,
 ) -> Review {
-    let mut suggestions = Vec::new();
+    let mut findings = Vec::new();
     for item in inventory.cleanup_candidates() {
-        let supported_action = match (item.category, item.scope.as_str()) {
-            (Category::Skill, "repository") => {
-                "remove or move the skill directory in the repository; it is an ordinary Git change you review and commit yourself"
-                    .to_string()
-            }
-            (Category::Skill, _) => {
-                "detach it from this project with the harness's own settings; ahu will not delete a skill shared with every project on this machine"
-                    .to_string()
-            }
-            (Category::Memory, "repository") => {
-                "edit or delete the file in the repository; it is an ordinary Git change you review and commit yourself"
-                    .to_string()
-            }
-            _ => "no per-agent control for this source; see the unsupported list".to_string(),
+        let control = match (item.category, item.scope.as_str()) {
+            (Category::Skill | Category::Memory, "repository") => Control::RepositoryEdit,
+            (Category::Skill, _) => Control::HarnessSetting,
+            _ => Control::None,
         };
-        suggestions.push(Suggestion {
+        findings.push(Finding {
             what: item.name.clone(),
             location: item.location.clone(),
+            category: item.category,
             scope: item.scope.clone(),
             shared: item.shared,
-            supported_action,
+            control,
         });
     }
 
-    let mut supported_controls = vec![
-        "list every skill and memory source ahu can see, with its scope and whether it is shared"
-            .to_string(),
-        "preview an exact cleanup scope before anything changes".to_string(),
-    ];
+    let mut supported_controls = vec![Control::InventoryListing, Control::CleanupPreview];
     let mut unsupported_controls = Vec::new();
     if enforcement.harness == "claude-code" {
-        supported_controls.push(
-            "repository-scoped skills and instruction files can be changed as ordinary repository edits"
-                .to_string(),
-        );
+        supported_controls.push(Control::RepositoryEdit);
         unsupported_controls.extend([
-            "ahu cannot disable an individual skill for one agent without changing a setting that applies more widely, so it does not offer that as a per-agent operation"
-                .to_string(),
-            "Claude Code's memory reading and memory writing are not separately switchable per agent from outside a session, so ahu cannot report \"memory off\""
-                .to_string(),
-            "clearing a source shared with other agents or projects is not offered as a per-agent operation; ahu will not present a global deletion as a local one"
-                .to_string(),
+            Control::SkillDisable,
+            Control::MemoryToggle,
+            Control::SharedSourceClear,
         ]);
     }
 
@@ -172,7 +207,7 @@ pub fn review(
 
     Review {
         agent_key: agent_key.to_string(),
-        suggestions,
+        findings,
         supported_controls,
         unsupported_controls,
         next_due,
@@ -180,6 +215,10 @@ pub fn review(
 }
 
 /// Render a review for a terminal.
+///
+/// Facts only: the sources found, their scope, and the control keys. The
+/// recommendations that used to be spelled out here are the `context-hygiene`
+/// skill's, and the reader is pointed at it.
 pub fn render(review: &Review, trigger: Trigger, loaded: &LoadedConfig) -> String {
     let mut out = String::new();
     let reason = match trigger {
@@ -198,29 +237,27 @@ pub fn render(review: &Review, trigger: Trigger, loaded: &LoadedConfig) -> Strin
         crate::util::display_path(&loaded.path)
     ));
 
-    if review.suggestions.is_empty() {
+    if review.findings.is_empty() {
         out.push_str(
             "No skills or memory sources were found that ahu can see influencing this agent.\n\
-             Nothing is being proposed for deletion. This is a report of what was found,\n\
-             not a recommendation to remove data ahu did not inspect.\n\n",
+             This is a report of what was found, not a statement about data ahu did not\n\
+             inspect.\n\n",
         );
     } else {
         out.push_str("Sources that may influence this agent:\n");
-        for suggestion in &review.suggestions {
+        for finding in &review.findings {
             // `what` and `location` are repository-derived paths and labels.
             out.push_str(&format!(
-                "  - {} [{}{}]\n",
-                display_safe(&suggestion.what),
-                suggestion.scope,
-                if suggestion.shared { ", shared" } else { "" }
+                "  - {} [{}, {}{}]\n",
+                display_safe(&finding.what),
+                finding.category.as_str(),
+                finding.scope,
+                if finding.shared { ", shared" } else { "" }
             ));
-            if let Some(location) = &suggestion.location {
+            if let Some(location) = &finding.location {
                 out.push_str(&format!("      at {}\n", display_safe(location)));
             }
-            out.push_str(&format!(
-                "      {}\n",
-                display_safe(&suggestion.supported_action)
-            ));
+            out.push_str(&format!("      control: {}\n", finding.control.as_str()));
         }
         out.push('\n');
         out.push_str(
@@ -229,26 +266,27 @@ pub fn render(review: &Review, trigger: Trigger, loaded: &LoadedConfig) -> Strin
         );
     }
 
-    out.push_str("What ahu can do here:\n");
-    for control in &review.supported_controls {
-        out.push_str(&format!("  - {control}\n"));
-    }
+    out.push_str(&format!(
+        "Per-agent controls ahu offers here: {}\n",
+        keys(&review.supported_controls)
+    ));
     if !review.unsupported_controls.is_empty() {
         let style = crate::style::stdout();
         let role = crate::style::Role::Gap;
-        out.push_str(&style.paint(role, "\nWhat this harness does not let ahu do per agent:\n"));
-        for control in &review.unsupported_controls {
-            out.push_str(&format!(
-                "  - {}\n",
-                style.paint(role, &display_safe(control))
-            ));
-        }
+        out.push_str(&style.paint(
+            role,
+            &format!(
+                "Per-agent controls this harness does not expose: {}\n",
+                keys(&review.unsupported_controls)
+            ),
+        ));
     }
-    out.push_str(
-        "\nChanging a file does not remove content already loaded into a running session,\n\
-         a compaction summary, or the harness's caches. Start a fresh task after a change,\n\
-         and recheck the inventory before treating the new session as clean.\n",
-    );
+    out.push_str(&format!(
+        "\nHow to read these facts and what to do about them: the `{}` skill at {}.\n\
+         `ahu mcp setup` writes it into a repository for review and commit.\n",
+        crate::mcp::CONTEXT_HYGIENE_SKILL,
+        crate::mcp::skill_path(crate::mcp::CONTEXT_HYGIENE_SKILL)
+    ));
     if let Some(next) = &review.next_due {
         out.push_str(&format!("\nNext scheduled review after {next}.\n"));
     }
