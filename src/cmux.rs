@@ -67,11 +67,12 @@ pub fn resolve_executable() -> Result<PathBuf> {
         Some(path) => {
             let path = PathBuf::from(path);
             if path.is_absolute() {
-                Ok(path)
-            } else if path.components().count() > 1 {
-                Ok(std::env::current_dir()?.join(path))
+                Ok(path.canonicalize().unwrap_or(path))
+            } else if path.as_os_str().as_encoded_bytes().contains(&b'/') {
+                let path = std::env::current_dir()?.join(path);
+                Ok(path.canonicalize().unwrap_or(path))
             } else {
-                crate::selection::resolve_utility(&path.to_string_lossy())
+                resolve_explicit_name(&path)
             }
         }
         None => crate::selection::resolve_utility("cmux").map_err(|error| {
@@ -81,6 +82,25 @@ pub fn resolve_executable() -> Result<PathBuf> {
             .with_kind(crate::util::ErrorKind::Prerequisite)
         }),
     }
+}
+
+/// Explicit user selection retains PATH semantics, including relative entries
+/// and repository-local commands. The implicit resolver remains restricted.
+fn resolve_explicit_name(name: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let cwd = std::env::current_dir()?;
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    for directory in std::env::split_paths(&path) {
+        let candidate = cwd.join(directory).join(name);
+        if std::fs::metadata(&candidate)
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        {
+            return candidate.canonicalize().map_err(Error::from);
+        }
+    }
+    Err(Error::new(
+        "explicit AHU_CMUX_BIN command was not found on PATH",
+    ))
 }
 
 impl Cmux {

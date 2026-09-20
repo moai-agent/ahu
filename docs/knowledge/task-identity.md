@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: Task identity
-description: Global task IDs, their grammar, the cross-checkout pointer index, and resolution semantics.
+description: Task IDs, their grammar, the repository-scoped pointer index, and resolution semantics.
 tags: [worktrees, state, security]
 status: draft
 sources:
@@ -10,7 +10,7 @@ sources:
     title: Task ID generation and record schema
   - id: index
     resource: ../../src/task_index.rs
-    title: Cross-checkout pointer index
+    title: Repository-scoped pointer index
   - id: commands
     resource: ../../src/commands.rs
     title: Normalization and resolution
@@ -27,32 +27,33 @@ sources:
 
 # Task identity
 
-A task ID is a hyphenated UUID v7: 36 lowercase hex digits with a 48-bit
-big-endian millisecond timestamp, so IDs sort by launch time as plain strings,
-followed by 74 random bits drawn from operating-system entropy. ID generation
+A task ID is a hyphenated version-7 universally unique identifier. Its 36
+characters contain hyphens and lowercase hexadecimal digits. A 48-bit big-endian
+millisecond timestamp lets IDs sort by launch time as plain strings; 74 random
+bits come from operating-system entropy. ID generation
 fails closed rather than minting a guessable ID when entropy is unavailable.
-The URN spelling `ahu:task:<uuid>` may appear in prompt metadata; commands
+The typed spelling `ahu:task:<uuid>` may appear in prompt metadata; commands
 accept it, the bare hyphenated form, uppercase, or an unambiguous prefix. The
 bare form is what records and stores hold. An empty ID after normalization is
 refused as a usage error.[^task][^commands]
 
-Record schema 3 writes these UUID IDs; schema 2 wrote 18-character hex IDs.
+Record schema 3 writes these version-7 IDs; schema 2 wrote 18-character hex IDs.
 The fields are otherwise identical, so schema-2 records load unchanged and
 keep their original IDs. The build reads exactly schemas 2 and 3 and refuses
 schema 1, whose digest field reinterprets file bytes as delivered bytes.[^task]
 
-The cross-checkout task index maps IDs to where their durable state lives. It
-holds one small entry per task: the ID, the repository identity, the
-checkout, and which store kind holds it, and nothing else. It lives outside
-every Git checkout, by default
-under `$HOME/.local/state/ahu/task-index` or `AHU_TASK_INDEX_DIR`, which must
-name an absolute private directory outside repositories. The index is user
-state, never migrated in place and never rewritten to match records it cannot
-read.[^index]
+The repository-scoped task index maps IDs to durable state. Each entry holds the
+ID, repository identity, checkout, and store kind. New schema-2 entries live at
+`<primary-checkout>/.ahu/state/task-index/`, with owner-only permissions and
+repository checks. Ambient index overrides do not select this store. Compatible
+old external entries remain readable in place and are never rewritten by lookup;
+explicit additional roots use the primary checkout’s `legacy-lookup.json`.
+Unrelated repositories do not share a global lookup scope.[^index]
 
 Registration happens at launch, for interactive and headless tasks alike;
-rollback and task removal remove the entry.
-The index accepts canonical UUID IDs and absolute checkout paths
+rollback and task removal remove the primary entry. Old external entries remain
+untouched.
+The index accepts canonical version-7 IDs and absolute checkout paths
 only.[^index][^launch][^headless]
 
 Resolution consults local records first, then the index for IDs that are not

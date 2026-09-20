@@ -250,6 +250,15 @@ pub fn probe_version(resolved: &str) -> Option<String> {
     if !path.is_absolute() || is_excluded(path) {
         return None;
     }
+    probe_explicit_utility_version(path)
+}
+
+/// Bounded probe for an explicitly selected utility, after its caller pins the
+/// executable. This does not change the implicit harness/utility exclusions.
+pub(crate) fn probe_explicit_utility_version(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
     use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;

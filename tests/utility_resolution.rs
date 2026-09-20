@@ -398,3 +398,41 @@ fn a_multi_version_catalog_entry_matches_any_version_it_lists() {
         );
     }
 }
+
+#[test]
+fn explicit_cmux_installer_plan_pins_selected_repository_executable() {
+    let fixture = Fixture::new();
+    executable(
+        &fixture.repo.path().join("cmux"),
+        "if [ \"$1\" = --version ]; then echo '0.64.22 (102) [ddd4a01bc]'; exit 0; fi\nexit 99",
+    );
+    for prefix in [".", ""] {
+        let path = format!("{prefix}:{}:/usr/bin:/bin", fixture.bin.display());
+        let result = fixture
+            .command(fixture.repo.path(), &path)
+            .env("AHU_CMUX_BIN", "cmux")
+            .env("HOME", fixture.outside.path().canonicalize().unwrap())
+            .env_remove("CODEX_HOME")
+            .args(["cmux", "install", "--harness", "codex", "--dry-run"])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        let plan: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(
+            plan["executable"],
+            fixture
+                .repo
+                .path()
+                .join("cmux")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert_eq!(plan["available"], true);
+        assert_eq!(
+            plan["argv"],
+            serde_json::json!(["hooks", "codex", "install"])
+        );
+    }
+}

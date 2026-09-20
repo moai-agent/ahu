@@ -78,8 +78,8 @@ ahu launch @dev-astra --headless --background --prompt-file assignment.txt \
 ```
 
 The first command waits in the foreground; the second returns after supervisor
-startup. Each launches a separate task. Headless results and logs live outside
-repositories. See [headless execution](docs/reference.md#headless-execution) for
+startup. Each launches a separate task. Headless coordination lives in the primary checkout’s private state; native
+histories stay in the harness’s own stores. See [headless execution](docs/reference.md#headless-execution) for
 supported CLI versions, result collection, resume, cancellation, and limits.
 Headless mode covers Claude Code, Codex, Antigravity, and OpenCode; an agent on
 any other harness is refused rather than run on one of them.
@@ -88,7 +88,9 @@ Headless child launches need host grants (`--allow-child` or
 for entirely read-only assignments; use a separate registered reviewer for that
 mode when the coordinator needs to edit or run commands.
 
-Inspect work from the primary checkout or a sibling task worktree:
+Inspect work from the primary checkout or a sibling task worktree. Outside it,
+prefix the command with `ahu --repo /path/to/project`. Task commands accept
+`ahu:task:<id>`, bare IDs, and unique ID prefixes:
 
 ```sh
 ahu tasks
@@ -146,9 +148,10 @@ Each task starts at the invoking checkout's HEAD on `ahu/<agent>/<task-id>`, in
 `.worktrees/` under the primary checkout. Recognized agent configuration is copied
 from the invoking checkout, including uncommitted and ignored files and local
 deletions. Unrelated dirty source files stay behind. Interactive task records and
-prompts live in the worktree's ignored `.ahu/state/`; removing the worktree removes
-that state. Headless records, prompts, attempts, and results use an external
-runtime directory and survive worktree deletion. See
+prompts live in the worktree’s ignored `.ahu/state/`; removing the worktree removes
+that state. Headless coordination and the repository’s task index belong to the
+primary checkout’s `.ahu/state/` and survive task worktree deletion. ahu does not
+copy native event streams, stderr, final answers, or helper summaries there. See
 [state and compatibility](docs/reference.md#state-and-compatibility) for discovery,
 legacy records, overrides, and integrity limits.
 
@@ -156,7 +159,9 @@ ahu delivers its contract, available execution facts, agent instructions, and
 assignment in nonce-bearing sections with raw bodies. This is prompt text,
 not an enforced system prompt. The harness controls the running session,
 including model changes, approvals, and context loading. ahu reports visible
-settings and gaps, does not alter hooks, and never claims its inventory is complete.
+settings and gaps and never claims its inventory is complete. Ordinary launches
+do not alter native hooks or settings. Explicit `ahu cmux install` delegates a
+reviewable native installation to cmux.
 Private tracker material stays out of public files and reports; remote pushes
 require explicit user permission.
 
@@ -164,6 +169,8 @@ require explicit user permission.
 
 | Command | Purpose |
 | --- | --- |
+| `ahu cmux status` | Inspect native integration evidence and headless isolation |
+| `ahu cmux install --harness codex --dry-run` | Preview an explicit native installation |
 | `ahu help` | Options, prompt sources, and exit codes |
 | `ahu onboard` | Read-only preview of native definitions available for registration |
 | `ahu inventory [@agent]` | Inspect context sources, settings, and coverage gaps |
@@ -253,7 +260,7 @@ such as `ahu`, `cmux`, and `worktree`, are accepted through the tracked
 vocabulary at
 [`.vale/styles/config/vocabularies/ahu/accept.txt`](.vale/styles/config/vocabularies/ahu/accept.txt).
 
-CI runs the same script in the `prose` job, which fails on any alert. The
+CI runs the same script in the `prose` job and reports configured alerts. The
 configuration turns off the rules that encode the Google and Microsoft editorial
 voice, such as required contractions and passive-voice warnings, along with the
 Oxford comma rules, which flag two-item conjunctions. The reasons are recorded

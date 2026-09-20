@@ -36,12 +36,12 @@ pub const MERMAID_PIPELINE: &str = r#"flowchart TD
     M --> N["Materialize parent agent config<br/>at native paths"]
     N --> O["Write task record + prompt.txt"]
     O --> U{"Execution backend"}
-    U -- headless --> V["Supervisor: batch argv,<br/>external attempts + results"]
+    U -- headless --> V["Supervisor: batch argv,<br/>primary-owned coordination"]
     U -- interactive --> P["cmux: find-or-create repository group"]
     P --> Q["cmux: child workspace in that group"]
     Q --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
     R --> S["Re-derive argv, compare to record"]
-    S --> T["exec configured harness<br/>model flags + one composed prompt argument"]
+    S --> T["supervise configured harness<br/>model flags + one composed prompt argument"]
 "#;
 
 /// How a prompt reaches the harness without ever being shell input, and what
@@ -94,9 +94,9 @@ pub const MERMAID_CONTEXT: &str = r#"flowchart LR
         T["Task prompt"]
     end
 
-    subgraph unseen["ahu cannot read these"]
+    subgraph unseen["ahu cannot establish these completely"]
         B["Harness built-in system prompt"]
-        W["cmux wrapper-injected hooks"]
+        W["Effective wrapper hook injection"]
         PL["Plugin-contributed hooks"]
         L["Which sources actually loaded"]
         X["Retrieval, compaction, caches"]
@@ -272,13 +272,13 @@ pub fn document() -> Vec<Section> {
                 para(&[
                     "That one element holds everything ahu supplies, in a fixed order on every",
                     "harness: the delegation contract, available metadata and state, selected agent",
-                    "instructions, then the request. Layout 2 fences each section with XML-shaped",
+                    "instructions, then the request. Layout 3 fences each section with XML-shaped",
                     "tags carrying the launch nonce in both opening and closing names. Bodies retain",
                     "their exact bytes; this is raw text framing, not an escaped XML document.",
                     "Metadata and state hold frozen execution facts and native-session references,",
                     "without importing native history. Fence collisions refuse delivery; fences do",
                     "not enforce authority. Older records without a layout version replay layout 1",
-                    "exactly. Both layouts verify the complete delivery digest; unknown layouts refuse.",
+                    "exactly; layout 2 keeps its frozen bytes. Unknown layouts refuse.",
                 ]),
             ],
         },
@@ -320,11 +320,19 @@ pub fn document() -> Vec<Section> {
                     "hooks. An OpenCode launch does name the plugin modules a repository declares.",
                 ]),
                 para(&[
-                    "ahu reports hooks and never writes them. Recognized repository configuration",
+                    "Ordinary launch and inspection do not write hooks. Recognized configuration",
                     "travels into the task worktree with executable bits preserved; the harness",
                     "decides whether and when hooks run. Local settings can travel without being",
                     "shared policy. User and managed settings remain at their native locations.",
                     "Hooks outside project policy raise the consistency warning below.",
+                    "ahu cmux status, doctor and launch disclosures share native integration evidence.",
+                    "Registration, activation, isolation and live conformance are separate facts.",
+                    "Explicit ahu cmux install --harness ID delegates fixed native installer argv;",
+                    "--dry-run previews it. Native confirmations, scope and exit status are preserved.",
+                    "The installer mapping is reviewed only for cmux 0.64.22 build ddd4a01bc.",
+                    "Claude uses cmux Settings > Automation, with no native installer operation.",
+                    "Reviewed OpenCode Feed lacks disable/surface guards and refuses headless use.",
+                    "Unknown components and builds stay unknown. Static inspection is not live testing.",
                 ]),
             ],
         },
@@ -350,19 +358,23 @@ pub fn document() -> Vec<Section> {
                 "to return after supervisor startup; otherwise execution stays in the foreground.",
                 "The preview names the admitted CLI profile, exact command, timeout and gaps.",
                 "Known cmux wrappers and unsupported versions fail without a fallback.",
-                "Records, prompts and attempt artifacts use an owner-only directory outside Git:",
-                "$HOME/.local/state/ahu/runtime, or the absolute AHU_RUNTIME_DIR override.",
+                "Minimal coordination belongs to the primary checkout's owner-only .ahu/state/.",
+                "Native event streams, stderr, final text and helper summaries are not copied.",
+                "New results use schema 2, with bounded outcome metadata and native references.",
+                "Unverified native locations remain unknown; references do not import history.",
                 "Native harness session stores keep their own external homes and retention.",
                 "tasks and task show backend, attempt, ownership and blockers; wait follows an attempt, result",
                 "reads its outcome and known native session with provenance and artifact locations.",
                 "Human inspection bounds and escapes metadata; process completion is not acceptance.",
                 "resume explicitly continues its recorded native session, and",
                 "cancel requests termination of the task and its recorded ahu descendants; an",
-                "interactive (cmux) task is stopped by its run-task parent, recorded as",
-                "cancelled, and its workspace is closed; the worktree, branch and record stay.",
+                "interactive (cmux) task is stopped by its run-task parent. Confirmed cancellation",
+                "closes its workspace; an unconfirmed request leaves it open. Work and records stay.",
                 "Earlier attempt artifacts survive resume. Configuration or executable drift",
-                "refuses resume. A child cannot resume after its owning parent attempt terminates",
-                "or closes admission. Submit a new registered assignment with the prior result",
+                "refuses resume. A child cannot resume after its owning parent attempt terminates;",
+                "child/worker resume is also unsupported while its parent is live.",
+                "Legacy schema-1 resume and dispatch need the original runner or a new task.",
+                "Submit a new registered assignment with the prior result",
                 "and explicit source/revision scope; dirty changes and native sessions do not",
                 "transfer automatically. Child resume does not use the launch broker.",
                 "Supervisor loss is interrupted, with no automatic replay.",
@@ -387,12 +399,12 @@ pub fn document() -> Vec<Section> {
                 "MCP and slash commands are excluded; settings and deny rules remain discoverable.",
                 "The model tool ceiling does not prove hooks cannot write or spawn processes.",
                 "Known successful helper joins are required. Provider-side cleanup stays unknown.",
-                "Codex 0.154.0/0.155.1, Antigravity 1.2.2 and OpenCode 1.18.29/1.18.31 admit ordinary",
+                "Codex 0.154.0/0.155.1, Antigravity 1.2.2 and OpenCode 1.18.29/1.18.30/1.18.31 admit ordinary",
                 "headless execution, but refuse bounded helpers. Claude 2.1.269 also admits only",
                 "the disabled profile.",
                 "Same-user code is not isolated from broker state. Hooks and arbitrary shell",
                 "commands require a vetted environment; ahu's backend itself does not use cmux.",
-                "Explicit cleanup removes captured logs after known termination, retaining",
+                "Explicit cleanup removes recognized old captures and bounded requests, retaining",
                 "structured results, frozen inputs, native stores, branches and worktrees.",
             ])],
         },
@@ -403,12 +415,21 @@ pub fn document() -> Vec<Section> {
                 "An interactive task's record and prompt live in `.ahu/state/` in its worktree, chosen",
                 "by ahu at launch and passed to the session, so removing that worktree removes",
                 "them with it. `ahu tasks`, `task`, `diff` and `focus` find them by looking through",
-                "`.worktrees/`, from the primary checkout or from any sibling. Only the launch lock",
-                "and the cmux group mapping are shared, in the primary checkout's `.ahu/state/`;",
+                "`.worktrees/`, from the primary checkout or from any sibling. The launch lock,",
+                "cmux group mapping, headless coordination and task index belong to the primary;",
                 "hygiene timestamps stay in the checkout they were recorded from. `.ahu/` ignores",
                 "itself in Git. Nested sessions discover state from their working checkout;",
                 "coordination stays in the primary checkout. Legacy lookup reads the primary and",
                 "invoking plain-checkout stores; managed worktree stores always enforce ownership.",
+                "Use ahu --repo PATH before the command to select a checkout explicitly.",
+                "AHU_REPO_ROOT, AHU_STATE_DIR, AHU_RUNTIME_DIR and AHU_TASK_INDEX_DIR are not selectors.",
+                "Old external stores are read in place; legacy-lookup.json names additional roots.",
+                "There is no migration or global task scope across unrelated repositories.",
+                "Task commands accept ahu:task:<id>, bare IDs and unique prefixes consistently.",
+                "Message arguments after the task reference are literal inbox payload.",
+                "The run-task owner supervises the child and lends/restores terminal foreground.",
+                "Cancellation uses live ownership, preserves work, and reports unconfirmed outcomes.",
+                "Terminal outcomes persist even if foreground restoration fails.",
                 "Existing state symlinks are refused; path checks and mutable record",
                 "digests do not protect against concurrent hostile host processes. Policy never lives",
                 "there. Each record freezes the launched",
@@ -425,7 +446,7 @@ pub fn document() -> Vec<Section> {
             blocks: vec![bullets(&[
                 "substitute a different harness or model, for any reason",
                 "stage, commit, push, stash, reset, clean, or switch branches in your checkout",
-                "add, edit, or remove hooks, skills, memories, or instruction files",
+                "silently add, edit, or remove hooks, or reorganise native skills, settings, or histories",
                 "widen permissions unless a manifest asks for it, which the preview states in full before anything starts",
                 "claim to know the effective approval boundary: the harness's own settings decide it, and ahu only reports what it read and which flags it passed",
                 "install, configure, or authenticate a harness on your behalf",

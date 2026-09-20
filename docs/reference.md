@@ -3,6 +3,19 @@
 [Back to README](../README.md). Run `ahu help` for option syntax and
 `ahu explain` for the built-in architecture overview.
 
+## Repository and task selection
+
+`ahu --repo /path/to/project <command>` selects the checkout before parsing the
+command; `--repo=/path/to/project` is equivalent. Command paths are relative to
+that checkout. Without this prefix, ahu uses the current directory. Ambient
+`AHU_REPO_ROOT`, `AHU_STATE_DIR`, `AHU_RUNTIME_DIR`, and `AHU_TASK_INDEX_DIR` do
+not select storage. See [state and compatibility](#state-and-compatibility) for
+explicit lookup of old stores.
+
+Task commands consistently accept `ahu:task:<id>`, bare IDs, uppercase, and
+unambiguous ID prefixes. References to other resource kinds are refused.
+`@name` selects an agent for launch. It is not a task reference.
+
 ## Scriptable launch previews
 
 A launch prompt can come from an inline argument, a UTF-8 file, or piped stdin:
@@ -42,6 +55,7 @@ The interactive preview has `schema_version: 1` and these fields:
 | `prompt_digest`, `prompt_bytes` | SHA-256 and UTF-8 byte length of the original task prompt. |
 | `enforcement` | Model enforcement status, gaps, and applied controls. |
 | `warnings` | Hook, approval, wrapper, and other launch disclosures; ordinary in-session model switching is not a reliability warning. |
+| `cmux_integration` | Shared local component evidence, activation/isolation uncertainty, and headless admission. |
 | `executed` | Always `false` for a preview. |
 
 JSON strings preserve the actual metadata through JSON escaping; terminal
@@ -67,11 +81,11 @@ or screen scraping. `--background` detaches the supervisor after startup
 acknowledgement; without it, the caller supervises in the foreground. Use the
 foreground form under CI or a host service that manages process lifetime.
 A dry run performs preflight checks and prints the redacted command, frozen
-identity, capabilities, gaps, timeout, and external runtime path without launching.
+identity, capabilities, gaps, timeout, and coordination path without launching.
 Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
 The admitted CLI profiles are Codex 0.154.0/0.155.1, Claude Code 2.1.269/2.1.270,
-Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.31. Other versions fail before
+Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.30/1.18.31. Other versions fail before
 worktree creation, with no fallback harness or model. OpenCode's batch form is
 `opencode run --format json`; its permission mapping is the interactive one, so
 a manifest declaring `permissions = "accept-edits"` is refused here too. See
@@ -93,8 +107,9 @@ ahu result "$task_id" --output json
 ahu diff "$task_id"
 ```
 
-Captured stdout and stderr are limited to 64 MiB each; a parsed event line is
-limited to 1 MiB. Capture failure stops the attempt. Admission refuses a new task
+Stream evaluation is limited to 64 MiB per stdout/stderr stream and 1 MiB per
+parsed event line. Exceeding a bound stops the attempt. These streams are parsed
+in memory, not retained as ahu logs. Admission refuses a new task
 when 16 tasks in the repository runtime store lack terminal results, including
 interrupted tasks; there is no queue.
 
@@ -102,15 +117,16 @@ The timeout is positive seconds, default 1800 per attempt. `wait` follows the
 current attempt until it stops, returning 0 for `succeeded` and 5 otherwise.
 `result` reads the durable envelope without waiting; check its `outcome`, not
 just the command's exit status. Outcomes include `running`, `succeeded`, `failed`,
-`timed_out`, `cancelled`, `capture_failed`, `supervisor_error`, and `interrupted`. JSON schema 1 separates process exit,
-parsed harness events, agent report, worktree changes, and artifact paths.
-Schema 1 also records `writes_outside_worktree`: write-tool target paths from the
-captured event stream that fall outside the task worktree, when the stream
+`timed_out`, `cancelled`, `capture_failed`, `supervisor_error`, and `interrupted`. New result envelopes use schema 2 and separate process exit, bounded harness
+outcome metadata, native references, and worktree identity. Native transcript,
+final-answer, stderr, and helper-summary text is not copied into the envelope.
+Schema 2 also records `writes_outside_worktree`: write-tool target paths from the
+evaluated event stream that fall outside the task worktree, when the stream
 exposes them. The field is disclosure for post-run review, not a boundary;
 `ahu diff` prints it on stderr when the patch would otherwise look empty.
 `acceptance` stays `not assessed` and `completion_verified` stays false: a provider
 success or an agent's report does not establish that the assignment was accepted.
-Treat reports and logs as untrusted data before feeding them to another agent.
+Treat native reports and same-user editable metadata as untrusted data.
 
 Human-readable `tasks` identifies headless or cmux execution and summarizes the
 headless attempt number and outcome. `task` and `result` add observed supervisor
@@ -125,11 +141,10 @@ Inspection reads bounded metadata and escapes and truncates human display fields
 It shows at most eight blockers, directing readers to result JSON for more.
 Missing, malformed, unsupported, unsafe, or oversize inspection metadata is
 reported as unavailable. `wait` validates result envelopes and refuses malformed
-values or results belonging to another task or attempt. Its full-envelope API
-does not apply the 1 MiB inspection limit. Internal lifecycle result reading
-remains separate from inspection and its display bounds. Artifact paths refer to
-existing task and attempt locations; an agent report may not have been provided,
-and cleanup may have removed captured files. JSON retains structured values for review.
+values or results belonging to another task or attempt. New coordination results have a 1 MiB persistence bound. The full-envelope
+reader remains separate from the inspection limit. Internal lifecycle result reading
+remains separate from inspection and its display bounds. Native locations are references, not proof that files exist. Legacy capture
+paths may be displayed when inspecting an old schema-1 attempt. JSON retains structured values for review.
 
 Resume explicitly uses the recorded native session and creates another attempt
 in the same task, preserving earlier attempt artifacts:
@@ -165,39 +180,38 @@ The live supervisor owns process termination rather than trusting a saved PID.
 Provider-managed or escaped processes have unknown cleanup status. A host reboot
 or supervisor loss does not trigger automatic retry or prove child termination.
 
-Headless records and prompts live under
-`$HOME/.local/state/ahu/runtime/<repo-identity>/<task-id>/` by default.
-`AHU_RUNTIME_DIR` selects another absolute private directory outside every Git
-checkout. An existing root must be owned by the current user with owner-only
-permissions. Attempt artifacts include events, stderr, final text, and structured
-results. `ahu cleanup "$task_id" --output json` explicitly removes captured
-logs and final-text files across attempts after a known terminal attempt. It
-retains structured results (including report text), frozen inputs, native session
-stores, branches and worktrees; it refuses unknown/interrupted ownership.
-Removing a worktree does not remove these records. Reuse the same runtime
-root when collecting results from another checkout. Native harness homes and
-credentials retain their own external locations and retention policies; ahu does
-not relocate or impose a disk quota on provider session stores. Do not place
-execution traces in a repository, even ignored directories. Runtime records and
-their digests remain editable by the same user: they are integrity checks, not
-authenticated evidence or an OS security boundary.
+Headless records, frozen prompts, grants, broker requests, and bounded results live
+under `<primary-checkout>/.ahu/state/repos/<repo-identity>/headless/<task-id>/`.
+This owner-only coordination store survives deletion of a task worktree. ahu
+records native session IDs with provenance; native data locations remain unknown
+when unverified. Native settings, skills, histories, credentials, and retention
+remain under each harness’s control. ahu does not copy event streams, stderr,
+final answers, or helper summaries into its state.
 
-Every task, interactive or headless, carries a universally unique identifier
-(UUID) v7 minted at launch, written in its bare hyphenated lowercase form. IDs
-sort by launch time as plain strings. Task resolution consults a cross-checkout index
-under `AHU_TASK_INDEX_DIR`, or `$HOME/.local/state/ahu/task-index` by default,
-so a task remains addressable from any checkout of the repository that launched
-it, not only from the checkout where it was launched. Resolution prefers an
-exact ID, then a unique ID prefix; an ambiguous prefix is an error listing the
-matching tasks, and an index entry whose checkout no longer exists is reported
-as stale and refused.
+`ahu cleanup "$task_id" --output json` requires a known terminal attempt and
+removes recognized captured files if present and bounded broker request entries.
+It retains results, frozen inputs, private broker claims/responses, native stores,
+branches, and worktrees. It refuses unknown/interrupted ownership. Discovery
+reads compatible old stores in place; it does not migrate them. New-binary resume
+and child dispatch from legacy attempts are refused; use their original runner
+or submit a new assignment. Do not assume any legacy worker can use a new binary.
+
+Each new task has a version-7 universally unique identifier. The selected repository’s pointer index lives at
+`<primary-checkout>/.ahu/state/task-index/`; it contains task ID, repository
+identity, checkout, and store kind. Lookup checks local records before scoped
+pointers, exact IDs before unique prefixes, and refuses stale or inconsistent
+pointers. Primary and sibling worktrees share this scope; unrelated repositories
+do not provide global task access.
 
 `ahu message "$task_id" "text"` is the operator's delivery channel into a
 task's inbox. It writes a numbered message file under the task's private
 directory, capped at 100 entries and 1 MiB in total; delivery works from any
-checkout through the same resolution. Working agents cannot deliver inbox
+checkout of the selected repository through the same resolution. Working agents cannot deliver inbox
 messages: ahu refuses when `AHU_WORKER_SESSION` is set, because delivery
 belongs to the operator or to a broker-bound child, never to the task itself.
+After the task reference, message arguments are literal payload: text such as
+`--repo elsewhere`, `--color always`, and `--output json` does not change command
+options. Messages are trimmed before writing; empty text is refused.
 Tasks read inbox messages but never rewrite, renumber, or delete them, and a
 task ID grants no delivery into any other task's directory.
 
@@ -250,7 +264,7 @@ Admission closes when the parent process exits. Failed or unjoined registered
 children from its current attempt prevent parent success. The result's
 `ahu_children` records their task IDs and outcomes. Limits are eight child levels,
 128 assignments per root grant, and 16 active/interrupted assignments per
-repository runtime store. No global token cap or hidden task queue is promised.
+repository coordination store. No global token cap or hidden task queue is promised.
 The broker is not isolation against hostile code running as the same OS user.
 
 ### Bounded native helpers
@@ -267,7 +281,7 @@ requests must retain the policy frozen in their host grant.
 | Claude Code 2.1.270 | Admitted | Read-only profile |
 | Codex 0.154.0/0.155.1 | Admitted | Refused: incomplete helper identity/join event visibility |
 | Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
-| OpenCode 1.18.29/1.18.31 | Admitted | Refused: no validated native tool switch |
+| OpenCode 1.18.29/1.18.30/1.18.31 | Admitted | Refused: no validated native tool switch |
 
 The Claude bounded profile restricts the **entire attempt, including the owner**,
 to the model tools `Read`, `Grep`, `Glob`, and the parent's `Task` delegation tool.
@@ -282,6 +296,7 @@ ahu launch @reviewer --headless --native-helpers bounded \
 ```
 
 This example requires a registered Claude-backed reviewer and CLI 2.1.270.
+All listed profiles must also pass native integration/isolation admission.
 Apply the usual approval-widening flag if its manifest requires it. For a mixed
 workflow, register that reviewer's manifest with `native_helpers = "bounded"`
 and grant it to a shell-capable coordinator at host submission. The coordinator
@@ -644,10 +659,8 @@ no cmux; see [headless execution](#headless-execution).
 
 `auto` is the widest of the three and OpenCode has no sandbox to narrow it:
 unlike a Codex launch, which ahu gives `--sandbox workspace-write`, an OpenCode
-session's file tools act on whatever absolute path the model names. A live
-1.18.30 run under `--auto` wrote its file into the parent checkout rather than
-the task worktree it was launched in. Headless attempts disclose such paths
-when the captured event stream exposes them: the result envelope records
+session's file tools act on whatever absolute path the model names. Headless attempts disclose reported targets outside the task worktree
+when the evaluated event stream exposes them: the result envelope records
 `writes_outside_worktree`, and an empty `ahu diff` points to it on stderr. The
 worktree is where the session starts, not a boundary the harness is held to;
 the launch preview says so.
@@ -679,7 +692,7 @@ between OpenCode and Ollama.
 | Hosted-model authentication fails | Ollama's own sign-in for cloud models | Holds no provider credentials and cannot authenticate for you. |
 | Context below 64k | `ollama show <model>`; `limit.context` in the provider entry | Does not set or raise context limits. |
 | Manifest declares `accept-edits` | The manifest's `permissions` value | Refuses the manifest with an error and offers no substitute mode, interactively and headless alike. Declare `prompt` or `auto`. |
-| A headless launch reports no terminal event | The captured events under the task's artifacts | Scores a run only on OpenCode's own terminal step, never on its exit status: a refused tool call ends the run with exit 0. |
+| A headless launch reports no terminal event | The bounded result metadata and harness-owned session history | Scores a run only on OpenCode's own terminal step, never on its exit status: a refused tool call ends the run with exit 0. |
 
 In every one of these cases ahu reports and stops. It never silently selects
 another model, provider, or harness, and a failed session does not remove the
@@ -759,7 +772,7 @@ format has YAML frontmatter, so `ahu` records and shows both, always labelled:
 - **instructions digest**—SHA-256 of exactly the text `ahu` puts in the prompt:
   the same file with its frontmatter stripped, byte-for-byte identical to what
   lands inside the `agent` section, between `<ahu-agent-NONCE>` and
-  `</ahu-agent-NONCE>` in delivery layout 2.
+  `</ahu-agent-NONCE>` in delivery layout 3.
 
 For a format with no frontmatter the two cover the same bytes and come out equal.
 Both are folded into the agent's identity digest, so a change to either is
@@ -800,8 +813,11 @@ under skipped paths still arrive through Git; local edits there are not copied.
 ## Hooks
 
 Hooks run on harness lifecycle events and can affect tool calls or context.
-ahu inventories Claude Code hook settings and reports Codex, Antigravity, and
-OpenCode hook coverage as unknown. It does not add, edit, remove, or turn off hooks.
+ahu inventories Claude Code hook settings; general hook coverage for the other
+harnesses remains incomplete. The separate cmux integration inspection recognizes
+exact reviewed native components. Ordinary launch and inspection do not install
+or edit hooks. The explicit [cmux installer](#cmux-native-integration) delegates
+changes to the native command.
 
 Only a hook's program is shown, never its arguments, and only its digest is
 stored in the task record—hook commands routinely carry tokens, and an
@@ -834,6 +850,79 @@ contributed by plugins. Both are reported as gaps rather than omitted. A setting
 file that exists but cannot be parsed is reported as *unknown* hooks, never as
 *no* hooks.
 
+## cmux native integration
+
+`ahu cmux status [--output json]` inspects bounded local configuration and native
+artifact fingerprints without installing hooks or contacting a provider. It
+reports CLI availability/version separately from socket reachability,
+registration separately from activation, and isolation separately from live
+conformance. `ahu doctor` gives compact summaries and an initial refusal reason;
+the status command retains full provenance. Launch disclosures use the same
+inspection. Verified absence is reported as missing. Unreadable, redirected,
+unsupported, or indirect evidence stays unknown; a filename or matching fragment
+of a command does not prove a reviewed component.
+
+The native installer mapping is reviewed only for cmux
+`0.64.22 (102) [ddd4a01bc]`. Other builds remain unknown. Preview the exact
+operation and affected paths before explicit installation:
+
+```sh
+ahu cmux status --output json
+ahu cmux install --harness codex --dry-run
+```
+
+Without `--dry-run`, ahu runs only the fixed native arguments shown below,
+with inherited terminal streams, native confirmations, and native exit status.
+It adds no `--yes`, shell evaluation, project scope, or bulk installation.
+Native cmux owns its scripts, hooks, and activation/trust settings. Installation
+success does not establish activation or live delivery; ahu inspects again afterward,
+even after a failed native operation. Custom native configuration overrides make
+the default-scope installer unavailable until separately reviewed.
+
+| Harness ID | Native operation and scope | Inspected integration and headless admission |
+| --- | --- | --- |
+| `codex` | `cmux hooks codex install`; default user hooks, configuration, and cmux hook scripts | Exact reviewed commands check the hook-off variable and absent surface. Configuration activation is reported separately. Unknown commands or scopes refuse headless admission. |
+| `claude-code` | No installer arguments; use cmux Settings > Automation | The reviewed bundled wrapper is recognized, but invocation/injection is unobserved. Headless requires the direct harness executable; separately configured hooks need their own evidence. |
+| `opencode` | `cmux hooks opencode install`; default user Session and Feed plugins | The reviewed Session bytes check the hook-off variable and surface. Reviewed Feed bytes lack both and can use a fallback socket: installed Feed refuses headless coexistence. Reinstalling the same bytes does not fix isolation. |
+| `antigravity` | `cmux hooks antigravity install`; default user Gemini hooks configuration | Configured commands have no fingerprint verifier and remain unknown, refusing headless admission. Custom formats and extension scopes remain unverified; CLI version eligibility is separate. |
+
+Headless admission is checked before execution and rechecked by the supervisor.
+The child environment removes inherited `CMUX_*` routing variables and restores
+only a reviewed process-local control when the evidence requires one. Current
+verified guards use `CMUX_CODEX_HOOKS_DISABLED` or
+`CMUX_OPENCODE_HOOKS_DISABLED`. Claude’s reviewed wrapper requires a direct
+executable; registered Claude and Antigravity hook commands remain unknown.
+A variable name alone is not proof of isolation. Unsafe or unknown components
+refuse admission. ahu leaves native homes and settings in place. Arbitrary shell
+commands, hooks, remote plugins, and concurrent same-user changes remain outside
+these controls. A successful static inspection does not launch or validate a
+native session.
+
+Native authentication stores, account databases, managed preferences, and plugin
+sources can select additional executable configuration. ahu checks their presence
+without reading credentials or fetching remote context. Present or unresolved
+opaque sources refuse headless admission, even for a legitimate setup. Inspect
+the reported source with `ahu cmux status`; interactive execution remains available.
+
+### Conformance evidence
+
+The local investigation baseline is cmux 0.64.22 build ddd4a01bc, Codex 0.155.1,
+Claude Code 2.1.278, OpenCode 1.18.31, and Antigravity CLI 1.2.7. Installed versions
+are observations, not additions to the admitted [headless profiles](#headless-execution).
+In particular, Claude 2.1.278 and Antigravity 1.2.7 do not replace pinned profiles.
+
+| Evidence class | What it establishes | What remains unverified |
+| --- | --- | --- |
+| Native artifact/source inspection | Exact command/plugin fingerprints, declared settings, guards, and installer arguments | Effective trust, actual hook activation, native event delivery, and unknown builds |
+| Synthetic fixtures | Parser, refusal, environment filtering, and fixed-argv behavior under controlled inputs | Actual native harness behavior |
+| Real PTY tests | Terminal ownership, stdin/signal handling, restoration, and cancellation with test processes | Four-harness terminal interface/session conformance |
+| Live cmux plumbing tests | Group/workspace operations and focus behavior with harmless startup processes | Native hooks or four-harness provider sessions |
+| Scoped native Codex hook no-op probes | Reviewed hook behavior under the probed hook-off/absent-surface conditions | A live Codex conversation or equivalence with the other harnesses |
+
+The status report deliberately labels its evidence `locally_inspected;
+live_untested`. Do not infer four-harness live conformance from installation,
+static inspection, PTY coverage, or cmux plumbing.
+
 ## Context inventory and hygiene
 
 `ahu inventory` lists what can influence an agent: its fixed identity, the
@@ -854,11 +943,9 @@ a global deletion as a local one.
 
 ## State and compatibility
 
-Headless tasks use the external runtime store described in the preceding section. `tasks`, `task`,
-and `diff` include those records alongside interactive and legacy records.
-`focus` is for interactive cmux sessions. The following worktree-local layout
-describes interactive tasks and compatible legacy state; `AHU_RUNTIME_DIR`
-independently selects the headless store.
+Headless tasks use primary-owned coordination; interactive tasks use their own
+worktree-local records. `tasks`, `task`, and `diff` include compatible legacy
+records as well. `focus` is for interactive cmux sessions.
 
 Each interactive task stores `task.json` and `prompt.txt` under
 `<task-worktree>/.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Session status
@@ -895,15 +982,30 @@ leaves redirected paths alone. Cleanup can itself fail, so inspect the reported
 paths. A retained worktree without a record appears as incomplete in `ahu tasks`.
 Listing does not remove it or establish that its contents are safe to delete.
 
-Only the launch lock and cmux group mapping need shared coordination state, under
-`<primary-checkout>/.ahu/state/repos/<repo-identity>/`. Hygiene timestamps and
-generated architecture documents use the invoking checkout's `.ahu/state/`.
+The primary checkout owns the launch lock, cmux group mapping, headless
+coordination, and scoped task index. Hygiene timestamps and generated architecture
+documents use the invoking checkout’s `.ahu/state/`. All locations derive from
+explicit repository discovery, not ambient storage selectors.
 
-ahu neither resolves state through `AHU_STATE_DIR` nor injects it into coordinator
-or child sessions. Checkout-local state and primary-checkout coordination are
-derived from repository discovery. `AHU_RUNTIME_DIR` and `AHU_TASK_INDEX_DIR`
-retain their separate external-store roles. Harness configuration and
-credentials retain their native handling.
+Conventional old stores under `$HOME/.local/state/ahu/runtime` and
+`$HOME/.local/state/ahu/task-index` remain lookup sources. Additional old roots
+can be listed in `<primary-checkout>/.ahu/state/legacy-lookup.json`:
+
+```json
+{
+  "schema_version": 1,
+  "runtime_roots": ["/private/ahu-archive/runtime"],
+  "index_roots": ["/private/ahu-archive/task-index"]
+}
+```
+
+This file must be an owner-only regular file owned by the current user, without
+hard links, at most 64 KiB. Unknown fields, unsupported schemas, or more than 32
+combined roots are refused. Roots must be absolute, contain no `..`, remain
+outside Git checkouts, and pass path checks. Missing roots are not created by
+lookup. Old index entries remain read-only; new registrations and removals affect
+the primary index. Lookup neither relocates old data nor enables unsupported
+legacy execution. Explicit lifecycle commands are separate from read-only discovery.
 
 Checkout state paths refuse existing symlinks at `.ahu`, `state`, and descendant
 directories and files; state files must be regular files. Files are created
@@ -918,6 +1020,16 @@ not authenticated evidence against a writer able to change both. Neither these
 checks nor Git worktrees provide OS isolation or protection against concurrent
 hostile host processes.
 
+Interactive execution gives the child process group terminal foreground ownership
+and restores the caller’s foreground afterward, including error paths. The
+run-task owner holds a lock and supervises its child; cancellation uses an owned
+process, not an unverified saved PID. A request before startup is honored.
+Cancellation retains the task record, worktree, and branch. Only confirmed
+cancellation closes the recorded cmux workspace. An already-terminal task, an
+unconfirmed request, or a task that finishes on its own leaves the workspace open.
+A workspace-close failure is reported separately from confirmed process
+termination. A terminal outcome is recorded even if foreground restoration fails.
+
 ### Utility lookup
 
 Git and default cmux lookup skip empty and relative `PATH` entries. Candidates
@@ -930,8 +1042,8 @@ rejects the candidate. This also excludes executables in unopened sibling or
 unrelated working trees. Symlinked installations outside working trees remain
 usable; aliases resolving into a working tree do not.
 
-The selected canonical Git path is used for that Git invocation; default cmux
-keeps its canonical path across calls on the discovered client. `AHU_CMUX_BIN`
+The selected canonical Git path is used for that Git invocation; cmux
+keeps its selected canonical path across calls on the discovered client. `AHU_CMUX_BIN`
 is a deliberate user selection and retains normal command semantics: a bare name
 uses command lookup, and relative or absolute paths are accepted without the
 default working-tree exclusion. These are executable selection checks, not a
@@ -947,7 +1059,7 @@ verified version, comma-separated, and the prerequisite check accepts any of
 them. Headless admission uses its own explicit version profiles.
 Project configuration pins catalog `2026-09-13`; a mismatch is an error.
 
-Persisted task records use schema 3, whose IDs are hyphenated UUID v7 values;
+Persisted task records use schema 3, whose IDs are hyphenated `UUID v7` values;
 records written with schema 2 remain readable unchanged, keeping their 18-character
 hex IDs, and older schemas are refused. Launch-preview and task-inspection JSON use
 schema 1. Incompatible persisted records are refused and listed as unreadable;
@@ -958,7 +1070,7 @@ ahu does not reinterpret their digests or delete their worktrees.
 Outside ahu, delegation belongs to the current harness. Registered assignments
 inside ahu use registered ahu agents running their configured
 harnesses and models in separate worktrees. Interactive tasks use cmux workspaces;
-headless descendants inherit the headless state store and external runtime root.
+headless descendants inherit the execution mode and primary-owned coordination scope.
 Headless child grants and bounded native helpers follow the preceding policies.
 The supplied contract requires
 `ahu agents`, a complete UTF-8 assignment file, and `ahu launch @name
@@ -970,7 +1082,7 @@ files. Specify where findings belong and read them before reporting completion.
 
 ### Delivery layout
 
-New deliveries use typed layout 2, ordered as `contract`, optional `metadata`,
+New deliveries use typed layout 3, ordered as `contract`, optional `metadata`,
 optional `state`, optional `agent`, and `request`. Each section uses XML-shaped
 opening and closing tags carrying the same per-launch nonce, such as
 `<ahu-request-NONCE>` and `</ahu-request-NONCE>`. Bodies are raw text, not escaped
@@ -985,6 +1097,10 @@ facts and references. They do not import native histories or transcript summarie
 The contract, agent instructions, and requester assignment retain distinct
 sections, but all travel as prompt text in one argument. No adapter passes an
 agent-selection or system-prompt flag; tags do not enforce authority.
+
+Layout 3 keeps headless final reports in the native response, with no duplicate
+`result.md` in coordination. Layout 2 retains its frozen contract bytes for
+compatible inspection/replay; that does not admit legacy headless execution.
 
 A record without `delivery.layout_version` replays layout 1 byte-for-byte,
 including its bracket fences and unfenced request. Replay retains digest checks

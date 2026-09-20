@@ -422,16 +422,25 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         {
             warnings += 1;
         }
-        console.say(&cmux::integration::render(&status))?;
+        console.say(&format!("cmux integration {}:\n", display_safe(harness)))?;
+        console.say(&cmux::integration::render_summary(&status))?;
+        if let Some(reason) = status.headless.reasons.first() {
+            let safe = display_safe(reason);
+            let mut shown: String = safe.chars().take(240).collect();
+            if safe.chars().count() > 240 {
+                shown.push('…');
+            }
+            console.say(&format!("  headless   {shown}\n"))?;
+        }
         let installer = cmux::integration::installation_plan(harness, &native_cli)?;
         console.say(&format!(
-            "  installer  {}: {}\n",
+            "  installer  {}; inspect: ahu cmux install --harness {} --dry-run\n",
             if installer.available {
                 "available"
             } else {
                 "unavailable/unknown"
             },
-            installer.detail
+            display_safe(harness)
         ))?;
     }
 
@@ -1648,8 +1657,9 @@ pub fn knowledge_lint(console: &mut Console<'_>, repo: &Repo, json: bool) -> Res
 ///
 /// A headless task is delegated to the headless supervisor's cancel flow
 /// unchanged. An interactive (cmux) task is stopped by its run-task parent,
-/// which owns the harness process tree, and its cmux workspace is closed
-/// afterwards. The worktree, branch and record are never deleted.
+/// which owns the harness process tree. Confirmed cancellation closes the
+/// recorded cmux workspace; an unconfirmed request leaves it open. The worktree,
+/// branch and record are never deleted.
 pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
     let (dir, record) = inspect_task(repo, id)?;
     if dir.join("headless.json").exists() {

@@ -9,6 +9,9 @@ sources:
   - id: state
     resource: ../../src/state.rs
     title: State paths and confinement
+  - id: storage
+    resource: ../../src/storage.rs
+    title: Primary coordination and explicit legacy lookup
   - id: task
     resource: ../../src/task.rs
     title: Record storage and discovery
@@ -20,7 +23,7 @@ sources:
     title: Task planning and runtime checks
   - id: headless
     resource: ../../src/headless.rs
-    title: External runtime and attempt lifecycle
+    title: Primary-owned coordination and attempt lifecycle
   - id: commands
     resource: ../../src/commands.rs
     title: Task inspection and coordinator sessions
@@ -33,21 +36,24 @@ sources:
 
 Each interactive task's `task.json` and `prompt.txt` live under its own worktree at
 `.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Task directories are named by
-a universally unique identifier (UUID) v7; record schema 3 writes these IDs, while
+a version-7 universally unique identifier; record schema 3 writes these IDs, while
 records written by schema 2 keep their original 18-character hex identifiers and
 load unchanged. Launch derives this path without an environment override, and
 registers the task in the cross-checkout index once durable state exists. Removing
 the worktree removes its local state; `ahu remove` also removes the index
 entry. Records include session status, which does not prove task completion.[^state][^task][^index][^launch][^tests]
 
-Headless tasks instead store records, prompts and per-attempt results outside Git
-checkouts, under the default home runtime directory or `AHU_RUNTIME_DIR`.
-Discovery includes this external store. Worktree deletion retains headless
-results; supervisor loss reports an interrupted attempt without automatic replay.
-Process and harness outcomes remain separate from acceptance: agent reports and
-same-user editable records do not prove completion. The headless implementation
-in src/headless.rs defines this state store independently of checkout-local
-coordination.[^headless]
+Headless tasks keep minimal coordination under
+`<primary-checkout>/.ahu/state/repos/<repo-identity>/headless/<task-id>/`.
+This includes frozen prompts, grants, broker requests, bounded outcome metadata,
+and native session references. Native events, stderr, final text, and helper
+summaries are not copied. Native settings, skills, and histories stay native.
+Worktree deletion retains primary-owned coordination; supervisor loss reports an
+interrupted attempt without automatic replay. A native reference is a locator,
+not permission to import history; unverified locations remain unknown. New
+headless specs/results use schema 2. Schema-1 attempts remain readable in place,
+but this binary refuses their resume and child dispatch. Use the original runner
+or a new assignment; arbitrary legacy-worker use of a new binary is not supported.[^headless]
 
 Headless child grants freeze registered identities and native policies at host
 submission. The broker in src/broker.rs binds requests to a live parent attempt
@@ -63,8 +69,9 @@ intact. Further work needs a new registered assignment with explicit source
 scope, rather than silently detaching the old task from its provenance. Same-user code is
 not isolated from supervisor records, and provider-side cleanup remains unknown.
 
-Explicit cleanup removes captured attempt artifacts after known termination,
-retaining structured results, frozen inputs, native stores, branches, and worktrees.
+Explicit cleanup removes recognized old captures if present and bounded request
+entries after known termination, retaining results, frozen inputs, private broker
+claims/responses, native stores, branches, and worktrees.
 It is not a full erasure of task content.
 
 Interactive task discovery scans sibling task worktrees under the primary checkout's
@@ -89,11 +96,14 @@ attempting removal, leaves redirected paths alone and can fail. A retained
 recordless worktree is visible as incomplete; listing does not delete it or
 prove its contents disposable.[^launch][^tests]
 
-The launch lock and cmux group mapping coordinate siblings in the primary
-checkout's state store. Hygiene and generated architecture text use the invoking
+The launch lock, cmux group mapping, headless coordination, and scoped task index
+belong to the primary checkout’s state store. Hygiene and generated architecture text use the invoking
 checkout's store. Paths come from explicit checkout and repository discovery.
 ahu neither resolves state through `AHU_STATE_DIR` nor injects it into sessions.
-External runtime and task-index overrides keep their separate roles.[^state][^task][^launch]
+The `--repo` prefix selects a checkout; `AHU_REPO_ROOT`, `AHU_STATE_DIR`,
+`AHU_RUNTIME_DIR`, and `AHU_TASK_INDEX_DIR` do not select stores. Conventional old
+external roots and explicit `legacy-lookup.json` roots are read in place without
+migration.[^state][^storage][^task][^launch]
 
 Coordinator shortcuts preserve the invoking directory and configured model.
 `ahu codex` requests `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
@@ -111,6 +121,11 @@ values and results for another task or attempt, without imposing the 1 MiB
 inspection limit on its full-envelope API. Internal lifecycle result reading
 remains separate from inspection and its display bounds.[^headless][^commands]
 
+Interactive cancellation uses the live run-task owner and retains work. Only
+confirmed cancellation closes the recorded workspace. Unconfirmed requests and
+tasks that finish on their own leave it open. Terminal outcomes persist even if
+foreground restoration fails.[^commands][^launch]
+
 State access refuses existing symlinks in checkout store paths. Path checks do
 not prevent concurrent replacement. Startup checks prompt and delivery digests,
 command reconstruction, and repository/worktree identity. A writer able to alter
@@ -118,8 +133,8 @@ records and digests can alter both; these checks are not authentication or OS
 isolation.[^state][^launch]
 
 The state reference in docs/reference.md at the repository root details storage
-paths and external runtime overrides. [Task identity](task-identity.md) records
-the identifier grammar, the index, and global resolution; [Task communication](task-communication.md)
+paths and explicit legacy lookup configuration. [Task identity](task-identity.md) records
+the identifier grammar, the index, and scoped resolution; [Task communication](task-communication.md)
 records the operator inbox and task artifacts. [Configuration inheritance](task-configuration-inheritance.md)
 explains what enters a worktree through the launch snapshot.
 
@@ -128,5 +143,7 @@ explains what enters a worktree through the launch snapshot.
 [^index]: Cross-checkout pointer entries in src/task_index.rs.
 [^launch]: Planning, execution and runtime checks in src/launch.rs.
 [^tests]: Automatic placement, discovery, deletion and refusal cases in tests/task_state_lifecycle.rs.
-[^headless]: External runtime, attempt inspection, and lifecycle decisions in src/headless.rs.
+[^headless]: Primary coordination, attempt inspection, and lifecycle decisions in src/headless.rs.
 [^commands]: Inspection output and coordinator flags in src/commands.rs.
+
+[^storage]: Primary-owned paths and bounded legacy lookup configuration in src/storage.rs.

@@ -134,6 +134,79 @@ pub struct HeadlessPolicy {
     pub evidence_digest: String,
 }
 
+/// Result of the native preference presence probe. Values are never decoded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ManagedPreferences {
+    #[default]
+    NotApplicable,
+    Absent,
+    Present,
+    Unknown,
+}
+
+#[cfg(target_os = "macos")]
+fn codex_managed_preferences() -> ManagedPreferences {
+    use std::ffi::{c_char, c_void};
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringCreateWithCString(
+            allocator: *const c_void,
+            text: *const c_char,
+            encoding: u32,
+        ) -> *const c_void;
+        fn CFPreferencesCopyAppValue(
+            key: *const c_void,
+            application: *const c_void,
+        ) -> *const c_void;
+        fn CFRelease(object: *const c_void);
+    }
+    // Match the native loader's application and keys. Inspect only whether the
+    // API returns an opaque retained value; do not decode, log or hash values.
+    // SAFETY: static NUL-terminated strings use the UTF-8 encoding constant.
+    // Every non-null create/copy reference is released exactly once.
+    unsafe {
+        let domain =
+            CFStringCreateWithCString(std::ptr::null(), c"com.openai.codex".as_ptr(), 0x08000100);
+        if domain.is_null() {
+            return ManagedPreferences::Unknown;
+        }
+        for name in [c"config_toml_base64", c"requirements_toml_base64"] {
+            let key = CFStringCreateWithCString(std::ptr::null(), name.as_ptr(), 0x08000100);
+            if key.is_null() {
+                CFRelease(domain);
+                return ManagedPreferences::Unknown;
+            }
+            let value = CFPreferencesCopyAppValue(key, domain);
+            CFRelease(key);
+            if !value.is_null() {
+                CFRelease(value);
+                CFRelease(domain);
+                return ManagedPreferences::Present;
+            }
+        }
+        CFRelease(domain);
+    }
+    ManagedPreferences::Absent
+}
+#[cfg(not(target_os = "macos"))]
+fn codex_managed_preferences() -> ManagedPreferences {
+    ManagedPreferences::NotApplicable
+}
+
+fn codex_system_root() -> PathBuf {
+    // Only this OS-owned, fixed native anchor has a known macOS alias. User
+    // homes, config overrides, artifacts and children still reject all links.
+    let root = if cfg!(target_os = "macos")
+        && std::fs::read_link("/etc")
+            .is_ok_and(|p| p == Path::new("private/etc") || p == Path::new("/private/etc"))
+    {
+        Path::new("/private/etc")
+    } else {
+        Path::new("/etc")
+    };
+    root.join("codex")
+}
+
 /// Explicit inputs keep fixture tests independent of the host's configuration.
 #[derive(Debug, Clone, Default)]
 pub struct Locations {
@@ -141,6 +214,10 @@ pub struct Locations {
     pub overrides: BTreeMap<String, String>,
     pub wrapper: Option<PathBuf>,
     pub managed_claude: Option<PathBuf>,
+    pub managed_opencode: Option<PathBuf>,
+    pub managed_preferences: Option<PathBuf>,
+    pub system_codex: Option<PathBuf>,
+    pub codex_managed_preferences: ManagedPreferences,
 }
 impl Locations {
     pub fn detect() -> Self {
@@ -151,6 +228,11 @@ impl Locations {
             "OPENCODE_CONFIG",
             "OPENCODE_CONFIG_DIR",
             "OPENCODE_CONFIG_CONTENT",
+            "OPENCODE_AUTH_CONTENT",
+            "OPENCODE_TEST_MANAGED_CONFIG_DIR",
+            "OPENCODE_TEST_HOME",
+            "OPENCODE_DB",
+            "XDG_DATA_HOME",
             "GEMINI_CLI_HOME",
             "AGY_CONFIG_DIR",
         ];
@@ -158,10 +240,7 @@ impl Locations {
             home: std::env::var_os("HOME").map(PathBuf::from),
             overrides: names
                 .into_iter()
-                .filter_map(|key| {
-                    std::env::var_os(key)
-                        .map(|v| (key.to_string(), v.to_string_lossy().into_owned()))
-                })
+                .filter_map(|key| std::env::var_os(key).map(|_| (key.to_string(), String::new())))
                 .collect(),
             wrapper: Some(PathBuf::from(
                 "/Applications/cmux.app/Contents/Resources/bin/cmux-claude-wrapper",
@@ -169,6 +248,15 @@ impl Locations {
             managed_claude: Some(PathBuf::from(
                 "/Library/Application Support/ClaudeCode/managed-settings.json",
             )),
+            managed_opencode: Some(PathBuf::from(if cfg!(target_os = "macos") {
+                "/Library/Application Support/opencode"
+            } else {
+                "/etc/opencode"
+            })),
+            managed_preferences: cfg!(target_os = "macos")
+                .then(|| PathBuf::from("/Library/Managed Preferences")),
+            system_codex: Some(codex_system_root()),
+            codex_managed_preferences: codex_managed_preferences(),
         }
     }
 }
@@ -304,6 +392,11 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
             "OPENCODE_CONFIG",
             "OPENCODE_CONFIG_DIR",
             "OPENCODE_CONFIG_CONTENT",
+            "OPENCODE_AUTH_CONTENT",
+            "OPENCODE_TEST_MANAGED_CONFIG_DIR",
+            "OPENCODE_TEST_HOME",
+            "OPENCODE_DB",
+            "XDG_DATA_HOME",
         ],
         "antigravity" => &["GEMINI_CLI_HOME", "AGY_CONFIG_DIR"],
         _ => &[],
@@ -317,6 +410,7 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
     }
     match harness {
         "codex" => {
+            scan_codex_sources(repo, locations, &mut components);
             let config = home.join(".codex/config.toml");
             let activation = codex_activation(&config, &mut components);
             scan_hooks(
@@ -376,6 +470,7 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
             gaps.push("Claude integration is wrapper-managed. Separately configured hooks and plugins have independent behavior.".into());
         }
         "opencode" => {
+            scan_opencode_sources(locations, &mut components);
             for (base, scope) in [
                 (home.join(".config/opencode"), "user"),
                 (home.join(".opencode"), "user legacy"),
@@ -460,7 +555,7 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
         let mut c = component("additional integration scope", &path, "project");
         if let Some(bytes) = file_bytes(&mut c) {
             match serde_json::from_slice::<Value>(&bytes) {
-                Ok(_) if !String::from_utf8_lossy(&bytes).to_ascii_lowercase().contains("cmux") => {
+                Ok(value) if !json_mentions_cmux(&value) => {
                     absent(&mut c);
                     c.detail = "no cmux reference observed; arbitrary subprocess behavior is outside inspection".into();
                 },
@@ -471,6 +566,17 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
         components.push(c);
     }
     finish(harness, components, gaps)
+}
+
+fn json_mentions_cmux(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.to_ascii_lowercase().contains("cmux"),
+        Value::Array(items) => items.iter().any(json_mentions_cmux),
+        Value::Object(items) => items.iter().any(|(key, value)| {
+            key.to_ascii_lowercase().contains("cmux") || json_mentions_cmux(value)
+        }),
+        _ => false,
+    }
 }
 
 fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) -> Status {
@@ -517,9 +623,9 @@ fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) 
         .map(|c| {
             format!(
                 "{} ({}): {}",
-                c.name,
-                c.evidence[0].path.display(),
-                c.detail
+                display_safe(&c.name),
+                display_safe(&c.evidence[0].path.to_string_lossy()),
+                display_safe(&c.detail)
             )
         })
         .collect();
@@ -543,6 +649,206 @@ fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) 
             "opencode" => "Use interactive execution for unguarded Feed; explicit native removal is `cmux hooks opencode uninstall`, then inspect again. Reinstalling the same Feed does not provide isolation.".into(),
             _ => "Inspect unknown components and native scope; use interactive execution until isolation is verified. Installation is explicit: ahu cmux install --harness ID --dry-run.".into(),
         } }
+}
+
+/// Presence-only inspection for credentials, opaque native stores and legacy
+/// formats. Never open these files, hash their contents, or invoke their loader.
+fn opaque_source(path: &Path, name: &str, scope: &str, reason: &str, out: &mut Vec<Component>) {
+    let mut c = component(name, path, scope);
+    c.evidence[0].method = "metadata only; contents not read".into();
+    match check_path(path).and_then(|()| match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("cannot inspect native source metadata".into()),
+    }) {
+        Ok(false) => absent(&mut c),
+        Ok(true) => c.detail = reason.into(),
+        Err(reason) => c.detail = reason,
+    }
+    out.push(c);
+}
+
+fn source_directory(path: &Path, name: &str, out: &mut Vec<Component>) -> Vec<PathBuf> {
+    let mut c = component(name, path, "native source discovery");
+    c.evidence[0].method = "bounded directory names only; file contents not read".into();
+    if let Err(reason) = check_path(path) {
+        c.detail = reason;
+        out.push(c);
+        return vec![];
+    }
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            absent(&mut c);
+            out.push(c);
+            return vec![];
+        }
+        Err(_) => {
+            c.detail = "cannot enumerate native source scope".into();
+            out.push(c);
+            return vec![];
+        }
+    };
+    let mut paths = Vec::new();
+    for entry in entries.take(MAX_ENTRIES + 1) {
+        let Ok(entry) = entry else {
+            c.detail = "cannot inspect native source entry".into();
+            out.push(c);
+            return vec![];
+        };
+        paths.push(entry.path());
+    }
+    if paths.len() > MAX_ENTRIES {
+        c.detail = "native source enumeration limit exceeded".into();
+        out.push(c);
+        return vec![];
+    }
+    paths.sort();
+    paths
+}
+
+// OpenCode v1.18.29-v1.18.31 config/config.ts, config/managed.ts,
+// auth/index.ts and account/repo.ts. Native authentication can cause remote
+// config to add plugins; authentication values and account databases stay native.
+fn scan_opencode_sources(locations: &Locations, out: &mut Vec<Component>) {
+    let home = locations.home.as_ref().expect("home checked by caller");
+    let config = home.join(".config/opencode");
+    scan_plugin_config(&config.join("config.json"), "user defaults", out);
+    opaque_source(
+        &config.join("config"),
+        "legacy config",
+        "user",
+        "legacy native config may declare plugins; its migration/loader is not executed by inspection",
+        out,
+    );
+    let data = home.join(".local/share/opencode");
+    opaque_source(
+        &data.join("auth.json"),
+        "authenticated remote config",
+        "user native authentication",
+        "authentication store present; remote plugin configuration is unresolved. Credentials are not read and no remote context is fetched; use interactive execution",
+        out,
+    );
+    for path in source_directory(&data, "native account store discovery", out) {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name.starts_with("opencode")
+            && [".db", ".db-wal", ".db-shm"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        {
+            opaque_source(
+                &path,
+                "authenticated account config",
+                "native account database",
+                "account database may select authenticated remote configuration; database and tokens are not read, so headless isolation is unresolved",
+                out,
+            );
+        }
+    }
+    if let Some(managed) = &locations.managed_opencode {
+        for name in ["opencode.json", "opencode.jsonc"] {
+            scan_plugin_config(&managed.join(name), "system managed", out);
+        }
+    }
+    if let Some(preferences) = &locations.managed_preferences {
+        let domain = "ai.opencode.managed.plist";
+        opaque_source(
+            &preferences.join(domain),
+            "managed preferences",
+            "system managed",
+            "native managed preferences may declare executable plugins; plist decoding is unsupported",
+            out,
+        );
+        for user in source_directory(preferences, "managed preference domains", out) {
+            // The native loader selects a username via the OS, not HOME/USER.
+            // Check all bounded candidate domains conservatively, without
+            // reading any user's managed preference contents.
+            match std::fs::symlink_metadata(&user) {
+                Ok(meta) if meta.is_dir() || meta.file_type().is_symlink() => opaque_source(
+                    &user.join(domain),
+                    "managed user preferences",
+                    "system managed",
+                    "potential user managed preference source is unresolved; contents are not read",
+                    out,
+                ),
+                Ok(_) => {}
+                Err(_) => opaque_source(
+                    &user,
+                    "managed preference entry",
+                    "system managed",
+                    "managed source metadata unavailable",
+                    out,
+                ),
+            }
+        }
+    }
+}
+
+// Codex rust-v0.154.0 and rust-v0.155.1 hooks/engine/discovery.rs and
+// config/loader: native sources include TOML, plugins, managed and cloud layers.
+fn scan_codex_sources(repo: &Path, locations: &Locations, out: &mut Vec<Component>) {
+    let home = locations.home.as_ref().expect("home checked by caller");
+    let codex = home.join(".codex");
+    for (file, name, reason) in [
+        (
+            "plugins",
+            "plugin hook sources",
+            "native plugin bundles and remote-installed plugin state are unresolved; plugin code is not loaded by inspection",
+        ),
+        (
+            "auth.json",
+            "cloud authentication",
+            "native authentication may load remote managed hooks/plugins; credentials are not read and remote config is not fetched",
+        ),
+        (
+            "cloud-config-bundle-cache.json",
+            "cloud configuration",
+            "native cloud configuration cache may contain managed hooks; cached remote context is not read",
+        ),
+    ] {
+        opaque_source(&codex.join(file), name, "user native state", reason, out);
+    }
+    codex_activation(&repo.join("config.toml"), out);
+    scan_hooks(
+        &repo.join("hooks.json"),
+        "cwd",
+        "codex",
+        Activation::Unknown,
+        out,
+    );
+    if let Some(system) = &locations.system_codex {
+        codex_activation(&system.join("config.toml"), out);
+        scan_hooks(
+            &system.join("hooks.json"),
+            "system",
+            "codex",
+            Activation::Unknown,
+            out,
+        );
+        for file in ["requirements.toml", "managed_config.toml"] {
+            opaque_source(
+                &system.join(file),
+                "managed hook sources",
+                "system",
+                "managed native configuration is present; inline hooks and managed directories are unresolved",
+                out,
+            );
+        }
+    }
+    if locations.codex_managed_preferences != ManagedPreferences::NotApplicable {
+        let mut c = component(
+            "native managed preferences",
+            Path::new("com.openai.codex"),
+            "macOS CFPreferences",
+        );
+        c.evidence[0].method = "native CFPreferences key presence only; values not decoded".into();
+        if locations.codex_managed_preferences == ManagedPreferences::Absent {
+            absent(&mut c);
+        } else {
+            c.detail = "Codex managed preference values are present or the native query is unresolved; their executable hooks have not been verified. Use interactive execution".into();
+        }
+        out.push(c);
+    }
 }
 
 fn codex_activation(path: &Path, components: &mut Vec<Component>) -> Activation {
@@ -583,7 +889,11 @@ fn codex_indirection(value: &toml::Value) -> bool {
         return true;
     };
     for (key, entry) in table {
-        if ["notify", "include", "imports"].contains(&key.as_str()) {
+        if ["notify", "include", "imports", "profile"].contains(&key.as_str())
+            || (["plugins", "marketplaces"].contains(&key.as_str())
+                && entry.as_table().is_none_or(|t| !t.is_empty()))
+            || (key == "cli_auth_credentials_store" && entry.as_str() != Some("file"))
+        {
             return true;
         }
         if key == "hooks" && entry.is_table() {
@@ -699,25 +1009,36 @@ fn scan_hooks(
         out.push(c);
     }
 }
+// A deliberately small POSIX literal grammar, not a shell parser. Quoting must
+// enclose the whole path; unquoted words allow no expansion or token syntax.
+fn literal_artifact_path(command: &str) -> Option<&Path> {
+    let path = if let Some(quoted) = command.strip_prefix('\'') {
+        let path = quoted.strip_suffix('\'')?;
+        if path.contains('\'') || path.chars().any(char::is_control) {
+            return None;
+        }
+        path
+    } else {
+        if !command
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/_-.:+".contains(&b))
+        {
+            return None;
+        }
+        command
+    };
+    path.starts_with('/').then(|| Path::new(path))
+}
+
 fn verify_codex(command: &str, event: &str, item: &mut Component) {
     let Some((_, expected)) = CODEX_COMMANDS.iter().find(|(name, _)| *name == event) else {
         return;
     };
     let mut digest = digest_bytes(command.as_bytes());
     if digest != *expected {
-        // Only a literal absolute path (optionally single-quoted by the native
-        // installer) is supported. No shell expansion or argument evaluation.
-        let path = command
-            .strip_prefix('\'')
-            .and_then(|v| v.strip_suffix('\''))
-            .unwrap_or(command);
-        if (!command.starts_with('\'') && path.chars().any(char::is_whitespace))
-            || !path.starts_with('/')
-            || path.contains(['\'', '"', '\n', '\r', '$', '`', ';', '|', '&', '<', '>'])
-        {
+        let Some(path) = literal_artifact_path(command) else {
             return;
-        }
-        let path = Path::new(path);
+        };
         let Ok(Some(bytes)) = read(path) else {
             item.detail = "referenced hook artifact missing, unreadable or unresolved".into();
             return;
@@ -818,6 +1139,15 @@ fn scan_directory(path: &Path, scope: &str, plugins: bool, out: &mut Vec<Compone
 fn scan_plugin_config(path: &Path, scope: &str, out: &mut Vec<Component>) {
     let mut c = component("declared plugins", path, scope);
     if let Some(bytes) = file_bytes(&mut c) {
+        // Native substitution runs before JSON parsing. Do not read expansion
+        // targets or inspect environment values: even valid literal JSON may
+        // expand into a different executable configuration.
+        let text = String::from_utf8_lossy(&bytes);
+        if text.contains("{env:") || text.contains("{file:") {
+            c.detail = "native environment/file substitution is unresolved; expansion targets are not read".into();
+            out.push(c);
+            return;
+        }
         match serde_json::from_slice::<Value>(&bytes) {
             Ok(value)
                 if value.is_object()
@@ -891,7 +1221,7 @@ pub fn render_summary(status: &Status) -> String {
 pub fn render(status: &Status) -> String {
     let mut text = format!(
         "cmux integration {}: headless {} (native version eligibility checked separately)\n",
-        status.harness,
+        display_safe(&status.harness),
         if status.headless.allowed {
             "compatible with inspected components"
         } else {
@@ -901,29 +1231,35 @@ pub fn render(status: &Status) -> String {
     for c in &status.components {
         text.push_str(&format!(
             "  {}: {:?}; activation {:?}; isolation {:?}; conformance {:?}\n    {}\n",
-            c.name, c.registration, c.activation, c.isolation, c.conformance, c.detail
+            display_safe(&c.name),
+            c.registration,
+            c.activation,
+            c.isolation,
+            c.conformance,
+            display_safe(&c.detail)
         ));
         for e in &c.evidence {
             text.push_str(&format!(
                 "    {} [{}; {}{}]\n",
-                e.path.display(),
-                e.scope,
-                e.method,
+                display_safe(&e.path.to_string_lossy()),
+                display_safe(&e.scope),
+                display_safe(&e.method),
                 e.digest
                     .as_ref()
-                    .map(|d| format!("; sha256 {d}"))
+                    .map(|d| format!("; sha256 {}", display_safe(d)))
                     .unwrap_or_default()
             ));
         }
     }
     text.push_str(&format!(
         "  conformance: {}\n  next: {}\n",
-        status.conformance, status.next_action
+        display_safe(&status.conformance),
+        display_safe(&status.next_action)
     ));
     for gap in &status.gaps {
-        text.push_str(&format!("  gap: {gap}\n"));
+        text.push_str(&format!("  gap: {}\n", display_safe(gap)));
     }
-    crate::util::display_safe_block(&text)
+    text
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -936,10 +1272,13 @@ pub struct NativeCli {
 impl NativeCli {
     pub fn discover() -> Self {
         let executable = super::resolve_executable().ok();
-        let version = executable
-            .as_ref()
-            .and_then(|p| p.to_str())
-            .and_then(crate::selection::probe_version);
+        let version = executable.as_ref().and_then(|path| {
+            if std::env::var_os("AHU_CMUX_BIN").is_some() {
+                crate::selection::probe_explicit_utility_version(path)
+            } else {
+                path.to_str().and_then(crate::selection::probe_version)
+            }
+        });
         let installer_supported = version
             .as_deref()
             .is_some_and(|v| v.strip_prefix("cmux ").unwrap_or(v) == REVIEWED_VERSION);

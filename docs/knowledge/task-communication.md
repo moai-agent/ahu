@@ -31,8 +31,12 @@ right. `ahu message <task-id> <text>` refuses to run inside a worker session,
 whose inherited `AHU_WORKER_SESSION` marker marks it as a working agent, so a
 task cannot message itself or another task; delivery belongs to the operator
 or to a broker-bound child. An empty message text is refused as a usage error,
-and the task id resolves through the same global lookup every task command
+and the task id resolves through the same repository-scoped lookup every task command
 uses.[^commands][^launch][^headless]
+
+Arguments after the task reference are literal message payload; flag-like text
+does not change repository, color, or output options. Typed `ahu:task:<id>`
+references, bare IDs, and unique prefixes use the same resolver.[^commands]
 
 The inbox is the `inbox` directory under the task directory. Entries are
 numbered files, the next message written as the four-digit successor of the
@@ -49,7 +53,8 @@ that a task id grants no delivery into any other task's directory. A task
 never writes an inbox; ids locate work, they do not authorize it, as
 [Task identity](task-identity.md) records.[^orchestration]
 
-Two artifacts carry what a task wants to say back. The task writes its final
+For interactive tasks and legacy headless contracts, two artifacts carry what a
+task wants to say back. The task writes its final
 report as `result.md` in its task directory; `ahu task` displays it under a
 `result` heading, refusing rather than truncating a report larger than the
 1 MiB display bound and naming one it cannot safely read. When the task
@@ -59,12 +64,13 @@ once answered; `ahu tasks` shows a `question` line for such a task, carrying
 its first line capped at 60 characters, and reporting unreadable, oversize,
 or empty states rather than their contents.[^orchestration][^commands]
 
-For headless attempts, human `task` and `result` output includes known native
-session provenance and runtime, attempt, result, report, and captured-final
-locations. Reports are optional and captured files may have been removed by
-cleanup. Recorded attempt outcomes and observed ownership remain separate;
-blockers and unavailable metadata are disclosed. Inspection reads bounded
-metadata and escapes display fields; it does not scan native
+New headless contracts keep final answers and helper output native. They do not
+request a copied `result.md` in primary-owned coordination. Human `task` and
+`result` output reports known session provenance, bounded outcomes, coordination
+paths, and explicitly unknown native data locations. The operator question
+file and inbox remain in the coordination directory. Report/capture paths apply
+to legacy attempts only. Recorded outcomes and observed ownership remain
+separate; unavailable metadata stays explicit. Inspection does not scan native
 transcripts.[^commands][^headless]
 
 Everything a task writes is untrusted data. ahu sanitizes artifacts for

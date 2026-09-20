@@ -590,3 +590,288 @@ fn legacy_user_plugin_scope_refuses_opaque_feed_and_inventory_is_not_isolation()
             .any(|c| c.evidence[0].path == path && c.registration == Registration::Unknown)
     );
 }
+
+#[test]
+fn default_opencode_config_and_legacy_config_are_not_absence() {
+    for name in ["config.json", "config"] {
+        let f = Fixture::new();
+        f.write(
+            f.home.join(".config/opencode").join(name),
+            if name == "config" {
+                "plugin = ['synthetic-module']"
+            } else {
+                r#"{"plugin":["synthetic-module"]}"#
+            },
+        );
+        assert!(
+            !f.inspect("opencode").headless.allowed,
+            "source {name} was omitted"
+        );
+    }
+}
+
+#[test]
+fn remote_and_managed_opencode_sources_cannot_be_assumed_inert() {
+    for key in [
+        "OPENCODE_AUTH_CONTENT",
+        "OPENCODE_TEST_MANAGED_CONFIG_DIR",
+        "XDG_DATA_HOME",
+    ] {
+        let f = Fixture::new();
+        let mut locations = f.locations();
+        locations
+            .overrides
+            .insert(key.into(), "synthetic-private-value".into());
+        let status = integration::inspect_in(&f.root, "opencode", &locations);
+        assert!(!status.headless.allowed, "unresolved source {key}");
+        assert!(
+            !serde_json::to_string(&status)
+                .unwrap()
+                .contains("synthetic-private-value")
+        );
+    }
+    let f = Fixture::new();
+    f.write(
+        f.home.join(".local/share/opencode/auth.json"),
+        "synthetic secret must not be read",
+    );
+    assert!(!f.inspect("opencode").headless.allowed);
+}
+
+#[test]
+fn escaped_json_references_have_the_same_admission_as_literal_json() {
+    for file in [".mcp.json", ".agents/settings.json"] {
+        for body in [
+            r#"{"command":"cmux"}"#,
+            r#"{"command":"\u0063mux"}"#,
+            r#"{"command":"\u0063\u006d\u0075\u0078"}"#,
+            r#"{"\u0063mux":{}}"#,
+        ] {
+            let f = Fixture::new();
+            f.write(f.root.join(file), body);
+            assert!(
+                !f.inspect("codex").headless.allowed,
+                "escaped reference admitted: {body}"
+            );
+        }
+    }
+}
+
+#[test]
+fn shell_active_unquoted_artifact_paths_are_rejected_before_hashing() {
+    use std::os::unix::fs::PermissionsExt;
+    for name in ["a\\b", "a*b", "a?b", "a[b]", "a{b,c}", "a(b)"] {
+        let f = Fixture::new();
+        let script = f.home.join(name);
+        f.write(&script, "#!/bin/sh\necho synthetic\n");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        f.write(
+            f.home.join(".codex/hooks.json"),
+            json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":script}]}]}}).to_string(),
+        );
+        let status = f.inspect("codex");
+        let hook = status
+            .components
+            .iter()
+            .find(|c| c.name.starts_with("Stop registration"))
+            .unwrap();
+        assert_eq!(
+            hook.evidence.len(),
+            1,
+            "shell-active path was hashed: {name}"
+        );
+    }
+    // No command execution: demonstrate how POSIX shell tokenization changes
+    // the name the old artifact verifier inspected literally.
+    let output = Command::new("/bin/sh")
+        .args(["-c", "printf '%s' /synthetic/a\\b"])
+        .output()
+        .unwrap();
+    assert_eq!(output.stdout, b"/synthetic/ab");
+}
+
+#[test]
+fn native_names_cannot_forge_multiline_status() {
+    let f = Fixture::new();
+    f.write(f.home.join(".codex/hooks.json"), json!({"hooks":{"Stop\nFORGED_EVENT":[{"hooks":[{"type":"command","command":"synthetic"}]}]}}).to_string());
+    f.write(
+        f.home
+            .join(".config/opencode/plugins/plugin\nFORGED_PATH.js"),
+        "synthetic",
+    );
+    for harness in ["codex", "opencode"] {
+        let mut status = f.inspect(harness);
+        status.components[0].detail = "detail\nFORGED_DETAIL".into();
+        let rendered = integration::render(&status);
+        for forged in ["FORGED_EVENT", "FORGED_PATH", "FORGED_DETAIL"] {
+            assert!(
+                !rendered.lines().any(|line| line.starts_with(forged)),
+                "untrusted field created a status line: {rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_sensitive_sources_use_only_metadata_and_never_become_verified() {
+    use std::os::unix::fs::PermissionsExt;
+    for (harness, path) in [
+        ("opencode", ".local/share/opencode/auth.json"),
+        ("opencode", ".local/share/opencode/opencode.db"),
+        ("opencode", ".local/share/opencode/opencode-beta.db-wal"),
+        ("codex", ".codex/auth.json"),
+        ("codex", ".codex/cloud-config-bundle-cache.json"),
+    ] {
+        let f = Fixture::new();
+        let path = f.home.join(path);
+        f.write(&path, "synthetic secret content");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let status = f.inspect(harness);
+        assert!(!status.headless.allowed, "{status:?}");
+        let source = status
+            .components
+            .iter()
+            .find(|c| c.evidence[0].path == path)
+            .unwrap();
+        assert_eq!(source.registration, Registration::Unknown);
+        assert_eq!(
+            source.evidence[0].method,
+            "metadata only; contents not read"
+        );
+        assert!(source.evidence[0].digest.is_none());
+        assert!(
+            !serde_json::to_string(&status)
+                .unwrap()
+                .contains("synthetic secret content")
+        );
+    }
+}
+
+#[test]
+fn managed_and_plugin_hook_sources_refuse_until_verified() {
+    let f = Fixture::new();
+    let mut locations = f.locations();
+    locations.managed_opencode = Some(f.root.join("system-opencode"));
+    locations.managed_preferences = Some(f.root.join("managed-preferences"));
+    locations.system_codex = Some(f.root.join("system-codex"));
+    for (harness, path, content) in [
+        (
+            "opencode",
+            "system-opencode/opencode.json",
+            r#"{"plugin":["synthetic-native-plugin"]}"#,
+        ),
+        (
+            "opencode",
+            "managed-preferences/ai.opencode.managed.plist",
+            "opaque synthetic preferences",
+        ),
+        (
+            "opencode",
+            "managed-preferences/synthetic-user/ai.opencode.managed.plist",
+            "opaque synthetic preferences",
+        ),
+        (
+            "codex",
+            "system-codex/requirements.toml",
+            "[hooks]\nmanaged_dir = '/synthetic/hooks'\n",
+        ),
+        (
+            "codex",
+            "system-codex/managed_config.toml",
+            "[hooks]\nmanaged_dir = '/synthetic/hooks'\n",
+        ),
+        (
+            "codex",
+            "system-codex/config.toml",
+            "[plugins.synthetic]\nenabled=true\n",
+        ),
+    ] {
+        let path = f.root.join(path);
+        f.write(&path, content);
+        let status = integration::inspect_in(&f.root, harness, &locations);
+        assert!(!status.headless.allowed, "{status:?}");
+        assert!(
+            status
+                .components
+                .iter()
+                .any(|c| c.evidence[0].path == path && c.registration == Registration::Unknown)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+    for content in [
+        "[plugins.synthetic]\nenabled=true\n",
+        "profile='synthetic'\n",
+        "cli_auth_credentials_store='keyring'\n",
+        "[[hooks.Stop]]\nhooks=[]\n",
+    ] {
+        f.write(f.home.join(".codex/config.toml"), content);
+        assert!(!f.inspect("codex").headless.allowed, "{content}");
+    }
+    std::fs::remove_file(f.home.join(".codex/config.toml")).unwrap();
+    std::fs::create_dir_all(f.home.join(".codex/plugins")).unwrap();
+    assert!(!f.inspect("codex").headless.allowed);
+    std::fs::remove_dir(f.home.join(".codex/plugins")).unwrap();
+    locations.codex_managed_preferences = integration::ManagedPreferences::Present;
+    assert!(
+        !integration::inspect_in(&f.root, "codex", &locations)
+            .headless
+            .allowed
+    );
+}
+
+#[test]
+fn codex_cwd_configuration_is_an_executable_hook_scope() {
+    let f = Fixture::new();
+    f.write(
+        f.root.join("config.toml"),
+        "[plugins.synthetic]\nenabled=true\n",
+    );
+    assert!(!f.inspect("codex").headless.allowed);
+    std::fs::remove_file(f.root.join("config.toml")).unwrap();
+    f.write(
+        f.root.join("hooks.json"),
+        json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"synthetic-hook"}]}]}})
+            .to_string(),
+    );
+    assert!(!f.inspect("codex").headless.allowed);
+}
+
+#[test]
+fn literal_quoted_artifact_paths_are_inspected_without_shell_expansion() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    for name in ["a\\b", "a*b", "a?b", "a[b]", "a(b)", "a b", "a$HOME"] {
+        let path = f.home.join(name);
+        f.write(&path, "#!/bin/sh\necho synthetic\n");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        f.write(f.home.join(".codex/hooks.json"), json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":format!("'{}'",path.display())}]}]}}).to_string());
+        let status = f.inspect("codex");
+        let hook = status
+            .components
+            .iter()
+            .find(|c| c.name.starts_with("Stop registration"))
+            .unwrap();
+        assert_eq!(
+            hook.evidence.len(),
+            2,
+            "literal quoted path should be inspected: {name}"
+        );
+        assert_eq!(hook.evidence[1].path, path);
+        assert_eq!(hook.registration, Registration::Unknown); // opaque synthetic bytes
+    }
+}
+
+#[test]
+fn opencode_native_substitution_sources_remain_unresolved() {
+    let f = Fixture::new();
+    for content in [
+        r#"{"username":"{env:SYNTHETIC_CONFIG_FRAGMENT}"}"#,
+        r#"{"username":"{file:synthetic-config-fragment}"}"#,
+    ] {
+        f.write(f.home.join(".config/opencode/config.json"), content);
+        assert!(
+            !f.inspect("opencode").headless.allowed,
+            "native substitution source was treated as absent: {content}"
+        );
+    }
+}

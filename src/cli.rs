@@ -9,7 +9,7 @@ pub const HELP: &str = "ahu - The moai-agent command-line interface
 
 Launch repository-defined agents in fresh Git worktrees and organise their
 interactive sessions in cmux. Use --headless for unattended execution with
-external results and optional detached supervision.
+primary-owned coordination and optional detached supervision.
 
 Usage: ahu [--repo <path>] [COMMAND]
 
@@ -48,10 +48,11 @@ Commands:
   diff <task-id>         Review tracked changes since launch; list untracked files
   wait <task-id> [--output json]    Wait for a headless attempt to stop
   result <task-id> [--output json]  Read durable process and harness outcomes
-  cleanup <task-id>                Remove captured logs after a recorded terminal result;
-                                  retain results, native sessions, branches and worktrees
+  cleanup <task-id>                After known termination, remove recognized old captures
+                                  and bounded requests; retain results and native sessions,
+                                  branches and worktrees
   cancel <task-id>                Request cancellation of the task and ahu descendants;
-                                  an interactive task is stopped and its cmux workspace closed,
+                                  confirmed interactive cancellation closes its cmux workspace,
                                   while the worktree, branch and record are kept
   resume <task-id> --prompt-file PATH [--output json]
                                   Resume a root task from the host using its recorded native session;
@@ -59,7 +60,11 @@ Commands:
   focus <task-id>       Bring a task's cmux session to the front
   remove <task-id>      Remove a terminal task's record, worktree, and branch
   message <task-id> <text>
-                        Append an operator message to the task's inbox
+                        Append an operator message; subsequent flags are literal text
+  cmux status [--output json]
+                        Inspect native integration evidence and headless isolation
+  cmux install --harness ID [--dry-run]
+                        Preview or explicitly delegate a native cmux installation
   doctor                Check repository, configuration, harness, and cmux
   agy                   Open the Antigravity CLI here using its configured model
                         and permissions (ahu passes no --mode and no

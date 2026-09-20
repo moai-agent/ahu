@@ -33,7 +33,7 @@ Native definitions found elsewhere are candidates for onboarding, not implicit
 registrations. A referenced source supplies instructions without changing the
 manifest's harness or model selection.[^agent]
 
-New deliveries use typed layout 2. Sections appear in the order `contract`,
+New deliveries use typed layout 3. Sections appear in the order `contract`,
 optional `metadata`, optional `state`, optional `agent`, and `request`.
 XML-shaped opening and closing tags both carry the same per-launch nonce:
 `<ahu-agent-NONCE>` and `</ahu-agent-NONCE>`, for example. Bodies remain byte-exact
@@ -46,6 +46,10 @@ session reference, and frozen child grants. These minimal frozen facts locate
 execution context without importing native histories or transcript summaries.
 The contract and section roles are advisory prompt text, not harness-enforced
 policy or a system role.[^orchestration]
+
+Layout 3 asks headless workers to return final reports in their native response,
+without copying them into primary-owned coordination. Layout 2 retains its frozen
+contract bytes; legacy headless execution is separately refused.[^orchestration]
 
 Missing `delivery.layout_version` means layout 1. Replay preserves its bytes,
 including bracket fences and the unfenced request, and retains digest checks.
