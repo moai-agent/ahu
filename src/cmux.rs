@@ -500,6 +500,29 @@ impl Cmux {
         }
     }
 
+    /// Open a coordinator harness in a fresh workspace under a repository group.
+    /// This is used when the invoking terminal already anchors another group;
+    /// cmux cannot move that anchor into a second group.
+    pub fn create_coordinator_workspace(
+        &self,
+        group_id: &str,
+        window_id: Option<&str>,
+        title: &str,
+        summary: &str,
+        cwd: &Path,
+        startup_command: &str,
+    ) -> Result<CreatedWorkspace> {
+        self.create_task_workspace(
+            group_id,
+            window_id,
+            title,
+            summary,
+            cwd,
+            startup_command,
+            true,
+        )
+    }
+
     /// Open a Markdown file in cmux's own Markdown viewer.
     ///
     /// The bundled viewer renders ```` ```mermaid ```` fences as diagrams and

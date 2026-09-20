@@ -18,7 +18,7 @@ use crate::selection::ResolvedPair;
 use crate::snapshot::{self, ConfigSnapshot};
 use crate::state::{self, LaunchLock};
 use crate::task::{self, LaunchIdentity, LaunchMode, TaskRecord, TaskState};
-use crate::util::{Error, Result};
+use crate::util::{Error, Result, shell_single_quote};
 
 use serde::{Deserialize, Serialize};
 
@@ -722,14 +722,29 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
     Ok(group)
 }
 
+pub struct CoordinatorPlacement {
+    pub notes: Vec<String>,
+    pub opened_workspace: bool,
+}
+
 /// Coordinator shortcuts reuse their terminal and join the same primary-owned
-/// group as task launches. Outside cmux there is no workspace to arrange.
-pub fn group_coordinator(repo: &Repo) -> Result<Vec<String>> {
+/// group as task launches. If the terminal already anchors another group, open
+/// a fresh coordinator workspace under the repository group instead of trying
+/// to move a cmux anchor between groups.
+pub fn group_coordinator(
+    repo: &Repo,
+    executable: &str,
+    label: &str,
+    args: &[&str],
+) -> Result<CoordinatorPlacement> {
     let Some(workspace) = std::env::var("CMUX_WORKSPACE_ID")
         .ok()
         .filter(|id| !id.is_empty())
     else {
-        return Ok(Vec::new());
+        return Ok(CoordinatorPlacement {
+            notes: Vec::new(),
+            opened_workspace: false,
+        });
     };
     let client = Cmux::discover()?;
     client.check_capabilities()?;
@@ -743,10 +758,46 @@ pub fn group_coordinator(repo: &Repo) -> Result<Vec<String>> {
         .window_id
         .ok_or_else(|| Error::new("cmux repository group has no known window"))?;
     if !group.member_workspace_ids.contains(&workspace) {
+        let belongs_to_other_group =
+            client
+                .list_groups(Some(&window))?
+                .into_iter()
+                .any(|candidate| {
+                    candidate.id != group.id
+                        && candidate
+                            .member_workspace_ids
+                            .iter()
+                            .any(|member| member == &workspace)
+                });
+        if belongs_to_other_group {
+            let startup = std::iter::once(shell_single_quote(executable))
+                .chain(args.iter().map(|arg| shell_single_quote(arg)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            client.create_coordinator_workspace(
+                &group.id,
+                Some(&window),
+                &format!("{label} coordinator"),
+                &format!("{label} coordinator for {}", repo.display_name()),
+                &repo.root,
+                &startup,
+            )?;
+            notes.push(format!(
+                "the invoking workspace already belongs to another cmux group; ahu opened a new {label} coordinator workspace under the {} group.",
+                repo.display_name()
+            ));
+            return Ok(CoordinatorPlacement {
+                notes,
+                opened_workspace: true,
+            });
+        }
         client.add_workspace_to_group(&group.id, &workspace, &window)?;
     }
     client.expand_group(&group.id)?;
-    Ok(notes)
+    Ok(CoordinatorPlacement {
+        notes,
+        opened_workspace: false,
+    })
 }
 
 fn repository_group_candidates<'a>(

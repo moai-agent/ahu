@@ -10,7 +10,7 @@ fn coordinator_shortcuts_group_the_caller_before_starting_and_refuse_failed_grou
         ("opencode", "opencode"),
         ("agy", "agy"),
     ] {
-        for failure in ["none", "add", "verify", "identify"] {
+        for failure in ["none", "add", "verify", "identify", "conflict"] {
             let fixture = common::TestRepo::new();
             let scratch = tempfile::tempdir().unwrap();
             let repo = ahu::git::discover(fixture.path()).unwrap();
@@ -24,6 +24,8 @@ args = sys.argv[1:]
 if args[0] == 'ping': print('PONG'); sys.exit(0)
 if args[0] == 'capabilities':
  print(json.dumps({'capabilities':['workspace.groups.v1','workspace.group_create.v1','workspace.create_in_group.v1']})); sys.exit(0)
+if args[0] == 'new-workspace':
+ (base/'new-workspace').touch(); print('workspace:coordinator'); sys.exit(0)
 method, params = args[1], json.loads(args[2])
 with (base/'calls').open('a') as f: f.write(json.dumps([method,params])+'\n')
 if method == 'system.identify':
@@ -31,8 +33,13 @@ if method == 'system.identify':
  print(json.dumps({'caller':{'window_id':None if failure == 'identify' else ('target-window' if (base/'moved').exists() else 'caller-window')}}))
 elif method == 'workspace.group.list':
  assert params['window_id'] in ['target-window','caller-window']
- members = ['anchor'] + (['caller'] if (base/'added').exists() and failure != 'verify' else [])
- print(json.dumps({'groups':[{'id':'saved-group','name':'renamed repository','anchor_workspace_id':'anchor','member_workspace_ids':members}] if params['window_id']=='target-window' else []}))
+ members = ['anchor']
+ if (base/'added').exists() and failure != 'verify': members.append('caller')
+ if (base/'new-workspace').exists(): members.append('coordinator')
+ groups = [{'id':'saved-group','name':'renamed repository','anchor_workspace_id':'anchor','member_workspace_ids':members}] if params['window_id']=='target-window' else []
+ if failure == 'conflict' and params['window_id'] == 'target-window':
+  groups.append({'id':'other-group','name':'other repository','anchor_workspace_id':'caller','member_workspace_ids':['caller']})
+ print(json.dumps({'groups':groups}))
 elif method == 'workspace.list': print(json.dumps({'workspaces':[]}))
 elif method == 'workspace.move_to_window':
  assert params == {'workspace_id':'caller','window_id':'target-window'}
@@ -85,6 +92,9 @@ else: raise AssertionError(method)
             );
             if failure == "none" {
                 assert_eq!(result.status.code(), Some(7));
+            } else if failure == "conflict" {
+                assert!(scratch.path().join("new-workspace").exists());
+                assert_eq!(result.status.code(), Some(0));
             } else {
                 assert!(!result.status.success());
             }

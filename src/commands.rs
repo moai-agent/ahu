@@ -80,8 +80,12 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
     crate::state::ensure_checkout_state(&repo.root)?;
-    for note in launch::group_coordinator(repo)? {
+    let placement = launch::group_coordinator(repo, &executable, label, args)?;
+    for note in placement.notes {
         eprintln!("ahu: {}", display_safe(&note));
+    }
+    if placement.opened_workspace {
+        return Ok(0);
     }
     if !args.is_empty() {
         eprintln!("{label} coordinator: {}", args.join(" "));
