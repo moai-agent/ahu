@@ -24,9 +24,9 @@ configuration is then materialized from a snapshot taken at submission, includin
 uncommitted and ignored additions, modifications, and deletions. Unrelated dirty
 source files are not copied.[^launch][^snapshot]
 
-The snapshot recognizes `.agents`, `.claude`, `.codex`, `.agent`, and `.opencode`
+The snapshot recognizes `.agents`, `.claude`, `.codex`, `.agent`, `.opencode`, and `.gemini`
 directories, along with supported instruction and configuration filenames,
-including `opencode.json` and `opencode.jsonc`. It records content
+including `GEMINI.md`, `opencode.json` and `opencode.jsonc`. It records content
 digests and executable bits. Collection has a depth limit and skips directories
 such as `.git`, `.worktrees`, and build output; the scan is not an exhaustive
 inventory of every possible configuration location. Files already committed in

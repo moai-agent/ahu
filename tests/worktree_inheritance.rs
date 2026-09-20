@@ -14,11 +14,13 @@ use common::TestRepo;
 fn the_snapshot_covers_native_paths_for_every_supported_harness() {
     let repo = TestRepo::new();
     repo.write("CLAUDE.md", "repository guidance\n");
+    repo.write("GEMINI.md", "antigravity instructions\n");
     repo.write("AGENTS.md", "other harness guidance\n");
     repo.write(".claude/settings.json", "{}\n");
     repo.write(".claude/skills/review/SKILL.md", "review skill\n");
     repo.write(".claude/agents/chris.md", "---\nname: chris\n---\nbody\n");
     repo.write(".agents/skills/shared/SKILL.md", "shared skill\n");
+    repo.write(".gemini/antigravity-cli/skills/example/SKILL.md", "antigravity skill\n");
     repo.write(".mcp.json", "{\"mcpServers\":{}}\n");
     repo.write("docs/nested/CLAUDE.md", "nested guidance\n");
     repo.write("src/main.rs", "fn main() {}\n");
@@ -27,11 +29,13 @@ fn the_snapshot_covers_native_paths_for_every_supported_harness() {
     let paths: Vec<&str> = taken.entries.iter().map(|e| e.path.as_str()).collect();
     for expected in [
         "CLAUDE.md",
+        "GEMINI.md",
         "AGENTS.md",
         ".claude/settings.json",
         ".claude/skills/review/SKILL.md",
         ".claude/agents/chris.md",
         ".agents/skills/shared/SKILL.md",
+        ".gemini/antigravity-cli/skills/example/SKILL.md",
         ".mcp.json",
         "docs/nested/CLAUDE.md",
     ] {
