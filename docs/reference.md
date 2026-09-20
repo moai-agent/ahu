@@ -72,8 +72,8 @@ their distinct meaning. Names locate tasks and do not grant authority.
 stdout. Its first tools are read-only and repository-scoped:
 `ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get`. The server reports
 canonical task IDs and verified `@name` handles while using ahu's existing
-repository ownership and task-resolution rules. It does not create a second
-identity, task store, permission path, or harness adapter.
+repository ownership and task-resolution rules. Protocol handles describe
+inspection operations and do not replace ahu launch records or identities.
 
 `ahu mcp setup` materializes the skill bundle shipped with this ahu build into
 `.agents/skills/`. Claude can load that canonical tree directly; ahu does not
@@ -84,10 +84,60 @@ while installed harnesses lack verified native Skills-over-MCP support; the
 bundle can move to an independent repository later without changing the MCP
 task boundary.
 
-Mutating MCP task and agent tools are not exposed by this first server slice.
-Future tools retain ahu's task IDs, handles, ownership, grants, approval
-boundaries, and acceptance semantics while mapping observable lifecycle states
-to MCP Tasks where the protocol supports them.
+The modern path follows the [2026-07-28 Tasks extension](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks).
+Declare `io.modelcontextprotocol/tasks: {}` inside
+`params._meta["io.modelcontextprotocol/clientCapabilities"].extensions` on every
+Tasks request. `server/discover` advertises support. Inspection calls return a
+persisted `working` handle before execution. `tasks/get` returns the current
+state and its final tool result or JSON-RPC error. `tasks/update` answers
+outstanding input requests, and `tasks/cancel` durably cancels an active
+inspection. Cancellation is idempotent; completed results remain completed.
+Neither terminal protocol status nor an inspection result accepts, merges, or
+approves harness work. No MCP tool launches or changes harness permissions.
+
+The stdio host supplies `AHU_MCP_CALLER` as a stable authenticated principal for
+each caller; without it, the effective local OS user is the principal. The host
+must choose this value, retain it across reconnects, and use separate processes
+for separate callers. Client metadata cannot set or override it. This is a
+local transport boundary, not remote authentication: clients with the same OS
+account and direct filesystem/process access already share that account's
+trust. Handles are bound to this principal, repository identity, and checkout.
+Old handles without ownership metadata are refused rather than reassigned.
+
+The queue under the private repository coordination store (`mcp/tasks`) retains
+ownership, operation arguments, status, timestamps, cancellation, and final
+result/error. Atomic writes sync files and their directory before acknowledgement.
+TTL is persisted as `null` (unlimited); there is no automatic retention cleanup.
+On reconnect, a modern Tasks request starts recovery of that caller's queued
+inspections in the same checkout. Workers use OS locks to avoid duplicate
+execution and recheck cancellation before publishing results. A process crash
+can replay an interrupted read-only inspection. Work pauses while no server
+for that caller is running; this transport does not install a daemon.
+
+For stdio notifications, send `subscriptions/listen` with
+`notifications.taskIds` (up to 64 authorized IDs) and the Tasks capability.
+The server emits `notifications/subscriptions/acknowledged` followed by
+`notifications/tasks` snapshots when subscribed state changes, including changes
+from another connection. Each listen replaces this connection's subscriptions;
+reconnects require a new listen. Notifications may coalesce intermediate states;
+`tasks/get` remains authoritative. Task payloads are never broadcast to other
+callers.
+
+The optional experimental adapter is enabled by the host with
+`AHU_MCP_TASKS_ADAPTER=inspection-v1`. It exposes `ahu_task_inspect` to modern
+clients. A provided `task` selector behaves like `ahu_task_get`; omission requests
+selection through `input_required`. The creating client must also advertise
+`elicitation.form: {}`. Reply through `tasks/update.inputResponses` with
+`{"task-selection":{"action":"accept","content":{"task":"@reviewer"}}}`
+and both capabilities. `decline` or `cancel` cancels the inspection. Updates
+are limited to 8 KiB, selectors to 256 bytes, and the response can only fill that
+pending selector. Unknown or already answered input keys are ignored; identity,
+permissions, tool, and repository fields cannot be updated.
+
+`initialize` selects the isolated `2025-06-18` legacy inspection path for the
+connection. It always returns ordinary synchronous tool results and refuses
+Tasks methods even if later requests include modern capabilities. `tasks/list`
+and `tasks/result` are not implemented.
 
 ### Long-running task records
 
