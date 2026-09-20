@@ -5,6 +5,7 @@
 //! storage model. Mutating task tools will build on these same repository and
 //! task resolution paths.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 
@@ -12,6 +13,8 @@ use crate::git::Repo;
 use crate::util::{Error, Result};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
+const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+const TASKS_EXTENSION: &str = "io.modelcontextprotocol/tasks";
 const SERVER_NAME: &str = "ahu";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -85,6 +88,9 @@ fn handle(repo: &Repo, request: &Value) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(Value::as_str)?;
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    if request.get("id").is_none() && method.starts_with("notifications/") {
+        return None;
+    }
     match method {
         "notifications/initialized" | "notifications/cancelled" => None,
         "initialize" => Some(response(
@@ -97,8 +103,19 @@ fn handle(repo: &Repo, request: &Value) -> Option<Value> {
             }),
         )),
         "ping" => Some(response(&id, json!({}))),
+        "server/discover" => Some(response(
+            &id,
+            json!({
+                "protocolVersion": MODERN_PROTOCOL_VERSION,
+                "capabilities": {"extensions": {TASKS_EXTENSION: {}}},
+                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            }),
+        )),
         "tools/list" => Some(response(&id, json!({"tools": tools()}))),
         "tools/call" => Some(call_response(repo, &id, &params)),
+        "tasks/get" => Some(task_get_rpc(repo, &id, &params)),
+        "tasks/update" => Some(task_update_rpc(repo, &id, &params)),
+        "tasks/cancel" => Some(task_cancel_rpc(repo, &id, &params)),
         _ => Some(rpc_error(
             &id,
             -32601,
@@ -142,12 +159,158 @@ fn call_response(repo: &Repo, id: &Value, params: &Value) -> Value {
         _ => Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
     };
     match result {
+        Ok(value) if tasks_requested(params) => match create_completed_task(repo, value) {
+            Ok(task) => response(id, task),
+            Err(error) => rpc_error(id, -32603, error.to_string()),
+        },
         Ok(value) => response(
             id,
             json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())}],"structuredContent":value}),
         ),
         Err(error) => rpc_error(id, -32000, error.to_string()),
     }
+}
+
+fn tasks_requested(params: &Value) -> bool {
+    params
+        .get("_meta")
+        .and_then(|meta| meta.get("io.modelcontextprotocol/clientCapabilities"))
+        .and_then(|caps| caps.get("extensions"))
+        .and_then(|extensions| extensions.get(TASKS_EXTENSION))
+        .is_some()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct StoredTask {
+    task_id: String,
+    status: String,
+    created_at: String,
+    last_updated_at: String,
+    ttl_ms: Option<u64>,
+    poll_interval_ms: Option<u64>,
+    result: Option<Value>,
+}
+
+fn task_store_dir(repo: &Repo) -> Result<std::path::PathBuf> {
+    let dir = crate::state::coordination_dir(repo)?.join("mcp/tasks");
+    crate::state::create_private_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn task_path(repo: &Repo, task_id: &str) -> Result<std::path::PathBuf> {
+    if !crate::task::is_canonical_task_uuid(task_id) {
+        return Err(Error::new("invalid MCP task id"));
+    }
+    Ok(task_store_dir(repo)?.join(format!("{task_id}.json")))
+}
+
+fn create_completed_task(repo: &Repo, value: Value) -> Result<Value> {
+    let task_id = crate::task::new_task_id()?;
+    let timestamp = crate::task::now_rfc3339();
+    let task = StoredTask {
+        task_id: task_id.clone(),
+        status: "completed".into(),
+        created_at: timestamp.clone(),
+        last_updated_at: timestamp,
+        ttl_ms: None,
+        poll_interval_ms: None,
+        result: Some(json!({
+            "content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())}],
+            "structuredContent": value,
+        })),
+    };
+    let path = task_path(repo, &task_id)?;
+    crate::state::write_json(&path, &task)?;
+    Ok(json!({
+        "resultType":"task",
+        "taskId":task.task_id,
+        "status":task.status,
+        "createdAt":task.created_at,
+        "lastUpdatedAt":task.last_updated_at,
+        "ttlMs":task.ttl_ms,
+        "pollIntervalMs":task.poll_interval_ms,
+    }))
+}
+
+fn task_capability_error(id: &Value) -> Value {
+    rpc_error(
+        id,
+        -32021,
+        format!("MCP Tasks extension required: {TASKS_EXTENSION}"),
+    )
+}
+
+fn task_id(params: &Value) -> Option<&str> {
+    params.get("taskId").and_then(Value::as_str)
+}
+
+fn task_get_rpc(repo: &Repo, id: &Value, params: &Value) -> Value {
+    if !tasks_requested(params) {
+        return task_capability_error(id);
+    }
+    let Some(task_id) = task_id(params) else {
+        return rpc_error(id, -32602, "tasks/get requires params.taskId");
+    };
+    let Ok(path) = task_path(repo, task_id) else {
+        return rpc_error(id, -32602, "invalid task id");
+    };
+    let task: StoredTask = match crate::state::read_json(&path) {
+        Ok(task) => task,
+        Err(_) => return rpc_error(id, -32602, "unknown task id"),
+    };
+    let mut result = json!({
+        "resultType":"complete",
+        "taskId":task.task_id,
+        "status":task.status,
+        "createdAt":task.created_at,
+        "lastUpdatedAt":task.last_updated_at,
+        "ttlMs":task.ttl_ms,
+        "pollIntervalMs":task.poll_interval_ms,
+    });
+    if let Some(value) = task.result {
+        result["result"] = value;
+    }
+    response(id, result)
+}
+
+fn task_update_rpc(repo: &Repo, id: &Value, params: &Value) -> Value {
+    if !tasks_requested(params) {
+        return task_capability_error(id);
+    }
+    let Some(task_id) = task_id(params) else {
+        return rpc_error(id, -32602, "tasks/update requires params.taskId");
+    };
+    if task_path(repo, task_id)
+        .ok()
+        .and_then(|path| crate::state::read_json::<StoredTask>(&path).ok())
+        .is_none()
+    {
+        return rpc_error(id, -32602, "unknown task id");
+    }
+    response(id, json!({"resultType":"complete"}))
+}
+
+fn task_cancel_rpc(repo: &Repo, id: &Value, params: &Value) -> Value {
+    if !tasks_requested(params) {
+        return task_capability_error(id);
+    }
+    let Some(task_id) = task_id(params) else {
+        return rpc_error(id, -32602, "tasks/cancel requires params.taskId");
+    };
+    let Ok(path) = task_path(repo, task_id) else {
+        return rpc_error(id, -32602, "invalid task id");
+    };
+    let Ok(mut task): Result<StoredTask> = crate::state::read_json(&path) else {
+        return rpc_error(id, -32602, "unknown task id");
+    };
+    if task.status == "working" {
+        task.status = "cancelled".into();
+        task.last_updated_at = crate::task::now_rfc3339();
+        if let Err(error) = crate::state::write_json(&path, &task) {
+            return rpc_error(id, -32603, error.to_string());
+        }
+    }
+    response(id, json!({"resultType":"complete"}))
 }
 
 fn agents(repo: &Repo) -> Result<Value> {

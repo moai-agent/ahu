@@ -75,3 +75,73 @@ fn setup_materializes_the_bundled_skill_trees_without_overwriting_changes() {
         String::from_utf8_lossy(&refused.stderr).contains("refusing to overwrite changed skill")
     );
 }
+
+#[test]
+fn tasks_extension_returns_a_durable_handle_and_rejects_legacy_calls() {
+    let repo = common::TestRepo::new();
+    let mut child = common::ahu()
+        .args(["mcp", "serve"])
+        .current_dir(repo.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"server/discover","params":{}
+        })
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{
+                "name":"ahu_agents_list","arguments":{},
+                "_meta":{"io.modelcontextprotocol/clientCapabilities":{
+                    "extensions":{"io.modelcontextprotocol/tasks":{}}
+                }}
+            }
+        })
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":3,"method":"tasks/get",
+            "params":{"taskId":"not-a-task"}
+        })
+    )
+    .unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        rows[0]["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/tasks"],
+        serde_json::json!({})
+    );
+    assert_eq!(rows[1]["result"]["resultType"], "task");
+    assert!(rows[1]["result"]["taskId"].as_str().unwrap().contains('-'));
+    assert_eq!(rows[1]["result"]["status"], "completed");
+    assert_eq!(rows[2]["error"]["code"], -32021);
+    let task_files = std::fs::read_dir(
+        repo.path()
+            .join(".ahu/state")
+            .join("repos")
+            .join(ahu::git::discover(repo.path()).unwrap().identity())
+            .join("mcp/tasks"),
+    )
+    .unwrap()
+    .count();
+    assert_eq!(task_files, 1);
+}
