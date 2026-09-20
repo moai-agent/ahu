@@ -200,6 +200,14 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             let root = commands::repo_from_cwd().map(|r| r.root).unwrap_or(cwd);
             ahu::cmux::integration::install_command(&root, &harness, dry_run)
         }
+        Command::McpServe => {
+            let repo = commands::repo_from_cwd()?;
+            ahu::mcp::serve(&repo)
+        }
+        Command::McpSetup => {
+            let repo = commands::repo_from_cwd()?;
+            ahu::mcp::setup(&repo)
+        }
         // `doctor` reports on a missing repository rather than failing on one.
         Command::Doctor => {
             let repo = commands::repo_from_cwd();
@@ -251,6 +259,8 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Doctor
                 | Command::CmuxStatus { .. }
                 | Command::CmuxInstall { .. }
+                | Command::McpServe
+                | Command::McpSetup
                 | Command::Claude
                 | Command::Codex
                 | Command::OpenCode

@@ -200,6 +200,8 @@ require explicit user permission.
 | `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
+| `ahu mcp serve` | Serve repository-scoped agent and task inspection over stdio MCP |
+| `ahu mcp setup` | Materialize ahu's bundled skills into the project for review and commit |
 
 `ahu codex` passes `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
 and `ahu agy` pass `--dangerously-skip-permissions`. All three disclose the
@@ -208,6 +210,11 @@ harness's configured model. Registered child agents keep their own manifest
 permissions and launch requirements. Inside cmux, coordinator shortcuts place
 their workspace in the repository's group before starting. See
 [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
+
+The initial MCP integration is local and repository-scoped. `ahu mcp serve`
+provides read-only agent and task inspection over stdio; `ahu mcp setup` copies
+the bundled skills into `.agents/skills/` and `.claude/skills/` as ordinary files
+that the project can review and commit. The skill bundle ships with ahu for now.
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON
 contracts, prompt transport, hooks, state, and delegation boundaries.

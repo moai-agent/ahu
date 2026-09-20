@@ -66,6 +66,28 @@ name can acquire a suffix at submission if another task claimed it meanwhile.
 Registered agent names and task handles may share text; the command supplies
 their distinct meaning. Names locate tasks and do not grant authority.
 
+## MCP integration
+
+`ahu mcp serve` starts a local newline-delimited JSON request/response server on stdin and
+stdout. Its first tools are read-only and repository-scoped:
+`ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get`. The server reports
+canonical task IDs and verified `@name` handles while using ahu's existing
+repository ownership and task-resolution rules. It does not create a second
+identity, task store, permission path, or harness adapter.
+
+`ahu mcp setup` materializes the skill bundle shipped with this ahu build into
+`.agents/skills/` and `.claude/skills/`. The files are ordinary project files
+for review and commit. Setup refuses to overwrite a changed file, so local
+skill edits cannot be silently replaced. This is the temporary delivery path
+while installed harnesses lack verified native Skills-over-MCP support; the
+bundle can move to an independent repository later without changing the MCP
+task boundary.
+
+Mutating MCP task and agent tools are not exposed by this first server slice.
+Future tools retain ahu's task IDs, handles, ownership, grants, approval
+boundaries, and acceptance semantics while mapping observable lifecycle states
+to MCP Tasks where the protocol supports them.
+
 ## Scriptable launch previews
 
 A launch prompt can come from an inline argument, a UTF-8 file, or piped stdin:
@@ -1220,7 +1242,7 @@ Registered child agents retain their own manifest permissions, harness, and
 model. A coordinator's bypass does not alter a child's mapping or replace the
 child's required approval-widening flag or headless host grant.
 
-`ahu agy` opens Antigravity with `--dangerously-skip-permissions`, its YOLO
+`ahu agy` opens Antigravity with `--dangerously-skip-permissions`, its unattended
 mode, while retaining the configured model. `ahu opencode` opens OpenCode
 without arguments, retaining native model and permission settings. OpenCode's
 plugins retain their native loading behavior; ahu passes neither `--auto` nor

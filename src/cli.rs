@@ -65,6 +65,8 @@ Commands:
                         Inspect native integration evidence and headless isolation
   cmux install --harness ID [--dry-run]
                         Preview or explicitly delegate a native cmux installation
+  mcp serve              Serve read-only ahu inspection tools over stdio MCP
+  mcp setup              Materialize ahu's bundled skills into this repository
   doctor                Check repository, configuration, harness, and cmux
   agy                   Open the Antigravity CLI here using its configured model
                         in YOLO mode (--dangerously-skip-permissions)
@@ -240,6 +242,8 @@ pub enum Command {
         harness: String,
         dry_run: bool,
     },
+    McpServe,
+    McpSetup,
     Doctor,
     Codex,
     Claude,
@@ -399,6 +403,11 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             Ok(Command::Tasks)
         }
         "cmux" => parse_cmux(&args[1..]),
+        "mcp" => match args.get(1).map(String::as_str) {
+            Some("serve") if args.len() == 2 => Ok(Command::McpServe),
+            Some("setup") if args.len() == 2 => Ok(Command::McpSetup),
+            _ => bail!("expected ahu mcp serve or ahu mcp setup"),
+        },
         "doctor" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Doctor)
