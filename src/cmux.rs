@@ -558,8 +558,12 @@ impl Cmux {
 
     /// Set a namespaced sidebar status pill for a task workspace.
     pub fn set_status(&self, workspace_id: &str, value: &str) -> Result<()> {
+        self.set_status_entry(workspace_id, "ahu.task", value)
+    }
+
+    fn set_status_entry(&self, workspace_id: &str, key: &str, value: &str) -> Result<()> {
         let output = Command::new(&self.executable)
-            .args(["set-status", "ahu.task", value, "--workspace", workspace_id])
+            .args(["set-status", key, value, "--workspace", workspace_id])
             .output()
             .map_err(|e| Error::new(format!("cannot run cmux set-status: {e}")))?;
         if !output.status.success() {
@@ -569,6 +573,25 @@ impl Cmux {
             );
         }
         Ok(())
+    }
+
+    /// Publish the ahu coordinator identity in cmux's sidebar metadata.
+    ///
+    /// cmux exposes status entries as the stable metadata surface available to
+    /// the installed client. Keep the value compact and human-readable while
+    /// retaining all three identity fields needed to identify a coordinator.
+    pub fn set_agent_metadata(
+        &self,
+        workspace_id: &str,
+        agent: &str,
+        harness: &str,
+        model: &str,
+    ) -> Result<()> {
+        self.set_status_entry(
+            workspace_id,
+            "ahu.agent",
+            &format!("{agent} · {harness} · {model}"),
+        )
     }
 
     /// All windows must be inspected before absence can mean a stale session.

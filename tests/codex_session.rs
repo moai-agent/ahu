@@ -26,6 +26,10 @@ if args[0] == 'capabilities':
  print(json.dumps({'capabilities':['workspace.groups.v1','workspace.group_create.v1','workspace.create_in_group.v1']})); sys.exit(0)
 if args[0] == 'new-workspace':
  (base/'new-workspace').touch(); print('workspace:coordinator'); sys.exit(0)
+if args[0] == 'set-status':
+ assert args[1] == 'ahu.agent'
+ assert args[2] == 'director · ' + ('antigravity' if os.environ.get('AHU_TEST_PROGRAM') == 'agy' else ('claude-code' if os.environ.get('AHU_TEST_PROGRAM') == 'claude' else os.environ.get('AHU_TEST_PROGRAM'))) + ' · unconfigured'
+ (base/'metadata').touch(); sys.exit(0)
 method, params = args[1], json.loads(args[2])
 with (base/'calls').open('a') as f: f.write(json.dumps([method,params])+'\n')
 if method == 'system.identify':
@@ -78,6 +82,7 @@ else: raise AssertionError(method)
                 .env("AHU_CMUX_BIN", &cmux)
                 .env("AHU_TEST_COORDINATOR", scratch.path())
                 .env("AHU_TEST_GROUP_FAILURE", failure)
+                .env("AHU_TEST_PROGRAM", shortcut)
                 .env(
                     "PATH",
                     format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -92,8 +97,10 @@ else: raise AssertionError(method)
             );
             if failure == "none" {
                 assert_eq!(result.status.code(), Some(7));
+                assert!(scratch.path().join("metadata").exists());
             } else if failure == "conflict" {
                 assert!(scratch.path().join("new-workspace").exists());
+                assert!(scratch.path().join("metadata").exists());
                 assert_eq!(result.status.code(), Some(0));
             } else {
                 assert!(!result.status.success());

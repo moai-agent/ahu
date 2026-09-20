@@ -73,6 +73,18 @@ pub fn antigravity(repo: &Repo) -> Result<i32> {
 }
 
 fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) -> Result<i32> {
+    let harness = match program {
+        "claude" => "claude-code",
+        "agy" => "antigravity",
+        other => other,
+    };
+    let model = config::load(&repo.root)?
+        .and_then(|loaded| {
+            selection::ranked_models(&loaded, harness)
+                .into_iter()
+                .next()
+        })
+        .unwrap_or_else(|| "unconfigured".to_string());
     let executable = selection::resolve_executable(program).ok_or_else(|| {
         crate::util::Error::new(format!(
             "{label} is not installed or is not available on PATH outside the repository."
@@ -80,7 +92,7 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
     crate::state::ensure_checkout_state(&repo.root)?;
-    let placement = launch::group_coordinator(repo, &executable, label, args)?;
+    let placement = launch::group_coordinator(repo, &executable, label, harness, &model, args)?;
     for note in placement.notes {
         eprintln!("ahu: {}", display_safe(&note));
     }

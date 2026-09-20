@@ -735,6 +735,8 @@ pub fn group_coordinator(
     repo: &Repo,
     executable: &str,
     label: &str,
+    harness: &str,
+    model: &str,
     args: &[&str],
 ) -> Result<CoordinatorPlacement> {
     let Some(workspace) = std::env::var("CMUX_WORKSPACE_ID")
@@ -774,7 +776,7 @@ pub fn group_coordinator(
                 .chain(args.iter().map(|arg| shell_single_quote(arg)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            client.create_coordinator_workspace(
+            let created = client.create_coordinator_workspace(
                 &group.id,
                 Some(&window),
                 &format!("{label} coordinator"),
@@ -782,6 +784,13 @@ pub fn group_coordinator(
                 &repo.root,
                 &startup,
             )?;
+            if let Err(error) =
+                client.set_agent_metadata(&created.workspace_id, "director", harness, model)
+            {
+                notes.push(format!(
+                    "could not set coordinator metadata in cmux: {error}"
+                ));
+            }
             notes.push(format!(
                 "the invoking workspace already belongs to another cmux group; ahu opened a new {label} coordinator workspace under the {} group.",
                 repo.display_name()
@@ -792,6 +801,11 @@ pub fn group_coordinator(
             });
         }
         client.add_workspace_to_group(&group.id, &workspace, &window)?;
+    }
+    if let Err(error) = client.set_agent_metadata(&workspace, "director", harness, model) {
+        notes.push(format!(
+            "could not set coordinator metadata in cmux: {error}"
+        ));
     }
     client.expand_group(&group.id)?;
     Ok(CoordinatorPlacement {
