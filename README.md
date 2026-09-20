@@ -200,6 +200,7 @@ require explicit user permission.
 | `ahu knowledge lint` | Validate and lint configured OKF bundles with installed `okf` |
 | `ahu explain` | Built-in architecture overview |
 | `ahu explain --open` | Open the overview in cmux's Markdown viewer |
+| `ahu agy` | Open a coordinating Antigravity CLI session in the current terminal |
 | `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
@@ -207,11 +208,13 @@ require explicit user permission.
 | `ahu mcp setup` | Materialize ahu's bundled skills into the project for review and commit |
 
 `ahu codex` passes `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
-and `ahu agy` pass `--dangerously-skip-permissions`. All three disclose the
-flag and retain the
-harness's configured model. Registered child agents keep their own manifest
-permissions and launch requirements. Inside cmux, coordinator shortcuts place
-their workspace in the repository's group before starting. See
+and `ahu agy` pass `--dangerously-skip-permissions`, the Antigravity CLI's
+unattended mode. Each shortcut names the installed executable (`codex`,
+`claude`, `agy`, `opencode`), accepts no additional arguments, discloses the
+flag it passes, and retains the harness's configured model. Registered child
+agents keep their own manifest permissions and launch requirements. Inside
+cmux, coordinator shortcuts place their workspace in the repository's group
+before starting. See
 [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
 The initial MCP integration is local and repository-scoped. `ahu mcp serve`
