@@ -89,6 +89,24 @@ Future tools retain ahu's task IDs, handles, ownership, grants, approval
 boundaries, and acceptance semantics while mapping observable lifecycle states
 to MCP Tasks where the protocol supports them.
 
+### Long-running task records
+
+Long-running or failure-prone work should have a durable issue in the project's
+private GitHub tracker before an ahu task is launched. The issue records
+acceptance criteria, evidence, failures, and disposition; ahu task state records
+execution details and is not the roadmap record. Use labels for coordination:
+one lifecycle label (`status:planned`, `status:in-progress`, `status:review`,
+`status:blocked`, or `status:done`) and one label for the registered agent
+handling the current attempt. Do not use assignees for this single-maintainer
+workflow.
+
+The coordinator owns comments, label changes, and closure. A task process
+exiting successfully is not sufficient to close an issue: inspect its report,
+diff, validation, and delivery state first. Keep private tracker content out of
+this public repository and its knowledge base. Before writing, verify both the
+issue repository and linked project are private; a private project does not
+make a public linked issue private.
+
 ## Scriptable launch previews
 
 A launch prompt can come from an inline argument, a UTF-8 file, or piped stdin:

@@ -36,6 +36,32 @@ review of local changes, name the source checkout and exact revision or diff in
 the assignment. Keep issue updates with the coordinator responsible for the
 parent work, and do not push unless explicitly authorized.
 
+## Long-running work and GitHub records
+
+For work that can run for a long time or fail after submission, create or link a
+private GitHub issue before launching the task. The issue is the durable record;
+ahu's task state is execution evidence and may be removed with task cleanup.
+Keep the issue body limited to acceptance criteria, validation evidence,
+failure details, and disposition needed by the maintainer.
+
+Use labels instead of assignees for coordination. Keep one lifecycle label
+(`status:planned`, `status:in-progress`, `status:review`, `status:blocked`, or
+`status:done`) and one agent label naming the registered ahu agent responsible
+for the current attempt. Add a failure or delivery label only for an active
+condition, such as retry, missing evidence, or uncommitted work. Remove stale
+agent and failure labels when the state changes. The coordinator owns issue
+comments, label transitions, and closure after acceptance criteria and delivery
+checks are complete; an agent does not close its issue merely because its
+process exited.
+
+Before any GitHub write, verify that the issue's repository and any linked
+project are private. A private project does not make a linked public repository
+or public issue private. Never copy private issue titles, bodies, labels,
+identifiers, tracker URLs, roadmap ordering, or finding-to-fix mappings into
+the public repository, its knowledge base, task prompts, result reports, or
+commits. If the visibility check or write fails, record the tracking blocker in
+the private handoff and leave the issue open.
+
 ## Boundaries
 
 ahu owns identity resolution, worktree creation, task records, permissions,
