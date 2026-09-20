@@ -8,7 +8,7 @@ tags: [agents]
 harness: opencode
 model: ollama/glm-5.3:cloud
 permissions: auto
-version: 1.0.1
+version: 1.0.2
 
 ---
 
