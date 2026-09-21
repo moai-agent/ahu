@@ -12,6 +12,8 @@
 //! reserved for repository context and never used for an agent task — otherwise
 //! that task would have no visible row of its own.
 
+pub mod integration;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,6 +61,48 @@ pub struct Cmux {
     socket_path: Option<String>,
 }
 
+/// Resolve the native CLI independently of application/socket reachability.
+pub fn resolve_executable() -> Result<PathBuf> {
+    match std::env::var_os("AHU_CMUX_BIN") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                Ok(path.canonicalize().unwrap_or(path))
+            } else if path.as_os_str().as_encoded_bytes().contains(&b'/') {
+                let path = std::env::current_dir()?.join(path);
+                Ok(path.canonicalize().unwrap_or(path))
+            } else {
+                resolve_explicit_name(&path)
+            }
+        }
+        None => crate::selection::resolve_utility("cmux").map_err(|error| {
+            Error::new(format!(
+                "{error}\nInstall cmux, or set AHU_CMUX_BIN to its executable."
+            ))
+            .with_kind(crate::util::ErrorKind::Prerequisite)
+        }),
+    }
+}
+
+/// Explicit user selection retains PATH semantics, including relative entries
+/// and repository-local commands. The implicit resolver remains restricted.
+fn resolve_explicit_name(name: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let cwd = std::env::current_dir()?;
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    for directory in std::env::split_paths(&path) {
+        let candidate = cwd.join(directory).join(name);
+        if std::fs::metadata(&candidate)
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        {
+            return candidate.canonicalize().map_err(Error::from);
+        }
+    }
+    Err(Error::new(
+        "explicit AHU_CMUX_BIN command was not found on PATH",
+    ))
+}
+
 impl Cmux {
     /// Locate cmux, preferring the socket cmux itself told us about.
     ///
@@ -67,16 +111,7 @@ impl Cmux {
     /// never hard-coded: it comes from `CMUX_SOCKET_PATH` when ahu is running
     /// inside a cmux terminal, and otherwise from cmux's own resolver.
     pub fn discover() -> Result<Self> {
-        let executable = match std::env::var("AHU_CMUX_BIN") {
-            // An explicit override intentionally retains its normal command semantics.
-            Ok(executable) => PathBuf::from(executable),
-            Err(_) => crate::selection::resolve_utility("cmux").map_err(|error| {
-                Error::new(format!(
-                    "{error}\nInstall cmux, or set AHU_CMUX_BIN to its executable."
-                ))
-                .with_kind(crate::util::ErrorKind::Prerequisite)
-            })?,
-        };
+        let executable = resolve_executable()?;
         let socket_path = std::env::var("CMUX_SOCKET_PATH")
             .ok()
             .filter(|s| !s.is_empty());
@@ -207,11 +242,64 @@ impl Cmux {
 
     /// The window ahu is currently being invoked from, when it is inside cmux.
     pub fn current_window(&self) -> Result<Option<String>> {
+        if let Ok(workspace) = std::env::var("CMUX_WORKSPACE_ID")
+            && !workspace.is_empty()
+        {
+            return self.window_for_workspace(&workspace).map(Some);
+        }
         let value = self.rpc("workspace.current", serde_json::json!({}))?;
         Ok(value
             .get("window_id")
             .and_then(|v| v.as_str())
             .map(str::to_string))
+    }
+
+    /// Resolve the caller's window rather than whichever window has focus.
+    pub fn window_for_workspace(&self, workspace_id: &str) -> Result<String> {
+        let value = self.rpc(
+            "system.identify",
+            serde_json::json!({ "caller": { "workspace_id": workspace_id } }),
+        )?;
+        value
+            .pointer("/caller/window_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| Error::new("cmux could not locate the invoking workspace's window"))
+    }
+
+    /// Keep an existing terminal session in its repository's window and group.
+    pub fn add_workspace_to_group(
+        &self,
+        group_id: &str,
+        workspace_id: &str,
+        window_id: &str,
+    ) -> Result<()> {
+        if self.window_for_workspace(workspace_id)? != window_id {
+            self.rpc(
+                "workspace.move_to_window",
+                serde_json::json!({
+                    "workspace_id": workspace_id, "window_id": window_id,
+                }),
+            )?;
+        }
+        self.rpc(
+            "workspace.group.add",
+            serde_json::json!({
+                "group_id": group_id, "workspace_id": workspace_id, "window_id": window_id,
+            }),
+        )?;
+        if !self
+            .find_group(group_id, Some(window_id))?
+            .is_some_and(|group| {
+                group
+                    .member_workspace_ids
+                    .iter()
+                    .any(|id| id == workspace_id)
+            })
+        {
+            bail!("cmux did not place the invoking workspace in its repository group");
+        }
+        Ok(())
     }
 
     pub fn current_workspace(&self) -> Result<Option<String>> {
@@ -259,9 +347,10 @@ impl Cmux {
     }
 
     pub fn create_group(&self, name: &str, cwd: &Path) -> Result<Group> {
+        let window = self.current_window()?;
         let value = self.rpc(
             "workspace.group.create",
-            serde_json::json!({ "name": name, "cwd": cwd.to_string_lossy() }),
+            serde_json::json!({ "name": name, "cwd": cwd.to_string_lossy(), "window_id": window }),
         )?;
         let group = value
             .get("group")
@@ -377,7 +466,7 @@ impl Cmux {
                 _ => {
                     // Someone else added a workspace to this group at the same
                     // moment. Pick the one sitting in this task's worktree.
-                    let listed = self.workspaces()?;
+                    let listed = self.workspaces_in_window(window_id)?;
                     let mine: Vec<String> = added
                         .into_iter()
                         .filter(|id| {
@@ -409,6 +498,29 @@ impl Cmux {
             }
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
+    }
+
+    /// Open a coordinator harness in a fresh workspace under a repository group.
+    /// This is used when the invoking terminal already anchors another group;
+    /// cmux cannot move that anchor into a second group.
+    pub fn create_coordinator_workspace(
+        &self,
+        group_id: &str,
+        window_id: Option<&str>,
+        title: &str,
+        summary: &str,
+        cwd: &Path,
+        startup_command: &str,
+    ) -> Result<CreatedWorkspace> {
+        self.create_task_workspace(
+            group_id,
+            window_id,
+            title,
+            summary,
+            cwd,
+            startup_command,
+            true,
+        )
     }
 
     /// Open a Markdown file in cmux's own Markdown viewer.
@@ -446,8 +558,12 @@ impl Cmux {
 
     /// Set a namespaced sidebar status pill for a task workspace.
     pub fn set_status(&self, workspace_id: &str, value: &str) -> Result<()> {
+        self.set_status_entry(workspace_id, "ahu.task", value)
+    }
+
+    fn set_status_entry(&self, workspace_id: &str, key: &str, value: &str) -> Result<()> {
         let output = Command::new(&self.executable)
-            .args(["set-status", "ahu.task", value, "--workspace", workspace_id])
+            .args(["set-status", key, value, "--workspace", workspace_id])
             .output()
             .map_err(|e| Error::new(format!("cannot run cmux set-status: {e}")))?;
         if !output.status.success() {
@@ -459,33 +575,76 @@ impl Cmux {
         Ok(())
     }
 
-    /// Which workspaces currently exist, by id.
+    /// Publish the ahu coordinator identity in cmux's sidebar metadata.
+    ///
+    /// cmux exposes status entries as the stable metadata surface available to
+    /// the installed client. Keep the value compact and human-readable while
+    /// retaining all three identity fields needed to identify a coordinator.
+    pub fn set_agent_metadata(
+        &self,
+        workspace_id: &str,
+        agent: &str,
+        harness: &str,
+        model: &str,
+    ) -> Result<()> {
+        self.set_status_entry(
+            workspace_id,
+            "ahu.agent",
+            &format!("{agent} · {harness} · {model}"),
+        )
+    }
+
+    /// All windows must be inspected before absence can mean a stale session.
     pub fn workspaces(&self) -> Result<BTreeMap<String, WorkspaceInfo>> {
-        let value = self.rpc("workspace.list", serde_json::json!({}))?;
+        let value = self.rpc("window.list", serde_json::json!({}))?;
+        let windows = value
+            .get("windows")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| Error::new("cmux window.list returned no windows array"))?;
         let mut found = BTreeMap::new();
-        if let Some(items) = value.get("workspaces").and_then(|w| w.as_array()) {
-            for item in items {
-                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                    found.insert(
-                        id.to_string(),
-                        WorkspaceInfo {
-                            directory: item
-                                .get("current_directory")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            title: item
-                                .get("custom_title")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string),
-                            description: item
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string),
-                        },
-                    );
-                }
-            }
+        for window in windows {
+            let id = window
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::new("cmux window.list returned a window without an id"))?;
+            found.extend(self.workspaces_in_window(Some(id))?);
+        }
+        Ok(found)
+    }
+
+    /// Explicit window scope for repository discovery and task identification.
+    pub fn workspaces_in_window(
+        &self,
+        window: Option<&str>,
+    ) -> Result<BTreeMap<String, WorkspaceInfo>> {
+        let value = self.rpc("workspace.list", serde_json::json!({ "window_id": window }))?;
+        let mut found = BTreeMap::new();
+        let items = value
+            .get("workspaces")
+            .and_then(|w| w.as_array())
+            .ok_or_else(|| Error::new("cmux workspace.list returned no workspaces array"))?;
+        for item in items {
+            let id = item.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+                Error::new("cmux workspace.list returned a workspace without an id")
+            })?;
+            found.insert(
+                id.to_string(),
+                WorkspaceInfo {
+                    directory: item
+                        .get("current_directory")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    title: item
+                        .get("custom_title")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    description: item
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                },
+            );
         }
         Ok(found)
     }
@@ -561,6 +720,48 @@ pub fn workspace_identity(agent: &str, model: &str) -> String {
 #[cfg(test)]
 mod presentation_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_task_creation_identifies_the_workspace_in_the_target_window() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("cmux");
+        let marker = temp.path().join("created");
+        std::fs::write(&executable, format!(r#"#!/usr/bin/env python3
+import json,sys
+from pathlib import Path
+marker = Path({marker})
+if sys.argv[1] == 'new-workspace':
+ assert sys.argv[sys.argv.index('--window')+1] == 'window-b'
+ marker.touch(); sys.exit(0)
+method,params = sys.argv[2],json.loads(sys.argv[3])
+assert params['window_id'] == 'window-b'
+if method == 'workspace.group.list':
+ print(json.dumps({{'groups':[{{'id':'group-b','anchor_workspace_id':'anchor','member_workspace_ids':['anchor']+(['other','mine'] if marker.exists() else [])}}]}}))
+elif method == 'workspace.list':
+ print(json.dumps({{'workspaces':[{{'id':'other','current_directory':'/elsewhere'}},{{'id':'mine','current_directory':{cwd}}}]}}))
+else: raise AssertionError(method)
+"#, marker=serde_json::to_string(&marker).unwrap(), cwd=serde_json::to_string(temp.path()).unwrap())).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let client = Cmux {
+            executable,
+            socket_path: None,
+        };
+        let created = client
+            .create_task_workspace(
+                "group-b",
+                Some("window-b"),
+                "Task",
+                "",
+                temp.path(),
+                "true",
+                false,
+            )
+            .unwrap();
+        assert_eq!(created.workspace_id, "mine");
+        assert_eq!(created.window_id, "window-b");
+    }
 
     #[test]
     fn title_budget_belongs_to_the_task() {

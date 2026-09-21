@@ -121,9 +121,18 @@ pub fn check_prerequisite(harness_id: &str) -> Prerequisite {
     // Probe the resolved absolute path so version checks obey the same
     // repository and relative-PATH exclusions as actual launches.
     let version = found_at.as_deref().and_then(probe_version);
+    // A catalog entry may list more than one verified version, comma-separated:
+    // a harness that updates itself in place can move under a user between two
+    // launches, and a note saying the adapter was verified against a version
+    // they no longer have would be wrong rather than cautious.
     if let (Some(entry), Some(version)) = (entry, version.as_deref())
         && !entry.verified_versions.is_empty()
-        && !version.contains(entry.verified_versions)
+        && !entry
+            .verified_versions
+            .split(',')
+            .map(str::trim)
+            .filter(|verified| !verified.is_empty())
+            .any(|verified| version_reports(version, verified))
     {
         notes.push(format!(
             "installed {executable} reports {version:?}; the ahu adapter was verified against {}",
@@ -136,6 +145,25 @@ pub fn check_prerequisite(harness_id: &str) -> Prerequisite {
         version,
         notes,
     }
+}
+
+/// Whether a reported version string actually names `verified`.
+///
+/// Substring matching alone is wrong here: `"1.18.290".contains("1.18.29")` is
+/// true, so a catalog entry verified against 1.18.29 would silently accept a
+/// future 1.18.290 and suppress the very note the entry exists to produce. A
+/// match must therefore not continue into another digit or dot on either side.
+///
+/// It stays a substring search rather than an equality test because harnesses
+/// pad their version output differently — `codex-cli 0.154.0`, a bare
+/// `1.18.30`, a leading `v` — and an equality test would reintroduce false
+/// notes for the harnesses that do.
+fn version_reports(version: &str, verified: &str) -> bool {
+    let boundary = |c: Option<char>| !matches!(c, Some(c) if c.is_ascii_digit() || c == '.');
+    version.match_indices(verified).any(|(at, _)| {
+        boundary(version[..at].chars().next_back())
+            && boundary(version[at + verified.len()..].chars().next())
+    })
 }
 
 /// Repositories a harness binary must never be resolved from.
@@ -222,14 +250,54 @@ pub fn probe_version(resolved: &str) -> Option<String> {
     if !path.is_absolute() || is_excluded(path) {
         return None;
     }
-    let output = std::process::Command::new(path)
-        .arg("--version")
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    probe_explicit_utility_version(path)
+}
+
+/// Bounded probe for an explicitly selected utility, after its caller pins the
+/// executable. This does not change the implicit harness/utility exclusions.
+pub(crate) fn probe_explicit_utility_version(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let mut child = std::process::Command::new(path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    let pipe = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let ok = pipe.take(65537).read_to_end(&mut bytes).is_ok() && bytes.len() <= 65536;
+        let _ = tx.send(ok.then_some(bytes));
+    });
+    let pid = child.id();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exited = loop {
+        match crate::headless::child_exited(pid) {
+            Ok(true) => break true,
+            Err(_) => break false,
+            Ok(false) if Instant::now() >= deadline => break false,
+            Ok(false) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    // SAFETY: child is not reaped yet, so this process group id cannot be reused.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+    let status = child.wait().ok()?;
+    if !exited || !status.success() {
+        return None;
+    }
+    let bytes = rx.recv_timeout(Duration::from_millis(100)).ok()??;
+    Some(String::from_utf8_lossy(&bytes).trim().to_string())
 }
 
 /// Resolve `program` and ask it for its version, for an enforcement report.
@@ -288,5 +356,35 @@ fn is_executable(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         path.is_file()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_reports;
+
+    /// A verified version must not match a longer number that merely starts
+    /// with it.
+    ///
+    /// `verified_versions` is comma-separated because a harness can replace its
+    /// own binary in place between launches, which makes the matching rule
+    /// load-bearing: a plain `contains` reads a future 1.18.290 as the verified
+    /// 1.18.29 and suppresses the note the entry exists to produce.
+    #[test]
+    fn a_verified_version_does_not_match_a_longer_number_beginning_with_it() {
+        assert!(version_reports("1.18.29", "1.18.29"));
+        assert!(!version_reports("1.18.290", "1.18.29"));
+        assert!(!version_reports("1.18.29.1", "1.18.29"));
+        assert!(!version_reports("11.18.29", "1.18.29"));
+    }
+
+    /// The harnesses pad their version output differently, and all of those
+    /// shapes must still match, which is why this is not an equality test.
+    #[test]
+    fn the_shapes_harnesses_actually_print_still_match() {
+        assert!(version_reports("codex-cli 0.154.0", "0.154.0"));
+        assert!(version_reports("1.18.30", "1.18.30"));
+        assert!(version_reports("v1.18.30", "1.18.30"));
+        assert!(version_reports("2.1.270 (Claude Code)", "2.1.270"));
     }
 }

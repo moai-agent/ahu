@@ -10,25 +10,10 @@ use std::path::{Component, Path, PathBuf};
 use crate::bail;
 use crate::util::{Error, Result};
 
-/// Root of ahu's local state inside the current checkout. Linked worktrees
-/// have their own `.ahu/state` rather than writing to the parent.
-///
-/// `AHU_STATE_DIR` is an explicit override for tools and isolated tests. It
-/// replaces the auxiliary state this resolves -- hygiene timestamps, the
-/// generated architecture document, and the checkout store older task records
-/// were written to. It does not relocate a new task's record, which is placed
-/// in that task's own worktree, and it does not hide live tasks from
-/// discovery.
+/// Local state of the invoking checkout, discovered from the working directory.
 pub fn root() -> Result<PathBuf> {
-    if let Some(explicit) = std::env::var_os("AHU_STATE_DIR") {
-        return Ok(PathBuf::from(explicit));
-    }
-    default_root(&std::env::current_dir()?)
-}
-
-fn default_root(start: &Path) -> Result<PathBuf> {
-    let repo = crate::git::discover(start)?;
-    checkout_root(&repo.root)
+    let repo = crate::git::discover(&std::env::current_dir()?)?;
+    crate::storage::CheckoutStorage::new(&repo.root).state_root()
 }
 
 pub fn checkout_root(checkout: &Path) -> Result<PathBuf> {
@@ -106,64 +91,9 @@ pub fn repo_dir(repo_identity: &str) -> Result<PathBuf> {
     Ok(root()?.join("repos").join(repo_identity))
 }
 
-/// The group mapping and launch lock coordinate sibling worktrees, so they
-/// belong to the primary checkout. Per-session data stays in its own checkout.
-///
-/// Derived from the repository that was passed in, never from the process
-/// working directory: `run_task` resolves this while standing in a task
-/// worktree on behalf of the checkout that launched it, and both must reach the
-/// same lock.
-///
-/// An explicit store of the caller's own moves the lock and the group mapping
-/// there with it. That separates this repository's coordination from the
-/// primary checkout's; it says nothing about which tasks `ahu tasks` lists,
-/// which is decided per worktree and not by this path.
+/// Repository-wide coordination belongs to the primary checkout.
 pub fn coordination_dir(repo: &crate::git::Repo) -> Result<PathBuf> {
-    let shared = match isolated_store(repo)? {
-        Some(explicit) => explicit,
-        None => checkout_root(&repo.primary_root()?)?,
-    };
-    Ok(shared.join("repos").join(repo.identity()))
-}
-
-/// An explicit `AHU_STATE_DIR` that is a separate store, rather than ahu's own
-/// wiring handed back to it.
-///
-/// ahu injects a task worktree's own default store into every task session, so
-/// the variable being set does not by itself mean the caller asked for a
-/// separate store. A value that is exactly the default store of one of this
-/// repository's own checkouts is that wiring, and nested ahu commands in such a
-/// session must behave like ordinary ones rather than starting a second lock
-/// and cmux group for the repository.
-///
-/// Anything else is an embedding tool's or a test's own store and is honoured
-/// as one: coordination and the checkout store move there. That is a different
-/// place to keep those files, not isolation from the repository's live tasks,
-/// which are discovered from their worktrees either way.
-///
-/// The checkout has to be a checkout *root*. `<repo>/sub/.ahu/state` is a
-/// directory someone chose inside a repository, not a store ahu ever writes,
-/// and treating it as ahu's own wiring would silently redirect coordination to
-/// the primary checkout instead of honouring what the caller asked for.
-pub fn isolated_store(repo: &crate::git::Repo) -> Result<Option<PathBuf>> {
-    let Some(explicit) = std::env::var_os("AHU_STATE_DIR").map(PathBuf::from) else {
-        return Ok(None);
-    };
-    if let Some(checkout) = enclosing_checkout(&explicit)
-        && explicit == checkout.join(".ahu").join("state")
-        && crate::git::discover(&checkout).is_ok_and(|found| {
-            found.identity() == repo.identity()
-                && found
-                    .root
-                    .canonicalize()
-                    .ok()
-                    .zip(checkout.canonicalize().ok())
-                    .is_some_and(|(root, checkout)| root == checkout)
-        })
-    {
-        return Ok(None);
-    }
-    Ok(Some(explicit))
+    crate::storage::RepositoryStorage::new(repo)?.coordination_dir()
 }
 
 pub fn tasks_dir(repo_identity: &str) -> Result<PathBuf> {
@@ -185,19 +115,12 @@ pub fn task_dir(repo_identity: &str, task_id: &str) -> Result<PathBuf> {
 /// not exist yet at plan time. [`ensure_checkout_state`] and
 /// [`create_private_dir_all`] do the symlink checks when it is created.
 pub fn worktree_task_dir(worktree: &Path, repo_identity: &str, task_id: &str) -> PathBuf {
-    worktree
-        .join(".ahu")
-        .join("state")
-        .join("repos")
-        .join(repo_identity)
-        .join("tasks")
-        .join(task_id)
+    crate::storage::CheckoutStorage::new(worktree).task_dir(repo_identity, task_id)
 }
 
 /// The checkout whose store holds `path`, when `path` is inside one.
 ///
-/// `<checkout>/.ahu/state/...` answers `<checkout>`. An explicit `AHU_STATE_DIR`
-/// is not a checkout store and answers nothing.
+/// `<checkout>/.ahu/state/...` answers `<checkout>`; external stores answer nothing.
 pub fn enclosing_checkout(path: &Path) -> Option<PathBuf> {
     path.ancestors()
         .find(|ancestor| is_checkout_state_root(ancestor))
@@ -406,7 +329,7 @@ pub struct LaunchLock {
 
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
 
-fn state_io_error(operation: &str, path: &Path, error: std::io::Error) -> Error {
+pub(crate) fn state_io_error(operation: &str, path: &Path, error: std::io::Error) -> Error {
     let mut message = format!(
         "cannot {operation} ahu state at {}: {error}",
         path.display()
@@ -414,10 +337,8 @@ fn state_io_error(operation: &str, path: &Path, error: std::io::Error) -> Error 
     if error.kind() == std::io::ErrorKind::PermissionDenied {
         message.push_str(
             "\nCheck directory permissions and the calling process's sandbox. \
-             Run ahu from a terminal with access to this state directory, or set \
-             AHU_STATE_DIR to an absolute, writable path inside the checkout's ignored .ahu directory. \
-             Use the same AHU_STATE_DIR for subsequent ahu commands; changing it \
-             does not migrate existing task records. State access does not grant \
+             Run ahu from a terminal with access to the state directory shown above. \
+             State access does not grant \
              permission to create Git worktrees or access cmux.",
         );
     }
@@ -517,7 +438,7 @@ pub fn create_private_dir_all(dir: &Path) -> Result<()> {
 /// The state root a path is confined to, when ahu chose that root itself.
 ///
 /// Components at and above the root are the invoking user's own: the checkout
-/// ahu was run from, or an explicit `AHU_STATE_DIR`. Components below it are
+/// ahu was run from. Components below it are
 /// reachable by a repository, because `.ahu/` sits inside the checkout and Git
 /// will happily check out a tracked symlink at `.ahu/state/repos`.
 ///
@@ -527,12 +448,6 @@ pub fn create_private_dir_all(dir: &Path) -> Result<()> {
 /// descendant move the boundary past the link that reached it, which is the one
 /// thing the boundary exists to prevent.
 fn confinement_base(path: &Path) -> Option<PathBuf> {
-    // An explicit store encloses everything under it, markers included.
-    if let Some(explicit) = std::env::var_os("AHU_STATE_DIR").map(PathBuf::from)
-        && path.starts_with(&explicit)
-    {
-        return Some(explicit);
-    }
     // `ancestors` runs deepest first, so the last match is the shallowest.
     path.ancestors()
         .filter(|ancestor| is_checkout_state_root(ancestor))
@@ -551,33 +466,25 @@ fn is_checkout_state_root(path: &Path) -> bool {
 /// A caller that reads a record directly -- `task::load` on a path it was
 /// handed, say -- has not necessarily been through `root()`, so the two
 /// components that make up a checkout's default store are validated here rather
-/// than assumed to have been validated earlier. An explicit `AHU_STATE_DIR` is
-/// the user's own path and is left alone.
+/// than assumed to have been validated earlier.
 fn verify_base(base: &Path) -> Result<()> {
-    if is_checkout_state_root(base) {
-        let checkout = base
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| Error::new("invalid checkout state root"))?;
-        checkout_root(checkout)?;
-    }
+    checkout_root(checkout_for_state(base)?)?;
     Ok(())
 }
 
-/// Make sure the state root itself exists, with its own symlink checks.
+/// Make sure the checkout state root itself exists, with its own symlink checks.
 fn ensure_base(base: &Path) -> Result<()> {
-    if is_checkout_state_root(base) {
-        let checkout = base
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| Error::new("invalid checkout state root"))?;
-        ensure_checkout_state(checkout)?;
-        return Ok(());
+    ensure_checkout_state(checkout_for_state(base)?)?;
+    Ok(())
+}
+
+fn checkout_for_state(base: &Path) -> Result<&Path> {
+    if !is_checkout_state_root(base) {
+        bail!("invalid checkout state root");
     }
-    // An explicit `AHU_STATE_DIR`. The path is the user's, so its own
-    // components are not ahu's to police; everything below it still is.
-    std::fs::create_dir_all(base).map_err(|e| state_io_error("create directory", base, e))?;
-    set_private_mode(base)
+    base.parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Error::new("invalid checkout state root"))
 }
 
 /// Walk `dir` from `base` down, refusing to traverse a symlink at any component
@@ -830,24 +737,9 @@ pub fn create_new_private_file(path: &Path) -> Result<std::fs::File> {
 /// either name is refused rather than written through. `rename` replaces the
 /// destination name itself and never follows it, so the swap cannot escape.
 pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        create_private_dir_all(parent)?;
-    }
-    confine_file(path)?;
-    let temp = path.with_extension(format!("tmp{}", std::process::id()));
     let body = serde_json::to_vec_pretty(value)
         .map_err(|e| Error::new(format!("cannot serialize state: {e}")))?;
-    // Owner-only from creation, so no caller has to remember. State records
-    // carry task titles, hook labels, and repository paths.
-    let mut file = create_new_private_file(&temp)?;
-    {
-        use std::io::Write;
-        file.write_all(&body)
-            .map_err(|e| state_io_error("write temporary file", &temp, e))?;
-    }
-    drop(file);
-    std::fs::rename(&temp, path).map_err(|e| state_io_error("replace file", path, e))?;
-    Ok(())
+    write_private_file(path, &body)
 }
 
 /// Write a state file that is not JSON, with the same confinement.
@@ -856,16 +748,7 @@ pub fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
         create_private_dir_all(parent)?;
     }
     confine_file(path)?;
-    let temp = path.with_extension(format!("tmp{}", std::process::id()));
-    let mut file = create_new_private_file(&temp)?;
-    {
-        use std::io::Write;
-        file.write_all(body)
-            .map_err(|e| state_io_error("write temporary file", &temp, e))?;
-    }
-    drop(file);
-    std::fs::rename(&temp, path).map_err(|e| state_io_error("replace file", path, e))?;
-    Ok(())
+    crate::private_io::atomic_write(path, body, crate::private_io::Durability::Atomic)
 }
 
 /// Read a state file ahu wrote, refusing a redirected path.
@@ -899,8 +782,7 @@ mod tests {
             assert!(error.contains("write temporary file"), "{error}");
             assert!(error.contains("/example/state/hygiene.tmp123"), "{error}");
             assert!(error.contains("sandbox"), "{error}");
-            assert!(error.contains("AHU_STATE_DIR"), "{error}");
-            assert!(error.contains("does not migrate"), "{error}");
+            assert!(error.contains("state directory shown above"), "{error}");
         }
     }
 
@@ -909,13 +791,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hygiene.json");
         std::fs::write(&path, "{}").unwrap();
-        let temp = path.with_extension(format!("tmp{}", std::process::id()));
-        std::fs::create_dir(&temp).unwrap();
-        let error = write_json(&path, &serde_json::json!({"updated": true}))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("write temporary file"), "{error}");
-        assert!(error.contains(&temp.display().to_string()), "{error}");
+        let error = crate::private_io::atomic_write_with(
+            &path,
+            crate::private_io::Durability::Atomic,
+            |file| {
+                use std::io::Write;
+                file.write_all(b"partial")?;
+                Err(std::io::Error::other("injected write failure"))
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("injected write failure"), "{error}");
+        assert!(error.contains("replace file"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
     }
 }

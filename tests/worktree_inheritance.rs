@@ -14,11 +14,16 @@ use common::TestRepo;
 fn the_snapshot_covers_native_paths_for_every_supported_harness() {
     let repo = TestRepo::new();
     repo.write("CLAUDE.md", "repository guidance\n");
+    repo.write("GEMINI.md", "antigravity instructions\n");
     repo.write("AGENTS.md", "other harness guidance\n");
     repo.write(".claude/settings.json", "{}\n");
     repo.write(".claude/skills/review/SKILL.md", "review skill\n");
     repo.write(".claude/agents/chris.md", "---\nname: chris\n---\nbody\n");
     repo.write(".agents/skills/shared/SKILL.md", "shared skill\n");
+    repo.write(
+        ".gemini/antigravity-cli/skills/example/SKILL.md",
+        "antigravity skill\n",
+    );
     repo.write(".mcp.json", "{\"mcpServers\":{}}\n");
     repo.write("docs/nested/CLAUDE.md", "nested guidance\n");
     repo.write("src/main.rs", "fn main() {}\n");
@@ -27,11 +32,13 @@ fn the_snapshot_covers_native_paths_for_every_supported_harness() {
     let paths: Vec<&str> = taken.entries.iter().map(|e| e.path.as_str()).collect();
     for expected in [
         "CLAUDE.md",
+        "GEMINI.md",
         "AGENTS.md",
         ".claude/settings.json",
         ".claude/skills/review/SKILL.md",
         ".claude/agents/chris.md",
         ".agents/skills/shared/SKILL.md",
+        ".gemini/antigravity-cli/skills/example/SKILL.md",
         ".mcp.json",
         "docs/nested/CLAUDE.md",
     ] {
@@ -885,4 +892,114 @@ fn the_copied_bytes_are_the_digested_bytes() {
         use std::os::unix::fs::PermissionsExt;
         assert!(std::fs::metadata(&copied).unwrap().permissions().mode() & 0o111 != 0);
     }
+}
+
+/// An OpenCode agent's configuration travels the same way every other
+/// harness's does.
+///
+/// OpenCode reads a project `opencode.json`/`.jsonc` and a `.opencode/`
+/// directory, takes its rules from `AGENTS.md` with the Claude files as a
+/// fallback, and discovers skills on demand — including duplicate skill trees
+/// under both `.agents/skills` and `.claude/skills`. All of it has to be in the
+/// task worktree before OpenCode looks for it, because ahu never tells OpenCode
+/// where to look.
+///
+/// An `opencode.json` may name `plugin` modules OpenCode installs and runs at
+/// startup, so this is executable configuration: it is carried and digested,
+/// never rewritten, and never disabled with `--pure`.
+#[test]
+fn the_snapshot_covers_opencode_configuration_rules_and_duplicate_skills() {
+    let repo = TestRepo::new();
+    repo.write(
+        "opencode.json",
+        "{\"$schema\":\"https://opencode.ai/config.json\",\"plugin\":[\"example-plugin\"]}\n",
+    );
+    repo.write("nested/opencode.jsonc", "{ /* comment */ }\n");
+    repo.write(
+        ".opencode/agent/reviewer.md",
+        "---\nmode: primary\n---\nbody\n",
+    );
+    repo.write(".opencode/command/ship.md", "ship it\n");
+    repo.write("AGENTS.md", "repository rules for OpenCode\n");
+    repo.write("CLAUDE.md", "the Claude-compatible fallback\n");
+    repo.write(".agents/skills/review/SKILL.md", "agents-tree skill\n");
+    repo.write(".claude/skills/review/SKILL.md", "claude-tree skill\n");
+    let hook = repo.write(".opencode/plugin/startup.js", "export default () => {}\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    repo.write("src/main.rs", "fn main() {}\n");
+
+    let taken = snapshot::collect(repo.path()).unwrap();
+    let by_path = taken.by_path();
+    for expected in [
+        "opencode.json",
+        "nested/opencode.jsonc",
+        ".opencode/agent/reviewer.md",
+        ".opencode/command/ship.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/skills/review/SKILL.md",
+        ".claude/skills/review/SKILL.md",
+        ".opencode/plugin/startup.js",
+    ] {
+        assert!(
+            by_path.contains_key(expected),
+            "missing {expected} in {:?}",
+            by_path.keys().collect::<Vec<_>>()
+        );
+    }
+    // The two skill trees are distinct files, not one deduplicated by name.
+    assert_ne!(
+        by_path[".agents/skills/review/SKILL.md"].digest,
+        by_path[".claude/skills/review/SKILL.md"].digest
+    );
+    assert!(!by_path.contains_key("src/main.rs"));
+
+    // Executable configuration is recorded as executable, and the mode is part
+    // of the digest: a plugin gaining its executable bit changes behaviour.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(by_path[".opencode/plugin/startup.js"].executable);
+        assert_eq!(taken.executable_count(), 1);
+        let before = taken.digest();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let after = snapshot::collect(repo.path()).unwrap();
+        assert!(!after.by_path()[".opencode/plugin/startup.js"].executable);
+        assert_ne!(before, after.digest(), "the mode is part of the digest");
+    }
+
+    // And it all reaches a task worktree with its bytes and its mode intact.
+    let discovered = git::discover(repo.path()).unwrap();
+    repo.commit("opencode configuration");
+    let taken = snapshot::collect(repo.path()).unwrap();
+    let worktree = repo.state_path().join("wt-opencode");
+    git::add_worktree(
+        &discovered,
+        &worktree,
+        "ahu/test/opencode",
+        discovered.head.as_deref().unwrap(),
+    )
+    .unwrap();
+    snapshot::materialize(repo.path(), &taken, &worktree).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("opencode.json")).unwrap(),
+        "{\"$schema\":\"https://opencode.ai/config.json\",\"plugin\":[\"example-plugin\"]}\n",
+        "ahu must carry the user's OpenCode configuration unchanged"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".agents/skills/review/SKILL.md")).unwrap(),
+        "agents-tree skill\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".claude/skills/review/SKILL.md")).unwrap(),
+        "claude-tree skill\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("AGENTS.md")).unwrap(),
+        "repository rules for OpenCode\n"
+    );
 }

@@ -16,15 +16,30 @@ use crate::bail;
 use crate::util::{Error, Result, digest_bytes, digest_file};
 
 /// Directory names whose contents are agent configuration wherever they appear.
-const CONFIG_DIR_NAMES: &[&str] = &[".agents", ".claude", ".codex", ".agent"];
+const CONFIG_DIR_NAMES: &[&str] = &[
+    ".agents",
+    ".claude",
+    ".codex",
+    ".agent",
+    ".opencode",
+    ".gemini",
+];
 
 /// File names that are agent configuration wherever they appear.
 const CONFIG_FILE_NAMES: &[&str] = &[
     "CLAUDE.md",
     "CLAUDE.local.md",
+    "GEMINI.md",
+    "GEMINI.local.md",
     "AGENTS.md",
     "AGENTS.override.md",
     ".mcp.json",
+    // OpenCode project configuration. It may name `plugin` modules OpenCode
+    // installs and runs at startup, so it is executable configuration under the
+    // same trust boundary as any other inherited config: carried, digested and
+    // disclosed, never rewritten or disabled.
+    "opencode.json",
+    "opencode.jsonc",
 ];
 
 /// Directories never descended into while looking for configuration.
@@ -160,8 +175,9 @@ fn is_config_path(relative: &Path) -> bool {
 
 /// Walk `root` and collect every agent-configuration file.
 pub fn collect(root: &Path) -> Result<ConfigSnapshot> {
+    let source = crate::storage::CheckoutStorage::new(root).configuration();
     let mut snapshot = ConfigSnapshot::default();
-    walk(root, root, 0, &mut snapshot)?;
+    walk(source.root(), source.root(), 0, &mut snapshot)?;
     snapshot.entries.sort_by(|a, b| a.path.cmp(&b.path));
     snapshot.skipped_directories.sort();
     snapshot.skipped_directories.dedup();

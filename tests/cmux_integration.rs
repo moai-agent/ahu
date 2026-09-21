@@ -187,6 +187,95 @@ fn a_repository_group_holds_one_child_workspace_per_task() {
 }
 
 #[test]
+fn coordinator_shortcuts_join_the_repository_group_from_primary_and_linked_checkouts() {
+    let _environment = TestEnvironment::new();
+    let Some(client) = client_or_skip() else {
+        return;
+    };
+    let fixture = common::TestRepo::new();
+    let repo = ahu::git::discover(fixture.path()).unwrap();
+    let linked = fixture.state_path().join("linked");
+    common::git(
+        fixture.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = common::fake_harnesses(
+        scratch.path(),
+        &["codex", "claude", "opencode", "agy"],
+        |_| scratch.path().join("unused"),
+    );
+    for program in ["codex", "claude", "opencode", "agy"] {
+        std::fs::write(
+            bin.join(program),
+            "#!/bin/sh\nprintf 'coordinator-started\\n'\nexit 7\n",
+        )
+        .unwrap();
+    }
+    let mut target = TempGroup::new(client, &repo.display_name(), fixture.path());
+    let mut source = TempGroup::new(
+        Cmux::discover().unwrap(),
+        "ahu-test-coordinator-source",
+        scratch.path(),
+    );
+    for (index, shortcut) in ["codex", "claude", "opencode", "agy"].iter().enumerate() {
+        let workspace = source
+            .client
+            .create_anchor_workspace(&source.group_id, "ahu-test-coordinator", scratch.path())
+            .unwrap();
+        source.created.push(workspace.clone());
+        let checkout = if index % 2 == 0 {
+            fixture.path()
+        } else {
+            &linked
+        };
+        let output = common::ahu()
+            .args(["--repo", checkout.to_str().unwrap(), shortcut])
+            .current_dir(scratch.path())
+            .env("CMUX_WORKSPACE_ID", &workspace)
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .output()
+            .unwrap();
+        target.created.push(workspace.clone());
+        assert_eq!(
+            output.status.code(),
+            Some(7),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "coordinator-started\n"
+        );
+        let group = target
+            .client
+            .find_group(&target.group_id, None)
+            .unwrap()
+            .unwrap();
+        assert!(group.member_workspace_ids.contains(&workspace));
+        assert_ne!(group.anchor_workspace_id, workspace);
+        let mapping: ahu::launch::GroupMapping = ahu::state::read_json(
+            &ahu::state::coordination_dir(&repo)
+                .unwrap()
+                .join("cmux.json"),
+        )
+        .unwrap();
+        assert_eq!(mapping.group_id.as_deref(), Some(target.group_id.as_str()));
+        assert!(!fixture.path().join(".worktrees").exists());
+    }
+}
+
+#[test]
 fn a_closed_anchor_is_replaced_so_no_task_is_hidden_under_the_header() {
     let _environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
@@ -331,7 +420,7 @@ fn the_socket_path_is_discovered_rather_than_hard_coded() {
 /// is started here — see the README for what that leaves unverified.
 #[test]
 fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
-    let mut environment = TestEnvironment::new();
+    let _environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
         return;
     };
@@ -355,9 +444,6 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
     };
     let prompt = "Implement settings validation\nwith $(a hostile) second line";
 
-    // The state directory must be set before planning: the plan is where the
-    // worktree and task-record paths are chosen.
-    environment.set("AHU_STATE_DIR", repo.state_path().as_os_str());
     let planned = ahu::launch::plan(&discovered, Some(agent), pair, prompt);
     let launched = planned
         .as_ref()
@@ -401,16 +487,20 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
             "{\"local\":true}\n",
             "ignored native configuration must reach the task worktree"
         );
-        assert!(
-            plan.worktree
-                .join(".agents/ahu/agents/chris.toml")
-                .is_file()
-        );
+        assert!(plan.worktree.join(".agents/ahu/agents/chris.md").is_file());
 
         // The task record froze the identity that was launched.
         assert_eq!(launched.record.identity.model, "claude-opus-5");
         assert_eq!(launched.record.agent_label(), "chris@1.0.0");
         assert!(launched.record.reliability_warning.is_none());
+        let handle = ahu::task_handles::handle(&discovered, &launched.record.task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(handle, "@implement-settings-validation");
+        assert_eq!(
+            ahu::task_ref::resolve(&discovered, &handle).unwrap(),
+            launched.record.task_id
+        );
 
         // The prompt is on disk as data, never on a command line.
         let stored = std::fs::read_to_string(launched.task_dir.join("prompt.txt")).unwrap();
@@ -492,28 +582,28 @@ fn environment_overrides_restore_values_even_after_unwinding() {
                 .env("AHU_TEST_ENV_RESTORE_CHILD", "1")
                 .env("AHU_TEST_CMUX", "0");
             if let Some(value) = initial {
-                child.env("AHU_STATE_DIR", value);
+                child.env("AHU_TEST_ENV_VALUE", value);
             } else {
-                child.env_remove("AHU_STATE_DIR");
+                child.env_remove("AHU_TEST_ENV_VALUE");
             }
             let result = child.output().unwrap();
             assert!(result.status.success(), "{:?}", result);
         }
         return;
     }
-    let original_state = std::env::var_os("AHU_STATE_DIR");
+    let original_state = std::env::var_os("AHU_TEST_ENV_VALUE");
     let original_path = std::env::var_os("PATH");
     for panic in [false, true] {
         let result = std::panic::catch_unwind(|| {
             let mut environment = TestEnvironment::new();
-            environment.set("AHU_STATE_DIR", std::ffi::OsStr::new("first"));
-            environment.set("AHU_STATE_DIR", std::ffi::OsStr::new("second"));
+            environment.set("AHU_TEST_ENV_VALUE", std::ffi::OsStr::new("first"));
+            environment.set("AHU_TEST_ENV_VALUE", std::ffi::OsStr::new("second"));
             environment.set("PATH", std::ffi::OsStr::new("synthetic-bin"));
-            assert_eq!(std::env::var("AHU_STATE_DIR").unwrap(), "second");
+            assert_eq!(std::env::var("AHU_TEST_ENV_VALUE").unwrap(), "second");
             assert!(!panic, "synthetic unwind");
         });
         assert_eq!(result.is_err(), panic);
-        assert_eq!(std::env::var_os("AHU_STATE_DIR"), original_state);
+        assert_eq!(std::env::var_os("AHU_TEST_ENV_VALUE"), original_state);
         assert_eq!(std::env::var_os("PATH"), original_path);
     }
 }
@@ -522,7 +612,7 @@ fn environment_overrides_restore_values_even_after_unwinding() {
 /// must land in one group as distinct tasks.
 #[test]
 fn repeated_launches_reuse_one_repository_group_with_distinct_tasks() {
-    let mut environment = TestEnvironment::new();
+    let _environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
         return;
     };
@@ -547,7 +637,6 @@ fn repeated_launches_reuse_one_repository_group_with_distinct_tasks() {
     assert_eq!(sibling.identity(), discovered.identity());
 
     let mut launched = Vec::new();
-    environment.set("AHU_STATE_DIR", repo.state_path().as_os_str());
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for (source, prompt) in [
             (&discovered, "First task from the main checkout"),
@@ -693,7 +782,6 @@ fn two_agents_keep_their_own_harness_model_and_workspace_in_one_group() {
     let original_path = std::env::var_os("PATH").unwrap_or_default();
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(&original_path));
-    environment.set("AHU_STATE_DIR", repo.state_path().as_os_str());
     environment.set("PATH", &std::env::join_paths(paths).unwrap());
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for (name, prompt) in [

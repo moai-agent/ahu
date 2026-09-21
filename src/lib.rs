@@ -5,7 +5,7 @@
 //!
 //!   - a named agent's harness, model, and instructions come from the
 //!     repository and are used exactly as configured, or the launch fails. The
-//!     harness and model are pinned by real flags; the instructions are
+//!     harness and model are fixed by real flags; the instructions are
 //!     delivered as prompt text, because no harness offers ahu an instruction
 //!     channel it can verify, and ahu reports that as a gap rather than as
 //!     enforcement;
@@ -17,6 +17,7 @@
 //!     papered over.
 
 pub mod agent;
+pub mod agent_ref;
 pub mod catalog;
 pub mod cli;
 pub mod cmux;
@@ -34,9 +35,21 @@ pub mod launch;
 pub mod launcher;
 pub mod onboard;
 pub mod orchestration;
+mod private_io;
 pub mod selection;
 pub mod snapshot;
 pub mod state;
+pub mod storage;
 pub mod style;
 pub mod task;
+pub mod task_handles;
+pub mod task_index;
+pub mod task_ref;
 pub mod util;
+
+pub mod headless;
+
+pub mod broker;
+
+pub mod mcp;
+pub mod native;

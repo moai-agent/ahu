@@ -105,7 +105,7 @@ fn cli_transports_metadata_to_plan_without_changing_assignment() {
             "Review labels and task_id",
         ),
     ] {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+        let output = common::ahu()
             .current_dir(repo.path())
             .args([
                 "launch",
@@ -117,7 +117,6 @@ fn cli_transports_metadata_to_plan_without_changing_assignment() {
                 "json",
             ])
             .args(extra)
-            .env("AHU_STATE_DIR", repo.state_path())
             .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .env(
                 "PATH",

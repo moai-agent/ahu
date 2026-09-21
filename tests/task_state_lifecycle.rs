@@ -1,7 +1,7 @@
 //! A task's state belongs to the task's worktree.
 //!
 //! ahu chooses where a task's record, prompt and session state go at launch and
-//! wires the child to it, so nothing has to be prefixed with `AHU_STATE_DIR`.
+//! resolves the child checkout without environment wiring.
 //! Putting that state inside the worktree the task works in is what makes
 //! removing the worktree remove the task's state with it, and what lets the
 //! primary checkout and every sibling worktree find the live tasks by looking
@@ -41,7 +41,7 @@ fn child_repo() -> PathBuf {
 /// `env_remove` rather than a pointed-at temporary directory: these tests are
 /// about ordinary operation, where nothing sets that variable.
 fn ahu_in(dir: &Path, args: &[&str]) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    common::ahu()
         .args(args)
         .current_dir(dir)
         .env_remove("AHU_STATE_DIR")
@@ -740,14 +740,9 @@ fn discovery_from_a_given_repository_case() {
     );
 }
 
-/// An unrelated explicit store replaces the checkout store and nothing more.
-///
-/// It is deliberately *not* isolation from live tasks: worktree records stay
-/// visible, and `ahu tasks` may update a live task's own record in its own
-/// worktree. What the override does guarantee is that no task payload is
-/// written into the store the caller chose.
+/// Hostile inherited state selection cannot hide worktree or legacy records.
 #[test]
-fn an_explicit_store_still_sees_live_worktree_tasks() {
+fn an_inherited_override_cannot_hide_worktree_or_legacy_tasks() {
     let repo = fixture();
     let live = "006aa50000000000e1";
     prepare_task(&repo, repo.path(), live);
@@ -767,7 +762,7 @@ fn an_explicit_store_still_sees_live_worktree_tasks() {
     .unwrap();
 
     let chosen = tempfile::TempDir::new().unwrap();
-    let listed = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let listed = common::ahu()
         .args(["tasks"])
         .current_dir(repo.path())
         .env("AHU_STATE_DIR", chosen.path())
@@ -780,8 +775,8 @@ fn an_explicit_store_still_sees_live_worktree_tasks() {
         "an override must not hide a live task: {text}"
     );
     assert!(
-        !text.contains(legacy),
-        "an override replaces the checkout store, so its records are not read: {text}"
+        text.contains(legacy),
+        "inherited environment must not hide legacy records: {text}"
     );
     // No task payload was written into the chosen store.
     assert!(!chosen.path().join("repos").exists(), "{text}");
@@ -1067,53 +1062,37 @@ fn a_note_survives_a_listing_with_no_tasks_in_it() {
     );
 }
 
-/// A chosen store inside a repository is the caller's, not ahu's own wiring.
+/// Invoking checkout and primary coordination are explicit even from nested directories.
 #[test]
-fn a_store_below_a_checkout_root_is_treated_as_a_chosen_store() {
+fn inherited_paths_do_not_select_checkout_or_coordination() {
     let repo = fixture();
     let inside = repo.path().join("sub/.ahu/state");
     std::fs::create_dir_all(&inside).unwrap();
-
-    for (case, store) in [
-        ("a_subdirectory_store_is_chosen_case", inside),
-        (
-            "a_checkout_root_store_is_wiring_case",
-            repo.path().join(".ahu/state"),
-        ),
-    ] {
-        let output = common::run_child_case(case, |command| {
+    for store in [inside.clone(), repo.path().join(".ahu/state")] {
+        let output = common::run_child_case("checkout_context_case", |command| {
             command
                 .env("AHU_STATE_DIR", &store)
+                .current_dir(&inside)
                 .env("AHU_TEST_REPO", repo.path());
         });
-        common::assert_child_passed(case, &output);
+        common::assert_child_passed("checkout_context_case", &output);
     }
 }
 
 #[test]
-fn a_subdirectory_store_is_chosen_case() {
-    if !common::is_child_case("a_subdirectory_store_is_chosen_case") {
+fn checkout_context_case() {
+    if !common::is_child_case("checkout_context_case") {
         return;
     }
-    let discovered = git::discover(&child_repo()).unwrap();
-    let expected = PathBuf::from(std::env::var_os("AHU_STATE_DIR").unwrap());
+    let repo = git::discover(&child_repo()).unwrap();
+    let storage = ahu::storage::RepositoryStorage::new(&repo).unwrap();
     assert_eq!(
-        state::isolated_store(&discovered).unwrap().as_deref(),
-        Some(expected.as_path()),
-        "a store under a subdirectory is a chosen store, not ahu's own"
+        state::root().unwrap(),
+        storage.checkout.state_root().unwrap()
     );
-}
-
-#[test]
-fn a_checkout_root_store_is_wiring_case() {
-    if !common::is_child_case("a_checkout_root_store_is_wiring_case") {
-        return;
-    }
-    let discovered = git::discover(&child_repo()).unwrap();
     assert_eq!(
-        state::isolated_store(&discovered).unwrap(),
-        None,
-        "a checkout root's own store is ahu's wiring"
+        state::coordination_dir(&repo).unwrap(),
+        storage.primary.repo_dir(&repo.identity()).unwrap()
     );
 }
 

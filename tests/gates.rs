@@ -7,8 +7,6 @@
 
 mod common;
 
-use std::process::Command;
-
 use common::TestRepo;
 
 // --- `ahu launch` and approval widening ---
@@ -16,12 +14,11 @@ use common::TestRepo;
 fn launch(repo: &TestRepo, extra: &[&str]) -> std::process::Output {
     let temp = repo.state_path();
     let bin = common::fake_harness(temp, &temp.join("argv"));
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ahu"));
+    let mut cmd = common::ahu();
     cmd.current_dir(repo.path())
         .args(["launch", "@deploy", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .args(extra)
-        .env("AHU_STATE_DIR", temp)
         // cmux is deliberately absent, so a launch that gets past the gate
         // fails at session creation rather than starting anything.
         .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
@@ -42,17 +39,25 @@ fn repo_with_widened_agent(permissions: &str) -> TestRepo {
         "---\nname: deploy\nmodel: claude-opus-5\n---\n\nYou are deploy.\n",
     );
     repo.write(
-        ".agents/ahu/agents/deploy.toml",
+        ".agents/ahu/agents/deploy.md",
         &format!(
-            "schema_version = 1\n\
-             name = \"deploy\"\n\
-             version = \"1.0.0\"\n\
-             harness = \"claude-code\"\n\
-             model = \"claude-opus-5\"\n\
-             permissions = {permissions:?}\n\
-             \n[source]\n\
-             format = \"claude-agent\"\n\
-             path = \".claude/agents/deploy.md\"\n"
+            "---\n\
+             okf_version: 0.2\n\
+             type: ahu:agent\n\
+             title: deploy\n\
+             description: fixture agent\n\
+             status: stable\n\
+             tags: [agents]\n\
+             harness: claude-code\n\
+             model: claude-opus-5\n\
+             permissions: {permissions}\n\
+             version: 1.0.0\n\
+             source_format: claude-agent\n\
+             source_path: .claude/agents/deploy.md\n\
+             \n\
+             ---\n\
+             \n\
+             Instructions live in the native definition at `.claude/agents/deploy.md`, referenced in place and never edited.\n"
         ),
     );
     repo.write("assignment.txt", "deploy it\n");
@@ -100,12 +105,11 @@ fn launch_still_needs_no_opt_in_for_an_agent_that_widens_nothing() {
 
     let temp = repo.state_path();
     let bin = common::fake_harness(temp, &temp.join("argv"));
-    let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .current_dir(repo.path())
         .args(["launch", "@sable", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .arg("--dry-run")
-        .env("AHU_STATE_DIR", temp)
         .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
         .env(
             "PATH",
@@ -386,13 +390,12 @@ fn an_empty_prompt_digest_refuses_the_session() {
         },
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["run-task", "--task-dir", &task_dir.to_string_lossy()])
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .unwrap();
@@ -434,13 +437,12 @@ fn editing_the_recorded_agent_instructions_refuses_the_session() {
         },
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["run-task", "--task-dir", &task_dir.to_string_lossy()])
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .unwrap();
@@ -539,8 +541,12 @@ fn write_record(
 fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
     assert_eq!(
         ahu::task::TASK_SCHEMA_VERSION,
-        2,
-        "the digest split is a schema change and must be versioned as one"
+        3,
+        "the digest split and the task id change are schema changes and must be versioned as one"
+    );
+    assert!(
+        ahu::task::READABLE_SCHEMA_VERSIONS.contains(&2),
+        "schema 2 is this build's immediate predecessor and must stay readable"
     );
 
     let temp = tempfile::TempDir::new().unwrap();

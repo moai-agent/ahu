@@ -195,7 +195,13 @@ pub fn build(subject: &Subject<'_>) -> Result<Inventory> {
                 notes.push(format!(
                     "instructions digest {} covers exactly the text ahu delivers{}",
                     &agent.instructions_digest[..12],
-                    if agent.manifest.source.format.has_frontmatter() {
+                    if agent
+                        .manifest
+                        .source
+                        .as_ref()
+                        .map(|s| s.format.has_frontmatter())
+                        .unwrap_or(true)
+                    {
                         ", which is that file with its YAML frontmatter stripped"
                     } else {
                         "; this format has no frontmatter, so the two cover the same bytes"
@@ -431,48 +437,188 @@ fn classify(path: &str) -> Category {
 /// Sources outside the repository that can still influence a session.
 fn personal_sources(harness: &str) -> Vec<(PathBuf, Category, &'static str, &'static str)> {
     let mut found = Vec::new();
-    if harness != "claude-code" {
-        return found;
-    }
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return found;
     };
-    found.push((
-        home.join(".claude/CLAUDE.md"),
-        Category::PersonalInstructions,
-        "user",
-        "personal instructions; they apply to every project on this machine and are not part of project policy",
-    ));
-    found.push((
-        home.join(".claude/settings.json"),
-        Category::PersonalInstructions,
-        "user",
-        "personal Claude Code settings; may set a model, permissions, or hooks",
-    ));
-    found.push((
-        home.join(".claude/agents"),
-        Category::PersonalInstructions,
-        "user",
-        "personal agent definitions; they are discoverable alongside the project's",
-    ));
-    found.push((
-        home.join(".claude/skills"),
-        Category::Skill,
-        "user",
-        "personal skills; available in every project on this machine and shared between agents",
-    ));
-    found.push((
-        home.join(".claude/plugins"),
-        Category::Skill,
-        "user",
-        "personal plugins; may add skills, hooks, MCP servers, and agents",
-    ));
-    found.push((
-        PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"),
-        Category::Managed,
-        "machine",
-        "managed policy settings; required, not optional, and not removable by ahu",
-    ));
+    match harness {
+        "claude-code" => {
+            found.push((
+                home.join(".claude/CLAUDE.md"),
+                Category::PersonalInstructions,
+                "user",
+                "personal instructions; they apply to every project on this machine and are not part of project policy",
+            ));
+            found.push((
+                home.join(".claude/settings.json"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Claude Code settings; may set a model, permissions, or hooks",
+            ));
+            found.push((
+                home.join(".claude/agents"),
+                Category::PersonalInstructions,
+                "user",
+                "personal agent definitions; they are discoverable alongside the project's",
+            ));
+            found.push((
+                home.join(".claude/skills"),
+                Category::Skill,
+                "user",
+                "personal skills; available in every project on this machine and shared between agents",
+            ));
+            found.push((
+                home.join(".claude/plugins"),
+                Category::Skill,
+                "user",
+                "personal plugins; may add skills, hooks, MCP servers, and agents",
+            ));
+            found.push((
+                PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"),
+                Category::Managed,
+                "machine",
+                "managed policy settings; required, not optional, and not removable by ahu",
+            ));
+        }
+        "opencode" => {
+            found.push((
+                home.join(".agents/skills"),
+                Category::Skill,
+                "user",
+                "personal canonical skills; OpenCode can discover these in every project on this machine",
+            ));
+            found.push((
+                home.join(".config/opencode/opencode.json"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode configuration; may declare plugins, providers, or permissions",
+            ));
+            found.push((
+                home.join(".config/opencode/opencode.jsonc"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode configuration; may declare plugins, providers, or permissions",
+            ));
+            found.push((
+                home.join(".config/opencode/agent"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode agent definitions; discoverable alongside the project's",
+            ));
+            found.push((
+                home.join(".config/opencode/skills"),
+                Category::Skill,
+                "user",
+                "personal OpenCode skills; available in every project on this machine and shared between agents",
+            ));
+            found.push((
+                home.join(".config/opencode/plugins"),
+                Category::Skill,
+                "user",
+                "personal OpenCode plugins; installed modules that execute at startup",
+            ));
+            found.push((
+                home.join(".config/opencode/plugin"),
+                Category::Skill,
+                "user",
+                "personal OpenCode plugins; installed modules that execute at startup",
+            ));
+            found.push((
+                home.join(".opencode/opencode.json"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode configuration; may declare plugins, providers, or permissions",
+            ));
+            found.push((
+                home.join(".opencode/opencode.jsonc"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode configuration; may declare plugins, providers, or permissions",
+            ));
+            found.push((
+                home.join(".opencode/agent"),
+                Category::PersonalInstructions,
+                "user",
+                "personal OpenCode agent definitions; discoverable alongside the project's",
+            ));
+            found.push((
+                home.join(".opencode/skills"),
+                Category::Skill,
+                "user",
+                "personal OpenCode skills; available in every project on this machine and shared between agents",
+            ));
+            found.push((
+                home.join(".opencode/plugins"),
+                Category::Skill,
+                "user",
+                "personal OpenCode plugins; installed modules that execute at startup",
+            ));
+            found.push((
+                home.join(".opencode/plugin"),
+                Category::Skill,
+                "user",
+                "personal OpenCode plugins; installed modules that execute at startup",
+            ));
+        }
+        "codex" => {
+            found.push((
+                home.join(".agents/skills"),
+                Category::Skill,
+                "user",
+                "personal canonical skills; Codex can discover these in every project on this machine",
+            ));
+            found.push((
+                home.join(".codex/config.toml"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Codex configuration; may set model or sandbox options",
+            ));
+            found.push((
+                home.join(".codex/instructions.md"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Codex instructions; apply to sessions outside project policy",
+            ));
+            found.push((
+                home.join(".codex/agents"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Codex agent configurations",
+            ));
+            found.push((
+                home.join(".codex/skills"),
+                Category::Skill,
+                "user",
+                "personal Codex skills; available in every project on this machine and shared between agents",
+            ));
+        }
+        "antigravity" => {
+            found.push((
+                home.join(".gemini/antigravity-cli/config.toml"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Antigravity configuration; may set model or tool settings",
+            ));
+            found.push((
+                home.join(".gemini/antigravity-cli/skills"),
+                Category::Skill,
+                "user",
+                "personal Antigravity skills; available in every project on this machine and shared between agents",
+            ));
+            found.push((
+                home.join(".gemini/GEMINI.md"),
+                Category::PersonalInstructions,
+                "user",
+                "personal Antigravity instructions; apply to sessions outside project policy",
+            ));
+            found.push((
+                home.join(".agents"),
+                Category::PersonalInstructions,
+                "user",
+                "personal agent definitions; discoverable alongside the project's",
+            ));
+        }
+        _ => {}
+    }
     found
 }
 
@@ -545,5 +691,64 @@ pub fn render(inventory: &Inventory) -> String {
         "\nThis inventory is not complete. `available` means a source is discoverable by the\n\
          harness, not that its contents reached the model.\n",
     );
+    // The inventory reports what was found; deciding what to do about a source
+    // is the bundled skill's subject, so the reader is pointed at it rather
+    // than handed a recommendation here.
+    out.push_str(&format!(
+        "How to read these labels and what to do about a source: the `{}` skill at {}.\n",
+        crate::mcp::CONTEXT_HYGIENE_SKILL,
+        crate::mcp::skill_path(crate::mcp::CONTEXT_HYGIENE_SKILL)
+    ));
+    out.push_str(&render_feature_matrix());
+    out
+}
+
+/// Render the harness feature matrix: which adapter capabilities each catalog
+/// harness has actually been validated to deliver.
+///
+/// The matrix is a record of validation, not a comparison for shopping: an
+/// unmarked feature is an unvalidated adapter surface, not a claim about the
+/// harness itself.
+pub fn render_feature_matrix() -> String {
+    use crate::style::{self, Role};
+    let style = style::stdout();
+    let mut out = String::new();
+    out.push_str("\nHarness feature matrix\n");
+    out.push_str("=====================\n");
+    // A header row keyed by display name, so each mark can be read back to its
+    // column. The names are catalog constants, so the row is deterministic.
+    // Every column is padded to its harness's name, which is never shorter
+    // than a mark, so the marks line up under their headers.
+    let names: Vec<&str> = crate::catalog::HARNESSES
+        .iter()
+        .map(|h| h.display_name)
+        .collect();
+    let header = names
+        .iter()
+        .map(|n| format!("{n:<width$}  ", width = n.len()))
+        .collect::<String>();
+    out.push_str(&format!("  {:<28} {}\n", "", header));
+    for feature in crate::catalog::FEATURES {
+        let marks: Vec<String> = crate::catalog::HARNESSES
+            .iter()
+            .map(|h| {
+                let mark = if h.supports(*feature) {
+                    style.paint(Role::Success, "yes")
+                } else {
+                    String::from("-")
+                };
+                format!("{mark:<width$}  ", width = h.display_name.len())
+            })
+            .collect();
+        out.push_str(&format!("  {:<28} {}\n", feature.as_str(), marks.join("")));
+    }
+    out.push('\n');
+    out.push_str(
+        "Each `yes` is a live-validated adapter surface. A `-` is an unvalidated adapter\n\
+                  surface, not a claim about the harness itself:\n",
+    );
+    for feature in crate::catalog::FEATURES {
+        out.push_str(&format!("  {}: {}\n", feature.as_str(), feature.gloss()));
+    }
     out
 }

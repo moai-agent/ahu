@@ -71,13 +71,14 @@ proposals in the private tracker. Promotion requires coordinator review and
 independent evaluation. Before evaluating, agree on baseline and candidate cases
 and a success criterion. Include privacy and scope regression checks; simulation
 alone does not demonstrate improvement in real use. Keep evaluation records private.
-docs-astra owns authored skill prose and current knowledge;
-dev-opus owns code and tests and hands prose needs to docs-astra. Preserve existing
-delegation and approval boundaries.
+The documentation agents own authored skill prose and current knowledge; the
+development agents own code and tests and hand prose needs to their documentation
+counterpart on the same harness. Preserve existing delegation and approval
+boundaries.
 
-Maintain the canonical `.agents/skills/discover-requirements/SKILL.md` and the
-repo-local `.claude/skills/discover-requirements/SKILL.md` as identical regular
-files through a separately authorized edit; no symlinks, global sync, or installs.
+Maintain `.agents/skills/discover-requirements/SKILL.md` as the canonical
+repository skill file. Claude loads the same `.agents/skills/` tree directly;
+do not create a duplicate `.claude/skills/` copy, symlink, global sync, or install.
 
-After skill edits, run `python3 scripts/check-skills.py` to check the repository
-copies byte-for-byte. Keep all metadata identical in both copies.
+After skill edits, run `python3 scripts/check-skills.py` to validate the
+canonical repository skill tree.

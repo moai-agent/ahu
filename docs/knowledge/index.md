@@ -13,6 +13,8 @@ relative to this bundle root and refer to the accompanying checkout.
 - [Named agent identity](named-agent-identity.md) - How manifests select an agent's identity and instruction source.
 - [Task configuration inheritance](task-configuration-inheritance.md) - How task worktrees inherit recognized agent configuration.
 - [Task state](task-state.md) - Where records live and how discovery and integrity checks work.
+- [Task identity](task-identity.md) - Task IDs, their grammar, the repository-scoped pointer index, and resolution semantics.
+- [Task communication](task-communication.md) - Operator-only inbox delivery and the task artifacts ahu reads back for display.
 - [Utility lookup](utility-lookup.md) - How Git and default cmux candidates are selected.
 - [Knowledge validation](knowledge-validation.md) - How configured bundles are checked and where validator trust ends.
 

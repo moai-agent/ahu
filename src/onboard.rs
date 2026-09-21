@@ -2,13 +2,13 @@
 //!
 //! Adoption is additive. A teammate who never installs ahu keeps using the
 //! repository's existing harness setup unchanged. Onboarding writes nothing
-//! except `.agents/ahu/agents/<name>.toml` files that the user explicitly
+//! except `.agents/ahu/agents/<name>.md` files that the user explicitly
 //! selected, creates them exclusively, and never touches a native definition,
 //! the Git index, or the branch.
 
 use std::path::{Path, PathBuf};
 
-use crate::agent::{self, AgentManifest, SourceFormat};
+use crate::agent::{self, SourceFormat};
 use crate::bail;
 use crate::catalog;
 use crate::config::AGENTS_RELATIVE_DIR;
@@ -49,22 +49,34 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
         .unwrap_or_default();
     let mut candidates = Vec::new();
 
-    // Claude Code: `.claude/agents/<name>.md`.
-    let claude_agents = repo_root.join(".claude/agents");
-    if let Ok(entries) = std::fs::read_dir(&claude_agents) {
+    // Definitions ahu can read well enough to propose a manifest for: one
+    // Markdown file per agent, named by the file, with YAML frontmatter whose
+    // `model` and `description` are the only fields ahu interprets. A format
+    // belongs here when its declared model is an identifier the catalog can be
+    // asked about; everything else is listed below with a blocker instead.
+    for (dir, format) in [
+        (".claude/agents", SourceFormat::ClaudeAgent),
+        (".opencode/agent", SourceFormat::OpenCodeAgent),
+    ] {
+        let Ok(entries) = std::fs::read_dir(repo_root.join(dir)) else {
+            continue;
+        };
         let mut paths: Vec<PathBuf> = entries
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
             .collect();
         paths.sort();
+        // Every one of these formats names a harness; `unwrap_or` keeps the
+        // lookup total without inventing a second source of truth for it.
+        let harness = format.native_harness().unwrap_or("claude-code");
         for path in paths {
             let name = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default()
                 .to_string();
-            let relative = format!(".claude/agents/{name}.md");
+            let relative = format!("{dir}/{name}.md");
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             let (native_model, preserved_fields, description) = frontmatter_summary(&text);
             let mut blockers = Vec::new();
@@ -73,12 +85,15 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
                     "{name:?} is not usable as an ahu selector, branch segment, and session title"
                 ));
             }
+            // OpenCode spells an inherited model as no `model` key at all,
+            // where Claude Code writes `inherit`; both land as "ahu needs an
+            // explicit --model", which is the same conversation either way.
             if let Some(model) = native_model.as_deref()
                 && model != "inherit"
-                && catalog::model("claude-code", model).is_none()
+                && catalog::model(harness, model).is_none()
             {
                 blockers.push(format!(
-                    "the definition declares model {model:?}, which is not in compatibility catalog {}",
+                    "the definition declares model {model:?}, which is not a {harness} model in compatibility catalog {}",
                     catalog::CATALOG_VERSION
                 ));
             }
@@ -86,7 +101,7 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
                 already_registered: registered.contains(&name),
                 name,
                 path: relative,
-                format: SourceFormat::ClaudeAgent,
+                format,
                 native_model,
                 blockers,
                 preserved_fields,
@@ -149,12 +164,13 @@ pub fn preview(repo_root: &Path) -> Result<Vec<Candidate>> {
     Ok(candidates)
 }
 
-/// Quote `value` as a TOML basic string.
+/// Quote `value` as a YAML double-quoted string.
 ///
-/// Rust debug escaping uses `\u{XXXX}`, while TOML requires fixed-width
-/// Unicode escapes. Use TOML-compatible escapes so control and bidi characters
-/// cannot break registration or change terminal presentation.
-fn toml_string(value: &str) -> String {
+/// YAML's double-quoted escape surface is the one ahu's manifest parser
+/// accepts, and it matches the escapes used before migration. Use
+/// YAML-compatible escapes so control and bidi characters cannot break
+/// registration or change terminal presentation.
+fn yaml_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for ch in value.chars() {
@@ -166,9 +182,9 @@ fn toml_string(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\u{0c}' => out.push_str("\\f"),
             '\r' => out.push_str("\\r"),
-            // TOML forbids raw control characters in a basic string, and the
-            // characters that reorder text have no business in a manifest field
-            // either. Both take TOML's own escape, not Rust's.
+            // YAML forbids raw control characters in a double-quoted string,
+            // and the characters that reorder text have no business in a
+            // manifest field either. Both take YAML's own escape, not Rust's.
             c if (c as u32) < 0x20 || c as u32 == 0x7f => {
                 out.push_str(&format!("\\u{:04X}", c as u32));
             }
@@ -188,25 +204,42 @@ fn toml_string(value: &str) -> String {
 }
 
 /// The exact manifest ahu proposes for a candidate.
+///
+/// The manifest is OKF Markdown that references the native candidate in place:
+/// the body is a short pointer, never a copy, so the native definition stays
+/// the single editable source.
 pub fn proposed_manifest(candidate: &Candidate, model: &str, version: &str) -> String {
+    let description = if candidate.description.is_empty() {
+        "\"\"".to_string()
+    } else {
+        yaml_string(&candidate.description)
+    };
     format!(
-        "schema_version = 1\n\
-         name = {}\n\
-         version = {}\n\
-         description = {}\n\
-         harness = {}\n\
-         model = {}\n\
+        "---\n\
+         okf_version: 0.2\n\
+         type: ahu:agent\n\
+         title: {}\n\
+         description: {}\n\
+         status: stable\n\
+         tags: [agents]\n\
+         harness: {}\n\
+         model: {}\n\
+         permissions: prompt\n\
+         version: {}\n\
+         source_format: {}\n\
+         source_path: {}\n\
          \n\
-         [source]\n\
-         format = {}\n\
-         path = {}\n",
-        toml_string(&candidate.name),
-        toml_string(version),
-        toml_string(&candidate.description),
-        toml_string(candidate.format.native_harness().unwrap_or("claude-code")),
-        toml_string(model),
-        toml_string(candidate.format.as_str()),
-        toml_string(&candidate.path),
+         ---\n\
+         \n\
+         Instructions live in the native definition at `{}`, referenced in place and never edited.\n",
+        yaml_string(&candidate.name),
+        description,
+        yaml_string(candidate.format.native_harness().unwrap_or("claude-code")),
+        yaml_string(model),
+        yaml_string(version),
+        yaml_string(candidate.format.as_str()),
+        yaml_string(&candidate.path),
+        candidate.path,
     )
 }
 
@@ -229,7 +262,7 @@ pub fn register(
     // let it choose where ahu creates files.
     let path = resolve_within(
         repo_root,
-        &format!("{AGENTS_RELATIVE_DIR}/{}.toml", candidate.name),
+        &format!("{AGENTS_RELATIVE_DIR}/{}.md", candidate.name),
         true,
     )?;
     let body = proposed_manifest(candidate, model, version);
@@ -267,10 +300,10 @@ pub fn unregister(repo_root: &Path, name: &str) -> Result<PathBuf> {
     }
     // Same reasoning as `register`, and more important here: this deletes.
     // A symlinked `agents` directory would otherwise let `--remove config`
-    // unlink an arbitrary `config.toml` outside the repository.
+    // unlink an arbitrary `config.md` outside the repository.
     let path = resolve_within(
         repo_root,
-        &format!("{AGENTS_RELATIVE_DIR}/{name}.toml"),
+        &format!("{AGENTS_RELATIVE_DIR}/{name}.md"),
         false,
     )?;
     if !path.is_file() {
@@ -283,7 +316,7 @@ pub fn unregister(repo_root: &Path, name: &str) -> Result<PathBuf> {
     // cannot be deleted through this command.
     let body = std::fs::read_to_string(&path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
-    if toml::from_str::<AgentManifest>(&body).is_err() {
+    if agent::parse_manifest(&body, &path).is_err() {
         bail!(
             "{} is not an ahu agent manifest, so ahu will not delete it.",
             path.display()
@@ -340,8 +373,9 @@ pub fn render(candidates: &[Candidate], repo_root: &Path) -> String {
             "No native agent definitions were found.\n\
              A repository holding only skills or an AGENTS.md has nothing ahu can convert into a\n\
              launchable agent: a skill is not an agent, and AGENTS.md is not an agent registry.\n\
-             Create an ahu agent explicitly instead, with its own instructions under\n\
-             .agents/ahu/instructions/<name>.md.\n",
+             Create an ahu agent explicitly instead: a manifest under .agents/ahu/agents/<name>.md\n\
+             that either carries its own instructions in its body or references a native definition\n\
+             in place.\n",
         );
         return out;
     }
@@ -376,7 +410,7 @@ pub fn render(candidates: &[Candidate], repo_root: &Path) -> String {
         }
     }
     out.push_str(
-        "\nRegistering adds only .agents/ahu/agents/<name>.toml. Native definitions are\n\
+        "\nRegistering adds only .agents/ahu/agents/<name>.md. Native definitions are\n\
          referenced in place and never edited, and removing a registration deletes only that\n\
          manifest.\n",
     );

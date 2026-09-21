@@ -29,7 +29,7 @@ fn settings_with_hooks(event: &str, matcher: Option<&str>, command: &str) -> Str
 }
 
 #[test]
-fn doctor_only_summarizes_hooks_for_harnesses_used_by_the_project() {
+fn doctor_separates_project_hook_inventory_from_all_harness_integration_status() {
     for (claude_preference, claude_agent) in [(false, false), (true, false), (false, true)] {
         let repo = TestRepo::new();
         repo.init_config();
@@ -37,8 +37,7 @@ fn doctor_only_summarizes_hooks_for_harnesses_used_by_the_project() {
             let config = repo
                 .read(".agents/ahu/config.toml")
                 .replace("claude-code", "codex")
-                .replace("claude-opus-5", "gpt-6-astra")
-                .replace("claude-sonnet-5", "gpt-6-astra");
+                .replace("\"claude-opus-5\", \"claude-sonnet-5\"", "\"gpt-6-astra\"");
             repo.write(".agents/ahu/config.toml", &config);
         }
         if claude_agent {
@@ -48,7 +47,8 @@ fn doctor_only_summarizes_hooks_for_harnesses_used_by_the_project() {
         std::fs::create_dir(home.path().join(".claude")).unwrap();
         let settings = home.path().join(".claude/settings.json");
         let used = claude_preference || claude_agent;
-        // Even malformed unrelated settings must not affect doctor.
+        // Generic inventory follows project harnesses; integration status reports
+        // all native scopes, including unrelated malformed settings.
         std::fs::write(
             &settings,
             if used {
@@ -58,17 +58,21 @@ fn doctor_only_summarizes_hooks_for_harnesses_used_by_the_project() {
             },
         )
         .unwrap();
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+        let output = common::ahu()
             .arg("doctor")
             .current_dir(repo.path())
             .env("HOME", home.path())
-            .env("AHU_STATE_DIR", repo.state_path())
             .env("AHU_CMUX_BIN", home.path().join("missing-cmux"))
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(!text.contains(hooks::NON_PROJECT_HOOK_WARNING), "{text}");
-        assert!(!text.contains("warning(s)"), "{text}");
+        for harness in ["claude-code", "codex", "opencode", "antigravity"] {
+            assert!(
+                text.contains(&format!("cmux integration {harness}:")),
+                "{text}"
+            );
+        }
         if used {
             assert!(
                 text.contains("hooks        Claude Code: 1 configured"),
@@ -77,7 +81,7 @@ fn doctor_only_summarizes_hooks_for_harnesses_used_by_the_project() {
             assert!(text.contains("user         Stop → notify-me"), "{text}");
         } else {
             assert!(!text.contains("hooks        "), "{text}");
-            assert!(!text.contains("settings.json"), "{text}");
+            assert!(text.contains("settings.json"), "{text}");
         }
     }
 }

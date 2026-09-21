@@ -119,7 +119,10 @@ fn the_overview_says_ahu_is_not_a_harness_and_names_what_it_needs() {
             "{text}"
         );
         // The hard dependencies have to be stated, not implied.
-        assert!(text.contains("cmux"), "cmux is required");
+        assert!(
+            text.contains("cmux"),
+            "interactive cmux dependency must be named"
+        );
         assert!(
             text.contains("A supported harness"),
             "the harness dependency must be named: {text}"
@@ -191,20 +194,27 @@ fn the_terminal_render_carries_no_markdown_syntax() {
 }
 
 #[test]
-fn both_renders_are_built_from_the_same_document() {
-    // Every section title appears in both, so the two can never drift.
-    let terminal = explain::overview();
-    let markdown = explain::markdown();
-    for section in explain::document() {
-        assert!(
-            terminal.contains(section.title),
-            "terminal missing {}",
-            section.title
-        );
-        assert!(
-            markdown.contains(section.title),
-            "markdown missing {}",
-            section.title
-        );
+fn the_overview_distinguishes_headless_results_from_interactive_state() {
+    for text in [explain::overview(), explain::markdown()] {
+        for claim in [
+            "launch --headless",
+            "--background",
+            "AHU_RUNTIME_DIR",
+            "no automatic replay",
+            "not orchestrator acceptance",
+            "An interactive task's record",
+            "Bounded supports Claude Code 2.1.270 only",
+            "--allow-child-widened @name",
+            "outside the worker sandbox",
+            "the entire owner and helpers have read-only model tools",
+            "A child cannot resume after its owning parent attempt terminates",
+            "Child resume does not use the launch broker",
+            "does not prove hooks cannot write",
+            "total helper count is not capped",
+            "Provider-side cleanup stays unknown",
+        ] {
+            assert!(text.contains(claim), "missing backend boundary: {claim}");
+        }
+        assert!(!text.contains("every task session is a cmux workspace"));
     }
 }

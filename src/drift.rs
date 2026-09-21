@@ -36,7 +36,7 @@ fn short(digest: &str) -> &str {
 pub struct AgentDigests<'a> {
     /// `ResolvedAgent::identity_digest()`.
     pub identity: &'a str,
-    /// Digest of the whole file at `source.path`, frontmatter included.
+    /// Digest of the whole file the instructions are read from, frontmatter included.
     pub source: &'a str,
     /// Digest of exactly the instruction text ahu delivers.
     pub instructions: &'a str,

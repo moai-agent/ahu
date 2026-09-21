@@ -35,7 +35,8 @@ invocation. A discovered default cmux client retains its canonical executable
 across calls.[^selection][^git][^cmux][^tests]
 
 `AHU_CMUX_BIN` deliberately retains ordinary command semantics, including bare
-names and relative paths, without the default exclusion. Executable selection
+names and relative paths, without the default exclusion. The selected executable
+is pinned to its canonical path before probing or execution. Executable selection
 is not OS isolation and cannot prevent concurrent replacement by a host process.
 The separate harness resolver excludes repository roots ahu has opened; it does
 not perform this utility ancestry scan.[^selection][^cmux]

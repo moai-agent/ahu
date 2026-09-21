@@ -1,0 +1,72 @@
+# Terms Vale accepts in this repository's documentation.
+# Entries are regular expressions; a lowercase entry matches any casing.
+# See https://vale.sh/docs/keys/vocab.
+
+# Project and tooling names
+ahu('s)?
+cmux('s)?
+OpenCode
+Codex
+Antigravity
+Ollama('s)?
+Clippy
+rustfmt
+rustup
+zsh
+
+# Git and workspace vocabulary
+[Ww]orktree('s|s)?
+[Uu]ntracked
+[Uu]nstaged
+subdirectory('s)?
+workspace('s)?
+[Ll]ockfile
+[Ff]rontmatter
+[Aa]llowlist
+onboarding
+
+# Process and stream vocabulary
+stdin
+stdout
+stderr
+[Ss]ubprocess(es)?
+[Mm]ultiline
+[Dd]octests?
+[Ss]criptable
+[Vv]alidator
+[Rr]enderers?
+
+# Coined terms this project uses deliberately
+[Rr]ecordless
+uninspectable
+unjoined
+unreproduced
+unstyled
+untrusted
+unvalidated
+canonicalize[ds]?
+deduplicat(e|ed|ing)
+reachability
+rescanned
+snapshotted
+
+# Domain acronyms and terms, accepted as written. Vocabulary entries are also
+# exempt from the style packages' substitution and acronym rules, which
+# otherwise expand these or propose consumer-software synonyms.
+[Aa]gents?
+CLI
+OKF
+HEAD
+SHA
+TOML
+MCP
+MDM
+PTY
+PID
+GLM
+CVSS
+MIT
+USD
+proselint
+Claude
+home director(y|ies)

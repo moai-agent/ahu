@@ -8,9 +8,10 @@ use crate::util::Result;
 pub const HELP: &str = "ahu - The moai-agent command-line interface
 
 Launch repository-defined agents in fresh Git worktrees and organise their
-interactive sessions in cmux.
+interactive sessions in cmux. Use --headless for unattended execution with
+primary-owned coordination and optional detached supervision.
 
-Usage: ahu [COMMAND]
+Usage: ahu [--repo <path>] [COMMAND]
 
 Running `ahu` with no command opens the interactive launcher: pick an agent with
 `@name` (or leave it blank for the project's automatic selection), paste a task,
@@ -45,15 +46,49 @@ Commands:
   task <task-id> [--output json]
                         Inspect a task's recorded session state and locations
   diff <task-id>         Review tracked changes since launch; list untracked files
+  wait <task-id> [--output json]    Wait for a headless attempt to stop
+  result <task-id> [--output json]  Read durable process and harness outcomes
+  cleanup <task-id>                After known termination, remove recognized old captures
+                                  and bounded requests; retain results and native sessions,
+                                  branches and worktrees
+  cancel <task-id>                Request cancellation of the task and ahu descendants;
+                                  confirmed interactive cancellation closes its cmux workspace,
+                                  while the worktree, branch and record are kept
+  resume <task-id> --prompt-file PATH [--output json]
+                                  Resume a root task from the host using its recorded native session;
+                                  child/worker resume unsupported: submit a new registered assignment
   focus <task-id>       Bring a task's cmux session to the front
+  remove <task-id>      Remove a terminal task's record, worktree, and branch
+  message <task-id> <text>
+                        Append an operator message; subsequent flags are literal text
+  cmux status [--output json]
+                        Inspect native integration evidence and headless isolation
+  cmux install --harness ID [--dry-run]
+                        Preview or explicitly delegate a native cmux installation
+  mcp serve              Serve read-only ahu inspection tools over stdio MCP
+  mcp setup              Materialize ahu's bundled skills into this repository
   doctor                Check repository, configuration, harness, and cmux
-  codex                 Open Codex here with workspace-write sandboxing and
-                        on-request approvals (uses Codex's configured model)
+  agy                   Open the Antigravity CLI here using its configured model
+                        in YOLO mode (--dangerously-skip-permissions)
+  claude                Open Claude here with permission checks bypassed
+                        (uses Claude's configured model)
+  codex                 Open Codex here with approval prompts and sandbox bypassed
+                        (uses Codex's configured model)
+  opencode              Open OpenCode here using its configured model and
+                        permissions (ahu passes no --auto and no --pure)
   run-task              Internal: run a prepared task (used by cmux)
+
+Task references:
+  Use ahu:task:<id> to identify a task explicitly. Bare IDs and unique ID
+  prefixes remain accepted. Exact @name handles select tasks in this repository.
+  In `launch @name`, @name selects a registered agent instead.
 
 Options:
   -h, --help            Print this help message
   -V, --version         Print the version
+  --repo <path>         Select a repository checkout before the command.
+                        Also accepts --repo=<path>; paths in the command are
+                        relative to this checkout. No environment override.
   --color <choice>      auto, always, or never (also --color=<choice>).
                         Always/never override NO_COLOR. Auto honors any
                         NO_COLOR value and requires stdout to be a
@@ -80,12 +115,30 @@ launcher options:
   --no-focus            Do not switch to the new session after launching
 
 launch options:
+  --name <name>        Reserve an immutable @name for this task in the repository.
+                        By default, generate a short name from the displayed title.
   --prompt <text>       Use an inline prompt (conflicts with --prompt-file)
   --prompt-file <path>  Read a UTF-8 prompt file
                         With neither option, read non-terminal stdin to EOF.
                         Explicit sources take precedence over unread stdin.
-  --output json        Emit a versioned JSON plan; requires --dry-run.
+  --output json        Emit a versioned plan or headless launch/result envelope.
                         JSON goes to stdout, diagnostics to stderr.
+  --headless            Run without cmux; descendants inherit this backend
+  --allow-child @name   Grant this exact registered child identity (repeatable)
+  --allow-child-widened @name
+                        Grant a child whose manifest widens approvals. Frozen at
+                        host submission; child requests cannot expand the grant
+  --background          Detach a headless supervisor after startup acknowledgement
+  --timeout <seconds>   Bound a headless attempt (default 1800)
+  --native-helpers <policy>
+                        disabled (default), or bounded: Claude 2.1.270 ONLY.
+                        Bounded confines the entire parent and helpers to read-only
+                        model tools. No shell, edits, builds or ahu child launches.
+                        Settings-defined hook side effects remain unverified. Budget
+                        $5 per attempt; one concurrent helper, depth one, same model.
+                        Roles are requested; total helper count is not capped.
+                        Agent native_helpers or project [execution].native_helpers
+                        supplies the default; this flag overrides it.
   --dry-run             Show the preview and create nothing
   --allow-widened-approvals
                         Required to launch an agent whose manifest declares
@@ -134,6 +187,20 @@ pub enum Command {
         /// interactive confirmation.
         allow_widened_approvals: bool,
     },
+    HeadlessLaunch {
+        launch: Box<Command>,
+        options: crate::headless::Options,
+    },
+    BatchControl {
+        action: String,
+        task_id: String,
+        prompt: Option<PathBuf>,
+        json: bool,
+    },
+    BatchSupervisor {
+        task_dir: PathBuf,
+    },
+    TasksJson,
     Agents,
     Onboard {
         register: Option<String>,
@@ -161,8 +228,27 @@ pub enum Command {
     Focus {
         task_id: String,
     },
+    Remove {
+        task_id: String,
+    },
+    Message {
+        task_id: String,
+        text: String,
+    },
+    CmuxStatus {
+        output_json: bool,
+    },
+    CmuxInstall {
+        harness: String,
+        dry_run: bool,
+    },
+    McpServe,
+    McpSetup,
     Doctor,
     Codex,
+    Claude,
+    OpenCode,
+    Antigravity,
     RunTask {
         task_dir: PathBuf,
     },
@@ -260,17 +346,87 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             expect_no_more(&args[1..])?;
             Ok(Command::Agents)
         }
+        "supervise" => {
+            if args.len() != 3 || args[1] != "--task-dir" {
+                bail!("supervise requires --task-dir PATH");
+            }
+            Ok(Command::BatchSupervisor {
+                task_dir: PathBuf::from(&args[2]),
+            })
+        }
+        "wait" | "result" | "cancel" | "resume" | "cleanup" => {
+            let task_id = args
+                .get(1)
+                .filter(|s| !s.starts_with('-'))
+                .cloned()
+                .ok_or_else(|| crate::util::Error::new("task id required"))?;
+            let mut prompt = None;
+            let mut json = false;
+            let mut index = 2;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--output" if !json => {
+                        if value_for("--output", &args, &mut index)? != "json" {
+                            bail!("expected json");
+                        }
+                        json = true;
+                    }
+                    "--prompt-file" if first == "resume" && prompt.is_none() => {
+                        prompt = Some(PathBuf::from(value_for(
+                            "--prompt-file",
+                            &args,
+                            &mut index,
+                        )?));
+                    }
+                    other => bail!("unexpected option {other:?}"),
+                }
+                index += 1;
+            }
+            if first == "resume" && prompt.is_none() {
+                bail!("resume requires --prompt-file PATH");
+            }
+            Ok(Command::BatchControl {
+                action: first.to_string(),
+                task_id,
+                prompt,
+                json,
+            })
+        }
+        "tasks" if args.get(1).map(String::as_str) == Some("--output") => {
+            if args.len() != 3 || args[2] != "json" {
+                bail!("expected tasks --output json");
+            }
+            Ok(Command::TasksJson)
+        }
         "tasks" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Tasks)
         }
+        "cmux" => parse_cmux(&args[1..]),
+        "mcp" => match args.get(1).map(String::as_str) {
+            Some("serve") if args.len() == 2 => Ok(Command::McpServe),
+            Some("setup") if args.len() == 2 => Ok(Command::McpSetup),
+            _ => bail!("expected ahu mcp serve or ahu mcp setup"),
+        },
         "doctor" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Doctor)
         }
+        "claude" => {
+            expect_no_more(&args[1..])?;
+            Ok(Command::Claude)
+        }
         "codex" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Codex)
+        }
+        "opencode" => {
+            expect_no_more(&args[1..])?;
+            Ok(Command::OpenCode)
+        }
+        "agy" => {
+            expect_no_more(&args[1..])?;
+            Ok(Command::Antigravity)
         }
         "task" | "diff" => {
             let task_id = args
@@ -301,6 +457,26 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             expect_no_more(&args[2..])?;
             Ok(Command::Focus { task_id })
         }
+        "remove" => {
+            let task_id = args
+                .get(1)
+                .filter(|id| !id.is_empty() && !id.starts_with('-'))
+                .cloned()
+                .ok_or_else(|| crate::util::Error::new("`ahu remove` needs a task id."))?;
+            expect_no_more(&args[2..])?;
+            Ok(Command::Remove { task_id })
+        }
+        "message" => {
+            let task_id = args
+                .get(1)
+                .filter(|id| !id.is_empty() && !id.starts_with('-'))
+                .cloned()
+                .ok_or_else(|| {
+                    crate::util::Error::new("`ahu message` needs a task id and a message text.")
+                })?;
+            let text = args[2..].join(" ");
+            Ok(Command::Message { task_id, text })
+        }
         "inventory" => Ok(Command::Inventory {
             agent: optional_agent(&args[1..])?,
         }),
@@ -308,7 +484,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             agent: optional_agent(&args[1..])?,
         }),
         "knowledge" => parse_knowledge(&args[1..]),
-        "launch" => parse_launch(&args[1..], stdin_available),
+        "launch" => parse_launch_backend(&args[1..], stdin_available),
         "onboard" => parse_onboard(&args[1..]),
         "run-task" => parse_run_task(&args[1..]),
         "--no-focus" => {
@@ -423,6 +599,90 @@ fn value_for(flag: &str, rest: &[String], index: &mut usize) -> Result<String> {
         .ok_or_else(|| crate::util::Error::new(format!("{flag} needs a value.")))
 }
 
+fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Command> {
+    // Only an in-process broker dispatch implicitly selects the headless
+    // profile; the broker always dispatches children with explicit --headless.
+    let inherited = std::env::var_os("AHU_BROKER_DISPATCH").is_some();
+    let mut options = crate::headless::Options::default();
+    let mut headless = inherited;
+    let mut filtered = Vec::new();
+    let mut requested_dry_run = false;
+    let mut batch_flags = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let flag = rest[i].as_str();
+        if matches!(
+            flag,
+            "--headless" | "--background" | "--timeout" | "--native-helpers"
+        ) && !batch_flags.insert(flag)
+        {
+            bail!("repeated batch option {flag}");
+        }
+        if flag == "--dry-run" {
+            requested_dry_run = true;
+        }
+        match flag {
+            "--headless" => headless = true,
+            "--background" => options.background = true,
+            "--timeout" => {
+                options.timeout_seconds = value_for("--timeout", rest, &mut i)?
+                    .parse()
+                    .map_err(|_| crate::util::Error::new("--timeout needs seconds"))?;
+                if options.timeout_seconds == 0 {
+                    bail!("timeout must be positive");
+                }
+            }
+            "--allow-child" | "--allow-child-widened" => {
+                let name = value_for(flag, rest, &mut i)?;
+                let name = name.strip_prefix('@').unwrap_or(&name).to_string();
+                if !crate::util::is_safe_name(&name) {
+                    bail!("invalid child agent name");
+                }
+                if flag == "--allow-child" {
+                    options.child_agents.push(name);
+                } else {
+                    options.child_widened.push(name);
+                }
+            }
+            "--native-helpers" => {
+                options.native_helpers_explicit = true;
+                options.native_helpers = value_for("--native-helpers", rest, &mut i)?;
+                if !matches!(options.native_helpers.as_str(), "disabled" | "bounded") {
+                    bail!("native helpers must be disabled or bounded");
+                }
+            }
+            value => {
+                filtered.push(value.to_string());
+                if matches!(
+                    value,
+                    "--prompt" | "--prompt-file" | "--title" | "--summary" | "--name" | "--output"
+                ) {
+                    filtered.push(value_for(value, rest, &mut i)?);
+                }
+            }
+        }
+        i += 1;
+    }
+    if !headless {
+        if options != crate::headless::Options::default() {
+            bail!("batch options require --headless");
+        }
+        return parse_launch(&filtered, stdin_available);
+    }
+    // Let the existing parser enforce prompt exclusivity and all shared flags.
+    if !requested_dry_run {
+        filtered.push("--dry-run".into());
+    }
+    let mut launch = parse_launch(&filtered, stdin_available)?;
+    if let Command::Launch { dry_run, .. } = &mut launch {
+        *dry_run = requested_dry_run;
+    }
+    Ok(Command::HeadlessLaunch {
+        launch: Box::new(launch),
+        options,
+    })
+}
+
 fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     let name = rest
         .first()
@@ -445,6 +705,11 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     let mut index = 1;
     while index < rest.len() {
         match rest[index].as_str() {
+            "--name" if display.name.is_none() => {
+                display.name = Some(crate::task_handles::name(&value_for(
+                    "--name", rest, &mut index,
+                )?)?);
+            }
             "--title" if display.title.is_none() => {
                 display.title = Some(value_for("--title", rest, &mut index)?);
             }
@@ -494,9 +759,46 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     })
 }
 
-/// Remove global color options while leaving command option values intact.
-/// Keeping value-taking options together prevents an inline prompt that happens
-/// to say `--color=always` from being interpreted as application configuration.
+/// Read the repository selector only before the command, so literal prompts,
+/// messages, and native arguments can never change the lookup scope.
+pub fn extract_repository(args: Vec<String>) -> Result<(Vec<String>, Option<PathBuf>)> {
+    let mut remaining = Vec::new();
+    let mut repository = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let value = if arg == "--repo" {
+            Some(args.next().ok_or_else(|| {
+                crate::util::Error::new("--repo needs a checkout path.")
+                    .with_kind(crate::util::ErrorKind::Usage)
+            })?)
+        } else {
+            arg.strip_prefix("--repo=").map(str::to_string)
+        };
+        if let Some(value) = value {
+            if value.is_empty() || value.starts_with("--") {
+                bail!(kind: crate::util::ErrorKind::Usage, "--repo needs a checkout path; prefix a path beginning with '--' with './'.");
+            }
+            if repository.replace(PathBuf::from(value)).is_some() {
+                bail!(kind: crate::util::ErrorKind::Usage, "--repo may only be supplied once.");
+            }
+        } else if arg == "--color" {
+            remaining.push(arg);
+            if let Some(value) = args.next() {
+                remaining.push(value);
+            }
+        } else if arg.starts_with("--color=") {
+            remaining.push(arg);
+        } else {
+            remaining.push(arg);
+            remaining.extend(args);
+            break;
+        }
+    }
+    Ok((remaining, repository))
+}
+
+/// Remove global color options while leaving command option values and inbox
+/// messages intact. A literal payload never changes application configuration.
 pub fn extract_color(
     args: Vec<String>,
 ) -> Result<(Vec<String>, Option<crate::style::ColorChoice>)> {
@@ -505,6 +807,11 @@ pub fn extract_color(
     let mut choice = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
+        if remaining.first().map(String::as_str) == Some("message") && remaining.len() >= 2 {
+            remaining.push(arg);
+            remaining.extend(args);
+            break;
+        }
         let value = if arg == "--color" {
             Some(args.next().ok_or_else(|| {
                 crate::util::Error::new("--color needs auto, always, or never.")
@@ -538,6 +845,10 @@ pub fn extract_color(
                     | "--model"
                     | "--agent-version"
                     | "--task-dir"
+                    | "--timeout"
+                    | "--native-helpers"
+                    | "--allow-child"
+                    | "--allow-child-widened"
             );
             remaining.push(arg);
             if takes_value && let Some(value) = args.next() {
@@ -546,6 +857,43 @@ pub fn extract_color(
         }
     }
     Ok((remaining, choice))
+}
+
+fn parse_cmux(args: &[String]) -> Result<Command> {
+    match args.first().map(String::as_str) {
+        Some("status") => {
+            let output_json = match &args[1..] {
+                [] => false,
+                [flag, value] if flag == "--output" && value == "json" => true,
+                _ => bail!("expected ahu cmux status [--output json]"),
+            };
+            Ok(Command::CmuxStatus { output_json })
+        }
+        Some("install") => {
+            let mut harness = None;
+            let mut dry_run = false;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--harness" if harness.is_none() => {
+                        harness = Some(value_for("--harness", args, &mut index)?.to_string());
+                    }
+                    "--dry-run" if !dry_run => dry_run = true,
+                    _ => bail!("expected ahu cmux install --harness ID [--dry-run]"),
+                }
+                index += 1;
+            }
+            let harness =
+                harness.ok_or_else(|| crate::util::Error::new("--harness ID required"))?;
+            if !["claude-code", "codex", "opencode", "antigravity"].contains(&harness.as_str()) {
+                bail!("unsupported harness; use claude-code, codex, opencode, or antigravity");
+            }
+            Ok(Command::CmuxInstall { harness, dry_run })
+        }
+        _ => bail!(
+            "expected ahu cmux status [--output json] or ahu cmux install --harness ID [--dry-run]"
+        ),
+    }
 }
 
 #[cfg(test)]

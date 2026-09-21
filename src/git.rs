@@ -2,7 +2,7 @@
 //!
 //! ahu never stages, commits, stashes, resets, cleans, or switches branches in
 //! the invoking checkout. The only mutating Git operation it performs is
-//! creating and removing its own task worktrees.
+//! creating and removing its own task worktrees and deleting their branches.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -78,7 +78,7 @@ pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
         .map_err(|e| Error::new(format!("cannot run git: {e}")))
 }
 
-fn run_ok(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn run_ok(dir: &Path, args: &[&str]) -> Result<String> {
     let out = run(dir, args)?;
     if !out.status.success() {
         bail!(
@@ -177,6 +177,18 @@ pub fn add_worktree(repo: &Repo, path: &Path, branch: &str, base: &str) -> Resul
 /// process could have run in the worktree. It refuses to force-remove, so a
 /// worktree holding changes is preserved and reported instead.
 pub fn remove_worktree(repo: &Repo, path: &Path, branch: &str) -> Result<()> {
+    remove_task_worktree(repo, path)?;
+    // Best effort: a branch that still holds commits is left alone by `-d`.
+    let _ = run(&repo.root, &["branch", "-d", branch]);
+    Ok(())
+}
+
+/// Remove a task worktree without touching any branch.
+///
+/// `--` closes the option list, so the path is treated as a path even when
+/// something has arranged for it to begin with a hyphen. Refuses to force, so a
+/// worktree holding changes or untracked files is preserved and reported.
+pub fn remove_task_worktree(repo: &Repo, path: &Path) -> Result<()> {
     let path_str = path.to_string_lossy().to_string();
     let out = run(&repo.root, &["worktree", "remove", "--", &path_str])?;
     if !out.status.success() {
@@ -186,9 +198,64 @@ pub fn remove_worktree(repo: &Repo, path: &Path, branch: &str) -> Result<()> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    // Best effort: a branch that still holds commits is left alone by `-d`.
-    let _ = run(&repo.root, &["branch", "-d", branch]);
     Ok(())
+}
+
+/// Delete a task branch with `git branch -d`, which refuses a branch whose
+/// commits are not merged.
+///
+/// `--` closes the option list: the name is treated as a branch name even when
+/// something has arranged for it to begin with a hyphen. Never `-D`, never
+/// `refs/heads/` spelling — `git branch -d` does not accept the fully-qualified
+/// form, and the gate on unmerged commits belongs to Git itself.
+///
+/// `primary` must be the repository's primary checkout, resolved while the
+/// checkout that `remove` is tearing down still exists: `remove` deletes the
+/// task's worktree first, and resolving the primary afterwards would ask Git
+/// to run from a directory that is already gone. Running from the primary also
+/// keeps `-d`'s own merged-check judging the same HEAD that
+/// [`branch_merged_into_primary_head`] gates on.
+pub fn delete_task_branch(primary: &Path, branch: &str) -> Result<()> {
+    let out = run(primary, &["branch", "-d", "--", branch])?;
+    if !out.status.success() {
+        bail!(
+            "could not delete branch {}: {}",
+            branch,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// `true` when every commit on `branch` is already in the primary checkout's
+/// current branch.
+///
+/// The `refs/heads/` spelling keeps a branch name that begins with `-` from
+/// being read as an option. Runs from the primary checkout so "merged" is
+/// judged against what the user sees there, not against a linked worktree.
+pub fn branch_merged_into_primary_head(repo: &Repo, branch: &str) -> Result<bool> {
+    let primary = repo.primary_root()?;
+    let out = run(
+        &primary,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &format!("refs/heads/{branch}"),
+            "HEAD",
+        ],
+    )?;
+    if out.status.success() {
+        return Ok(true);
+    }
+    let code = out.status.code();
+    if code == Some(1) {
+        return Ok(false);
+    }
+    bail!(
+        "cannot tell whether branch {} is merged: {}",
+        branch,
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
 }
 
 /// `true` when `branch` already exists in the repository.

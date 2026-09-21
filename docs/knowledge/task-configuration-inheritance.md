@@ -4,7 +4,7 @@ title: Task configuration inheritance
 description: How task worktrees inherit recognized agent configuration.
 tags: [worktrees, configuration]
 status: draft
-generated: { by: docs-astra/1.0.0, at: 2026-09-12T23:06:20Z }
+generated: { by: docs-opus/1.0.0, at: 2026-09-14T03:51:17Z }
 sources:
   - id: snapshot
     resource: ../../src/snapshot.rs
@@ -24,8 +24,9 @@ configuration is then materialized from a snapshot taken at submission, includin
 uncommitted and ignored additions, modifications, and deletions. Unrelated dirty
 source files are not copied.[^launch][^snapshot]
 
-The snapshot recognizes `.agents`, `.claude`, `.codex`, and `.agent` directories,
-along with supported instruction and configuration filenames. It records content
+The snapshot recognizes `.agents`, `.claude`, `.codex`, `.agent`, `.opencode`, and `.gemini`
+directories, along with supported instruction and configuration filenames,
+including `GEMINI.md`, `opencode.json` and `opencode.jsonc`. It records content
 digests and executable bits. Collection has a depth limit and skips directories
 such as `.git`, `.worktrees`, and build output; the scan is not an exhaustive
 inventory of every possible configuration location. Files already committed in

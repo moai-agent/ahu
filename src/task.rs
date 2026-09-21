@@ -28,7 +28,9 @@ pub enum LaunchMode {
 /// Life cycle of a task session, as far as ahu can actually observe it.
 ///
 /// `Exited` means the harness process ended. It is not a claim that the task
-/// was completed successfully.
+/// was completed successfully. `Cancelled` means ahu terminated the harness
+/// process tree on request; like `Exited`, it is terminal and is not a claim
+/// of success.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskState {
@@ -36,6 +38,7 @@ pub enum TaskState {
     Running,
     Exited,
     Failed,
+    Cancelled,
 }
 
 impl TaskState {
@@ -45,7 +48,51 @@ impl TaskState {
             TaskState::Running => "running",
             TaskState::Exited => "exited",
             TaskState::Failed => "failed",
+            TaskState::Cancelled => "cancelled",
         }
+    }
+
+    /// A state whose session may still be doing work. Only these states can
+    /// meaningfully be cancelled; the rest describe sessions that already
+    /// stopped for some reason.
+    pub fn is_live(self) -> bool {
+        matches!(self, TaskState::Starting | TaskState::Running)
+    }
+}
+
+/// What a task's session signal showed at the moment ahu looked.
+///
+/// This is an observation, not a recorded state and never an acceptance of
+/// work: `live` means the signal was held, `stale` means it was not, and
+/// `unknown` means ahu could not read it. Nothing in ahu mutates a task
+/// record based on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservedLiveness {
+    Live,
+    Stale,
+    Unknown,
+}
+
+impl ObservedLiveness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ObservedLiveness::Live => "live",
+            ObservedLiveness::Stale => "stale",
+            ObservedLiveness::Unknown => "unknown",
+        }
+    }
+}
+
+/// Interpret a session-ownership probe for display.
+///
+/// `None` means the probe could not be made at all -- no signal applies to
+/// this task, or reading it failed -- which is `unknown`, never `stale`: a
+/// failed read must not be presented as a held-or-released verdict.
+pub fn observed_liveness(owner: Option<bool>) -> ObservedLiveness {
+    match owner {
+        Some(true) => ObservedLiveness::Live,
+        Some(false) => ObservedLiveness::Stale,
+        None => ObservedLiveness::Unknown,
     }
 }
 
@@ -151,32 +198,62 @@ impl TaskRecord {
     }
 }
 
-const TASK_FILE: &str = "task.json";
-const PROMPT_FILE: &str = "prompt.txt";
+pub(crate) const TASK_FILE: &str = "task.json";
+pub(crate) const PROMPT_FILE: &str = "prompt.txt";
 /// Schema 2 splits `LaunchIdentity`'s single instruction digest into
 /// `source_digest` (the whole file) and `instructions_digest` (the delivered
 /// text). A schema-1 record carries the whole-file digest under the *name*
 /// `instructions_digest`, so reading one as schema 2 would attribute file bytes
 /// to delivered bytes. `load` refuses it by version instead.
-pub const TASK_SCHEMA_VERSION: u32 = 2;
-
-/// A time-ordered, collision-resistant task identifier.
 ///
-/// Repeated and concurrent launches of the same agent must produce distinct
-/// tasks, so the identifier mixes a timestamp with process and counter entropy.
-pub fn new_task_id() -> String {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let now = std::time::SystemTime::now()
+/// Schema 3 changes the task identifier from 18 hex characters to a hyphenated
+/// UUID v7. The fields are otherwise identical, so schema-2 records still load
+/// unchanged; they keep their original ids.
+pub const TASK_SCHEMA_VERSION: u32 = 3;
+/// The schema versions this build can read: the current one and its immediate
+/// predecessor. `load` refuses everything else.
+pub const READABLE_SCHEMA_VERSIONS: [u32; 2] = [2, TASK_SCHEMA_VERSION];
+
+/// A time-ordered, collision-resistant task identifier: a UUID v7 whose random
+/// bits come from `os_entropy`. Fails closed rather than minting a guessable id.
+///
+/// The 48-bit timestamp is big-endian milliseconds, so ids sort by launch time
+/// as plain strings. The remaining 74 bits are random.
+pub fn new_task_id() -> Result<String> {
+    let mut rand = [0u8; 10];
+    crate::orchestration::os_entropy(&mut rand)?;
+    let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Ok(uuid_v7(now_ms, &rand))
+}
+
+/// Format a UUID v7 from a millisecond timestamp and 10 random bytes.
+fn uuid_v7(now_ms: u64, rand: &[u8; 10]) -> String {
+    let rand_a = ((rand[0] as u16) << 4) | ((rand[1] >> 4) as u16);
+    let mut tail: u64 = 0;
+    for byte in &rand[2..10] {
+        tail = (tail << 8) | u64::from(*byte);
+    }
+    let rand_b = (((rand[1] & 0x0f) as u64) << 58) | (tail >> 6);
     format!(
-        "{:010x}{:04x}{:04x}",
-        now.as_secs(),
-        (now.subsec_nanos() >> 8) & 0xffff,
-        (std::process::id() ^ counter) & 0xffff
+        "{:08x}-{:04x}-7{:03x}-{:04x}-{:012x}",
+        now_ms >> 16,
+        now_ms & 0xffff,
+        rand_a,
+        0x8000 | (rand_b >> 48) as u16,
+        rand_b & 0xffff_ffff_ffff
     )
+}
+
+/// True for a canonical task id: 36 lowercase hex digits hyphenated as a UUID.
+pub fn is_canonical_task_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| match (i, b) {
+            (8 | 13 | 18 | 23, b'-') => true,
+            (_, b) => b.is_ascii_hexdigit() && !b.is_ascii_uppercase(),
+        })
 }
 
 /// RFC 3339 UTC timestamp, computed without a date library.
@@ -227,13 +304,16 @@ pub fn save(dir: &Path, record: &TaskRecord, prompt: &str) -> Result<()> {
     state::create_private_dir_all(dir)?;
     // The record names the agent, the repository, and the task title. It is not
     // as sensitive as the prompt, but it has no reason to be world-readable.
-    state::write_json(&dir.join(TASK_FILE), record)?;
-    state::write_private_file(&dir.join(PROMPT_FILE), prompt.as_bytes())
+    state::write_json(&crate::storage::TaskStorage::new(dir).record(), record)?;
+    state::write_private_file(
+        &crate::storage::TaskStorage::new(dir).prompt(),
+        prompt.as_bytes(),
+    )
 }
 
 pub fn load(dir: &Path) -> Result<TaskRecord> {
-    let path = dir.join(TASK_FILE);
-    let bytes = state::read_private_file(&path)
+    let path = crate::storage::TaskStorage::new(dir).record();
+    let bytes = crate::storage::read_task_metadata(&path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
 
     // The schema version is read on its own, before the record is deserialized
@@ -245,14 +325,21 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
         .ok()
         .and_then(|value| value.get("schema_version")?.as_u64());
     if let Some(version) = version
-        && version != u64::from(TASK_SCHEMA_VERSION)
+        && !READABLE_SCHEMA_VERSIONS
+            .iter()
+            .any(|v| u64::from(*v) == version)
     {
+        let reason = if version == 1 {
+            "schema 1 recorded the whole file's digest under the name \
+             instructions_digest, which now means the delivered instruction text, \
+             so the same field would be read as covering bytes it does not cover."
+        } else {
+            "ahu does not know how to read records written by that version."
+        };
         bail!(
-            "{} was written by a different ahu schema version ({version}); this ahu build reads \
-             {TASK_SCHEMA_VERSION}.\n\
-             ahu will not reinterpret it: schema 1 recorded the whole file's digest under the \
-             name instructions_digest, which now means the delivered instruction text, so the \
-             same field would be read as covering bytes it does not cover.",
+            "{} was written by a different ahu schema version ({version}); this ahu \
+             build reads schema {TASK_SCHEMA_VERSION} and legacy schema 2 task records.\n\
+             ahu will not reinterpret it: {reason}",
             path.display()
         );
     }
@@ -266,9 +353,10 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
     // A record whose `schema_version` could not be read as a number at all --
     // absent, or not an integer -- still must not be accepted on the strength of
     // the struct happening to deserialize.
-    if record.schema_version != TASK_SCHEMA_VERSION {
+    if !READABLE_SCHEMA_VERSIONS.contains(&record.schema_version) {
         bail!(
-            "{} declares ahu schema version {}; this ahu build reads {TASK_SCHEMA_VERSION}.",
+            "{} declares ahu schema version {}; this ahu build reads \
+             {TASK_SCHEMA_VERSION} and legacy schema 2 task records.",
             path.display(),
             record.schema_version
         );
@@ -277,7 +365,7 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
 }
 
 pub fn load_prompt(dir: &Path) -> Result<String> {
-    let path = dir.join(PROMPT_FILE);
+    let path = crate::storage::TaskStorage::new(dir).prompt();
     let bytes = state::read_private_file(&path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
     String::from_utf8(bytes)
@@ -288,7 +376,7 @@ pub fn load_prompt(dir: &Path) -> Result<String> {
 pub fn set_state(dir: &Path, new_state: TaskState) -> Result<()> {
     let mut record = load(dir)?;
     record.state = new_state;
-    state::write_json(&dir.join(TASK_FILE), &record)
+    state::write_json(&crate::storage::TaskStorage::new(dir).record(), &record)
 }
 
 /// A task directory whose record ahu could not read.
@@ -363,24 +451,23 @@ impl TaskListing {
 /// * each task worktree under `.worktrees/`, which is where a task's own record
 ///   lives and where it goes away when the worktree is removed, and
 /// * the invoking checkout's own store, which holds records written before task
-///   state moved into worktrees, and records written under an explicit
-///   `AHU_STATE_DIR`.
+///   state moved into worktrees.
 ///
 /// A task found in both is reported from its worktree: that copy is the live
 /// one, and the other is a leftover of the older layout.
 pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
     let identity = repo.identity();
-    let primary_root = repo.primary_root()?;
+    let storage = crate::storage::RepositoryStorage::new(repo)?;
     let mut listing = TaskListing::default();
     let mut incomplete = Vec::new();
     scan_worktrees(
-        &state::worktrees_root_at(&primary_root),
+        &storage.worktrees_root(),
         &identity,
         &mut listing,
         &mut incomplete,
     )?;
 
-    for store in checkout_stores(repo, &primary_root, &identity)? {
+    for store in storage.legacy_task_stores()? {
         // Listing is a read of the store, so the path to it is confined the
         // same way a record read is: a link below the state root is refused,
         // not walked.
@@ -400,6 +487,45 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
         }
     }
 
+    for dir in crate::headless::review::directories(repo)? {
+        let task_id = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let record = match crate::headless::review::record(repo, &dir) {
+            Ok(record) if record.repo_identity == identity && record.task_id == task_id => record,
+            result => {
+                let reason = match result {
+                    Err(error) => error.to_string(),
+                    Ok(_) => {
+                        "external task record has inconsistent repository/task identity".into()
+                    }
+                };
+                listing.unreadable.push(UnreadableTask {
+                    dir,
+                    task_id,
+                    reason,
+                });
+                continue;
+            }
+        };
+        if listing
+            .records
+            .iter()
+            .any(|(_, old)| old.task_id == record.task_id)
+        {
+            bail!(
+                "conflicting internal and external task records for {}",
+                record.task_id
+            );
+        }
+        listing
+            .unreadable
+            .retain(|row| row.task_id != record.task_id);
+        listing.records.push((dir, record));
+    }
+
     // Only now, when every store has been read: a worktree from the older
     // layout has no state of its own and its record has just been found in a
     // checkout store, so reporting it as recordless would be wrong.
@@ -414,61 +540,6 @@ pub fn list(repo: &crate::git::Repo) -> Result<TaskListing> {
         .sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
     listing.unreadable.sort_by(|a, b| b.task_id.cmp(&a.task_id));
     Ok(listing)
-}
-
-/// The per-checkout stores that can hold a task record for this repository.
-///
-/// The invoking checkout's store comes first, then the primary checkout's, so a
-/// record written before task state moved into worktrees is still found when
-/// `ahu tasks` runs from a sibling worktree rather than from the checkout that
-/// launched it. Both are derived from the repository passed in, not from the
-/// process working directory, so a caller holding a valid repository gets the
-/// same answer wherever it is standing.
-///
-/// A managed task worktree's store is deliberately absent from this list.
-/// [`scan_worktrees`] has already read it as that task's own store, under the
-/// rule that a task worktree holds only its own state. Reading it again here --
-/// as a checkout store, which may legitimately hold many tasks -- would take
-/// back exactly the records that rule refused, and would do so only when
-/// listing from inside that worktree.
-///
-/// An explicit `AHU_STATE_DIR` that is not simply one of this repository's own
-/// checkout stores replaces these default stores, and is then the only one read
-/// here. It changes nothing else: `list` scans task worktrees separately and
-/// always, so a task launched by an ordinary ahu is still found by a tool that
-/// sets one -- and `ahu tasks` may then update that task's recorded state
-/// inside its own worktree. An override is not a promise of isolation from live
-/// tasks, and nothing here should be read as one.
-fn checkout_stores(
-    repo: &crate::git::Repo,
-    primary_root: &Path,
-    identity: &str,
-) -> Result<Vec<PathBuf>> {
-    let tasks_under = |root: &Path| root.join("repos").join(identity).join("tasks");
-    if let Some(explicit) = state::isolated_store(repo)? {
-        return Ok(vec![tasks_under(&explicit)]);
-    }
-    let mut stores = Vec::new();
-    if !is_managed_worktree(&repo.root, primary_root) {
-        stores.push(tasks_under(&state::checkout_root(&repo.root)?));
-    }
-    let primary = tasks_under(&state::checkout_root(primary_root)?);
-    if !stores.contains(&primary) {
-        stores.push(primary);
-    }
-    Ok(stores)
-}
-
-/// Whether `root` is one of the task worktrees ahu creates.
-///
-/// Resolved before comparing: the same directory is reached one way through
-/// Git's answer and another through a path ahu built.
-fn is_managed_worktree(root: &Path, primary_root: &Path) -> bool {
-    let worktrees = state::worktrees_root_at(primary_root);
-    root.canonicalize()
-        .ok()
-        .zip(worktrees.canonicalize().ok())
-        .is_some_and(|(root, worktrees)| root.parent() == Some(worktrees.as_path()))
 }
 
 /// Which store a scan is reading, and therefore what it may contain.
@@ -682,7 +753,7 @@ fn scan_worktrees(
             }
             _ => continue,
         }
-        let state_root = match state::checkout_root(&worktree) {
+        let tasks = match crate::storage::CheckoutStorage::new(&worktree).tasks_dir(repo_identity) {
             Ok(root) => root,
             Err(e) => {
                 listing.unreadable.push(UnreadableTask {
@@ -693,7 +764,6 @@ fn scan_worktrees(
                 continue;
             }
         };
-        let tasks = state_root.join("repos").join(repo_identity).join("tasks");
         if let Err(e) = state::confine_existing_dir(&tasks) {
             listing.unreadable.push(UnreadableTask {
                 dir: tasks,
@@ -735,4 +805,131 @@ fn scan_worktrees(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn held_signal_is_live() {
+        assert_eq!(observed_liveness(Some(true)), ObservedLiveness::Live);
+    }
+
+    #[test]
+    fn unheld_signal_is_stale() {
+        assert_eq!(observed_liveness(Some(false)), ObservedLiveness::Stale);
+    }
+
+    #[test]
+    fn unreadable_signal_is_unknown() {
+        assert_eq!(observed_liveness(None), ObservedLiveness::Unknown);
+    }
+
+    #[test]
+    fn as_str_values() {
+        assert_eq!(ObservedLiveness::Live.as_str(), "live");
+        assert_eq!(ObservedLiveness::Stale.as_str(), "stale");
+        assert_eq!(ObservedLiveness::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn states_are_distinct() {
+        assert_ne!(ObservedLiveness::Live, ObservedLiveness::Stale);
+        assert_ne!(ObservedLiveness::Live, ObservedLiveness::Unknown);
+        assert_ne!(ObservedLiveness::Stale, ObservedLiveness::Unknown);
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_state_strings_and_serde() {
+        assert_eq!(TaskState::Cancelled.as_str(), "cancelled");
+        let value = serde_json::to_value(TaskState::Cancelled).unwrap();
+        assert_eq!(value, serde_json::json!("cancelled"));
+        let round: TaskState = serde_json::from_value(value).unwrap();
+        assert_eq!(round, TaskState::Cancelled);
+    }
+
+    #[test]
+    fn live_states_are_starting_and_running_only() {
+        assert!(TaskState::Starting.is_live());
+        assert!(TaskState::Running.is_live());
+        assert!(!TaskState::Exited.is_live());
+        assert!(!TaskState::Failed.is_live());
+        assert!(!TaskState::Cancelled.is_live());
+    }
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::*;
+
+    #[test]
+    fn uuid_v7_extremes() {
+        assert_eq!(
+            uuid_v7(0, &[0u8; 10]),
+            "00000000-0000-7000-8000-000000000000"
+        );
+        assert_eq!(
+            uuid_v7(0xffff_ffff_ffff, &[0xff; 10]),
+            "ffffffff-ffff-7fff-bfff-ffffffffffff"
+        );
+    }
+
+    #[test]
+    fn uuid_v7_shape_and_timestamp() {
+        for now_ms in [0u64, 1, 0x0123_4567_89ab, 0xffff_ffff_ffff] {
+            let id = uuid_v7(now_ms, &[0xab; 10]);
+            assert_eq!(id.len(), 36);
+            assert_eq!(id.as_bytes()[8], b'-');
+            assert_eq!(id.as_bytes()[13], b'-');
+            assert_eq!(id.as_bytes()[18], b'-');
+            assert_eq!(id.as_bytes()[23], b'-');
+            assert!(is_canonical_task_uuid(&id));
+            assert_eq!(&id[14..15], "7");
+            assert_eq!(u16::from_str_radix(&id[19..23], 16).unwrap() >> 14, 0b10);
+            let recovered = (u64::from_str_radix(&id[0..8], 16).unwrap() << 16)
+                | u64::from_str_radix(&id[9..13], 16).unwrap();
+            assert_eq!(recovered, now_ms);
+        }
+    }
+
+    #[test]
+    fn distinct_random_bits_yield_distinct_ids() {
+        let a = uuid_v7(1, &[0u8; 10]);
+        let b = uuid_v7(1, &[1u8; 10]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn ids_sort_by_launch_time() {
+        assert!(uuid_v7(1, &[0u8; 10]) < uuid_v7(2, &[0xff; 10]));
+    }
+
+    #[test]
+    fn new_task_id_is_canonical() {
+        assert!(is_canonical_task_uuid(&new_task_id().unwrap()));
+    }
+
+    #[test]
+    fn is_canonical_task_uuid_rejects_malformed_ids() {
+        let canonical = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b";
+        assert!(is_canonical_task_uuid(canonical));
+        assert!(!is_canonical_task_uuid(""));
+        assert!(!is_canonical_task_uuid("018f1a2b3c4d7e5f8a9b0c1d2e3f4a5b"));
+        assert!(!is_canonical_task_uuid(
+            "018F1A2B-3C4D-7E5F-8A9B-0C1D2E3F4A5B"
+        ));
+        assert!(!is_canonical_task_uuid(
+            "018f1a2b-3c4d-ge5f-8a9b-0c1d2e3f4a5b"
+        ));
+        assert!(!is_canonical_task_uuid("006aa50000000000a1"));
+        assert!(!is_canonical_task_uuid(
+            "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b\u{fffd}"
+        ));
+    }
 }

@@ -5,6 +5,7 @@
 //! or something the user is told about.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::agent::ResolvedAgent;
 use crate::bail;
@@ -17,7 +18,7 @@ use crate::selection::ResolvedPair;
 use crate::snapshot::{self, ConfigSnapshot};
 use crate::state::{self, LaunchLock};
 use crate::task::{self, LaunchIdentity, LaunchMode, TaskRecord, TaskState};
-use crate::util::{Error, Result};
+use crate::util::{Error, Result, shell_single_quote};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,7 @@ fn mapping_path(repo: &Repo) -> Result<PathBuf> {
 pub struct DisplayMetadata {
     pub title: Option<String>,
     pub summary: Option<String>,
+    pub name: Option<String>,
 }
 
 /// What a launch is going to do, shown before anything is created.
@@ -59,9 +61,12 @@ pub struct LaunchPlan {
     pub snapshot: ConfigSnapshot,
     /// Every hook ahu can see that will be in effect for this task.
     pub hooks: HookInventory,
+    /// Bounded native integration evidence shared by human and JSON previews.
+    pub cmux_integration: crate::cmux::integration::Status,
     pub base_commit: Option<String>,
     pub parent_dirty: bool,
     pub task_id: String,
+    pub task_name: Option<String>,
     pub branch: String,
     pub worktree: PathBuf,
     pub task_dir: PathBuf,
@@ -79,6 +84,9 @@ pub struct LaunchPlan {
 
 impl LaunchPlan {
     pub fn apply_display(&mut self, display: &DisplayMetadata) -> Result<()> {
+        if let Some(name) = &display.name {
+            self.task_name = Some(crate::task_handles::name(name)?);
+        }
         for (flag, value) in [("--title", &display.title), ("--summary", &display.summary)] {
             if let Some(value) = value
                 && crate::util::sidebar_text(value, 160).is_empty()
@@ -167,12 +175,15 @@ pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
         "schema_version": 1,
         "agent": agent,
         "title": plan.title,
+        "task_handle_candidate": format!("@{}", plan.task_name.clone().unwrap_or_else(|| crate::task_handles::generated_name(&plan.title))),
+        "task_handle_reserved": false,
         "summary": plan.summary,
         "harness": plan.pair.harness,
         "model": plan.pair.model,
         "selection_basis": plan.pair.basis,
         "policy_digest": plan.pair.policy_digest,
         "catalog_version": plan.pair.catalog_version,
+        "cmux_integration": plan.cmux_integration,
         "permissions": plan.permissions.as_str(),
         "argv": argv,
         "prompt_digest": crate::util::digest_bytes(prompt.as_bytes()),
@@ -214,7 +225,7 @@ pub fn plan(
     let parent_dirty = git::is_dirty(repo)?;
     // Refuse early if `.worktrees` is a symlink, before anything is created.
     state::ensure_worktrees_root(&repo.root)?;
-    let task_id = task::new_task_id();
+    let task_id = task::new_task_id()?;
     let agent_segment = match &agent {
         Some(agent) => agent.manifest.name.clone(),
         None => "auto".to_string(),
@@ -232,12 +243,23 @@ pub fn plan(
         .as_ref()
         .map(|a| a.manifest.permissions)
         .unwrap_or_default();
-    // Everything ahu supplies is composed here, once, for every harness: the
-    // fenced delegation contract, then the resolved agent's fenced instructions,
-    // then the task prompt. Adapters receive the finished text and have no say
-    // in its construction, so a per-harness difference cannot reappear.
-    let (delivered, delivery) =
-        crate::orchestration::deliver(agent.as_ref().map(|a| a.instructions.as_str()), prompt)?;
+    // Adapters transport the fully composed text literally. All rendered facts
+    // are frozen now, rather than reconstructed from the runtime environment.
+    let metadata = crate::orchestration::Metadata {
+        task_id: task_id.clone(),
+        agent: agent
+            .as_ref()
+            .map(|a| a.label())
+            .unwrap_or_else(|| "auto".into()),
+        harness: pair.harness.clone(),
+        model: pair.model.clone(),
+        permissions,
+    };
+    let (delivered, delivery) = crate::orchestration::deliver_composed(
+        agent.as_ref().map(|a| a.instructions.as_str()),
+        prompt,
+        crate::orchestration::Composition::interactive(Some(metadata)),
+    )?;
     let command = adapter.launch_command(&LaunchRequest {
         model: &pair.model,
         prompt: &delivered,
@@ -260,10 +282,9 @@ pub fn plan(
     // Delivering text is something ahu did; the model heeding it is not, and the
     // gap below says so in the same block.
     enforcement.applied_controls.push(format!(
-        "the ahu delegation contract v1 (digest {}) is delivered as prompt text, fenced with this \
-         launch's nonce {}",
-        &crate::util::digest_bytes(crate::orchestration::INSTRUCTIONS.as_bytes())[..12],
-        delivery.nonce
+        "the ahu delegation contract is delivered as prompt text using layout {}; both fence \
+         tag names carry the delivery's nonce",
+        delivery.layout_version
     ));
     enforcement
         .gaps
@@ -301,11 +322,42 @@ pub fn plan(
             found_hooks.mcp_servers.len()
         ));
     }
+    // A plugin entry names a module a harness installs and runs at startup. The
+    // snapshot carries and digests the file that declares it, but the digest
+    // describes the declaration, not the code it resolves to, and an npm
+    // specifier is not a file the executable-bit scan can see. Counting the
+    // names is what makes the trust decision visible on the launch preview.
+    //
+    // Gated through the feature matrix: `opencode.json` travels into every
+    // task worktree, but only OpenCode reads it, and telling a launch of
+    // another harness that it executes these modules would be false.
+    // A harness with no catalog entry claims no feature, so the lookup and the
+    // feature test are one step: an absent entry simply leaves the gap unsaid
+    // rather than panicking the preview on a cross-module invariant.
+    if let Some(entry) = crate::catalog::harness(&pair.harness)
+        .filter(|entry| entry.supports(crate::catalog::Feature::StartupPluginInventory))
+        && !found_hooks.declared_plugins.is_empty()
+    {
+        let modules: Vec<String> = found_hooks
+            .declared_plugins
+            .iter()
+            .map(|plugin| crate::util::display_safe(&plugin.module))
+            .collect();
+        enforcement.gaps.push(format!(
+            "{} plugin module(s) declared by this repository ({}) are installed and executed by \
+             {} at startup; ahu carries the declaration into the task worktree but \
+             neither resolves, pins, nor sandboxes what it fetches.",
+            modules.len(),
+            modules.join(", "),
+            entry.display_name
+        ));
+    }
     // A wrapper between ahu and the harness can add flags ahu refuses to pass.
     if let Some(note) = harness::wrapper_interposed(&harness_executable) {
         enforcement.gaps.push(note);
     }
 
+    let cmux_integration = crate::cmux::integration::inspect(&repo.root, &pair.harness);
     Ok(LaunchPlan {
         mode: if agent.is_some() {
             LaunchMode::Named
@@ -317,9 +369,11 @@ pub fn plan(
         enforcement,
         snapshot,
         hooks: found_hooks,
+        cmux_integration,
         base_commit,
         parent_dirty,
         task_id,
+        task_name: None,
         branch,
         worktree,
         task_dir,
@@ -332,116 +386,15 @@ pub fn plan(
     })
 }
 
-/// Undo the worktree a failed launch created, and say so when Git refuses.
-///
-/// `git worktree remove` will not force-delete a checkout that holds work, and
-/// materialization can legitimately leave one dirty by copying uncommitted
-/// agent configuration into it. When that happens the worktree and its branch
-/// stay, so the failure that is reported has to name them: they are the user's
-/// to inspect, and nothing else is going to mention them.
-fn rollback_worktree(repo: &Repo, plan: &LaunchPlan, cause: Error) -> Error {
-    // The record lives inside the worktree, so removing the worktree takes it.
-    // If Git refuses, the record is removed on its own so no half-prepared
-    // task is left claiming to be one.
-    if let Err(refused) = git::remove_worktree(repo, &plan.worktree, &plan.branch) {
-        discard_task_dir(&plan.task_dir);
-        let kind = cause.kind();
-        return Error::new(format!(
-            "{cause}\n\n\
-             The task checkout ahu created for this launch could not be removed, so it is still \
-             here along with its branch:\n  \
-             worktree {}\n  branch   {}\n\
-             {refused}\n\
-             ahu does not force-remove a checkout that holds work. Inspect it, then remove it \
-             yourself once you are sure nothing in it is needed. `ahu tasks` lists it as a task \
-             worktree with no record until then.",
-            plan.worktree.display(),
-            plan.branch
-        ))
-        .with_kind(kind);
-    }
-    discard_task_dir(&plan.task_dir);
-    cause
-}
-
-/// Remove a task directory a failed launch created, but never through a path
-/// ahu would refuse to write to.
-///
-/// One of the ways a launch fails here is a repository that committed a link at
-/// the worktree's `.ahu`. Deleting the task directory by name would follow that
-/// same link and take the deletion outside the checkout, which would turn a
-/// refusal into the damage the refusal exists to prevent. A path that cannot be
-/// validated is left exactly as it is; the error already tells the user the
-/// worktree was kept.
-fn discard_task_dir(task_dir: &Path) {
-    if state::confine_existing_dir(task_dir).is_ok() {
-        let _ = std::fs::remove_dir_all(task_dir);
-    }
-}
-
-/// Result of a successful launch.
-#[derive(Debug, Clone)]
-pub struct Launched {
-    pub record: TaskRecord,
-    pub task_dir: PathBuf,
-    /// Non-fatal things the user should know, such as a reconciled anchor.
-    pub notes: Vec<String>,
-}
-
-/// Execute a plan: create the worktree, the task record, and the cmux session.
-pub fn execute(
+pub(crate) fn prepared_record(
     repo: &Repo,
     loaded: &LoadedConfig,
     plan: &LaunchPlan,
     prompt: &str,
-    focus: bool,
-) -> Result<Launched> {
+    materialize: crate::snapshot::MaterializeReport,
+) -> TaskRecord {
     let repo_identity = repo.identity();
-    let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
-    let mut notes = Vec::new();
-
-    // cmux must be reachable before a worktree is created, so an unavailable
-    // cmux never leaves a worktree behind.
-    let cmux_client =
-        Cmux::discover().map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
-    cmux_client.check_capabilities()?;
-
-    if git::branch_exists(repo, &plan.branch)? {
-        bail!(
-            "branch {} already exists; ahu will not reuse or move it.",
-            plan.branch
-        );
-    }
-    let base = plan
-        .base_commit
-        .as_deref()
-        .ok_or_else(|| Error::new("the launch plan has no base commit"))?;
-    // `.worktrees/` ignores itself, so task checkouts never show up in
-    // `git status` and cannot be committed by accident.
-    state::ensure_worktrees_root(&repo.root)?;
-    git::add_worktree(repo, &plan.worktree, &plan.branch, base)?;
-
-    // From here on, a failure must clean up the worktree it just made, but only
-    // while no session could have started in it.
-    let materialize = match snapshot::materialize(&repo.root, &plan.snapshot, &plan.worktree) {
-        Ok(report) => report,
-        Err(e) => return Err(rollback_worktree(repo, plan, e)),
-    };
-    // The task's own state directory, created now that its worktree exists. A
-    // repository that committed a link at `.ahu` or `.ahu/state` is refused
-    // here, before a record or a prompt is written through it.
-    if let Err(e) = state::ensure_checkout_state(&plan.worktree) {
-        return Err(rollback_worktree(repo, plan, e));
-    }
-    if !materialize.concurrently_modified.is_empty() {
-        notes.push(format!(
-            "agent configuration changed while the task was being prepared: {}. \
-             The worktree holds the version copied at submission.",
-            materialize.concurrently_modified.join(", ")
-        ));
-    }
-
-    let mut record = TaskRecord {
+    TaskRecord {
         schema_version: task::TASK_SCHEMA_VERSION,
         task_id: plan.task_id.clone(),
         title: plan.title.clone(),
@@ -498,9 +451,132 @@ pub fn execute(
         cmux_workspace_id: None,
         cmux_window_id: None,
         state: TaskState::Starting,
+    }
+}
+
+/// Undo the worktree a failed launch created, and say so when Git refuses.
+///
+/// `git worktree remove` will not force-delete a checkout that holds work, and
+/// materialization can legitimately leave one dirty by copying uncommitted
+/// agent configuration into it. When that happens the worktree and its branch
+/// stay, so the failure that is reported has to name them: they are the user's
+/// to inspect, and nothing else is going to mention them.
+fn rollback_worktree(repo: &Repo, plan: &LaunchPlan, cause: Error) -> Error {
+    // A dead pointer in the task index degrades into a lead at resolution
+    // time, but removing it here keeps the index honest about live tasks.
+    let _ = crate::task_index::remove_in(repo, &plan.task_id);
+    // The record lives inside the worktree, so removing the worktree takes it.
+    // If Git refuses, the record is removed on its own so no half-prepared
+    // task is left claiming to be one.
+    if let Err(refused) = git::remove_worktree(repo, &plan.worktree, &plan.branch) {
+        discard_task_dir(&plan.task_dir);
+        let kind = cause.kind();
+        return Error::new(format!(
+            "{cause}\n\n\
+             The task checkout ahu created for this launch could not be removed, so it is still \
+             here along with its branch:\n  \
+             worktree {}\n  branch   {}\n\
+             {refused}\n\
+             ahu does not force-remove a checkout that holds work. Inspect it, then remove it \
+             yourself once you are sure nothing in it is needed. `ahu tasks` lists it as a task \
+             worktree with no record until then.",
+            plan.worktree.display(),
+            plan.branch
+        ))
+        .with_kind(kind);
+    }
+    discard_task_dir(&plan.task_dir);
+    cause
+}
+
+/// Remove a task directory a failed launch created, but never through a path
+/// ahu would refuse to write to.
+///
+/// One of the ways a launch fails here is a repository that committed a link at
+/// the worktree's `.ahu`. Deleting the task directory by name would follow that
+/// same link and take the deletion outside the checkout, which would turn a
+/// refusal into the damage the refusal exists to prevent. A path that cannot be
+/// validated is left exactly as it is; the error already tells the user the
+/// worktree was kept.
+fn discard_task_dir(task_dir: &Path) {
+    if state::confine_existing_dir(task_dir).is_ok() {
+        let _ = std::fs::remove_dir_all(task_dir);
+    }
+}
+
+/// Result of a successful launch.
+#[derive(Debug, Clone)]
+pub struct Launched {
+    pub record: TaskRecord,
+    pub task_dir: PathBuf,
+    /// Non-fatal things the user should know, such as a reconciled anchor.
+    pub notes: Vec<String>,
+}
+
+/// Execute a plan: create the worktree, the task record, and the cmux session.
+pub fn execute(
+    repo: &Repo,
+    loaded: &LoadedConfig,
+    plan: &LaunchPlan,
+    prompt: &str,
+    focus: bool,
+) -> Result<Launched> {
+    let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
+    let mut notes = Vec::new();
+
+    // cmux must be reachable before a worktree is created, so an unavailable
+    // cmux never leaves a worktree behind.
+    let cmux_client =
+        Cmux::discover().map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
+    cmux_client.check_capabilities()?;
+
+    if git::branch_exists(repo, &plan.branch)? {
+        bail!(
+            "branch {} already exists; ahu will not reuse or move it.",
+            plan.branch
+        );
+    }
+    let base = plan
+        .base_commit
+        .as_deref()
+        .ok_or_else(|| Error::new("the launch plan has no base commit"))?;
+    crate::task_handles::reserve(repo, &plan.task_id, plan.task_name.as_deref(), &plan.title)?;
+    // `.worktrees/` ignores itself, so task checkouts never show up in
+    // `git status` and cannot be committed by accident.
+    state::ensure_worktrees_root(&repo.root)?;
+    git::add_worktree(repo, &plan.worktree, &plan.branch, base)?;
+
+    // From here on, a failure must clean up the worktree it just made, but only
+    // while no session could have started in it.
+    let materialize = match snapshot::materialize(&repo.root, &plan.snapshot, &plan.worktree) {
+        Ok(report) => report,
+        Err(e) => return Err(rollback_worktree(repo, plan, e)),
     };
+    // The task's own state directory, created now that its worktree exists. A
+    // repository that committed a link at `.ahu` or `.ahu/state` is refused
+    // here, before a record or a prompt is written through it.
+    if let Err(e) = state::ensure_checkout_state(&plan.worktree) {
+        return Err(rollback_worktree(repo, plan, e));
+    }
+    if !materialize.concurrently_modified.is_empty() {
+        notes.push(format!(
+            "agent configuration changed while the task was being prepared: {}. \
+             The worktree holds the version copied at submission.",
+            materialize.concurrently_modified.join(", ")
+        ));
+    }
+
+    let mut record = prepared_record(repo, loaded, plan, prompt, materialize);
 
     if let Err(e) = task::save(&plan.task_dir, &record, prompt) {
+        return Err(rollback_worktree(repo, plan, e));
+    }
+    if let Err(e) = crate::task_index::register(
+        &repo.identity(),
+        &plan.task_id,
+        &plan.worktree,
+        crate::task_index::StoreKind::Worktree,
+    ) {
         return Err(rollback_worktree(repo, plan, e));
     }
 
@@ -515,7 +591,7 @@ pub fn execute(
     let startup = cmux::startup_command(&executable, &plan.task_dir);
     let title = cmux::workspace_title(&plan.agent_label(), &plan.title);
 
-    let window = cmux_client.current_window().ok().flatten();
+    let window = state::read_json::<GroupMapping>(&mapping_path(repo)?)?.window_id;
     let created = match cmux_client.create_task_workspace(
         &group.id,
         window.as_deref(),
@@ -572,7 +648,7 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
     // earlier ahu invocation saved a different group after losing its state.
     let groups = client.list_groups(current_window.as_deref())?;
     let current_workspace = client.current_workspace()?;
-    let workspaces = client.workspaces()?;
+    let workspaces = client.workspaces_in_window(current_window.as_deref())?;
     let candidates = repository_group_candidates(&groups, &repo.display_name(), |id| {
         workspaces.get(id).is_some_and(|workspace| {
             git::discover(Path::new(&workspace.directory))
@@ -619,7 +695,7 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
                          dedicated one ({e}); one task may be hidden under the group header."
                     )),
                 }
-                mapping.window_id = current_window.clone().or(mapping.window_id.clone());
+                mapping.window_id = window.clone();
                 state::write_json(&path, &mapping)?;
                 if let Some(refreshed) = client.find_group(&group_id, window.as_deref())? {
                     return Ok(refreshed);
@@ -644,6 +720,98 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
     };
     state::write_json(&path, &mapping)?;
     Ok(group)
+}
+
+pub struct CoordinatorPlacement {
+    pub notes: Vec<String>,
+    pub opened_workspace: bool,
+}
+
+/// Coordinator shortcuts reuse their terminal and join the same primary-owned
+/// group as task launches. If the terminal already anchors another group, open
+/// a fresh coordinator workspace under the repository group instead of trying
+/// to move a cmux anchor between groups.
+pub fn group_coordinator(
+    repo: &Repo,
+    executable: &str,
+    label: &str,
+    harness: &str,
+    model: &str,
+    args: &[&str],
+) -> Result<CoordinatorPlacement> {
+    let Some(workspace) = std::env::var("CMUX_WORKSPACE_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(CoordinatorPlacement {
+            notes: Vec::new(),
+            opened_workspace: false,
+        });
+    };
+    let client = Cmux::discover()?;
+    client.check_capabilities()?;
+    // Validate the explicit caller before creating a group or changing state.
+    client.window_for_workspace(&workspace)?;
+    let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
+    let mut notes = Vec::new();
+    let group = ensure_group(&client, repo, &mut notes)?;
+    let mapping: GroupMapping = state::read_json(&mapping_path(repo)?)?;
+    let window = mapping
+        .window_id
+        .ok_or_else(|| Error::new("cmux repository group has no known window"))?;
+    if !group.member_workspace_ids.contains(&workspace) {
+        let belongs_to_other_group =
+            client
+                .list_groups(Some(&window))?
+                .into_iter()
+                .any(|candidate| {
+                    candidate.id != group.id
+                        && candidate
+                            .member_workspace_ids
+                            .iter()
+                            .any(|member| member == &workspace)
+                });
+        if belongs_to_other_group {
+            let startup = std::iter::once(shell_single_quote(executable))
+                .chain(args.iter().map(|arg| shell_single_quote(arg)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let created = client.create_coordinator_workspace(
+                &group.id,
+                Some(&window),
+                &format!("{label} coordinator"),
+                &format!("{label} coordinator for {}", repo.display_name()),
+                &repo.root,
+                &startup,
+            )?;
+            if let Err(error) =
+                client.set_agent_metadata(&created.workspace_id, "director", harness, model)
+            {
+                notes.push(format!(
+                    "could not set coordinator metadata in cmux: {error}"
+                ));
+            }
+            notes.push(format!(
+                "the invoking workspace already belongs to another cmux group; ahu opened a new {label} coordinator workspace under the {} group.",
+                repo.display_name()
+            ));
+            return Ok(CoordinatorPlacement {
+                notes,
+                opened_workspace: true,
+            });
+        }
+        client.add_workspace_to_group(&group.id, &workspace, &window)?;
+    }
+    if let Err(error) = client.set_agent_metadata(&workspace, "director", harness, model) {
+        notes.push(format!(
+            "could not set coordinator metadata in cmux: {error}"
+        ));
+    }
+    client.expand_group(&group.id)?;
+    Ok(CoordinatorPlacement {
+        notes,
+        opened_workspace: false,
+    })
 }
 
 fn repository_group_candidates<'a>(
@@ -694,7 +862,10 @@ pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
     let Ok(client) = Cmux::discover() else {
         return Ok(tasks);
     };
-    let live = client.workspaces()?;
+    let Ok(live) = client.workspaces() else {
+        // Partial or unreadable window coverage cannot prove a session exited.
+        return Ok(tasks);
+    };
     for (dir, record) in tasks.records.iter_mut() {
         let Some(workspace_id) = record.cmux_workspace_id.as_deref() else {
             continue;
@@ -720,7 +891,10 @@ pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
 /// invokes. It receives only a directory path; the prompt is read from a file
 /// and handed to the harness as one argument, so shell syntax in the prompt is
 /// never interpreted.
-pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
+pub(crate) fn verify_task(
+    task_dir: &Path,
+    batch: Option<&crate::headless::Spec>,
+) -> Result<(TaskRecord, LaunchCommand, PathBuf)> {
     // A refused record is read here inside a live cmux pane, where the user has
     // no other context, so the error says what to do next rather than only what
     // went wrong.
@@ -769,7 +943,30 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     // contract, the agent's instructions and the prompt all live in the one argv
     // element that redaction replaces. `redeliver` rebuilds that element from
     // the frozen delivery and refuses if its digest has moved.
-    let delivered = crate::orchestration::redeliver(&record.delivery, &prompt)?;
+    let expected_composition = crate::orchestration::Composition {
+        mode: match batch {
+            Some(spec) => crate::orchestration::Mode::headless(&spec.options.native_helpers)?,
+            None => crate::orchestration::Mode::Interactive,
+        },
+        metadata: Some(crate::orchestration::Metadata {
+            task_id: record.task_id.clone(),
+            agent: record.agent_label(),
+            harness: record.identity.harness.clone(),
+            model: record.identity.model.clone(),
+            permissions: record.identity.permissions,
+        }),
+        state: batch.map(crate::headless::Spec::coordination_state),
+    };
+    record.delivery.verify_composition(&expected_composition)?;
+    let delivered = if let Some(spec) = batch {
+        crate::orchestration::redeliver_headless_policy(
+            &record.delivery,
+            &prompt,
+            &spec.options.native_helpers,
+        )?
+    } else {
+        crate::orchestration::redeliver(&record.delivery, &prompt)?
+    };
 
     // The working directory is part of the launch identity: the harness
     // discovers instructions, skills, hooks, and MCP configuration from it.
@@ -805,6 +1002,14 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         );
     }
 
+    if batch.is_some_and(|spec| spec.schema_version == 2) {
+        let expected = crate::headless::store(&discovered)?.join(&record.task_id);
+        if task_dir != expected {
+            bail!("headless task is not held by its primary-owned coordination store");
+        }
+        crate::headless::confined(task_dir, false)?;
+    }
+
     // A record kept inside a task worktree must be that worktree's own. Records
     // written before task state moved into worktrees live in a checkout's store
     // rather than under `.worktrees/`, and are not subject to this.
@@ -827,12 +1032,17 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     }
 
     let adapter = harness::adapter_for(&record.identity.harness)?;
-    let rebuilt = adapter.launch_command(&LaunchRequest {
+    let request = LaunchRequest {
         model: &record.identity.model,
         prompt: &delivered,
         cwd: &record.worktree,
         permissions: record.identity.permissions,
-    })?;
+    };
+    let rebuilt = if let Some(spec) = batch {
+        crate::headless::batch_command(&record.identity.harness, &request, spec)?
+    } else {
+        adapter.launch_command(&request)?
+    };
     if rebuilt.redacted() != record.launch_command {
         bail!(
             "the recorded launch command for task {} does not match what its configuration \
@@ -887,7 +1097,9 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
             }
         }
     }
-    if !record.harness_executable.as_os_str().is_empty() && record.harness_executable != executable
+    if batch.is_none()
+        && !record.harness_executable.as_os_str().is_empty()
+        && record.harness_executable != executable
     {
         eprintln!(
             "ahu: this workspace resolves {} to {}, not the {} seen at submission. \
@@ -898,6 +1110,179 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         );
     }
 
+    Ok((record, rebuilt, executable))
+}
+
+/// What happened to an interactive task's harness process, from the run-task
+/// parent that spawned it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessOutcome {
+    /// The harness process ended on its own, successfully or not.
+    Exited(std::process::ExitStatus),
+    /// ahu terminated the harness process tree because a cancellation was
+    /// requested.
+    Cancelled,
+}
+
+/// Poll a spawned interactive harness, terminating its process tree when a
+/// cancellation is requested in the task directory.
+fn supervise_harness(child: &mut std::process::Child, task_dir: &Path) -> Result<HarnessOutcome> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(HarnessOutcome::Exited(status));
+        }
+        if task_dir.join("cancel.json").exists() {
+            terminate_group(child)?;
+            return Ok(HarnessOutcome::Cancelled);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Terminal ownership borrowed by a harness. Drop also restores it on errors.
+struct Foreground {
+    fd: Option<(i32, libc::pid_t)>,
+}
+
+impl Foreground {
+    /// Piped stdin needs no transfer; a terminal transfer must succeed before
+    /// supervision starts. `pgid` is the unreaped harness child's PID in its
+    /// fresh process group. Never change process-wide job-control dispositions.
+    fn hand_to(fd: i32, pgid: libc::pid_t) -> Result<Option<Self>> {
+        if unsafe { libc::isatty(fd) } != 1 {
+            return Ok(None);
+        }
+        let previous = unsafe { libc::tcgetpgrp(fd) };
+        if previous < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let foreground = Self {
+            fd: Some((fd, previous)),
+        };
+        Self::set(fd, pgid)?;
+        // Recover a stdin read that raced the transfer and stopped the group.
+        if let Err(error) = signal_owned_group(pgid as u32, libc::SIGCONT)
+            && !crate::headless::child_exited(pgid as u32)?
+        {
+            return Err(error);
+        }
+        Ok(Some(foreground))
+    }
+
+    fn set(fd: i32, pgid: libc::pid_t) -> Result<()> {
+        // POSIX permits tcsetpgrp from a background group when SIGTTOU is
+        // blocked. Scope the mask to this thread and this syscall, including
+        // failure paths, rather than leaving SIGTTIN/SIGTTOU ignored globally.
+        let mut block: libc::sigset_t = unsafe { std::mem::zeroed() };
+        let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut block);
+            libc::sigaddset(&mut block, libc::SIGTTOU);
+        }
+        let error = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &block, &mut previous) };
+        if error != 0 {
+            return Err(std::io::Error::from_raw_os_error(error).into());
+        }
+        let result = loop {
+            if unsafe { libc::tcsetpgrp(fd, pgid) } == 0 {
+                break Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                break Err(error);
+            }
+        };
+        let restored =
+            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()) };
+        result.map_err(|error| {
+            Error::new(format!(
+                "cannot set terminal foreground to process group {pgid}: {error}"
+            ))
+        })?;
+        if restored != 0 {
+            return Err(std::io::Error::from_raw_os_error(restored).into());
+        }
+        Ok(())
+    }
+
+    fn take_back(mut self) -> Result<()> {
+        self.restore()
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if let Some((fd, previous)) = self.fd {
+            Self::set(fd, previous)?;
+            self.fd = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Foreground {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            eprintln!("ahu: could not restore terminal foreground: {error}");
+        }
+    }
+}
+
+/// Only for a fresh group whose unreaped child this supervisor owns.
+fn signal_owned_group(pid: u32, signal: i32) -> Result<()> {
+    let pid = i32::try_from(pid).map_err(|_| Error::new("invalid owned process group"))?;
+    if pid <= 0 {
+        bail!("invalid owned process group");
+    }
+    if unsafe { libc::kill(-pid, signal) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+/// Resume and terminate the owned group, then reap its leader. Keep the leader
+/// unreaped until the final group signal so its PID cannot be reused first.
+fn terminate_group(child: &mut std::process::Child) -> Result<()> {
+    let pid = child.id();
+    crate::headless::child_exited(pid)?;
+    let graceful = signal_owned_group(pid, libc::SIGCONT)
+        .and_then(|()| signal_owned_group(pid, libc::SIGTERM));
+    if let Err(error) = graceful
+        && !crate::headless::child_exited(pid)?
+    {
+        return Err(error);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if crate::headless::child_exited(pid)? {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Even a cooperative leader can leave TERM-ignoring descendants behind.
+    let killed = signal_owned_group(pid, libc::SIGKILL);
+    // Do not wait indefinitely after a denied signal to a still-live leader.
+    if killed.is_err() && !crate::headless::child_exited(pid)? {
+        return killed;
+    }
+    child.wait()?;
+    if let Err(error) = killed {
+        // Darwin can return EPERM for a group containing only zombies. Reap
+        // our leader, then accept that error only if the group is now absent.
+        // This is a read-only probe: never send another signal after reaping,
+        // when the identifier could refer to an unrelated new process group.
+        let absent = unsafe { libc::kill(-(pid as i32), 0) } < 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if !absent {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
+    let (record, rebuilt, executable) = verify_task(task_dir, None)?;
     eprintln!(
         "ahu task {} — {} on {} / {}",
         record.task_id,
@@ -909,9 +1294,8 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
     eprintln!("branch   {}", record.branch);
     eprintln!();
 
-    // A session's nested ahu commands belong to the checkout it edits, even
-    // when the launcher inherited an explicit state override from its caller.
-    let session_state = state::ensure_checkout_state(&record.worktree)?;
+    // Nested commands discover the checkout the session edits.
+    state::ensure_checkout_state(&record.worktree)?;
     let _ = task::set_state(task_dir, TaskState::Running);
     if let (Ok(client), Some(workspace)) = (Cmux::discover(), record.cmux_workspace_id.as_deref()) {
         let _ = client.set_status(
@@ -920,37 +1304,100 @@ pub fn run_task(task_dir: &Path) -> Result<std::process::ExitStatus> {
         );
     }
 
-    let status = std::process::Command::new(&executable)
-        .args(&rebuilt.args)
-        .env("AHU_BIN", std::env::current_exe()?)
-        .env("AHU_STATE_DIR", &session_state)
-        .current_dir(&record.worktree)
-        .status()
-        .map_err(|e| {
-            Error::new(format!(
-                "cannot start {}: {e}\nThe worktree and task record are preserved at {} and {}.",
-                executable.display(),
-                record.worktree.display(),
-                task_dir.display()
-            ))
-        })?;
+    // A cancellation that arrived before the harness started must not be
+    // lost to the spawn that follows.
+    if task_dir.join("cancel.json").exists() {
+        let _ = task::set_state(task_dir, TaskState::Cancelled);
+        eprintln!(
+            "ahu: the task was cancelled before the harness started. The worktree {} and its \
+             branch {} are kept.",
+            record.worktree.display(),
+            record.branch
+        );
+        return Ok(HarnessOutcome::Cancelled);
+    }
 
-    // A process exit is not evidence the task succeeded, so the state says only
-    // that the harness stopped.
-    let final_state = if status.success() {
-        TaskState::Exited
-    } else {
-        TaskState::Failed
+    let mut child = {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new(&executable)
+            .args(&rebuilt.args)
+            .env("AHU_BIN", std::env::current_exe()?)
+            .env("AHU_WORKER_SESSION", "cmux")
+            .env("AHU_TASK_ID", &record.task_id)
+            .env("AHU_TASK_DIR", task_dir)
+            .current_dir(&record.worktree)
+            // The run-task parent owns the harness's fresh process group, so
+            // cancellation can terminate the whole tree without signalling
+            // this parent or the pane it lives in.
+            .process_group(0)
+            .spawn()
+            .map_err(|e| {
+                Error::new(format!(
+                    "cannot start {}: {e}\nThe worktree and task record are preserved at {} and {}.",
+                    executable.display(),
+                    record.worktree.display(),
+                    task_dir.display()
+                ))
+            })?
     };
-    let _ = task::set_state(task_dir, final_state);
-    eprintln!(
-        "\nahu: the harness exited ({}). The worktree {} and its branch {} are kept.\n\
-         Exiting does not mean the task succeeded, and ahu does not delete either for you.",
-        final_state.as_str(),
-        record.worktree.display(),
-        record.branch
-    );
-    Ok(status)
+
+    // The TUI harness needs the terminal's foreground or its first stdin read
+    // stops it with SIGTTIN; hand it over now and take it back when the
+    // harness is done.
+    let foreground = match Foreground::hand_to(libc::STDIN_FILENO, child.id() as libc::pid_t) {
+        Ok(foreground) => foreground,
+        Err(error) => {
+            terminate_group(&mut child)?;
+            task::set_state(task_dir, TaskState::Failed)?;
+            return Err(error);
+        }
+    };
+
+    let outcome = supervise_harness(&mut child, task_dir)?;
+    let restoration = foreground.map_or(Ok(()), Foreground::take_back);
+    let final_state = record_harness_outcome(outcome, restoration, |state| {
+        task::set_state(task_dir, state)
+    })?;
+    match outcome {
+        HarnessOutcome::Exited(status) => {
+            eprintln!(
+                "\nahu: the harness exited ({}). The worktree {} and its branch {} are kept.\n\
+                 Exiting does not mean the task succeeded, and ahu does not delete either for you.",
+                final_state.as_str(),
+                record.worktree.display(),
+                record.branch
+            );
+            Ok(HarnessOutcome::Exited(status))
+        }
+        HarnessOutcome::Cancelled => {
+            eprintln!(
+                "\nahu: cancellation of the owned harness process group completed.\n\
+                 The worktree {} and its branch {} are kept; cancelling does not delete either \
+                 for you.",
+                record.worktree.display(),
+                record.branch
+            );
+            Ok(HarnessOutcome::Cancelled)
+        }
+    }
+}
+
+/// Persist an observed process outcome independently of terminal restoration.
+fn record_harness_outcome(
+    outcome: HarnessOutcome,
+    restoration: Result<()>,
+    persist: impl FnOnce(TaskState) -> Result<()>,
+) -> Result<TaskState> {
+    // Exited records process exit, not successful completion of the task.
+    let state = match outcome {
+        HarnessOutcome::Exited(status) if status.success() => TaskState::Exited,
+        HarnessOutcome::Exited(_) => TaskState::Failed,
+        HarnessOutcome::Cancelled => TaskState::Cancelled,
+    };
+    persist(state)?;
+    // A terminal restore error must not erase an already observed outcome.
+    restoration?;
+    Ok(state)
 }
 
 #[cfg(test)]
@@ -988,5 +1435,405 @@ mod group_recovery_tests {
         );
         assert!(recover_group(&[], None).unwrap().is_none());
         assert!(repository_group_candidates(&groups, "different", |_| true).is_empty());
+    }
+
+    fn spawn_sleep(seconds: &str) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new("sleep")
+            .arg(seconds)
+            .process_group(0)
+            .spawn()
+            .expect("POSIX sleep is available in the test environment")
+    }
+
+    #[test]
+    fn supervise_returns_exit_when_child_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_sleep("0.1");
+        match supervise_harness(&mut child, dir.path()).unwrap() {
+            HarnessOutcome::Exited(status) => assert!(status.success()),
+            HarnessOutcome::Cancelled => panic!("no cancellation was requested"),
+        }
+    }
+
+    #[test]
+    fn supervise_cancels_child_on_cancel_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_sleep("30");
+        let _ = child.try_wait().expect("child has not exited");
+        std::fs::write(dir.path().join("cancel.json"), b"").unwrap();
+        match supervise_harness(&mut child, dir.path()).unwrap() {
+            HarnessOutcome::Cancelled => {}
+            HarnessOutcome::Exited(_) => panic!("cancellation was requested"),
+        }
+        assert!(
+            child.try_wait().expect("child is reaped").is_some(),
+            "the cancelled child must be reaped"
+        );
+    }
+
+    #[test]
+    fn terminal_outcome_is_persisted_when_foreground_restoration_fails() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::ExitStatusExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let mut lost = Vec::new();
+        for (outcome, expected) in [
+            (
+                HarnessOutcome::Exited(std::process::ExitStatus::from_raw(0)),
+                TaskState::Exited,
+            ),
+            (
+                HarnessOutcome::Exited(std::process::ExitStatus::from_raw(1 << 8)),
+                TaskState::Failed,
+            ),
+            (HarnessOutcome::Cancelled, TaskState::Cancelled),
+        ] {
+            state::write_json(&path, &TaskState::Running).unwrap();
+            // Inject a real tcsetpgrp failure without changing this runner's
+            // terminal: the captured descriptor no longer names a terminal.
+            let foreground = Foreground {
+                fd: Some((file.as_raw_fd(), unsafe { libc::getpgrp() })),
+            };
+            let restoration = foreground.take_back();
+            let restoration_error = restoration.as_ref().unwrap_err().to_string();
+            let result = record_harness_outcome(outcome, restoration, |state| {
+                state::write_json(&path, &state)
+            });
+            assert_eq!(result.unwrap_err().to_string(), restoration_error);
+            let saved: TaskState = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if saved != expected {
+                lost.push((expected, saved));
+            }
+        }
+        assert!(
+            lost.is_empty(),
+            "terminal states lost on restore failure: {lost:?}"
+        );
+    }
+
+    #[test]
+    fn foreground_handover_is_a_noop_without_a_terminal() {
+        use std::os::fd::AsRawFd;
+        // Cargo runs tests with piped stdio, so /dev/null stands in for any
+        // non-terminal fd: the handover must leave it alone.
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert!(
+            Foreground::hand_to(file.as_raw_fd(), 12345)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod pty_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command, Stdio};
+
+    // Each case runs in a separate session with a disposable controlling PTY.
+    // Neither job-control signals nor terminal settings touch the test runner.
+    fn pty_case(case: &str) {
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                0
+            );
+        }
+        let output = tempfile::tempfile().unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "launch::pty_tests::pty_child_entry",
+                "--nocapture",
+            ])
+            .env("AHU_TEST_PTY_CASE", case)
+            .stdin(slave)
+            .stdout(output.try_clone().unwrap())
+            .stderr(output.try_clone().unwrap());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        master.write_all(b"input\n").unwrap();
+        unsafe {
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let status = loop {
+            // Drain terminal echo: Darwin can wait for pending PTY output when
+            // the controlling session exits, even with stdout redirected.
+            let mut echo = [0; 256];
+            let _ = master.read(&mut echo);
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                eprintln!("PTY {case}: timeout");
+                use std::os::unix::fs::FileExt;
+                let mut debug = vec![0; output.metadata().unwrap().len() as usize];
+                output.read_at(&mut debug, 0).unwrap();
+                eprintln!("{}", String::from_utf8_lossy(&debug));
+                // Closing the master also releases a session stuck in tty exit.
+                drop(master);
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("PTY case {case} timed out");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        use std::os::unix::fs::FileExt;
+        let mut bytes = vec![0; output.metadata().unwrap().len() as usize];
+        output.read_at(&mut bytes, 0).unwrap();
+        assert!(
+            status.success(),
+            "PTY case {case}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    fn shell(script: &str) -> OwnedChild {
+        OwnedChild(
+            Command::new("/bin/sh")
+                .args(["-c", script])
+                .process_group(0)
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    fn stopped(child: &Child, signal: i32) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let mut status = 0;
+            let result = unsafe {
+                libc::waitpid(
+                    child.id() as _,
+                    &mut status,
+                    libc::WUNTRACED | libc::WNOHANG,
+                )
+            };
+            assert!(result >= 0);
+            if result > 0 {
+                assert!(
+                    libc::WIFSTOPPED(status),
+                    "expected a stopped child: {status}"
+                );
+                assert_eq!(libc::WSTOPSIG(status), signal);
+                return;
+            }
+            assert!(Instant::now() < deadline, "child did not stop");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn pty_stdin_recovers_from_sigttin_and_restores_on_exit() {
+        pty_case("read");
+    }
+    #[test]
+    fn pty_foreground_restores_on_drop() {
+        pty_case("drop");
+    }
+    extern "C" fn job_control_handler(_: libc::c_int) {}
+
+    #[test]
+    fn pty_handover_preserves_signal_dispositions() {
+        pty_case("signals");
+    }
+    #[test]
+    fn pty_cancellation_resumes_stopped_group_and_cleans_descendants() {
+        pty_case("cancel");
+    }
+
+    #[test]
+    fn pty_fast_exit_during_handover_is_not_a_failure() {
+        pty_case("fast-exit");
+    }
+    #[test]
+    fn pty_handover_failure_restores_owner_and_signal_mask() {
+        pty_case("failure");
+    }
+    #[test]
+    fn pty_foreground_restores_during_unwind() {
+        pty_case("unwind");
+    }
+    #[test]
+    fn pty_cancellation_escalates_for_stopped_term_ignoring_leader() {
+        pty_case("kill");
+    }
+
+    #[test]
+    fn pty_child_entry() {
+        let Ok(case) = std::env::var("AHU_TEST_PTY_CASE") else {
+            return;
+        };
+        let parent = unsafe { libc::tcgetpgrp(0) };
+        assert_eq!(parent, unsafe { libc::getpgrp() });
+        if case == "fast-exit" {
+            let mut child = shell("exit 0");
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !crate::headless::child_exited(child.0.id()).unwrap() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let foreground = Foreground::hand_to(0, child.0.id() as _).unwrap().unwrap();
+            assert!(child.0.wait().unwrap().success());
+            foreground.take_back().unwrap();
+            assert_eq!(unsafe { libc::tcgetpgrp(0) }, parent);
+            return;
+        }
+        if case == "failure" {
+            let mut before: libc::sigset_t = unsafe { std::mem::zeroed() };
+            let mut after: libc::sigset_t = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut before) },
+                0
+            );
+            assert!(Foreground::hand_to(0, -1).is_err());
+            assert_eq!(unsafe { libc::tcgetpgrp(0) }, parent);
+            assert_eq!(
+                unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut after) },
+                0
+            );
+            for signal in [libc::SIGTTIN, libc::SIGTTOU] {
+                assert_eq!(unsafe { libc::sigismember(&before, signal) }, unsafe {
+                    libc::sigismember(&after, signal)
+                });
+            }
+            return;
+        }
+        if case == "cancel" || case == "kill" {
+            // The leader cooperates with TERM; its descendant deliberately does
+            // not. An inherited pipe proves the whole group stopped, not just
+            // the leader. No persisted PID is used as signal authority.
+            let mut unrelated = shell("exec sleep 30");
+            let script = if case == "kill" {
+                "trap '' TERM; echo ready; exec sleep 30"
+            } else {
+                "trap 'exit 0' TERM; /bin/sh -c 'trap \"\" TERM; echo ready; for i in 1 2 3 4 5 6; do sleep 1; done' & wait"
+            };
+            let mut child = shell(script);
+            let mut pipe = child.0.stdout.take().unwrap();
+            let mut ready = [0; 6];
+            pipe.read_exact(&mut ready).unwrap();
+            assert_eq!(&ready, b"ready\n");
+            let foreground = Foreground::hand_to(0, child.0.id() as _).unwrap().unwrap();
+            crate::headless::signal_group(child.0.id(), libc::SIGSTOP);
+            stopped(&child.0, libc::SIGSTOP);
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("cancel.json"), b"{}").unwrap();
+            assert_eq!(
+                supervise_harness(&mut child.0, dir.path()).unwrap(),
+                HarnessOutcome::Cancelled
+            );
+            let status = child.0.try_wait().unwrap().unwrap();
+            if case == "cancel" {
+                assert!(status.success(), "stopped leader did not handle TERM");
+            } else {
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(status.signal(), Some(libc::SIGKILL));
+            }
+            assert!(unrelated.0.try_wait().unwrap().is_none());
+            foreground.take_back().unwrap();
+            assert_eq!(unsafe { libc::tcgetpgrp(0) }, parent);
+            let mut poll = libc::pollfd {
+                fd: pipe.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLHUP,
+                revents: 0,
+            };
+            assert_eq!(
+                unsafe { libc::poll(&mut poll, 1, 1500) },
+                1,
+                "descendant still holds its output pipe"
+            );
+            assert_eq!(pipe.read(&mut [0; 1]).unwrap(), 0);
+            return;
+        }
+        let mut child = shell("read line; test \"$line\" = input");
+        // Force the real read-before-handoff race rather than relying on timing.
+        stopped(&child.0, libc::SIGTTIN);
+        if case == "signals" {
+            // Preserve caller-installed handlers as well as ignored signals.
+            // Install after the child stops so its read still tests SIGTTIN.
+            unsafe {
+                assert_ne!(
+                    libc::signal(libc::SIGTTIN, job_control_handler as *const () as usize),
+                    libc::SIG_ERR
+                );
+                assert_ne!(libc::signal(libc::SIGTTOU, libc::SIG_IGN), libc::SIG_ERR);
+            }
+        }
+        let foreground = Foreground::hand_to(0, child.0.id() as _).unwrap().unwrap();
+        assert_eq!(unsafe { libc::tcgetpgrp(0) }, child.0.id() as i32);
+        if case == "signals" {
+            for (signal, expected) in [
+                (libc::SIGTTIN, job_control_handler as *const () as usize),
+                (libc::SIGTTOU, libc::SIG_IGN),
+            ] {
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                assert_eq!(
+                    unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) },
+                    0
+                );
+                assert_eq!(action.sa_sigaction, expected, "signal disposition leaked");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            matches!(supervise_harness(&mut child.0, dir.path()).unwrap(), HarnessOutcome::Exited(status) if status.success())
+        );
+        if case == "drop" {
+            drop(foreground);
+        } else if case == "unwind" {
+            assert!(
+                std::panic::catch_unwind(move || {
+                    let _foreground = foreground;
+                    panic!("synthetic unwind");
+                })
+                .is_err()
+            );
+        } else {
+            foreground.take_back().unwrap();
+        }
+        assert_eq!(unsafe { libc::tcgetpgrp(0) }, parent);
     }
 }

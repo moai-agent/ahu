@@ -76,12 +76,11 @@ impl Fixture {
     }
 
     fn command(&self, cwd: &Path, path: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ahu"));
+        let mut command = common::ahu();
         command
             .current_dir(cwd)
             .env("PATH", path)
             .env("HOME", self.outside.path())
-            .env("AHU_STATE_DIR", self.repo.state_path())
             .env_remove("AHU_CMUX_BIN")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
@@ -346,5 +345,94 @@ fn utility_marker_inspection_does_not_follow_git_pointers_or_unbounded_ancestry(
         assert!(result.status.success(), "{result:?}");
         assert!(fixture.outside.path().join("external-git-ran").exists());
         std::fs::remove_file(fixture.outside.path().join("external-git-ran")).unwrap();
+    }
+}
+
+/// A catalog entry that lists several verified versions matches any of them.
+///
+/// OpenCode updates itself in place: the install used to verify its adapter
+/// reported 1.18.29 at the start of the review and 1.18.30 by the end of it,
+/// with no user action. An entry that could only name one of the two would tell
+/// a user on the other that the adapter was verified against a version they do
+/// not have, which is a false warning rather than a cautious one.
+#[test]
+fn a_multi_version_catalog_entry_matches_any_version_it_lists() {
+    let entry = ahu::catalog::harness("opencode").expect("catalog entry");
+    assert!(
+        entry.verified_versions.contains(','),
+        "this test is only meaningful for a multi-version entry: {}",
+        entry.verified_versions
+    );
+
+    let verified: Vec<&str> = entry
+        .verified_versions
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .collect();
+    assert_eq!(verified, vec!["1.18.29", "1.18.30", "1.18.31"]);
+
+    // Whatever this machine has, a note appears only for a version the entry
+    // does not list — never for one it does.
+    let prerequisite = ahu::selection::check_prerequisite("opencode");
+    if let Some(version) = &prerequisite.version {
+        let listed = verified.iter().any(|v| version.contains(v));
+        let noted = prerequisite
+            .notes
+            .iter()
+            .any(|note| note.contains("the ahu adapter was verified against"));
+        assert_eq!(
+            listed, !noted,
+            "installed {version:?} against {:?}: notes {:?}",
+            entry.verified_versions, prerequisite.notes
+        );
+    }
+
+    // Single-version entries keep their exact-match behaviour.
+    for single in ["claude-code", "codex", "antigravity"] {
+        let entry = ahu::catalog::harness(single).expect("catalog entry");
+        assert!(
+            !entry.verified_versions.contains(','),
+            "{single} is expected to name one version: {}",
+            entry.verified_versions
+        );
+    }
+}
+
+#[test]
+fn explicit_cmux_installer_plan_pins_selected_repository_executable() {
+    let fixture = Fixture::new();
+    executable(
+        &fixture.repo.path().join("cmux"),
+        "if [ \"$1\" = --version ]; then echo '0.64.22 (102) [ddd4a01bc]'; exit 0; fi\nexit 99",
+    );
+    for prefix in [".", ""] {
+        let path = format!("{prefix}:{}:/usr/bin:/bin", fixture.bin.display());
+        let result = fixture
+            .command(fixture.repo.path(), &path)
+            .env("AHU_CMUX_BIN", "cmux")
+            .env("HOME", fixture.outside.path().canonicalize().unwrap())
+            .env_remove("CODEX_HOME")
+            .args(["cmux", "install", "--harness", "codex", "--dry-run"])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        let plan: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(
+            plan["executable"],
+            fixture
+                .repo
+                .path()
+                .join("cmux")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert_eq!(plan["available"], true);
+        assert_eq!(
+            plan["argv"],
+            serde_json::json!(["hooks", "codex", "install"])
+        );
     }
 }

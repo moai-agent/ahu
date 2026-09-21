@@ -109,12 +109,13 @@ fn file_inline_and_stdin_prompts_reach_the_argv_boundary_byte_for_byte() {
             .read(&mut Cursor::new(stdin.as_bytes()), false)
             .unwrap();
         assert_eq!(text.as_bytes(), prompt.as_bytes());
-        let (delivered, _) =
+        let (delivered, delivery) =
             ahu::orchestration::deliver(Some("Fixture instructions."), &text).unwrap();
         for (harness, model) in [
             ("claude-code", "claude-opus-5"),
             ("codex", "gpt-6-astra"),
             ("antigravity", "gemini-3.1-pro-high"),
+            ("opencode", "ollama/glm-5.3:cloud"),
         ] {
             let command = harness::adapter_for(harness)
                 .unwrap()
@@ -127,7 +128,10 @@ fn file_inline_and_stdin_prompts_reach_the_argv_boundary_byte_for_byte() {
                 .unwrap();
             let index = command.prompt_arg.unwrap();
             assert_eq!(command.args[index], delivered);
-            assert!(command.args[index].ends_with(&prompt));
+            assert_eq!(
+                ahu::orchestration::fence_body(&command.args[index], "request", &delivery.nonce),
+                Some(prompt.as_str())
+            );
             assert_eq!(
                 command
                     .args
@@ -280,13 +284,12 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
     let task_dir = temp.path().join("task");
     write_task_record(&task_dir, &worktree, &prompt, &bin.join("claude"));
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["run-task", "--task-dir", &task_dir.to_string_lossy()])
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_STATE_DIR", repo.state_path())
         // Point cmux discovery at nothing so the test never touches a real session.
         .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
@@ -297,10 +300,7 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert_eq!(
-        std::fs::read_to_string(&state_capture).unwrap(),
-        worktree.join(".ahu/state").to_string_lossy()
-    );
+    assert_eq!(std::fs::read_to_string(&state_capture).unwrap(), "");
     assert!(worktree.join(".ahu/.gitignore").is_file());
     assert!(!worktree.join(".worktrees").exists());
     let recorded = std::fs::read_to_string(&recorder).expect("the harness ran");
@@ -325,12 +325,12 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
         !delivered.contains("tools: Read, Edit"),
         "frontmatter is metadata ahu reads, not instructions it delivers: {delivered}"
     );
-    assert!(
-        delivered.ends_with(&prompt),
-        "the task prompt is last and unmodified"
-    );
-    // ahu's sections are fenced and the task prompt is outside the fence.
     let record = ahu::task::load(&task_dir).unwrap();
+    assert_eq!(
+        ahu::orchestration::fence_body(&delivered, "request", &record.delivery.nonce),
+        Some(prompt.as_str())
+    );
+    // The request follows the agent's instructions in its own fence.
     let close = ahu::orchestration::close_tag("agent", &record.delivery.nonce);
     assert!(delivered.find(&close).unwrap() < delivered.find(&prompt).unwrap());
     assert!(
@@ -370,13 +370,12 @@ fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
     assert_ne!(tampered, raw, "the fixture must actually be changed");
     std::fs::write(task_dir.join("task.json"), tampered).unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ahu"))
+    let output = common::ahu()
         .args(["run-task", "--task-dir", &task_dir.to_string_lossy()])
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_STATE_DIR", repo.state_path())
         .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .expect("ahu runs");
@@ -486,6 +485,7 @@ fn every_adapter_delivers_the_prompt_literally_and_widens_no_permissions() {
         ("claude-code", "claude-opus-5"),
         ("codex", "gpt-6-astra"),
         ("antigravity", "gemini-3.1-pro-high"),
+        ("opencode", "ollama/glm-5.3:cloud"),
     ] {
         let adapter = harness::adapter_for(harness).unwrap();
         let command = adapter
@@ -544,14 +544,15 @@ fn every_adapter_delivers_the_prompt_literally_and_widens_no_permissions() {
     }
 }
 
-/// Only Claude Code can actually enforce a named agent's system prompt. The
-/// other two say so instead of implying a guarantee they cannot keep.
+/// No adapter can actually enforce a named agent's system prompt. Each says so
+/// instead of implying a guarantee it cannot keep.
 #[test]
 fn adapters_report_their_real_enforcement_limits() {
     for (harness, model) in [
         ("claude-code", "claude-opus-5"),
         ("codex", "gpt-6-astra"),
         ("antigravity", "gemini-3.1-pro-high"),
+        ("opencode", "ollama/glm-5.3:cloud"),
     ] {
         let report = harness::adapter_for(harness)
             .unwrap()
@@ -560,7 +561,7 @@ fn adapters_report_their_real_enforcement_limits() {
         assert_eq!(report.harness, harness);
         assert!(
             !report.model_fixed_for_session,
-            "{harness}: none of the three can hold a model for a whole session"
+            "{harness}: no adapter can hold a model for a whole session"
         );
         assert!(!report.gaps.is_empty(), "{harness} must name its gaps");
         assert!(
@@ -570,7 +571,7 @@ fn adapters_report_their_real_enforcement_limits() {
     }
 
     // No adapter may claim to select or enforce an agent identity.
-    for harness in ["claude-code", "codex", "antigravity"] {
+    for harness in ["claude-code", "codex", "antigravity", "opencode"] {
         let report = harness::adapter_for(harness)
             .unwrap()
             .enforcement("x", Default::default())
@@ -659,7 +660,7 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
         assert!(preview.contains("ahu inventory"), "{preview}");
         // And it must still say where the instructions came from.
         assert!(
-            preview.contains(".agents/ahu/instructions/vela.md"),
+            preview.contains(".agents/ahu/agents/vela.md"),
             "the attribution must survive: {preview}"
         );
     }
@@ -676,23 +677,28 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
 fn a_source_format_only_decides_how_its_file_is_parsed() {
     use ahu::agent::SourceFormat;
 
+    // A codex definition holds no frontmatter: whatever the file holds is the
+    // verbatim instruction text, frontmatter-looking text and all.
     assert!(SourceFormat::ClaudeAgent.has_frontmatter());
     assert!(SourceFormat::AntigravityAgent.has_frontmatter());
-    assert!(!SourceFormat::Markdown.has_frontmatter());
+    assert!(!SourceFormat::CodexAgent.has_frontmatter());
+    assert!(SourceFormat::OpenCodeAgent.has_frontmatter());
 
     // The parse is what ahu delivers: frontmatter is metadata, the body is the
     // instruction text.
     let repo = TestRepo::new();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
     repo.write(
-        ".agents/ahu/instructions/plain.md",
+        ".codex/agents/plain.toml",
         "---\nnot: frontmatter\n---\nplain body\n",
     );
     repo.write(
-        ".agents/ahu/agents/plain.toml",
-        "schema_version = 1\nname = \"plain\"\nversion = \"1.0.0\"\n\
-         harness = \"claude-code\"\nmodel = \"claude-opus-5\"\n\
-         \n[source]\nformat = \"markdown\"\npath = \".agents/ahu/instructions/plain.md\"\n",
+        ".agents/ahu/agents/plain.md",
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: plain\ndescription: fixture agent\n\
+         status: stable\ntags: [agents]\nharness: codex\nmodel: gpt-6-astra\n\
+         permissions: prompt\nversion: 1.0.0\nsource_format: codex-agent\n\
+         source_path: .codex/agents/plain.toml\n\n---\n\nInstructions live in the native \
+         definition at `.codex/agents/plain.toml`, referenced in place and never edited.\n",
     );
     repo.commit("fixture");
 
@@ -708,9 +714,10 @@ fn a_source_format_only_decides_how_its_file_is_parsed() {
         "frontmatter is still read, just not delivered"
     );
 
-    // Plain Markdown is used as-is, frontmatter-looking text and all.
-    let markdown = ahu::agent::find(repo.path(), "plain").unwrap();
-    assert!(markdown.instructions.contains("not: frontmatter"));
+    // The codex-agent parse is verbatim: nothing is stripped, so the
+    // frontmatter-looking text is delivered as instruction text.
+    let plain = ahu::agent::find(repo.path(), "plain").unwrap();
+    assert!(plain.instructions.contains("not: frontmatter"));
 
     // And no adapter has anywhere to put a name even if one were derived.
     for harness_id in ["claude-code", "codex", "antigravity"] {
@@ -766,13 +773,14 @@ fn approval_widening_is_opt_in_and_harness_native() {
     use ahu::agent::Permissions;
 
     // Default: ahu adds no permission flag anywhere.
-    for harness_id in ["claude-code", "codex", "antigravity"] {
+    for harness_id in ["claude-code", "codex", "antigravity", "opencode"] {
         let command = harness::adapter_for(harness_id)
             .unwrap()
             .launch_command(&LaunchRequest {
                 model: match harness_id {
                     "codex" => "gpt-6-astra",
                     "antigravity" => "gemini-3.1-pro-high",
+                    "opencode" => "ollama/glm-5.3:cloud",
                     _ => "claude-opus-5",
                 },
                 prompt: "p",
@@ -787,6 +795,7 @@ fn approval_widening_is_opt_in_and_harness_native() {
             "--ask-for-approval",
             "--sandbox",
             "--mode",
+            "--auto",
         ] {
             assert!(
                 !command.args.iter().any(|a| a == flag),
@@ -833,6 +842,12 @@ fn approval_widening_is_opt_in_and_harness_native() {
             Permissions::AcceptEdits,
             vec!["--approve-for-me"],
         ),
+        (
+            "opencode",
+            "ollama/glm-5.3:cloud",
+            Permissions::Auto,
+            vec!["--auto"],
+        ),
     ] {
         let command = harness::adapter_for(harness_id)
             .unwrap()
@@ -855,6 +870,23 @@ fn approval_widening_is_opt_in_and_harness_native() {
         let index = command.prompt_arg.unwrap();
         assert_eq!(command.args[index], HOSTILE_PROMPT, "{harness_id}");
     }
+
+    // Where a harness has no equivalent of a requested widening, the launch is
+    // refused rather than mapped onto the nearest flag. OpenCode's permission
+    // actions are static configuration and its only flag is the widening
+    // `--auto`, so accept-edits has nothing honest to map to.
+    let refusal = harness::adapter_for("opencode")
+        .unwrap()
+        .launch_command(&LaunchRequest {
+            model: "ollama/glm-5.3:cloud",
+            prompt: HOSTILE_PROMPT,
+            cwd: Path::new("/tmp"),
+            permissions: Permissions::AcceptEdits,
+        })
+        .expect_err("accept-edits must not be approximated")
+        .to_string();
+    assert!(refusal.contains("no accept-edits"), "{refusal}");
+    assert!(refusal.contains("will not widen"), "{refusal}");
 
     // Every mode explains itself, and only the widening ones say so.
     assert!(!Permissions::Prompt.widens_defaults());
@@ -886,6 +918,7 @@ fn no_enforcement_control_denies_a_flag_the_launch_actually_passes() {
         ("claude-code", "claude-opus-5"),
         ("codex", "gpt-6-astra"),
         ("antigravity", "gemini-3.1-pro-high"),
+        ("opencode", "ollama/glm-5.3:cloud"),
     ] {
         for permissions in [
             Permissions::Prompt,
@@ -893,14 +926,17 @@ fn no_enforcement_control_denies_a_flag_the_launch_actually_passes() {
             Permissions::Auto,
         ] {
             let adapter = harness::adapter_for(harness).unwrap();
-            let command = adapter
-                .launch_command(&LaunchRequest {
-                    model,
-                    prompt: "do the thing",
-                    cwd: Path::new("/tmp/ahu-fixture-worktree"),
-                    permissions,
-                })
-                .unwrap();
+            // An adapter with no honest mapping for a permission value refuses
+            // the launch. There is then no argv for a control to contradict,
+            // and the contradiction this test exists to catch cannot arise.
+            let Ok(command) = adapter.launch_command(&LaunchRequest {
+                model,
+                prompt: "do the thing",
+                cwd: Path::new("/tmp/ahu-fixture-worktree"),
+                permissions,
+            }) else {
+                continue;
+            };
             let report = adapter.enforcement(model, permissions).unwrap();
 
             for control in &report.applied_controls {

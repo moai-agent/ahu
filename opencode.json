@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "ollama/glm-5.3:cloud",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama",
+      "options": {
+        "baseURL": "http://localhost:11434/v1"
+      },
+      "models": {
+        "glm-5.3:cloud": {
+          "name": "GLM 5.3 (Ollama cloud)",
+          "limit": {
+            "context": 65536,
+            "output": 32768
+          }
+        }
+      }
+    }
+  }
+}

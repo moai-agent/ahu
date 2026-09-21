@@ -1,7 +1,7 @@
 //! Shared fixtures: throwaway Git repositories and a fake harness executable.
 //!
 //! Every test that touches the filesystem works inside a `tempfile::TempDir` and
-//! points `AHU_STATE_DIR` at it, so no test can read or write a developer's real
+//! resolves state from its checkout, so no test can read or write a developer's real
 //! ahu state, cmux session, or checkouts.
 
 #![allow(dead_code)]
@@ -113,44 +113,54 @@ impl TestRepo {
             ),
         );
         self.write(
-            &format!(".agents/ahu/agents/{name}.toml"),
+            &format!(".agents/ahu/agents/{name}.md"),
             &format!(
-                "schema_version = 1\n\
-                 name = \"{name}\"\n\
-                 version = \"{version}\"\n\
-                 description = \"fixture agent\"\n\
-                 harness = \"claude-code\"\n\
-                 model = \"{model}\"\n\
-                 \n[source]\n\
-                 format = \"claude-agent\"\n\
-                 path = \".claude/agents/{name}.md\"\n"
+                "---\n\
+                 okf_version: 0.2\n\
+                 type: ahu:agent\n\
+                 title: {name}\n\
+                 description: fixture agent\n\
+                 status: stable\n\
+                 tags: [agents]\n\
+                 harness: claude-code\n\
+                 model: {model}\n\
+                 permissions: prompt\n\
+                 version: {version}\n\
+                 source_format: claude-agent\n\
+                 source_path: .claude/agents/{name}.md\n\
+                 \n\
+                 ---\n\
+                 \n\
+                 Instructions live in the native definition at `.claude/agents/{name}.md`, referenced in place and never edited.\n"
             ),
         );
     }
 
     /// A registered agent pinned to an arbitrary harness and model.
     ///
-    /// `add_agent` always writes `harness = "claude-code"`. A launch test that
+    /// `add_agent` always writes `harness: claude-code`. A launch test that
     /// has to prove two agents keep *different* configured harnesses needs a
-    /// second manifest that names another one, with an instructions file the
-    /// non-Claude source format accepts.
+    /// second manifest that names another one, with the instructions in the
+    /// manifest body.
     pub fn add_agent_on(&self, name: &str, version: &str, harness: &str, model: &str) {
         self.write(
-            &format!(".agents/ahu/instructions/{name}.md"),
-            &format!("You are {name}. Fixture instructions.\n"),
-        );
-        self.write(
-            &format!(".agents/ahu/agents/{name}.toml"),
+            &format!(".agents/ahu/agents/{name}.md"),
             &format!(
-                "schema_version = 1\n\
-                 name = \"{name}\"\n\
-                 version = \"{version}\"\n\
-                 description = \"fixture agent\"\n\
-                 harness = \"{harness}\"\n\
-                 model = \"{model}\"\n\
-                 \n[source]\n\
-                 format = \"markdown\"\n\
-                 path = \".agents/ahu/instructions/{name}.md\"\n"
+                "---\n\
+                 okf_version: 0.2\n\
+                 type: ahu:agent\n\
+                 title: {name}\n\
+                 description: fixture agent\n\
+                 status: stable\n\
+                 tags: [agents]\n\
+                 harness: {harness}\n\
+                 model: {model}\n\
+                 permissions: prompt\n\
+                 version: {version}\n\
+                 \n\
+                 ---\n\
+                 \n\
+                 You are {name}. Fixture instructions.\n"
             ),
         );
     }
@@ -186,10 +196,11 @@ pub fn fake_harnesses(
             &script,
             format!(
                 "#!/bin/sh\n\
-                 : > '{record}'\n\
-                 for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> '{record}'; done\n\
+                 record={record}\n\
+                 : > \"$record\"\n\
+                 for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$record\"; done\n\
                  exit 0\n",
-                record = record.display()
+                record = shell_quoted(&record.to_string_lossy())
             ),
         )
         .expect("write fake harness");
@@ -203,11 +214,72 @@ pub fn fake_harnesses(
     bin
 }
 
+/// Quote a value for `/bin/sh` so the shell reads it as one literal word.
+///
+/// A fixture path is chosen by `tempfile`, not by the test, and a checkout can
+/// live under a directory whose name contains a quote. Interpolating such a
+/// path straight into generated shell source ends the quoting early and turns
+/// the rest of the path into code, so the fixture would fail — or run — for a
+/// reason that has nothing to do with what the test is asserting.
+pub fn shell_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// A prompt built to break anything that treats it as shell input.
 pub const HOSTILE_PROMPT: &str = "Fix $(touch /tmp/ahu-pwned) and `rm -rf /` now\n\
 second line with 'single' and \"double\" quotes && a pipe | and ; a semicolon\n\
 third line with a trailing backslash \\\n\
 --not-a-flag";
+
+/// The environment an ahu worker session exports into its children.
+///
+/// When `cargo test` itself runs from inside an ahu session, these variables
+/// are ambient in every test process. A test that spawns `ahu` without
+/// removing them does not measure its fixture: it measures the developer's
+/// live session, whose resume guard then refuses, and whose state and runtime
+/// directories are the real ones.
+const WORKER_ENV: &[&str] = &[
+    "AHU_EXECUTION_BACKEND",
+    "AHU_PARENT_TASK",
+    "AHU_PARENT_ATTEMPT",
+    "AHU_BROKER_TOKEN",
+    "AHU_BROKER_DISPATCH",
+    "AHU_FROZEN_CHILD_GRANTS",
+    "AHU_EXPECTED_DIGEST",
+    "AHU_EXPECTED_CHILD_IDENTITY",
+    "AHU_EXPECTED_CHILD_SNAPSHOT",
+    "AHU_EXPECTED_CHILD_HOOKS",
+    "AHU_RUNTIME_DIR",
+    "AHU_BIN",
+    "AHU_STATE_DIR",
+    "AHU_CMUX_BIN",
+    "AHU_WORKER_SESSION",
+    "AHU_TASK_ID",
+    "AHU_TASK_DIR",
+];
+
+/// Strip the ambient worker environment from a command.
+///
+/// A variable removed here can still be set afterwards — `.env` overrides an
+/// earlier `.env_remove` — so a test that deliberately simulates worker context
+/// configures its own variables on top.
+pub fn clear_worker_env(command: &mut Command) {
+    for var in WORKER_ENV {
+        command.env_remove(var);
+    }
+}
+
+/// An `ahu` process free of the worker environment this test binary may itself
+/// be running under.
+///
+/// Every test that runs the built `ahu` starts here, so a session running the
+/// test suite cannot leak its own dispatch credentials, parent task, or state
+/// locations into the process under test.
+pub fn ahu() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ahu"));
+    clear_worker_env(&mut command);
+    command
+}
 
 /// The environment variable that tells a re-run of this test binary which case
 /// it is standing in for.
@@ -236,6 +308,7 @@ pub fn run_child_case(name: &str, configure: impl FnOnce(&mut Command)) -> std::
         .args([name, "--exact", "--nocapture", "--test-threads=1"])
         .env(CHILD_CASE, name)
         .env("RUST_BACKTRACE", "1");
+    clear_worker_env(&mut command);
     configure(&mut command);
     command.output().expect("the child test runs")
 }
@@ -259,7 +332,7 @@ pub fn assert_child_passed(name: &str, output: &std::process::Output) {
 }
 
 /// The harness programs every adapter resolves by name.
-pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy"];
+pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy", "opencode"];
 
 /// Run this test in a child process that has a machine of its own.
 ///
@@ -270,10 +343,8 @@ pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy"];
 /// configures a child instead.
 ///
 /// The child gets fake harness executables ahead of everything else on `PATH`,
-/// a private `HOME` so no developer's `~/.claude` is read, a private state
-/// directory, and an `AHU_CMUX_BIN` that is not there. `configure` runs last and
-/// can change any of it — a test about ahu's behaviour with no state override
-/// removes that variable.
+/// a private `HOME` so no developer's `~/.claude` is read, a throwaway checkout
+/// for local state, and an `AHU_CMUX_BIN` that is not there. `configure` runs last.
 ///
 /// Returns `true` in the child, where the body should run, and `false` in the
 /// parent, which has by then run the child and asserted it passed.
@@ -294,15 +365,13 @@ pub fn in_child_fixture(test_name: &str, configure: impl FnOnce(&mut Command)) -
         path.push(inherited);
     }
     let home = fixtures.path().join("home");
-    let state = fixtures.path().join("state");
-    for directory in [&home, &state] {
-        std::fs::create_dir_all(directory).expect("fixture directory");
-    }
+    let checkout = TestRepo::new();
+    std::fs::create_dir_all(&home).expect("fixture directory");
     let output = run_child_case(test_name, |command| {
         command
             .env("PATH", &path)
             .env("HOME", &home)
-            .env("AHU_STATE_DIR", &state)
+            .current_dir(checkout.path())
             .env("AHU_CMUX_BIN", fixtures.path().join("no-such-cmux"));
         configure(command);
     });

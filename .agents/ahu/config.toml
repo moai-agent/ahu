@@ -4,7 +4,7 @@
 schema_version = 1
 harness_preferences = ["codex"]
 model_selection = "project-ranked"
-catalog_version = "2026-09-12"
+catalog_version = "2026-09-13"
 
 [model_rankings]
 "codex" = ["gpt-6-astra"]
@@ -14,5 +14,5 @@ review_on_first_load = true
 review_interval_days = 7
 
 [knowledge]
-bundles = ["docs/knowledge"]
+bundles = ["docs/knowledge", ".agents/ahu/agents"]
 fail_on_warnings = false

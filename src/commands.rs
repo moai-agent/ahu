@@ -1,11 +1,13 @@
 //! Command implementations.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::agent::{self, ResolvedAgent};
 use crate::bail;
 use crate::catalog;
-use crate::cmux::Cmux;
+use crate::cmux::{self, Cmux};
 use crate::config::{self, LoadedConfig};
 use crate::drift;
 use crate::git::{self, Repo};
@@ -20,7 +22,7 @@ use crate::onboard;
 use crate::selection::{self, ResolvedPair};
 use crate::style::{self, Role};
 use crate::task;
-use crate::util::{Result, display_path, display_safe, display_safe_block};
+use crate::util::{Error, Result, display_path, display_safe, display_safe_block};
 
 /// Locate the repository ahu was invoked from.
 ///
@@ -33,32 +35,82 @@ pub fn repo_from_cwd() -> Result<Repo> {
 }
 
 /// Open a coordinating session in the invoking terminal. Repository discovery
-/// registers executable exclusions before resolving Codex, just as for agents.
+/// registers executable exclusions before resolving the harness, just as for agents.
 pub fn codex(repo: &Repo) -> Result<i32> {
-    let executable = selection::resolve_executable("codex").ok_or_else(|| {
-        crate::util::Error::new(
-            "Codex is not installed or is not available on PATH outside the repository.",
-        )
+    coordinating_session(
+        repo,
+        "codex",
+        "Codex",
+        &["--dangerously-bypass-approvals-and-sandbox"],
+    )
+}
+
+/// Open Claude using its configured model with permission checks bypassed.
+pub fn claude(repo: &Repo) -> Result<i32> {
+    coordinating_session(
+        repo,
+        "claude",
+        "Claude",
+        &["--dangerously-skip-permissions"],
+    )
+}
+
+/// Open OpenCode using its configured model and permission behavior.
+///
+/// This shortcut retains native permission settings and plugin loading.
+pub fn opencode(repo: &Repo) -> Result<i32> {
+    coordinating_session(repo, "opencode", "OpenCode", &[])
+}
+
+/// Open the Antigravity CLI in its unattended (YOLO) permission mode.
+pub fn antigravity(repo: &Repo) -> Result<i32> {
+    coordinating_session(
+        repo,
+        "agy",
+        "Antigravity CLI",
+        &["--dangerously-skip-permissions"],
+    )
+}
+
+fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) -> Result<i32> {
+    let harness = match program {
+        "claude" => "claude-code",
+        "agy" => "antigravity",
+        other => other,
+    };
+    let model = config::load(&repo.root)?
+        .and_then(|loaded| {
+            selection::ranked_models(&loaded, harness)
+                .into_iter()
+                .next()
+        })
+        .unwrap_or_else(|| "unconfigured".to_string());
+    let executable = selection::resolve_executable(program).ok_or_else(|| {
+        crate::util::Error::new(format!(
+            "{label} is not installed or is not available on PATH outside the repository."
+        ))
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
-    let state = crate::state::ensure_checkout_state(&repo.root)?;
+    crate::state::ensure_checkout_state(&repo.root)?;
+    let placement = launch::group_coordinator(repo, &executable, label, harness, &model, args)?;
+    for note in placement.notes {
+        eprintln!("ahu: {}", display_safe(&note));
+    }
+    if placement.opened_workspace {
+        return Ok(0);
+    }
+    if !args.is_empty() {
+        eprintln!("{label} coordinator: {}", args.join(" "));
+    }
     let mut command = std::process::Command::new(executable);
-    command
-        .args([
-            "--sandbox",
-            "workspace-write",
-            "--ask-for-approval",
-            "on-request",
-        ])
-        .env("AHU_BIN", std::env::current_exe()?)
-        .env("AHU_STATE_DIR", state);
-    // Inherit the terminal and cwd. Replacing ahu gives Codex terminal signals
+    command.args(args).env("AHU_BIN", std::env::current_exe()?);
+    // Inherit the terminal and cwd. Replacing ahu gives the harness terminal signals
     // directly and preserves its exit status, including signal termination.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         Err(crate::util::Error::new(format!(
-            "cannot start Codex: {}",
+            "cannot start {label}: {}",
             command.exec()
         )))
     }
@@ -66,7 +118,7 @@ pub fn codex(repo: &Repo) -> Result<i32> {
     {
         let status = command
             .status()
-            .map_err(|e| crate::util::Error::new(format!("cannot start Codex: {e}")))?;
+            .map_err(|e| crate::util::Error::new(format!("cannot start {label}: {e}")))?;
         Ok(status.code().unwrap_or(5))
     }
 }
@@ -119,14 +171,14 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         console.say(&style.paint(
             Role::Hint,
             "No ahu agents are registered.\n\
-             Only .agents/ahu/agents/*.toml makes an agent launchable through ahu; native\n\
-             definitions elsewhere are onboarding candidates. Run `ahu onboard` to see them.\n",
+              Only .agents/ahu/agents/*.md makes an agent launchable through ahu; native\n\
+              definitions elsewhere are onboarding candidates. Run `ahu onboard` to see them.\n",
         ))?;
         return Ok(0);
     }
     for agent in &agents {
         console.say(&format!(
-            "@{} {}\n  harness  {}\n  model    {}\n  source   {} [{}]\n  identity {}\n",
+            "@{} {}\n  harness  {}\n  model    {}\n  source   {} [{}]\n  identity {}\n  reference {}\n",
             style.paint(Role::Agent, &display_safe(&agent.manifest.name)),
             style.paint(Role::Hint, &display_safe(&agent.manifest.version)),
             style.paint(Role::Runtime, &display_safe(&agent.manifest.harness)),
@@ -138,8 +190,14 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
                     .unwrap_or(&agent.source_path)
                     .to_string_lossy()
             ),
-            agent.manifest.source.format.as_str(),
+            agent
+                .manifest
+                .source
+                .as_ref()
+                .map(|s| s.format.as_str())
+                .unwrap_or("manifest"),
             &agent.identity_digest()[..12],
+            crate::agent_ref::ensure(repo, agent)?,
         ))?;
         if !agent.manifest.description.is_empty() {
             console.say(&format!(
@@ -194,13 +252,18 @@ pub fn onboard_cmd(
             display_safe(&candidate.blockers.join("; "))
         );
     }
+    let harness = candidate.format.native_harness().unwrap_or("claude-code");
     let model = match model.or(candidate.native_model.as_deref()) {
         Some(model) if model != "inherit" && !model.is_empty() => model.to_string(),
+        // Listed for the harness this definition actually belongs to. A Claude
+        // Code list in front of someone registering an OpenCode agent names
+        // models their manifest would be refused for.
         _ => bail!(kind: crate::util::ErrorKind::Usage,
             "{name} does not declare a usable model, so ahu needs an explicit one.\n\
-             Re-run with --model <exact identifier>. Catalog {} lists: {}.",
+             Re-run with --model <exact identifier>. Catalog {} lists for {}: {}.",
             catalog::CATALOG_VERSION,
-            catalog::models_for("claude-code")
+            harness,
+            catalog::models_for(harness)
                 .iter()
                 .map(|m| m.model)
                 .collect::<Vec<_>>()
@@ -208,10 +271,7 @@ pub fn onboard_cmd(
         ),
     };
     console.say("The following file will be created. Nothing else is touched:\n\n")?;
-    console.say(&format!(
-        ".agents/ahu/agents/{}.toml\n\n",
-        display_safe(name)
-    ))?;
+    console.say(&format!(".agents/ahu/agents/{}.md\n\n", display_safe(name)))?;
     console.say(&onboard::proposed_manifest(candidate, &model, version))?;
     if !launcher::confirm(console, "\nCreate it? [y/N]: ")? {
         console.say("Cancelled. Nothing was written.\n")?;
@@ -288,33 +348,56 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         }
     }
 
-    if let Ok(repo) = repo
-        && project_harnesses.contains("claude-code")
-    {
-        match hooks::collect(&repo.root, "claude-code") {
-            Ok(found) => {
-                console.say(&format!(
-                    "hooks        Claude Code: {} configured\n",
-                    found.hooks.len()
-                ))?;
-                for hook in &found.hooks {
-                    console.say(&format!("  {:<12} {}\n", hook.scope.as_str(), hook.label()))?;
+    if let Ok(repo) = repo {
+        for harness in &project_harnesses {
+            if hooks::hook_surface_is_implemented(harness) {
+                match hooks::collect(&repo.root, harness) {
+                    Ok(found) => {
+                        let display_name = catalog::harness(harness)
+                            .map(|h| h.display_name)
+                            .unwrap_or(harness);
+                        let count = found.hooks.len() + found.declared_plugins.len();
+                        console.say(&format!(
+                            "hooks        {display_name}: {count} configured\n",
+                        ))?;
+                        for hook in &found.hooks {
+                            console.say(&format!(
+                                "  {:<12} {}\n",
+                                hook.scope.as_str(),
+                                hook.label()
+                            ))?;
+                        }
+                        for plugin in &found.declared_plugins {
+                            let scope = if plugin.source.starts_with('/')
+                                || plugin.source.starts_with('~')
+                            {
+                                "user"
+                            } else {
+                                "project"
+                            };
+                            console.say(&format!(
+                                "  {:<12} plugin → {}\n",
+                                scope,
+                                display_safe(&plugin.module)
+                            ))?;
+                        }
+                        for unreadable in &found.unreadable {
+                            warnings += 1;
+                            console.say(&format!(
+                                "  {} {}\n",
+                                style::stdout().paint(Role::Warning, "unreadable"),
+                                display_safe(unreadable)
+                            ))?;
+                        }
+                    }
+                    Err(e) => {
+                        problems += 1;
+                        console.say(&format!(
+                            "hooks        could not be read for {harness}: {}\n",
+                            display_safe_block(&e.to_string())
+                        ))?;
+                    }
                 }
-                for unreadable in &found.unreadable {
-                    warnings += 1;
-                    console.say(&format!(
-                        "  {} {}\n",
-                        style::stdout().paint(Role::Warning, "unreadable"),
-                        display_safe(unreadable)
-                    ))?;
-                }
-            }
-            Err(e) => {
-                problems += 1;
-                console.say(&format!(
-                    "hooks        could not be read: {}\n",
-                    display_safe_block(&e.to_string())
-                ))?;
             }
         }
     }
@@ -329,12 +412,57 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             "not installed".to_string()
         } else if let Some(version) = &prerequisite.version {
             let version = version.strip_prefix("codex-cli ").unwrap_or(version);
-            format!("{} — ready", display_safe(version))
+            format!("{} — executable ready", display_safe(version))
         } else {
             "installed (version unavailable)".to_string()
         };
         console.say(&format!(
             "harness      {} {status}\n",
+            display_safe(harness)
+        ))?;
+    }
+
+    let integration_root = repo
+        .as_ref()
+        .map(|r| r.root.clone())
+        .unwrap_or(std::env::current_dir()?);
+    let native_cli = cmux::integration::NativeCli::discover();
+    console.say(&format!(
+        "cmux CLI     {}\n",
+        display_safe(
+            native_cli
+                .version
+                .as_deref()
+                .unwrap_or("unavailable or version unknown")
+        )
+    ))?;
+    for harness in ["claude-code", "codex", "opencode", "antigravity"] {
+        let status = cmux::integration::inspect(&integration_root, harness);
+        if status
+            .components
+            .iter()
+            .any(|c| c.registration != cmux::integration::Registration::Installed)
+        {
+            warnings += 1;
+        }
+        console.say(&format!("cmux integration {}:\n", display_safe(harness)))?;
+        console.say(&cmux::integration::render_summary(&status))?;
+        if let Some(reason) = status.headless.reasons.first() {
+            let safe = display_safe(reason);
+            let mut shown: String = safe.chars().take(240).collect();
+            if safe.chars().count() > 240 {
+                shown.push('…');
+            }
+            console.say(&format!("  headless   {shown}\n"))?;
+        }
+        let installer = cmux::integration::installation_plan(harness, &native_cli)?;
+        console.say(&format!(
+            "  installer  {}; inspect: ahu cmux install --harness {} --dry-run\n",
+            if installer.available {
+                "available"
+            } else {
+                "unavailable/unknown"
+            },
             display_safe(harness)
         ))?;
     }
@@ -362,7 +490,10 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         }
     }
 
-    let state_root = crate::state::root()?;
+    let state_root = match repo {
+        Ok(repo) => crate::storage::CheckoutStorage::new(&repo.root).state_root()?,
+        Err(_) => crate::state::root()?,
+    };
     let state_display = repo
         .as_ref()
         .ok()
@@ -405,9 +536,64 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
 /// a false claim that no tasks exist.
 pub const NO_TASKS: &str = "No ahu tasks have been launched from this repository.";
 
+/// Whether this task's liveness would be read from the cmux surface.
+///
+/// Headless tasks carry their signal in `owner.lock` inside the task
+/// directory; everything else is interactive and, when a workspace id was
+/// recorded, is read from the cmux workspace list.
+fn cmux_liveness_needed(dir: &Path, record: &task::TaskRecord) -> bool {
+    !dir.join("headless.json").exists() && record.cmux_workspace_id.is_some()
+}
+
+/// The cmux workspace list, if any record being shown needs it.
+///
+/// Each window is fetched once per listing instead of once per row, and not at
+/// all when no row can use it. An unreachable cmux is `None`, so liveness degrades to
+/// `unknown` rather than failing the listing.
+fn cmux_workspaces() -> Option<BTreeMap<String, cmux::WorkspaceInfo>> {
+    Cmux::discover().ok()?.workspaces().ok()
+}
+
+/// Read the cmux workspace list once, if the records being listed need it.
+pub fn liveness_workspaces(
+    records: &[(PathBuf, task::TaskRecord)],
+) -> Option<BTreeMap<String, cmux::WorkspaceInfo>> {
+    if records
+        .iter()
+        .any(|(dir, record)| cmux_liveness_needed(dir, record))
+    {
+        cmux_workspaces()
+    } else {
+        None
+    }
+}
+
+/// Whether the task's session signal is held, if ahu could read one.
+///
+/// The answer is an observation for display, never a recorded state, and
+/// this function writes nothing: neither the lock file it probes nor the
+/// cmux surface it lists is modified.
+fn session_owner(
+    dir: &Path,
+    record: &task::TaskRecord,
+    workspaces: Option<&BTreeMap<String, cmux::WorkspaceInfo>>,
+) -> Option<bool> {
+    if dir.join("headless.json").exists() {
+        return crate::headless::supervisor_owns_attempt(dir).ok();
+    }
+    let id = record.cmux_workspace_id.as_deref()?;
+    workspaces.map(|list| list.contains_key(id))
+}
+
 /// `ahu tasks`
 pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
-    let listing = launch::reconcile(repo)?;
+    let listing = if std::env::var("AHU_EXECUTION_BACKEND").ok().as_deref() == Some("headless")
+        || !crate::headless::discover(repo)?.is_empty()
+    {
+        task::list(repo)?
+    } else {
+        launch::reconcile(repo)?
+    };
     // Printed before anything returns: a store can hold something that is not a
     // task and nothing that is, and that is exactly when saying so matters.
     for note in &listing.notes {
@@ -420,24 +606,38 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         console.say(&format!("{NO_TASKS}\n"))?;
         return Ok(0);
     }
+    let workspaces = liveness_workspaces(&listing.records);
     for (dir, record) in &listing.records {
+        let review = if crate::headless::review::is_headless(dir) {
+            Some(crate::headless::inspection(dir)?)
+        } else {
+            None
+        };
         // Every field here comes out of task.json, which was built from the
         // prompt and from repository configuration. `tasks` is as much a
         // disclosure surface as the launch preview, so it escapes the same way.
         console.say(&format!(
-            "{} [session {}] {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n",
-            display_safe(&record.task_id),
+            "{} [session {}] {}\n  backend   {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n  liveness  {}\n",
+            display_safe(&crate::task_handles::label(repo, &record.task_id)),
             record.state.as_str(),
             display_safe(&record.title),
+            if review.is_some() { "headless" } else { "cmux" },
             style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
             style::stdout().paint(Role::Runtime, &display_safe(&record.identity.harness)),
             style::stdout().paint(Role::Runtime, &display_safe(&record.identity.model)),
             display_safe(&record.branch),
             display_path(&record.worktree),
             display_path(dir),
+            review.as_ref().and_then(|v| v["liveness"].as_str()).unwrap_or_else(|| task::observed_liveness(session_owner(dir, record, workspaces.as_ref())).as_str()),
         ))?;
+        if let Some(review) = &review {
+            console.say(&crate::headless::review::render(review, true))?;
+        }
         if let Some(workspace) = &record.cmux_workspace_id {
             console.say(&format!("  cmux      {}\n", display_safe(workspace)))?;
+        }
+        if let Some(question) = question_excerpt(dir) {
+            console.say(&format!("  question  {question}\n"))?;
         }
         console.say("\n")?;
     }
@@ -451,7 +651,10 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         console.say(
             "\nSession state does not indicate whether the agent is working or awaiting input.\n\
              `exited` means the harness process ended. It is not a claim that the task \
-             succeeded.\n",
+             succeeded.\n\
+             Liveness is observed at listing time, not recorded: `live` means the session's \
+             signal is held, `stale` means it is not, `unknown` means ahu could not read it. \
+             It is not a claim of progress or success.\n",
         )?;
     }
     console.say("Worktrees and branches are kept until you remove them yourself.\n")?;
@@ -501,7 +704,7 @@ pub fn render_unreadable_tasks(repo: &Repo, unreadable: &[task::UnreadableTask])
         for found in members {
             out.push_str(&format!(
                 "\n     {} [unreadable]\n",
-                display_safe(&found.task_id)
+                display_safe(&crate::task_ref::display(&found.task_id))
             ));
             out.push_str(&format!("       record    {}\n", display_path(&found.dir)));
 
@@ -562,11 +765,170 @@ fn strip_record_path(reason: &str, dir: &Path) -> String {
         .unwrap_or_else(|| reason.to_string())
 }
 
-/// Resolve exact IDs before unique prefixes, including unreadable candidates.
-fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
-    if id.is_empty() {
-        bail!(kind: crate::util::ErrorKind::Usage, "a task id must not be empty.");
+/// The shared wording for a task whose record exists but cannot be read.
+fn unreadable_record(blocked: &task::UnreadableTask) -> Error {
+    Error::new(format!(
+        "task {} has an unreadable record at {}: {}",
+        blocked.task_id,
+        blocked.dir.display(),
+        blocked.reason
+    ))
+}
+
+/// Where a task id resolved from. The listing and pointer forms both carry a
+/// readable record; the pointer records which checkout advertised it.
+enum Located {
+    Listing(PathBuf, task::TaskRecord),
+    Pointer(crate::task_index::Entry, PathBuf, task::TaskRecord),
+    Unreadable(task::UnreadableTask),
+    NoMatch { unreadable_in_repo: usize },
+}
+
+/// Load the record behind a task index entry, refusing stale or hostile
+/// entries instead of guessing.
+fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task::TaskRecord)> {
+    if !entry.checkout.is_dir() {
+        bail!(
+            "the task index records task {} at {}, but that checkout no longer exists; the entry \
+             is stale and the task cannot be reached from here.",
+            display_safe(&crate::task_ref::display(&entry.task_id)),
+            display_path(&entry.checkout)
+        );
     }
+    let dir = match entry.store {
+        crate::task_index::StoreKind::Worktree => crate::state::checkout_root(&entry.checkout)?
+            .join("repos")
+            .join(&entry.repo_identity)
+            .join("tasks")
+            .join(&entry.task_id),
+        crate::task_index::StoreKind::Headless => {
+            let repo = crate::git::discover(&entry.checkout)?;
+            if repo.identity() != entry.repo_identity {
+                bail!("task index repository identity mismatch");
+            }
+            crate::headless::lookup(&repo, &entry.task_id)?
+        }
+    };
+    if !dir.exists() {
+        bail!(
+            "the task index records task {} at {}, but its task directory {} no longer exists; the \
+             entry is stale.",
+            display_safe(&crate::task_ref::display(&entry.task_id)),
+            display_path(&entry.checkout),
+            display_path(&dir)
+        );
+    }
+    let record = task::load(&dir).map_err(|e| {
+        Error::new(format!(
+            "task {} has an unreadable record at {}: {}\nThe task index records its checkout as \
+             {}.",
+            display_safe(&crate::task_ref::display(&entry.task_id)),
+            display_path(&dir),
+            strip_record_path(&e.to_string(), &dir),
+            display_path(&entry.checkout)
+        ))
+    })?;
+    let hostile = match entry.store {
+        crate::task_index::StoreKind::Worktree => {
+            record.task_id != entry.task_id
+                || record.repo_identity != entry.repo_identity
+                || record.worktree.canonicalize().ok() != entry.checkout.canonicalize().ok()
+        }
+        crate::task_index::StoreKind::Headless => {
+            record.task_id != entry.task_id || record.repo_identity != entry.repo_identity
+        }
+    };
+    if hostile {
+        bail!(
+            "the task index records task {} at checkout {}, but the record ahu found there \
+             describes a different task. Nothing was done; re-check the task id.",
+            display_safe(&crate::task_ref::display(&entry.task_id)),
+            display_path(&entry.checkout)
+        );
+    }
+    Ok((dir, record))
+}
+
+/// Resolve exact IDs before unique prefixes, including unreadable candidates.
+/// The task index is consulted for ids that are not local records, so a task is
+/// reachable from any checkout of the repository that launched it.
+fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
+    let id = crate::task_ref::resolve(repo, input)?;
+    // Inspection needs no live cmux connection and does not rewrite records.
+    let listing = task::list(repo)?;
+    if let Some((dir, record)) = listing.records.iter().find(|(_, r)| r.task_id == id) {
+        return Ok(Located::Listing(dir.clone(), record.clone()));
+    }
+    if let Some(blocked) = listing.unreadable.iter().find(|u| u.task_id == id) {
+        return Ok(Located::Unreadable(blocked.clone()));
+    }
+    let unreadable_in_repo = listing.unreadable.len();
+    let records: Vec<_> = listing
+        .records
+        .into_iter()
+        .filter(|(_, r)| r.task_id.starts_with(&id))
+        .collect();
+    let unreadable: Vec<task::UnreadableTask> = listing
+        .unreadable
+        .into_iter()
+        .filter(|u| u.task_id.starts_with(&id))
+        .collect();
+    let entries = if task::is_canonical_task_uuid(&id) {
+        match crate::task_index::lookup_in(repo, &id)? {
+            Some(entry) => {
+                let (dir, record) = load_indexed_task(&entry)?;
+                return Ok(Located::Pointer(entry, dir, record));
+            }
+            None => Vec::new(),
+        }
+    } else {
+        let mut entries = crate::task_index::lookup_prefix_in(repo, &id)?;
+        entries.retain(|e| {
+            !records.iter().any(|(_, r)| r.task_id == e.task_id)
+                && !unreadable.iter().any(|u| u.task_id == e.task_id)
+        });
+        entries
+    };
+    let total = records.len() + unreadable.len() + entries.len();
+    if total > 1 {
+        let mut message = format!(
+            "ambiguous task id {input:?}: it matches {total} tasks; use a full task id from \
+             `ahu tasks`.\n"
+        );
+        for (dir, _) in &records {
+            message.push_str(&format!("  record at {}\n", display_path(dir)));
+        }
+        for blocked in &unreadable {
+            message.push_str(&format!(
+                "  unreadable record at {}\n",
+                display_path(&blocked.dir)
+            ));
+        }
+        for entry in &entries {
+            message.push_str(&format!(
+                "  task index entry at {}\n",
+                display_path(&entry.checkout)
+            ));
+        }
+        return Err(Error::new(message).with_kind(crate::util::ErrorKind::Usage));
+    }
+    if let Some((dir, record)) = records.first() {
+        return Ok(Located::Listing(dir.clone(), record.clone()));
+    }
+    if let Some(blocked) = unreadable.first() {
+        return Ok(Located::Unreadable(blocked.clone()));
+    }
+    if let Some(entry) = entries.first() {
+        let (dir, record) = load_indexed_task(entry)?;
+        return Ok(Located::Pointer(entry.clone(), dir, record));
+    }
+    Ok(Located::NoMatch { unreadable_in_repo })
+}
+
+/// Resolve exact IDs before unique prefixes, including unreadable candidates.
+pub(crate) fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
+    let normalized = crate::task_ref::resolve(repo, id)?;
+    let id: &str = &normalized;
     // Inspection needs no live cmux connection and does not rewrite records.
     let listing = task::list(repo)?;
     let exact = listing.records.iter().any(|(_, r)| r.task_id == id)
@@ -599,49 +961,338 @@ fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
     })
 }
 
+pub fn task_summary(
+    dir: &Path,
+    record: &task::TaskRecord,
+    workspaces: Option<&BTreeMap<String, cmux::WorkspaceInfo>>,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::json!({
+        "schema_version": 1,
+        "task_id": record.task_id,
+        "task_ref": crate::task_ref::display(&record.task_id),
+        "task_handle": crate::task_handles::at(dir, &record.task_id),
+        "repo_identity": record.repo_identity,
+        "agent": record.agent_label(),
+        "harness": record.identity.harness,
+        "model": record.identity.model,
+        "branch": record.branch,
+        "base_commit": record.base_commit,
+        "worktree": record.worktree,
+        "worktree_exists": record.worktree.is_dir(),
+        "record_path": dir.join("task.json"),
+        "cmux_workspace_id": record.cmux_workspace_id,
+        "cmux_window_id": record.cmux_window_id,
+        "session_state": record.state.as_str(),
+        "state_source": "record",
+        "liveness": task::observed_liveness(session_owner(dir, record, workspaces)).as_str(),
+        "completion_verified": false,
+        "harness_executable": record.harness_executable,
+    });
+    value["execution_backend"] = if crate::headless::review::is_headless(dir) {
+        "headless".into()
+    } else {
+        "cmux".into()
+    };
+    if crate::headless::review::is_headless(dir) {
+        value["attempt"] = crate::headless::inspection(dir)?;
+        value["liveness"] = value["attempt"]["liveness"].clone();
+    }
+    Ok(value)
+}
+
 /// A small, versioned inspection contract; never expose the full launch record.
 pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) -> Result<i32> {
-    let (dir, record) = inspect_task(repo, id)?;
+    let (dir, record) = match resolve_task(repo, id)? {
+        Located::Listing(dir, record) | Located::Pointer(_, dir, record) => (dir, record),
+        Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
+        Located::NoMatch { .. } => {
+            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {id:?}.")
+        }
+    };
+    let workspaces = if cmux_liveness_needed(&dir, &record) {
+        cmux_workspaces()
+    } else {
+        None
+    };
+    let value = task_summary(&dir, &record, workspaces.as_ref())?;
     if json {
-        let value = serde_json::json!({
-            "schema_version": 1,
-            "task_id": record.task_id,
-            "agent": record.agent_label(),
-            "harness": record.identity.harness,
-            "model": record.identity.model,
-            "branch": record.branch,
-            "base_commit": record.base_commit,
-            "worktree": record.worktree,
-            "worktree_exists": record.worktree.is_dir(),
-            "record_path": dir.join("task.json"),
-            "cmux_workspace_id": record.cmux_workspace_id,
-            "cmux_window_id": record.cmux_window_id,
-            "session_state": record.state.as_str(),
-            "state_source": "record",
-            "completion_verified": false,
-        });
         console.say(&format!("{}\n", serde_json::to_string(&value)?))?;
     } else {
         console.say(&format!(
-            "{} [session {}]\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  base      {}\n  worktree  {}\n  exists    {}\n  record    {}\n  cmux      {}\n\nState is recorded, not a live activity check. Task completion is not verified.\n",
-            display_safe(&record.task_id), record.state.as_str(), display_safe(&record.agent_label()),
+            "{} [session {}]\n  backend   {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  base      {}\n  worktree  {}\n  exists    {}\n  record    {}\n  liveness  {}\n\nState is recorded, not a live activity check. Task completion is not verified. Liveness is observed at this moment, not a verdict; `unknown` means ahu could not read the signal.\n",
+            display_safe(&crate::task_handles::label(repo, &record.task_id)), record.state.as_str(), value["execution_backend"].as_str().unwrap_or("unknown"), display_safe(&record.agent_label()),
             display_safe(&record.identity.harness), display_safe(&record.identity.model),
             display_safe(&record.branch), display_safe(record.base_commit.as_deref().unwrap_or("unknown")),
             display_path(&record.worktree), record.worktree.is_dir(), display_path(&dir.join("task.json")),
-            display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none")),
+            value["liveness"].as_str().unwrap_or("unknown"),
         ))?;
+        if value["execution_backend"] == "headless" {
+            console.say(&crate::headless::review::render(&value["attempt"], false))?;
+        } else {
+            console.say(&format!(
+                "  cmux      {}\n",
+                display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none"))
+            ))?;
+        }
+        if let Some(body) = read_artifact(&dir, "result.md") {
+            match body {
+                ArtifactBody::Content(body) => {
+                    console.say(&format!("\nresult:\n{body}\n"))?;
+                }
+                ArtifactBody::Oversized => {
+                    console.say(&style::stdout().paint(
+                        Role::Warning,
+                        &format!(
+                            "\n!! result.md is larger than the 1 MiB display bound; ahu will not \
+                             print it. Read it at {}.\n",
+                            display_path(&dir.join("result.md"))
+                        ),
+                    ))?;
+                }
+                ArtifactBody::Unreadable => {
+                    console.say(&style::stdout().paint(
+                        Role::Warning,
+                        &format!(
+                            "\n!! ahu cannot safely read result.md; inspect it at {}.\n",
+                            display_path(&dir.join("result.md"))
+                        ),
+                    ))?;
+                }
+            }
+        }
+        if let Some(body) = read_artifact(&dir, "question.md") {
+            match body {
+                ArtifactBody::Content(body) => {
+                    console.say(&format!("\nquestion:\n{body}\n"))?;
+                }
+                ArtifactBody::Oversized => {
+                    console.say(&style::stdout().paint(
+                        Role::Warning,
+                        &format!(
+                            "\n!! question.md is larger than the 1 MiB display bound; ahu will \
+                             not print it. Read it at {}.\n",
+                            display_path(&dir.join("question.md"))
+                        ),
+                    ))?;
+                }
+                ArtifactBody::Unreadable => {
+                    console.say(&style::stdout().paint(
+                        Role::Warning,
+                        &format!(
+                            "\n!! ahu cannot safely read question.md; inspect it at {}.\n",
+                            display_path(&dir.join("question.md"))
+                        ),
+                    ))?;
+                }
+            }
+        }
     }
     Ok(0)
+}
+
+/// The most inbox entries a task directory accepts.
+const INBOX_MAX_ENTRIES: usize = 100;
+
+/// The byte budget all inbox entries in one task directory share.
+const INBOX_MAX_TOTAL_BYTES: u64 = 1024 * 1024;
+
+/// The largest task artifact ahu will read back for display.
+const TASK_ARTIFACT_LIMIT: u64 = 1024 * 1024;
+
+/// `ahu message <task-id> <text>`
+///
+/// Appends an operator message to the task's inbox. Delivery is the
+/// operator's exclusive right: a worker session inherits the environment
+/// marker below and is refused, so a task cannot message itself or another
+/// task. The inbox is size-bounded and confined to the task directory.
+pub fn message_cmd(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    task_id: &str,
+    text: &str,
+) -> Result<i32> {
+    if std::env::var_os("AHU_WORKER_SESSION").is_some() {
+        bail!(
+            "ahu message is an operator command. Working agents cannot deliver inbox messages; \
+             delivery belongs to the operator or to a broker-bound child."
+        );
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        bail!(
+            kind: crate::util::ErrorKind::Usage,
+            "`ahu message` needs a task id and a message text."
+        );
+    }
+    let (dir, record) = match resolve_task(repo, task_id)? {
+        Located::Listing(dir, record) | Located::Pointer(_, dir, record) => (dir, record),
+        Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
+        Located::NoMatch { .. } => {
+            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
+        }
+    };
+    let entry = deliver_inbox_message(&dir, text)?;
+    console.say(&format!(
+        "delivered inbox message {entry:04} to task {}.\n",
+        display_safe(&crate::task_handles::label(repo, &record.task_id))
+    ))?;
+    Ok(0)
+}
+
+/// The number of a numbered inbox entry file, when its name is one ahu wrote.
+fn parse_inbox_entry(name: &str) -> Option<u64> {
+    let stem = name.strip_suffix(".md")?;
+    let digits = stem.strip_prefix('0')?;
+    let digits = digits.strip_prefix('0').unwrap_or(digits);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let number: u64 = digits.parse().ok()?;
+    if number < 1 {
+        return None;
+    }
+    Some(number)
+}
+
+/// Append one operator message to the task's inbox, enforcing its bounds.
+///
+/// The scan fails closed: an inbox entry ahu does not recognize, or one it
+/// cannot inspect safely, stops delivery instead of writing next to it.
+fn deliver_inbox_message(dir: &Path, text: &str) -> Result<usize> {
+    let inbox = dir.join("inbox");
+    crate::state::create_private_dir_all(&inbox)?;
+    let mut highest = 0u64;
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(&inbox).map_err(|e| {
+        Error::new(format!(
+            "cannot scan the task inbox at {}: {e}",
+            display_path(&inbox)
+        ))
+    })? {
+        let entry = entry.map_err(|e| {
+            Error::new(format!(
+                "cannot scan the task inbox at {}: {e}",
+                display_path(&inbox)
+            ))
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(number) = parse_inbox_entry(&name) else {
+            bail!(
+                "the task inbox at {} holds an unrecognized entry {name:?}; ahu will not write \
+                 next to it.",
+                display_path(&inbox)
+            );
+        };
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|e| {
+            Error::new(format!(
+                "cannot inspect the task inbox entry {} at {}: {e}",
+                display_path(&entry.path()),
+                display_path(&inbox)
+            ))
+        })?;
+        if !metadata.is_file() {
+            bail!(
+                "the task inbox at {} holds an entry {name:?} that is not a regular file; ahu \
+                 will not write next to it.",
+                display_path(&inbox)
+            );
+        }
+        total = total.saturating_add(metadata.len());
+        highest = highest.max(number);
+    }
+    let next = highest
+        .checked_add(1)
+        .ok_or_else(|| Error::new("the task inbox is full."))?;
+    if highest >= INBOX_MAX_ENTRIES as u64 {
+        bail!(
+            "the task inbox at {} is full ({INBOX_MAX_ENTRIES} entries); no message was written.",
+            display_path(&inbox)
+        );
+    }
+    let bytes = text.len() as u64;
+    if total.saturating_add(bytes) > INBOX_MAX_TOTAL_BYTES {
+        bail!(
+            "the task inbox at {} holds more than {} bytes already; no message was written.",
+            display_path(&inbox),
+            INBOX_MAX_TOTAL_BYTES
+        );
+    }
+    crate::state::write_private_file(&inbox.join(format!("{next:04}.md")), text.as_bytes())?;
+    Ok(next as usize)
+}
+
+/// `ahu tasks`: the question.md line for one task, when one is on record.
+fn question_excerpt(dir: &Path) -> Option<String> {
+    let path = dir.join("question.md");
+    if !path.exists() {
+        return None;
+    }
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(_) => return Some("present, unreadable".to_string()),
+    };
+    if body.len() as u64 > TASK_ARTIFACT_LIMIT {
+        return Some("present, larger than the display bound".to_string());
+    }
+    let text = String::from_utf8_lossy(&body);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Some("present, empty".to_string());
+    }
+    let first = trimmed.lines().next().unwrap_or("");
+    let mut line: String = first.chars().take(60).collect();
+    if first.chars().count() > 60 {
+        line.push('…');
+    }
+    Some(display_safe(&line))
+}
+
+/// A task artifact read back for display, with the bounds that allow it.
+enum ArtifactBody {
+    Content(String),
+    Oversized,
+    Unreadable,
+}
+
+/// Read result.md or question.md under the display bound, never trusting it.
+fn read_artifact(dir: &Path, file: &str) -> Option<ArtifactBody> {
+    let path = dir.join(file);
+    if !path.exists() {
+        return None;
+    }
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(_) => return Some(ArtifactBody::Unreadable),
+    };
+    if body.len() as u64 > TASK_ARTIFACT_LIMIT {
+        return Some(ArtifactBody::Oversized);
+    }
+    Some(ArtifactBody::Content(display_safe_block(
+        &String::from_utf8_lossy(&body),
+    )))
 }
 
 /// Compare the task checkout to its launch base without staging or running diff helpers.
 pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32> {
     use std::io::IsTerminal;
-    let (_, record) = inspect_task(repo, id)?;
+    let (dir, record, owner_identity, via_index) = match resolve_task(repo, id)? {
+        Located::Listing(dir, record) => (dir, record, repo.identity(), false),
+        Located::Pointer(entry, dir, record) => (dir, record, entry.repo_identity.clone(), true),
+        Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
+        Located::NoMatch { .. } => {
+            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {id:?}.")
+        }
+    };
     let task_repo = git::discover(&record.worktree)?;
-    if task_repo.identity() != repo.identity()
+    if task_repo.identity() != owner_identity
         || task_repo.root.canonicalize()? != record.worktree.canonicalize()?
     {
+        if via_index {
+            bail!(
+                "task worktree does not belong to the repository that launched it or is not a checkout root."
+            );
+        }
         bail!("task worktree does not belong to this repository or is not a checkout root.");
     }
     let base = record
@@ -670,10 +1321,30 @@ pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32>
         "--",
     ])?;
     let untracked = run(&["ls-files", "--others", "--exclude-standard", "-z"])?;
-    for path in untracked.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+    let untracked: Vec<String> = untracked
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| display_safe(&String::from_utf8_lossy(p)))
+        .collect();
+    for path in &untracked {
+        eprintln!("Untracked (not included in diff): {path}");
+    }
+    if patch.is_empty()
+        && untracked.is_empty()
+        && let Some(outside) = crate::headless::recorded_writes_outside_worktree(&dir)
+    {
         eprintln!(
-            "Untracked (not included in diff): {}",
-            display_safe(&String::from_utf8_lossy(path))
+            "No changes in the task worktree, but write tool calls in the recorded event stream targeted paths outside it:"
+        );
+        for path in outside.iter().take(3) {
+            eprintln!("  {}", display_safe(path));
+        }
+        if outside.len() > 3 {
+            eprintln!("... and {} more", outside.len() - 3);
+        }
+        eprintln!(
+            "Run `ahu result {}` for the full recorded list.",
+            display_safe(&crate::task_handles::reference(repo, &record.task_id))
         );
     }
     if std::io::stdout().is_terminal() {
@@ -687,38 +1358,32 @@ pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32>
 
 /// `ahu focus <task-id>`
 pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i32> {
-    let listing = task::list(repo)?;
-    let found = listing
-        .records
-        .iter()
-        .find(|(_, r)| r.task_id == task_id || r.task_id.starts_with(task_id));
-    let Some((_, record)) = found else {
-        // "no task matching" would be a claim that nothing here is that task.
-        // If a directory with that id exists and ahu simply could not read its
-        // record, saying so is the difference between a user looking for a
-        // typo and a user looking at a leftover worktree.
-        let unreadable: Vec<&task::UnreadableTask> = listing
-            .unreadable
-            .iter()
-            .filter(|u| u.task_id == task_id || u.task_id.starts_with(task_id))
-            .collect();
-        if let Some(blocked) = unreadable.first() {
+    let record = match resolve_task(repo, task_id)? {
+        Located::Listing(_, record) | Located::Pointer(_, _, record) => record,
+        Located::Unreadable(blocked) => {
+            // "no task matching" would be a claim that nothing here is that task.
+            // If a directory with that id exists and ahu simply could not read its
+            // record, saying so is the difference between a user looking for a
+            // typo and a user looking at a leftover worktree.
             bail!(
                 "task {} exists but ahu cannot read its record, so it cannot find its cmux \
                  session.\n{}\nThe record is at {}. Run `ahu tasks` for its worktree and branch.",
-                display_safe(&blocked.task_id),
+                display_safe(&crate::task_ref::display(&blocked.task_id)),
                 display_safe_block(&blocked.reason),
                 display_path(&blocked.dir)
             );
         }
-        if listing.unreadable.is_empty() {
-            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.");
+        Located::NoMatch {
+            unreadable_in_repo: 0,
+        } => {
+            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
         }
-        bail!(
-            "no readable task matching {task_id:?}. {} other task record(s) in this repository \
-             could not be read either; run `ahu tasks` to see them.",
-            listing.unreadable.len()
-        );
+        Located::NoMatch { unreadable_in_repo } => {
+            bail!(
+                "no readable task matching {task_id:?}. {unreadable_in_repo} other task record(s) \
+                 in this repository could not be read either; run `ahu tasks` to see them."
+            );
+        }
     };
     let Some(workspace) = record.cmux_workspace_id.as_deref() else {
         bail!("task {} has no recorded cmux session.", record.task_id);
@@ -731,6 +1396,180 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
         display_safe(&record.title),
         display_path(&record.worktree)
     ))?;
+    Ok(0)
+}
+
+/// `ahu remove <task-id>`
+///
+/// Removes a terminal task's record, worktree, and branch in one explicit
+/// action. Every gate runs before anything is removed: a live task is a
+/// cancellation, not a removal, and a dirty worktree or a branch holding
+/// unmerged commits keeps its work for review.
+pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i32> {
+    let (record_dir, record, owner_identity, via_index, gate_discovered) =
+        match resolve_task(repo, task_id)? {
+            Located::Listing(dir, record) => (dir, record, repo.identity(), false, None),
+            Located::Pointer(entry, dir, record) => {
+                let gate = git::discover(&entry.checkout).map_err(|e| {
+                    Error::new(format!(
+                        "the task index records task {} at {}, but that checkout cannot be \
+                     inspected: {e}\nNothing was removed.",
+                        display_safe(&crate::task_ref::display(&entry.task_id)),
+                        display_path(&entry.checkout)
+                    ))
+                })?;
+                (dir, record, entry.repo_identity.clone(), true, Some(gate))
+            }
+            Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
+            Located::NoMatch { .. } => {
+                bail!(kind: crate::util::ErrorKind::Usage, "no task matching {task_id:?}.")
+            }
+        };
+    let gate: &Repo = gate_discovered.as_ref().unwrap_or(repo);
+    if record.state.is_live() {
+        bail!(
+            "task {} is {} — not a terminal state; nothing was removed.\n\
+             Stop it with `ahu cancel {}` first; removal only takes tasks that have finished.",
+            display_safe(task_id),
+            record.state.as_str(),
+            display_safe(task_id)
+        );
+    }
+    let worktree_present = record.worktree.is_dir();
+    let branch_present = git::branch_exists(gate, &record.branch)?;
+    if worktree_present {
+        let discovered = git::discover(&record.worktree).map_err(|e| {
+            Error::new(format!(
+                "the task worktree {} cannot be inspected: {e}\n\
+                 Nothing was removed.",
+                display_path(&record.worktree)
+            ))
+        })?;
+        if discovered.identity() != owner_identity
+            || discovered.root.canonicalize()? != record.worktree.canonicalize()?
+        {
+            if via_index {
+                bail!(
+                    "task worktree does not belong to the repository that launched it or is not a checkout root."
+                );
+            }
+            bail!("task worktree does not belong to this repository or is not a checkout root.");
+        }
+        if discovered.root.canonicalize()? == repo.root.canonicalize()? {
+            bail!(
+                "this command is running inside the worktree being removed. Run `ahu remove {}` \
+                 from another checkout of the repository.",
+                display_safe(task_id)
+            );
+        }
+        if let Err(e) = git::is_dirty(&discovered) {
+            bail!(
+                "cannot tell whether the worktree for task {} is clean: {e}\n\
+                 Nothing was removed.",
+                display_safe(task_id)
+            );
+        }
+        if git::is_dirty(&discovered)? {
+            bail!(
+                "the worktree for task {} has uncommitted changes; nothing was removed.\n\
+                 Uncommitted changes are reviewable work. Inspect {}, commit or discard what you \
+                 find there, then run `ahu remove {}` again.",
+                display_safe(task_id),
+                display_path(&record.worktree),
+                display_safe(task_id)
+            );
+        }
+    }
+    if branch_present && !git::branch_merged_into_primary_head(gate, &record.branch)? {
+        bail!(
+            "branch {} has commits that are not in the primary checkout's current branch; nothing \
+             was removed.\n\
+             Removal never deletes work that exists only on that branch. Merge or apply it first, \
+             then run `ahu remove {}` again.",
+            display_safe(&record.branch),
+            display_safe(task_id)
+        );
+    }
+    // The branch deletion runs from the primary checkout, which must be
+    // resolved while the task's own worktree still exists: `primary_root`
+    // asks Git to run from `gate`'s root, and below this point that root may
+    // be the worktree being removed.
+    let branch_checkout = if branch_present {
+        Some(gate.primary_root()?)
+    } else {
+        None
+    };
+    let mut completed: Vec<(&str, String)> = Vec::new();
+    let mut not_removed: Vec<(&str, String)> = Vec::new();
+    let mut worktree_removed = false;
+    if worktree_present {
+        match git::remove_task_worktree(gate, &record.worktree) {
+            Ok(()) => {
+                completed.push(("worktree", "removed".to_string()));
+                worktree_removed = true;
+            }
+            Err(e) => not_removed.push(("worktree", format!("{e}"))),
+        }
+    } else {
+        completed.push(("worktree", "already absent".to_string()));
+    }
+    if record_dir.exists() {
+        let record_result = crate::state::confine_existing_dir(&record_dir)
+            .and_then(|()| std::fs::remove_dir_all(&record_dir).map_err(Error::from));
+        match record_result {
+            Ok(()) => completed.push(("record", "removed".to_string())),
+            Err(e) => not_removed.push(("record", format!("{e}"))),
+        }
+    } else if worktree_removed {
+        completed.push(("record", "removed with its worktree".to_string()));
+    } else {
+        completed.push(("record", "already absent".to_string()));
+    }
+    if let Some(primary) = &branch_checkout {
+        match git::delete_task_branch(primary, &record.branch) {
+            Ok(()) => completed.push(("branch", "deleted".to_string())),
+            Err(e) => not_removed.push(("branch", format!("{e}"))),
+        }
+    } else {
+        completed.push(("branch", "already absent".to_string()));
+    }
+    if !not_removed.is_empty() {
+        let mut message = format!(
+            "task {} was only partly removed.\n\
+             Completed:\n",
+            display_safe(task_id)
+        );
+        for (label, status) in &completed {
+            message.push_str(&format!("  {label:<8}  {status}\n"));
+        }
+        message.push_str("Not removed:\n");
+        for (label, status) in &not_removed {
+            message.push_str(&format!("  {label:<8}  {status}\n"));
+        }
+        if record_dir.exists() {
+            message.push_str(&format!(
+                "Fix the problem, then run `ahu remove {}` again.",
+                display_safe(task_id)
+            ));
+        } else {
+            message.push_str(
+                "Delete the branch yourself once you are sure its commits are not needed.",
+            );
+        }
+        bail!("{message}");
+    }
+    if let Err(e) = crate::task_index::remove_in(repo, &record.task_id) {
+        eprintln!(
+            "warning: could not remove the task index entry for {}: {e}",
+            display_safe(&crate::task_handles::label(repo, &record.task_id))
+        );
+    }
+    let mut said = format!("removed task {}\n", display_safe(task_id));
+    said.push_str(&format!(
+        "  worktree  {}\n  branch    {}\n  record    {}\n",
+        completed[0].1, completed[2].1, completed[1].1
+    ));
+    console.say(&said)?;
     Ok(0)
 }
 
@@ -804,15 +1643,14 @@ pub fn hygiene_cmd(
         .as_ref()
         .map(|a| a.label())
         .unwrap_or_else(|| "auto".to_string());
-    let identity = repo.identity();
-    let review_state = hygiene::load_state(&identity)?;
+    let review_state = hygiene::load_state(repo)?;
     let review = hygiene::review(&key, &built, &enforcement, &loaded, &review_state);
     console.say(&hygiene::render(
         &review,
         hygiene::Trigger::Requested,
         &loaded,
     ))?;
-    hygiene::record_review(&identity, &key)?;
+    hygiene::record_review(repo, &key)?;
     Ok(0)
 }
 
@@ -841,20 +1679,123 @@ pub fn knowledge_lint(console: &mut Console<'_>, repo: &Repo, json: bool) -> Res
     ))
 }
 
+/// `ahu cancel <task-id>` — request cancellation of a running task.
+///
+/// A headless task is delegated to the headless supervisor's cancel flow
+/// unchanged. An interactive (cmux) task is stopped by its run-task parent,
+/// which owns the harness process tree. Confirmed cancellation closes the
+/// recorded cmux workspace; an unconfirmed request leaves it open. The worktree,
+/// branch and record are never deleted.
+pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
+    let (dir, record) = inspect_task(repo, id)?;
+    if dir.join("headless.json").exists() {
+        return crate::headless::control(repo, "cancel", &record.task_id, None, json_output);
+    }
+    if !record.state.is_live() {
+        eprintln!(
+            "ahu: task {} is recorded as terminal ({}); no new cancellation was requested. The worktree, \
+             branch and record are kept.",
+            record.task_id,
+            record.state.as_str()
+        );
+        return crate::headless::emit(
+            &serde_json::json!({
+                    "schema_version": 1,
+                    "task_id": record.task_id,
+            "task_ref": crate::task_ref::display(&record.task_id),
+                    "cancellation": "already-terminal",
+                    "state": record.state.as_str(),
+                    "workspace": "left open",
+                    "retention": "the worktree, branch and record are kept",
+                }),
+            json_output,
+        )
+        .map(|()| 0);
+    }
+
+    // The run-task parent supervises this directory and does the terminating;
+    // this request is the only signal it needs.
+    let request = serde_json::json!({
+        "requested_at": task::now_rfc3339(),
+        "reason": "cancelled",
+    });
+    crate::state::write_private_file(
+        &dir.join("cancel.json"),
+        serde_json::to_string(&request)
+            .unwrap_or_default()
+            .as_bytes(),
+    )?;
+
+    let mut cancellation = "requested-unconfirmed";
+    let mut state = record.state;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match task::load(&dir) {
+            Ok(current) if !current.state.is_live() => {
+                state = current.state;
+                if state == task::TaskState::Cancelled {
+                    cancellation = "confirmed";
+                } else {
+                    cancellation = "finished-on-its-own";
+                }
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Only the spawning supervisor can confirm termination. A timeout or a
+    // read failure preserves the pane; closing it is not process supervision.
+    let workspace = match record.cmux_workspace_id.as_deref() {
+        None => "absent",
+        Some(workspace_id) if cancellation == "confirmed" => {
+            Cmux::discover()
+                .and_then(|client| client.close_workspace(workspace_id))
+                .map_err(|error| {
+                    crate::util::Error::new(format!(
+                        "cancellation confirmed, but cmux workspace close failed: {error}"
+                    ))
+                })?;
+            "closed"
+        }
+        Some(_) => "left open",
+    };
+
+    crate::headless::emit(
+        &serde_json::json!({
+            "schema_version": 1,
+            "task_id": record.task_id,
+            "task_ref": crate::task_ref::display(&record.task_id),
+            "cancellation": cancellation,
+            "state": state.as_str(),
+            "workspace": workspace,
+            "retention": "the worktree, branch and record are kept",
+        }),
+        json_output,
+    )?;
+    Ok(0)
+}
+
 /// `ahu run-task --task-dir <dir>` — the fixed entrypoint cmux starts.
 pub fn run_task(task_dir: &Path) -> Result<i32> {
-    let status = launch::run_task(task_dir)?;
-    if status.success() {
-        Ok(0)
-    } else {
-        Err(crate::util::Error::new(format!(
+    match launch::run_task(task_dir)? {
+        launch::HarnessOutcome::Exited(status) if status.success() => Ok(0),
+        launch::HarnessOutcome::Exited(status) => Err(crate::util::Error::new(format!(
             "the harness exited unsuccessfully ({status})."
-        )))
+        ))),
+        // The harness was terminated on request; the pane reports the
+        // cancellation itself rather than an unsuccessful exit.
+        launch::HarnessOutcome::Cancelled => Ok(1),
     }
 }
 
 /// Resolve a launch identity from an optional `@name`.
-fn resolve_identity(
+pub(crate) fn resolve_identity(
     repo: &Repo,
     loaded: &LoadedConfig,
     agent_name: Option<&str>,
@@ -1026,10 +1967,62 @@ fn submit(
     let mut plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
     plan.apply_display(display)?;
 
+    preflight(console, repo, loaded, &plan, prompt, dry_run)?;
+
+    // Generated here, after the prompt has been read and after the plan is
+    // built, so nothing in the prompt can have contained it.
+    let code = confirmation_code()?;
+    if dry_run {
+        console.say(&render_preview(
+            repo,
+            &plan,
+            prompt,
+            confirm.then_some(code.as_str()),
+        ))?;
+    } else {
+        console.say(&render_launch_preview(
+            repo,
+            &plan,
+            prompt,
+            confirm.then_some(code.as_str()),
+        ))?;
+    }
+
+    if dry_run {
+        console.say("Dry run. No task or session was created.\n")?;
+        if output_json {
+            println!("{}", launch::render_json(&plan, prompt)?);
+        }
+        return Ok(0);
+    }
+    if confirm && !launcher::confirm_submit(console, &code)? {
+        console.say("Cancelled. No worktree, branch, or session was created.\n")?;
+        return Ok(1);
+    }
+
+    let launched = launch::execute(repo, loaded, &plan, prompt, focus_new)?;
+    console.say(&format!(
+        "\nStarted @{} in cmux.\n  task       {}\n  worktree   {}\n\nOpen session: ahu focus {}\nList tasks:   ahu tasks\n",
+        display_safe(&launched.record.identity.agent),
+        display_safe(&crate::task_handles::label(repo, &launched.record.task_id)),
+        display_path(launched.record.worktree.strip_prefix(&repo.root).unwrap_or(&launched.record.worktree)),
+        display_safe(&crate::task_handles::reference(repo, &launched.record.task_id)),
+    ))?;
+    console.say(&style::stdout().paint(Role::Warning, &render_launch_notes(&launched.notes)))?;
+    Ok(0)
+}
+
+pub(crate) fn preflight(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    loaded: &LoadedConfig,
+    plan: &launch::LaunchPlan,
+    prompt: &str,
+    dry_run: bool,
+) -> Result<()> {
     // First-load and overdue context hygiene review, before submission.
-    let identity = repo.identity();
     let key = plan.agent_label();
-    let review_state = hygiene::load_state(&identity)?;
+    let review_state = hygiene::load_state(repo)?;
     let trigger = hygiene::due(loaded, &review_state, &key);
     if trigger != hygiene::Trigger::NotDue {
         let built = inventory::build(&inventory::Subject {
@@ -1047,7 +2040,7 @@ fn submit(
         console.say("\n")?;
         console.say(&hygiene::render(&review, trigger, loaded))?;
         if !dry_run {
-            hygiene::record_review(&identity, &key)?;
+            hygiene::record_review(repo, &key)?;
         }
     }
 
@@ -1084,47 +2077,7 @@ fn submit(
         console.say(&style::stdout().paint(Role::Drift, &drift::render(&found)))?;
     }
 
-    // Generated here, after the prompt has been read and after the plan is
-    // built, so nothing in the prompt can have contained it.
-    let code = confirmation_code();
-    if dry_run {
-        console.say(&render_preview(
-            repo,
-            &plan,
-            prompt,
-            confirm.then_some(code.as_str()),
-        ))?;
-    } else {
-        console.say(&render_launch_preview(
-            repo,
-            &plan,
-            prompt,
-            confirm.then_some(code.as_str()),
-        ))?;
-    }
-
-    if dry_run {
-        console.say("Dry run. No task or session was created.\n")?;
-        if output_json {
-            println!("{}", launch::render_json(&plan, prompt)?);
-        }
-        return Ok(0);
-    }
-    if confirm && !launcher::confirm_submit(console, &code)? {
-        console.say("Cancelled. No worktree, branch, or session was created.\n")?;
-        return Ok(1);
-    }
-
-    let launched = launch::execute(repo, loaded, &plan, prompt, focus_new)?;
-    console.say(&format!(
-        "\nStarted @{} in cmux.\n  task       {}\n  worktree   {}\n\nOpen session: ahu focus {}\nList tasks:   ahu tasks\n",
-        display_safe(&launched.record.identity.agent),
-        display_safe(&launched.record.task_id),
-        display_path(launched.record.worktree.strip_prefix(&repo.root).unwrap_or(&launched.record.worktree)),
-        display_safe(&launched.record.task_id),
-    ))?;
-    console.say(&style::stdout().paint(Role::Warning, &render_launch_notes(&launched.notes)))?;
-    Ok(0)
+    Ok(())
 }
 
 /// The normal launch view contains decisions and next actions. Full audit
@@ -1213,6 +2166,7 @@ pub fn render_launch_preview(
             ),
         ));
     }
+    out.push_str(&cmux::integration::render_summary(&plan.cmux_integration));
     out
 }
 
@@ -1250,8 +2204,8 @@ pub fn render_launch_notes(notes: &[String]) -> String {
 ///
 /// Six hex characters: enough that a prompt written before the launch cannot
 /// contain it, short enough to retype.
-fn confirmation_code() -> String {
-    crate::orchestration::new_nonce()[..6].to_string()
+fn confirmation_code() -> Result<String> {
+    Ok(crate::orchestration::new_nonce()?[..6].to_string())
 }
 
 /// The submission preview: identity, Git effects, and every warning.
@@ -1319,7 +2273,13 @@ pub fn render_preview(
         out.push_str(&format!(
             "             instructions digest {} ({})\n",
             &agent.instructions_digest[..12],
-            if agent.manifest.source.format.has_frontmatter() {
+            if agent
+                .manifest
+                .source
+                .as_ref()
+                .map(|s| s.format.has_frontmatter())
+                .unwrap_or(true)
+            {
                 "the body ahu delivers, YAML frontmatter read as metadata and not delivered"
             } else {
                 "the text ahu delivers; this format has no frontmatter, so it is the whole file"
@@ -1467,6 +2427,7 @@ pub fn render_preview(
         ));
         out.push_str("It was generated after your prompt was read, so no pasted text can have supplied it.\n");
     }
+    out.push_str(&cmux::integration::render(&plan.cmux_integration));
     out
 }
 

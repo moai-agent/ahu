@@ -31,7 +31,7 @@ are refused. The executable resolver excludes repository-local programs. The
 validator receives arguments directly, without shell interpretation.[^knowledge]
 
 For every bundle, `validate` runs before `lint`. ahu requires the OKF 0.5 JSON
-report contract and checks fields, counts, command identity and exit status.
+report contract and checks fields, counts, command identity, and exit status.
 Findings are combined and deduplicated. Errors fail the check; warnings fail only
 when `knowledge.fail_on_warnings` is true. Human output escapes validator-derived
 text; schema 1 JSON preserves the underlying values through JSON escaping.
