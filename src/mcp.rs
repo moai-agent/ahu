@@ -250,17 +250,31 @@ pub fn setup(repo: &Repo) -> Result<i32> {
             &format!(".agents/skills/{name}/SKILL.md"),
             true,
         )?;
-        if let Ok(existing) = std::fs::read_to_string(&path) {
-            if existing != content {
+        match std::fs::read(&path) {
+            Ok(existing) => {
+                if existing != content.as_bytes() {
+                    return Err(Error::new(format!(
+                        "refusing to overwrite changed skill {}",
+                        path.display()
+                    )));
+                }
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
                 return Err(Error::new(format!(
-                    "refusing to overwrite changed skill {}",
+                    "cannot read skill {}: {error}",
                     path.display()
                 )));
             }
-            continue;
         }
         std::fs::create_dir_all(path.parent().expect("skill path has parent"))?;
-        std::fs::write(&path, content)?;
+        // A skill created since the read must not be truncated either.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(content.as_bytes())?;
         println!("Wrote {}", path.display());
     }
     Ok(0)

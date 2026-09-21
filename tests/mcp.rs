@@ -68,6 +68,27 @@ fn setup_refuses_to_write_through_a_skills_symlink() {
 }
 
 #[test]
+fn setup_preserves_existing_non_utf8_skill_bytes() {
+    let repo = common::TestRepo::new();
+    let path = repo
+        .path()
+        .join(".agents/skills/discover-requirements/SKILL.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = b"local skill\n\xff\xfe";
+    std::fs::write(&path, original).unwrap();
+    let output = common::ahu()
+        .args(["mcp", "setup"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("refusing to overwrite changed skill")
+    );
+}
+
+#[test]
 fn setup_materializes_the_bundled_skill_trees_without_overwriting_changes() {
     let repo = common::TestRepo::new();
     let output = common::ahu()
@@ -81,6 +102,14 @@ fn setup_materializes_the_bundled_skill_trees_without_overwriting_changes() {
     assert!(agents.contains("# Discover requirements"));
     let hygiene = repo.read(".agents/skills/context-hygiene/SKILL.md");
     assert!(hygiene.contains("# Context hygiene"), "{hygiene}");
+
+    let repeated = common::ahu()
+        .args(["mcp", "setup"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(repeated.status.success());
+    assert!(repeated.stdout.is_empty());
 
     repo.write(
         ".agents/skills/discover-requirements/SKILL.md",
