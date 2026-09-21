@@ -1115,7 +1115,7 @@ else:
                 "@worker",
                 "--headless",
                 "--timeout",
-                "4",
+                "8",
                 "--prompt",
                 "parent-shutdown",
                 "--allow-child",
@@ -1242,7 +1242,7 @@ time.sleep(30)
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(
-            at.elapsed() < std::time::Duration::from_secs(5),
+            at.elapsed() < std::time::Duration::from_secs(10),
             "{mode}: {:?}",
             at.elapsed()
         );

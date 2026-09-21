@@ -96,6 +96,11 @@ delivery path while installed harnesses lack verified native Skills-over-MCP
 support; the bundle can move to an independent repository later without
 changing the MCP task boundary.
 
+Setup is additive and ordered. It refuses to overwrite a changed existing file;
+if a later bundled skill differs, earlier skills may already have been written
+before the command reports the refusal. Setup never removes skills that are no
+longer bundled, so removal remains an explicit repository edit.
+
 The canonical tree follows a strict contract so every harness can load it: one
 directory per skill directly under `.agents/skills/`, named after the skill,
 holding exactly one `SKILL.md`. The frontmatter carries only the portable keys

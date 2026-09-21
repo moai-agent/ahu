@@ -481,6 +481,12 @@ fn personal_sources(harness: &str) -> Vec<(PathBuf, Category, &'static str, &'st
         }
         "opencode" => {
             found.push((
+                home.join(".agents/skills"),
+                Category::Skill,
+                "user",
+                "personal canonical skills; OpenCode can discover these in every project on this machine",
+            ));
+            found.push((
                 home.join(".config/opencode/opencode.json"),
                 Category::PersonalInstructions,
                 "user",
@@ -554,6 +560,12 @@ fn personal_sources(harness: &str) -> Vec<(PathBuf, Category, &'static str, &'st
             ));
         }
         "codex" => {
+            found.push((
+                home.join(".agents/skills"),
+                Category::Skill,
+                "user",
+                "personal canonical skills; Codex can discover these in every project on this machine",
+            ));
             found.push((
                 home.join(".codex/config.toml"),
                 Category::PersonalInstructions,

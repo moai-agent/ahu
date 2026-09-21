@@ -38,7 +38,7 @@ jobs:
       - name: Install pinned Rust and components
         # Reads rust-toolchain.toml; fresh runners may fetch tools/dependencies.
         run: rustup toolchain install --no-self-update
-      - name: Check repository skill copies
+      - name: Check canonical repository skills
         run: python3 scripts/check-skills.py
       - name: Check formatting
         run: cargo fmt --check

@@ -1,6 +1,6 @@
 [package]
 name = "ahu"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "The moai-agent command-line interface"
 repository = "https://github.com/moai-agent/ahu"
