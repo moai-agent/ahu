@@ -47,6 +47,23 @@ fn stdio_server_negotiates_and_lists_repository_agents_and_tasks() {
 }
 
 #[test]
+fn setup_refuses_to_write_through_a_skills_symlink() {
+    let repo = common::TestRepo::new();
+    let external = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(repo.path().join(".agents")).unwrap();
+    std::os::unix::fs::symlink(external.path(), repo.path().join(".agents/skills")).unwrap();
+    let output = common::ahu()
+        .args(["mcp", "setup"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("refusing to act through a symlink"), "{}", stderr);
+    assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn setup_materializes_the_bundled_skill_trees_without_overwriting_changes() {
     let repo = common::TestRepo::new();
     let output = common::ahu()
