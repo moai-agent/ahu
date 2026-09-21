@@ -231,15 +231,10 @@ fn task_get(repo: &Repo, arguments: &Value) -> Result<Value> {
         .get("task")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::new("ahu_task_get requires arguments.task"))?;
-    let id = crate::task_ref::resolve(repo, input)?;
+    let (dir, record) = crate::commands::inspect_task(repo, input)?;
     let listing = crate::task::list(repo)?;
-    let (dir, record) = listing
-        .records
-        .iter()
-        .find(|(_, record)| record.task_id == id)
-        .ok_or_else(|| Error::new(format!("no task matching {input:?}")))?;
     let workspaces = crate::commands::liveness_workspaces(&listing.records);
-    crate::commands::task_summary(dir, record, workspaces.as_ref())
+    crate::commands::task_summary(&dir, &record, workspaces.as_ref())
 }
 
 /// Copy the bundled skill set into a repository for review and commit.

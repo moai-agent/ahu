@@ -926,7 +926,7 @@ fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
 }
 
 /// Resolve exact IDs before unique prefixes, including unreadable candidates.
-fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
+pub(crate) fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
     let normalized = crate::task_ref::resolve(repo, id)?;
     let id: &str = &normalized;
     // Inspection needs no live cmux connection and does not rewrite records.
