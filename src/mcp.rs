@@ -245,7 +245,11 @@ fn task_get(repo: &Repo, arguments: &Value) -> Result<Value> {
 /// Copy the bundled skill set into a repository for review and commit.
 pub fn setup(repo: &Repo) -> Result<i32> {
     for &(name, content) in BUNDLED_SKILLS {
-        let path = crate::util::resolve_within(&repo.root, &format!(".agents/skills/{name}/SKILL.md"), true)?;
+        let path = crate::util::resolve_within(
+            &repo.root,
+            &format!(".agents/skills/{name}/SKILL.md"),
+            true,
+        )?;
         if let Ok(existing) = std::fs::read_to_string(&path) {
             if existing != content {
                 return Err(Error::new(format!(

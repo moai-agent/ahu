@@ -59,7 +59,11 @@ fn setup_refuses_to_write_through_a_skills_symlink() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("refusing to act through a symlink"), "{}", stderr);
+    assert!(
+        stderr.contains("refusing to act through a symlink"),
+        "{}",
+        stderr
+    );
     assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
 }
 
