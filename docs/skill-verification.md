@@ -2,14 +2,14 @@
 
 [Back to README](../README.md). This page records how to verify, for each
 supported harness, whether skills in the canonical `.agents/skills/` tree are
-discovered and invocable, and what this repository observed when it ran those
+discovered and can be invoked, and what this repository observed when it ran those
 probes. It exists so the portability claims about the canonical tree stay tied
 to reproducible commands and recorded evidence instead of assumptions.
 
 `scripts/check-skills.py` verifies the tree contract deterministically in CI.
-The probes below verify the other half — that a specific installed harness
-actually discovers and invokes those files — which requires the harness CLI and
-its credentials, so they run on demand rather than in CI.
+The probes below verify the other half: that a specific installed harness
+actually discovers and invokes those files; this requires the harness CLI and
+its credentials. They run on demand rather than in CI.
 
 ## Fixture
 
@@ -52,7 +52,7 @@ Piping the output to a parser is unreliable; redirect to a file first. To probe
 invocation, start `opencode`, ask it to use the probe skill, and check for
 `PROBE_SKILL_OK`.
 
-Observed (opencode 1.18.31): `opencode debug skill` lists skills from
+Observed (OpenCode 1.18.31): `opencode debug skill` lists skills from
 `.agents/skills/`, including all four canonical repository skills at
 `.agents/skills/<name>/SKILL.md`, and live in-session invocation followed the
 listed skills. OpenCode discovers `.agents/skills/` natively.
@@ -73,17 +73,17 @@ cd "$fixture" && codex exec --sandbox read-only \
   "Use the probe-skill skill, follow its instructions exactly, and output only what it requires."
 ```
 
-Observed (codex-cli 0.155.1): `codex debug prompt-input` reported the skill roots
+Observed (Codex CLI 0.155.1): `codex debug prompt-input` reported the skill roots
 `~/.codex/skills/.system` and the fixture's `.agents/skills`, and listed
 `probe-skill` from the fixture root; the invocation probe answered
 `PROBE_SKILL_OK`. `codex features list` showed `skill_search` as stable. Codex
 discovers `.agents/skills/` natively.
 
-## Claude Code
+## Claude code skill behavior
 
 Claude Code does not document `.agents/skills/` as a skill location; its
 locations are enterprise, personal, project (`.claude/skills/`), nested,
-additional directories, plugins, and claude.ai sync, all under
+additional directories, plugins, and Claude.ai sync, all under
 `.claude/skills/` or harness-managed paths. Project discovery also requires
 that the directory be a git repository the session trusts.
 
@@ -95,8 +95,8 @@ cd "$fixture" && claude -p \
 ```
 
 Observed (Claude Code 2.1.278, print mode, default feature flags): the same
-fixture's `.agents/skills/probe-skill` was not discovered — the session reported
-that probe-skill was not available — while `.claude/skills/probe-skill` was
+fixture's `.agents/skills/probe-skill` was not discovered; the session reported
+that probe-skill was not available; while `.claude/skills/probe-skill` was
 discovered and the invocation probe answered `PROBE_SKILL_OK`. Discovery
 required the fixture to be a git repository: a non-git directory with
 `.claude/skills/` present showed nothing. In the ahu worktree itself, none of
@@ -146,10 +146,10 @@ what an untrusted directory gets, not what a trusted folder would show.
 
 - Antigravity skill discovery in a trusted folder or interactive session.
 - Claude Code interactive sessions, plugin distribution, managed settings, and
-  claude.ai sync, all of which can carry skills by other paths.
-- Any harness other than the four above, and any version other than the
+  Claude.ai sync, all of which can carry skills by other paths.
+- Any harness other than the four preceding, and any version other than the
   recorded ones.
-- Probes of live harnesses in CI; the fixture protocol above is the manual
+- Probes of live harnesses in CI; the fixture protocol earlier is the manual
   replacement, and `scripts/check-skills.py` guards the tree contract
   deterministically.
 

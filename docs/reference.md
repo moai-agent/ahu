@@ -84,7 +84,7 @@ inspection operations and do not replace ahu launch records or identities.
 
 `ahu mcp setup` materializes the skill bundle shipped with this ahu build into
 `.agents/skills/`. OpenCode and Codex discover that canonical tree natively;
-Claude Code does not — its documented skill locations are `.claude/skills/` and
+Claude Code does not discover it; its documented skill locations are `.claude/skills/` and
 harness-managed paths, and `ahu mcp setup` does not duplicate the bundle into
 `.claude/skills/`. Operators who want Claude Code to load a canonical skill can
 copy or symlink that skill's directory into `.claude/skills/` and commit it, as
@@ -615,7 +615,7 @@ the form `ahu:agent:<uuid>`. The UUID identifies the registered name, version,
 harness, model, source digest, and delivered-instructions digest together. A
 reference is valid only in its repository's primary coordination store. When
 the registration or either source changes, resolution fails as stale instead of
-silently retargeting the reference; native harness session identifiers remain
+silently selecting a new target; native harness session identifiers remain
 provider-owned and are not agent references.
 
 For the registration example below, first create the matching definition:
