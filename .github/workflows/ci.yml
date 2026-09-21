@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   workflow_dispatch:
 
 permissions:
@@ -83,3 +83,69 @@ jobs:
       - name: Lint documentation prose
         # Downloads the style packages named in .vale.ini.
         run: scripts/lint-prose.sh
+
+  release-boundary:
+    name: Release boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust and components
+        run: rustup toolchain install --no-self-update
+      - name: Validate the release package
+        run: |
+          set -euo pipefail
+          cargo package --locked --no-verify
+          if cargo package --locked --no-verify --list | grep -Eiq '(^|/)(\.ahu|\.env|.*\.(pem|key|log|trace|dump|sqlite|db)|credentials|secrets)(/|$)'; then
+            echo 'Release package contains a private-state or credential-like path' >&2
+            exit 1
+          fi
+      - name: Check local Markdown links
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          broken = []
+          files = [Path('README.md'), *Path('docs').rglob('*.md'), *Path('.agents').rglob('*.md')]
+          for path in files:
+              for target in re.findall(r'\[[^]]+\]\(([^)]+)\)', path.read_text()):
+                  target = target.split('#', 1)[0]
+                  if not target or '://' in target or target.startswith('mailto:'):
+                      continue
+                  if not (path.parent / target).resolve().exists():
+                      broken.append(f'{path}: {target}')
+          if broken:
+              print('\n'.join(broken))
+              raise SystemExit(1)
+          print(f'checked {len(files)} Markdown files')
+
+  cmux:
+    name: Live cmux (macOS)
+    runs-on: macos-14
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust and components
+        run: rustup toolchain install --no-self-update
+      - name: Run live cmux plumbing when the runner provides cmux
+        run: |
+          set -euo pipefail
+          if ! command -v cmux >/dev/null 2>&1; then
+            echo '::notice::GitHub-hosted macOS runner does not provide cmux; live probe skipped.'
+            exit 0
+          fi
+          cmux --version
+          AHU_TEST_CMUX=1 cargo test --locked --test cmux_integration -- --test-threads=1
