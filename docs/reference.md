@@ -83,13 +83,18 @@ repository ownership and task-resolution rules. Protocol handles describe
 inspection operations and do not replace ahu launch records or identities.
 
 `ahu mcp setup` materializes the skill bundle shipped with this ahu build into
-`.agents/skills/`. Claude can load that canonical tree directly; ahu does not
-duplicate it into `.claude/skills/`. The files are ordinary project files for
-review and commit. Setup refuses to overwrite a changed file, so local skill
-edits cannot be silently replaced. This is the temporary delivery path
-while installed harnesses lack verified native Skills-over-MCP support; the
-bundle can move to an independent repository later without changing the MCP
-task boundary.
+`.agents/skills/`. OpenCode and Codex discover that canonical tree natively;
+Claude Code does not — its documented skill locations are `.claude/skills/` and
+harness-managed paths, and `ahu mcp setup` does not duplicate the bundle into
+`.claude/skills/`. Operators who want Claude Code to load a canonical skill can
+copy or symlink that skill's directory into `.claude/skills/` and commit it, as
+an ordinary project file. See [skill verification](skill-verification.md) for
+per-harness probe protocols and recorded evidence. The files are ordinary
+project files for review and commit. Setup refuses to overwrite a changed file,
+so local skill edits cannot be silently replaced. This is the temporary
+delivery path while installed harnesses lack verified native Skills-over-MCP
+support; the bundle can move to an independent repository later without
+changing the MCP task boundary.
 
 The canonical tree follows a strict contract so every harness can load it: one
 directory per skill directly under `.agents/skills/`, named after the skill,

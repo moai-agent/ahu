@@ -162,7 +162,8 @@ request needs clearer outcomes, scope, or acceptance criteria. Ask to use
 `discover-requirements` with your idea; it gathers facts and proposes choices in
 your preferred channel, keeping discovery records private. Specified tasks proceed
 without a mandatory interview. The canonical repository skill tree is
-`.agents/skills/`, which Claude can load directly as well.
+`.agents/skills/`, which OpenCode and Codex discover natively; see
+[skill verification](docs/skill-verification.md) for per-harness evidence.
 
 ## What travels with a task
 
