@@ -67,7 +67,7 @@ jobs:
           echo "$stub_dir" >> "$GITHUB_PATH"
       - name: Test with synthetic fixtures
         run: |
-          unset AHU_TEST_CMUX
+          unset AHU_TEST_CMUX XDG_CONFIG_HOME OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT
           cargo test --locked
       # Configured knowledge validation remains a separate maintainer check:
       # install OKF 0.5.0 outside the checkout, then run
