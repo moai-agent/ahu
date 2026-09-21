@@ -46,6 +46,25 @@ jobs:
         run: cargo build --locked
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Install synthetic harness executables
+        run: |
+          set -euo pipefail
+          stub_dir="${RUNNER_TEMP}/ahu-harnesses"
+          mkdir -p "$stub_dir"
+          for harness in claude codex agy opencode; do
+            cat > "$stub_dir/$harness" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          case "$(basename "$0")" in
+            claude) echo '2.1.270' ;;
+            codex) echo 'codex-cli 0.155.1' ;;
+            agy) echo '1.2.2' ;;
+            opencode) echo '1.18.31' ;;
+          esac
+          SH
+            chmod +x "$stub_dir/$harness"
+          done
+          echo "$stub_dir" >> "$GITHUB_PATH"
       - name: Test with synthetic fixtures
         run: |
           unset AHU_TEST_CMUX
