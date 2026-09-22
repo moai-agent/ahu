@@ -21,15 +21,17 @@ explicitly unknown and identify who can resolve it.
 ## Private record and tracker access
 
 The private tracker is the durable record for discovery, decisions, acceptance
-criteria, and parent/child relationships. Obtain its location from the user or
-coordinator at runtime. Use authenticated `gh api graphql` metadata discovery to
-resolve the project, repositories, fields, options, and record identifiers; never
-hardcode IDs. Verify both project visibility and each linked issue repository's
-visibility before writing. A private project can contain public issues. Treat
-unknown visibility as a blocker to that write and report it privately.
+criteria, and parent/child relationships. Obtain its location and provider
+protocol from the user or coordinator at runtime. Prefer the provider's MCP
+server or documented API to resolve projects, repositories, fields, options,
+and record identifiers; never hardcode IDs. GitHub's authenticated GraphQL API
+is one supported provider, not a required data model. Verify the visibility of
+the project, record repository, and linked objects before writing. A private
+project can contain public issues. Treat unknown visibility as a blocker to
+that write and report it privately.
 
-Reuse relevant records before creating new ones. The custom project single-select
-field **Issue Type** uses the following vocabulary:
+Reuse relevant records before creating new ones. If the provider supports a
+typed work-item field, these high-level categories are useful defaults:
 
 | Value | Use |
 | --- | --- |
@@ -39,10 +41,11 @@ field **Issue Type** uses the following vocabulary:
 | Task | Bounded implementation work |
 | Bug | An observed defect |
 
-Native GitHub organization issue types are **Task**, **Bug**, and **Feature**;
-they are separate from the custom project field. Discover current metadata for
-each before choosing or writing a value. Do not mechanically create every level
-or change field definitions to fit this table.
+Map those categories to the provider's native types only after discovering its
+current metadata. GitHub organization issue types, project fields, milestones,
+and labels are one possible mapping; do not mechanically create every level,
+force a provider to accept this vocabulary, or change field definitions to fit
+the table.
 
 Carry the agreed outcome, scope and non-goals, constraints, testable acceptance
 criteria, open questions, and necessary relationships into the appropriate existing
