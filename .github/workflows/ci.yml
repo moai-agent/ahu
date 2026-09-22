@@ -23,7 +23,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
-      TEST_THREADS: '1'
+      TEST_THREADS: ${{ matrix.os == 'ubuntu-24.04' && '1' || '2' }}
     defaults:
       run:
         shell: bash
