@@ -22,6 +22,8 @@ jobs:
         os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      TEST_THREADS: ${{ matrix.os == 'ubuntu-24.04' && '1' || '2' }}
     defaults:
       run:
         shell: bash
@@ -68,7 +70,7 @@ jobs:
       - name: Test with synthetic fixtures
         run: |
           unset AHU_TEST_CMUX XDG_CONFIG_HOME OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT
-          cargo test --locked
+          cargo test --locked -- --test-threads="$TEST_THREADS"
       # Configured knowledge validation remains a separate maintainer check:
       # install OKF 0.5.0 outside the checkout, then run
       # cargo run --locked -- knowledge lint. CI tests its fixture integration.

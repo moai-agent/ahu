@@ -38,6 +38,10 @@ pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
         "ahu-architecture",
         include_str!("../.agents/skills/ahu-architecture/SKILL.md"),
     ),
+    (
+        "release",
+        include_str!("../.agents/skills/release/SKILL.md"),
+    ),
 ];
 
 pub fn skill_path(name: &str) -> String {
