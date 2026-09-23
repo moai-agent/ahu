@@ -295,12 +295,14 @@ pub const HARNESSES: &[HarnessEntry] = &[
         executable: "opencode",
         // Both were checked on 2026-09-13; the install updated itself in place
         // between the two probe runs, which is why the entry lists a pair.
-        verified_versions: "1.18.29, 1.18.30, 1.18.31",
+        verified_versions: "1.18.29, 1.18.30, 1.18.31, 1.18.32",
         // The batch surface was inspected on 1.18.30; 1.18.29 carries the same
         // `run` options and is the other version the catalog entry names.
         // 1.18.31 was live-probed on 2026-09-15: a fresh `run --format json`
         // turn and a `--session` resume that recalled context both behaved.
-        headless_verified_versions: &["1.18.29", "1.18.30", "1.18.31"],
+        // 1.18.32 was live-probed on 2026-09-23: headless JSON events and
+        // explicit skill-tool events remained compatible.
+        headless_verified_versions: &["1.18.29", "1.18.30", "1.18.31", "1.18.32"],
         enforces_model_for_session: false,
         features: &[
             Feature::InteractiveLaunch,

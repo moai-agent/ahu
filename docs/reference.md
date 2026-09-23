@@ -315,7 +315,7 @@ identity, capabilities, gaps, timeout, and coordination path without launching.
 Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
 The admitted CLI profiles are Codex 0.154.0/0.155.1, Claude Code 2.1.269/2.1.270,
-Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.30/1.18.31. Other versions fail before
+Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.30/1.18.31/1.18.32. Other versions fail before
 worktree creation, with no fallback harness or model. OpenCode's batch form is
 `opencode run --format json`; its permission mapping is the interactive one, so
 a manifest declaring `permissions = "accept-edits"` is refused here too. See
@@ -532,7 +532,7 @@ requests must retain the policy frozen in their host grant.
 | Claude Code 2.1.270 | Admitted | Read-only profile |
 | Codex 0.154.0/0.155.1 | Admitted | Refused: incomplete helper identity/join event visibility |
 | Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
-| OpenCode 1.18.29/1.18.30/1.18.31 | Admitted | Refused: no validated native tool switch |
+| OpenCode 1.18.29/1.18.30/1.18.31/1.18.32 | Admitted | Refused: no validated native tool switch |
 
 The Claude bounded profile restricts the **entire attempt, including the owner**,
 to the model tools `Read`, `Grep`, `Glob`, and the parent's `Task` delegation tool.
