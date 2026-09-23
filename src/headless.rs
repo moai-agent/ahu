@@ -279,31 +279,6 @@ fn build_native_profile(harness: &str, model: &str, spec: &Spec) -> Result<crate
     })
 }
 
-/// Only CLI versions whose argument surface was inspected are admitted.
-///
-/// The validated sets live in the catalog's `headless_verified_versions`, one
-/// table instead of a second opinion in this module.
-fn check_version(harness: &str, version: &str) -> Result<()> {
-    let supported = crate::catalog::harness(harness)
-        .map(|h| h.headless_verified_versions)
-        .unwrap_or(&[]);
-    // Probe output may carry a CLI-name prefix (codex prints
-    // `codex-cli 0.154.0`) and trailing decoration after whitespace. The
-    // first token that parses as a version is the one whose argument surface
-    // got inspected; a leading name token is not a version, and empty probe
-    // output is refused rather than silently admitted.
-    let token = version
-        .split_whitespace()
-        .find(|v| crate::util::is_semver(v))
-        .unwrap_or_else(|| version.split_whitespace().next().unwrap_or(""));
-    if !supported.contains(&token) {
-        bail!(
-            "unvalidated headless {harness} version {version:?}; supported CLI profiles: {supported:?}. Update the compatibility validation before launching; no fallback was selected."
-        );
-    }
-    Ok(())
-}
-
 fn validate_executable(path: &Path, repo: &crate::git::Repo) -> Result<PathBuf> {
     if let Some(note) = crate::harness::wrapper_interposed(path) {
         bail!("headless launch refuses cmux wrappers: {note}");
@@ -718,7 +693,7 @@ pub fn launch(
         .harness_version
         .clone()
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
-    check_version(&plan.pair.harness, &version)?;
+    crate::catalog::check_headless_version(&plan.pair.harness, &version)?;
     let parent_task = std::env::var("AHU_PARENT_TASK").ok();
     let depth = if let Some(parent) = &parent_task {
         let parent_dir = lookup(repo, parent)?;
@@ -811,7 +786,8 @@ pub fn launch(
         spec.gaps.push("The ENTIRE assignment has a read-only MODEL TOOL ceiling: parent and helpers have no model tools for editing, building, shell commands or shell-launching registered children. Settings-defined hooks are outside that tool ceiling and their side effects are not proven read-only. MCP tools and slash commands are disabled; repository settings remain discoverable. Roles are requested/observed, not an allowlist; total helper count is not capped. Budget is 5 USD per attempt, concurrency 1, depth 1, helper model equals manifest model.".into());
     }
     spec.native_profile = Some(profile);
-    let cmux_integration = validate_environment(repo, &repo.root, &plan.pair.harness)?;
+    let cmux_integration =
+        validate_environment(repo, &repo.root, &plan.pair.harness, &spec.harness_version)?;
     plan.cmux_integration = cmux_integration.clone();
     spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", cmux_integration.headless.evidence_digest));
     let (delivered, delivery) = crate::orchestration::deliver_composed(
@@ -1011,6 +987,7 @@ fn validate_environment(
     repo: &crate::git::Repo,
     config_root: &Path,
     harness: &str,
+    version: &str,
 ) -> Result<crate::cmux::integration::Status> {
     for variable in [
         "HOME",
@@ -1039,7 +1016,8 @@ fn validate_environment(
             }
         }
     }
-    crate::cmux::integration::enforce(config_root, harness)
+    crate::catalog::check_headless_version(harness, version)?;
+    Ok(crate::cmux::integration::enforce(config_root, harness)?.with_version(Some(version)))
 }
 
 pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
@@ -2029,10 +2007,15 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     {
         bail!("harness executable changed since submission; refusing execution");
     }
-    check_version(&record.identity.harness, &spec.harness_version)?;
+    crate::catalog::check_headless_version(&record.identity.harness, &spec.harness_version)?;
     validate_parent_attempt(&repo, spec)?;
     validate_frozen_configuration(&record)?;
-    let cmux_integration = validate_environment(&repo, &record.worktree, &record.identity.harness)?;
+    let cmux_integration = validate_environment(
+        &repo,
+        &record.worktree,
+        &record.identity.harness,
+        &spec.harness_version,
+    )?;
     if let Some(parent) = &spec.parent_task {
         let parent_dir = lookup(&repo, parent)?;
         if parent_dir.join("cancel.json").exists() {
@@ -2723,7 +2706,12 @@ pub fn control(
             {
                 bail!("harness executable changed; previous attempt preserved, resume refused");
             }
-            validate_environment(repo, &record.worktree, &record.identity.harness)?;
+            validate_environment(
+                repo,
+                &record.worktree,
+                &record.identity.harness,
+                &spec.harness_version,
+            )?;
             let original_spec = spec.clone();
             let original_record = record.clone();
             let original_prompt = task::load_prompt(&dir)?;

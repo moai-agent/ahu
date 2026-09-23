@@ -289,6 +289,27 @@ helper lifecycle validation. Codex 0.155.1 admission covers the batch launch
 and recorded-session resume surfaces checked by compatibility probes; bounded
 native helpers remain refused.
 
+`ahu cmux status` (also `--output json`) checks installed CLI versions and
+reports the same isolation profile used by launch previews. Inspection alone
+without a version observation reports component compatibility only. An admitted
+version and inspected components do not replace executable, approval, model, or
+other launch checks.
+
+| Harness | Required native isolation evidence |
+| --- | --- |
+| Codex | Absent sources or exact reviewed hooks with disable guards. Plugin state, cloud authentication/configuration, and managed sources remain unresolved. |
+| OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; authentication/account stores, declared modules, and substitutions remain unresolved. |
+| Claude Code | Direct executable avoids the cmux wrapper. Independent hooks, enabled plugins, and managed settings require separate evidence. |
+| Antigravity | Absent inspected hooks and an exact reviewed CLI version. Custom hooks, extensions, and overrides remain unverified. |
+
+Unknown or unsafe integrations have no operator bypass, including with
+`--allow-widened-approvals`. Use interactive cmux execution while resolving native
+sources with their owner; it retains the normal approval and launch checks.
+ahu does not remove credentials, rewrite native settings, or treat interactive
+availability as headless isolation. CLI version drift requires compatibility
+validation before the reviewed version list changes. Evidence is bounded local
+inspection; live delivery, provider availability, and sandboxing are not implied.
+
 ```sh
 ahu launch @dev-astra --headless --background --timeout 1800 \
   --prompt-file assignment.txt --allow-widened-approvals --output json

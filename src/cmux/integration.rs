@@ -120,12 +120,35 @@ pub struct Component {
 pub struct Status {
     pub harness: String,
     pub native_agent: Option<String>,
+    pub profile: Option<crate::catalog::IsolationProfile>,
+    pub cli_version: Option<String>,
+    pub version_checked: bool,
     pub components: Vec<Component>,
     pub gaps: Vec<String>,
     pub conformance: String,
     pub headless: HeadlessPolicy,
     pub next_action: String,
 }
+impl Status {
+    /// Add a version observation to the same evidence used for interactive
+    /// disclosure. This never gates interactive execution or probes a provider.
+    pub fn with_version(mut self, version: Option<&str>) -> Self {
+        self.version_checked = true;
+        self.cli_version = version.map(str::to_owned);
+        if let Err(error) =
+            crate::catalog::check_headless_version(&self.harness, version.unwrap_or(""))
+        {
+            self.headless.allowed = false;
+            self.headless.reasons.push(error.to_string());
+            self.next_action = format!(
+                "Use a reviewed CLI version or validate the new CLI profile before headless execution. Interactive execution remains available subject to normal prerequisites. {}",
+                self.next_action
+            );
+        }
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HeadlessPolicy {
     pub allowed: bool,
@@ -642,11 +665,11 @@ fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) 
             &serde_json::to_vec(&components).expect("component serialization"),
         ),
     };
-    Status { harness: harness.into(), native_agent: native_agent(harness).map(str::to_string),
+    Status { profile: crate::catalog::isolation_profile(harness), cli_version: None, version_checked: false, harness: harness.into(), native_agent: native_agent(harness).map(str::to_string),
         components, gaps, conformance: "locally_inspected; live_untested".into(), headless,
         next_action: match harness {
-            "claude-code" => "Use cmux Settings > Automation for Claude wrapper integration; no native Claude installer is exposed.".into(),
-            "opencode" => "Use interactive execution for unguarded Feed; explicit native removal is `cmux hooks opencode uninstall`, then inspect again. Reinstalling the same Feed does not provide isolation.".into(),
+            "claude-code" => "Use interactive execution while independent hooks/plugins or managed settings are unresolved. Review those sources with their native owner, then inspect again. cmux Settings > Automation controls only the Claude wrapper; no native Claude installer is exposed.".into(),
+            "opencode" => "Use interactive execution for unresolved native configuration/authentication sources; credentials and account databases are not read. For unguarded Feed, explicit native removal is `cmux hooks opencode uninstall`, then inspect again. Reinstalling the same Feed does not provide isolation.".into(),
             _ => "Inspect unknown components and native scope; use interactive execution until isolation is verified. Installation is explicit: ahu cmux install --harness ID --dry-run.".into(),
         } }
 }
@@ -1220,7 +1243,7 @@ pub fn render_summary(status: &Status) -> String {
 
 pub fn render(status: &Status) -> String {
     let mut text = format!(
-        "cmux integration {}: headless {} (native version eligibility checked separately)\n",
+        "cmux integration {}: headless {}\n",
         display_safe(&status.harness),
         if status.headless.allowed {
             "compatible with inspected components"
@@ -1228,6 +1251,25 @@ pub fn render(status: &Status) -> String {
             "refused"
         }
     );
+    text.push_str(&format!(
+        "  CLI version: {} ({}); approval, executable and launch checks still apply\n",
+        display_safe(status.cli_version.as_deref().unwrap_or("unknown")),
+        if status.version_checked {
+            "checked"
+        } else {
+            "not checked; component compatibility only"
+        }
+    ));
+    if let Some(profile) = &status.profile {
+        text.push_str(&format!(
+            "  profile {}: {}; reviewed versions: {}\n  evidence: {}\n  unknown integration opt-in: {}; interactive supported: {}\n  limitations: {}\n",
+            profile.harness, profile.version_policy, profile.headless_verified_versions.join(", "),
+            profile.evidence, profile.unknown_integration_opt_in, profile.interactive_supported, profile.limitations
+        ));
+    }
+    for reason in &status.headless.reasons {
+        text.push_str(&format!("  refusal: {}\n", display_safe(reason)));
+    }
     for c in &status.components {
         text.push_str(&format!(
             "  {}: {:?}; activation {:?}; isolation {:?}; conformance {:?}\n    {}\n",
@@ -1383,7 +1425,11 @@ pub fn status_command(repo: &Path, json: bool) -> Result<i32> {
     let cli = NativeCli::discover();
     let statuses: Vec<_> = ["claude-code", "codex", "opencode", "antigravity"]
         .into_iter()
-        .map(|h| inspect(repo, h))
+        .map(|h| {
+            let version = crate::catalog::harness(h)
+                .and_then(|entry| crate::selection::installed_version(entry.executable));
+            inspect(repo, h).with_version(version.as_deref())
+        })
         .collect();
     let plans = statuses
         .iter()

@@ -2600,3 +2600,153 @@ fn ordinary_event_subtypes_do_not_consume_helper_budget() {
     events.observe("codex", br#"{"type":"turn.completed"}"#);
     assert!(events.terminal && !events.failed);
 }
+
+#[test]
+fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux() {
+    use std::os::unix::fs::PermissionsExt;
+    for (harness, model, executable, version, source, body, reason) in [
+        (
+            "codex",
+            "gpt-6-astra",
+            "codex",
+            "0.155.1",
+            ".codex/plugins",
+            "synthetic plugin state",
+            "plugin",
+        ),
+        (
+            "opencode",
+            "ollama/glm-5.3:cloud",
+            "opencode",
+            "1.18.31",
+            ".local/share/opencode/auth.json",
+            "SYNTHETIC_OPAQUE_SENTINEL",
+            "authentication store present",
+        ),
+        (
+            "claude-code",
+            "claude-opus-5",
+            "claude",
+            "2.1.270",
+            ".claude/settings.json",
+            r#"{"enabledPlugins":{"synthetic":true}}"#,
+            "plugin hook behavior",
+        ),
+        (
+            "antigravity",
+            "gemini-3.1-pro-high",
+            "agy",
+            "1.2.3",
+            "",
+            "",
+            "unvalidated headless antigravity version",
+        ),
+    ] {
+        let f = Fixture::new();
+        f.repo.add_agent_on("matrix", "1.0.0", harness, model);
+        f.repo.commit("synthetic admission matrix");
+        // Every executable is disposable. A real invocation would leave proof.
+        for entry in ahu::catalog::HARNESSES {
+            let stub = f.bin.join(entry.executable);
+            let observed = if entry.executable == executable {
+                version
+            } else {
+                entry.headless_verified_versions[0]
+            };
+            std::fs::write(&stub, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{observed}'; exit 0; fi\ntouch \"$HOME/worker-started\"\nexit 97\n")).unwrap();
+            std::fs::set_permissions(stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let home = f.external.path().join("home");
+        if !source.is_empty() {
+            let path = home.join(source);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let status = f
+            .command()
+            .args(["cmux", "status", "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let status = Fixture::value(&status);
+        let status = status["integrations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["harness"] == harness)
+            .unwrap();
+        assert_eq!(status["headless"]["allowed"], false, "{status}");
+        assert_eq!(status["cli_version"], version);
+        assert!(
+            status["headless"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str().unwrap().contains(reason)),
+            "{status}"
+        );
+        let human = f.command().args(["cmux", "status"]).output().unwrap();
+        let human = String::from_utf8(human.stdout).unwrap();
+        assert!(human.contains(reason), "{human}");
+        assert!(human.contains(status["next_action"].as_str().unwrap()));
+
+        let interactive = f
+            .command()
+            .args([
+                "launch",
+                "@matrix",
+                "--dry-run",
+                "--output",
+                "json",
+                "--prompt",
+                "synthetic task",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            interactive.status.success(),
+            "{}",
+            String::from_utf8_lossy(&interactive.stderr)
+        );
+        let preview = Fixture::value(&interactive);
+        assert_eq!(preview["cmux_integration"]["headless"]["allowed"], false);
+        assert_eq!(
+            preview["cmux_integration"]["profile"]["interactive_supported"],
+            true
+        );
+        let refused = f
+            .command()
+            .args([
+                "launch",
+                "@matrix",
+                "--headless",
+                "--dry-run",
+                "--output",
+                "json",
+                "--prompt",
+                "synthetic task",
+            ])
+            .output()
+            .unwrap();
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(reason),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(!home.join("worker-started").exists());
+        assert_eq!(
+            common::git(f.repo.path(), &["worktree", "list", "--porcelain"])
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count(),
+            1
+        );
+        assert_eq!(preview["executed"], false);
+        assert!(!status.to_string().contains("SYNTHETIC_OPAQUE_SENTINEL"));
+    }
+}

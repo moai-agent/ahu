@@ -357,7 +357,8 @@ pub fn plan(
         enforcement.gaps.push(note);
     }
 
-    let cmux_integration = crate::cmux::integration::inspect(&repo.root, &pair.harness);
+    let cmux_integration = crate::cmux::integration::inspect(&repo.root, &pair.harness)
+        .with_version(enforcement.harness_version.as_deref());
     Ok(LaunchPlan {
         mode: if agent.is_some() {
             LaunchMode::Named
