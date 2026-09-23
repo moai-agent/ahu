@@ -45,6 +45,7 @@ pub mod task;
 pub mod task_handles;
 pub mod task_index;
 pub mod task_ref;
+pub mod telemetry;
 pub mod util;
 
 pub mod headless;

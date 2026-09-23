@@ -2031,6 +2031,18 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         .stderr(Stdio::piped())
         .process_group(0);
     sanitize(&mut command, Some(&cmux_integration.headless));
+    let telemetry = crate::config::load(&record.worktree)?
+        .map(|loaded| loaded.config.telemetry)
+        .unwrap_or_default();
+    crate::telemetry::initialize(&telemetry)?;
+    crate::telemetry::configure_child(
+        &mut command,
+        &telemetry,
+        &record.agent_label(),
+        &record.identity.harness,
+        &record.identity.model,
+        Some(&record.task_id),
+    );
     command
         .env("AHU_BIN", std::env::current_exe()?)
         .env("AHU_EXECUTION_BACKEND", "headless")

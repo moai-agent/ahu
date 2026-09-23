@@ -442,6 +442,7 @@ pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
         // Setup asks nothing about knowledge bundles: a new project has none to
         // name yet, and an empty list makes `ahu knowledge lint` say so.
         knowledge: crate::config::Knowledge::default(),
+        telemetry: crate::config::TelemetryConfig::default(),
     };
 
     console.say("\nConfiguration to be written to .agents/ahu/config.toml:\n\n")?;

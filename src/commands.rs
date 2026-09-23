@@ -78,13 +78,14 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
         "agy" => "antigravity",
         other => other,
     };
-    let model = config::load(&repo.root)?
-        .and_then(|loaded| {
-            selection::ranked_models(&loaded, harness)
-                .into_iter()
-                .next()
-        })
+    let loaded = config::load(&repo.root)?;
+    let model = loaded
+        .as_ref()
+        .and_then(|loaded| selection::ranked_models(loaded, harness).into_iter().next())
         .unwrap_or_else(|| "unconfigured".to_string());
+    if let Some(loaded) = &loaded {
+        crate::telemetry::initialize(&loaded.config.telemetry)?;
+    }
     let executable = selection::resolve_executable(program).ok_or_else(|| {
         crate::util::Error::new(format!(
             "{label} is not installed or is not available on PATH outside the repository."
@@ -104,6 +105,16 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
     }
     let mut command = std::process::Command::new(executable);
     command.args(args).env("AHU_BIN", std::env::current_exe()?);
+    if let Some(loaded) = &loaded {
+        crate::telemetry::configure_child(
+            &mut command,
+            &loaded.config.telemetry,
+            "director",
+            harness,
+            &model,
+            None,
+        );
+    }
     // Inherit the terminal and cwd. Replacing ahu gives the harness terminal signals
     // directly and preserves its exit status, including signal termination.
     #[cfg(unix)]
@@ -1783,6 +1794,10 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
 
 /// `ahu run-task --task-dir <dir>` — the fixed entrypoint cmux starts.
 pub fn run_task(task_dir: &Path) -> Result<i32> {
+    let record = crate::task::load(task_dir)?;
+    if let Some(loaded) = crate::config::load(&record.worktree)? {
+        crate::telemetry::initialize(&loaded.config.telemetry)?;
+    }
     match launch::run_task(task_dir)? {
         launch::HarnessOutcome::Exited(status) if status.success() => Ok(0),
         launch::HarnessOutcome::Exited(status) => Err(crate::util::Error::new(format!(
@@ -1916,6 +1931,7 @@ pub fn launch_cmd(
         )
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
+    crate::telemetry::initialize(&loaded.config.telemetry)?;
     let (resolved, pair) = resolve_identity(repo, &loaded, Some(agent))?;
     let permissions = resolved
         .as_ref()
@@ -1964,6 +1980,20 @@ fn submit(
     output_json: bool,
     display: &launch::DisplayMetadata,
 ) -> Result<i32> {
+    crate::telemetry::initialize(&loaded.config.telemetry)?;
+    let _span = crate::telemetry::span(
+        "ahu.launch",
+        [
+            (
+                "ahu.agent.name",
+                resolved
+                    .as_ref()
+                    .map_or_else(|| "auto".to_string(), |agent| agent.label()),
+            ),
+            ("ahu.harness", pair.harness.clone()),
+            ("ahu.model", pair.model.clone()),
+        ],
+    );
     let mut plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
     plan.apply_display(display)?;
 

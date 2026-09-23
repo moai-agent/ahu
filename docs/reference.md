@@ -598,6 +598,27 @@ are rejected. Bundle paths and contents must not be symlinks; contents must be
 regular files or directories. Omitting the section defaults to no bundles and
 `fail_on_warnings = false`.
 
+## Local OpenTelemetry
+
+Telemetry is disabled unless the project opts in. When enabled, ahu exports its
+own launch and harness lifecycle traces to the project-configured local OTLP
+collector and injects the same endpoint only into harness processes started by
+ahu. It never changes the invoking shell or harness sessions started directly.
+Only traces are enabled in this initial integration; inherited OTLP headers,
+signal-specific endpoints, and log/metric exporters are cleared for the child.
+
+```toml
+[telemetry]
+enabled = true
+endpoint = "http://127.0.0.1:4318"
+```
+
+The first implementation accepts only the local OTLP/HTTP endpoint on port
+4318. Configure an upstream OpenTelemetry Collector to receive the endpoint and
+write or route telemetry as needed. Agent, harness, model, and task attributes
+are namespaced under `ahu.*`; prompts, transcripts, credentials, and private
+issue content are not exported by ahu.
+
 ```sh
 ahu knowledge lint
 ahu knowledge lint --output json

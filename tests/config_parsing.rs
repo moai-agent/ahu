@@ -114,6 +114,7 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
             .collect(),
         context_hygiene: config::ContextHygiene::default(),
         knowledge: config::Knowledge::default(),
+        telemetry: config::TelemetryConfig::default(),
     };
     let path = config::write_new(repo.path(), &new_config).expect("first write");
     assert!(path.exists());
@@ -158,6 +159,7 @@ fn rendered_config_round_trips() {
             ],
             fail_on_warnings: true,
         },
+        telemetry: config::TelemetryConfig::default(),
     };
     config::write_new(repo.path(), &original).unwrap();
     let loaded = config::load(repo.path()).unwrap().unwrap();
