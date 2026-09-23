@@ -52,7 +52,7 @@ Piping the output to a parser is unreliable; redirect to a file first. To probe
 invocation, start `opencode`, ask it to use the probe skill, and check for
 `PROBE_SKILL_OK`.
 
-Observed (OpenCode 1.18.31): `opencode debug skill` lists skills from
+Observed (OpenCode 1.18.32): `opencode debug skill` lists skills from
 `.agents/skills/`, including all four canonical repository skills at
 `.agents/skills/<name>/SKILL.md`, and live in-session invocation followed the
 listed skills. OpenCode discovers `.agents/skills/` natively.
@@ -122,7 +122,7 @@ cd "$fixture" && agy --dangerously-skip-permissions --print \
 next argument as its prompt. `--output-format json` returns status, response,
 duration, turn count, and usage fields.
 
-Observed (Antigravity 1.2.7): the session listed only its builtin skills
+Observed (Antigravity 1.2.9): the session listed only its builtin skills
 (`a11y-debugging`, `agy-customizations`, `antigravity-guide`, `chrome-devtools`,
 `chrome-extensions`, `debug-optimize-lcp`, `google-antigravity-sdk`,
 `memory-leak-debugging`, `modern-web-guidance`, `troubleshooting`), and neither
@@ -144,10 +144,10 @@ not claim a project skill was used when Antigravity does not expose one.
 
 | Harness        | Version | `.agents/skills/` native discovery | Invocation | Notes |
 | -------------- | ------- | --------------------------------- | ---------- | ----- |
-| OpenCode       | 1.18.31 | yes                               | verified in session | `opencode debug skill` is the deterministic surface |
+| OpenCode       | 1.18.32 | yes                               | verified in session | `opencode debug skill` is the deterministic surface |
 | Codex          | 0.155.1 | yes                               | `PROBE_SKILL_OK` | `codex debug prompt-input` is the deterministic surface |
 | Claude Code    | 2.1.278 | no                                | `.claude/skills/` only, `PROBE_SKILL_OK` | project discovery needs git trust; `.agents/skills/` not a documented location |
-| Antigravity    | 1.2.7   | not observed                      | not observed | builtin skills only; folder trust untested |
+| Antigravity    | 1.2.9   | not observed                      | not observed | builtin skills only; folder trust untested |
 
 ## Not verified here
 
