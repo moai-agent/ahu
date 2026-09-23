@@ -13,11 +13,14 @@ use crate::util::{Error, Result};
 #[path = "mcp_tasks.rs"]
 mod task_protocol;
 
-const PROTOCOL_VERSION: &str = "2025-06-18";
+const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const TASKS_EXTENSION: &str = "io.modelcontextprotocol/tasks";
 const SERVER_NAME: &str = "ahu";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CLIENT_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
+const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
+const SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
 
 pub const CONTEXT_HYGIENE_SKILL: &str = "context-hygiene";
 
@@ -77,6 +80,10 @@ pub fn serve(repo: &Repo) -> Result<i32> {
                         continue;
                     }
                 };
+                if let Some(response) = validate_request(&request, &mut session) {
+                    write_response(&mut stdout, &response)?;
+                    continue;
+                }
                 if let Some(response) = handle(repo, &request, &mut session) {
                     write_response(&mut stdout, &response)?;
                 }
@@ -93,6 +100,53 @@ pub fn serve(repo: &Repo) -> Result<i32> {
     Ok(0)
 }
 
+fn validate_request(request: &Value, session: &mut task_protocol::Session) -> Option<Value> {
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request.get("method").and_then(Value::as_str)?;
+    if method == "initialize" {
+        if session.modern() {
+            return Some(rpc_error(&id, -32601, "method not found: initialize"));
+        }
+        return None;
+    }
+    if session.legacy() {
+        if method == "server/discover" {
+            return Some(rpc_error(&id, -32601, "method not found: server/discover"));
+        }
+        return None;
+    }
+    let meta = request.get("params").and_then(|params| params.get("_meta"));
+    let version = meta.and_then(|meta| meta.get(PROTOCOL_VERSION_META));
+    let capabilities = meta.and_then(|meta| meta.get(CLIENT_CAPABILITIES_META));
+    if version.and_then(Value::as_str) != Some(MODERN_PROTOCOL_VERSION)
+        || !capabilities.is_some_and(Value::is_object)
+    {
+        let mut error = rpc_error(
+            &id,
+            -32022,
+            "Unsupported protocol version or missing request metadata",
+        );
+        error["error"]["data"] = json!({
+            "supported": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
+            "requested": version.cloned().unwrap_or(Value::Null),
+        });
+        return Some(error);
+    }
+    if method == "server/discover"
+        && request["params"]
+            .as_object()
+            .is_some_and(|params| params.keys().any(|key| key != "_meta"))
+    {
+        return Some(rpc_error(
+            &id,
+            -32602,
+            "server/discover accepts only standard request metadata",
+        ));
+    }
+    session.mark_modern();
+    None
+}
+
 fn write_response(output: &mut impl Write, value: &Value) -> Result<()> {
     serde_json::to_writer(&mut *output, value)?;
     output.write_all(b"\n")?;
@@ -101,7 +155,17 @@ fn write_response(output: &mut impl Write, value: &Value) -> Result<()> {
 }
 
 fn response(id: &Value, result: Value) -> Value {
+    let mut result = result;
+    if let Some(object) = result.as_object_mut() {
+        object.entry("_meta").or_insert_with(
+            || json!({SERVER_INFO_META: {"name": SERVER_NAME, "version": SERVER_VERSION}}),
+        );
+    }
     json!({"jsonrpc":"2.0","id":id,"result":result})
+}
+
+fn modern_params(params: &Value) -> bool {
+    params["_meta"][PROTOCOL_VERSION_META].as_str() == Some(MODERN_PROTOCOL_VERSION)
 }
 
 fn rpc_error(id: &Value, code: i64, message: impl Into<String>) -> Value {
@@ -123,28 +187,55 @@ fn handle(repo: &Repo, request: &Value, session: &mut task_protocol::Session) ->
         "initialize" => Some(response(
             &id,
             json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": legacy_protocol_version(&params),
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "instructions": "ahu exposes repository-scoped agent and task inspection. Task identity, ownership and permissions remain controlled by ahu."
             }),
         )),
-        "ping" => Some(response(&id, json!({}))),
+        "ping" => {
+            let result = if modern_params(&params) {
+                json!({"resultType":"complete"})
+            } else {
+                json!({})
+            };
+            Some(response(&id, result))
+        }
         "server/discover" => Some(response(
             &id,
             json!({
-                "protocolVersion": MODERN_PROTOCOL_VERSION,
-                "capabilities": {"extensions": {TASKS_EXTENSION: {}}},
-                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+                "resultType": "complete",
+                "supportedVersions": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
+                "capabilities": {"tools": {}, "extensions": {TASKS_EXTENSION: {}}},
+                "_meta": {SERVER_INFO_META: {"name": SERVER_NAME, "version": SERVER_VERSION}},
+                "instructions": "ahu exposes repository-scoped agent and task inspection.",
+                "ttlMs": 0,
+                "cacheScope": "private",
             }),
         )),
-        "tools/list" => Some(response(&id, json!({"tools": tools()}))),
+        "tools/list" => {
+            let mut result = json!({"tools": tools()});
+            if modern_params(&params) {
+                result["resultType"] = json!("complete");
+            }
+            Some(response(&id, result))
+        }
         "tools/call" => Some(call_response(repo, &id, &params)),
         _ => Some(rpc_error(
             &id,
             -32601,
             format!("method not found: {method}"),
         )),
+    }
+}
+
+fn legacy_protocol_version(params: &Value) -> &'static str {
+    match params.get("protocolVersion").and_then(Value::as_str) {
+        Some("2025-11-25") => "2025-11-25",
+        Some("2025-06-18") => "2025-06-18",
+        Some("2025-03-26") => "2025-03-26",
+        Some("2024-11-05") => "2024-11-05",
+        _ => LEGACY_PROTOCOL_VERSION,
     }
 }
 
@@ -183,10 +274,13 @@ fn call_response(repo: &Repo, id: &Value, params: &Value) -> Value {
         _ => Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
     };
     match result {
-        Ok(value) => response(
-            id,
-            json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())}],"structuredContent":value}),
-        ),
+        Ok(value) => {
+            let mut result = json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())}],"structuredContent":value});
+            if modern_params(params) {
+                result["resultType"] = json!("complete");
+            }
+            response(id, result)
+        }
         Err(error) => rpc_error(id, -32000, error.to_string()),
     }
 }

@@ -57,6 +57,15 @@ is GitHub, issues, labels, projects, and milestones are one possible mapping;
 do not bake repository names, issue-number formats, label names, project field
 IDs, or milestone semantics into task prompts or public skill prose.
 
+The tracker provider contract is intentionally small. It must be able to
+resolve the private work area and visibility boundary, find or create a durable
+work record, read and update lifecycle plus current-agent state, append
+validation evidence, link parent/child or release context, and close the record
+only after delivery checks. Provider identifiers stay in the private tracker;
+ahu task IDs, worktrees, and attempts remain separate execution identifiers.
+If a provider cannot implement one of these operations, report that capability
+gap rather than approximating it with a public comment or a local file.
+
 Use the provider's coordination fields, labels, tags, or status values instead
 of personal assignees when the project is maintained by one maintainer. Preserve
 one lifecycle state (planned, active, review, blocked, or done) and one current

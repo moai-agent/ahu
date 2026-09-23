@@ -120,16 +120,28 @@ setup` never duplicates skills into harness-owned locations such as
 review and remove. `ahu inventory` lists skill sources, including duplicates,
 so a same-named skill outside the canonical tree stays visible.
 
-The modern path follows the [2026-07-28 Tasks extension](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks).
+The modern path follows the [2026-07-28 MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
+and its [Tasks extension](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks).
+Modern stdio requests do not use `initialize`: every request carries
+`io.modelcontextprotocol/protocolVersion: "2026-07-28"` and an object-valued
+`io.modelcontextprotocol/clientCapabilities` in `params._meta`. `server/discover`
+returns `resultType: "complete"`, supported versions, capabilities, cache hints,
+and server identity under `_meta["io.modelcontextprotocol/serverInfo"]`.
+
 Declare `io.modelcontextprotocol/tasks: {}` inside
 `params._meta["io.modelcontextprotocol/clientCapabilities"].extensions` on every
-Tasks request. `server/discover` advertises support. Inspection calls return a
-persisted `working` handle before execution. `tasks/get` returns the current
-state and its final tool result or JSON-RPC error. `tasks/update` answers
-outstanding input requests, and `tasks/cancel` durably cancels an active
-inspection. Cancellation is idempotent; completed results remain completed.
-Neither terminal protocol status nor an inspection result accepts, merges, or
-approves harness work. No MCP tool launches or changes harness permissions.
+Tasks request. Inspection calls return a persisted `working` handle before
+execution. `tasks/get` returns the current state and its final tool result or
+JSON-RPC error. `tasks/update` answers outstanding input requests, and
+`tasks/cancel` durably cancels an active inspection. Cancellation is idempotent;
+completed results remain completed. Neither terminal protocol status nor an
+inspection result accepts, merges, or approves harness work. No MCP tool
+launches or changes harness permissions.
+
+The stdio binding is newline-delimited UTF-8 JSON-RPC: each line is one request,
+notification, or response, and stdout contains no other bytes. Diagnostics go
+to stderr. A dual-era client may probe `server/discover` and fall back to the
+legacy handshake when the probe is not understood.
 
 The stdio host supplies `AHU_MCP_CALLER` as a stable authenticated principal for
 each caller; without it, the effective local OS user is the principal. The host
@@ -155,9 +167,11 @@ For stdio notifications, send `subscriptions/listen` with
 The server emits `notifications/subscriptions/acknowledged` followed by
 `notifications/tasks` snapshots when subscribed state changes, including changes
 from another connection. Each listen replaces this connection's subscriptions;
-reconnects require a new listen. Notifications may coalesce intermediate states;
-`tasks/get` remains authoritative. Task payloads are never broadcast to other
-callers.
+reconnects require a new listen. Every subscription notification carries the
+originating `subscriptions/listen` request ID in
+`_meta["io.modelcontextprotocol/subscriptionId"]`. Notifications may coalesce
+intermediate states; `tasks/get` remains authoritative. Task payloads are never
+broadcast to other callers.
 
 The optional experimental adapter is enabled by the host with
 `AHU_MCP_TASKS_ADAPTER=inspection-v1`. It exposes `ahu_task_inspect` to modern
@@ -170,28 +184,30 @@ are limited to 8 KiB, selectors to 256 bytes, and the response can only fill tha
 pending selector. Unknown or already answered input keys are ignored; identity,
 permissions, tool, and repository fields cannot be updated.
 
-`initialize` selects the isolated `2025-06-18` legacy inspection path for the
-connection. It always returns ordinary synchronous tool results and refuses
-Tasks methods even if later requests include modern capabilities. `tasks/list`
-and `tasks/result` are not implemented.
+`initialize` selects the isolated `2025-11-25` (or an older requested handshake
+revision) legacy inspection path for the connection. It always returns ordinary
+synchronous tool results and refuses Tasks methods even if later requests
+include modern capabilities. `tasks/list` and `tasks/result` are not
+implemented.
 
 ### Long-running task records
 
-Long-running or failure-prone work should have a durable issue in the project's
-private GitHub tracker before an ahu task is launched. The issue records
-acceptance criteria, evidence, failures, and disposition; ahu task state records
-execution details and is not the roadmap record. Use labels for coordination:
-one lifecycle label (`status:planned`, `status:in-progress`, `status:review`,
-`status:blocked`, or `status:done`) and one label for the registered agent
-handling the current attempt. Do not use assignees for this single-maintainer
+Long-running or failure-prone work should have a durable record in the project's
+private tracker before an ahu task is launched. An issue, task, milestone item,
+or equivalent provider object records acceptance criteria, evidence, failures,
+and disposition; ahu task state records execution details and is not the roadmap
+record. Use the provider's native labels, tags, or fields for coordination: one
+lifecycle state (planned, active, review, blocked, or done) and one marker for
+the registered agent handling the current attempt. Do not use assignees for this
+single-maintainer
 workflow.
 
 The coordinator owns comments, label changes, and closure. A task process
-exiting successfully is not sufficient to close an issue: inspect its report,
+exiting successfully is not sufficient to close a record: inspect its report,
 diff, validation, and delivery state first. Keep private tracker content out of
-this public repository and its knowledge base. Before writing, verify both the
-issue repository and linked project are private; a private project does not
-make a public linked issue private.
+this public repository and its knowledge base. Before writing, verify the
+provider's record, project, and linked-object visibility; a private project does
+not necessarily make a linked public record private.
 
 ## Scriptable launch previews
 

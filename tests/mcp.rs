@@ -47,6 +47,105 @@ fn stdio_server_negotiates_and_lists_repository_agents_and_tasks() {
 }
 
 #[test]
+fn modern_stdio_conformance_requires_metadata_and_uses_discovery_shape() {
+    let repo = common::TestRepo::new();
+    let mut child = common::ahu()
+        .args(["mcp", "serve"])
+        .current_dir(repo.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/list","params":{}
+        })
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":2,"method":"server/discover",
+            "params":{"_meta":{
+                "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities":{}
+            }}
+        })
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":3,"method":"tools/list",
+            "params":{"_meta":{
+                "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities":{}
+            }}
+        })
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":4,"method":"initialize","params":{}
+        })
+    )
+    .unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[0]["error"]["code"], -32022);
+    assert_eq!(rows[0]["error"]["data"]["supported"][0], "2026-07-28");
+    assert_eq!(rows[1]["result"]["resultType"], "complete");
+    assert_eq!(rows[1]["result"]["supportedVersions"][0], "2026-07-28");
+    assert_eq!(
+        rows[1]["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "ahu"
+    );
+    assert_eq!(rows[2]["result"]["resultType"], "complete");
+    assert_eq!(rows[3]["error"]["code"], -32601);
+}
+
+#[test]
+fn legacy_initialize_echoes_a_supported_handshake_version() {
+    let repo = common::TestRepo::new();
+    let mut child = common::ahu()
+        .args(["mcp", "serve"])
+        .current_dir(repo.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}
+        })
+    )
+    .unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let line = output.stdout.split(|byte| *byte == b'\n').next().unwrap();
+    let response: serde_json::Value = serde_json::from_slice(line).unwrap();
+    assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
+}
+
+#[test]
 fn setup_refuses_to_write_through_a_skills_symlink() {
     let repo = common::TestRepo::new();
     let external = tempfile::TempDir::new().unwrap();
@@ -141,7 +240,11 @@ fn tasks_extension_returns_a_durable_handle_and_rejects_legacy_calls() {
         input,
         "{}",
         serde_json::json!({
-            "jsonrpc":"2.0","id":1,"method":"server/discover","params":{}
+            "jsonrpc":"2.0","id":1,"method":"server/discover",
+            "params":{"_meta":{
+                "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities":{}
+            }}
         })
     )
     .unwrap();
@@ -152,7 +255,9 @@ fn tasks_extension_returns_a_durable_handle_and_rejects_legacy_calls() {
             "jsonrpc":"2.0","id":2,"method":"tools/call",
             "params":{
                 "name":"ahu_agents_list","arguments":{},
-                "_meta":{"io.modelcontextprotocol/clientCapabilities":{
+                "_meta":{
+                    "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities":{
                     "extensions":{"io.modelcontextprotocol/tasks":{}}
                 }}
             }
@@ -164,7 +269,13 @@ fn tasks_extension_returns_a_durable_handle_and_rejects_legacy_calls() {
         "{}",
         serde_json::json!({
             "jsonrpc":"2.0","id":3,"method":"tasks/get",
-            "params":{"taskId":"not-a-task"}
+            "params":{
+                "taskId":"not-a-task",
+                "_meta":{
+                    "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities":{}
+                }
+            }
         })
     )
     .unwrap();
@@ -202,9 +313,18 @@ use std::time::{Duration, Instant};
 
 const EXT: &str = "io.modelcontextprotocol/tasks";
 fn modern(mut params: Value) -> Value {
-    params["_meta"] = json!({"io.modelcontextprotocol/clientCapabilities":{
+    params["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{
         "extensions":{EXT:{}}, "elicitation":{"form":{}}
     }});
+    params
+}
+fn modern_without_tasks(mut params: Value) -> Value {
+    params["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{}
+    });
     params
 }
 struct Client {
@@ -433,7 +553,7 @@ fn task_authorization_legacy_isolation_and_invalid_ids() {
             assert_eq!(bob.call(method, request)["error"]["code"], -32602);
         }
         assert_eq!(
-            alice.call(method, json!({"taskId":id}))["error"]["code"],
+            alice.call(method, modern_without_tasks(json!({"taskId":id})))["error"]["code"],
             -32021
         );
     }
@@ -448,7 +568,7 @@ fn task_authorization_legacy_isolation_and_invalid_ids() {
     let mut legacy = Client::new(&repo, "alice");
     assert_eq!(
         legacy.call("initialize", json!({}))["result"]["protocolVersion"],
-        "2025-06-18"
+        "2025-11-25"
     );
     legacy.call("server/discover", json!({}));
     for method in [
@@ -481,7 +601,7 @@ fn subscribed_stdio_clients_receive_authorized_durable_transitions() {
     assert_eq!(
         client.call(
             "subscriptions/listen",
-            json!({"notifications":{"taskIds":[id]}})
+            modern_without_tasks(json!({"notifications":{"taskIds":[id]}}))
         )["error"]["code"],
         -32021
     );
@@ -497,6 +617,10 @@ fn subscribed_stdio_clients_receive_authorized_durable_transitions() {
         acknowledgement["method"],
         "notifications/subscriptions/acknowledged"
     );
+    assert_eq!(
+        acknowledgement["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
+        3
+    );
     loop {
         let notification = client.next();
         assert_eq!(notification["method"], "notifications/tasks");
@@ -511,7 +635,15 @@ fn subscribed_stdio_clients_receive_authorized_durable_transitions() {
         other.task("tasks/cancel", &id)["result"]["resultType"],
         "complete"
     );
-    let cancelled = client.next();
+    let mut cancelled = client.next();
     assert_eq!(cancelled["params"]["status"], "cancelled");
+    assert_eq!(
+        cancelled["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
+        3
+    );
+    cancelled["params"]["_meta"]
+        .as_object_mut()
+        .unwrap()
+        .remove("io.modelcontextprotocol/subscriptionId");
     assert_eq!(cancelled["params"], other.task("tasks/get", &id)["result"]);
 }

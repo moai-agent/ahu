@@ -31,10 +31,12 @@ fn missing(id: &Value) -> Value {
 pub(super) struct Session {
     owner: String,
     legacy: bool,
+    modern: bool,
     enabled: bool,
     worker_started: bool,
     inspection_adapter: bool,
     subscriptions: BTreeMap<String, Value>,
+    subscription_id: Option<Value>,
     acknowledged: bool,
 }
 impl Session {
@@ -51,13 +53,27 @@ impl Session {
         Ok(Self {
             owner,
             legacy: false,
+            modern: false,
             enabled: false,
             worker_started: false,
             inspection_adapter: std::env::var("AHU_MCP_TASKS_ADAPTER").as_deref()
                 == Ok("inspection-v1"),
             subscriptions: BTreeMap::new(),
+            subscription_id: None,
             acknowledged: false,
         })
+    }
+
+    pub(super) fn legacy(&self) -> bool {
+        self.legacy
+    }
+
+    pub(super) fn modern(&self) -> bool {
+        self.modern
+    }
+
+    pub(super) fn mark_modern(&mut self) {
+        self.modern = true;
     }
 
     pub(super) fn handle(
@@ -224,6 +240,7 @@ impl Session {
             subscriptions.insert(task_id.into(), Value::Null);
         }
         self.subscriptions = subscriptions;
+        self.subscription_id = Some(id.clone());
         self.acknowledged = true;
         response(id, json!({"resultType":"complete"}))
     }
@@ -231,7 +248,8 @@ impl Session {
     pub(super) fn notifications(&mut self, repo: &Repo) -> Result<Vec<Value>> {
         let mut messages = Vec::new();
         if self.acknowledged {
-            messages.push(json!({"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"notifications":{"taskIds":self.subscriptions.keys().collect::<Vec<_>>()}}}));
+            let subscription_id = self.subscription_id.clone().unwrap_or(Value::Null);
+            messages.push(json!({"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":subscription_id},"notifications":{"taskIds":self.subscriptions.keys().collect::<Vec<_>>()}}}));
             self.acknowledged = false;
         }
         for (id, previous) in &mut self.subscriptions {
@@ -242,8 +260,11 @@ impl Session {
             };
             let view = task.view("complete");
             if view != *previous {
+                let mut params = view;
+                params["_meta"]["io.modelcontextprotocol/subscriptionId"] =
+                    self.subscription_id.clone().unwrap_or(Value::Null);
                 messages
-                    .push(json!({"jsonrpc":"2.0","method":"notifications/tasks","params":view}));
+                    .push(json!({"jsonrpc":"2.0","method":"notifications/tasks","params":params}));
                 *previous = task.view("complete");
             }
         }
@@ -297,7 +318,8 @@ impl StoredTask {
     }
     fn view(&self, result_type: &str) -> Value {
         let mut value = json!({"resultType":result_type,"taskId":self.task_id,"status":self.status,
-            "createdAt":self.created_at,"lastUpdatedAt":self.last_updated_at,"ttlMs":self.ttl_ms,"pollIntervalMs":100});
+            "createdAt":self.created_at,"lastUpdatedAt":self.last_updated_at,"ttlMs":self.ttl_ms,"pollIntervalMs":100,
+            "_meta":{super::SERVER_INFO_META:{"name":super::SERVER_NAME,"version":super::SERVER_VERSION}}});
         if result_type != "task" {
             for (key, data) in [
                 ("inputRequests", &self.input_requests),
