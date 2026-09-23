@@ -5,7 +5,7 @@
 //! initialization retains synchronous, read-only inspection.
 
 use serde_json::{Value, json};
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Write};
 
 use crate::git::Repo;
 use crate::util::{Error, Result};
@@ -21,6 +21,7 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CLIENT_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
 const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
 const SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 pub const CONTEXT_HYGIENE_SKILL: &str = "context-hygiene";
 
@@ -55,9 +56,21 @@ pub fn skill_path(name: &str) -> String {
 pub fn serve(repo: &Repo) -> Result<i32> {
     let (send, receive) = std::sync::mpsc::sync_channel(32);
     std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            if send.send(line).is_err() {
-                break;
+        let mut input = std::io::stdin().lock();
+        loop {
+            match read_frame(&mut input) {
+                Ok(Some(frame)) => {
+                    if send.send(Ok(frame)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let recoverable = error.kind() == io::ErrorKind::InvalidData;
+                    if send.send(Err(error)).is_err() || !recoverable {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -65,8 +78,7 @@ pub fn serve(repo: &Repo) -> Result<i32> {
     let mut session = task_protocol::Session::new()?;
     loop {
         match receive.recv_timeout(std::time::Duration::from_millis(50)) {
-            Ok(line) => {
-                let line = line?;
+            Ok(Ok(line)) => {
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -98,6 +110,12 @@ pub fn serve(repo: &Repo) -> Result<i32> {
                     session.start_worker(repo);
                 }
             }
+            Ok(Err(error)) => {
+                write_response(
+                    &mut stdout,
+                    &rpc_error(&Value::Null, -32600, error.to_string()),
+                )?;
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -106,6 +124,62 @@ pub fn serve(repo: &Repo) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+fn read_frame(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+    let mut frame = Vec::new();
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return if frame.is_empty() {
+                Ok(None)
+            } else {
+                String::from_utf8(frame)
+                    .map(Some)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            };
+        }
+        let take = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(buffer.len(), |position| position + 1);
+        let terminated = take < buffer.len() || buffer[take - 1] == b'\n';
+        if frame.len() + take > MAX_FRAME_BYTES {
+            reader.consume(take);
+            if !terminated {
+                discard_frame(reader)?;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("MCP frame exceeds {MAX_FRAME_BYTES} bytes"),
+            ));
+        }
+        frame.extend_from_slice(&buffer[..take]);
+        reader.consume(take);
+        if terminated {
+            return String::from_utf8(frame)
+                .map(Some)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+        }
+    }
+}
+
+fn discard_frame(reader: &mut impl BufRead) -> io::Result<()> {
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok(());
+        }
+        let take = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(buffer.len(), |position| position + 1);
+        let terminated = take < buffer.len() || buffer[take - 1] == b'\n';
+        reader.consume(take);
+        if terminated {
+            return Ok(());
+        }
+    }
 }
 
 // MCP request IDs are strings or integers; null and fractional IDs are invalid.
@@ -450,8 +524,29 @@ pub fn setup(repo: &Repo) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::Cursor;
 
-    use super::{BUNDLED_SKILLS, skill_path, tools};
+    use super::{BUNDLED_SKILLS, MAX_FRAME_BYTES, read_frame, skill_path, tools};
+
+    #[test]
+    fn frame_reader_accepts_exact_limit_and_recovers_after_oversize() {
+        let mut exact = vec![b'x'; MAX_FRAME_BYTES - 1];
+        exact.push(b'\n');
+        let mut exact_reader = Cursor::new(exact);
+        assert_eq!(
+            read_frame(&mut exact_reader).unwrap().unwrap().len(),
+            MAX_FRAME_BYTES
+        );
+
+        let mut oversized = vec![b'x'; MAX_FRAME_BYTES + 1];
+        oversized.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\"}\n");
+        let mut reader = Cursor::new(oversized);
+        assert!(read_frame(&mut reader).is_err());
+        assert_eq!(
+            read_frame(&mut reader).unwrap().as_deref(),
+            Some("{\"jsonrpc\":\"2.0\"}\n")
+        );
+    }
 
     #[test]
     fn read_only_tools_are_explicit_and_bounded() {

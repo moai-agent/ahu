@@ -142,7 +142,9 @@ launches or changes harness permissions.
 
 The stdio binding is newline-delimited UTF-8 JSON-RPC: each line is one request,
 notification, or response, and stdout contains no other bytes. Diagnostics go
-to stderr. A dual-era client may probe `server/discover` and fall back to the
+to stderr. Frames are limited to 1 MiB, including the newline; an oversized
+frame receives `-32600` and is discarded through its newline so later frames can
+still be processed. A dual-era client may probe `server/discover` and fall back to the
 legacy handshake when the probe is not understood. Malformed JSON receives
 `-32700`; invalid envelopes (including batches, missing/wrong `jsonrpc`, missing
 or non-string methods, response-shaped messages, and invalid IDs) receive
