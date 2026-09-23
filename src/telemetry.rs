@@ -6,7 +6,7 @@
 
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use opentelemetry::global;
 use opentelemetry::trace::{Span, Tracer};
@@ -89,12 +89,15 @@ pub fn initialize(config: &TelemetryConfig) -> Result<()> {
 }
 
 /// Apply project telemetry only to a child process ahu is about to start.
+#[allow(clippy::too_many_arguments)]
 pub fn configure_child(
     command: &mut std::process::Command,
     config: &TelemetryConfig,
     agent: &str,
     harness: &str,
     model: &str,
+    agent_version: Option<&str>,
+    harness_version: Option<&str>,
     task_id: Option<&str>,
 ) {
     if !config.enabled {
@@ -124,6 +127,8 @@ pub fn configure_child(
                 agent,
                 harness,
                 model,
+                agent_version,
+                harness_version,
                 task_id,
                 std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
             ),
@@ -134,6 +139,8 @@ fn resource_attributes(
     agent: &str,
     harness: &str,
     model: &str,
+    agent_version: Option<&str>,
+    harness_version: Option<&str>,
     task_id: Option<&str>,
     inherited: Option<&str>,
 ) -> String {
@@ -141,7 +148,14 @@ fn resource_attributes(
         format!("ahu.agent.name={}", escape(agent)),
         format!("ahu.harness={}", escape(harness)),
         format!("ahu.model={}", escape(model)),
+        format!("ahu.version={}", escape(env!("CARGO_PKG_VERSION"))),
     ];
+    if let Some(version) = agent_version {
+        values.push(format!("ahu.agent.version={}", escape(version)));
+    }
+    if let Some(version) = harness_version {
+        values.push(format!("ahu.harness.version={}", escape(version)));
+    }
     if let Some(task_id) = task_id {
         values.push(format!("ahu.task.id={}", escape(task_id)));
     }
@@ -158,11 +172,32 @@ fn escape(value: &str) -> String {
         .replace('=', "\\=")
 }
 
-pub struct SpanGuard(Option<global::BoxedSpan>);
+pub struct SpanGuard {
+    span: Option<global::BoxedSpan>,
+    started: Instant,
+}
+
+impl SpanGuard {
+    pub fn set_string(&mut self, key: &'static str, value: impl Into<String>) {
+        if let Some(span) = self.span.as_mut() {
+            span.set_attribute(KeyValue::new(key, Value::from(value.into())));
+        }
+    }
+
+    pub fn set_u64(&mut self, key: &'static str, value: u64) {
+        if let Some(span) = self.span.as_mut() {
+            span.set_attribute(KeyValue::new(key, value as i64));
+        }
+    }
+}
 
 impl Drop for SpanGuard {
     fn drop(&mut self) {
-        if let Some(span) = self.0.as_mut() {
+        if let Some(span) = self.span.as_mut() {
+            span.set_attribute(KeyValue::new(
+                "ahu.duration_ms",
+                self.started.elapsed().as_millis() as i64,
+            ));
             span.end();
         }
     }
@@ -177,7 +212,10 @@ pub fn span(
     for (key, value) in attributes {
         span.set_attribute(KeyValue::new(key, Value::from(value)));
     }
-    SpanGuard(Some(span))
+    SpanGuard {
+        span: Some(span),
+        started: Instant::now(),
+    }
 }
 
 pub fn shutdown() {
@@ -216,6 +254,8 @@ mod tests {
             "agent",
             "codex",
             "model",
+            None,
+            None,
             Some("task"),
         );
         assert!(
@@ -235,6 +275,8 @@ mod tests {
             "agent",
             "codex",
             "model",
+            None,
+            None,
             Some("task"),
         );
         let env: std::collections::BTreeMap<_, _> = command

@@ -1189,6 +1189,49 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cached: Option<u64>,
+    pub total: Option<u64>,
+}
+
+impl TokenUsage {
+    fn observe(&mut self, event: &Value) {
+        fn max_slot(slot: &mut Option<u64>, value: Option<u64>) {
+            if let Some(value) = value {
+                *slot = Some(slot.unwrap_or(0).max(value));
+            }
+        }
+        for usage in [
+            event.get("usage"),
+            event.pointer("/part/usage"),
+            event.pointer("/result/usage"),
+            event.pointer("/response/usage"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        {
+            let number = |keys: &[&str]| {
+                keys.iter()
+                    .find_map(|key| usage.get(*key).and_then(Value::as_u64))
+            };
+            max_slot(&mut self.input, number(&["input_tokens", "prompt_tokens"]));
+            max_slot(
+                &mut self.output,
+                number(&["output_tokens", "completion_tokens"]),
+            );
+            max_slot(
+                &mut self.cached,
+                number(&["cached_tokens", "cache_read_input_tokens"]),
+            );
+            max_slot(&mut self.total, number(&["total_tokens"]));
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Events {
     pub session: Option<String>,
     pub terminal: bool,
@@ -1201,6 +1244,10 @@ pub struct Events {
     pub stderr_diagnostics: Vec<String>,
     #[serde(default)]
     pub stderr_unclassified_lines: u64,
+    #[serde(default)]
+    pub usage: TokenUsage,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(skip_serializing)]
     pub native_observations: Vec<Value>,
     #[serde(default)]
@@ -1274,6 +1321,15 @@ impl Events {
                 return;
             }
         };
+        self.usage.observe(&event);
+        if self.model.is_none() {
+            self.model = event
+                .get("model")
+                .or_else(|| event.get("model_name"))
+                .or_else(|| event.pointer("/part/model"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
         let metadata = native_metadata(harness, &event);
         let helper_event = metadata["type"] == "system" || metadata["type"] == "collab";
         if helper_event && self.native_event_count >= 256 {
@@ -2035,12 +2091,28 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         .map(|loaded| loaded.config.telemetry)
         .unwrap_or_default();
     crate::telemetry::initialize(&telemetry)?;
+    let mut telemetry_span = crate::telemetry::span(
+        "ahu.harness.run",
+        [
+            ("ahu.agent.name", record.agent_label()),
+            ("ahu.harness", record.identity.harness.clone()),
+            ("ahu.model.requested", record.identity.model.clone()),
+            ("ahu.version", env!("CARGO_PKG_VERSION").to_string()),
+            ("ahu.task.id", record.task_id.clone()),
+        ],
+    );
+    if let Some(version) = record.identity.agent_version.as_deref() {
+        telemetry_span.set_string("ahu.agent.version", version);
+    }
+    telemetry_span.set_string("ahu.harness.version", &spec.harness_version);
     crate::telemetry::configure_child(
         &mut command,
         &telemetry,
         &record.agent_label(),
         &record.identity.harness,
         &record.identity.model,
+        record.identity.agent_version.as_deref(),
+        Some(&spec.harness_version),
         Some(&record.task_id),
     );
     command
@@ -2357,6 +2429,22 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     } else {
         "succeeded"
     };
+    if let Some(model) = events.model.as_deref() {
+        telemetry_span.set_string("ahu.model.resolved", model);
+    }
+    telemetry_span.set_string("ahu.status", outcome);
+    if let Some(value) = events.usage.input {
+        telemetry_span.set_u64("ahu.tokens.input", value);
+    }
+    if let Some(value) = events.usage.output {
+        telemetry_span.set_u64("ahu.tokens.output", value);
+    }
+    if let Some(value) = events.usage.cached {
+        telemetry_span.set_u64("ahu.tokens.cached", value);
+    }
+    if let Some(value) = events.usage.total {
+        telemetry_span.set_u64("ahu.tokens.total", value);
+    }
     let helpers: Vec<Value> = events.native.helpers().iter().map(|h| json!({
         "task_id":h.task_id,"role":h.role,"depth":h.depth,"backgrounded":h.backgrounded,"status":h.status,
         "output_reference":{"location":h.output_file,"source":"harness event stream","verified_exists":false},"total_tokens":h.total_tokens
@@ -2872,6 +2960,28 @@ pub fn inspection(dir: &Path) -> Result<Value> {
 /// supervisor is running.
 pub(crate) fn supervisor_owns_attempt(dir: &Path) -> Result<bool> {
     Lock::is_owned(&dir.join("owner.lock"))
+}
+
+#[cfg(test)]
+mod telemetry_usage_tests {
+    use super::Events;
+
+    #[test]
+    fn usage_normalization_keeps_common_cumulative_snapshot_fields() {
+        let mut events = Events::default();
+        events.observe(
+            "codex",
+            br#"{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":7,"cached_tokens":3,"total_tokens":19}}"#,
+        );
+        events.observe(
+            "codex",
+            br#"{"type":"turn.completed","usage":{"input_tokens":20,"output_tokens":9,"cached_tokens":5,"total_tokens":29}}"#,
+        );
+        assert_eq!(events.usage.input, Some(20));
+        assert_eq!(events.usage.output, Some(9));
+        assert_eq!(events.usage.cached, Some(5));
+        assert_eq!(events.usage.total, Some(29));
+    }
 }
 
 #[cfg(test)]

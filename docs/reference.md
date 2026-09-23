@@ -615,9 +615,21 @@ endpoint = "http://127.0.0.1:4318"
 
 The first implementation accepts only the local OTLP/HTTP endpoint on port
 4318. Configure an upstream OpenTelemetry Collector to receive the endpoint and
-write or route telemetry as needed. Agent, harness, model, and task attributes
-are namespaced under `ahu.*`; prompts, transcripts, credentials, and private
-issue content are not exported by ahu.
+write or route telemetry as needed. Ahu adds normalized `ahu.*` attributes for
+its version, agent and manifest version, harness and installed harness version,
+requested model, provider-resolved model when the event stream reports one,
+task, outcome, elapsed milliseconds, and any token usage the
+harness event stream actually reports (`input`, `output`, `cached`, and
+`total`). Missing usage remains absent; ahu never estimates it. Prompts,
+transcripts, credentials, and private issue content are not exported by ahu.
+
+Harness event streams are not identical. Codex, Claude Code, Antigravity, and
+OpenCode use different event names and terminal records, so ahu normalizes
+terminal status and the common usage keys where they are present. Provider
+native OTEL spans, if a harness emits them, remain harness-owned and may use
+different semantic conventions. Interactive sessions generally provide timing
+and process status; headless sessions additionally provide the structured event
+usage fields that ahu can normalize.
 
 ```sh
 ahu knowledge lint

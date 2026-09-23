@@ -1288,15 +1288,22 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
         .map(|loaded| loaded.config.telemetry)
         .unwrap_or_default();
     crate::telemetry::initialize(&telemetry)?;
-    let _span = crate::telemetry::span(
+    let mut _span = crate::telemetry::span(
         "ahu.harness.run",
         [
             ("ahu.agent.name", record.agent_label()),
             ("ahu.harness", record.identity.harness.clone()),
-            ("ahu.model", record.identity.model.clone()),
+            ("ahu.model.requested", record.identity.model.clone()),
+            ("ahu.version", env!("CARGO_PKG_VERSION").to_string()),
             ("ahu.task.id", record.task_id.clone()),
         ],
     );
+    if let Some(version) = record.identity.agent_version.as_deref() {
+        _span.set_string("ahu.agent.version", version);
+    }
+    if let Some(version) = record.enforcement.harness_version.as_deref() {
+        _span.set_string("ahu.harness.version", version);
+    }
     eprintln!(
         "ahu task {} — {} on {} / {}",
         record.task_id,
@@ -1347,6 +1354,8 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             &record.agent_label(),
             &record.identity.harness,
             &record.identity.model,
+            record.identity.agent_version.as_deref(),
+            record.enforcement.harness_version.as_deref(),
             Some(&record.task_id),
         );
         command
@@ -1384,6 +1393,14 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     })?;
     match outcome {
         HarnessOutcome::Exited(status) => {
+            _span.set_string(
+                "ahu.status",
+                if status.success() {
+                    "succeeded"
+                } else {
+                    "failed"
+                },
+            );
             eprintln!(
                 "\nahu: the harness exited ({}). The worktree {} and its branch {} are kept.\n\
                  Exiting does not mean the task succeeded, and ahu does not delete either for you.",
@@ -1394,6 +1411,7 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             Ok(HarnessOutcome::Exited(status))
         }
         HarnessOutcome::Cancelled => {
+            _span.set_string("ahu.status", "cancelled");
             eprintln!(
                 "\nahu: cancellation of the owned harness process group completed.\n\
                  The worktree {} and its branch {} are kept; cancelling does not delete either \

@@ -113,6 +113,8 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
             harness,
             &model,
             None,
+            selection::installed_version(program).as_deref(),
+            None,
         );
     }
     // Inherit the terminal and cwd. Replacing ahu gives the harness terminal signals
@@ -1981,7 +1983,8 @@ fn submit(
     display: &launch::DisplayMetadata,
 ) -> Result<i32> {
     crate::telemetry::initialize(&loaded.config.telemetry)?;
-    let _span = crate::telemetry::span(
+    let mut plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
+    let mut _span = crate::telemetry::span(
         "ahu.launch",
         [
             (
@@ -1991,10 +1994,20 @@ fn submit(
                     .map_or_else(|| "auto".to_string(), |agent| agent.label()),
             ),
             ("ahu.harness", pair.harness.clone()),
-            ("ahu.model", pair.model.clone()),
+            ("ahu.model.requested", pair.model.clone()),
+            ("ahu.version", env!("CARGO_PKG_VERSION").to_string()),
         ],
     );
-    let mut plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
+    if let Some(version) = plan
+        .agent
+        .as_ref()
+        .map(|agent| agent.manifest.version.as_str())
+    {
+        _span.set_string("ahu.agent.version", version);
+    }
+    if let Some(version) = plan.enforcement.harness_version.as_deref() {
+        _span.set_string("ahu.harness.version", version);
+    }
     plan.apply_display(display)?;
 
     preflight(console, repo, loaded, &plan, prompt, dry_run)?;
@@ -2020,6 +2033,7 @@ fn submit(
 
     if dry_run {
         console.say("Dry run. No task or session was created.\n")?;
+        _span.set_string("ahu.status", "planned");
         if output_json {
             println!("{}", launch::render_json(&plan, prompt)?);
         }
@@ -2027,6 +2041,7 @@ fn submit(
     }
     if confirm && !launcher::confirm_submit(console, &code)? {
         console.say("Cancelled. No worktree, branch, or session was created.\n")?;
+        _span.set_string("ahu.status", "cancelled");
         return Ok(1);
     }
 
@@ -2039,6 +2054,7 @@ fn submit(
         display_safe(&crate::task_handles::reference(repo, &launched.record.task_id)),
     ))?;
     console.say(&style::stdout().paint(Role::Warning, &render_launch_notes(&launched.notes)))?;
+    _span.set_string("ahu.status", "submitted");
     Ok(0)
 }
 
