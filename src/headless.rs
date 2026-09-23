@@ -1210,6 +1210,10 @@ pub struct TokenUsage {
     pub input: Option<u64>,
     pub output: Option<u64>,
     pub cached: Option<u64>,
+    #[serde(default)]
+    pub cache_write: Option<u64>,
+    #[serde(default)]
+    pub reasoning: Option<u64>,
     pub total: Option<u64>,
 }
 
@@ -1225,6 +1229,11 @@ impl TokenUsage {
             event.pointer("/part/usage"),
             event.pointer("/result/usage"),
             event.pointer("/response/usage"),
+            event.pointer("/step_update/usage"),
+            event.pointer("/result/result/usage"),
+            event.pointer("/step_update/tool_info/usage"),
+            event.get("tokens"),
+            event.pointer("/part/tokens"),
         ]
         .into_iter()
         .flatten()
@@ -1241,7 +1250,32 @@ impl TokenUsage {
             );
             max_slot(
                 &mut self.cached,
-                number(&["cached_tokens", "cache_read_input_tokens"]),
+                number(&[
+                    "cached_tokens",
+                    "cache_read_input_tokens",
+                    "cached_input_tokens",
+                ])
+                .or_else(|| {
+                    usage
+                        .get("cache")
+                        .and_then(|cache| cache.get("read"))
+                        .and_then(Value::as_u64)
+                }),
+            );
+            max_slot(
+                &mut self.cache_write,
+                number(&["cache_write_input_tokens", "cache_creation_input_tokens"]).or_else(
+                    || {
+                        usage
+                            .get("cache")
+                            .and_then(|cache| cache.get("write"))
+                            .and_then(Value::as_u64)
+                    },
+                ),
+            );
+            max_slot(
+                &mut self.reasoning,
+                number(&["reasoning_output_tokens", "thinking_tokens", "reasoning"]),
             );
             max_slot(&mut self.total, number(&["total_tokens"]));
         }
@@ -1363,6 +1397,18 @@ impl Events {
                 }
             }
         }
+        for value in [
+            event.pointer("/step_update/tool_name"),
+            event.pointer("/step_update/tool_info/name"),
+        ] {
+            if tool_is_skill(value.unwrap_or(&Value::Null)) {
+                found.extend(
+                    event
+                        .pointer("/step_update/tool_info/parameters")
+                        .and_then(skill_name),
+                );
+            }
+        }
         for name in found {
             if self.skills.len() >= 128 {
                 self.failed = true;
@@ -1475,7 +1521,11 @@ impl Events {
         if helper_event {
             self.native_event_count += 1;
         }
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let kind = event
+            .get("type")
+            .or_else(|| event.get("event"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let session = event
             .get("session_id")
             .or_else(|| event.get("thread_id"))
@@ -1483,6 +1533,7 @@ impl Events {
             // OpenCode spells it `sessionID`, on every event including its
             // error events, which is what makes its errors resumable at all.
             .or_else(|| event.get("sessionID"))
+            .or_else(|| event.pointer("/step_update/conversation_id"))
             .and_then(Value::as_str);
         if let Some(session) = session.filter(|s| valid_session(s)) {
             if let Some(previous) = &self.session {
@@ -1531,21 +1582,27 @@ impl Events {
                 }
             }
             ("claude-code" | "antigravity", "result") => {
-                let status = event
-                    .get("status")
+                let result = event.get("result").filter(|value| value.is_object());
+                let status = result
+                    .and_then(|value| value.get("status"))
+                    .or_else(|| event.get("status"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_ascii_lowercase();
-                let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
+                let subtype = result
+                    .and_then(|value| value.get("subtype"))
+                    .or_else(|| event.get("subtype"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 let recognized_success = if harness == "claude-code" {
                     subtype == "success"
                         && event.get("is_error").and_then(Value::as_bool) == Some(false)
                         && event.get("result").and_then(Value::as_str).is_some()
                 } else {
                     matches!(status.as_str(), "success" | "succeeded" | "ok")
-                        && event
-                            .get("response")
-                            .or_else(|| event.get("result"))
+                        && result
+                            .and_then(|value| value.get("response"))
+                            .or_else(|| event.get("response"))
                             .and_then(Value::as_str)
                             .is_some()
                 };
@@ -1561,13 +1618,15 @@ impl Events {
                     || subtype.starts_with("error")
                     || event.get("error").is_some_and(|v| !v.is_null());
                 self.summary = event
-                    .get("result")
-                    .or_else(|| event.get("response"))
+                    .get("response")
+                    .or_else(|| result.and_then(|value| value.get("response")))
+                    .or_else(|| event.get("result"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .into();
                 self.finish(failed);
             }
+            ("antigravity", "step_update") => (),
             // OpenCode's `run --format json` stream, observed on 1.18.30. Every
             // event is `{type, timestamp, sessionID, part}`; the work of a turn
             // is a sequence of steps, and only the reason on a step's finish
@@ -2573,6 +2632,12 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     }
     if let Some(value) = events.usage.cached {
         telemetry_span.set_u64("ahu.tokens.cached", value);
+    }
+    if let Some(value) = events.usage.cache_write {
+        telemetry_span.set_u64("ahu.tokens.cache_write", value);
+    }
+    if let Some(value) = events.usage.reasoning {
+        telemetry_span.set_u64("ahu.tokens.reasoning", value);
     }
     if let Some(value) = events.usage.total {
         telemetry_span.set_u64("ahu.tokens.total", value);

@@ -133,6 +133,13 @@ the ahu worktree. Caveat: neither directory is in Antigravity's
 discovery on folder trust, as Claude Code does for git trust. This probe shows
 what an untrusted directory gets, not what a trusted folder would show.
 
+The current `--output-format stream-json` probe (Antigravity 1.2.9) emits an
+outer `event` field with nested `init`, `step_update`, and `result` objects.
+The disposable project skill was still unavailable in that session, and no
+skill invocation event was emitted. Ahu's headless evaluator recognizes this
+stream envelope and records its nested usage and lifecycle fields, but it does
+not claim a project skill was used when Antigravity does not expose one.
+
 ## Results
 
 | Harness        | Version | `.agents/skills/` native discovery | Invocation | Notes |

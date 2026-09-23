@@ -610,6 +610,31 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
 }
 
 #[test]
+fn antigravity_stream_json_shape_is_normalized() {
+    use ahu::headless::Events;
+
+    let mut events = Events::default();
+    events.observe(
+        "antigravity",
+        br#"{"event":"init","conversation_id":"agy-session","init":{"cwd":"/tmp/probe"}}"#,
+    );
+    events.observe(
+        "antigravity",
+        br#"{"event":"step_update","step_update":{"conversation_id":"agy-session","state":"DONE","step_type":"agent_response","usage":{"input_tokens":11,"output_tokens":4,"thinking_tokens":2,"total_tokens":15}}}"#,
+    );
+    events.observe(
+        "antigravity",
+        br#"{"event":"result","result":{"conversation_id":"agy-session","status":"SUCCESS","response":"PROBE_SKILL_OK","usage":{"input_tokens":11,"output_tokens":4,"thinking_tokens":2,"total_tokens":15}}}"#,
+    );
+    assert!(events.terminal);
+    assert!(!events.failed, "{:?}", events.blockers);
+    assert_eq!(events.session.as_deref(), Some("agy-session"));
+    assert_eq!(events.usage.total, Some(15));
+    assert_eq!(events.usage.reasoning, Some(2));
+    assert_eq!(events.summary, "PROBE_SKILL_OK");
+}
+
+#[test]
 fn cli_values_never_become_batch_options_and_duplicates_are_refused() {
     for field in ["--prompt", "--title", "--summary"] {
         let mut args = vec!["launch", "@worker", "--headless", field, "--dry-run"];
