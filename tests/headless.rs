@@ -537,6 +537,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "codex",
             vec![
                 json!({"type":"thread.started","thread_id":"thr-codex"}),
+                json!({"type":"item.completed","item":{"type":"function_call","name":"skill","input":{"skill":"direct-agents"}}}),
                 json!({"type":"item.completed","item":{"type":"agent_message","text":"done"}}),
                 json!({"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18},"model":"gpt-test"}),
             ],
@@ -545,6 +546,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "claude-code",
             vec![
                 json!({"type":"system","session_id":"ses-claude","subtype":"init"}),
+                json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"direct-agents"}}]}}),
                 json!({"type":"assistant","message":{"content":[]}}),
                 json!({"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18},"model":"claude-test"}),
             ],
@@ -553,6 +555,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "antigravity",
             vec![
                 json!({"type":"init","session_id":"ses-agy"}),
+                json!({"type":"tool_use","name":"Skill","input":{"skill":"direct-agents"}}),
                 json!({"type":"result","status":"success","response":"done","usage":{"prompt_tokens":17,"completion_tokens":4,"total_tokens":21},"model_name":"gemini-test"}),
             ],
         ),
@@ -560,6 +563,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "opencode",
             vec![
                 json!({"type":"step_start","sessionID":"ses-opencode","part":{"type":"step-start"}}),
+                json!({"type":"tool_use","sessionID":"ses-opencode","part":{"type":"tool","tool":"skill","state":{"input":{"skill":"direct-agents"}}}}),
                 json!({"type":"text","sessionID":"ses-opencode","part":{"type":"text","text":"done"}}),
                 json!({"type":"step_finish","sessionID":"ses-opencode","part":{"type":"step-finish","reason":"stop","usage":{"input_tokens":19,"output_tokens":6,"total_tokens":25},"model":"glm-test"}}),
             ],
@@ -596,6 +600,12 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             events.model.is_some(),
             "{harness} resolved model was not captured"
         );
+        assert_eq!(
+            events.skills.len(),
+            1,
+            "{harness} skill invocation was not captured"
+        );
+        assert_eq!(events.skills[0].name, "direct-agents");
     }
 }
 

@@ -1188,6 +1188,23 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillInvocation {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillCatalogEntry {
+    pub name: String,
+    pub source: String,
+    pub digest: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input: Option<u64>,
@@ -1231,6 +1248,38 @@ impl TokenUsage {
     }
 }
 
+fn skill_catalog(worktree: &Path) -> Vec<SkillCatalogEntry> {
+    let roots = [
+        ".agents/skills",
+        ".claude/skills",
+        ".gemini/antigravity-cli/skills",
+    ];
+    let mut entries = Vec::new();
+    for root in roots {
+        let path = worktree.join(root);
+        let Ok(children) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for child in children.flatten() {
+            let name = child.file_name().to_string_lossy().into_owned();
+            if name.is_empty() || name.starts_with('.') {
+                continue;
+            }
+            let file = child.path().join("SKILL.md");
+            let Ok(bytes) = std::fs::read(&file) else {
+                continue;
+            };
+            entries.push(SkillCatalogEntry {
+                name,
+                source: format!("{root}/{}/SKILL.md", child.file_name().to_string_lossy()),
+                digest: digest_bytes(&bytes),
+            });
+        }
+    }
+    entries.sort_by(|left, right| left.source.cmp(&right.source));
+    entries
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Events {
     pub session: Option<String>,
@@ -1248,6 +1297,8 @@ pub struct Events {
     pub usage: TokenUsage,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<SkillInvocation>,
     #[serde(skip_serializing)]
     pub native_observations: Vec<Value>,
     #[serde(default)]
@@ -1259,6 +1310,83 @@ pub struct Events {
     native_event_count: usize,
 }
 impl Events {
+    fn observe_skill(&mut self, event: &Value) {
+        fn skill_name(value: &Value) -> Option<String> {
+            let object = value.as_object()?;
+            for key in ["skill", "skill_name", "name"] {
+                if let Some(name) = object.get(key).and_then(Value::as_str)
+                    && !name.trim().is_empty()
+                {
+                    return Some(name.to_string());
+                }
+            }
+            None
+        }
+        fn tool_is_skill(value: &Value) -> bool {
+            value
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("skill") || name.ends_with(".skill"))
+        }
+        let mut found = Vec::new();
+        if tool_is_skill(event.get("name").unwrap_or(&Value::Null)) {
+            found.extend(
+                event
+                    .get("input")
+                    .and_then(skill_name)
+                    .or_else(|| skill_name(event)),
+            );
+        }
+        for path in ["/item", "/part", "/tool"] {
+            if let Some(value) = event.pointer(path)
+                && (tool_is_skill(value.get("name").unwrap_or(&Value::Null))
+                    || tool_is_skill(value.get("tool").unwrap_or(&Value::Null))
+                    || tool_is_skill(value.get("type").unwrap_or(&Value::Null)))
+            {
+                found.extend(
+                    value
+                        .get("input")
+                        .and_then(skill_name)
+                        .or_else(|| {
+                            value
+                                .get("state")
+                                .and_then(|state| state.get("input"))
+                                .and_then(skill_name)
+                        })
+                        .or_else(|| skill_name(value)),
+                );
+            }
+        }
+        if let Some(content) = event.pointer("/message/content").and_then(Value::as_array) {
+            for value in content {
+                if tool_is_skill(value.get("name").unwrap_or(&Value::Null)) {
+                    found.extend(value.get("input").and_then(skill_name));
+                }
+            }
+        }
+        for name in found {
+            if self.skills.len() >= 128 {
+                self.failed = true;
+                self.blockers.push("skill invocation limit exceeded".into());
+                break;
+            }
+            self.skills.push(SkillInvocation {
+                name,
+                source: None,
+                digest: None,
+                status: "invoked".into(),
+            });
+        }
+    }
+
+    fn resolve_skills(&mut self, catalog: &[SkillCatalogEntry]) {
+        for invocation in &mut self.skills {
+            if let Some(entry) = catalog.iter().find(|entry| entry.name == invocation.name) {
+                invocation.source = Some(entry.source.clone());
+                invocation.digest = Some(entry.digest.clone());
+            }
+        }
+    }
+
     fn observe_stderr(&mut self, line: &[u8]) {
         let text = String::from_utf8_lossy(line);
         let text = text.trim();
@@ -1322,6 +1450,7 @@ impl Events {
             }
         };
         self.usage.observe(&event);
+        self.observe_skill(&event);
         if self.model.is_none() {
             self.model = event
                 .get("model")
@@ -1468,6 +1597,7 @@ impl Events {
                         .push("harness reported permission denials".into());
                 }
             }
+            (_, "tool_use") => (),
             ("opencode", "step_finish") => {
                 match event.pointer("/part/reason").and_then(Value::as_str) {
                     Some("stop") => self.finish(false),
@@ -2422,6 +2552,8 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
                 .into(),
         );
     }
+    let skill_catalog = skill_catalog(&record.worktree);
+    events.resolve_skills(&skill_catalog);
     let outcome = if let Some((reason, _)) = stop {
         reason
     } else if !status.success() || events.failed {
@@ -2445,6 +2577,19 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     if let Some(value) = events.usage.total {
         telemetry_span.set_u64("ahu.tokens.total", value);
     }
+    telemetry_span.set_u64("ahu.skills.available", skill_catalog.len() as u64);
+    telemetry_span.set_u64("ahu.skills.invoked.count", events.skills.len() as u64);
+    if !events.skills.is_empty() {
+        telemetry_span.set_string(
+            "ahu.skills.invoked",
+            events
+                .skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
     let helpers: Vec<Value> = events.native.helpers().iter().map(|h| json!({
         "task_id":h.task_id,"role":h.role,"depth":h.depth,"backgrounded":h.backgrounded,"status":h.status,
         "output_reference":{"location":h.output_file,"source":"harness event stream","verified_exists":false},"total_tokens":h.total_tokens
@@ -2455,6 +2600,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         "identity":record.identity,"worktree":record.worktree,"branch":record.branch,
         "outcome":outcome,"started_at":started,"finished_at":task::now_rfc3339(),
         "process":{"exit_code":status.code(),"signal":status.signal()},"harness":events,
+        "skill_catalog":skill_catalog,
         "native_reference":{"session":events.session,"source":"harness event stream","harness":record.identity.harness,"harness_version":spec.harness_version,"data_location":null,"location_status":"unknown; harness-owned"},
         "native_helpers":helpers,"native_shell_tasks":events.native.shell_tasks(),"native_refusals":events.native.refusals(),"acceptance":"not assessed","completion_verified":false,
         "writes_outside_worktree":events.writes_outside_worktree,"write_evidence":"reported tool targets; not proof of writes",

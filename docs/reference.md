@@ -631,6 +631,14 @@ different semantic conventions. Interactive sessions generally provide timing
 and process status; headless sessions additionally provide the structured event
 usage fields that ahu can normalize.
 
+Headless results also distinguish the skill catalog copied into the task
+worktree from observed skill invocations. A catalog entry records only its
+name, source path, and content digest. A skill invocation is recorded only when
+the harness emits a recognizable skill/tool event; mentioning a skill in text,
+having a skill on disk, or having an unrecognized event does not count as use.
+Invocation records are bounded and do not retain skill contents, prompts, or
+tool arguments.
+
 ```sh
 ahu knowledge lint
 ahu knowledge lint --output json
