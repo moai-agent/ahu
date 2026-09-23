@@ -80,15 +80,23 @@ pub fn serve(repo: &Repo) -> Result<i32> {
                         continue;
                     }
                 };
-                if let Some(response) = validate_request(&request, &mut session) {
+                if let Some(response) = validate_envelope(&request) {
                     write_response(&mut stdout, &response)?;
                     continue;
                 }
-                if let Some(response) = handle(repo, &request, &mut session) {
-                    write_response(&mut stdout, &response)?;
+                // Notifications never receive responses or invoke request-only operations.
+                // Currently all supported inbound notifications are advisory no-ops.
+                if request.get("id").is_some() {
+                    if let Some(response) = validate_request(&request, &mut session) {
+                        write_response(&mut stdout, &response)?;
+                        continue;
+                    }
+                    if let Some(response) = handle(repo, &request, &mut session) {
+                        write_response(&mut stdout, &response)?;
+                    }
+                    // Work starts only after the durable handle has been flushed.
+                    session.start_worker(repo);
                 }
-                // Work starts only after the durable handle has been flushed.
-                session.start_worker(repo);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -100,9 +108,37 @@ pub fn serve(repo: &Repo) -> Result<i32> {
     Ok(0)
 }
 
+// MCP request IDs are strings or integers; null and fractional IDs are invalid.
+fn validate_envelope(request: &Value) -> Option<Value> {
+    let valid_id = |id: &Value| id.is_string() || id.is_i64() || id.is_u64();
+    if !request.is_object()
+        || request["jsonrpc"] != "2.0"
+        || !request["method"].is_string()
+        || request.get("id").is_some_and(|id| !valid_id(id))
+        || request.get("result").is_some()
+        || request.get("error").is_some()
+    {
+        return Some(rpc_error(&Value::Null, -32600, "invalid JSON-RPC request"));
+    }
+    None
+}
+
 fn validate_request(request: &Value, session: &mut task_protocol::Session) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(Value::as_str)?;
+    if request
+        .get("params")
+        .is_some_and(|params| !params.is_object())
+    {
+        return Some(rpc_error(&id, -32602, "params must be an object"));
+    }
+    if method.starts_with("notifications/") {
+        return Some(rpc_error(
+            &id,
+            -32601,
+            format!("method not found: {method}"),
+        ));
+    }
     if method == "initialize" {
         if session.modern() {
             return Some(rpc_error(&id, -32601, "method not found: initialize"));
@@ -164,10 +200,6 @@ fn response(id: &Value, result: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":result})
 }
 
-fn modern_params(params: &Value) -> bool {
-    params["_meta"][PROTOCOL_VERSION_META].as_str() == Some(MODERN_PROTOCOL_VERSION)
-}
-
 fn rpc_error(id: &Value, code: i64, message: impl Into<String>) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message.into()}})
 }
@@ -176,14 +208,10 @@ fn handle(repo: &Repo, request: &Value, session: &mut task_protocol::Session) ->
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(Value::as_str)?;
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-    if request.get("id").is_none() && method.starts_with("notifications/") {
-        return None;
-    }
     if let Some(result) = session.handle(repo, &id, method, &params) {
         return Some(result);
     }
     match method {
-        "notifications/initialized" | "notifications/cancelled" => None,
         "initialize" => Some(response(
             &id,
             json!({
@@ -194,7 +222,7 @@ fn handle(repo: &Repo, request: &Value, session: &mut task_protocol::Session) ->
             }),
         )),
         "ping" => {
-            let result = if modern_params(&params) {
+            let result = if session.modern() {
                 json!({"resultType":"complete"})
             } else {
                 json!({})
@@ -215,12 +243,12 @@ fn handle(repo: &Repo, request: &Value, session: &mut task_protocol::Session) ->
         )),
         "tools/list" => {
             let mut result = json!({"tools": tools()});
-            if modern_params(&params) {
+            if session.modern() {
                 result["resultType"] = json!("complete");
             }
             Some(response(&id, result))
         }
-        "tools/call" => Some(call_response(repo, &id, &params)),
+        "tools/call" => Some(call_response(repo, &id, &params, session.modern())),
         _ => Some(rpc_error(
             &id,
             -32601,
@@ -259,7 +287,46 @@ fn tools() -> Vec<Value> {
     ]
 }
 
-fn call_response(repo: &Repo, id: &Value, params: &Value) -> Value {
+fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
+    let name = params["name"]
+        .as_str()
+        .ok_or_else(|| Error::new("tools/call requires a string params.name"))?;
+    let selector = match name {
+        "ahu_agents_list" | "ahu_tasks_list" => false,
+        "ahu_task_get" => true,
+        "ahu_task_inspect" if inspection_adapter => true,
+        _ => return Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
+    };
+    let empty = json!({});
+    let arguments = params.get("arguments").unwrap_or(&empty);
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| Error::new("arguments must be an object"))?;
+    if serde_json::to_vec(arguments)?.len() > 8192
+        || object.keys().any(|key| !selector || key != "task")
+    {
+        return Err(Error::new("invalid inspection arguments"));
+    }
+    match object.get("task") {
+        Some(value)
+            if !value
+                .as_str()
+                .is_some_and(|s| !s.is_empty() && s.len() <= 256) =>
+        {
+            return Err(Error::new("invalid task selector"));
+        }
+        None if name == "ahu_task_get" => {
+            return Err(Error::new("ahu_task_get requires arguments.task"));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn call_response(repo: &Repo, id: &Value, params: &Value, modern: bool) -> Value {
+    if let Err(error) = validate_tool_call(params, false) {
+        return rpc_error(id, -32602, error.to_string());
+    }
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return rpc_error(id, -32602, "tools/call requires a string params.name");
     };
@@ -276,12 +343,19 @@ fn call_response(repo: &Repo, id: &Value, params: &Value) -> Value {
     match result {
         Ok(value) => {
             let mut result = json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())}],"structuredContent":value});
-            if modern_params(params) {
+            if modern {
                 result["resultType"] = json!("complete");
             }
             response(id, result)
         }
-        Err(error) => rpc_error(id, -32000, error.to_string()),
+        Err(error) => {
+            let mut result =
+                json!({"isError":true,"content":[{"type":"text","text":error.to_string()}]});
+            if modern {
+                result["resultType"] = json!("complete");
+            }
+            response(id, result)
+        }
     }
 }
 

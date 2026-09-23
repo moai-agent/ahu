@@ -101,7 +101,7 @@ impl Session {
         if method == "tools/list" && self.inspection_adapter && capable(params) {
             let mut tools = super::tools();
             tools.push(json!({"name":"ahu_task_inspect", "description":"Inspect a repository task, requesting a task selector when omitted (experimental inspection adapter).", "inputSchema":{"type":"object","properties":{"task":{"type":"string","maxLength":256}},"additionalProperties":false}}));
-            return Some(response(id, json!({"tools":tools})));
+            return Some(response(id, json!({"resultType":"complete","tools":tools})));
         }
         if method == "tools/call" && capable(params) {
             self.enabled = true;
@@ -166,13 +166,11 @@ impl Session {
     }
 
     fn create(&self, repo: &Repo, params: &Value) -> Result<StoredTask> {
+        super::validate_tool_call(params, self.inspection_adapter)?;
         let name = params["name"]
             .as_str()
             .ok_or_else(|| Error::new("missing tool name"))?;
         let adapter = name == "ahu_task_inspect" && self.inspection_adapter;
-        if !adapter && !matches!(name, "ahu_agents_list" | "ahu_tasks_list" | "ahu_task_get") {
-            return Err(Error::new("unknown ahu MCP tool"));
-        }
         let arguments = params
             .get("arguments")
             .cloned()
@@ -180,18 +178,7 @@ impl Session {
         let object = arguments
             .as_object()
             .ok_or_else(|| Error::new("arguments must be an object"))?;
-        if serde_json::to_vec(&arguments)?.len() > MAX_UPDATE || object.keys().any(|k| k != "task")
-        {
-            return Err(Error::new("invalid inspection arguments"));
-        }
-        if let Some(selector) = object.get("task") {
-            if !selector
-                .as_str()
-                .is_some_and(|s| !s.is_empty() && s.len() <= 256)
-            {
-                return Err(Error::new("invalid task selector"));
-            }
-        } else if adapter && !elicitation(params) {
+        if adapter && object.get("task").is_none() && !elicitation(params) {
             return Err(Error::new(
                 "inspection adapter requires elicitation.form capability",
             ));
@@ -469,6 +456,7 @@ fn work(repo: &Repo, owner: &str) -> Result<()> {
             repo,
             &Value::Null,
             &json!({"name":snapshot.name,"arguments":snapshot.arguments}),
+            true,
         );
         let _lock = Lock::acquire(&path.with_extension("lock"))?;
         let mut task = load(repo, id, owner)?;

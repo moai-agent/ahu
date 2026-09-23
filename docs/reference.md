@@ -120,7 +120,7 @@ setup` never duplicates skills into harness-owned locations such as
 review and remove. `ahu inventory` lists skill sources, including duplicates,
 so a same-named skill outside the canonical tree stays visible.
 
-The modern path follows the [2026-07-28 MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
+The modern path targets the [2026-07-28 MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
 and its [Tasks extension](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks).
 Modern stdio requests do not use `initialize`: every request carries
 `io.modelcontextprotocol/protocolVersion: "2026-07-28"` and an object-valued
@@ -132,7 +132,9 @@ Declare `io.modelcontextprotocol/tasks: {}` inside
 `params._meta["io.modelcontextprotocol/clientCapabilities"].extensions` on every
 Tasks request. Inspection calls return a persisted `working` handle before
 execution. `tasks/get` returns the current state and its final tool result or
-JSON-RPC error. `tasks/update` answers outstanding input requests, and
+JSON-RPC error. A tool execution failure is a completed tool result with
+`isError: true`; `failed` and `error` are reserved for protocol/execution
+infrastructure failures. `tasks/update` answers outstanding input requests, and
 `tasks/cancel` durably cancels an active inspection. Cancellation is idempotent;
 completed results remain completed. Neither terminal protocol status nor an
 inspection result accepts, merges, or approves harness work. No MCP tool
@@ -141,7 +143,39 @@ launches or changes harness permissions.
 The stdio binding is newline-delimited UTF-8 JSON-RPC: each line is one request,
 notification, or response, and stdout contains no other bytes. Diagnostics go
 to stderr. A dual-era client may probe `server/discover` and fall back to the
-legacy handshake when the probe is not understood.
+legacy handshake when the probe is not understood. Malformed JSON receives
+`-32700`; invalid envelopes (including batches, missing/wrong `jsonrpc`, missing
+or non-string methods, response-shaped messages, and invalid IDs) receive
+`-32600` with a null ID. Request IDs must be strings or integers, not null,
+booleans, arrays, objects, or fractional numbers. This server sends no requests
+to clients and does not accept response envelopes. Method parameters, when
+present, must be objects (`-32602` otherwise).
+
+An envelope with no ID is a notification, regardless of its method name. Valid
+notification envelopes receive no response, even with unknown methods, invalid
+parameters, or absent modern metadata. Supported inbound notifications are
+advisory no-ops: notifications never select a protocol mode, queue inspections,
+cancel Tasks, or change subscriptions. Use requests with IDs for those operations.
+A `notifications/*` method sent with an ID receives `-32601`.
+
+Unknown methods receive `-32601`. Unknown tools, missing/non-string tool names,
+and invalid tool arguments receive `-32602` in both synchronous and Tasks paths,
+before any handle is created. Arguments must be objects matching the advertised
+schema: list tools accept no keys, `ahu_task_get` requires `task`, and only the
+experimental adapter permits its omission. Selectors must be nonempty strings
+of at most 256 UTF-8 bytes; arguments are limited to 8 KiB. Failures while
+executing a valid inspection (such as a missing repository task) return text
+content with `isError: true`, not a top-level JSON-RPC error. Modern synchronous
+results, including tool errors and every `tools/list` variant, carry
+`resultType: "complete"`; queued calls carry `resultType: "task"`, and their
+stored final tool results carry `resultType: "complete"`.
+
+Modern requests require version/capability metadata on every request (`-32022`
+when absent or unsupported). A validated modern request locks out `initialize`
+(`-32601`). A failed metadata/discovery-parameter check does not select a mode.
+Legacy initialization locks out `server/discover` (`-32601`) and Tasks methods
+(`-32021`). Subsequent modern metadata on a legacy connection is ignored: it
+cannot opt into modern result shapes, asynchronous calls, or experimental tools.
 
 The stdio host supplies `AHU_MCP_CALLER` as a stable authenticated principal for
 each caller; without it, the effective local OS user is the principal. The host
@@ -176,8 +210,9 @@ broadcast to other callers.
 The optional experimental adapter is enabled by the host with
 `AHU_MCP_TASKS_ADAPTER=inspection-v1`. It exposes `ahu_task_inspect` to modern
 clients. A provided `task` selector behaves like `ahu_task_get`; omission requests
-selection through `input_required`. The creating client must also advertise
-`elicitation.form: {}`. Reply through `tasks/update.inputResponses` with
+selection through `input_required`. When omitting the selector, the creating
+client must also advertise `elicitation.form: {}`. Reply through
+`tasks/update.inputResponses` with
 `{"task-selection":{"action":"accept","content":{"task":"@reviewer"}}}`
 and both capabilities. `decline` or `cancel` cancels the inspection. Updates
 are limited to 8 KiB, selectors to 256 bytes, and the response can only fill that

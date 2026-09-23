@@ -500,11 +500,11 @@ fn input_round_trip_is_durable_bounded_and_capability_checked() {
         client.call("tasks/update", modern(valid))["result"]["resultType"],
         "complete"
     );
-    let failed = client.until(&id, "failed");
-    assert!(failed["error"]["code"].is_number());
+    let tool_error = client.until(&id, "completed");
+    assert_eq!(tool_error["result"]["isError"], true);
     client.stop();
     let mut reconnected = Client::new(&repo, "alice");
-    assert_eq!(reconnected.task("tasks/get", &id)["result"], failed);
+    assert_eq!(reconnected.task("tasks/get", &id)["result"], tool_error);
 }
 
 #[test]
@@ -646,4 +646,276 @@ fn subscribed_stdio_clients_receive_authorized_durable_transitions() {
         .unwrap()
         .remove("io.modelcontextprotocol/subscriptionId");
     assert_eq!(cancelled["params"], other.task("tasks/get", &id)["result"]);
+}
+
+// EOF bounds the exchange: unexpected notification replies cannot hide behind
+// a timeout, and every stdout line must be a JSON-RPC response.
+fn exchange(repo: &common::TestRepo, lines: &[String]) -> Vec<Value> {
+    let mut child = common::ahu()
+        .args(["mcp", "serve"])
+        .current_dir(repo.path())
+        .env("AHU_MCP_CALLER", "conformance")
+        .env_remove("AHU_MCP_TASKS_ADAPTER")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    for line in lines {
+        writeln!(input, "{line}").unwrap();
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn conformance_rejects_invalid_envelopes_and_recovers() {
+    let repo = common::TestRepo::new();
+    let invalid = [
+        json!(null),
+        json!(42),
+        json!("request"),
+        json!([]),
+        json!([{"jsonrpc":"2.0","id":1,"method":"ping"}]),
+        json!({"id":1,"method":"ping"}),
+        json!({"jsonrpc":"1.0","id":1,"method":"ping"}),
+        json!({"jsonrpc":"2.0","id":1}),
+        json!({"jsonrpc":"2.0","id":1,"method":12}),
+        json!({"jsonrpc":"2.0","id":null,"method":"initialize"}),
+        json!({"jsonrpc":"2.0","id":true,"method":"initialize"}),
+        json!({"jsonrpc":"2.0","id":{},"method":"initialize"}),
+        json!({"jsonrpc":"2.0","id":[],"method":"initialize"}),
+        json!({"jsonrpc":"2.0","id":1.5,"method":"initialize"}),
+        json!({"jsonrpc":"2.0","id":1,"method":"ping","result":{}}),
+        json!({"jsonrpc":"2.0","id":1,"method":"ping","error":{}}),
+    ];
+    let mut lines = vec!["{".to_string()];
+    lines.extend(invalid.iter().map(Value::to_string));
+    lines.push(json!({"jsonrpc":"2.0","id":"ok","method":"server/discover","params":modern_without_tasks(json!({}))}).to_string());
+    let rows = exchange(&repo, &lines);
+    assert_eq!(rows.len(), lines.len());
+    assert_eq!(rows[0]["error"]["code"], -32700);
+    for row in &rows[1..=invalid.len()] {
+        assert_eq!(row["error"]["code"], -32600, "{row}");
+        assert_eq!(row["id"], Value::Null);
+    }
+    assert_eq!(rows.last().unwrap()["id"], "ok");
+    assert_eq!(rows.last().unwrap()["result"]["resultType"], "complete");
+}
+
+#[test]
+fn conformance_notifications_are_silent_and_do_not_select_modes_or_queue_work() {
+    let repo = common::TestRepo::new();
+    let mut lines: Vec<_> = [
+        ("initialize", json!({})),
+        ("server/discover", modern(json!({}))),
+        ("notifications/initialized", json!({})),
+        ("notifications/cancelled", json!({})),
+        ("unknown", json!({})),
+        ("tools/call", modern(json!({"name":"ahu_agents_list"}))),
+        ("tasks/cancel", modern(json!({"taskId":"invalid"}))),
+        (
+            "subscriptions/listen",
+            modern(json!({"notifications":{"taskIds":[]}})),
+        ),
+        ("ping", json!(false)),
+    ]
+    .into_iter()
+    .map(|(method, params)| json!({"jsonrpc":"2.0","method":method,"params":params}).to_string())
+    .collect();
+    lines.push(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}).to_string());
+    lines.push(json!({"jsonrpc":"2.0","id":2,"method":"notifications/initialized"}).to_string());
+    lines.push(json!({"jsonrpc":"2.0","id":3,"method":"ping"}).to_string());
+    let rows = exchange(&repo, &lines);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[0]["result"]["protocolVersion"], "2025-11-25");
+    assert_eq!(rows[1]["error"]["code"], -32601);
+    assert!(rows[2]["result"].is_object());
+    assert!(
+        !repo.path().join(".ahu/state/repos").exists(),
+        "notifications must not persist work"
+    );
+}
+
+#[test]
+fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
+    let repo = common::TestRepo::new();
+    let mut client = Client::new(&repo, "alice");
+    for (params, count) in [(modern_without_tasks(json!({})), 3), (modern(json!({})), 4)] {
+        let result = client.call("tools/list", params)["result"].clone();
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["tools"].as_array().unwrap().len(), count);
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "ahu"
+        );
+    }
+    assert_eq!(
+        client.call("initialize", json!({}))["error"]["code"],
+        -32601
+    );
+    for params in [json!(null), json!([]), json!(false), json!("bad")] {
+        assert_eq!(client.call("ping", params)["error"]["code"], -32602);
+    }
+    assert_eq!(client.call("ping", json!({}))["error"]["code"], -32022);
+    assert_eq!(
+        client.call("server/discover", modern(json!({"extra":true})))["error"]["code"],
+        -32602
+    );
+    let mut legacy = Client::new(&repo, "legacy");
+    legacy.call("initialize", json!({}));
+    for (method, params) in [
+        ("ping", modern(json!({}))),
+        ("tools/list", modern(json!({}))),
+        ("tools/call", modern(json!({"name":"ahu_agents_list"}))),
+    ] {
+        let result = legacy.call(method, params)["result"].clone();
+        assert!(result.is_object());
+        assert!(result.get("resultType").is_none(), "{result}");
+        assert!(result.get("taskId").is_none());
+        if method == "tools/list" {
+            assert_eq!(result["tools"].as_array().unwrap().len(), 3);
+        }
+    }
+    assert_eq!(
+        legacy.call("server/discover", modern(json!({})))["error"]["code"],
+        -32601
+    );
+}
+
+#[test]
+fn conformance_tool_errors_and_argument_validation_match_across_modes() {
+    let repo = common::TestRepo::new();
+    for mode in 0..3 {
+        let mut client = Client::new(&repo, "alice");
+        if mode == 0 {
+            client.call("initialize", json!({}));
+        }
+        let params = |p| match mode {
+            0 => p,
+            1 => modern_without_tasks(p),
+            _ => modern(p),
+        };
+        for invalid in [
+            json!({}),
+            json!({"name":null}),
+            json!({"name":"unknown"}),
+            json!({"name":"ahu_agents_list","arguments":null}),
+            json!({"name":"ahu_agents_list","arguments":[]}),
+            json!({"name":"ahu_agents_list","arguments":{"task":"@missing"}}),
+            json!({"name":"ahu_tasks_list","arguments":{"extra":true}}),
+            json!({"name":"ahu_task_get"}),
+            json!({"name":"ahu_task_get","arguments":{"task":4}}),
+            json!({"name":"ahu_task_get","arguments":{"task":""}}),
+            json!({"name":"ahu_task_get","arguments":{"task":"x".repeat(257)}}),
+            json!({"name":"ahu_task_get","arguments":{"task":"@missing","extra":true}}),
+        ] {
+            let response = client.call("tools/call", params(invalid));
+            assert_eq!(response["error"]["code"], -32602, "mode {mode}: {response}");
+        }
+        let response = client.call(
+            "tools/call",
+            params(json!({"name":"ahu_task_get","arguments":{"task":"@missing"}})),
+        );
+        let result = if mode == 2 {
+            let id = response["result"]["taskId"].as_str().unwrap();
+            let completed = client.until(id, "completed");
+            assert!(completed.get("error").is_none());
+            completed["result"].clone()
+        } else {
+            assert!(response.get("error").is_none());
+            response["result"].clone()
+        };
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(result["content"][0]["text"].is_string());
+        if mode != 0 {
+            assert_eq!(result["resultType"], "complete");
+        }
+    }
+}
+
+#[test]
+fn conformance_notifications_cannot_mutate_an_existing_task() {
+    let repo = common::TestRepo::new();
+    let mut client = Client::new(&repo, "alice");
+    let id = client.create("ahu_task_inspect", json!({}));
+    let pending = client.until(&id, "input_required");
+    for (method, params) in [
+        ("tasks/cancel", modern(json!({"taskId":id}))),
+        (
+            "tasks/update",
+            modern(json!({"taskId":id,"inputResponses":{"task-selection":{"action":"decline"}}})),
+        ),
+        (
+            "subscriptions/listen",
+            modern(json!({"notifications":{"taskIds":[id]}})),
+        ),
+        ("initialize", json!({})),
+        ("notifications/initialized", json!({})),
+    ] {
+        writeln!(
+            client.input.as_mut().unwrap(),
+            "{}",
+            json!({"jsonrpc":"2.0","method":method,"params":params})
+        )
+        .unwrap();
+    }
+    // The request is a processing barrier for all preceding notifications.
+    assert_eq!(client.task("tasks/get", &id)["result"], pending);
+    assert!(client.notifications.is_empty());
+}
+
+#[test]
+fn conformance_failed_probes_allow_legacy_and_adapter_requires_both_opt_ins() {
+    let repo = common::TestRepo::new();
+    let mut client = Client::new(&repo, "alice");
+    for meta in [
+        json!({}),
+        json!({"io.modelcontextprotocol/protocolVersion":"unsupported","io.modelcontextprotocol/clientCapabilities":{}}),
+        json!({"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":[]}),
+    ] {
+        assert_eq!(
+            client.call("server/discover", json!({"_meta":meta}))["error"]["code"],
+            -32022
+        );
+    }
+    assert_eq!(
+        client.call("server/discover", modern(json!({"extra":true})))["error"]["code"],
+        -32602
+    );
+    assert_eq!(
+        client.call("initialize", json!({}))["result"]["protocolVersion"],
+        "2025-11-25"
+    );
+    assert_eq!(
+        client.call("tools/call", modern(json!({"name":"ahu_task_inspect"})))["error"]["code"],
+        -32602
+    );
+    let mut modern_client = Client::new(&repo, "alice");
+    assert_eq!(
+        modern_client.call(
+            "tools/call",
+            modern_without_tasks(json!({"name":"ahu_task_inspect"}))
+        )["error"]["code"],
+        -32602
+    );
+    let rows = exchange(&repo, &[
+        json!({"jsonrpc":"2.0","id":0,"method":"tools/list","params":modern(json!({}))}).to_string(),
+        json!({"jsonrpc":"2.0","id":-1,"method":"tools/call","params":modern(json!({"name":"ahu_task_inspect"}))}).to_string(),
+        json!({"jsonrpc":"2.0","id":"","method":"ping","params":modern_without_tasks(json!({}))}).to_string(),
+    ]);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["id"], 0);
+    assert_eq!(rows[0]["result"]["resultType"], "complete");
+    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(rows[1]["id"], -1);
+    assert_eq!(rows[1]["error"]["code"], -32602);
+    assert_eq!(rows[2]["id"], "");
+    assert_eq!(rows[2]["result"]["resultType"], "complete");
 }
