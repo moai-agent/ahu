@@ -528,6 +528,78 @@ fn protocol_parser_rejects_uppercase_error_duplicate_and_session_drift() {
 }
 
 #[test]
+fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
+    use ahu::headless::Events;
+    use serde_json::json;
+
+    let fixtures = [
+        (
+            "codex",
+            vec![
+                json!({"type":"thread.started","thread_id":"thr-codex"}),
+                json!({"type":"item.completed","item":{"type":"agent_message","text":"done"}}),
+                json!({"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18},"model":"gpt-test"}),
+            ],
+        ),
+        (
+            "claude-code",
+            vec![
+                json!({"type":"system","session_id":"ses-claude","subtype":"init"}),
+                json!({"type":"assistant","message":{"content":[]}}),
+                json!({"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18},"model":"claude-test"}),
+            ],
+        ),
+        (
+            "antigravity",
+            vec![
+                json!({"type":"init","session_id":"ses-agy"}),
+                json!({"type":"result","status":"success","response":"done","usage":{"prompt_tokens":17,"completion_tokens":4,"total_tokens":21},"model_name":"gemini-test"}),
+            ],
+        ),
+        (
+            "opencode",
+            vec![
+                json!({"type":"step_start","sessionID":"ses-opencode","part":{"type":"step-start"}}),
+                json!({"type":"text","sessionID":"ses-opencode","part":{"type":"text","text":"done"}}),
+                json!({"type":"step_finish","sessionID":"ses-opencode","part":{"type":"step-finish","reason":"stop","usage":{"input_tokens":19,"output_tokens":6,"total_tokens":25},"model":"glm-test"}}),
+            ],
+        ),
+    ];
+
+    for (harness, fixture) in fixtures {
+        let mut events = Events::default();
+        for event in fixture {
+            events.observe(harness, serde_json::to_string(&event).unwrap().as_bytes());
+        }
+        assert!(
+            events.terminal,
+            "{harness} did not produce a terminal result"
+        );
+        assert!(
+            !events.failed,
+            "{harness} produced blockers: {:?}",
+            events.blockers
+        );
+        assert_eq!(
+            events.unknown_events, 0,
+            "{harness} fixture was not fully recognized"
+        );
+        assert!(
+            events.session.is_some(),
+            "{harness} session was not captured"
+        );
+        assert!(
+            events.usage.total.is_some(),
+            "{harness} total usage was not captured"
+        );
+        assert!(
+            events.model.is_some(),
+            "{harness} resolved model was not captured"
+        );
+    }
+}
+
+#[test]
 fn cli_values_never_become_batch_options_and_duplicates_are_refused() {
     for field in ["--prompt", "--title", "--summary"] {
         let mut args = vec!["launch", "@worker", "--headless", field, "--dry-run"];
