@@ -2718,35 +2718,161 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             preview["cmux_integration"]["profile"]["interactive_supported"],
             true
         );
-        let refused = f
-            .command()
-            .args([
-                "launch",
-                "@matrix",
-                "--headless",
-                "--dry-run",
-                "--output",
-                "json",
-                "--prompt",
-                "synthetic task",
-            ])
-            .output()
-            .unwrap();
-        assert!(!refused.status.success());
-        assert!(
-            String::from_utf8_lossy(&refused.stderr).contains(reason),
-            "{}",
-            String::from_utf8_lossy(&refused.stderr)
-        );
-        assert!(!home.join("worker-started").exists());
-        assert_eq!(
-            common::git(f.repo.path(), &["worktree", "list", "--porcelain"])
-                .lines()
-                .filter(|line| line.starts_with("worktree "))
-                .count(),
-            1
-        );
+        let repo = ahu::git::discover(f.repo.path()).unwrap();
+        let branches = common::git(f.repo.path(), &["branch", "--list"]);
+        for extra in [vec!["--dry-run"], vec![], vec!["--allow-widened-approvals"]] {
+            let refused = f
+                .command()
+                .args([
+                    "launch",
+                    "@matrix",
+                    "--headless",
+                    "--output",
+                    "json",
+                    "--prompt",
+                    "synthetic task",
+                ])
+                .args(&extra)
+                .output()
+                .unwrap();
+            assert!(!refused.status.success(), "{harness}: {extra:?}");
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains(reason),
+                "{harness}: {extra:?}: {}",
+                String::from_utf8_lossy(&refused.stderr)
+            );
+            assert!(!home.join("worker-started").exists());
+            assert!(!f.external.path().join("runtime").exists());
+            assert!(!ahu::headless::store(&repo).unwrap().exists());
+            // Planning may create the self-ignoring root, but no task checkout.
+            assert!(
+                std::fs::read_dir(f.repo.path().join(".worktrees"))
+                    .unwrap()
+                    .all(|entry| entry.unwrap().file_name() == ".gitignore")
+            );
+            assert_eq!(common::git(f.repo.path(), &["branch", "--list"]), branches);
+            assert_eq!(
+                common::git(f.repo.path(), &["worktree", "list", "--porcelain"])
+                    .lines()
+                    .filter(|line| line.starts_with("worktree "))
+                    .count(),
+                1
+            );
+            let listed = f
+                .command()
+                .args(["tasks", "--output", "json"])
+                .output()
+                .unwrap();
+            assert!(
+                listed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&listed.stderr)
+            );
+            assert_eq!(Fixture::value(&listed)["tasks"], serde_json::json!([]));
+        }
         assert_eq!(preview["executed"], false);
         assert!(!status.to_string().contains("SYNTHETIC_OPAQUE_SENTINEL"));
     }
+}
+
+#[test]
+fn headless_isolation_refusal_does_not_gate_real_interactive_cmux_dispatch() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let home = f.external.path().join("home");
+    std::fs::create_dir(home.join(".claude")).unwrap();
+    std::fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"enabledPlugins":{"synthetic":true}}"#,
+    )
+    .unwrap();
+    let refused = f.launch("success", &[]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("plugin hook behavior"));
+    // Planning may create the self-ignoring root, but no task checkout.
+    assert!(
+        std::fs::read_dir(f.repo.path().join(".worktrees"))
+            .unwrap()
+            .all(|entry| entry.unwrap().file_name() == ".gitignore")
+    );
+
+    // Reuse the saved-group protocol from the synthetic coordinator fixture.
+    // Record the real dispatch, without executing its shell command or opening a terminal.
+    let cmux = f.bin.join("cmux");
+    std::fs::write(&cmux, r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+base = Path(os.environ['HOME'])
+args = sys.argv[1:]
+if args[0] == 'ping': print('PONG'); sys.exit(0)
+if args[0] == 'capabilities':
+ print(json.dumps({'capabilities':['workspace.groups.v1','workspace.group_create.v1','workspace.create_in_group.v1']})); sys.exit(0)
+if args[0] == 'new-workspace':
+ assert not (base/'dispatch.json').exists()
+ (base/'dispatch.json').write_text(json.dumps(args)); sys.exit(0)
+if args[0] == 'set-status': sys.exit(0)
+assert args[0] == 'rpc', args
+method, params = args[1], json.loads(args[2])
+if method == 'system.identify':
+ assert params == {'caller':{'workspace_id':'sentinel'}}
+ print(json.dumps({'caller':{'window_id':'synthetic-window'}}))
+elif method == 'workspace.group.list':
+ assert params == {'window_id':'synthetic-window'}
+ members = ['anchor']
+ if (base/'dispatch.json').exists(): members.append('synthetic-task')
+ print(json.dumps({'groups':[{'id':'saved-group','name':'synthetic group','anchor_workspace_id':'anchor','member_workspace_ids':members}]}))
+elif method == 'workspace.list': print(json.dumps({'workspaces':[]}))
+elif method == 'workspace.group.expand':
+ assert params == {'group_id':'saved-group'}
+ print('{}')
+else: raise AssertionError(method)
+"#).unwrap();
+    std::fs::set_permissions(&cmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let repo = ahu::git::discover(f.repo.path()).unwrap();
+    ahu::state::write_json(
+        &ahu::state::coordination_dir(&repo)
+            .unwrap()
+            .join("cmux.json"),
+        &ahu::launch::GroupMapping {
+            group_id: Some("saved-group".into()),
+            window_id: Some("synthetic-window".into()),
+            anchor_workspace_id: Some("anchor".into()),
+        },
+    )
+    .unwrap();
+    let launched = f
+        .command()
+        .env("AHU_CMUX_BIN", &cmux)
+        .args([
+            "launch",
+            "@worker",
+            "--prompt",
+            "synthetic interactive task",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let listing = ahu::task::list(&repo).unwrap();
+    assert!(listing.unreadable.is_empty());
+    assert_eq!(listing.records.len(), 1);
+    let (task_dir, record) = &listing.records[0];
+    assert_eq!(record.cmux_workspace_id.as_deref(), Some("synthetic-task"));
+    assert_eq!(record.cmux_group_id.as_deref(), Some("saved-group"));
+    assert!(record.worktree.is_dir());
+    assert_eq!(record.identity.agent, "worker");
+    let args: Vec<String> =
+        serde_json::from_slice(&std::fs::read(home.join("dispatch.json")).unwrap()).unwrap();
+    let option = |name| args[args.iter().position(|arg| arg == name).unwrap() + 1].clone();
+    assert_eq!(option("--cwd"), record.worktree.to_str().unwrap());
+    assert_eq!(option("--group"), "saved-group");
+    assert_eq!(
+        option("--command"),
+        ahu::cmux::startup_command(std::path::Path::new(env!("CARGO_BIN_EXE_ahu")), task_dir)
+    );
+    assert!(!ahu::headless::store(&repo).unwrap().exists());
+    assert!(!f.external.path().join("runtime").exists());
 }
