@@ -623,6 +623,52 @@ Interactive sessions and attempts that stop before result persistence do not
 produce this object. Resume produces a separate attempt, not a merged total;
 metrics follow existing result retention and cleanup behavior.
 
+### Private association boundary (library only)
+
+`telemetry::private::PrivateMapping` provides an in-memory schema and numeric
+summary primitive for a future private host adapter. It is not connected to
+launch, resume, CLI, MCP, child environments, or exporters. No mapping store or
+tracker client is installed. The existing checkout-local state store is not a
+suitable privacy boundary for this association.
+
+The bounded JSON input (at most 64 KiB) requires exactly `schema_version = 1`,
+`record_key`, `repo_identity`, and `tasks`. The opaque record key is 1–256 ASCII
+letters, digits, underscores, or hyphens; URLs and free text are unsupported.
+The repository key is the existing machine-local 16-character lowercase hex
+identity. Membership is an explicit list of 1–256 distinct canonical task UUIDs;
+paths, handles, and legacy task IDs are unsupported. Unknown or duplicate fields,
+unsupported versions, and invalid values fail with a fixed error that includes
+no submitted content. The mapping has no serialization or debug representation;
+its key is accessible only through an explicit library accessor. Validation does
+not establish tracker visibility, ownership, or authorization.
+
+With `local_metrics` enabled, `summarize` accepts at most 4096 supplied numeric
+observations, each scoped to that repository, a listed task, and a positive
+attempt number. A retry submitted as a new task or a registered child requires
+explicit membership; a resume uses its existing task and new attempt. Identical
+duplicates count once, conflicting duplicates fail without a partial result.
+Per-field output reports the maximum observed value and counts of observed and
+unavailable attempts. A null maximum means no observation; zero remains observed.
+Missing totals are never inferred and values are never summed: resumed sessions
+may repeat cumulative usage, and parent usage may overlap child usage. These are
+coverage statistics over supplied observations, not complete task totals or
+billing. Absent results, disabled collection, and undiscovered attempts are not
+invented as observations. The caller must validate task ownership and extract
+only opted-in numeric projections; this primitive does not read result envelopes
+or prove completeness. No provider calls are involved.
+
+A durable adapter remains deferred. Before wiring one in, choose an explicitly
+host-owned location outside every checkout and configuration snapshot, validate
+both tracker project and backing-record visibility, and provide owner-only,
+symlink-resistant, atomic storage with locking and conflict handling. Keep mapping
+keys out of task records, worktree names, prompts, MCP responses, shared config,
+OTEL attributes, and diagnostics. Bind through validated repository/task identity
+rather than caller-supplied paths; repository moves require explicit rebinding.
+Plan explicit removal and retention independent of task cleanup, bounded reads,
+crash recovery, and failures that cannot affect launch or exporter outcomes.
+No migration, automatic ancestry inheritance, cancellation behavior, filesystem
+confinement guarantee, or same-user process isolation is added by this primitive.
+
 Telemetry is disabled unless the project opts in. When enabled, ahu exports its
 own launch and harness lifecycle traces to the project-configured local OTLP
 collector and injects the same endpoint only into harness processes started by

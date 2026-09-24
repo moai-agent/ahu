@@ -192,3 +192,53 @@ not claim a project skill was used when Antigravity does not expose one.
   CI tests its format without running a provider.
 
 [claude-skills]: https://code.claude.com/docs/en/skills
+
+## Normalized headless invocation metadata
+
+`result.json` retains bounded invocation reports in `harness.skills`. Each
+record contains `name`, `harness`, `observed_at` (ahu receipt time, not a provider
+execution timestamp), `status: invoked`, `evidence: observed`, and
+`execution: unverified`. Task, attempt, model, and native session correlation
+remain in the containing result envelope; they are not inferred from tool
+arguments. `invoked` means a recognized invocation event was reported, not that
+execution succeeded or that the skill's instructions were followed. Legacy
+records without evidence fields deserialize as unverified.
+
+`harness.skill_observation` distinguishes:
+
+- `observed`: at least one accepted invocation report.
+- `unavailable`: no accepted or malformed recognized skill report; this is not
+  an observed zero invocations or proof that skills are unsupported.
+- `unverified`: a recognized skill tool report lacked a valid name and no
+  accepted report was seen.
+
+The normalizer accepts only these synthetic protocol shapes:
+
+| Harness | Envelope and skill selector |
+| --- | --- |
+| Codex | `item.completed`, `item.type: function_call`, `item.name: skill`, `item.input` |
+| Claude Code | `assistant`, `message.content[]` with `type: tool_use`, `name: Skill`, `input` |
+| OpenCode | `tool_use`, `part.type: tool`, `part.tool: skill`, `part.state.input` |
+| Antigravity | `type: tool_use`, `name: Skill`, `input`; or `event: step_update`, `step_update.tool_name` / `tool_info.name: Skill`, `tool_info.parameters` |
+
+Only `skill` (or `name` when `skill` is absent) is read from those input objects.
+Names must start with an ASCII letter or digit, contain only ASCII letters,
+digits, hyphens, underscores, dots, or colons, and fit in 128 bytes. At most 128
+reports are retained; exceeding that limit marks the attempt failed. No input
+objects, prompts, response text, tool arguments, arbitrary payloads, or
+credentials are copied into invocation records. Names are untrusted labels,
+not authorization or proof of provenance. Unrecognized envelopes, tools,
+renamed fields, and text-only sentinel responses produce no invocation record.
+New protocol shapes require explicit adapter and fixture updates. The two
+Antigravity tool-name aliases produce one report, but repeated stream reports
+are not deduplicated across events: counts measure accepted reports, not unique
+successful executions.
+
+The filesystem catalog remains separate. A same-named local file cannot prove
+which skill a harness loaded; new invocation records therefore leave the
+legacy `source` and `digest` fields unset. OTEL exports the same bounded names
+and observation state, and emits an invocation count only when reports were
+observed. Missing evidence is not exported as zero. These provider-free tests
+establish parser behavior only; live skill invocation conformance for these
+shapes remains unverified, including the synthetic Codex function-call and
+Antigravity skill-tool fixtures.

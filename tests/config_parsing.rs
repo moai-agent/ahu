@@ -21,11 +21,16 @@ fn local_metrics_default_off_and_round_trip_independently_of_export() {
         &rendered.replace("local_metrics = true", "local_metrics = \"yes\""),
     );
     assert!(config::load(repo.path()).is_err());
-    repo.write(
-        ".agents/ahu/config.toml",
-        &rendered.replace("local_metrics = true", "tracker_url = \"private-marker\""),
-    );
-    assert!(config::load(repo.path()).is_err());
+    for field in ["tracker_url", "record_key", "private_mapping", "tracker_id"] {
+        repo.write(
+            ".agents/ahu/config.toml",
+            &rendered.replace(
+                "local_metrics = true",
+                &format!("{field} = \"private-marker\""),
+            ),
+        );
+        assert!(config::load(repo.path()).is_err());
+    }
 }
 
 #[test]

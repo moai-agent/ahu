@@ -3094,3 +3094,145 @@ else: raise AssertionError(method)
     assert!(!ahu::headless::store(&repo).unwrap().exists());
     assert!(!f.external.path().join("runtime").exists());
 }
+
+#[test]
+fn skill_probe_normalized_records_are_bounded_and_harness_scoped() {
+    use ahu::headless::Events;
+    use serde_json::json;
+    let fixtures = [
+        (
+            "codex",
+            json!({"type":"item.completed","item":{"type":"function_call","name":"skill","input":{"skill":"plugin:probe-skill","args":"PRIVATE INPUT"}}}),
+        ),
+        (
+            "claude-code",
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"plugin:probe-skill","args":"PRIVATE INPUT"}}]}}),
+        ),
+        (
+            "opencode",
+            json!({"type":"tool_use","part":{"type":"tool","tool":"skill","state":{"input":{"name":"plugin:probe-skill","args":"PRIVATE INPUT"}}}}),
+        ),
+        (
+            "antigravity",
+            json!({"event":"step_update","step_update":{"tool_name":"Skill","tool_info":{"name":"Skill","parameters":{"skill":"plugin:probe-skill","args":"PRIVATE INPUT"}}}}),
+        ),
+    ];
+    for (harness, fixture) in &fixtures {
+        let mut events = Events::default();
+        events.observe(harness, &serde_json::to_vec(fixture).unwrap());
+        let value = serde_json::to_value(&events).unwrap();
+        assert_eq!(value["skill_observation"], "observed");
+        assert_eq!(events.skills.len(), 1, "{harness}");
+        let record = &value["skills"][0];
+        assert_eq!(record["harness"], *harness);
+        assert_eq!(record["evidence"], "observed");
+        assert_eq!(record["execution"], "unverified");
+        assert!(record["observed_at"].as_str().unwrap().ends_with('Z'));
+        assert!(record.get("source").is_none());
+        assert!(!value.to_string().contains("PRIVATE INPUT"));
+        for (other, _) in &fixtures {
+            if other != harness {
+                let mut wrong = Events::default();
+                wrong.observe(other, &serde_json::to_vec(fixture).unwrap());
+                assert!(wrong.skills.is_empty(), "{harness} accepted as {other}");
+            }
+        }
+        let input_path = match *harness {
+            "codex" => "/item/input",
+            "claude-code" => "/message/content/0/input",
+            "opencode" => "/part/state/input",
+            _ => "/step_update/tool_info/parameters",
+        };
+        for input in [
+            json!({"skill": "secret prompt text"}),
+            json!({"skill": "x".repeat(129)}),
+            json!({"skill_name":"probe-skill"}),
+            json!("{\"skill\":\"probe-skill\"}"),
+        ] {
+            let mut invalid = fixture.clone();
+            *invalid.pointer_mut(input_path).unwrap() = input;
+            let mut events = Events::default();
+            events.observe(harness, &serde_json::to_vec(&invalid).unwrap());
+            assert!(events.skills.is_empty(), "{harness}");
+            assert_eq!(
+                serde_json::to_value(events).unwrap()["skill_observation"],
+                "unverified"
+            );
+        }
+        let mut drift = fixture.clone();
+        drift["type"] = json!("future-event");
+        drift["event"] = json!("future-event");
+        let mut events = Events::default();
+        events.observe(harness, &serde_json::to_vec(&drift).unwrap());
+        assert!(events.skills.is_empty());
+        assert_eq!(
+            serde_json::to_value(events).unwrap()["skill_observation"],
+            "unavailable"
+        );
+    }
+}
+
+#[test]
+fn skill_probe_rejects_payloads_and_bounds_records() {
+    use ahu::headless::Events;
+    use serde_json::json;
+    for name in [
+        json!(""),
+        json!("x".repeat(129)),
+        json!("/tmp/secret"),
+        json!("prompt with spaces"),
+        json!("line\nbreak"),
+        json!({"credential":"secret"}),
+        json!(null),
+    ] {
+        let mut events = Events::default();
+        let event = json!({"type":"tool_use","name":"Skill","input":{"skill":name}});
+        events.observe("antigravity", &serde_json::to_vec(&event).unwrap());
+        assert!(events.skills.is_empty());
+        assert_eq!(
+            serde_json::to_value(events).unwrap()["skill_observation"],
+            "unverified"
+        );
+    }
+    for event in [
+        json!({"type":"result","name":"Skill","input":{"skill":"probe-skill"}}),
+        json!({"type":"tool_use","name":"mcp.skill","input":{"skill":"probe-skill"}}),
+        json!({"type":"assistant","message":{"content":[{"type":"text","name":"Skill","input":{"skill":"probe-skill"}}]}}),
+        json!({"type":"system","skills":["probe-skill"]}),
+    ] {
+        for harness in [
+            "codex",
+            "claude-code",
+            "opencode",
+            "antigravity",
+            "future-harness",
+        ] {
+            let mut events = Events::default();
+            events.observe(harness, &serde_json::to_vec(&event).unwrap());
+            assert!(events.skills.is_empty());
+        }
+    }
+    let mut events = Events::default();
+    for _ in 0..140 {
+        events.observe(
+            "antigravity",
+            br#"{"type":"tool_use","name":"Skill","input":{"skill":"probe-skill"}}"#,
+        );
+    }
+    assert_eq!(events.skills.len(), 128);
+    assert!(events.failed);
+    assert_eq!(
+        events
+            .blockers
+            .iter()
+            .filter(|b| *b == "skill invocation limit exceeded")
+            .count(),
+        1
+    );
+    let legacy: ahu::headless::SkillInvocation =
+        serde_json::from_value(json!({"name":"probe-skill","status":"invoked"})).unwrap();
+    assert_eq!(
+        serde_json::to_value(legacy).unwrap()["evidence"],
+        "unverified"
+    );
+}

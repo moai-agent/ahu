@@ -17,6 +17,8 @@ use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 use crate::config::TelemetryConfig;
 use crate::util::{Error, Result};
 
+pub mod private;
+
 static PROVIDER: OnceLock<Mutex<Option<SdkTracerProvider>>> = OnceLock::new();
 
 fn provider_slot() -> &'static Mutex<Option<SdkTracerProvider>> {
@@ -178,6 +180,30 @@ fn escape(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace(',', "\\,")
         .replace('=', "\\=")
+}
+
+/// Evidence about skill events, never a claim that a skill executed correctly.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillEvidence {
+    Observed,
+    #[default]
+    Unavailable,
+    Unverified,
+}
+
+impl SkillEvidence {
+    pub(crate) fn unverified() -> Self {
+        Self::Unverified
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Unavailable => "unavailable",
+            Self::Unverified => "unverified",
+        }
+    }
 }
 
 /// Local numeric projection, never passed to an OTEL exporter or child env.
