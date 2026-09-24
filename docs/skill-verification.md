@@ -201,7 +201,8 @@ execution timestamp), `status: invoked`, `evidence: observed`, and
 `execution: unverified`. Task, attempt, model, and native session correlation
 remain in the containing result envelope; they are not inferred from tool
 arguments. `invoked` means a recognized invocation event was reported, not that
-execution succeeded or that the skill's instructions were followed. Legacy
+execution succeeded or that the skill's instructions were followed. Explicit
+tool completion reports can subsequently update this record as described below. Legacy
 records without evidence fields are read as unverified.
 
 `harness.skill_observation` distinguishes:
@@ -230,9 +231,9 @@ credentials are copied into invocation records. Names are untrusted labels,
 not authorization or proof of provenance. Unrecognized envelopes, tools,
 renamed fields, and text-only sentinel responses produce no invocation record.
 New protocol shapes require explicit adapter and fixture updates. The two
-Antigravity tool-name aliases produce one report, but repeated stream reports
-are not deduplicated across events: counts measure accepted reports, not unique
-successful executions.
+Antigravity tool-name aliases produce one report. OpenCode and nested
+Antigravity snapshots with the same bounded call ID update one record. Reports
+without IDs remain separate; counts do not establish unique successful executions.
 
 The filesystem catalog remains separate. A same-named local file cannot prove
 which skill a harness loaded; new invocation records therefore leave the
@@ -242,3 +243,42 @@ observed. Missing evidence is not exported as zero. These provider-free tests
 establish parser behavior only; live skill invocation conformance for these
 shapes remains unverified, including the synthetic Codex function-call and
 Antigravity skill-tool fixtures.
+
+
+### Completion evidence
+
+The provider-free lifecycle fixtures in `tests/skill_lifecycle.rs` extend the
+invocation adapters with the following explicit completion contracts:
+
+| Harness | Completion evidence |
+| --- | --- |
+| Codex | `item.completed`, `item.type: function_call_output`, matching `item.call_id`, boolean `item.is_error` |
+| Claude Code | `user`, `message.content[]` with `type: tool_result`, matching `tool_use_id`, boolean `is_error` |
+| OpenCode | Skill tool snapshot with `part.state.status: completed` or `error`; snapshots correlate by `part.callID` |
+| Antigravity | `type: tool_result`, matching `tool_use_id`, boolean `is_error`; or a recognized nested Skill snapshot with `step_update.state: DONE` or `ERROR`, correlated by `tool_info.id` when present |
+
+Separate results correlate with invocation `call_id` (Codex) or `id` (Claude
+Code and flat Antigravity). IDs are bounded to 128 ASCII graphic bytes and held
+only in memory, with at most one entry per retained invocation. They are never
+serialized. Ambiguous IDs cannot establish completion. Identical terminal
+reports are idempotent; contradictory results revoke completion evidence.
+
+An explicit result sets `status: completed` or `failed`, `execution: observed`,
+and `completed_at` to ahu's receipt time. This describes reported tool outcome,
+not correct instruction adherence or task acceptance. `elapsed_ms` measures a
+monotonic interval between correlated receipts; a single terminal snapshot has
+no measured duration. No provider timestamps, tool output, input contents, or
+transcripts enter these records. Missing or nonboolean success indicators never
+imply success, and deserialization does not restore correlation state.
+
+`skill_unknown_events` counts malformed recognized skill inputs/statuses and
+unattributed, ambiguous, or conflicting result reports. Unattributed results may
+belong to ordinary tools; this counter is not a count of skill failures. Unknown
+outer envelopes continue to increment `unknown_events`. OTEL exposes the
+unclassified count and exports completed/failed counts only when explicit
+completion evidence exists. The invocation and catalog evidence remain separate.
+
+These contracts are synthetic fixtures, not a claim of current live harness
+compatibility. Live completion conformance, explicit loaded-source attribution,
+and source digest verification remain unverified. Source/digest fields remain
+unset because these accepted envelopes do not identify the loaded source.

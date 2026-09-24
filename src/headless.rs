@@ -1,6 +1,7 @@
 //! Unattended attempts with minimal primary-owned state and an ahu supervisor.
 //! Process and harness outcomes are evidence, never work acceptance.
 pub(crate) mod review;
+mod skills;
 
 use crate::harness::{LaunchCommand, LaunchRequest};
 use crate::util::{Error, Result, digest_bytes};
@@ -1196,6 +1197,10 @@ pub struct SkillInvocation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
     #[serde(default)]
     pub harness: Option<String>,
     #[serde(default)]
@@ -1353,6 +1358,10 @@ pub struct Events {
     pub model: Option<String>,
     #[serde(default)]
     pub skills: Vec<SkillInvocation>,
+    #[serde(default)]
+    pub skill_unknown_events: u64,
+    #[serde(skip)]
+    skill_calls: Vec<skills::Call>,
     #[serde(default = "crate::telemetry::SkillEvidence::unverified")]
     pub skill_observation: crate::telemetry::SkillEvidence,
     #[serde(skip_serializing)]
@@ -1366,99 +1375,6 @@ pub struct Events {
     native_event_count: usize,
 }
 impl Events {
-    fn observe_skill(&mut self, harness: &str, event: &Value) {
-        use crate::telemetry::SkillEvidence;
-        // Exact envelope/tool pairs only. New versions must not turn arbitrary
-        // nested payloads, response text, or similarly named MCP tools into use.
-        let kind = event.get("type").and_then(Value::as_str);
-        let mut inputs = Vec::new();
-        match harness {
-            "codex"
-                if kind == Some("item.completed")
-                    && event.pointer("/item/type").and_then(Value::as_str)
-                        == Some("function_call")
-                    && event.pointer("/item/name").and_then(Value::as_str) == Some("skill") =>
-            {
-                inputs.push(event.pointer("/item/input"));
-            }
-            "claude-code" if kind == Some("assistant") => {
-                if let Some(content) = event.pointer("/message/content").and_then(Value::as_array) {
-                    for block in content {
-                        if block["type"] == "tool_use" && block["name"] == "Skill" {
-                            inputs.push(block.get("input"));
-                        }
-                    }
-                }
-            }
-            "opencode"
-                if kind == Some("tool_use")
-                    && event.pointer("/part/type").and_then(Value::as_str) == Some("tool")
-                    && event.pointer("/part/tool").and_then(Value::as_str) == Some("skill") =>
-            {
-                inputs.push(event.pointer("/part/state/input"));
-            }
-            "antigravity" if kind == Some("tool_use") && event["name"] == "Skill" => {
-                inputs.push(event.get("input"));
-            }
-            "antigravity" if event["event"] == "step_update" => {
-                let step = &event["step_update"];
-                // Some envelopes carry both aliases; this is still one report.
-                if step["tool_name"] == "Skill"
-                    || step
-                        .pointer("/tool_info/name")
-                        .is_some_and(|v| v == "Skill")
-                {
-                    inputs.push(step.pointer("/tool_info/parameters"));
-                }
-            }
-            _ => (),
-        }
-        for input in inputs {
-            let name = input
-                .and_then(|v| v.get("skill").or_else(|| v.get("name")))
-                .and_then(Value::as_str)
-                .filter(|name| {
-                    !name.is_empty()
-                        && name.len() <= 128
-                        && name.bytes().all(|b| {
-                            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':')
-                        })
-                        && name
-                            .bytes()
-                            .next()
-                            .is_some_and(|b| b.is_ascii_alphanumeric())
-                });
-            let Some(name) = name else {
-                if self.skill_observation != SkillEvidence::Observed {
-                    self.skill_observation = SkillEvidence::Unverified;
-                }
-                continue;
-            };
-            if self.skills.len() >= 128 {
-                self.failed = true;
-                if !self
-                    .blockers
-                    .iter()
-                    .any(|b| b == "skill invocation limit exceeded")
-                {
-                    self.blockers.push("skill invocation limit exceeded".into());
-                }
-                break;
-            }
-            self.skill_observation = SkillEvidence::Observed;
-            self.skills.push(SkillInvocation {
-                name: name.into(),
-                source: None,
-                digest: None,
-                status: "invoked".into(),
-                harness: Some(harness.into()),
-                observed_at: Some(task::now_rfc3339()),
-                evidence: SkillEvidence::Observed,
-                execution: SkillEvidence::Unverified,
-            });
-        }
-    }
-
     fn observe_stderr(&mut self, line: &[u8]) {
         let text = String::from_utf8_lossy(line);
         let text = text.trim();
@@ -1682,7 +1598,7 @@ impl Events {
                         .push("harness reported permission denials".into());
                 }
             }
-            (_, "tool_use") => (),
+            (_, "tool_use") | ("antigravity", "tool_result") => (),
             ("opencode", "step_finish") => {
                 match event.pointer("/part/reason").and_then(Value::as_str) {
                     Some("stop") => self.finish(false),
@@ -2658,6 +2574,26 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     telemetry_span.set_string("ahu.skills.observation", events.skill_observation.as_str());
     if events.skill_observation == crate::telemetry::SkillEvidence::Observed {
         telemetry_span.set_u64("ahu.skills.invoked.count", events.skills.len() as u64);
+    }
+    telemetry_span.set_u64("ahu.skills.unclassified.count", events.skill_unknown_events);
+    if events
+        .skills
+        .iter()
+        .any(|skill| skill.execution == crate::telemetry::SkillEvidence::Observed)
+    {
+        for (status, field) in [
+            ("completed", "ahu.skills.completed.count"),
+            ("failed", "ahu.skills.failed.count"),
+        ] {
+            telemetry_span.set_u64(
+                field,
+                events
+                    .skills
+                    .iter()
+                    .filter(|skill| skill.status == status)
+                    .count() as u64,
+            );
+        }
     }
     if !events.skills.is_empty() {
         telemetry_span.set_string(
