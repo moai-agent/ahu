@@ -20,8 +20,8 @@ unable to execute because macOS caches code-signature validation by file identit
 For a locally built release, remove the destination before copying:
 
 ```sh
-rm /Users/you/.cargo/bin/ahu
-cp target/release/ahu /Users/you/.cargo/bin/ahu
+rm -f "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
+cp target/release/ahu "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
 ```
 
 The running process keeps its old file open, and new invocations use the fresh

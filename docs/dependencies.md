@@ -34,7 +34,8 @@ Each normal scan fetches the current
 data. The command promotes `index-failure` warnings to errors so an incomplete
 yanked-release lookup also fails the check. Advisory fetch/check failures fail the
 check. The database intentionally moves independently of the tool and lockfile so newly disclosed advisories can fail an unchanged tree.
-The workflow runs on pull requests, main pushes, weekly, and on manual dispatch.
+The workflow runs on pull requests, pushes to `main` and `release/**`, weekly,
+and on manual dispatch.
 Offline runs use cached information and are diagnostic only;
 the configured seven-day staleness limit does not make them equivalent to an
 online scan. Record the database revision when preserving scan evidence.

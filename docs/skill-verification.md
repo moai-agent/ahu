@@ -252,10 +252,10 @@ invocation adapters with the following explicit completion contracts:
 
 | Harness | Completion evidence |
 | --- | --- |
-| Codex | `item.completed`, `item.type: function_call_output`, matching `item.call_id`, boolean `item.is_error` |
-| Claude Code | `user`, `message.content[]` with `type: tool_result`, matching `tool_use_id`, boolean `is_error` |
+| Codex | `item.completed`, `item.type: function_call_output`, matching `item.call_id`, Boolean `item.is_error` |
+| Claude Code | `user`, `message.content[]` with `type: tool_result`, matching `tool_use_id`, Boolean `is_error` |
 | OpenCode | Skill tool snapshot with `part.state.status: completed` or `error`; snapshots correlate by `part.callID` |
-| Antigravity | `type: tool_result`, matching `tool_use_id`, boolean `is_error`; or a recognized nested Skill snapshot with `step_update.state: DONE` or `ERROR`, correlated by `tool_info.id` when present |
+| Antigravity | `type: tool_result`, matching `tool_use_id`, Boolean `is_error`; or a recognized nested Skill snapshot with `step_update.state: DONE` or `ERROR`, correlated by `tool_info.id` when present |
 
 Separate results correlate with invocation `call_id` (Codex) or `id` (Claude
 Code and flat Antigravity). IDs are bounded to 128 ASCII graphic bytes and held
@@ -268,8 +268,9 @@ and `completed_at` to ahu's receipt time. This describes reported tool outcome,
 not correct instruction adherence or task acceptance. `elapsed_ms` measures a
 monotonic interval between correlated receipts; a single terminal snapshot has
 no measured duration. No provider timestamps, tool output, input contents, or
-transcripts enter these records. Missing or nonboolean success indicators never
-imply success, and deserialization does not restore correlation state.
+transcripts enter these records. Missing success indicators or values other
+than `true` or `false` never imply success.
+Parsing a stored record does not restore correlation state.
 
 `skill_unknown_events` counts malformed recognized skill inputs/statuses and
 unattributed, ambiguous, or conflicting result reports. Unattributed results may

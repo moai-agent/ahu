@@ -19,8 +19,8 @@ the destination with a fresh file. For a locally built release, remove the
 destination before copying the artifact:
 
 ```sh
-rm /Users/you/.cargo/bin/ahu
-cp target/release/ahu /Users/you/.cargo/bin/ahu
+rm -f "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
+cp target/release/ahu "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
 ```
 
 Do not copy a new build over an installed path while an ahu process may still
@@ -598,117 +598,6 @@ are rejected. Bundle paths and contents must not be symlinks; contents must be
 regular files or directories. Omitting the section defaults to no bundles and
 `fail_on_warnings = false`.
 
-## Local OpenTelemetry
-
-For local numeric headless attempt metrics without an exporter, set
-`local_metrics = true` in `[telemetry]` and leave `enabled = false`.
-Both options default to false and operate independently. Headless attempt results
-then include a `metrics` object with `schema_version = 1`, six normalized
-`ahu.tokens.*` fields under `values`, and
-`token_aggregation = "maximum-reported-per-field"`. Each value has
-`kind = "observed"` with an unsigned integer `value`, or
-`kind = "unavailable"` without a value. Zero is an observation, not missing data.
-No estimated values are produced; missing totals are never inferred.
-Reported maxima are not additive task totals or billing measurements.
-This option controls the new projection; it does not change existing
-`harness.usage` collection or retention.
-
-The containing result's existing task ID and attempt identify the observation.
-The metrics object accepts no issue references, free text, paths, account data,
-or arbitrary attributes. Any private mapping must be maintained separately
-outside the repository; no tracker integration or mapping store is provided.
-This object is not sent to OTLP or child environments. The complete task result
-still contains existing coordination metadata and is not a safe export format.
-Interactive sessions and attempts that stop before result persistence do not
-produce this object. Resume produces a separate attempt, not a merged total;
-metrics follow existing result retention and cleanup behavior.
-
-### Private association boundary (library only)
-
-`telemetry::private::PrivateMapping` provides an in-memory schema and numeric
-summary primitive for a future private host adapter. It is not connected to
-launch, resume, CLI, MCP, child environments, or exporters. No mapping store or
-tracker client is installed. The existing checkout-local state store is not a
-suitable privacy boundary for this association.
-
-The bounded JSON input (at most 64 KiB) requires exactly `schema_version = 1`,
-`record_key`, `repo_identity`, and `tasks`. The opaque record key is 1–256 ASCII
-letters, digits, underscores, or hyphens; URLs and free text are unsupported.
-The repository key is the existing machine-local 16-character lowercase hex
-identity. Membership is an explicit list of 1–256 distinct canonical task UUID values;
-paths, handles, and legacy task IDs are unsupported. Unknown or duplicate fields,
-unsupported versions, and invalid values fail with a fixed error that includes
-no submitted content. The mapping has no serialization or debug representation;
-its key is accessible only through an explicit library method. Validation does
-not establish tracker visibility, ownership, or authorization.
-
-With `local_metrics` enabled, `summarize` accepts at most 4096 supplied numeric
-observations, each scoped to that repository, a listed task, and a positive
-attempt number. A retry submitted as a new task or a registered child requires
-explicit membership; a task resume uses its existing task and new attempt. Identical
-duplicates count once, conflicting duplicates fail without a partial result.
-Per-field output reports the maximum observed value and counts of observed and
-unavailable attempts. A null maximum means no observation; zero remains observed.
-Missing totals are never inferred and values are never summed: resumed sessions
-may repeat cumulative usage, and parent usage may overlap child usage. These are
-coverage statistics over supplied observations, not complete task totals or
-billing. Absent results, disabled collection, and undiscovered attempts are not
-invented as observations. The caller must validate task ownership and extract
-only opted-in numeric projections; this primitive does not read result envelopes
-or prove completeness. No provider calls are involved.
-
-A durable adapter remains deferred. Before wiring one in, choose an explicitly
-host-owned location outside every checkout and configuration snapshot, validate
-both tracker project and backing-record visibility, and provide owner-only,
-symlink-resistant, atomic storage with locking and conflict handling. Keep mapping
-keys out of task records, worktree names, prompts, MCP responses, shared configuration,
-OTEL attributes, and diagnostics. Bind through validated repository/task identity
-rather than caller-supplied paths; repository moves require explicit rebinding.
-Plan explicit removal and retention independent of task cleanup, bounded reads,
-crash recovery, and failures that cannot affect launch or exporter outcomes.
-No migration, automatic ancestry inheritance, cancellation behavior, filesystem
-confinement guarantee, or same-user process isolation is added by this primitive.
-
-Telemetry is disabled unless the project opts in. When enabled, ahu exports its
-own launch and harness lifecycle traces to the project-configured local OTLP
-collector and injects the same endpoint only into harness processes started by
-ahu. It never changes the invoking shell or harness sessions started directly.
-Only traces are enabled in this initial integration; inherited OTLP headers,
-signal-specific endpoints, and log/metric exporters are cleared for the child.
-Exporter construction or delivery failure does not fail the assignment.
-
-```toml
-[telemetry]
-enabled = true
-endpoint = "http://127.0.0.1:4318"
-```
-
-The first implementation accepts only the local OTLP/HTTP endpoint on port
-4318. Configure an upstream OpenTelemetry Collector to receive the endpoint and
-write or route telemetry as needed. ahu adds normalized `ahu.*` attributes for
-its version, agent and manifest version, harness and installed harness version,
-requested model, provider-resolved model when the event stream reports one,
-task, outcome, elapsed milliseconds, and any token usage the
-harness event stream actually reports (`input`, `output`, `cached`, and
-`total`). Missing usage remains absent; ahu never estimates it. Prompts,
-transcripts, credentials, and private issue content are not exported by ahu.
-
-Harness event streams are not identical. Codex, Claude Code, Antigravity, and
-OpenCode use different event names and terminal records, so ahu normalizes
-terminal status and the common usage keys where they are present. Provider
-native OTEL spans, if a harness emits them, remain harness-owned and may use
-different semantic conventions. Interactive sessions generally provide timing
-and process status; headless sessions additionally provide the structured event
-usage fields that ahu can normalize.
-
-Headless results also distinguish the skill catalog copied into the task
-worktree from observed skill invocations. A catalog entry records only its
-name, source path, and content digest. A skill invocation is recorded only when
-the harness emits a recognizable skill/tool event; mentioning a skill in text,
-having a skill on disk, or having an unrecognized event does not count as use.
-Invocation records are bounded and do not retain skill contents, prompts, or
-tool arguments.
-
 ```sh
 ahu knowledge lint
 ahu knowledge lint --output json
@@ -747,6 +636,123 @@ OKF, but cannot prevent concurrent changes after inspection. Reports are collect
 before the 16 MiB parsing limit is checked, so this is not a subprocess output
 or memory limit. See [validator boundaries](knowledge/knowledge-validation.md)
 for source provenance.
+
+## Local OpenTelemetry
+
+For local numeric headless attempt metrics without an exporter, set
+`local_metrics = true` in `[telemetry]` and leave `enabled = false`.
+Both options default to false and operate independently. Headless attempt results
+then include a `metrics` object with `schema_version = 1`, six normalized
+`ahu.tokens.*` fields under `values`, and
+`token_aggregation = "maximum-reported-per-field"`. Each value has
+`kind = "observed"` with an unsigned integer `value`, or
+`kind = "unavailable"` without a value. Zero is an observation, not missing data.
+No estimated values are produced; missing totals are never inferred.
+Reported maxima are not additive task totals or billing measurements.
+This option controls the new projection; it does not change existing
+`harness.usage` collection or retention.
+
+The containing result's existing task ID and attempt identify the observation.
+The metrics object accepts no issue references, free text, paths, account data,
+or arbitrary attributes. Any private mapping must be maintained separately
+outside the repository; no tracker integration or mapping store is provided.
+This object is not sent to OTLP or child environments. The complete task result
+still contains existing coordination metadata and is not a safe export format.
+Interactive sessions and attempts that stop before result persistence do not
+produce this object. Resume produces a separate attempt, not a merged total;
+metrics follow existing result retention and cleanup behavior.
+
+### Private association boundary (library only)
+
+`telemetry::private::PrivateMapping` provides an in-memory schema and numeric
+summary primitive for private host adapters. It is not connected to
+launch, resume, CLI, MCP, child environments, or exporters. No mapping store or
+tracker client is installed. The existing checkout-local state store is not a
+suitable privacy boundary for this association.
+
+The bounded JSON input (at most 64 KiB) requires exactly `schema_version = 1`,
+`record_key`, `repo_identity`, and `tasks`. The opaque record key is 1–256 ASCII
+letters, digits, underscores, or hyphens; URLs and free text are unsupported.
+The repository key is the existing machine-local 16-character lowercase hex
+identity. Membership is an explicit list of 1–256 distinct canonical task UUID values;
+paths, handles, and legacy task IDs are unsupported. Unknown or duplicate fields,
+unsupported versions, and invalid values fail with a fixed error that includes
+no submitted content. The mapping has no serialization or debug representation;
+its key is accessible only through an explicit library method. Validation does
+not establish tracker visibility, ownership, or authorization.
+
+With `local_metrics` enabled, `summarize` accepts at most 4096 supplied numeric
+observations, each scoped to that repository, a listed task, and a positive
+attempt number. A retry submitted as a new task or a registered child requires
+explicit membership; a task resume uses its existing task and new attempt. Identical
+duplicates count once, conflicting duplicates fail without a partial result.
+Per-field output reports the maximum observed value and counts of observed and
+unavailable attempts. A null maximum means no observation; zero remains observed.
+Missing totals are never inferred and values are never summed: resumed sessions
+may repeat cumulative usage, and parent usage may overlap child usage. These are
+coverage statistics over supplied observations, not complete task totals or
+billing. Absent results, disabled collection, and undiscovered attempts are not
+invented as observations. The caller must validate task ownership and extract
+only opted-in numeric projections; this primitive does not read result envelopes
+or prove completeness. No provider calls are involved.
+
+The privacy requirements for any durable adapter include an explicitly
+host-owned location outside every checkout and configuration snapshot, verified
+tracker project and backing-record visibility, and owner-only,
+symlink-resistant, atomic storage with locking and conflict handling. Keep mapping
+keys out of task records, worktree names, prompts, MCP responses, shared configuration,
+OTEL attributes, and diagnostics. Bind through validated repository/task identity
+rather than caller-supplied paths; repository moves require explicit rebinding.
+Require explicit removal and retention independent of task cleanup, bounded reads,
+crash recovery, and failures that cannot affect launch or exporter outcomes.
+No migration, automatic ancestry inheritance, cancellation behavior, filesystem
+confinement guarantee, or same-user process isolation is added by this primitive.
+
+### Local trace export
+
+Trace export is disabled unless the project opts in. When enabled, ahu exports its
+own launch and harness lifecycle traces to the project-configured local OTLP
+collector and injects the same endpoint only into harness processes started by
+ahu. It never changes the invoking shell or harness sessions started directly.
+Only traces are enabled in this initial integration; inherited OTLP headers,
+signal-specific endpoints, and log/metric exporters are cleared for the child.
+Exporter construction or delivery failure does not fail the assignment.
+
+```toml
+[telemetry]
+enabled = true
+endpoint = "http://127.0.0.1:4318"
+```
+
+The exporter accepts only the local OTLP/HTTP endpoint on port
+4318. Configure an upstream OpenTelemetry Collector to receive the endpoint and
+write or route telemetry as needed. ahu adds normalized `ahu.*` attributes for
+its version, agent and manifest version, harness and installed harness version,
+requested model, provider-resolved model when the event stream reports one,
+task, outcome, elapsed milliseconds, and any token usage the
+harness event stream actually reports (`input`, `output`, `cached`,
+`cache_write`, `reasoning`, and `total`). Missing usage remains absent; ahu never
+estimates it. ahu does not add prompts, transcripts, credentials, or private
+issue content to its span attributes. Inherited `OTEL_RESOURCE_ATTRIBUTES` are retained for
+children, and the exporter SDK can read ambient OpenTelemetry configuration.
+Keep sensitive data out of that configuration; these settings are not a
+redaction boundary.
+
+Harness event streams are not identical. Codex, Claude Code, Antigravity, and
+OpenCode use different event names and terminal records, so ahu normalizes
+terminal status and the common usage keys where they are present. Provider
+native OTEL spans, if a harness emits them, remain harness-owned and may use
+different semantic conventions. Interactive sessions generally provide timing
+and process status; headless sessions additionally provide the structured event
+usage fields that ahu can normalize.
+
+Headless results also distinguish the skill catalog copied into the task
+worktree from observed skill invocations. A catalog entry records only its
+name, source path, and content digest. A skill invocation is recorded only when
+the harness emits a recognizable skill/tool event; mentioning a skill in text,
+having a skill on disk, or having an unrecognized event does not count as use.
+Invocation records are bounded and do not retain skill contents, prompts, or
+tool arguments.
 
 ## Sidebar text
 

@@ -171,4 +171,8 @@ jobs:
             exit 0
           fi
           cmux --version
+          if ! cmux ping >/dev/null 2>&1; then
+            echo '::notice::cmux is installed but unreachable; live probe skipped.'
+            exit 0
+          fi
           AHU_TEST_CMUX=1 cargo test --locked --test cmux_integration -- --test-threads=1
