@@ -730,7 +730,7 @@ fn source_directory(path: &Path, name: &str, out: &mut Vec<Component>) -> Vec<Pa
     paths
 }
 
-// OpenCode v1.18.29-v1.18.31 config/config.ts, config/managed.ts,
+// OpenCode v1.18.29-v1.18.32 config/config.ts, config/managed.ts,
 // auth/index.ts and account/repo.ts. Native authentication can cause remote
 // config to add plugins; authentication values and account databases stay native.
 fn scan_opencode_sources(locations: &Locations, out: &mut Vec<Component>) {

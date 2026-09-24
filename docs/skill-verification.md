@@ -124,7 +124,7 @@ cd "$fixture" && claude -p \
   "Use the probe-skill skill, follow its instructions exactly, and output only what it requires."
 ```
 
-Observed (Claude Code 2.1.278, print mode, default feature flags): the same
+Observed (Claude Code 2.1.281, print mode, default feature flags): the same
 fixture's `.agents/skills/probe-skill` was not discovered; the session reported
 that probe-skill was not available; while `.claude/skills/probe-skill` was
 discovered and the invocation probe answered `PROBE_SKILL_OK`. Discovery
@@ -176,7 +176,7 @@ not claim a project skill was used when Antigravity does not expose one.
 | -------------- | ------- | --------------------------------- | ---------- | ----- |
 | OpenCode       | 1.18.32 | yes                               | verified in session | `opencode debug skill` is the deterministic surface |
 | Codex          | 0.155.1 | yes                               | `PROBE_SKILL_OK` | `codex debug prompt-input` is the deterministic surface |
-| Claude Code    | 2.1.278 | no                                | `.claude/skills/` only, `PROBE_SKILL_OK` | project discovery needs git trust; `.agents/skills/` not a documented location |
+| Claude Code    | 2.1.281 | no                                | `.claude/skills/` only, `PROBE_SKILL_OK` | project discovery needs git trust; `.agents/skills/` not a documented location |
 | Antigravity    | 1.2.9   | not observed                      | not observed | builtin skills only; folder trust untested |
 
 ## Not verified here

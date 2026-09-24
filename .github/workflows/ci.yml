@@ -63,7 +63,7 @@ jobs:
             claude) echo '2.1.270' ;;
             codex) echo 'codex-cli 0.155.1' ;;
             agy) echo '1.2.2' ;;
-            opencode) echo '1.18.31' ;;
+            opencode) echo '1.18.32' ;;
           esac
           SH
             chmod +x "$stub_dir/$harness"

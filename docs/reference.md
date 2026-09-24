@@ -1279,9 +1279,9 @@ the reported source with `ahu cmux status`; interactive execution remains availa
 ### Conformance evidence
 
 The local investigation baseline is cmux 0.64.22 build ddd4a01bc, Codex 0.155.1,
-Claude Code 2.1.278, OpenCode 1.18.31, and Antigravity CLI 1.2.7. Installed versions
+Claude Code 2.1.281, OpenCode 1.18.32, and Antigravity CLI 1.2.9. Installed versions
 are observations, not additions to the admitted [headless profiles](#headless-execution).
-In particular, Claude 2.1.278 and Antigravity 1.2.7 do not replace pinned profiles.
+In particular, Claude 2.1.281 and Antigravity 1.2.9 do not replace pinned profiles.
 
 | Evidence class | What it establishes | What remains unverified |
 | --- | --- | --- |
