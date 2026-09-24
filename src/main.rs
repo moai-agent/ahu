@@ -7,7 +7,9 @@ use ahu::style::{self, Role};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match run(args) {
+    let result = run(args);
+    ahu::telemetry::shutdown();
+    match result {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(5)),
         Err(error) => {
             // Error text carries repository-controlled values: file names,

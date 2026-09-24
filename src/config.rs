@@ -52,6 +52,30 @@ pub struct Knowledge {
     pub fail_on_warnings: bool,
 }
 
+/// Opt-in, project-scoped OpenTelemetry delivery for ahu and its children.
+///
+/// The endpoint is deliberately local-only in this first implementation. A
+/// launch applies these settings to the child process environment; ahu never
+/// changes the invoking shell or a harness started outside ahu.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelemetryConfig {
+    pub enabled: bool,
+    /// Numeric headless attempt metrics only; independent of OTLP delivery.
+    pub local_metrics: bool,
+    pub endpoint: String,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            local_metrics: false,
+            endpoint: "http://127.0.0.1:4318".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectConfig {
     pub schema_version: u32,
@@ -68,6 +92,8 @@ pub struct ProjectConfig {
     pub context_hygiene: ContextHygiene,
     #[serde(default)]
     pub knowledge: Knowledge,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 /// A loaded config plus the identity of the exact bytes it came from.
@@ -253,6 +279,7 @@ fn validate(config: &ProjectConfig, path: &Path) -> Result<()> {
         );
     }
     catalog::require_version(&config.catalog_version)?;
+    crate::telemetry::validate_config(&config.telemetry, path)?;
     Ok(())
 }
 
@@ -361,6 +388,16 @@ pub fn render(config: &ProjectConfig) -> String {
     out.push_str(&format!(
         "fail_on_warnings = {}\n",
         config.knowledge.fail_on_warnings
+    ));
+    out.push_str("\n[telemetry]\n");
+    out.push_str(&format!("enabled = {}\n", config.telemetry.enabled));
+    out.push_str(&format!(
+        "local_metrics = {}\n",
+        config.telemetry.local_metrics
+    ));
+    out.push_str(&format!(
+        "endpoint = {}\n",
+        toml_string(&config.telemetry.endpoint)
     ));
     out
 }

@@ -20,8 +20,8 @@ unable to execute because macOS caches code-signature validation by file identit
 For a locally built release, remove the destination before copying:
 
 ```sh
-rm /Users/you/.cargo/bin/ahu
-cp target/release/ahu /Users/you/.cargo/bin/ahu
+rm -f "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
+cp target/release/ahu "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
 ```
 
 The running process keeps its old file open, and new invocations use the fresh
@@ -301,5 +301,5 @@ voice, such as required contractions and passive-voice warnings, along with the
 Oxford comma rules, which flag two-item conjunctions. The reasons are recorded
 beside each entry in `.vale.ini`.
 
-See the [0.3.0 preparation notes](docs/releases/0.3.0.md) for implemented behavior
+See the [0.4.0 preparation notes](docs/releases/0.4.0.md) for implemented behavior
 and validation limits. This version is prepared locally and is not yet published.

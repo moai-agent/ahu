@@ -64,7 +64,8 @@ exit {code}
         command
             .current_dir(&self.root)
             .env("AHU_CMUX_BIN", &self.bin)
-            .env("HOME", &self.home);
+            .env("HOME", &self.home)
+            .env("PATH", "/usr/bin:/bin");
         for key in [
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
@@ -874,4 +875,64 @@ fn opencode_native_substitution_sources_remain_unresolved() {
             "native substitution source was treated as absent: {content}"
         );
     }
+}
+
+#[test]
+fn isolation_profile_matrix_preserves_refusals_and_representation_parity() {
+    for (harness, version, source, body) in [
+        (
+            "codex",
+            "0.155.1",
+            ".codex/plugins",
+            "opaque synthetic plugin state",
+        ),
+        (
+            "opencode",
+            "1.18.31",
+            ".local/share/opencode/auth.json",
+            "DO_NOT_READ_SYNTHETIC",
+        ),
+        (
+            "claude-code",
+            "2.1.270",
+            ".claude/settings.json",
+            r#"{"enabledPlugins":{"synthetic":true}}"#,
+        ),
+        ("antigravity", "1.2.3", "", ""),
+    ] {
+        let f = Fixture::new();
+        let entry = ahu::catalog::harness(harness).unwrap();
+        for reviewed in entry.headless_verified_versions {
+            let clean = f.inspect(harness).with_version(Some(reviewed));
+            assert!(clean.headless.allowed, "{clean:?}");
+        }
+        assert!(!f.inspect(harness).with_version(None).headless.allowed);
+        if !source.is_empty() {
+            f.write(f.home.join(source), body);
+        }
+        let status = f.inspect(harness).with_version(Some(version));
+        assert!(!status.headless.allowed, "{status:?}");
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["profile"]["interactive_supported"], true);
+        assert_eq!(value["profile"]["unknown_integration_opt_in"], false);
+        assert_eq!(value["version_checked"], true);
+        let human = integration::render(&status);
+        assert!(human.contains("headless refused"));
+        for reason in value["headless"]["reasons"].as_array().unwrap() {
+            assert!(human.contains(reason.as_str().unwrap()), "{human}");
+        }
+        for field in ["next_action", "conformance"] {
+            assert!(human.contains(value[field].as_str().unwrap()));
+        }
+        for gap in value["gaps"].as_array().unwrap() {
+            assert!(human.contains(gap.as_str().unwrap()));
+        }
+        assert!(human.contains(value["profile"]["limitations"].as_str().unwrap()));
+        assert!(!human.contains("DO_NOT_READ_SYNTHETIC"));
+        assert!(!value.to_string().contains("DO_NOT_READ_SYNTHETIC"));
+    }
+    let f = Fixture::new();
+    let unknown = f.inspect("unknown").with_version(Some("1.2.2"));
+    assert!(unknown.profile.is_none());
+    assert!(!unknown.headless.allowed);
 }

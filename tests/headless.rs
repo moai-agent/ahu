@@ -161,6 +161,7 @@ fn foreground_keeps_primary_coordination_and_identity_without_native_copies() {
     );
     let v = Fixture::value(&out);
     assert_eq!(v["outcome"], "succeeded");
+    assert!(v.get("metrics").is_none());
     assert_eq!(v["completion_verified"], false);
     assert_eq!(v["identity"]["agent"], "worker");
     let worktree = PathBuf::from(v["worktree"].as_str().unwrap());
@@ -196,6 +197,66 @@ fn foreground_keeps_primary_coordination_and_identity_without_native_copies() {
         "{}",
         String::from_utf8_lossy(&inspect.stderr)
     );
+}
+
+#[test]
+fn local_metrics_survive_attempt_persistence_without_an_exporter() {
+    let f = Fixture::new();
+    let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
+    config.telemetry.local_metrics = true;
+    f.repo
+        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    let out = f.launch("success", &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value = Fixture::value(&out);
+    assert_eq!(value["metrics"]["schema_version"], 1);
+    assert_eq!(
+        value["metrics"]["values"]["ahu.tokens.total"]["kind"],
+        "unavailable"
+    );
+    let stored: Value = serde_json::from_slice(
+        &std::fs::read(value["review"]["result_path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored["metrics"], value["metrics"]);
+    assert_eq!(stored["task_id"], value["task_id"]);
+    assert_eq!(stored["attempt"], value["attempt"]);
+}
+
+#[test]
+fn exporter_setup_failure_does_not_block_headless_execution() {
+    let f = Fixture::new();
+    let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
+    config.telemetry.enabled = true;
+    config.telemetry.local_metrics = true;
+    f.repo
+        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    let out = f
+        .command()
+        .env("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "gzip")
+        .args([
+            "launch",
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "perform synthetic task",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value = Fixture::value(&out);
+    assert_eq!(value["outcome"], "succeeded");
+    assert_eq!(value["metrics"]["schema_version"], 1);
 }
 
 #[test]
@@ -525,6 +586,163 @@ fn protocol_parser_rejects_uppercase_error_duplicate_and_session_drift() {
     codex.observe("codex", br#"{"type":"turn.completed"}"#);
     codex.observe("codex", br#"{"type":"turn.completed"}"#);
     assert!(codex.failed);
+}
+
+#[test]
+fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
+    use ahu::headless::Events;
+    use serde_json::json;
+
+    let fixtures = [
+        (
+            "codex",
+            vec![
+                json!({"type":"thread.started","thread_id":"thr-codex"}),
+                json!({"type":"item.completed","item":{"type":"function_call","name":"skill","input":{"skill":"direct-agents"}}}),
+                json!({"type":"item.completed","item":{"type":"agent_message","text":"done"}}),
+                json!({"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18},"model":"gpt-test"}),
+            ],
+        ),
+        (
+            "claude-code",
+            vec![
+                json!({"type":"system","session_id":"ses-claude","subtype":"init"}),
+                json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"direct-agents"}}]}}),
+                json!({"type":"assistant","message":{"content":[]}}),
+                json!({"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18},"model":"claude-test"}),
+            ],
+        ),
+        (
+            "antigravity",
+            vec![
+                json!({"type":"init","session_id":"ses-agy"}),
+                json!({"type":"tool_use","name":"Skill","input":{"skill":"direct-agents"}}),
+                json!({"type":"result","status":"success","response":"done","usage":{"prompt_tokens":17,"completion_tokens":4,"total_tokens":21},"model_name":"gemini-test"}),
+            ],
+        ),
+        (
+            "opencode",
+            vec![
+                json!({"type":"step_start","sessionID":"ses-opencode","part":{"type":"step-start"}}),
+                json!({"type":"tool_use","sessionID":"ses-opencode","part":{"type":"tool","tool":"skill","state":{"input":{"skill":"direct-agents"}}}}),
+                json!({"type":"text","sessionID":"ses-opencode","part":{"type":"text","text":"done"}}),
+                json!({"type":"step_finish","sessionID":"ses-opencode","part":{"type":"step-finish","reason":"stop","usage":{"input_tokens":19,"output_tokens":6,"total_tokens":25},"model":"glm-test"}}),
+            ],
+        ),
+    ];
+
+    for (harness, fixture) in fixtures {
+        let mut events = Events::default();
+        for event in fixture {
+            events.observe(harness, serde_json::to_string(&event).unwrap().as_bytes());
+        }
+        assert!(
+            events.terminal,
+            "{harness} did not produce a terminal result"
+        );
+        assert!(
+            !events.failed,
+            "{harness} produced blockers: {:?}",
+            events.blockers
+        );
+        assert_eq!(
+            events.unknown_events, 0,
+            "{harness} fixture was not fully recognized"
+        );
+        assert!(
+            events.session.is_some(),
+            "{harness} session was not captured"
+        );
+        assert!(
+            events.usage.total.is_some(),
+            "{harness} total usage was not captured"
+        );
+        assert!(
+            events.model.is_some(),
+            "{harness} resolved model was not captured"
+        );
+        assert_eq!(
+            events.skills.len(),
+            1,
+            "{harness} skill invocation was not captured"
+        );
+        assert_eq!(events.skills[0].name, "direct-agents");
+    }
+}
+
+#[test]
+fn antigravity_stream_json_shape_is_normalized() {
+    use ahu::headless::Events;
+
+    let mut events = Events::default();
+    events.observe(
+        "antigravity",
+        br#"{"event":"init","conversation_id":"agy-session","init":{"cwd":"/tmp/probe"}}"#,
+    );
+    events.observe(
+        "antigravity",
+        br#"{"event":"step_update","step_update":{"conversation_id":"agy-session","state":"DONE","step_type":"agent_response","usage":{"input_tokens":11,"output_tokens":4,"thinking_tokens":2,"total_tokens":15}}}"#,
+    );
+    events.observe(
+        "antigravity",
+        br#"{"event":"result","result":{"conversation_id":"agy-session","status":"SUCCESS","response":"PROBE_SKILL_OK","usage":{"input_tokens":11,"output_tokens":4,"thinking_tokens":2,"total_tokens":15}}}"#,
+    );
+    assert!(events.terminal);
+    assert!(!events.failed, "{:?}", events.blockers);
+    assert_eq!(events.session.as_deref(), Some("agy-session"));
+    assert_eq!(events.usage.total, Some(15));
+    assert_eq!(events.usage.reasoning, Some(2));
+    assert_eq!(events.summary, "PROBE_SKILL_OK");
+}
+
+#[test]
+fn skill_probe_response_text_is_not_an_invocation_event() {
+    use serde_json::json;
+
+    for (harness, event) in [
+        (
+            "codex",
+            json!({"type":"item.completed","item":{"type":"agent_message","text":"PROBE_SKILL_OK"}}),
+        ),
+        (
+            "opencode",
+            json!({"type":"text","part":{"type":"text","text":"PROBE_SKILL_OK"}}),
+        ),
+        (
+            "claude-code",
+            json!({"type":"result","subtype":"success","result":"PROBE_SKILL_OK"}),
+        ),
+        (
+            "antigravity",
+            json!({"event":"result","result":{"status":"SUCCESS","response":"PROBE_SKILL_OK"}}),
+        ),
+    ] {
+        let mut events = ahu::headless::Events::default();
+        events.observe(harness, &serde_json::to_vec(&event).unwrap());
+        assert!(
+            events.skills.is_empty(),
+            "{harness} inferred skill use from text"
+        );
+        let metadata = serde_json::to_string(&events).unwrap();
+        assert!(!metadata.contains("PROBE_SKILL_OK"));
+    }
+}
+
+#[test]
+fn skill_probe_antigravity_nested_tool_event_records_only_invocation_metadata() {
+    let mut events = ahu::headless::Events::default();
+    // Synthetic protocol fixture, not evidence of live project discovery.
+    events.observe("antigravity", br#"{"event":"step_update","step_update":{"tool_name":"Skill","tool_info":{"parameters":{"skill":"probe-skill","prompt":"synthetic-private-input"}}}}"#);
+    assert_eq!(events.skills.len(), 1);
+    assert_eq!(events.skills[0].name, "probe-skill");
+    assert_eq!(events.skills[0].status, "invoked");
+    assert!(events.skills[0].source.is_none());
+    assert!(events.skills[0].digest.is_none());
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("synthetic-private-input")
+    );
 }
 
 #[test]
@@ -2599,4 +2817,422 @@ fn ordinary_event_subtypes_do_not_consume_helper_budget() {
     }
     events.observe("codex", br#"{"type":"turn.completed"}"#);
     assert!(events.terminal && !events.failed);
+}
+
+#[test]
+fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux() {
+    use std::os::unix::fs::PermissionsExt;
+    for (harness, model, executable, version, source, body, reason) in [
+        (
+            "codex",
+            "gpt-6-astra",
+            "codex",
+            "0.155.1",
+            ".codex/plugins",
+            "synthetic plugin state",
+            "plugin",
+        ),
+        (
+            "opencode",
+            "ollama/glm-5.3:cloud",
+            "opencode",
+            "1.18.31",
+            ".local/share/opencode/auth.json",
+            "SYNTHETIC_OPAQUE_SENTINEL",
+            "authentication store present",
+        ),
+        (
+            "claude-code",
+            "claude-opus-5",
+            "claude",
+            "2.1.270",
+            ".claude/settings.json",
+            r#"{"enabledPlugins":{"synthetic":true}}"#,
+            "plugin hook behavior",
+        ),
+        (
+            "antigravity",
+            "gemini-3.1-pro-high",
+            "agy",
+            "1.2.3",
+            "",
+            "",
+            "unvalidated headless antigravity version",
+        ),
+    ] {
+        let f = Fixture::new();
+        f.repo.add_agent_on("matrix", "1.0.0", harness, model);
+        f.repo.commit("synthetic admission matrix");
+        // Every executable is disposable. A real invocation would leave proof.
+        for entry in ahu::catalog::HARNESSES {
+            let stub = f.bin.join(entry.executable);
+            let observed = if entry.executable == executable {
+                version
+            } else {
+                entry.headless_verified_versions[0]
+            };
+            std::fs::write(&stub, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{observed}'; exit 0; fi\ntouch \"$HOME/worker-started\"\nexit 97\n")).unwrap();
+            std::fs::set_permissions(stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let home = f.external.path().join("home");
+        if !source.is_empty() {
+            let path = home.join(source);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let status = f
+            .command()
+            .args(["cmux", "status", "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let status = Fixture::value(&status);
+        let status = status["integrations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["harness"] == harness)
+            .unwrap();
+        assert_eq!(status["headless"]["allowed"], false, "{status}");
+        assert_eq!(status["cli_version"], version);
+        assert!(
+            status["headless"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str().unwrap().contains(reason)),
+            "{status}"
+        );
+        let human = f.command().args(["cmux", "status"]).output().unwrap();
+        let human = String::from_utf8(human.stdout).unwrap();
+        assert!(human.contains(reason), "{human}");
+        assert!(human.contains(status["next_action"].as_str().unwrap()));
+
+        let interactive = f
+            .command()
+            .args([
+                "launch",
+                "@matrix",
+                "--dry-run",
+                "--output",
+                "json",
+                "--prompt",
+                "synthetic task",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            interactive.status.success(),
+            "{}",
+            String::from_utf8_lossy(&interactive.stderr)
+        );
+        let preview = Fixture::value(&interactive);
+        assert_eq!(preview["cmux_integration"]["headless"]["allowed"], false);
+        assert_eq!(
+            preview["cmux_integration"]["profile"]["interactive_supported"],
+            true
+        );
+        let repo = ahu::git::discover(f.repo.path()).unwrap();
+        let branches = common::git(f.repo.path(), &["branch", "--list"]);
+        for extra in [vec!["--dry-run"], vec![], vec!["--allow-widened-approvals"]] {
+            let refused = f
+                .command()
+                .args([
+                    "launch",
+                    "@matrix",
+                    "--headless",
+                    "--output",
+                    "json",
+                    "--prompt",
+                    "synthetic task",
+                ])
+                .args(&extra)
+                .output()
+                .unwrap();
+            assert!(!refused.status.success(), "{harness}: {extra:?}");
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains(reason),
+                "{harness}: {extra:?}: {}",
+                String::from_utf8_lossy(&refused.stderr)
+            );
+            assert!(!home.join("worker-started").exists());
+            assert!(!f.external.path().join("runtime").exists());
+            assert!(!ahu::headless::store(&repo).unwrap().exists());
+            // Planning may create the self-ignoring root, but no task checkout.
+            assert!(
+                std::fs::read_dir(f.repo.path().join(".worktrees"))
+                    .unwrap()
+                    .all(|entry| entry.unwrap().file_name() == ".gitignore")
+            );
+            assert_eq!(common::git(f.repo.path(), &["branch", "--list"]), branches);
+            assert_eq!(
+                common::git(f.repo.path(), &["worktree", "list", "--porcelain"])
+                    .lines()
+                    .filter(|line| line.starts_with("worktree "))
+                    .count(),
+                1
+            );
+            let listed = f
+                .command()
+                .args(["tasks", "--output", "json"])
+                .output()
+                .unwrap();
+            assert!(
+                listed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&listed.stderr)
+            );
+            assert_eq!(Fixture::value(&listed)["tasks"], serde_json::json!([]));
+        }
+        assert_eq!(preview["executed"], false);
+        assert!(!status.to_string().contains("SYNTHETIC_OPAQUE_SENTINEL"));
+    }
+}
+
+#[test]
+fn headless_isolation_refusal_does_not_gate_real_interactive_cmux_dispatch() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let home = f.external.path().join("home");
+    std::fs::create_dir(home.join(".claude")).unwrap();
+    std::fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"enabledPlugins":{"synthetic":true}}"#,
+    )
+    .unwrap();
+    let refused = f.launch("success", &[]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("plugin hook behavior"));
+    // Planning may create the self-ignoring root, but no task checkout.
+    assert!(
+        std::fs::read_dir(f.repo.path().join(".worktrees"))
+            .unwrap()
+            .all(|entry| entry.unwrap().file_name() == ".gitignore")
+    );
+
+    // Reuse the saved-group protocol from the synthetic coordinator fixture.
+    // Record the real dispatch, without executing its shell command or opening a terminal.
+    let cmux = f.bin.join("cmux");
+    std::fs::write(&cmux, r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+base = Path(os.environ['HOME'])
+args = sys.argv[1:]
+if args[0] == 'ping': print('PONG'); sys.exit(0)
+if args[0] == 'capabilities':
+ print(json.dumps({'capabilities':['workspace.groups.v1','workspace.group_create.v1','workspace.create_in_group.v1']})); sys.exit(0)
+if args[0] == 'new-workspace':
+ assert not (base/'dispatch.json').exists()
+ (base/'dispatch.json').write_text(json.dumps(args)); sys.exit(0)
+if args[0] == 'set-status': sys.exit(0)
+assert args[0] == 'rpc', args
+method, params = args[1], json.loads(args[2])
+if method == 'system.identify':
+ assert params == {'caller':{'workspace_id':'sentinel'}}
+ print(json.dumps({'caller':{'window_id':'synthetic-window'}}))
+elif method == 'workspace.group.list':
+ assert params == {'window_id':'synthetic-window'}
+ members = ['anchor']
+ if (base/'dispatch.json').exists(): members.append('synthetic-task')
+ print(json.dumps({'groups':[{'id':'saved-group','name':'synthetic group','anchor_workspace_id':'anchor','member_workspace_ids':members}]}))
+elif method == 'workspace.list': print(json.dumps({'workspaces':[]}))
+elif method == 'workspace.group.expand':
+ assert params == {'group_id':'saved-group'}
+ print('{}')
+else: raise AssertionError(method)
+"#).unwrap();
+    std::fs::set_permissions(&cmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let repo = ahu::git::discover(f.repo.path()).unwrap();
+    ahu::state::write_json(
+        &ahu::state::coordination_dir(&repo)
+            .unwrap()
+            .join("cmux.json"),
+        &ahu::launch::GroupMapping {
+            group_id: Some("saved-group".into()),
+            window_id: Some("synthetic-window".into()),
+            anchor_workspace_id: Some("anchor".into()),
+        },
+    )
+    .unwrap();
+    let launched = f
+        .command()
+        .env("AHU_CMUX_BIN", &cmux)
+        .args([
+            "launch",
+            "@worker",
+            "--prompt",
+            "synthetic interactive task",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let listing = ahu::task::list(&repo).unwrap();
+    assert!(listing.unreadable.is_empty());
+    assert_eq!(listing.records.len(), 1);
+    let (task_dir, record) = &listing.records[0];
+    assert_eq!(record.cmux_workspace_id.as_deref(), Some("synthetic-task"));
+    assert_eq!(record.cmux_group_id.as_deref(), Some("saved-group"));
+    assert!(record.worktree.is_dir());
+    assert_eq!(record.identity.agent, "worker");
+    let args: Vec<String> =
+        serde_json::from_slice(&std::fs::read(home.join("dispatch.json")).unwrap()).unwrap();
+    let option = |name| args[args.iter().position(|arg| arg == name).unwrap() + 1].clone();
+    assert_eq!(option("--cwd"), record.worktree.to_str().unwrap());
+    assert_eq!(option("--group"), "saved-group");
+    assert_eq!(
+        option("--command"),
+        ahu::cmux::startup_command(std::path::Path::new(env!("CARGO_BIN_EXE_ahu")), task_dir)
+    );
+    assert!(!ahu::headless::store(&repo).unwrap().exists());
+    assert!(!f.external.path().join("runtime").exists());
+}
+
+#[test]
+fn skill_probe_normalized_records_are_bounded_and_harness_scoped() {
+    use ahu::headless::Events;
+    use serde_json::json;
+    let fixtures = [
+        (
+            "codex",
+            json!({"type":"item.completed","item":{"type":"function_call","name":"skill","input":{"skill":"plugin:probe-skill","args":"PRIVATE INPUT"}}}),
+        ),
+        (
+            "claude-code",
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"plugin:probe-skill","args":"PRIVATE INPUT"}}]}}),
+        ),
+        (
+            "opencode",
+            json!({"type":"tool_use","part":{"type":"tool","tool":"skill","state":{"input":{"name":"plugin:probe-skill","args":"PRIVATE INPUT"}}}}),
+        ),
+        (
+            "antigravity",
+            json!({"event":"step_update","step_update":{"tool_name":"Skill","tool_info":{"name":"Skill","parameters":{"skill":"plugin:probe-skill","args":"PRIVATE INPUT"}}}}),
+        ),
+    ];
+    for (harness, fixture) in &fixtures {
+        let mut events = Events::default();
+        events.observe(harness, &serde_json::to_vec(fixture).unwrap());
+        let value = serde_json::to_value(&events).unwrap();
+        assert_eq!(value["skill_observation"], "observed");
+        assert_eq!(events.skills.len(), 1, "{harness}");
+        let record = &value["skills"][0];
+        assert_eq!(record["harness"], *harness);
+        assert_eq!(record["evidence"], "observed");
+        assert_eq!(record["execution"], "unverified");
+        assert!(record["observed_at"].as_str().unwrap().ends_with('Z'));
+        assert!(record.get("source").is_none());
+        assert!(!value.to_string().contains("PRIVATE INPUT"));
+        for (other, _) in &fixtures {
+            if other != harness {
+                let mut wrong = Events::default();
+                wrong.observe(other, &serde_json::to_vec(fixture).unwrap());
+                assert!(wrong.skills.is_empty(), "{harness} accepted as {other}");
+            }
+        }
+        let input_path = match *harness {
+            "codex" => "/item/input",
+            "claude-code" => "/message/content/0/input",
+            "opencode" => "/part/state/input",
+            _ => "/step_update/tool_info/parameters",
+        };
+        for input in [
+            json!({"skill": "secret prompt text"}),
+            json!({"skill": "x".repeat(129)}),
+            json!({"skill_name":"probe-skill"}),
+            json!("{\"skill\":\"probe-skill\"}"),
+        ] {
+            let mut invalid = fixture.clone();
+            *invalid.pointer_mut(input_path).unwrap() = input;
+            let mut events = Events::default();
+            events.observe(harness, &serde_json::to_vec(&invalid).unwrap());
+            assert!(events.skills.is_empty(), "{harness}");
+            assert_eq!(
+                serde_json::to_value(events).unwrap()["skill_observation"],
+                "unverified"
+            );
+        }
+        let mut drift = fixture.clone();
+        drift["type"] = json!("future-event");
+        drift["event"] = json!("future-event");
+        let mut events = Events::default();
+        events.observe(harness, &serde_json::to_vec(&drift).unwrap());
+        assert!(events.skills.is_empty());
+        assert_eq!(
+            serde_json::to_value(events).unwrap()["skill_observation"],
+            "unavailable"
+        );
+    }
+}
+
+#[test]
+fn skill_probe_rejects_payloads_and_bounds_records() {
+    use ahu::headless::Events;
+    use serde_json::json;
+    for name in [
+        json!(""),
+        json!("x".repeat(129)),
+        json!("/tmp/secret"),
+        json!("prompt with spaces"),
+        json!("line\nbreak"),
+        json!({"credential":"secret"}),
+        json!(null),
+    ] {
+        let mut events = Events::default();
+        let event = json!({"type":"tool_use","name":"Skill","input":{"skill":name}});
+        events.observe("antigravity", &serde_json::to_vec(&event).unwrap());
+        assert!(events.skills.is_empty());
+        assert_eq!(
+            serde_json::to_value(events).unwrap()["skill_observation"],
+            "unverified"
+        );
+    }
+    for event in [
+        json!({"type":"result","name":"Skill","input":{"skill":"probe-skill"}}),
+        json!({"type":"tool_use","name":"mcp.skill","input":{"skill":"probe-skill"}}),
+        json!({"type":"assistant","message":{"content":[{"type":"text","name":"Skill","input":{"skill":"probe-skill"}}]}}),
+        json!({"type":"system","skills":["probe-skill"]}),
+    ] {
+        for harness in [
+            "codex",
+            "claude-code",
+            "opencode",
+            "antigravity",
+            "future-harness",
+        ] {
+            let mut events = Events::default();
+            events.observe(harness, &serde_json::to_vec(&event).unwrap());
+            assert!(events.skills.is_empty());
+        }
+    }
+    let mut events = Events::default();
+    for _ in 0..140 {
+        events.observe(
+            "antigravity",
+            br#"{"type":"tool_use","name":"Skill","input":{"skill":"probe-skill"}}"#,
+        );
+    }
+    assert_eq!(events.skills.len(), 128);
+    assert!(events.failed);
+    assert_eq!(
+        events
+            .blockers
+            .iter()
+            .filter(|b| *b == "skill invocation limit exceeded")
+            .count(),
+        1
+    );
+    let legacy: ahu::headless::SkillInvocation =
+        serde_json::from_value(json!({"name":"probe-skill","status":"invoked"})).unwrap();
+    assert_eq!(
+        serde_json::to_value(legacy).unwrap()["evidence"],
+        "unverified"
+    );
 }

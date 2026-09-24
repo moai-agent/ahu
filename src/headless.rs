@@ -1,6 +1,7 @@
 //! Unattended attempts with minimal primary-owned state and an ahu supervisor.
 //! Process and harness outcomes are evidence, never work acceptance.
 pub(crate) mod review;
+mod skills;
 
 use crate::harness::{LaunchCommand, LaunchRequest};
 use crate::util::{Error, Result, digest_bytes};
@@ -277,31 +278,6 @@ fn build_native_profile(harness: &str, model: &str, spec: &Spec) -> Result<crate
         budget_usd: Some(5.0),
         assignment_writes: false,
     })
-}
-
-/// Only CLI versions whose argument surface was inspected are admitted.
-///
-/// The validated sets live in the catalog's `headless_verified_versions`, one
-/// table instead of a second opinion in this module.
-fn check_version(harness: &str, version: &str) -> Result<()> {
-    let supported = crate::catalog::harness(harness)
-        .map(|h| h.headless_verified_versions)
-        .unwrap_or(&[]);
-    // Probe output may carry a CLI-name prefix (codex prints
-    // `codex-cli 0.154.0`) and trailing decoration after whitespace. The
-    // first token that parses as a version is the one whose argument surface
-    // got inspected; a leading name token is not a version, and empty probe
-    // output is refused rather than silently admitted.
-    let token = version
-        .split_whitespace()
-        .find(|v| crate::util::is_semver(v))
-        .unwrap_or_else(|| version.split_whitespace().next().unwrap_or(""));
-    if !supported.contains(&token) {
-        bail!(
-            "unvalidated headless {harness} version {version:?}; supported CLI profiles: {supported:?}. Update the compatibility validation before launching; no fallback was selected."
-        );
-    }
-    Ok(())
 }
 
 fn validate_executable(path: &Path, repo: &crate::git::Repo) -> Result<PathBuf> {
@@ -718,7 +694,7 @@ pub fn launch(
         .harness_version
         .clone()
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
-    check_version(&plan.pair.harness, &version)?;
+    crate::catalog::check_headless_version(&plan.pair.harness, &version)?;
     let parent_task = std::env::var("AHU_PARENT_TASK").ok();
     let depth = if let Some(parent) = &parent_task {
         let parent_dir = lookup(repo, parent)?;
@@ -811,7 +787,8 @@ pub fn launch(
         spec.gaps.push("The ENTIRE assignment has a read-only MODEL TOOL ceiling: parent and helpers have no model tools for editing, building, shell commands or shell-launching registered children. Settings-defined hooks are outside that tool ceiling and their side effects are not proven read-only. MCP tools and slash commands are disabled; repository settings remain discoverable. Roles are requested/observed, not an allowlist; total helper count is not capped. Budget is 5 USD per attempt, concurrency 1, depth 1, helper model equals manifest model.".into());
     }
     spec.native_profile = Some(profile);
-    let cmux_integration = validate_environment(repo, &repo.root, &plan.pair.harness)?;
+    let cmux_integration =
+        validate_environment(repo, &repo.root, &plan.pair.harness, &spec.harness_version)?;
     plan.cmux_integration = cmux_integration.clone();
     spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", cmux_integration.headless.evidence_digest));
     let (delivered, delivery) = crate::orchestration::deliver_composed(
@@ -1011,6 +988,7 @@ fn validate_environment(
     repo: &crate::git::Repo,
     config_root: &Path,
     harness: &str,
+    version: &str,
 ) -> Result<crate::cmux::integration::Status> {
     for variable in [
         "HOME",
@@ -1039,7 +1017,8 @@ fn validate_environment(
             }
         }
     }
-    crate::cmux::integration::enforce(config_root, harness)
+    crate::catalog::check_headless_version(harness, version)?;
+    Ok(crate::cmux::integration::enforce(config_root, harness)?.with_version(Some(version)))
 }
 
 pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
@@ -1210,6 +1189,156 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillInvocation {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default)]
+    pub harness: Option<String>,
+    #[serde(default)]
+    pub observed_at: Option<String>,
+    #[serde(default = "crate::telemetry::SkillEvidence::unverified")]
+    pub evidence: crate::telemetry::SkillEvidence,
+    #[serde(default = "crate::telemetry::SkillEvidence::unverified")]
+    pub execution: crate::telemetry::SkillEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillCatalogEntry {
+    pub name: String,
+    pub source: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cached: Option<u64>,
+    #[serde(default)]
+    pub cache_write: Option<u64>,
+    #[serde(default)]
+    pub reasoning: Option<u64>,
+    pub total: Option<u64>,
+}
+
+impl TokenUsage {
+    /// Shared field names for OTEL and the opt-in local metrics projection.
+    pub(crate) fn normalized_fields(&self) -> [(&'static str, Option<u64>); 6] {
+        [
+            ("ahu.tokens.input", self.input),
+            ("ahu.tokens.output", self.output),
+            ("ahu.tokens.cached", self.cached),
+            ("ahu.tokens.cache_write", self.cache_write),
+            ("ahu.tokens.reasoning", self.reasoning),
+            ("ahu.tokens.total", self.total),
+        ]
+    }
+
+    fn observe(&mut self, event: &Value) {
+        fn max_slot(slot: &mut Option<u64>, value: Option<u64>) {
+            if let Some(value) = value {
+                *slot = Some(slot.unwrap_or(0).max(value));
+            }
+        }
+        for usage in [
+            event.get("usage"),
+            event.pointer("/part/usage"),
+            event.pointer("/result/usage"),
+            event.pointer("/response/usage"),
+            event.pointer("/step_update/usage"),
+            event.pointer("/result/result/usage"),
+            event.pointer("/step_update/tool_info/usage"),
+            event.get("tokens"),
+            event.pointer("/part/tokens"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        {
+            let number = |keys: &[&str]| {
+                keys.iter()
+                    .find_map(|key| usage.get(*key).and_then(Value::as_u64))
+            };
+            max_slot(&mut self.input, number(&["input_tokens", "prompt_tokens"]));
+            max_slot(
+                &mut self.output,
+                number(&["output_tokens", "completion_tokens"]),
+            );
+            max_slot(
+                &mut self.cached,
+                number(&[
+                    "cached_tokens",
+                    "cache_read_input_tokens",
+                    "cached_input_tokens",
+                ])
+                .or_else(|| {
+                    usage
+                        .get("cache")
+                        .and_then(|cache| cache.get("read"))
+                        .and_then(Value::as_u64)
+                }),
+            );
+            max_slot(
+                &mut self.cache_write,
+                number(&["cache_write_input_tokens", "cache_creation_input_tokens"]).or_else(
+                    || {
+                        usage
+                            .get("cache")
+                            .and_then(|cache| cache.get("write"))
+                            .and_then(Value::as_u64)
+                    },
+                ),
+            );
+            max_slot(
+                &mut self.reasoning,
+                number(&["reasoning_output_tokens", "thinking_tokens", "reasoning"]),
+            );
+            max_slot(&mut self.total, number(&["total_tokens"]));
+        }
+    }
+}
+
+fn skill_catalog(worktree: &Path) -> Vec<SkillCatalogEntry> {
+    let roots = [
+        ".agents/skills",
+        ".claude/skills",
+        ".gemini/antigravity-cli/skills",
+    ];
+    let mut entries = Vec::new();
+    for root in roots {
+        let path = worktree.join(root);
+        let Ok(children) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for child in children.flatten() {
+            let name = child.file_name().to_string_lossy().into_owned();
+            if name.is_empty() || name.starts_with('.') {
+                continue;
+            }
+            let file = child.path().join("SKILL.md");
+            let Ok(bytes) = std::fs::read(&file) else {
+                continue;
+            };
+            entries.push(SkillCatalogEntry {
+                name,
+                source: format!("{root}/{}/SKILL.md", child.file_name().to_string_lossy()),
+                digest: digest_bytes(&bytes),
+            });
+        }
+    }
+    entries.sort_by(|left, right| left.source.cmp(&right.source));
+    entries
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Events {
     pub session: Option<String>,
@@ -1223,6 +1352,18 @@ pub struct Events {
     pub stderr_diagnostics: Vec<String>,
     #[serde(default)]
     pub stderr_unclassified_lines: u64,
+    #[serde(default)]
+    pub usage: TokenUsage,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<SkillInvocation>,
+    #[serde(default)]
+    pub skill_unknown_events: u64,
+    #[serde(skip)]
+    skill_calls: Vec<skills::Call>,
+    #[serde(default = "crate::telemetry::SkillEvidence::unverified")]
+    pub skill_observation: crate::telemetry::SkillEvidence,
     #[serde(skip_serializing)]
     pub native_observations: Vec<Value>,
     #[serde(default)]
@@ -1296,6 +1437,16 @@ impl Events {
                 return;
             }
         };
+        self.usage.observe(&event);
+        self.observe_skill(harness, &event);
+        if self.model.is_none() {
+            self.model = event
+                .get("model")
+                .or_else(|| event.get("model_name"))
+                .or_else(|| event.pointer("/part/model"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
         let metadata = native_metadata(harness, &event);
         let helper_event = metadata["type"] == "system" || metadata["type"] == "collab";
         if helper_event && self.native_event_count >= 256 {
@@ -1312,7 +1463,11 @@ impl Events {
         if helper_event {
             self.native_event_count += 1;
         }
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let kind = event
+            .get("type")
+            .or_else(|| event.get("event"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let session = event
             .get("session_id")
             .or_else(|| event.get("thread_id"))
@@ -1320,6 +1475,7 @@ impl Events {
             // OpenCode spells it `sessionID`, on every event including its
             // error events, which is what makes its errors resumable at all.
             .or_else(|| event.get("sessionID"))
+            .or_else(|| event.pointer("/step_update/conversation_id"))
             .and_then(Value::as_str);
         if let Some(session) = session.filter(|s| valid_session(s)) {
             if let Some(previous) = &self.session {
@@ -1368,21 +1524,27 @@ impl Events {
                 }
             }
             ("claude-code" | "antigravity", "result") => {
-                let status = event
-                    .get("status")
+                let result = event.get("result").filter(|value| value.is_object());
+                let status = result
+                    .and_then(|value| value.get("status"))
+                    .or_else(|| event.get("status"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_ascii_lowercase();
-                let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
+                let subtype = result
+                    .and_then(|value| value.get("subtype"))
+                    .or_else(|| event.get("subtype"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 let recognized_success = if harness == "claude-code" {
                     subtype == "success"
                         && event.get("is_error").and_then(Value::as_bool) == Some(false)
                         && event.get("result").and_then(Value::as_str).is_some()
                 } else {
                     matches!(status.as_str(), "success" | "succeeded" | "ok")
-                        && event
-                            .get("response")
-                            .or_else(|| event.get("result"))
+                        && result
+                            .and_then(|value| value.get("response"))
+                            .or_else(|| event.get("response"))
                             .and_then(Value::as_str)
                             .is_some()
                 };
@@ -1398,13 +1560,15 @@ impl Events {
                     || subtype.starts_with("error")
                     || event.get("error").is_some_and(|v| !v.is_null());
                 self.summary = event
-                    .get("result")
-                    .or_else(|| event.get("response"))
+                    .get("response")
+                    .or_else(|| result.and_then(|value| value.get("response")))
+                    .or_else(|| event.get("result"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .into();
                 self.finish(failed);
             }
+            ("antigravity", "step_update") => (),
             // OpenCode's `run --format json` stream, observed on 1.18.30. Every
             // event is `{type, timestamp, sessionID, part}`; the work of a turn
             // is a sequence of steps, and only the reason on a step's finish
@@ -1434,6 +1598,7 @@ impl Events {
                         .push("harness reported permission denials".into());
                 }
             }
+            (_, "tool_use") | ("antigravity", "tool_result") => (),
             ("opencode", "step_finish") => {
                 match event.pointer("/part/reason").and_then(Value::as_str) {
                     Some("stop") => self.finish(false),
@@ -2029,10 +2194,15 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     {
         bail!("harness executable changed since submission; refusing execution");
     }
-    check_version(&record.identity.harness, &spec.harness_version)?;
+    crate::catalog::check_headless_version(&record.identity.harness, &spec.harness_version)?;
     validate_parent_attempt(&repo, spec)?;
     validate_frozen_configuration(&record)?;
-    let cmux_integration = validate_environment(&repo, &record.worktree, &record.identity.harness)?;
+    let cmux_integration = validate_environment(
+        &repo,
+        &record.worktree,
+        &record.identity.harness,
+        &spec.harness_version,
+    )?;
     if let Some(parent) = &spec.parent_task {
         let parent_dir = lookup(&repo, parent)?;
         if parent_dir.join("cancel.json").exists() {
@@ -2048,6 +2218,34 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         .stderr(Stdio::piped())
         .process_group(0);
     sanitize(&mut command, Some(&cmux_integration.headless));
+    let telemetry = crate::config::load(&record.worktree)?
+        .map(|loaded| loaded.config.telemetry)
+        .unwrap_or_default();
+    crate::telemetry::initialize(&telemetry)?;
+    let mut telemetry_span = crate::telemetry::span(
+        "ahu.harness.run",
+        [
+            ("ahu.agent.name", record.agent_label()),
+            ("ahu.harness", record.identity.harness.clone()),
+            ("ahu.model.requested", record.identity.model.clone()),
+            ("ahu.version", env!("CARGO_PKG_VERSION").to_string()),
+            ("ahu.task.id", record.task_id.clone()),
+        ],
+    );
+    if let Some(version) = record.identity.agent_version.as_deref() {
+        telemetry_span.set_string("ahu.agent.version", version);
+    }
+    telemetry_span.set_string("ahu.harness.version", &spec.harness_version);
+    crate::telemetry::configure_child(
+        &mut command,
+        &telemetry,
+        &record.agent_label(),
+        &record.identity.harness,
+        &record.identity.model,
+        record.identity.agent_version.as_deref(),
+        Some(&spec.harness_version),
+        Some(&record.task_id),
+    );
     command
         .env("AHU_BIN", std::env::current_exe()?)
         .env("AHU_EXECUTION_BACKEND", "headless")
@@ -2355,6 +2553,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
                 .into(),
         );
     }
+    let skill_catalog = skill_catalog(&record.worktree);
     let outcome = if let Some((reason, _)) = stop {
         reason
     } else if !status.success() || events.failed {
@@ -2362,21 +2561,70 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     } else {
         "succeeded"
     };
+    if let Some(model) = events.model.as_deref() {
+        telemetry_span.set_string("ahu.model.resolved", model);
+    }
+    telemetry_span.set_string("ahu.status", outcome);
+    for (key, value) in events.usage.normalized_fields() {
+        if let Some(value) = value {
+            telemetry_span.set_u64(key, value);
+        }
+    }
+    telemetry_span.set_u64("ahu.skills.available", skill_catalog.len() as u64);
+    telemetry_span.set_string("ahu.skills.observation", events.skill_observation.as_str());
+    if events.skill_observation == crate::telemetry::SkillEvidence::Observed {
+        telemetry_span.set_u64("ahu.skills.invoked.count", events.skills.len() as u64);
+    }
+    telemetry_span.set_u64("ahu.skills.unclassified.count", events.skill_unknown_events);
+    if events
+        .skills
+        .iter()
+        .any(|skill| skill.execution == crate::telemetry::SkillEvidence::Observed)
+    {
+        for (status, field) in [
+            ("completed", "ahu.skills.completed.count"),
+            ("failed", "ahu.skills.failed.count"),
+        ] {
+            telemetry_span.set_u64(
+                field,
+                events
+                    .skills
+                    .iter()
+                    .filter(|skill| skill.status == status)
+                    .count() as u64,
+            );
+        }
+    }
+    if !events.skills.is_empty() {
+        telemetry_span.set_string(
+            "ahu.skills.invoked",
+            events
+                .skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
     let helpers: Vec<Value> = events.native.helpers().iter().map(|h| json!({
         "task_id":h.task_id,"role":h.role,"depth":h.depth,"backgrounded":h.backgrounded,"status":h.status,
         "output_reference":{"location":h.output_file,"source":"harness event stream","verified_exists":false},"total_tokens":h.total_tokens
     })).collect();
     events.blockers.truncate(128);
-    let result = json!({"schema_version":2,"backend":"headless","task_id":record.task_id,"attempt":spec.attempt,
+    let mut result = json!({"schema_version":2,"backend":"headless","task_id":record.task_id,"attempt":spec.attempt,
         "parent_task":spec.parent_task,"parent_attempt":spec.parent_attempt,"broker_request":spec.broker_request,"root_task":spec.root_task,
         "identity":record.identity,"worktree":record.worktree,"branch":record.branch,
         "outcome":outcome,"started_at":started,"finished_at":task::now_rfc3339(),
         "process":{"exit_code":status.code(),"signal":status.signal()},"harness":events,
+        "skill_catalog":skill_catalog,
         "native_reference":{"session":events.session,"source":"harness event stream","harness":record.identity.harness,"harness_version":spec.harness_version,"data_location":null,"location_status":"unknown; harness-owned"},
         "native_helpers":helpers,"native_shell_tasks":events.native.shell_tasks(),"native_refusals":events.native.refusals(),"acceptance":"not assessed","completion_verified":false,
         "writes_outside_worktree":events.writes_outside_worktree,"write_evidence":"reported tool targets; not proof of writes",
         "descendant_cancellation":cancellation_results,"native_completeness":native_completeness,"ahu_children":ahu_children,
         "native_cleanup":"unknown for external/provider-managed processes"});
+    if let Some(metrics) = crate::telemetry::local_metrics(&telemetry, &events.usage) {
+        result["metrics"] = serde_json::to_value(metrics)?;
+    }
     *phase = "result_persistence";
     if serde_json::to_vec(&result)?.len() > 1024 * 1024 {
         bail!("coordination result exceeded its 1 MiB evaluation bound");
@@ -2723,7 +2971,12 @@ pub fn control(
             {
                 bail!("harness executable changed; previous attempt preserved, resume refused");
             }
-            validate_environment(repo, &record.worktree, &record.identity.harness)?;
+            validate_environment(
+                repo,
+                &record.worktree,
+                &record.identity.harness,
+                &spec.harness_version,
+            )?;
             let original_spec = spec.clone();
             let original_record = record.clone();
             let original_prompt = task::load_prompt(&dir)?;
@@ -2872,6 +3125,28 @@ pub fn inspection(dir: &Path) -> Result<Value> {
 /// supervisor is running.
 pub(crate) fn supervisor_owns_attempt(dir: &Path) -> Result<bool> {
     Lock::is_owned(&dir.join("owner.lock"))
+}
+
+#[cfg(test)]
+mod telemetry_usage_tests {
+    use super::Events;
+
+    #[test]
+    fn usage_normalization_keeps_common_cumulative_snapshot_fields() {
+        let mut events = Events::default();
+        events.observe(
+            "codex",
+            br#"{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":7,"cached_tokens":3,"total_tokens":19}}"#,
+        );
+        events.observe(
+            "codex",
+            br#"{"type":"turn.completed","usage":{"input_tokens":20,"output_tokens":9,"cached_tokens":5,"total_tokens":29}}"#,
+        );
+        assert_eq!(events.usage.input, Some(20));
+        assert_eq!(events.usage.output, Some(9));
+        assert_eq!(events.usage.cached, Some(5));
+        assert_eq!(events.usage.total, Some(29));
+    }
 }
 
 #[cfg(test)]

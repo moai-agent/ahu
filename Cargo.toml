@@ -1,6 +1,6 @@
 [package]
 name = "ahu"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "The moai-agent command-line interface"
 repository = "https://github.com/moai-agent/ahu"
@@ -20,6 +20,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 toml = "0.9"
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

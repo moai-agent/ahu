@@ -138,6 +138,66 @@ pub fn supports(harness_id: &str, feature: Feature) -> bool {
         .unwrap_or(false)
 }
 
+/// Static capability and isolation contract, separate from local evidence.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IsolationProfile {
+    pub harness: &'static str,
+    pub headless_verified_versions: &'static [&'static str],
+    pub version_policy: &'static str,
+    pub evidence: &'static str,
+    pub unknown_integration_opt_in: bool,
+    pub interactive_supported: bool,
+    pub limitations: &'static str,
+}
+
+pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
+    let entry = harness(id)?;
+    let evidence = match id {
+        "codex" => {
+            "Absent native sources or exact reviewed hook commands with disable guards; plugins, cloud/authentication and managed sources must be resolved."
+        }
+        "opencode" => {
+            "Absent native sources or the exact reviewed guarded Session plugin; Feed is unsafe, and authentication/account stores, substitutions and declared modules are unresolved."
+        }
+        "claude-code" => {
+            "Direct executable bypasses the cmux wrapper; separately configured hooks, enabled plugins and managed settings must be resolved."
+        }
+        "antigravity" => {
+            "Absent inspected hook configuration; custom hooks, extensions and configuration overrides are unverified."
+        }
+        _ => return None,
+    };
+    Some(IsolationProfile {
+        harness: entry.id,
+        headless_verified_versions: entry.headless_verified_versions,
+        version_policy: "exact reviewed CLI version; missing or unvalidated versions refuse headless execution",
+        evidence,
+        unknown_integration_opt_in: false,
+        interactive_supported: entry.supports(Feature::InteractiveLaunch),
+        limitations: "Bounded local inspection is not live conformance, authentication validation or a sandbox. Interactive support still requires normal launch prerequisites and approval checks.",
+    })
+}
+
+/// Shared by preflight disclosure and the execution gate. Never widens a version
+/// range based on an installed CLI or a successful interactive launch.
+pub fn check_headless_version(harness: &str, version: &str) -> Result<()> {
+    let supported = isolation_profile(harness)
+        .map(|p| p.headless_verified_versions)
+        .unwrap_or(&[]);
+    // Preserve native CLI-name prefixes and whitespace-delimited decoration;
+    // empty, malformed, and unreviewed version tokens still fail closed.
+    let token = version
+        .split_whitespace()
+        .find(|v| crate::util::is_semver(v))
+        .unwrap_or_else(|| version.split_whitespace().next().unwrap_or(""));
+    if !supported.contains(&token) {
+        bail!(
+            "unvalidated headless {harness} version {version:?}; supported CLI profiles: {supported:?}. Update the compatibility validation before launching; no fallback was selected."
+        );
+    }
+    Ok(())
+}
+
 /// A verified harness/model pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelEntry {
@@ -235,12 +295,14 @@ pub const HARNESSES: &[HarnessEntry] = &[
         executable: "opencode",
         // Both were checked on 2026-09-13; the install updated itself in place
         // between the two probe runs, which is why the entry lists a pair.
-        verified_versions: "1.18.29, 1.18.30, 1.18.31",
+        verified_versions: "1.18.29, 1.18.30, 1.18.31, 1.18.32",
         // The batch surface was inspected on 1.18.30; 1.18.29 carries the same
         // `run` options and is the other version the catalog entry names.
         // 1.18.31 was live-probed on 2026-09-15: a fresh `run --format json`
         // turn and a `--session` resume that recalled context both behaved.
-        headless_verified_versions: &["1.18.29", "1.18.30", "1.18.31"],
+        // 1.18.32 was live-probed on 2026-09-23: headless JSON events and
+        // explicit skill-tool events remained compatible.
+        headless_verified_versions: &["1.18.29", "1.18.30", "1.18.31", "1.18.32"],
         enforces_model_for_session: false,
         features: &[
             Feature::InteractiveLaunch,

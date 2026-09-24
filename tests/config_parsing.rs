@@ -6,6 +6,34 @@ use ahu::{agent, catalog, config, selection, util};
 use common::TestRepo;
 
 #[test]
+fn local_metrics_default_off_and_round_trip_independently_of_export() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    let mut loaded = config::load(repo.path()).unwrap().unwrap().config;
+    assert!(!loaded.telemetry.local_metrics);
+    assert!(!loaded.telemetry.enabled);
+    loaded.telemetry.local_metrics = true;
+    repo.write(".agents/ahu/config.toml", &config::render(&loaded));
+    assert_eq!(config::load(repo.path()).unwrap().unwrap().config, loaded);
+    let rendered = config::render(&loaded);
+    repo.write(
+        ".agents/ahu/config.toml",
+        &rendered.replace("local_metrics = true", "local_metrics = \"yes\""),
+    );
+    assert!(config::load(repo.path()).is_err());
+    for field in ["tracker_url", "record_key", "private_mapping", "tracker_id"] {
+        repo.write(
+            ".agents/ahu/config.toml",
+            &rendered.replace(
+                "local_metrics = true",
+                &format!("{field} = \"private-marker\""),
+            ),
+        );
+        assert!(config::load(repo.path()).is_err());
+    }
+}
+
+#[test]
 fn missing_config_is_the_signal_to_initialize_not_an_error() {
     let repo = TestRepo::new();
     let loaded = config::load(repo.path()).expect("load succeeds");
@@ -114,6 +142,7 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
             .collect(),
         context_hygiene: config::ContextHygiene::default(),
         knowledge: config::Knowledge::default(),
+        telemetry: config::TelemetryConfig::default(),
     };
     let path = config::write_new(repo.path(), &new_config).expect("first write");
     assert!(path.exists());
@@ -158,6 +187,7 @@ fn rendered_config_round_trips() {
             ],
             fail_on_warnings: true,
         },
+        telemetry: config::TelemetryConfig::default(),
     };
     config::write_new(repo.path(), &original).unwrap();
     let loaded = config::load(repo.path()).unwrap().unwrap();

@@ -357,7 +357,8 @@ pub fn plan(
         enforcement.gaps.push(note);
     }
 
-    let cmux_integration = crate::cmux::integration::inspect(&repo.root, &pair.harness);
+    let cmux_integration = crate::cmux::integration::inspect(&repo.root, &pair.harness)
+        .with_version(enforcement.harness_version.as_deref());
     Ok(LaunchPlan {
         mode: if agent.is_some() {
             LaunchMode::Named
@@ -1283,6 +1284,26 @@ fn terminate_group(child: &mut std::process::Child) -> Result<()> {
 
 pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     let (record, rebuilt, executable) = verify_task(task_dir, None)?;
+    let telemetry = crate::config::load(&record.worktree)?
+        .map(|loaded| loaded.config.telemetry)
+        .unwrap_or_default();
+    crate::telemetry::initialize(&telemetry)?;
+    let mut _span = crate::telemetry::span(
+        "ahu.harness.run",
+        [
+            ("ahu.agent.name", record.agent_label()),
+            ("ahu.harness", record.identity.harness.clone()),
+            ("ahu.model.requested", record.identity.model.clone()),
+            ("ahu.version", env!("CARGO_PKG_VERSION").to_string()),
+            ("ahu.task.id", record.task_id.clone()),
+        ],
+    );
+    if let Some(version) = record.identity.agent_version.as_deref() {
+        _span.set_string("ahu.agent.version", version);
+    }
+    if let Some(version) = record.enforcement.harness_version.as_deref() {
+        _span.set_string("ahu.harness.version", version);
+    }
     eprintln!(
         "ahu task {} — {} on {} / {}",
         record.task_id,
@@ -1319,13 +1340,25 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
 
     let mut child = {
         use std::os::unix::process::CommandExt;
-        std::process::Command::new(&executable)
+        let mut command = std::process::Command::new(&executable);
+        command
             .args(&rebuilt.args)
             .env("AHU_BIN", std::env::current_exe()?)
             .env("AHU_WORKER_SESSION", "cmux")
             .env("AHU_TASK_ID", &record.task_id)
             .env("AHU_TASK_DIR", task_dir)
-            .current_dir(&record.worktree)
+            .current_dir(&record.worktree);
+        crate::telemetry::configure_child(
+            &mut command,
+            &telemetry,
+            &record.agent_label(),
+            &record.identity.harness,
+            &record.identity.model,
+            record.identity.agent_version.as_deref(),
+            record.enforcement.harness_version.as_deref(),
+            Some(&record.task_id),
+        );
+        command
             // The run-task parent owns the harness's fresh process group, so
             // cancellation can terminate the whole tree without signalling
             // this parent or the pane it lives in.
@@ -1360,6 +1393,14 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     })?;
     match outcome {
         HarnessOutcome::Exited(status) => {
+            _span.set_string(
+                "ahu.status",
+                if status.success() {
+                    "succeeded"
+                } else {
+                    "failed"
+                },
+            );
             eprintln!(
                 "\nahu: the harness exited ({}). The worktree {} and its branch {} are kept.\n\
                  Exiting does not mean the task succeeded, and ahu does not delete either for you.",
@@ -1370,6 +1411,7 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             Ok(HarnessOutcome::Exited(status))
         }
         HarnessOutcome::Cancelled => {
+            _span.set_string("ahu.status", "cancelled");
             eprintln!(
                 "\nahu: cancellation of the owned harness process group completed.\n\
                  The worktree {} and its branch {} are kept; cancelling does not delete either \

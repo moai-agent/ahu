@@ -5,7 +5,7 @@
 //! initialization retains synchronous, read-only inspection.
 
 use serde_json::{Value, json};
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Write};
 
 use crate::git::Repo;
 use crate::util::{Error, Result};
@@ -13,11 +13,15 @@ use crate::util::{Error, Result};
 #[path = "mcp_tasks.rs"]
 mod task_protocol;
 
-const PROTOCOL_VERSION: &str = "2025-06-18";
+const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const TASKS_EXTENSION: &str = "io.modelcontextprotocol/tasks";
 const SERVER_NAME: &str = "ahu";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CLIENT_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
+const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
+const SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 pub const CONTEXT_HYGIENE_SKILL: &str = "context-hygiene";
 
@@ -52,9 +56,21 @@ pub fn skill_path(name: &str) -> String {
 pub fn serve(repo: &Repo) -> Result<i32> {
     let (send, receive) = std::sync::mpsc::sync_channel(32);
     std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            if send.send(line).is_err() {
-                break;
+        let mut input = std::io::stdin().lock();
+        loop {
+            match read_frame(&mut input) {
+                Ok(Some(frame)) => {
+                    if send.send(Ok(frame)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let recoverable = error.kind() == io::ErrorKind::InvalidData;
+                    if send.send(Err(error)).is_err() || !recoverable {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -62,8 +78,7 @@ pub fn serve(repo: &Repo) -> Result<i32> {
     let mut session = task_protocol::Session::new()?;
     loop {
         match receive.recv_timeout(std::time::Duration::from_millis(50)) {
-            Ok(line) => {
-                let line = line?;
+            Ok(Ok(line)) => {
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -77,11 +92,29 @@ pub fn serve(repo: &Repo) -> Result<i32> {
                         continue;
                     }
                 };
-                if let Some(response) = handle(repo, &request, &mut session) {
+                if let Some(response) = validate_envelope(&request) {
                     write_response(&mut stdout, &response)?;
+                    continue;
                 }
-                // Work starts only after the durable handle has been flushed.
-                session.start_worker(repo);
+                // Notifications never receive responses or invoke request-only operations.
+                // Currently all supported inbound notifications are advisory no-ops.
+                if request.get("id").is_some() {
+                    if let Some(response) = validate_request(&request, &mut session) {
+                        write_response(&mut stdout, &response)?;
+                        continue;
+                    }
+                    if let Some(response) = handle(repo, &request, &mut session) {
+                        write_response(&mut stdout, &response)?;
+                    }
+                    // Work starts only after the durable handle has been flushed.
+                    session.start_worker(repo);
+                }
+            }
+            Ok(Err(error)) => {
+                write_response(
+                    &mut stdout,
+                    &rpc_error(&Value::Null, -32600, error.to_string()),
+                )?;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -93,6 +126,137 @@ pub fn serve(repo: &Repo) -> Result<i32> {
     Ok(0)
 }
 
+fn read_frame(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+    let mut frame = Vec::new();
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return if frame.is_empty() {
+                Ok(None)
+            } else {
+                String::from_utf8(frame)
+                    .map(Some)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            };
+        }
+        let take = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(buffer.len(), |position| position + 1);
+        let terminated = take < buffer.len() || buffer[take - 1] == b'\n';
+        if frame.len() + take > MAX_FRAME_BYTES {
+            reader.consume(take);
+            if !terminated {
+                discard_frame(reader)?;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("MCP frame exceeds {MAX_FRAME_BYTES} bytes"),
+            ));
+        }
+        frame.extend_from_slice(&buffer[..take]);
+        reader.consume(take);
+        if terminated {
+            return String::from_utf8(frame)
+                .map(Some)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+        }
+    }
+}
+
+fn discard_frame(reader: &mut impl BufRead) -> io::Result<()> {
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok(());
+        }
+        let take = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(buffer.len(), |position| position + 1);
+        let terminated = take < buffer.len() || buffer[take - 1] == b'\n';
+        reader.consume(take);
+        if terminated {
+            return Ok(());
+        }
+    }
+}
+
+// MCP request IDs are strings or integers; null and fractional IDs are invalid.
+fn validate_envelope(request: &Value) -> Option<Value> {
+    let valid_id = |id: &Value| id.is_string() || id.is_i64() || id.is_u64();
+    if !request.is_object()
+        || request["jsonrpc"] != "2.0"
+        || !request["method"].is_string()
+        || request.get("id").is_some_and(|id| !valid_id(id))
+        || request.get("result").is_some()
+        || request.get("error").is_some()
+    {
+        return Some(rpc_error(&Value::Null, -32600, "invalid JSON-RPC request"));
+    }
+    None
+}
+
+fn validate_request(request: &Value, session: &mut task_protocol::Session) -> Option<Value> {
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request.get("method").and_then(Value::as_str)?;
+    if request
+        .get("params")
+        .is_some_and(|params| !params.is_object())
+    {
+        return Some(rpc_error(&id, -32602, "params must be an object"));
+    }
+    if method.starts_with("notifications/") {
+        return Some(rpc_error(
+            &id,
+            -32601,
+            format!("method not found: {method}"),
+        ));
+    }
+    if method == "initialize" {
+        if session.modern() {
+            return Some(rpc_error(&id, -32601, "method not found: initialize"));
+        }
+        return None;
+    }
+    if session.legacy() {
+        if method == "server/discover" {
+            return Some(rpc_error(&id, -32601, "method not found: server/discover"));
+        }
+        return None;
+    }
+    let meta = request.get("params").and_then(|params| params.get("_meta"));
+    let version = meta.and_then(|meta| meta.get(PROTOCOL_VERSION_META));
+    let capabilities = meta.and_then(|meta| meta.get(CLIENT_CAPABILITIES_META));
+    if version.and_then(Value::as_str) != Some(MODERN_PROTOCOL_VERSION)
+        || !capabilities.is_some_and(Value::is_object)
+    {
+        let mut error = rpc_error(
+            &id,
+            -32022,
+            "Unsupported protocol version or missing request metadata",
+        );
+        error["error"]["data"] = json!({
+            "supported": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
+            "requested": version.cloned().unwrap_or(Value::Null),
+        });
+        return Some(error);
+    }
+    if method == "server/discover"
+        && request["params"]
+            .as_object()
+            .is_some_and(|params| params.keys().any(|key| key != "_meta"))
+    {
+        return Some(rpc_error(
+            &id,
+            -32602,
+            "server/discover accepts only standard request metadata",
+        ));
+    }
+    session.mark_modern();
+    None
+}
+
 fn write_response(output: &mut impl Write, value: &Value) -> Result<()> {
     serde_json::to_writer(&mut *output, value)?;
     output.write_all(b"\n")?;
@@ -101,6 +265,12 @@ fn write_response(output: &mut impl Write, value: &Value) -> Result<()> {
 }
 
 fn response(id: &Value, result: Value) -> Value {
+    let mut result = result;
+    if let Some(object) = result.as_object_mut() {
+        object.entry("_meta").or_insert_with(
+            || json!({SERVER_INFO_META: {"name": SERVER_NAME, "version": SERVER_VERSION}}),
+        );
+    }
     json!({"jsonrpc":"2.0","id":id,"result":result})
 }
 
@@ -112,39 +282,62 @@ fn handle(repo: &Repo, request: &Value, session: &mut task_protocol::Session) ->
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(Value::as_str)?;
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-    if request.get("id").is_none() && method.starts_with("notifications/") {
-        return None;
-    }
     if let Some(result) = session.handle(repo, &id, method, &params) {
         return Some(result);
     }
     match method {
-        "notifications/initialized" | "notifications/cancelled" => None,
         "initialize" => Some(response(
             &id,
             json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": legacy_protocol_version(&params),
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "instructions": "ahu exposes repository-scoped agent and task inspection. Task identity, ownership and permissions remain controlled by ahu."
             }),
         )),
-        "ping" => Some(response(&id, json!({}))),
+        "ping" => {
+            let result = if session.modern() {
+                json!({"resultType":"complete"})
+            } else {
+                json!({})
+            };
+            Some(response(&id, result))
+        }
         "server/discover" => Some(response(
             &id,
             json!({
-                "protocolVersion": MODERN_PROTOCOL_VERSION,
-                "capabilities": {"extensions": {TASKS_EXTENSION: {}}},
-                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+                "resultType": "complete",
+                "supportedVersions": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
+                "capabilities": {"tools": {}, "extensions": {TASKS_EXTENSION: {}}},
+                "_meta": {SERVER_INFO_META: {"name": SERVER_NAME, "version": SERVER_VERSION}},
+                "instructions": "ahu exposes repository-scoped agent and task inspection.",
+                "ttlMs": 0,
+                "cacheScope": "private",
             }),
         )),
-        "tools/list" => Some(response(&id, json!({"tools": tools()}))),
-        "tools/call" => Some(call_response(repo, &id, &params)),
+        "tools/list" => {
+            let mut result = json!({"tools": tools()});
+            if session.modern() {
+                result["resultType"] = json!("complete");
+            }
+            Some(response(&id, result))
+        }
+        "tools/call" => Some(call_response(repo, &id, &params, session.modern())),
         _ => Some(rpc_error(
             &id,
             -32601,
             format!("method not found: {method}"),
         )),
+    }
+}
+
+fn legacy_protocol_version(params: &Value) -> &'static str {
+    match params.get("protocolVersion").and_then(Value::as_str) {
+        Some("2025-11-25") => "2025-11-25",
+        Some("2025-06-18") => "2025-06-18",
+        Some("2025-03-26") => "2025-03-26",
+        Some("2024-11-05") => "2024-11-05",
+        _ => LEGACY_PROTOCOL_VERSION,
     }
 }
 
@@ -168,7 +361,46 @@ fn tools() -> Vec<Value> {
     ]
 }
 
-fn call_response(repo: &Repo, id: &Value, params: &Value) -> Value {
+fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
+    let name = params["name"]
+        .as_str()
+        .ok_or_else(|| Error::new("tools/call requires a string params.name"))?;
+    let selector = match name {
+        "ahu_agents_list" | "ahu_tasks_list" => false,
+        "ahu_task_get" => true,
+        "ahu_task_inspect" if inspection_adapter => true,
+        _ => return Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
+    };
+    let empty = json!({});
+    let arguments = params.get("arguments").unwrap_or(&empty);
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| Error::new("arguments must be an object"))?;
+    if serde_json::to_vec(arguments)?.len() > 8192
+        || object.keys().any(|key| !selector || key != "task")
+    {
+        return Err(Error::new("invalid inspection arguments"));
+    }
+    match object.get("task") {
+        Some(value)
+            if !value
+                .as_str()
+                .is_some_and(|s| !s.is_empty() && s.len() <= 256) =>
+        {
+            return Err(Error::new("invalid task selector"));
+        }
+        None if name == "ahu_task_get" => {
+            return Err(Error::new("ahu_task_get requires arguments.task"));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn call_response(repo: &Repo, id: &Value, params: &Value, modern: bool) -> Value {
+    if let Err(error) = validate_tool_call(params, false) {
+        return rpc_error(id, -32602, error.to_string());
+    }
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return rpc_error(id, -32602, "tools/call requires a string params.name");
     };
@@ -183,11 +415,21 @@ fn call_response(repo: &Repo, id: &Value, params: &Value) -> Value {
         _ => Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
     };
     match result {
-        Ok(value) => response(
-            id,
-            json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())}],"structuredContent":value}),
-        ),
-        Err(error) => rpc_error(id, -32000, error.to_string()),
+        Ok(value) => {
+            let mut result = json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())}],"structuredContent":value});
+            if modern {
+                result["resultType"] = json!("complete");
+            }
+            response(id, result)
+        }
+        Err(error) => {
+            let mut result =
+                json!({"isError":true,"content":[{"type":"text","text":error.to_string()}]});
+            if modern {
+                result["resultType"] = json!("complete");
+            }
+            response(id, result)
+        }
     }
 }
 
@@ -282,8 +524,29 @@ pub fn setup(repo: &Repo) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::Cursor;
 
-    use super::{BUNDLED_SKILLS, skill_path, tools};
+    use super::{BUNDLED_SKILLS, MAX_FRAME_BYTES, read_frame, skill_path, tools};
+
+    #[test]
+    fn frame_reader_accepts_exact_limit_and_recovers_after_oversize() {
+        let mut exact = vec![b'x'; MAX_FRAME_BYTES - 1];
+        exact.push(b'\n');
+        let mut exact_reader = Cursor::new(exact);
+        assert_eq!(
+            read_frame(&mut exact_reader).unwrap().unwrap().len(),
+            MAX_FRAME_BYTES
+        );
+
+        let mut oversized = vec![b'x'; MAX_FRAME_BYTES + 1];
+        oversized.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\"}\n");
+        let mut reader = Cursor::new(oversized);
+        assert!(read_frame(&mut reader).is_err());
+        assert_eq!(
+            read_frame(&mut reader).unwrap().as_deref(),
+            Some("{\"jsonrpc\":\"2.0\"}\n")
+        );
+    }
 
     #[test]
     fn read_only_tools_are_explicit_and_bounded() {

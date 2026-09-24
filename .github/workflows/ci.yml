@@ -41,7 +41,9 @@ jobs:
         # Reads rust-toolchain.toml; fresh runners may fetch tools/dependencies.
         run: rustup toolchain install --no-self-update
       - name: Check canonical repository skills
-        run: python3 scripts/check-skills.py
+        run: |
+          python3 scripts/check-skills.py
+          python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - name: Check formatting
         run: cargo fmt --check
       - name: Build
@@ -61,7 +63,7 @@ jobs:
             claude) echo '2.1.270' ;;
             codex) echo 'codex-cli 0.155.1' ;;
             agy) echo '1.2.2' ;;
-            opencode) echo '1.18.31' ;;
+            opencode) echo '1.18.32' ;;
           esac
           SH
             chmod +x "$stub_dir/$harness"
@@ -169,4 +171,8 @@ jobs:
             exit 0
           fi
           cmux --version
+          if ! cmux ping >/dev/null 2>&1; then
+            echo '::notice::cmux is installed but unreachable; live probe skipped.'
+            exit 0
+          fi
           AHU_TEST_CMUX=1 cargo test --locked --test cmux_integration -- --test-threads=1

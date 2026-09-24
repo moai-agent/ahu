@@ -19,8 +19,8 @@ the destination with a fresh file. For a locally built release, remove the
 destination before copying the artifact:
 
 ```sh
-rm /Users/you/.cargo/bin/ahu
-cp target/release/ahu /Users/you/.cargo/bin/ahu
+rm -f "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
+cp target/release/ahu "${CARGO_HOME:-$HOME/.cargo}/bin/ahu"
 ```
 
 Do not copy a new build over an installed path while an ahu process may still
@@ -120,16 +120,64 @@ setup` never duplicates skills into harness-owned locations such as
 review and remove. `ahu inventory` lists skill sources, including duplicates,
 so a same-named skill outside the canonical tree stays visible.
 
-The modern path follows the [2026-07-28 Tasks extension](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks).
+The modern path targets the [2026-07-28 MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
+and its [Tasks extension](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks).
+Modern stdio requests do not use `initialize`: every request carries
+`io.modelcontextprotocol/protocolVersion: "2026-07-28"` and an object-valued
+`io.modelcontextprotocol/clientCapabilities` in `params._meta`. `server/discover`
+returns `resultType: "complete"`, supported versions, capabilities, cache hints,
+and server identity under `_meta["io.modelcontextprotocol/serverInfo"]`.
+
 Declare `io.modelcontextprotocol/tasks: {}` inside
 `params._meta["io.modelcontextprotocol/clientCapabilities"].extensions` on every
-Tasks request. `server/discover` advertises support. Inspection calls return a
-persisted `working` handle before execution. `tasks/get` returns the current
-state and its final tool result or JSON-RPC error. `tasks/update` answers
-outstanding input requests, and `tasks/cancel` durably cancels an active
-inspection. Cancellation is idempotent; completed results remain completed.
-Neither terminal protocol status nor an inspection result accepts, merges, or
-approves harness work. No MCP tool launches or changes harness permissions.
+Tasks request. Inspection calls return a persisted `working` handle before
+execution. `tasks/get` returns the current state and its final tool result or
+JSON-RPC error. A tool execution failure is a completed tool result with
+`isError: true`; `failed` and `error` are reserved for protocol/execution
+infrastructure failures. `tasks/update` answers outstanding input requests, and
+`tasks/cancel` durably cancels an active inspection. Cancellation is idempotent;
+completed results remain completed. Neither terminal protocol status nor an
+inspection result accepts, merges, or approves harness work. No MCP tool
+launches or changes harness permissions.
+
+The stdio binding is newline-delimited UTF-8 JSON-RPC: each line is one request,
+notification, or response, and stdout contains no other bytes. Diagnostics go
+to stderr. Frames are limited to 1 MiB, including the newline; an oversized
+frame receives `-32600` and is discarded through its newline so later frames can
+still be processed. A dual-era client may probe `server/discover` and fall back to the
+legacy handshake when the probe is not understood. Malformed JSON receives
+`-32700`; invalid envelopes (including batches, missing/wrong `jsonrpc`, missing
+or non-string methods, response-shaped messages, and invalid IDs) receive
+`-32600` with a null ID. Request IDs must be strings or integers, not null,
+true/false values, arrays, objects, or fractional numbers. This server sends no requests
+to clients and does not accept response envelopes. Method parameters, when
+present, must be objects (`-32602` otherwise).
+
+An envelope with no ID is a notification, regardless of its method name. Valid
+notification envelopes receive no response, even with unknown methods, invalid
+parameters, or absent modern metadata. Supported inbound notifications are
+advisory no-ops: notifications never select a protocol mode, queue inspections,
+cancel Tasks, or change subscriptions. Use requests with IDs for those operations.
+A `notifications/*` method sent with an ID receives `-32601`.
+
+Unknown methods receive `-32601`. Unknown tools, missing/non-string tool names,
+and invalid tool arguments receive `-32602` in both synchronous and Tasks paths,
+before any handle is created. Arguments must be objects matching the advertised
+schema: list tools accept no keys, `ahu_task_get` requires `task`, and only the
+experimental adapter permits its omission. Selectors must be nonempty strings
+of at most 256 UTF-8 bytes; arguments are limited to 8 KiB. Failures while
+executing a valid inspection (such as a missing repository task) return text
+content with `isError: true`, not a top-level JSON-RPC error. Modern synchronous
+results, including tool errors and every `tools/list` variant, carry
+`resultType: "complete"`; queued calls carry `resultType: "task"`, and their
+stored final tool results carry `resultType: "complete"`.
+
+Modern requests require version/capability metadata on every request (`-32022`
+when absent or unsupported). A validated modern request locks out `initialize`
+(`-32601`). A failed metadata/discovery-parameter check does not select a mode.
+Legacy initialization locks out `server/discover` (`-32601`) and Tasks methods
+(`-32021`). Subsequent modern metadata on a legacy connection is ignored: it
+cannot opt into modern result shapes, asynchronous calls, or experimental tools.
 
 The stdio host supplies `AHU_MCP_CALLER` as a stable authenticated principal for
 each caller; without it, the effective local OS user is the principal. The host
@@ -155,43 +203,48 @@ For stdio notifications, send `subscriptions/listen` with
 The server emits `notifications/subscriptions/acknowledged` followed by
 `notifications/tasks` snapshots when subscribed state changes, including changes
 from another connection. Each listen replaces this connection's subscriptions;
-reconnects require a new listen. Notifications may coalesce intermediate states;
-`tasks/get` remains authoritative. Task payloads are never broadcast to other
-callers.
+reconnects require a new listen. Every subscription notification carries the
+originating `subscriptions/listen` request ID in
+`_meta["io.modelcontextprotocol/subscriptionId"]`. Notifications may coalesce
+intermediate states; `tasks/get` remains authoritative. Task payloads are never
+broadcast to other callers.
 
 The optional experimental adapter is enabled by the host with
 `AHU_MCP_TASKS_ADAPTER=inspection-v1`. It exposes `ahu_task_inspect` to modern
 clients. A provided `task` selector behaves like `ahu_task_get`; omission requests
-selection through `input_required`. The creating client must also advertise
-`elicitation.form: {}`. Reply through `tasks/update.inputResponses` with
+selection through `input_required`. When omitting the selector, the creating
+client must also advertise `elicitation.form: {}`. Reply through
+`tasks/update.inputResponses` with
 `{"task-selection":{"action":"accept","content":{"task":"@reviewer"}}}`
 and both capabilities. `decline` or `cancel` cancels the inspection. Updates
 are limited to 8 KiB, selectors to 256 bytes, and the response can only fill that
 pending selector. Unknown or already answered input keys are ignored; identity,
 permissions, tool, and repository fields cannot be updated.
 
-`initialize` selects the isolated `2025-06-18` legacy inspection path for the
-connection. It always returns ordinary synchronous tool results and refuses
-Tasks methods even if later requests include modern capabilities. `tasks/list`
-and `tasks/result` are not implemented.
+`initialize` selects the isolated `2025-11-25` (or an older requested handshake
+revision) legacy inspection path for the connection. It always returns ordinary
+synchronous tool results and refuses Tasks methods even if later requests
+include modern capabilities. `tasks/list` and `tasks/result` are not
+implemented.
 
 ### Long-running task records
 
-Long-running or failure-prone work should have a durable issue in the project's
-private GitHub tracker before an ahu task is launched. The issue records
-acceptance criteria, evidence, failures, and disposition; ahu task state records
-execution details and is not the roadmap record. Use labels for coordination:
-one lifecycle label (`status:planned`, `status:in-progress`, `status:review`,
-`status:blocked`, or `status:done`) and one label for the registered agent
-handling the current attempt. Do not use assignees for this single-maintainer
+Long-running or failure-prone work should have a durable record in the project's
+private tracker before an ahu task is launched. An issue, task, milestone item,
+or equivalent provider object records acceptance criteria, evidence, failures,
+and disposition; ahu task state records execution details and is not the roadmap
+record. Use the provider's native labels, tags, or fields for coordination: one
+lifecycle state (planned, active, review, blocked, or done) and one marker for
+the registered agent handling the current attempt. Do not use assignees for this
+single-maintainer
 workflow.
 
 The coordinator owns comments, label changes, and closure. A task process
-exiting successfully is not sufficient to close an issue: inspect its report,
+exiting successfully is not sufficient to close a record: inspect its report,
 diff, validation, and delivery state first. Keep private tracker content out of
-this public repository and its knowledge base. Before writing, verify both the
-issue repository and linked project are private; a private project does not
-make a public linked issue private.
+this public repository and its knowledge base. Before writing, verify the
+provider's record, project, and linked-object visibility; a private project does
+not necessarily make a linked public record private.
 
 ## Scriptable launch previews
 
@@ -262,7 +315,7 @@ identity, capabilities, gaps, timeout, and coordination path without launching.
 Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
 The admitted CLI profiles are Codex 0.154.0/0.155.1, Claude Code 2.1.269/2.1.270,
-Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.30/1.18.31. Other versions fail before
+Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.30/1.18.31/1.18.32. Other versions fail before
 worktree creation, with no fallback harness or model. OpenCode's batch form is
 `opencode run --format json`; its permission mapping is the interactive one, so
 a manifest declaring `permissions = "accept-edits"` is refused here too. See
@@ -272,6 +325,27 @@ surface, not successful authentication, provider availability, or full native
 helper lifecycle validation. Codex 0.155.1 admission covers the batch launch
 and recorded-session resume surfaces checked by compatibility probes; bounded
 native helpers remain refused.
+
+`ahu cmux status` (also `--output json`) checks installed CLI versions and
+reports the same isolation profile used by launch previews. Inspection alone
+without a version observation reports component compatibility only. An admitted
+version and inspected components do not replace executable, approval, model, or
+other launch checks.
+
+| Harness | Required native isolation evidence |
+| --- | --- |
+| Codex | Absent sources or exact reviewed hooks with disable guards. Plugin state, cloud authentication/configuration, and managed sources remain unresolved. |
+| OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; authentication/account stores, declared modules, and substitutions remain unresolved. |
+| Claude Code | Direct executable avoids the cmux wrapper. Independent hooks, enabled plugins, and managed settings require separate evidence. |
+| Antigravity | Absent inspected hooks and an exact reviewed CLI version. Custom hooks, extensions, and overrides remain unverified. |
+
+Unknown or unsafe integrations have no operator bypass, including with
+`--allow-widened-approvals`. Use interactive cmux execution while resolving native
+sources with their owner; it retains the normal approval and launch checks.
+ahu does not remove credentials, rewrite native settings, or treat interactive
+availability as headless isolation. CLI version drift requires compatibility
+validation before the reviewed version list changes. Evidence is bounded local
+inspection; live delivery, provider availability, and sandbox behavior are not implied.
 
 ```sh
 ahu launch @dev-astra --headless --background --timeout 1800 \
@@ -458,7 +532,7 @@ requests must retain the policy frozen in their host grant.
 | Claude Code 2.1.270 | Admitted | Read-only profile |
 | Codex 0.154.0/0.155.1 | Admitted | Refused: incomplete helper identity/join event visibility |
 | Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
-| OpenCode 1.18.29/1.18.30/1.18.31 | Admitted | Refused: no validated native tool switch |
+| OpenCode 1.18.29/1.18.30/1.18.31/1.18.32 | Admitted | Refused: no validated native tool switch |
 
 The Claude bounded profile restricts the **entire attempt, including the owner**,
 to the model tools `Read`, `Grep`, `Glob`, and the parent's `Task` delegation tool.
@@ -562,6 +636,123 @@ OKF, but cannot prevent concurrent changes after inspection. Reports are collect
 before the 16 MiB parsing limit is checked, so this is not a subprocess output
 or memory limit. See [validator boundaries](knowledge/knowledge-validation.md)
 for source provenance.
+
+## Local OpenTelemetry
+
+For local numeric headless attempt metrics without an exporter, set
+`local_metrics = true` in `[telemetry]` and leave `enabled = false`.
+Both options default to false and operate independently. Headless attempt results
+then include a `metrics` object with `schema_version = 1`, six normalized
+`ahu.tokens.*` fields under `values`, and
+`token_aggregation = "maximum-reported-per-field"`. Each value has
+`kind = "observed"` with an unsigned integer `value`, or
+`kind = "unavailable"` without a value. Zero is an observation, not missing data.
+No estimated values are produced; missing totals are never inferred.
+Reported maxima are not additive task totals or billing measurements.
+This option controls the new projection; it does not change existing
+`harness.usage` collection or retention.
+
+The containing result's existing task ID and attempt identify the observation.
+The metrics object accepts no issue references, free text, paths, account data,
+or arbitrary attributes. Any private mapping must be maintained separately
+outside the repository; no tracker integration or mapping store is provided.
+This object is not sent to OTLP or child environments. The complete task result
+still contains existing coordination metadata and is not a safe export format.
+Interactive sessions and attempts that stop before result persistence do not
+produce this object. Resume produces a separate attempt, not a merged total;
+metrics follow existing result retention and cleanup behavior.
+
+### Private association boundary (library only)
+
+`telemetry::private::PrivateMapping` provides an in-memory schema and numeric
+summary primitive for private host adapters. It is not connected to
+launch, resume, CLI, MCP, child environments, or exporters. No mapping store or
+tracker client is installed. The existing checkout-local state store is not a
+suitable privacy boundary for this association.
+
+The bounded JSON input (at most 64 KiB) requires exactly `schema_version = 1`,
+`record_key`, `repo_identity`, and `tasks`. The opaque record key is 1–256 ASCII
+letters, digits, underscores, or hyphens; URLs and free text are unsupported.
+The repository key is the existing machine-local 16-character lowercase hex
+identity. Membership is an explicit list of 1–256 distinct canonical task UUID values;
+paths, handles, and legacy task IDs are unsupported. Unknown or duplicate fields,
+unsupported versions, and invalid values fail with a fixed error that includes
+no submitted content. The mapping has no serialization or debug representation;
+its key is accessible only through an explicit library method. Validation does
+not establish tracker visibility, ownership, or authorization.
+
+With `local_metrics` enabled, `summarize` accepts at most 4096 supplied numeric
+observations, each scoped to that repository, a listed task, and a positive
+attempt number. A retry submitted as a new task or a registered child requires
+explicit membership; a task resume uses its existing task and new attempt. Identical
+duplicates count once, conflicting duplicates fail without a partial result.
+Per-field output reports the maximum observed value and counts of observed and
+unavailable attempts. A null maximum means no observation; zero remains observed.
+Missing totals are never inferred and values are never summed: resumed sessions
+may repeat cumulative usage, and parent usage may overlap child usage. These are
+coverage statistics over supplied observations, not complete task totals or
+billing. Absent results, disabled collection, and undiscovered attempts are not
+invented as observations. The caller must validate task ownership and extract
+only opted-in numeric projections; this primitive does not read result envelopes
+or prove completeness. No provider calls are involved.
+
+The privacy requirements for any durable adapter include an explicitly
+host-owned location outside every checkout and configuration snapshot, verified
+tracker project and backing-record visibility, and owner-only,
+symlink-resistant, atomic storage with locking and conflict handling. Keep mapping
+keys out of task records, worktree names, prompts, MCP responses, shared configuration,
+OTEL attributes, and diagnostics. Bind through validated repository/task identity
+rather than caller-supplied paths; repository moves require explicit rebinding.
+Require explicit removal and retention independent of task cleanup, bounded reads,
+crash recovery, and failures that cannot affect launch or exporter outcomes.
+No migration, automatic ancestry inheritance, cancellation behavior, filesystem
+confinement guarantee, or same-user process isolation is added by this primitive.
+
+### Local trace export
+
+Trace export is disabled unless the project opts in. When enabled, ahu exports its
+own launch and harness lifecycle traces to the project-configured local OTLP
+collector and injects the same endpoint only into harness processes started by
+ahu. It never changes the invoking shell or harness sessions started directly.
+Only traces are enabled in this initial integration; inherited OTLP headers,
+signal-specific endpoints, and log/metric exporters are cleared for the child.
+Exporter construction or delivery failure does not fail the assignment.
+
+```toml
+[telemetry]
+enabled = true
+endpoint = "http://127.0.0.1:4318"
+```
+
+The exporter accepts only the local OTLP/HTTP endpoint on port
+4318. Configure an upstream OpenTelemetry Collector to receive the endpoint and
+write or route telemetry as needed. ahu adds normalized `ahu.*` attributes for
+its version, agent and manifest version, harness and installed harness version,
+requested model, provider-resolved model when the event stream reports one,
+task, outcome, elapsed milliseconds, and any token usage the
+harness event stream actually reports (`input`, `output`, `cached`,
+`cache_write`, `reasoning`, and `total`). Missing usage remains absent; ahu never
+estimates it. ahu does not add prompts, transcripts, credentials, or private
+issue content to its span attributes. Inherited `OTEL_RESOURCE_ATTRIBUTES` are retained for
+children, and the exporter SDK can read ambient OpenTelemetry configuration.
+Keep sensitive data out of that configuration; these settings are not a
+redaction boundary.
+
+Harness event streams are not identical. Codex, Claude Code, Antigravity, and
+OpenCode use different event names and terminal records, so ahu normalizes
+terminal status and the common usage keys where they are present. Provider
+native OTEL spans, if a harness emits them, remain harness-owned and may use
+different semantic conventions. Interactive sessions generally provide timing
+and process status; headless sessions additionally provide the structured event
+usage fields that ahu can normalize.
+
+Headless results also distinguish the skill catalog copied into the task
+worktree from observed skill invocations. A catalog entry records only its
+name, source path, and content digest. A skill invocation is recorded only when
+the harness emits a recognizable skill/tool event; mentioning a skill in text,
+having a skill on disk, or having an unrecognized event does not count as use.
+Invocation records are bounded and do not retain skill contents, prompts, or
+tool arguments.
 
 ## Sidebar text
 
@@ -1094,9 +1285,9 @@ the reported source with `ahu cmux status`; interactive execution remains availa
 ### Conformance evidence
 
 The local investigation baseline is cmux 0.64.22 build ddd4a01bc, Codex 0.155.1,
-Claude Code 2.1.278, OpenCode 1.18.31, and Antigravity CLI 1.2.7. Installed versions
+Claude Code 2.1.281, OpenCode 1.18.32, and Antigravity CLI 1.2.9. Installed versions
 are observations, not additions to the admitted [headless profiles](#headless-execution).
-In particular, Claude 2.1.278 and Antigravity 1.2.7 do not replace pinned profiles.
+In particular, Claude 2.1.281 and Antigravity 1.2.9 do not replace pinned profiles.
 
 | Evidence class | What it establishes | What remains unverified |
 | --- | --- | --- |
