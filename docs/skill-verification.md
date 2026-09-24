@@ -13,31 +13,60 @@ its credentials. They run on demand rather than in CI.
 
 ## Fixture
 
-Every probe uses a disposable fixture: a git repository containing a probe skill
-in each candidate location. Reproduce it with:
+Use a disposable git fixture with **one candidate location at a time**. A
+same-named skill in several roots makes a successful invocation ambiguous.
+The provider-free helper creates only synthetic skill content; it never runs
+a harness, changes trust settings, or copies the repository's skills:
 
 ```sh
-fixture="$(mktemp -d "${TMPDIR:-/tmp}/skill-probe.XXXXXX")"
-git init -q "$fixture"
-mkdir -p "$fixture/.agents/skills/probe-skill" \
-  "$fixture/.claude/skills/probe-skill" \
-  "$fixture/.gemini/antigravity-cli/skills/probe-skill"
-for dir in .agents .claude .gemini/antigravity-cli; do
-  printf '%s\n' \
-    '---' \
-    'name: probe-skill' \
-    'description: Test-only skill for harness discovery probes.' \
-    '---' \
-    '' \
-    'If invoked, respond with exactly: PROBE_SKILL_OK' \
-    > "$fixture/$dir/skills/probe-skill/SKILL.md"
-done
+probe_root="$(mktemp -d "${TMPDIR:-/tmp}/skill-probe.XXXXXX")"
+fixture="$probe_root/canonical"
+python3 scripts/probe-skills.py fixture "$fixture"
 ```
 
-`PROBE_SKILL_OK` in the harness output means the skill was discovered, loaded,
-and followed. Each section below gives the exact commands, then the evidence
-observed here with the harness version recorded. Results depend on the
-installed harness version; re-run the probes when that matters.
+The default location is `.agents/skills`. To test a harness-specific control,
+create a separate fixture with `--location .claude/skills` or
+`--location .gemini/antigravity-cli/skills`. Do not add these copies to the
+repository. Run each harness command below from the chosen fixture. Record
+its installed version and whether the session trusts that fixture; creating a
+git repository does not grant trust. Inspect discovery locations to exclude
+same-named personal or builtin skills before attributing an invocation to the
+fixture.
+
+`PROBE_SKILL_OK` is the invocation sentinel. A response containing it is an
+operator-observed invocation result, not proof of a native skill-tool event.
+Ahu's headless evaluator records skill invocation events separately; filesystem
+catalog entries alone do not establish harness discovery.
+
+After inspecting the probe in the session, return to the ahu checkout and record
+only the outcome fields:
+
+```sh
+python3 scripts/probe-skills.py record --harness codex --version 0.155.1 \
+  --discovery discovered --trust unknown --invocation sentinel-observed
+```
+
+This example illustrates the record format, not a new run. Supply the version
+and outcomes actually observed. The recorder emits JSON to stdout with harness,
+release number, candidate location, git fixture status, documented trust
+prerequisite, observed trust status, discovery, and invocation. It is an
+operator attestation, not an automated verifier. It accepts no prompt,
+transcript, session ID, or machine path. Use `not-tested` for unrun checks,
+`not-observed` for absent discovery, and `failed` for an attempted invocation
+without the sentinel. An untrusted or untested result is not evidence that a
+trusted session cannot discover skills. Keep any saved records outside the
+repository; do not save raw CLI output or execution traces here.
+
+Provider-free regression coverage runs with:
+
+```sh
+python3 -B -m unittest discover -s scripts -p 'test_*.py'
+cargo test --locked --test headless skill_probe
+```
+
+These synthetic checks verify fixture isolation, metadata recording, and event
+interpretation. They do not establish live harness conformance. The observations
+below retain the versions already recorded in this repository.
 
 ## OpenCode
 
@@ -48,7 +77,8 @@ cd "$fixture" && opencode debug skill
 ```
 
 The command prints a JSON array of discovered skills with their locations.
-Piping the output to a parser is unreliable; redirect to a file first. To probe
+Piping the output to a parser is unreliable; if needed, use a temporary file
+outside the repository and remove it after inspection. To probe
 invocation, start `opencode`, ask it to use the probe skill, and check for
 `PROBE_SKILL_OK`.
 
@@ -158,6 +188,7 @@ not claim a project skill was used when Antigravity does not expose one.
   recorded ones.
 - Probes of live harnesses in CI; the fixture protocol earlier is the manual
   replacement, and `scripts/check-skills.py` guards the tree contract
-  deterministically.
+  deterministically. The provider-free helper records operator observations;
+  CI tests its format without running a provider.
 
 [claude-skills]: https://code.claude.com/docs/en/skills

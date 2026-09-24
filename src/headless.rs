@@ -1218,6 +1218,18 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
+    /// Shared field names for OTEL and the opt-in local metrics projection.
+    pub(crate) fn normalized_fields(&self) -> [(&'static str, Option<u64>); 6] {
+        [
+            ("ahu.tokens.input", self.input),
+            ("ahu.tokens.output", self.output),
+            ("ahu.tokens.cached", self.cached),
+            ("ahu.tokens.cache_write", self.cache_write),
+            ("ahu.tokens.reasoning", self.reasoning),
+            ("ahu.tokens.total", self.total),
+        ]
+    }
+
     fn observe(&mut self, event: &Value) {
         fn max_slot(slot: &mut Option<u64>, value: Option<u64>) {
             if let Some(value) = value {
@@ -2624,23 +2636,10 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         telemetry_span.set_string("ahu.model.resolved", model);
     }
     telemetry_span.set_string("ahu.status", outcome);
-    if let Some(value) = events.usage.input {
-        telemetry_span.set_u64("ahu.tokens.input", value);
-    }
-    if let Some(value) = events.usage.output {
-        telemetry_span.set_u64("ahu.tokens.output", value);
-    }
-    if let Some(value) = events.usage.cached {
-        telemetry_span.set_u64("ahu.tokens.cached", value);
-    }
-    if let Some(value) = events.usage.cache_write {
-        telemetry_span.set_u64("ahu.tokens.cache_write", value);
-    }
-    if let Some(value) = events.usage.reasoning {
-        telemetry_span.set_u64("ahu.tokens.reasoning", value);
-    }
-    if let Some(value) = events.usage.total {
-        telemetry_span.set_u64("ahu.tokens.total", value);
+    for (key, value) in events.usage.normalized_fields() {
+        if let Some(value) = value {
+            telemetry_span.set_u64(key, value);
+        }
     }
     telemetry_span.set_u64("ahu.skills.available", skill_catalog.len() as u64);
     telemetry_span.set_u64("ahu.skills.invoked.count", events.skills.len() as u64);
@@ -2660,7 +2659,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         "output_reference":{"location":h.output_file,"source":"harness event stream","verified_exists":false},"total_tokens":h.total_tokens
     })).collect();
     events.blockers.truncate(128);
-    let result = json!({"schema_version":2,"backend":"headless","task_id":record.task_id,"attempt":spec.attempt,
+    let mut result = json!({"schema_version":2,"backend":"headless","task_id":record.task_id,"attempt":spec.attempt,
         "parent_task":spec.parent_task,"parent_attempt":spec.parent_attempt,"broker_request":spec.broker_request,"root_task":spec.root_task,
         "identity":record.identity,"worktree":record.worktree,"branch":record.branch,
         "outcome":outcome,"started_at":started,"finished_at":task::now_rfc3339(),
@@ -2671,6 +2670,9 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         "writes_outside_worktree":events.writes_outside_worktree,"write_evidence":"reported tool targets; not proof of writes",
         "descendant_cancellation":cancellation_results,"native_completeness":native_completeness,"ahu_children":ahu_children,
         "native_cleanup":"unknown for external/provider-managed processes"});
+    if let Some(metrics) = crate::telemetry::local_metrics(&telemetry, &events.usage) {
+        result["metrics"] = serde_json::to_value(metrics)?;
+    }
     *phase = "result_persistence";
     if serde_json::to_vec(&result)?.len() > 1024 * 1024 {
         bail!("coordination result exceeded its 1 MiB evaluation bound");

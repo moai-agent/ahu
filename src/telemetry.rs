@@ -73,8 +73,16 @@ pub fn initialize(config: &TelemetryConfig) -> Result<()> {
             config.endpoint.trim_end_matches('/')
         ))
         .with_timeout(Duration::from_millis(500))
-        .build()
-        .map_err(|error| Error::new(format!("cannot configure OTLP exporter: {error}")))?;
+        .build();
+    let exporter = match exporter {
+        Ok(exporter) => exporter,
+        Err(_) => {
+            // Exporter diagnostics can contain environment-derived credentials.
+            // Telemetry setup must never prevent the assignment from running.
+            eprintln!("ahu: OTLP exporter unavailable; continuing without export");
+            return Ok(());
+        }
+    };
     let resource = Resource::builder()
         .with_service_name("ahu")
         .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
@@ -172,6 +180,47 @@ fn escape(value: &str) -> String {
         .replace('=', "\\=")
 }
 
+/// Local numeric projection, never passed to an OTEL exporter or child env.
+/// Correlation uses the containing result's existing task ID and attempt.
+/// No task record, prompt, identity string, or tracker reference is accepted.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct LocalMetrics {
+    schema_version: u32,
+    token_aggregation: &'static str,
+    values: std::collections::BTreeMap<&'static str, Measurement>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+enum Measurement {
+    Observed(u64),
+    Unavailable,
+    // Estimates need an explicit method and provenance before being produced.
+    // Schema v1 emits no estimates and never derives a missing total.
+}
+
+pub(crate) fn local_metrics(
+    config: &TelemetryConfig,
+    usage: &crate::headless::TokenUsage,
+) -> Option<LocalMetrics> {
+    config.local_metrics.then(|| LocalMetrics {
+        schema_version: 1,
+        // The normalizer retains maxima across reports. These are observations,
+        // not additive task totals or provider billing measurements.
+        token_aggregation: "maximum-reported-per-field",
+        values: usage
+            .normalized_fields()
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    value.map_or(Measurement::Unavailable, Measurement::Observed),
+                )
+            })
+            .collect(),
+    })
+}
+
 pub struct SpanGuard {
     span: Option<global::BoxedSpan>,
     started: Instant,
@@ -235,12 +284,43 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn local_metrics_are_opt_in_numeric_and_do_not_infer_totals() {
+        let mut events = crate::headless::Events::default();
+        events.observe("codex", br#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":7,"cached_tokens":"private-marker","total_tokens":-1,"tracker_url":"private-marker"},"prompt":"private-marker","model":"private-marker"}"#);
+        let mut config = TelemetryConfig::default();
+        assert!(super::local_metrics(&config, &events.usage).is_none());
+        config.local_metrics = true;
+        let value = serde_json::to_value(super::local_metrics(&config, &events.usage)).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version": 1,
+                "token_aggregation": "maximum-reported-per-field",
+                "values": {
+                    "ahu.tokens.input": {"kind":"observed", "value":0},
+                    "ahu.tokens.output": {"kind":"observed", "value":7},
+                    "ahu.tokens.cached": {"kind":"unavailable"},
+                    "ahu.tokens.cache_write": {"kind":"unavailable"},
+                    "ahu.tokens.reasoning": {"kind":"unavailable"},
+                    "ahu.tokens.total": {"kind":"unavailable"}
+                }
+            })
+        );
+        let mut child = std::process::Command::new("true");
+        configure_child(
+            &mut child, &config, "agent", "codex", "model", None, None, None,
+        );
+        assert_eq!(child.get_envs().count(), 0);
+    }
+
+    #[test]
     fn local_endpoint_is_accepted_and_remote_is_rejected() {
         let config = TelemetryConfig::default();
         validate_config(&config, Path::new("config.toml")).unwrap();
         let remote = TelemetryConfig {
             enabled: true,
             endpoint: "https://collector.example.test:443".to_string(),
+            ..TelemetryConfig::default()
         };
         assert!(validate_config(&remote, Path::new("config.toml")).is_err());
     }

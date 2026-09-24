@@ -600,12 +600,36 @@ regular files or directories. Omitting the section defaults to no bundles and
 
 ## Local OpenTelemetry
 
+For local numeric headless attempt metrics without an exporter, set
+`local_metrics = true` in `[telemetry]` and leave `enabled = false`.
+Both options default to false and operate independently. Headless attempt results
+then include a `metrics` object with `schema_version = 1`, six normalized
+`ahu.tokens.*` fields under `values`, and
+`token_aggregation = "maximum-reported-per-field"`. Each value has
+`kind = "observed"` with an unsigned integer `value`, or
+`kind = "unavailable"` without a value. Zero is an observation, not missing data.
+No estimated values are produced; missing totals are never inferred.
+Reported maxima are not additive task totals or billing measurements.
+This option controls the new projection; it does not change existing
+`harness.usage` collection or retention.
+
+The containing result's existing task ID and attempt identify the observation.
+The metrics object accepts no issue references, free text, paths, account data,
+or arbitrary attributes. Any private mapping must be maintained separately
+outside the repository; no tracker integration or mapping store is provided.
+This object is not sent to OTLP or child environments. The complete task result
+still contains existing coordination metadata and is not a safe export format.
+Interactive sessions and attempts that stop before result persistence do not
+produce this object. Resume produces a separate attempt, not a merged total;
+metrics follow existing result retention and cleanup behavior.
+
 Telemetry is disabled unless the project opts in. When enabled, ahu exports its
 own launch and harness lifecycle traces to the project-configured local OTLP
 collector and injects the same endpoint only into harness processes started by
 ahu. It never changes the invoking shell or harness sessions started directly.
 Only traces are enabled in this initial integration; inherited OTLP headers,
 signal-specific endpoints, and log/metric exporters are cleared for the child.
+Exporter construction or delivery failure does not fail the assignment.
 
 ```toml
 [telemetry]

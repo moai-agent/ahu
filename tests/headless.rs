@@ -161,6 +161,7 @@ fn foreground_keeps_primary_coordination_and_identity_without_native_copies() {
     );
     let v = Fixture::value(&out);
     assert_eq!(v["outcome"], "succeeded");
+    assert!(v.get("metrics").is_none());
     assert_eq!(v["completion_verified"], false);
     assert_eq!(v["identity"]["agent"], "worker");
     let worktree = PathBuf::from(v["worktree"].as_str().unwrap());
@@ -196,6 +197,66 @@ fn foreground_keeps_primary_coordination_and_identity_without_native_copies() {
         "{}",
         String::from_utf8_lossy(&inspect.stderr)
     );
+}
+
+#[test]
+fn local_metrics_survive_attempt_persistence_without_an_exporter() {
+    let f = Fixture::new();
+    let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
+    config.telemetry.local_metrics = true;
+    f.repo
+        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    let out = f.launch("success", &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value = Fixture::value(&out);
+    assert_eq!(value["metrics"]["schema_version"], 1);
+    assert_eq!(
+        value["metrics"]["values"]["ahu.tokens.total"]["kind"],
+        "unavailable"
+    );
+    let stored: Value = serde_json::from_slice(
+        &std::fs::read(value["review"]["result_path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored["metrics"], value["metrics"]);
+    assert_eq!(stored["task_id"], value["task_id"]);
+    assert_eq!(stored["attempt"], value["attempt"]);
+}
+
+#[test]
+fn exporter_setup_failure_does_not_block_headless_execution() {
+    let f = Fixture::new();
+    let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
+    config.telemetry.enabled = true;
+    config.telemetry.local_metrics = true;
+    f.repo
+        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    let out = f
+        .command()
+        .env("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "gzip")
+        .args([
+            "launch",
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "perform synthetic task",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value = Fixture::value(&out);
+    assert_eq!(value["outcome"], "succeeded");
+    assert_eq!(value["metrics"]["schema_version"], 1);
 }
 
 #[test]
@@ -632,6 +693,56 @@ fn antigravity_stream_json_shape_is_normalized() {
     assert_eq!(events.usage.total, Some(15));
     assert_eq!(events.usage.reasoning, Some(2));
     assert_eq!(events.summary, "PROBE_SKILL_OK");
+}
+
+#[test]
+fn skill_probe_response_text_is_not_an_invocation_event() {
+    use serde_json::json;
+
+    for (harness, event) in [
+        (
+            "codex",
+            json!({"type":"item.completed","item":{"type":"agent_message","text":"PROBE_SKILL_OK"}}),
+        ),
+        (
+            "opencode",
+            json!({"type":"text","part":{"type":"text","text":"PROBE_SKILL_OK"}}),
+        ),
+        (
+            "claude-code",
+            json!({"type":"result","subtype":"success","result":"PROBE_SKILL_OK"}),
+        ),
+        (
+            "antigravity",
+            json!({"event":"result","result":{"status":"SUCCESS","response":"PROBE_SKILL_OK"}}),
+        ),
+    ] {
+        let mut events = ahu::headless::Events::default();
+        events.observe(harness, &serde_json::to_vec(&event).unwrap());
+        assert!(
+            events.skills.is_empty(),
+            "{harness} inferred skill use from text"
+        );
+        let metadata = serde_json::to_string(&events).unwrap();
+        assert!(!metadata.contains("PROBE_SKILL_OK"));
+    }
+}
+
+#[test]
+fn skill_probe_antigravity_nested_tool_event_records_only_invocation_metadata() {
+    let mut events = ahu::headless::Events::default();
+    // Synthetic protocol fixture, not evidence of live project discovery.
+    events.observe("antigravity", br#"{"event":"step_update","step_update":{"tool_name":"Skill","tool_info":{"parameters":{"skill":"probe-skill","prompt":"synthetic-private-input"}}}}"#);
+    assert_eq!(events.skills.len(), 1);
+    assert_eq!(events.skills[0].name, "probe-skill");
+    assert_eq!(events.skills[0].status, "invoked");
+    assert!(events.skills[0].source.is_none());
+    assert!(events.skills[0].digest.is_none());
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("synthetic-private-input")
+    );
 }
 
 #[test]
