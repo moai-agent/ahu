@@ -301,5 +301,5 @@ voice, such as required contractions and passive-voice warnings, along with the
 Oxford comma rules, which flag two-item conjunctions. The reasons are recorded
 beside each entry in `.vale.ini`.
 
-See the [0.3.0 preparation notes](docs/releases/0.3.0.md) for implemented behavior
+See the [0.4.0 preparation notes](docs/releases/0.4.0.md) for implemented behavior
 and validation limits. This version is prepared locally and is not yet published.
