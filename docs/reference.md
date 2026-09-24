@@ -149,7 +149,7 @@ legacy handshake when the probe is not understood. Malformed JSON receives
 `-32700`; invalid envelopes (including batches, missing/wrong `jsonrpc`, missing
 or non-string methods, response-shaped messages, and invalid IDs) receive
 `-32600` with a null ID. Request IDs must be strings or integers, not null,
-booleans, arrays, objects, or fractional numbers. This server sends no requests
+true/false values, arrays, objects, or fractional numbers. This server sends no requests
 to clients and does not accept response envelopes. Method parameters, when
 present, must be objects (`-32602` otherwise).
 
@@ -345,7 +345,7 @@ sources with their owner; it retains the normal approval and launch checks.
 ahu does not remove credentials, rewrite native settings, or treat interactive
 availability as headless isolation. CLI version drift requires compatibility
 validation before the reviewed version list changes. Evidence is bounded local
-inspection; live delivery, provider availability, and sandboxing are not implied.
+inspection; live delivery, provider availability, and sandbox behavior are not implied.
 
 ```sh
 ahu launch @dev-astra --headless --background --timeout 1800 \
@@ -635,17 +635,17 @@ The bounded JSON input (at most 64 KiB) requires exactly `schema_version = 1`,
 `record_key`, `repo_identity`, and `tasks`. The opaque record key is 1–256 ASCII
 letters, digits, underscores, or hyphens; URLs and free text are unsupported.
 The repository key is the existing machine-local 16-character lowercase hex
-identity. Membership is an explicit list of 1–256 distinct canonical task UUIDs;
+identity. Membership is an explicit list of 1–256 distinct canonical task UUID values;
 paths, handles, and legacy task IDs are unsupported. Unknown or duplicate fields,
 unsupported versions, and invalid values fail with a fixed error that includes
 no submitted content. The mapping has no serialization or debug representation;
-its key is accessible only through an explicit library accessor. Validation does
+its key is accessible only through an explicit library method. Validation does
 not establish tracker visibility, ownership, or authorization.
 
 With `local_metrics` enabled, `summarize` accepts at most 4096 supplied numeric
 observations, each scoped to that repository, a listed task, and a positive
 attempt number. A retry submitted as a new task or a registered child requires
-explicit membership; a resume uses its existing task and new attempt. Identical
+explicit membership; a task resume uses its existing task and new attempt. Identical
 duplicates count once, conflicting duplicates fail without a partial result.
 Per-field output reports the maximum observed value and counts of observed and
 unavailable attempts. A null maximum means no observation; zero remains observed.
@@ -661,7 +661,7 @@ A durable adapter remains deferred. Before wiring one in, choose an explicitly
 host-owned location outside every checkout and configuration snapshot, validate
 both tracker project and backing-record visibility, and provide owner-only,
 symlink-resistant, atomic storage with locking and conflict handling. Keep mapping
-keys out of task records, worktree names, prompts, MCP responses, shared config,
+keys out of task records, worktree names, prompts, MCP responses, shared configuration,
 OTEL attributes, and diagnostics. Bind through validated repository/task identity
 rather than caller-supplied paths; repository moves require explicit rebinding.
 Plan explicit removal and retention independent of task cleanup, bounded reads,
@@ -685,7 +685,7 @@ endpoint = "http://127.0.0.1:4318"
 
 The first implementation accepts only the local OTLP/HTTP endpoint on port
 4318. Configure an upstream OpenTelemetry Collector to receive the endpoint and
-write or route telemetry as needed. Ahu adds normalized `ahu.*` attributes for
+write or route telemetry as needed. ahu adds normalized `ahu.*` attributes for
 its version, agent and manifest version, harness and installed harness version,
 requested model, provider-resolved model when the event stream reports one,
 task, outcome, elapsed milliseconds, and any token usage the

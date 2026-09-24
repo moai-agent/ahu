@@ -35,7 +35,7 @@ fixture.
 
 `PROBE_SKILL_OK` is the invocation sentinel. A response containing it is an
 operator-observed invocation result, not proof of a native skill-tool event.
-Ahu's headless evaluator records skill invocation events separately; filesystem
+ahu's headless evaluator records skill invocation events separately; filesystem
 catalog entries alone do not establish harness discovery.
 
 After inspecting the probe in the session, return to the ahu checkout and record
@@ -51,7 +51,7 @@ and outcomes actually observed. The recorder emits JSON to stdout with harness,
 release number, candidate location, git fixture status, documented trust
 prerequisite, observed trust status, discovery, and invocation. It is an
 operator attestation, not an automated verifier. It accepts no prompt,
-transcript, session ID, or machine path. Use `not-tested` for unrun checks,
+transcript, session ID, or machine path. Use `not-tested` for checks that were not run,
 `not-observed` for absent discovery, and `failed` for an attempted invocation
 without the sentinel. An untrusted or untested result is not evidence that a
 trusted session cannot discover skills. Keep any saved records outside the
@@ -166,7 +166,7 @@ what an untrusted directory gets, not what a trusted folder would show.
 The current `--output-format stream-json` probe (Antigravity 1.2.9) emits an
 outer `event` field with nested `init`, `step_update`, and `result` objects.
 The disposable project skill was still unavailable in that session, and no
-skill invocation event was emitted. Ahu's headless evaluator recognizes this
+skill invocation event was emitted. ahu's headless evaluator recognizes this
 stream envelope and records its nested usage and lifecycle fields, but it does
 not claim a project skill was used when Antigravity does not expose one.
 
@@ -202,7 +202,7 @@ execution timestamp), `status: invoked`, `evidence: observed`, and
 remain in the containing result envelope; they are not inferred from tool
 arguments. `invoked` means a recognized invocation event was reported, not that
 execution succeeded or that the skill's instructions were followed. Legacy
-records without evidence fields deserialize as unverified.
+records without evidence fields are read as unverified.
 
 `harness.skill_observation` distinguishes:
 
