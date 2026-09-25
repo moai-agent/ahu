@@ -12,6 +12,35 @@ that checkout. Without this prefix, ahu uses the current directory. Ambient
 not select storage. See [state and compatibility](#state-and-compatibility) for
 explicit lookup of old stores.
 
+## CLI entry points
+
+Run `ahu --help` for the current public command list. `ahu doctor` checks
+repository and harness readiness, context-hygiene cadence, bundled skill bytes,
+telemetry configuration, and registered-agent configuration drift. For a
+configured local telemetry endpoint, doctor reports TCP reachability only; it
+does not verify OTLP delivery. `ahu agents` displays the registered agents, pinned
+harnesses and models, manifest paths, and detected drift in a table. `ahu tasks`
+uses a compact task table with relative worktree paths.
+
+To launch work directly, use a registered agent name followed by a quoted
+positional prompt. With no prompt, `ahu @name` opens the interactive launcher
+with that agent preselected. You can also pass a prompt file or the usual launch
+options, including headless options:
+
+```sh
+ahu @reviewer 'Review the configuration validation.' --dry-run
+ahu @reviewer --prompt-file assignment.txt --dry-run
+ahu @reviewer --headless --prompt-file assignment.txt --output json
+ahu @reviewer
+```
+
+The `ahu launch @name` form remains a backward-compatible alias. Both forms
+accept `--prompt`, `--prompt-file`, or piped stdin. Do not combine a positional
+prompt with either prompt flag. Direct prompts are passed as one literal
+argument; quote multi-word prompts in the shell. `ahu inventory`,
+`ahu hygiene`, and `ahu diff` remain available for detailed inspection even
+though the first two are omitted from the short top-level command list.
+
 ## Installing and updating ahu safely
 
 On macOS, use `cargo install` to update an installed ahu binary. Cargo replaces
@@ -251,17 +280,18 @@ not necessarily make a linked public record private.
 A launch prompt can come from an inline argument, a UTF-8 file, or piped stdin:
 
 ```sh
-ahu launch @offsec-astra --prompt 'Review the subprocess argument handling.' --dry-run --allow-widened-approvals
+ahu @offsec-astra 'Review the subprocess argument handling.' --dry-run --allow-widened-approvals
 printf '%s\n' 'Review the subprocess argument handling.' > assignment.txt
-ahu launch @offsec-astra --prompt-file assignment.txt --dry-run --allow-widened-approvals
-printf '%s\n' 'Review the subprocess argument handling.' | ahu launch @offsec-astra --dry-run --allow-widened-approvals
-ahu launch @offsec-astra --prompt 'Review the subprocess argument handling.' --dry-run --allow-widened-approvals --output json
+ahu @offsec-astra --prompt-file assignment.txt --dry-run --allow-widened-approvals
+printf '%s\n' 'Review the subprocess argument handling.' | ahu @offsec-astra --dry-run --allow-widened-approvals
+ahu @offsec-astra 'Review the subprocess argument handling.' --dry-run --allow-widened-approvals --output json
 ```
 
-`--prompt` and `--prompt-file` are mutually exclusive. An explicit source takes
-precedence over stdin, which is read only when neither flag is given and stdin
-is not a terminal. Empty or whitespace-only prompts are rejected. Accepted
-prompt text retains its original bytes, including leading and trailing newlines.
+The positional prompt, `--prompt`, and `--prompt-file` are mutually exclusive.
+An explicit source takes precedence over stdin, which is read only when neither
+flag is given and stdin is not a terminal. Empty or whitespace-only prompts are
+rejected. Accepted prompt text retains its original bytes, including leading
+and trailing newlines.
 
 `--dry-run --output json` writes one JSON object to stdout and human-readable
 preview information to stderr. Previewing requires Git, valid project settings,
@@ -348,7 +378,7 @@ validation before the reviewed version list changes. Evidence is bounded local
 inspection; live delivery, provider availability, and sandbox behavior are not implied.
 
 ```sh
-ahu launch @dev-astra --headless --background --timeout 1800 \
+ahu @dev-astra --headless --background --timeout 1800 \
   --prompt-file assignment.txt --allow-widened-approvals --output json
 ahu tasks --output json
 task_id=abc123  # replace with the returned task ID
@@ -486,7 +516,7 @@ For example, after registering a shell-capable `@coordinator` and a `@reviewer`
 with ordinary approval settings:
 
 ```sh
-ahu launch @coordinator --headless --background --allow-child @reviewer \
+ahu @coordinator --headless --background --allow-child @reviewer \
   --prompt-file assignment.txt --output json
 ```
 
@@ -541,7 +571,7 @@ run shell commands, builds or tests, create native worktrees/teams, or shell-lau
 registered ahu children. Use it for read-only review or investigation:
 
 ```sh
-ahu launch @reviewer --headless --native-helpers bounded \
+ahu @reviewer --headless --native-helpers bounded \
   --prompt 'Read the relevant source, use and await a helper, and report findings.' \
   --output json
 ```
@@ -1015,7 +1045,7 @@ Preview before launching anything:
 
 ```sh
 ahu agents
-ahu launch @glm-reviewer --prompt 'Review the configuration validation and report findings.' --dry-run
+ahu @glm-reviewer 'Review the configuration validation and report findings.' --dry-run
 ```
 
 The preview's `argv` shows the command ahu builds:
@@ -1026,7 +1056,7 @@ assignment:
 
 ```sh
 printf '%s\n' 'Review configuration validation and report findings.' > assignment.txt
-ahu launch @glm-reviewer --prompt-file assignment.txt
+ahu @glm-reviewer --prompt-file assignment.txt
 ```
 
 This manifest declares `prompt`, so no approval-widening flag is needed. A
@@ -1461,9 +1491,9 @@ inside ahu use registered ahu agents running their configured
 harnesses and models in separate worktrees. Interactive tasks use cmux workspaces;
 headless descendants inherit the execution mode and primary-owned coordination scope.
 Headless child grants and bounded native helpers follow the preceding policies.
-The supplied contract requires
-`ahu agents`, a complete UTF-8 assignment file, and `ahu launch @name
---prompt-file assignment.txt`. `AHU_BIN` points to the launching ahu executable.
+The supplied delegation contract still uses the backward-compatible
+`ahu launch @name --prompt-file assignment.txt` form so saved deliveries can
+be replayed. `AHU_BIN` points to the launching ahu executable.
 
 Specify the absolute source checkout and revision or diff scope when assigning
 a review of uncommitted work: children start at HEAD and do not copy dirty source

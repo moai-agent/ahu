@@ -23,7 +23,10 @@ Outside ahu, sub-agents and fan out use the current harness's native
 sub-agent features. Inside ahu, registered assignments use registered ahu
 agents, each using its configured harness and model in a separate worktree.
 Headless children inherit that backend; interactive children use cmux.
-Use ahu launch @name --prompt-file /path/to/task.txt.
+Use `ahu @name 'assignment text'` for a direct launch, or
+`ahu @name --prompt-file /path/to/task.txt` for a file-backed assignment.
+`ahu launch @name` remains a supported alias and accepts the older
+`--prompt` form.
 Headless native helpers follow the frozen policy described below. Every
 launch supplies its backend delegation contract as prompt text on every
 harness, inside a fence tagged with a per-launch nonce,
@@ -382,4 +385,3 @@ normal harness capabilities, not launch problems.
 >
 > They can block tool calls and put text into the model's context, and they are
 > not part of the configuration every ahu user in this project shares.
-
