@@ -218,7 +218,9 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         other => {
             let repo = commands::repo_from_cwd()?;
             commands::with_stdio(|console| match other {
-                Command::Interactive { focus } => commands::interactive(console, &repo, focus),
+                Command::Interactive { focus, agent } => {
+                    commands::interactive(console, &repo, focus, agent.as_deref())
+                }
                 Command::Init => commands::init(console, &repo),
                 Command::Agents => commands::agents(console, &repo),
                 Command::Onboard {

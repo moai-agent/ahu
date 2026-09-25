@@ -271,7 +271,7 @@ fn pasting_a_multiline_prompt_does_not_submit_it() {
     let script = "@chris\nline one\nline two\n\nline four\n.\nn\n";
     let (code, text) = with_state(&repo, || {
         scripted(script, |console| {
-            commands::interactive(console, &discovered, false)
+            commands::interactive(console, &discovered, false, None)
         })
     });
 
@@ -315,7 +315,7 @@ fn a_pasted_confirmation_no_longer_submits_through_the_interactive_flow() {
     let script = "@chris\nPlease review\n.\nyes\ny\nsubmit\n";
     let (code, text) = with_state(&repo, || {
         scripted(script, |console| {
-            commands::interactive(console, &discovered, false)
+            commands::interactive(console, &discovered, false, None)
         })
     });
 
@@ -366,7 +366,7 @@ fn the_resolved_harness_and_model_are_shown_before_the_prompt_is_entered() {
     // No selector: automatic selection.
     let (_, text) = with_state(&repo, || {
         scripted("\n.cancel\n", |console| {
-            commands::interactive(console, &discovered, false)
+            commands::interactive(console, &discovered, false, None)
         })
     });
     let resolved_at = text.find("Resolved for this task").expect("preview shown");
@@ -395,7 +395,7 @@ fn a_first_load_hygiene_review_runs_before_submission_and_deletes_nothing() {
 
     let (_, text) = with_state(&repo, || {
         scripted("@chris\ndo the thing\n.\nn\n", |console| {
-            commands::interactive(console, &discovered, false)
+            commands::interactive(console, &discovered, false, None)
         })
     });
     assert!(text.contains("Context hygiene review"), "{text}");
@@ -422,7 +422,7 @@ fn a_noninteractive_first_run_asks_for_setup_and_writes_nothing() {
             interactive: false,
         };
         with_state(&repo, || {
-            commands::interactive(&mut console, &discovered, false)
+            commands::interactive(&mut console, &discovered, false, None)
         })
     };
     let error = result.unwrap_err().to_string();

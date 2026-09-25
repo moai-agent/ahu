@@ -13,6 +13,9 @@ primary-owned coordination and optional detached supervision.
 
 Usage: ahu [--repo <path>] [COMMAND]
 
+Start work directly with a registered agent using `ahu @agent [prompt]`.
+Use `ahu @agent` to open the interactive launcher with that agent selected.
+
 Running `ahu` with no command opens the interactive launcher: pick an agent with
 `@name` (or leave it blank for the project's automatic selection), paste a task,
 and submit it. Pasting never submits by itself: the preview ends with a
@@ -30,22 +33,21 @@ Commands:
   help                  Print this help message
   explain               Architecture overview and Mermaid diagrams
   init                  Record this project's agreed harness and model order
-  launch @name [--prompt <text> | --prompt-file <path>] [--dry-run]
-                        Assign work in a separate cmux session. Reads no
-                        confirmation, so approval widening needs an explicit flag
+  @agent [prompt]       Assign work to an agent; quote multi-word prompts.
+                        Also accepts --prompt or --prompt-file.
+  launch @name [options]
+                        Backward-compatible alias. Reads no confirmation, so
+                        approval widening needs an explicit flag.
                         --title <text> and --summary <text> set plain sidebar text.
                         With --title alone, the description also uses that title.
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
-  inventory [@agent]    Inspect visible context sources and coverage gaps
-  hygiene [@agent]      Run the context hygiene review now
   knowledge lint [--output json]
                         Check the OKF bundles named in [knowledge] with okf.
                         Reads only; nothing is fetched, indexed, or rewritten
   tasks                 List tasks launched from this repository
   task <task-id> [--output json]
                         Inspect a task's recorded session state and locations
-  diff <task-id>         Review tracked changes since launch; list untracked files
   wait <task-id> [--output json]    Wait for a headless attempt to stop
   result <task-id> [--output json]  Read durable process and harness outcomes
   cleanup <task-id>                After known termination, remove recognized old captures
@@ -174,6 +176,7 @@ pub enum Command {
     },
     Interactive {
         focus: bool,
+        agent: Option<String>,
     },
     Init,
     Launch {
@@ -314,7 +317,10 @@ where
 
 fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
     let Some(first) = args.first().map(String::as_str) else {
-        return Ok(Command::Interactive { focus: true });
+        return Ok(Command::Interactive {
+            focus: true,
+            agent: None,
+        });
     };
     match first {
         "help" | "-h" | "--help" => {
@@ -485,11 +491,26 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         }),
         "knowledge" => parse_knowledge(&args[1..]),
         "launch" => parse_launch_backend(&args[1..], stdin_available),
+        direct if direct.starts_with('@') => {
+            if args.len() == 1 && !stdin_available {
+                let agent = direct.strip_prefix('@').unwrap_or_default();
+                validate_agent_name(agent)?;
+                Ok(Command::Interactive {
+                    focus: true,
+                    agent: Some(agent.to_string()),
+                })
+            } else {
+                parse_launch_backend(&args, stdin_available)
+            }
+        }
         "onboard" => parse_onboard(&args[1..]),
         "run-task" => parse_run_task(&args[1..]),
         "--no-focus" => {
             expect_no_more(&args[1..])?;
-            Ok(Command::Interactive { focus: false })
+            Ok(Command::Interactive {
+                focus: false,
+                agent: None,
+            })
         }
         other => bail!("unknown command {other:?}.\n\nRun 'ahu help' for usage."),
     }
@@ -688,20 +709,14 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
         .first()
         .ok_or_else(|| crate::util::Error::new("ahu launch needs @agent --prompt-file <path>."))?;
     let agent = name.strip_prefix('@').unwrap_or(name);
-    if agent.is_empty()
-        || !agent
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        || agent.starts_with('-')
-    {
-        bail!("invalid agent name {agent:?}.");
-    }
+    validate_agent_name(agent)?;
     let mut display = crate::launch::DisplayMetadata::default();
     let mut prompt_file = None;
     let mut prompt_inline = None;
     let mut output_json = false;
     let mut dry_run = false;
     let mut allow_widened_approvals = false;
+    let mut positional_prompt = Vec::new();
     let mut index = 1;
     while index < rest.len() {
         match rest[index].as_str() {
@@ -733,10 +748,16 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
             "--allow-widened-approvals" if !allow_widened_approvals => {
                 allow_widened_approvals = true;
             }
+            value if !value.starts_with('-') => positional_prompt.push(value.to_string()),
             other => bail!("unknown or repeated option {other:?} for ahu launch."),
         }
         index += 1;
     }
+    if !positional_prompt.is_empty() && (prompt_file.is_some() || prompt_inline.is_some()) {
+        bail!("a positional prompt cannot be combined with --prompt or --prompt-file.");
+    }
+    let prompt_inline = prompt_inline
+        .or_else(|| (!positional_prompt.is_empty()).then(|| positional_prompt.join(" ")));
     let prompt = match (prompt_file, prompt_inline) {
         (Some(_), Some(_)) => {
             bail!("--prompt and --prompt-file conflict; supply exactly one prompt source.")
@@ -757,6 +778,18 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
         dry_run,
         allow_widened_approvals,
     })
+}
+
+fn validate_agent_name(agent: &str) -> Result<()> {
+    if agent.is_empty()
+        || !agent
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        || agent.starts_with('-')
+    {
+        bail!("invalid agent name {agent:?}.");
+    }
+    Ok(())
 }
 
 /// Read the repository selector only before the command, so literal prompts,
@@ -943,5 +976,66 @@ mod color_tests {
                 assert_eq!(args, ["launch", "@fixture", option, value]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod direct_agent_tests {
+    use super::*;
+
+    #[test]
+    fn direct_agent_syntax_accepts_positional_prompt_and_launch_alias_remains() {
+        for args in [
+            vec!["@dev-glm", "fix", "the", "parser"],
+            vec!["launch", "@dev-glm", "fix", "the", "parser"],
+        ] {
+            let Command::Launch {
+                agent,
+                prompt: PromptSource::Inline(prompt),
+                ..
+            } = parse_with_stdin(args, false).unwrap()
+            else {
+                panic!("expected inline launch");
+            };
+            assert_eq!(agent, "dev-glm");
+            assert_eq!(prompt, "fix the parser");
+        }
+    }
+
+    #[test]
+    fn direct_agent_without_prompt_preselects_interactive_or_reads_piped_stdin() {
+        assert_eq!(
+            parse_with_stdin(["@dev-glm"], false).unwrap(),
+            Command::Interactive {
+                focus: true,
+                agent: Some("dev-glm".into()),
+            }
+        );
+        assert_eq!(
+            parse_with_stdin(["@dev-glm"], true).unwrap(),
+            Command::Launch {
+                agent: "dev-glm".into(),
+                prompt: PromptSource::Stdin,
+                display: crate::launch::DisplayMetadata::default(),
+                output_json: false,
+                dry_run: false,
+                allow_widened_approvals: false,
+            }
+        );
+    }
+
+    #[test]
+    fn help_hides_inventory_and_diff_and_positional_prompt_conflicts_are_rejected() {
+        assert!(
+            !HELP
+                .lines()
+                .any(|line| line.trim_start().starts_with("inventory "))
+        );
+        assert!(
+            !HELP
+                .lines()
+                .any(|line| line.trim_start().starts_with("diff "))
+        );
+        assert!(parse(["@dev-glm", "positional", "--prompt", "flag"]).is_err());
     }
 }

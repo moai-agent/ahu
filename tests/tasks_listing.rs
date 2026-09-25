@@ -220,6 +220,78 @@ fn tasks_lists_the_readable_record_and_reports_the_unreadable_one() {
     assert_eq!(dirs.len(), 2, "{dirs:?}");
 }
 
+#[test]
+fn agent_listing_uses_a_table_and_marks_configuration_drift() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let dir = tasks_dir(&repo);
+    write_current(&dir, &repo, &ahu::task::new_task_id().unwrap());
+
+    let (_, text) = scripted(&repo, |console| {
+        let discovered = ahu::git::discover(repo.path()).unwrap();
+        ahu::commands::agents(console, &discovered)
+    });
+    assert!(text.contains("AGENT"), "{text}");
+    assert!(text.contains("@chris 1.0.0 [drifted]"), "{text}");
+    assert!(text.contains(".claude/agents/chris.md"), "{text}");
+}
+
+#[test]
+fn launch_displays_a_prominent_drift_warning() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let dir = tasks_dir(&repo);
+    write_current(&dir, &repo, &ahu::task::new_task_id().unwrap());
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = common::fake_harness(scratch.path(), &scratch.path().join("argv"));
+
+    let output = common::ahu()
+        .args(["launch", "@chris", "--prompt", "review", "--dry-run"])
+        .current_dir(repo.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{text}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text.contains("!! CONFIGURATION DRIFT"), "{text}");
+    assert!(
+        text.contains("Drift since the last chris@1.0.0 launch"),
+        "{text}"
+    );
+}
+
+#[test]
+fn task_listing_is_a_compact_table_with_relative_worktree_paths() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let dir = tasks_dir(&repo);
+    let id = ahu::task::new_task_id().unwrap();
+    write_current(&dir, &repo, &id);
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    ahu::task_handles::reserve(&discovered, &id, None, "a current task").unwrap();
+
+    let (_, text) = scripted(&repo, |console| ahu::commands::tasks(console, &discovered));
+    assert!(text.contains("TASK HANDLE"), "{text}");
+    assert!(text.contains(".worktrees/"), "{text}");
+    assert!(text.contains("Run `ahu task <handle>`"), "{text}");
+    assert!(!text.contains("Session state does not indicate"), "{text}");
+    assert!(!text.contains("Worktrees and branches are kept"), "{text}");
+}
+
 /// Every record unreadable: the absence claim must not be printed.
 ///
 /// This is the assertion the whole finding reduces to.
@@ -303,7 +375,7 @@ fn an_unreadable_record_still_names_its_worktree_and_branch() {
     let (_, text) = scripted(&repo, |console| ahu::commands::tasks(console, &discovered));
 
     assert!(
-        text.contains(&ahu::util::display_path(&worktree)),
+        text.contains(&format!(".worktrees/{task_id}")),
         "the worktree must be named: {text}"
     );
     assert!(

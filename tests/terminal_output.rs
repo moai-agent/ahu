@@ -45,6 +45,48 @@ fn doctor_shows_project_harness_readiness_without_executable_paths() {
 }
 
 #[test]
+fn doctor_reports_hygiene_telemetry_and_verified_skills_in_one_place() {
+    let repo = common::TestRepo::new();
+    repo.init_config();
+    let setup = common::ahu()
+        .args(["mcp", "setup"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+
+    let scratch = tempfile::tempdir().unwrap();
+    let output = common::ahu()
+        .arg("doctor")
+        .current_dir(repo.path())
+        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
+        .env_remove("AHU_STATE_DIR")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("telemetry    off (local telemetry is opt-in)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("hygiene      auto: due (first load)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("skills       5/5 bundled skills verified; 0 missing, 0 changed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("drift        no registered agents are drifted"),
+        "{text}"
+    );
+}
+
+#[test]
 fn normal_harness_capabilities_are_not_warnings_but_failures_still_surface() {
     let repo = common::TestRepo::new();
     repo.init_config();
@@ -313,10 +355,10 @@ fn forced_styling_contains_hostile_descriptions() {
         text.contains('\x1b'),
         "explicit always must override environment"
     );
-    let start = text.find("BEGIN").unwrap();
-    let end = text[start..].find("END").unwrap() + start + 3;
-    assert_eq!(&text[start..end], display_safe(&hostile));
-    assert!(!text[start..end].contains('\x1b'));
+    // The compact agent table does not print descriptions, so hostile
+    // description bytes must not leak into its styled output at all.
+    assert!(!text.contains("BEGIN"));
+    assert!(!text.contains("END"));
     for hostile in INVISIBLE {
         assert!(!text.contains(*hostile));
     }

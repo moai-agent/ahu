@@ -1,6 +1,7 @@
 //! Command implementations.
 
 use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -189,11 +190,32 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         ))?;
         return Ok(0);
     }
+    let drifted = match agent_drift(repo, &agents) {
+        Ok(names) => names,
+        Err(error) => {
+            console.say(&style.paint(
+                Role::Warning,
+                &format!(
+                    "!! drift could not be checked: {}\n",
+                    display_safe_block(&error.to_string())
+                ),
+            ))?;
+            std::collections::BTreeSet::new()
+        }
+    };
+    console.say("AGENT                 HARNESS       MODEL                         STATUS\n")?;
     for agent in &agents {
+        let label = if drifted.contains(&agent.manifest.name) {
+            format!(
+                "@{} {} [drifted]",
+                agent.manifest.name, agent.manifest.version
+            )
+        } else {
+            format!("@{} {}", agent.manifest.name, agent.manifest.version)
+        };
         console.say(&format!(
-            "@{} {}\n  harness  {}\n  model    {}\n  source   {} [{}]\n  identity {}\n  reference {}\n",
-            style.paint(Role::Agent, &display_safe(&agent.manifest.name)),
-            style.paint(Role::Hint, &display_safe(&agent.manifest.version)),
+            "{:<22} {:<13} {:<29} {}\n",
+            style.paint(Role::Agent, &display_safe(&label)),
             style.paint(Role::Runtime, &display_safe(&agent.manifest.harness)),
             style.paint(Role::Runtime, &display_safe(&agent.manifest.model)),
             display_safe(
@@ -203,24 +225,48 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
                     .unwrap_or(&agent.source_path)
                     .to_string_lossy()
             ),
-            agent
-                .manifest
-                .source
-                .as_ref()
-                .map(|s| s.format.as_str())
-                .unwrap_or("manifest"),
-            &agent.identity_digest()[..12],
-            crate::agent_ref::ensure(repo, agent)?,
         ))?;
-        if !agent.manifest.description.is_empty() {
-            console.say(&format!(
-                "  {}\n",
-                style.paint(Role::Hint, &display_safe(&agent.manifest.description))
-            ))?;
-        }
-        console.say("\n")?;
     }
     Ok(0)
+}
+
+fn agent_drift(
+    repo: &Repo,
+    agents: &[ResolvedAgent],
+) -> Result<std::collections::BTreeSet<String>> {
+    let Some(loaded) = config::load(&repo.root)? else {
+        return Ok(std::collections::BTreeSet::new());
+    };
+    let snapshot = crate::snapshot::collect(&repo.root)?;
+    let previous = task::list(repo)?;
+    if !previous.unreadable.is_empty() {
+        return Err(Error::new(format!(
+            "{} earlier task record(s) could not be read",
+            previous.unreadable.len()
+        )));
+    }
+    let mut drifted = std::collections::BTreeSet::new();
+    for agent in agents {
+        let found_hooks = hooks::collect(&repo.root, &agent.manifest.harness)?;
+        let identity = agent.identity_digest();
+        if drift::detect(
+            &agent.label(),
+            Some(drift::AgentDigests {
+                identity: &identity,
+                source: &agent.source_digest,
+                instructions: &agent.instructions_digest,
+            }),
+            &snapshot.digest(),
+            &loaded.digest,
+            &found_hooks.digest(),
+            &previous.records,
+        )
+        .is_some()
+        {
+            drifted.insert(agent.manifest.name.clone());
+        }
+    }
+    Ok(drifted)
 }
 
 /// `ahu onboard [--register <name> [--model <id>] [--version <v>]] [--remove <name>]`
@@ -303,6 +349,8 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
     let mut problems = 0;
     let mut warnings = 0;
     let mut project_harnesses = std::collections::BTreeSet::new();
+    let mut loaded_config: Option<LoadedConfig> = None;
+    let mut registered_agents = Vec::new();
     match repo {
         Ok(repo) => {
             console.say(&format!(
@@ -327,6 +375,7 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         match config::load(&repo.root) {
             Ok(Some(loaded)) => {
                 project_harnesses.extend(loaded.config.harness_preferences.iter().cloned());
+                loaded_config = Some(loaded.clone());
                 console.say(&format!(
                     "config       {} ({})\n  catalog    {}\n  harnesses  {}\n",
                     display_path(&loaded.path),
@@ -350,6 +399,7 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         match agent::load_all(&repo.root) {
             Ok(agents) => {
                 project_harnesses.extend(agents.iter().map(|agent| agent.manifest.harness.clone()));
+                registered_agents = agents;
             }
             Err(e) => {
                 problems += 1;
@@ -433,6 +483,107 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             "harness      {} {status}\n",
             display_safe(harness)
         ))?;
+    }
+
+    if let Ok(repo) = repo {
+        if let Some(loaded) = &loaded_config {
+            let (label, collector_warning) = telemetry_collector_status(&loaded.config.telemetry);
+            if collector_warning {
+                warnings += 1;
+            }
+            console.say(&format!("telemetry    {label}\n"))?;
+
+            let review_state = match hygiene::load_state(repo) {
+                Ok(state) => state,
+                Err(error) => {
+                    warnings += 1;
+                    console.say(&format!(
+                        "hygiene      review cadence unavailable: {}\n",
+                        display_safe_block(&error.to_string())
+                    ))?;
+                    hygiene::ReviewState::default()
+                }
+            };
+            let mut cadence_due = 0;
+            let cadence_agents: Vec<_> = if registered_agents.is_empty() {
+                vec![None]
+            } else {
+                registered_agents.iter().map(Some).collect()
+            };
+            for agent in cadence_agents {
+                let key = agent
+                    .map(ResolvedAgent::label)
+                    .unwrap_or_else(|| "auto".into());
+                let state = hygiene::due(loaded, &review_state, &key);
+                let status = match state {
+                    hygiene::Trigger::FirstLoad => {
+                        cadence_due += 1;
+                        "due (first load)"
+                    }
+                    hygiene::Trigger::Overdue => {
+                        cadence_due += 1;
+                        "due (interval elapsed)"
+                    }
+                    hygiene::Trigger::NotDue => "current",
+                    hygiene::Trigger::Requested => "current",
+                };
+                console.say(&format!("hygiene      {key}: {status}\n"))?;
+            }
+            if cadence_due > 0 {
+                warnings += 1;
+                console.say(&format!(
+                    "  Run `ahu hygiene` or launch the affected agent to review its context.\n"
+                ))?;
+            }
+
+            match crate::mcp::verify_bundled_skills(&repo.root) {
+                Ok((verified, missing, changed)) => {
+                    console.say(&format!(
+                        "skills       {verified}/{} bundled skills verified; {missing} missing, {changed} changed\n",
+                        crate::mcp::BUNDLED_SKILLS.len()
+                    ))?;
+                    if missing + changed > 0 {
+                        warnings += 1;
+                        console.say(
+                            "  Review with `ahu mcp setup`; changed skills are left untouched.\n",
+                        )?;
+                    }
+                }
+                Err(error) => {
+                    warnings += 1;
+                    console.say(&format!(
+                        "skills       verification unavailable: {}\n",
+                        display_safe_block(&error.to_string())
+                    ))?;
+                }
+            }
+
+            match agent_drift(repo, &registered_agents) {
+                Ok(names) if names.is_empty() => {
+                    console.say("drift        no registered agents are drifted\n")?;
+                }
+                Ok(names) => {
+                    warnings += 1;
+                    console.say(&format!(
+                        "drift        {}\n",
+                        display_safe(
+                            &names
+                                .into_iter()
+                                .map(|name| format!("@{name}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    ))?;
+                }
+                Err(error) => {
+                    warnings += 1;
+                    console.say(&format!(
+                        "drift        could not be checked: {}\n",
+                        display_safe_block(&error.to_string())
+                    ))?;
+                }
+            }
+        }
     }
 
     let integration_root = repo
@@ -543,6 +694,62 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
     }
 }
 
+fn telemetry_collector_status(config: &crate::config::TelemetryConfig) -> (String, bool) {
+    if !config.enabled {
+        return ("off (local telemetry is opt-in)".to_string(), false);
+    }
+    let endpoint = match config.endpoint.parse::<url::Url>() {
+        Ok(endpoint) => endpoint,
+        Err(_) => return ("enabled; endpoint is invalid".to_string(), true),
+    };
+    let port = endpoint.port_or_known_default().unwrap_or(4318);
+    let address = match endpoint.host_str() {
+        Some("localhost" | "127.0.0.1") => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        Some("::1" | "[::1]") => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+        _ => return ("enabled; endpoint is not local".to_string(), true),
+    };
+    if local_collector_reachable(address) {
+        (
+            format!(
+                "enabled; TCP listener reachable at {} (OTLP not verified)",
+                address
+            ),
+            false,
+        )
+    } else {
+        (format!("enabled; no local listener at {}", address), true)
+    }
+}
+
+fn local_collector_reachable(address: SocketAddr) -> bool {
+    TcpStream::connect_timeout(&address, Duration::from_millis(150)).is_ok()
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::{local_collector_reachable, telemetry_collector_status};
+    use crate::config::TelemetryConfig;
+    use std::net::TcpListener;
+
+    #[test]
+    fn telemetry_is_off_by_default_and_describes_listener_evidence_precisely() {
+        let config = TelemetryConfig::default();
+        assert_eq!(
+            telemetry_collector_status(&config),
+            ("off (local telemetry is opt-in)".into(), false)
+        );
+    }
+
+    #[test]
+    fn local_collector_probe_only_checks_tcp_reachability() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        assert!(local_collector_reachable(listener.local_addr().unwrap()));
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        assert!(!local_collector_reachable(address));
+    }
+}
+
 /// The one sentence `ahu tasks` may print only when it really found nothing.
 ///
 /// Unreadable records still count as task directories; they must not produce
@@ -620,58 +827,69 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         return Ok(0);
     }
     let workspaces = liveness_workspaces(&listing.records);
+    console.say(
+        "TASK HANDLE             TITLE                        STATE     AGENT                  MODE     LIVE    RUNTIME                         WORKTREE\n",
+    )?;
     for (dir, record) in &listing.records {
         let review = if crate::headless::review::is_headless(dir) {
             Some(crate::headless::inspection(dir)?)
         } else {
             None
         };
+        let mode = if review.is_some() { "headless" } else { "cmux" };
         // Every field here comes out of task.json, which was built from the
         // prompt and from repository configuration. `tasks` is as much a
         // disclosure surface as the launch preview, so it escapes the same way.
+        let live = task::observed_liveness(session_owner(dir, record, workspaces.as_ref()));
+        let runtime = format!("{} / {}", record.identity.harness, record.identity.model);
+        let worktree = repo_relative_path(repo, &record.worktree);
         console.say(&format!(
-            "{} [session {}] {}\n  backend   {}\n  agent     {}\n  harness   {} / {}\n  branch    {}\n  worktree  {}\n  record    {}\n  liveness  {}\n",
-            display_safe(&crate::task_handles::label(repo, &record.task_id)),
-            record.state.as_str(),
-            display_safe(&record.title),
-            if review.is_some() { "headless" } else { "cmux" },
-            style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
-            style::stdout().paint(Role::Runtime, &display_safe(&record.identity.harness)),
-            style::stdout().paint(Role::Runtime, &display_safe(&record.identity.model)),
-            display_safe(&record.branch),
-            display_path(&record.worktree),
-            display_path(dir),
-            review.as_ref().and_then(|v| v["liveness"].as_str()).unwrap_or_else(|| task::observed_liveness(session_owner(dir, record, workspaces.as_ref())).as_str()),
+            "{} {} {} {} {} {} {} {}\n",
+            table_cell(
+                &display_safe(&crate::task_handles::label(repo, &record.task_id)),
+                22
+            ),
+            table_cell(&display_safe(&record.title), 28),
+            table_cell(record.state.as_str(), 9),
+            table_cell(&display_safe(&record.agent_label()), 22),
+            table_cell(mode, 8),
+            table_cell(live.as_str(), 7),
+            table_cell(&display_safe(&runtime), 30),
+            display_safe(&worktree),
         ))?;
         if let Some(review) = &review {
             console.say(&crate::headless::review::render(review, true))?;
         }
-        if let Some(workspace) = &record.cmux_workspace_id {
-            console.say(&format!("  cmux      {}\n", display_safe(workspace)))?;
-        }
         if let Some(question) = question_excerpt(dir) {
             console.say(&format!("  question  {question}\n"))?;
         }
-        console.say("\n")?;
     }
     console.say(&style::stdout().paint(
         Role::Warning,
         &render_unreadable_tasks(repo, &listing.unreadable),
     ))?;
-    if !listing.records.is_empty() {
-        // This footer explains the `exited` state in the listing above. With no
-        // readable records there is no such listing for it to explain.
-        console.say(
-            "\nSession state does not indicate whether the agent is working or awaiting input.\n\
-             `exited` means the harness process ended. It is not a claim that the task \
-             succeeded.\n\
-             Liveness is observed at listing time, not recorded: `live` means the session's \
-             signal is held, `stale` means it is not, `unknown` means ahu could not read it. \
-             It is not a claim of progress or success.\n",
-        )?;
-    }
-    console.say("Worktrees and branches are kept until you remove them yourself.\n")?;
+    console.say("Run `ahu task <handle>` for task details.\n")?;
     Ok(0)
+}
+
+fn table_cell(value: &str, width: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    let cell = if chars.len() <= width {
+        value.to_string()
+    } else {
+        chars
+            .into_iter()
+            .take(width.saturating_sub(1))
+            .collect::<String>()
+            + "…"
+    };
+    format!("{cell:<width$}")
+}
+
+fn repo_relative_path(repo: &Repo, path: &Path) -> String {
+    path.strip_prefix(&repo.root)
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| display_path(path))
 }
 
 /// Report the task directories ahu could not read.
@@ -725,12 +943,15 @@ pub fn render_unreadable_tasks(repo: &Repo, unreadable: &[task::UnreadableTask])
             // is recoverable without touching the record.
             match crate::state::worktree_dir(&repo.root, &found.task_id) {
                 Ok(worktree) if worktree.is_dir() => {
-                    out.push_str(&format!("       worktree  {}\n", display_path(&worktree)));
+                    out.push_str(&format!(
+                        "       worktree  {}\n",
+                        repo_relative_path(repo, &worktree)
+                    ));
                 }
                 Ok(worktree) => {
                     out.push_str(&format!(
                         "       worktree  {} (no longer on disk)\n",
-                        display_path(&worktree)
+                        repo_relative_path(repo, &worktree)
                     ));
                 }
                 Err(_) => {
@@ -1837,7 +2058,12 @@ pub(crate) fn resolve_identity(
 }
 
 /// The default `ahu` flow: setup if needed, then select, compose, preview, submit.
-pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> Result<i32> {
+pub fn interactive(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    focus_new: bool,
+    preselected_agent: Option<&str>,
+) -> Result<i32> {
     let Some(loaded) = config_or_setup(repo, console)? else {
         return Ok(1);
     };
@@ -1851,7 +2077,13 @@ pub fn interactive(console: &mut Console<'_>, repo: &Repo, focus_new: bool) -> R
     ))?;
 
     let registered = agent::load_all(&repo.root)?;
-    let selector = launcher::read_selector(console, &registered)?;
+    let selector = match preselected_agent {
+        Some(name) => {
+            console.say(&format!("Preselected agent: @{name}\n"))?;
+            Some(name.to_string())
+        }
+        None => launcher::read_selector(console, &registered)?,
+    };
     let (resolved, pair) = resolve_identity(repo, &loaded, selector.as_deref())?;
 
     // The resolved pair is shown before the prompt is entered, and again in the
@@ -2120,6 +2352,10 @@ pub(crate) fn preflight(
         &previous.records,
     ) {
         console.say("\n")?;
+        console.say(&style::stdout().paint(
+            Role::Drift,
+            "!! CONFIGURATION DRIFT: the selected agent's effective inputs changed.\n",
+        ))?;
         console.say(&style::stdout().paint(Role::Drift, &drift::render(&found)))?;
     }
 

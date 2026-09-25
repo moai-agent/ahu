@@ -61,11 +61,19 @@ pair appears before you enter the task. Finish the prompt with a line containing
 only `.`, then review the preview and type its confirmation code. Pasting never
 submits. Use `.cancel` on its own line to abandon the prompt.
 
+Start work directly with a registered agent and a quoted prompt. With no prompt,
+this opens the interactive launcher with that agent selected:
+
+```sh
+ahu @dev-astra 'Review configuration validation.'
+ahu @dev-astra
+```
+
 For a scriptable preview in this repository:
 
 ```sh
 ahu agents
-ahu launch @dev-astra --prompt 'Review configuration validation.' \
+ahu @dev-astra 'Review configuration validation.' \
   --dry-run --allow-widened-approvals
 ```
 
@@ -73,12 +81,14 @@ To submit an assignment, write it to a UTF-8 file:
 
 ```sh
 printf '%s\n' 'Review configuration validation and report findings.' > assignment.txt
-ahu launch @dev-astra --prompt-file assignment.txt \
+ahu @dev-astra --prompt-file assignment.txt \
   --title "Configuration review" --summary "Check validation and report findings" \
   --allow-widened-approvals
 ```
 
-`launch` submits without interactive confirmation and keeps focus on the caller.
+Direct `ahu @agent` submissions do not ask for interactive confirmation and keep
+focus on the caller. The older `ahu launch @agent` form remains supported,
+including `--prompt` and `--prompt-file`.
 Each task receives a short handle derived from its displayed title, such as
 `@configuration-review`. Use `--name review` to choose one. Task commands accept
 the handle: `ahu task @review`, `ahu focus @review`, or `ahu cancel @review`.
@@ -90,9 +100,9 @@ the child's requested settings; it grants no extra access to the caller.
 For unattended execution, use an initialized project and the same registered agent:
 
 ```sh
-ahu launch @dev-astra --headless --prompt-file assignment.txt \
+ahu @dev-astra --headless --prompt-file assignment.txt \
   --allow-widened-approvals --output json
-ahu launch @dev-astra --headless --background --prompt-file assignment.txt \
+ahu @dev-astra --headless --background --prompt-file assignment.txt \
   --allow-widened-approvals --output json
 ```
 
@@ -125,30 +135,16 @@ known native session reference, and artifact paths. A process exit does not
 prove completion. Review the changes and findings. Tasks keep their branches,
 worktrees, and records after the harness exits.
 
-## This repository's agents
+## Registered agents
 
-| Agent | Harness / model | Role |
-| --- | --- | --- |
-| `@arch-astra` | Codex / `gpt-6-astra` | Plans implementation with code-grounded designs, dependencies, and verifiable work increments. |
-| `@offsec-astra` | Codex / `gpt-6-astra` | Identifies and validates security issues with concrete evidence. |
-| `@defsec-astra` | Codex / `gpt-6-astra` | Reviews and implements defensive programming and focused refactoring. |
-| `@dev-astra` | Codex / `gpt-6-astra` | Validates and remediates reported issues with regression coverage. |
-| `@docs-astra` | Codex / `gpt-6-astra` | Maintains all tracked Markdown, specifications, knowledge formats, and current project context. |
-| `@roadmap-product-manager` | Codex / `gpt-6-astra` | Turns product ideas and feedback into verifiable roadmap increments. |
-| `@roadmap-architect` | Codex / `gpt-6-astra` | Turns roadmap outcomes into code-grounded technical increments. |
-| `@arch-opus` | Claude Code / `claude-opus-5` | Plans implementation with code-grounded designs, dependencies, and verifiable work increments. |
-| `@defsec-opus` | Claude Code / `claude-opus-5` | Reviews and implements defensive programming and focused refactoring. |
-| `@dev-opus` | Claude Code / `claude-opus-5` | General-purpose ahu development and code review; product documentation belongs to docs-opus. |
-| `@docs-opus` | Claude Code / `claude-opus-5` | Maintains all tracked Markdown, specifications, knowledge formats, and current project context. |
-| `@arch-glm` | OpenCode / `ollama/glm-5.3:cloud` | Plans implementation with code-grounded designs, dependencies, and verifiable work increments. |
-| `@defsec-glm` | OpenCode / `ollama/glm-5.3:cloud` | Reviews and implements defensive programming and focused refactoring. |
-| `@dev-glm` | OpenCode / `ollama/glm-5.3:cloud` | Validates and remediates reported issues with regression coverage. |
-| `@docs-glm` | OpenCode / `ollama/glm-5.3:cloud` | Maintains all tracked Markdown, specifications, knowledge formats, and current project context. |
-
-[Manifests](.agents/ahu/agents/) are OKF Markdown documents that pair each
-agent's identity with its instructions. Named launches use their manifest's
-pair independently of automatic project selection. This repository's automatic
-choice is Codex / `gpt-6-astra`; it does not select a named agent.
+Run `ahu agents` to see this checkout's registered agents, their pinned harness
+and model, source manifest, and any detected configuration drift. The list is
+loaded from the repository each time, so this README does not duplicate a
+potentially stale agent catalog. [Manifests](.agents/ahu/agents/) are OKF
+Markdown documents that pair each agent's identity with its instructions.
+Named launches use their manifest's pair independently of automatic project
+selection. This repository's automatic choice is Codex / `gpt-6-astra`; it does
+not select a named agent.
 
 Automatic selection walks the configured harness order, takes the first harness
 with an available adapter and a nonempty project model ranking, and selects that
@@ -192,12 +188,15 @@ require explicit user permission.
 
 | Command | Purpose |
 | --- | --- |
+| `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
+| `ahu launch @agent [options]` | Backward-compatible launch alias with `--prompt` and `--prompt-file` support |
+| `ahu doctor` | Check repository, configuration, harness, cmux, hygiene cadence, telemetry, skills, and drift |
+| `ahu agents` | List registered agents and detected drift |
+| `ahu tasks` | List tasks in a compact table |
 | `ahu cmux status` | Inspect native integration evidence and headless isolation |
 | `ahu cmux install --harness codex --dry-run` | Preview an explicit native installation |
 | `ahu help` | Options, prompt sources, and exit codes |
 | `ahu onboard` | Read-only preview of native definitions available for registration |
-| `ahu inventory [@agent]` | Inspect context sources, settings, and coverage gaps |
-| `ahu hygiene [@agent]` | Propose context cleanup without changing files |
 | `ahu knowledge lint` | Validate and lint configured OKF bundles with installed `okf` |
 | `ahu explain` | Built-in architecture overview |
 | `ahu explain --open` | Open the overview in cmux's Markdown viewer |
@@ -207,6 +206,9 @@ require explicit user permission.
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
 | `ahu mcp serve` | Serve repository-scoped agent and task inspection over stdio MCP |
 | `ahu mcp setup` | Materialize ahu's bundled skills into the project for review and commit |
+
+Advanced inspection commands such as `ahu inventory`, `ahu hygiene`, and
+`ahu diff` remain available; run `ahu <command> --help` for their options.
 
 `ahu codex` passes `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
 and `ahu agy` pass `--dangerously-skip-permissions`, the Antigravity CLI's

@@ -5,7 +5,7 @@
 //! initialization retains synchronous, read-only inspection.
 
 use serde_json::{Value, json};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 
 use crate::git::Repo;
 use crate::util::{Error, Result};
@@ -50,6 +50,39 @@ pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
 
 pub fn skill_path(name: &str) -> String {
     format!(".agents/skills/{name}/SKILL.md")
+}
+
+/// Compare materialized bundled skills with the exact bytes shipped in this
+/// binary. Missing and locally changed files are reported separately; this is
+/// read-only and refuses symlink traversal.
+pub fn verify_bundled_skills(repo_root: &std::path::Path) -> Result<(usize, usize, usize)> {
+    const MAX_SKILL_BYTES: u64 = 1024 * 1024;
+    let mut verified = 0;
+    let mut missing = 0;
+    let mut changed = 0;
+    for &(name, expected) in BUNDLED_SKILLS {
+        let relative = skill_path(name);
+        let Some(path) = crate::util::resolve_existing_within(repo_root, &relative)? else {
+            missing += 1;
+            continue;
+        };
+        let metadata = std::fs::metadata(&path)
+            .map_err(|error| Error::new(format!("cannot inspect {relative}: {error}")))?;
+        if !metadata.is_file() || metadata.len() > MAX_SKILL_BYTES {
+            changed += 1;
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        std::fs::File::open(&path)
+            .and_then(|file| file.take(MAX_SKILL_BYTES + 1).read_to_end(&mut bytes))
+            .map_err(|error| Error::new(format!("cannot read {relative}: {error}")))?;
+        if bytes.as_slice() == expected.as_bytes() {
+            verified += 1;
+        } else {
+            changed += 1;
+        }
+    }
+    Ok((verified, missing, changed))
 }
 
 /// Serve newline-delimited JSON-RPC messages on stdin/stdout.
@@ -526,7 +559,9 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Cursor;
 
-    use super::{BUNDLED_SKILLS, MAX_FRAME_BYTES, read_frame, skill_path, tools};
+    use super::{
+        BUNDLED_SKILLS, MAX_FRAME_BYTES, read_frame, skill_path, tools, verify_bundled_skills,
+    };
 
     #[test]
     fn frame_reader_accepts_exact_limit_and_recovers_after_oversize() {
@@ -620,5 +655,49 @@ mod tests {
             assert!(!keys["description"].is_empty(), "empty description: {name}");
             assert!(body > 0, "empty skill body: {name}");
         }
+    }
+
+    #[test]
+    fn skill_verification_distinguishes_missing_verified_and_changed_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        assert_eq!(
+            verify_bundled_skills(root).unwrap(),
+            (0, BUNDLED_SKILLS.len(), 0)
+        );
+
+        let (name, content) = BUNDLED_SKILLS[0];
+        let path = root.join(skill_path(name));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        assert_eq!(
+            verify_bundled_skills(root).unwrap(),
+            (1, BUNDLED_SKILLS.len() - 1, 0)
+        );
+
+        std::fs::write(path, "locally changed\n").unwrap();
+        assert_eq!(
+            verify_bundled_skills(root).unwrap(),
+            (0, BUNDLED_SKILLS.len() - 1, 1)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_verification_refuses_symlinked_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let (name, content) = BUNDLED_SKILLS[0];
+        let path = root.join(skill_path(name));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, content).unwrap();
+        std::os::unix::fs::symlink(outside, &path).unwrap();
+        assert!(
+            verify_bundled_skills(root)
+                .unwrap_err()
+                .to_string()
+                .contains("symlink")
+        );
     }
 }
