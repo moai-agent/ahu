@@ -485,103 +485,102 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         ))?;
     }
 
-    if let Ok(repo) = repo {
-        if let Some(loaded) = &loaded_config {
-            let (label, collector_warning) = telemetry_collector_status(&loaded.config.telemetry);
-            if collector_warning {
-                warnings += 1;
-            }
-            console.say(&format!("telemetry    {label}\n"))?;
+    if let Ok(repo) = repo
+        && let Some(loaded) = &loaded_config
+    {
+        let (label, collector_warning) = telemetry_collector_status(&loaded.config.telemetry);
+        if collector_warning {
+            warnings += 1;
+        }
+        console.say(&format!("telemetry    {label}\n"))?;
 
-            let review_state = match hygiene::load_state(repo) {
-                Ok(state) => state,
-                Err(error) => {
-                    warnings += 1;
-                    console.say(&format!(
-                        "hygiene      review cadence unavailable: {}\n",
-                        display_safe_block(&error.to_string())
-                    ))?;
-                    hygiene::ReviewState::default()
-                }
-            };
-            let mut cadence_due = 0;
-            let cadence_agents: Vec<_> = if registered_agents.is_empty() {
-                vec![None]
-            } else {
-                registered_agents.iter().map(Some).collect()
-            };
-            for agent in cadence_agents {
-                let key = agent
-                    .map(ResolvedAgent::label)
-                    .unwrap_or_else(|| "auto".into());
-                let state = hygiene::due(loaded, &review_state, &key);
-                let status = match state {
-                    hygiene::Trigger::FirstLoad => {
-                        cadence_due += 1;
-                        "due (first load)"
-                    }
-                    hygiene::Trigger::Overdue => {
-                        cadence_due += 1;
-                        "due (interval elapsed)"
-                    }
-                    hygiene::Trigger::NotDue => "current",
-                    hygiene::Trigger::Requested => "current",
-                };
-                console.say(&format!("hygiene      {key}: {status}\n"))?;
-            }
-            if cadence_due > 0 {
+        let review_state = match hygiene::load_state(repo) {
+            Ok(state) => state,
+            Err(error) => {
                 warnings += 1;
                 console.say(&format!(
-                    "  Run `ahu hygiene` or launch the affected agent to review its context.\n"
+                    "hygiene      review cadence unavailable: {}\n",
+                    display_safe_block(&error.to_string())
                 ))?;
+                hygiene::ReviewState::default()
             }
+        };
+        let mut cadence_due = 0;
+        let cadence_agents: Vec<_> = if registered_agents.is_empty() {
+            vec![None]
+        } else {
+            registered_agents.iter().map(Some).collect()
+        };
+        for agent in cadence_agents {
+            let key = agent
+                .map(ResolvedAgent::label)
+                .unwrap_or_else(|| "auto".into());
+            let state = hygiene::due(loaded, &review_state, &key);
+            let status = match state {
+                hygiene::Trigger::FirstLoad => {
+                    cadence_due += 1;
+                    "due (first load)"
+                }
+                hygiene::Trigger::Overdue => {
+                    cadence_due += 1;
+                    "due (interval elapsed)"
+                }
+                hygiene::Trigger::NotDue => "current",
+                hygiene::Trigger::Requested => "current",
+            };
+            console.say(&format!("hygiene      {key}: {status}\n"))?;
+        }
+        if cadence_due > 0 {
+            warnings += 1;
+            console
+                .say("  Run `ahu hygiene` or launch the affected agent to review its context.\n")?;
+        }
 
-            match crate::mcp::verify_bundled_skills(&repo.root) {
-                Ok((verified, missing, changed)) => {
-                    console.say(&format!(
+        match crate::mcp::verify_bundled_skills(&repo.root) {
+            Ok((verified, missing, changed)) => {
+                console.say(&format!(
                         "skills       {verified}/{} bundled skills verified; {missing} missing, {changed} changed\n",
                         crate::mcp::BUNDLED_SKILLS.len()
                     ))?;
-                    if missing + changed > 0 {
-                        warnings += 1;
-                        console.say(
-                            "  Review with `ahu mcp setup`; changed skills are left untouched.\n",
-                        )?;
-                    }
-                }
-                Err(error) => {
+                if missing + changed > 0 {
                     warnings += 1;
-                    console.say(&format!(
-                        "skills       verification unavailable: {}\n",
-                        display_safe_block(&error.to_string())
-                    ))?;
+                    console.say(
+                        "  Review with `ahu mcp setup`; changed skills are left untouched.\n",
+                    )?;
                 }
             }
+            Err(error) => {
+                warnings += 1;
+                console.say(&format!(
+                    "skills       verification unavailable: {}\n",
+                    display_safe_block(&error.to_string())
+                ))?;
+            }
+        }
 
-            match agent_drift(repo, &registered_agents) {
-                Ok(names) if names.is_empty() => {
-                    console.say("drift        no registered agents are drifted\n")?;
-                }
-                Ok(names) => {
-                    warnings += 1;
-                    console.say(&format!(
-                        "drift        {}\n",
-                        display_safe(
-                            &names
-                                .into_iter()
-                                .map(|name| format!("@{name}"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    ))?;
-                }
-                Err(error) => {
-                    warnings += 1;
-                    console.say(&format!(
-                        "drift        could not be checked: {}\n",
-                        display_safe_block(&error.to_string())
-                    ))?;
-                }
+        match agent_drift(repo, &registered_agents) {
+            Ok(names) if names.is_empty() => {
+                console.say("drift        no registered agents are drifted\n")?;
+            }
+            Ok(names) => {
+                warnings += 1;
+                console.say(&format!(
+                    "drift        {}\n",
+                    display_safe(
+                        &names
+                            .into_iter()
+                            .map(|name| format!("@{name}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                ))?;
+            }
+            Err(error) => {
+                warnings += 1;
+                console.say(&format!(
+                    "drift        could not be checked: {}\n",
+                    display_safe_block(&error.to_string())
+                ))?;
             }
         }
     }
@@ -723,31 +722,6 @@ fn telemetry_collector_status(config: &crate::config::TelemetryConfig) -> (Strin
 
 fn local_collector_reachable(address: SocketAddr) -> bool {
     TcpStream::connect_timeout(&address, Duration::from_millis(150)).is_ok()
-}
-
-#[cfg(test)]
-mod doctor_tests {
-    use super::{local_collector_reachable, telemetry_collector_status};
-    use crate::config::TelemetryConfig;
-    use std::net::TcpListener;
-
-    #[test]
-    fn telemetry_is_off_by_default_and_describes_listener_evidence_precisely() {
-        let config = TelemetryConfig::default();
-        assert_eq!(
-            telemetry_collector_status(&config),
-            ("off (local telemetry is opt-in)".into(), false)
-        );
-    }
-
-    #[test]
-    fn local_collector_probe_only_checks_tcp_reachability() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        assert!(local_collector_reachable(listener.local_addr().unwrap()));
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        assert!(!local_collector_reachable(address));
-    }
 }
 
 /// The one sentence `ahu tasks` may print only when it really found nothing.
@@ -2743,4 +2717,29 @@ pub fn with_stdio_output<T>(
 /// when a record cannot be trusted or interpreted.
 pub fn task_dirs(repo: &Repo) -> Result<Vec<PathBuf>> {
     Ok(task::list(repo)?.dirs())
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::{local_collector_reachable, telemetry_collector_status};
+    use crate::config::TelemetryConfig;
+    use std::net::TcpListener;
+
+    #[test]
+    fn telemetry_is_off_by_default_and_describes_listener_evidence_precisely() {
+        let config = TelemetryConfig::default();
+        assert_eq!(
+            telemetry_collector_status(&config),
+            ("off (local telemetry is opt-in)".into(), false)
+        );
+    }
+
+    #[test]
+    fn local_collector_probe_only_checks_tcp_reachability() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        assert!(local_collector_reachable(listener.local_addr().unwrap()));
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        assert!(!local_collector_reachable(address));
+    }
 }

@@ -1492,8 +1492,8 @@ harnesses and models in separate worktrees. Interactive tasks use cmux workspace
 headless descendants inherit the execution mode and primary-owned coordination scope.
 Headless child grants and bounded native helpers follow the preceding policies.
 The supplied delegation contract still uses the backward-compatible
-`ahu launch @name --prompt-file assignment.txt` form so saved deliveries remain
-replayable. `AHU_BIN` points to the launching ahu executable.
+`ahu launch @name --prompt-file assignment.txt` form so saved deliveries can
+be replayed. `AHU_BIN` points to the launching ahu executable.
 
 Specify the absolute source checkout and revision or diff scope when assigning
 a review of uncommitted work: children start at HEAD and do not copy dirty source

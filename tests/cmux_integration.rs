@@ -187,7 +187,7 @@ fn a_repository_group_holds_one_child_workspace_per_task() {
 }
 
 #[test]
-fn coordinator_shortcuts_join_the_repository_group_from_primary_and_linked_checkouts() {
+fn coordinator_shortcuts_open_a_fallback_when_the_caller_is_in_another_group() {
     let _environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
         return;
@@ -225,6 +225,14 @@ fn coordinator_shortcuts_join_the_repository_group_from_primary_and_linked_check
         "ahu-test-coordinator-source",
         scratch.path(),
     );
+    let mut expected_members: std::collections::BTreeSet<_> = target
+        .client
+        .find_group(&target.group_id, None)
+        .unwrap()
+        .unwrap()
+        .member_workspace_ids
+        .into_iter()
+        .collect();
     for (index, shortcut) in ["codex", "claude", "opencode", "agy"].iter().enumerate() {
         let workspace = source
             .client
@@ -246,24 +254,31 @@ fn coordinator_shortcuts_join_the_repository_group_from_primary_and_linked_check
             )
             .output()
             .unwrap();
-        target.created.push(workspace.clone());
         assert_eq!(
             output.status.code(),
-            Some(7),
+            Some(0),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            "coordinator-started\n"
-        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("opened a new "));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("coordinator workspace"));
+        assert!(String::from_utf8_lossy(&output.stdout).is_empty());
         let group = target
             .client
             .find_group(&target.group_id, None)
             .unwrap()
             .unwrap();
-        assert!(group.member_workspace_ids.contains(&workspace));
-        assert_ne!(group.anchor_workspace_id, workspace);
+        assert!(!group.member_workspace_ids.contains(&workspace));
+        let added: Vec<_> = group
+            .member_workspace_ids
+            .iter()
+            .filter(|member| !expected_members.contains(*member))
+            .cloned()
+            .collect();
+        assert_eq!(added.len(), 1, "one fallback coordinator joins the group");
+        target.created.push(added[0].clone());
+        assert_ne!(group.anchor_workspace_id, added[0]);
+        expected_members = group.member_workspace_ids.into_iter().collect();
         let mapping: ahu::launch::GroupMapping = ahu::state::read_json(
             &ahu::state::coordination_dir(&repo)
                 .unwrap()
