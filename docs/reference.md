@@ -20,7 +20,8 @@ telemetry configuration, and registered-agent configuration drift. For a
 configured local telemetry endpoint, doctor reports TCP reachability only; it
 does not verify OTLP delivery. `ahu agents` displays the registered agents, pinned
 harnesses and models, manifest paths, and detected drift in a table. `ahu tasks`
-uses a compact task table with relative worktree paths.
+prints a task table laid out for the terminal; see [the task
+list](#the-task-list).
 
 To launch work directly, use a registered agent name followed by a quoted
 positional prompt. With no prompt, `ahu @name` opens the interactive launcher
@@ -37,9 +38,9 @@ ahu @reviewer
 The `ahu launch @name` form remains a backward-compatible alias. Both forms
 accept `--prompt`, `--prompt-file`, or piped stdin. Do not combine a positional
 prompt with either prompt flag. Direct prompts are passed as one literal
-argument; quote multi-word prompts in the shell. `ahu inventory`,
-`ahu hygiene`, and `ahu diff` remain available for detailed inspection even
-though the first two are omitted from the short top-level command list.
+argument; quote multi-word prompts in the shell. `ahu inventory` and
+`ahu hygiene` remain available for detailed inspection even though both are
+omitted from the short top-level command list.
 
 ## Installing and updating ahu safely
 
@@ -391,7 +392,6 @@ task_id=abc123  # replace with the returned task ID
 ahu task "$task_id" --output json
 ahu wait "$task_id" --output json
 ahu result "$task_id" --output json
-ahu diff "$task_id"
 ```
 
 Stream evaluation is limited to 64 MiB per stdout/stderr stream and 1 MiB per
@@ -410,13 +410,15 @@ final-answer, stderr, and helper-summary text is not copied into the envelope.
 Schema 2 also records `writes_outside_worktree`: write-tool target paths from the
 evaluated event stream that fall outside the task worktree, when the stream
 exposes them. The field is disclosure for post-run review, not a boundary;
-`ahu diff` prints it on stderr when the patch would otherwise look empty.
+`ahu task` and `ahu result` print the recorded paths, because looking only at
+the task's branch would show nothing and mean nothing.
 `acceptance` stays `not assessed` and `completion_verified` stays false: a provider
 success or an agent's report does not establish that the assignment was accepted.
 Treat native reports and same-user editable metadata as untrusted data.
 
-Human-readable `tasks` identifies headless or cmux execution and summarizes the
-headless attempt number and outcome. `task` and `result` add observed supervisor
+Human-readable `tasks` summarizes the headless attempt number and outcome on
+its own line under each row, so a headless task is identifiable even in a
+terminal too narrow for the `MODE` column. `task` and `result` add observed supervisor
 ownership, recorded blockers, known native session identity with its source, artifact
 locations, and commands for review. Recorded session state and the current
 `owner.lock` observation are separate: `live`, `stale`, or `unknown` ownership
@@ -1097,7 +1099,7 @@ no cmux; see [headless execution](#headless-execution).
 unlike a Codex launch, which ahu gives `--sandbox workspace-write`, an OpenCode
 session's file tools act on whatever absolute path the model names. Headless attempts disclose reported targets outside the task worktree
 when the evaluated event stream exposes them: the result envelope records
-`writes_outside_worktree`, and an empty `ahu diff` points to it on stderr. The
+`writes_outside_worktree`, and `ahu task` and `ahu result` print it. The
 worktree is where the session starts, not a boundary the harness is held to;
 the launch preview says so.
 
@@ -1143,10 +1145,9 @@ Inspect and review a task from any checkout of the repository that launched it:
 ```sh
 task_id=abc123  # replace with a task ID from ahu tasks
 ahu task "$task_id" --output json
-ahu diff "$task_id"
 ```
 
-Both commands accept a full task ID or an unambiguous prefix. `ahu focus`
+Task commands accept a full task ID or an unambiguous prefix. `ahu focus`
 uses the newest record matching its prefix without checking ambiguity; use
 a full ID when focusing a task. Inspection reads the saved record and headless
 attempt metadata without updating state. Interactive inspection may query cmux
@@ -1164,16 +1165,51 @@ Consumers should tolerate additional fields and check `schema_version`.
 The interactive task list labels states such as `session running` and `session exited`.
 A running session may be awaiting input; a process exit does not verify success.
 
-`ahu diff` compares the launch base to the current task worktree, including
-committed, staged, and unstaged tracked changes, including inherited agent
-configuration. Untracked files are listed on stderr and are not included in the
-patch; ignored files are omitted. Git external diff helpers and text conversion
-are turned off. Terminal output escapes control characters; redirected stdout
-preserves the patch bytes. If the patch is empty and the attempt's result
-envelope records write-tool paths outside the worktree, the empty output is
-qualified on stderr with those paths; see `ahu result`. The command fails if
-the checkout is missing or belongs to another repository. Neither command
-stages, commits, or applies changes.
+### The task list
+
+`ahu tasks` lays its table out to fit the terminal. The width comes from
+`COLUMNS` when it is set, otherwise from the terminal itself, and is 80 when
+stdout is redirected or reports no size. No row ever wraps.
+
+Columns give way in a fixed order as the terminal narrows. The title gives up
+width first and is cut with an ellipsis; the branch does the same. Below that,
+whole columns leave the table: `MODE`, then `LIVE`, then `RUNTIME`, then
+`AGENT`, then `BRANCH`, and `TITLE` last. `HANDLE` and `STATE` always stay, and
+a handle is never shortened — a cut handle does not resolve, and resolving it
+is the only reason the column is there. Whatever the surviving columns do not
+need is shared back between the title and the branch.
+
+| Column | What it holds |
+| --- | --- |
+| `HANDLE` | The task's `@name`, or `ahu:task:<id>` when it has none |
+| `TITLE` | The recorded task title |
+| `STATE` | The recorded session state |
+| `AGENT` | The agent and its version |
+| `MODE` | `cmux` or `headless` |
+| `LIVE` | The liveness observed at this moment: `live`, `stale`, or `unknown` |
+| `RUNTIME` | The pinned harness and model |
+| `BRANCH` | The task's branch — where the work is, and what to review |
+
+Colour, when stdout is a terminal and `NO_COLOR` is unset, carries meaning and
+nothing else: handles and agents are agent-coloured, the state is coloured by
+what it means for the reader, liveness ahu could not confirm is dimmed rather
+than asserted, the runtime is runtime-coloured, and the branch is dim. `ahu
+tasks --output json` is unaffected by width and by colour alike.
+
+ahu has no diff command. A task is an ordinary branch in an ordinary checkout,
+so Git reviews it directly and without an ahu-shaped wrapper around it. Text
+`ahu task` prints a `review` line with the exact command for that task:
+
+```sh
+git -C /path/to/.worktrees/<task-id> diff <base-commit>
+```
+
+The same two values are `worktree` and `base_commit` in `ahu task --output
+json`, so a script builds whatever Git invocation it needs. Inspection does not
+stage, commit, or apply anything. If the attempt's result envelope records
+write-tool paths outside the worktree, `ahu task` prints those paths too: the
+branch alone does not show everything the session touched. See `ahu result` for
+the full recorded list.
 
 - **A fresh branch and worktree.** `ahu/<agent>/<task-id>`, based on the HEAD of
   the checkout you launched from, under `.worktrees/` in the primary checkout.

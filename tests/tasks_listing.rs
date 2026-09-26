@@ -272,24 +272,212 @@ fn launch_displays_a_prominent_drift_warning() {
     );
 }
 
+/// A listing with one long-titled task, its handle reserved.
+fn listed(repo: &TestRepo, name: &str, title: &str) -> String {
+    let dir = tasks_dir(repo);
+    let id = ahu::task::new_task_id().unwrap();
+    let path = write_current(&dir, repo, &id);
+    let record = path.join("task.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    value["title"] = title.into();
+    std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    ahu::task_handles::reserve(&discovered, &id, Some(name), title).unwrap();
+    format!("ahu/chris/{id}")
+}
+
+/// Terminal columns a rendered line occupies, budgeted the way the layout
+/// budgets them: a non-ASCII glyph may be double width, bar the ellipsis.
+fn line_width(line: &str) -> usize {
+    line.chars()
+        .map(|c| match c {
+            '…' => 1,
+            c if c.is_ascii() => 1,
+            _ => 2,
+        })
+        .sum()
+}
+
 #[test]
-fn task_listing_is_a_compact_table_with_relative_worktree_paths() {
+fn task_listing_fits_the_terminal_and_keeps_handles_whole() {
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
     repo.commit("fixture");
-    let dir = tasks_dir(&repo);
-    let id = ahu::task::new_task_id().unwrap();
-    write_current(&dir, &repo, &id);
+    let branch = listed(
+        &repo,
+        "storage-cleanup",
+        "Remove the redundant inspection command and fit the task table to the terminal",
+    );
     let discovered = ahu::git::discover(repo.path()).unwrap();
-    ahu::task_handles::reserve(&discovered, &id, None, "a current task").unwrap();
 
-    let (_, text) = scripted(&repo, |console| ahu::commands::tasks(console, &discovered));
-    assert!(text.contains("TASK HANDLE"), "{text}");
-    assert!(text.contains(".worktrees/"), "{text}");
-    assert!(text.contains("Run `ahu task <handle>`"), "{text}");
-    assert!(!text.contains("Session state does not indicate"), "{text}");
-    assert!(!text.contains("Worktrees and branches are kept"), "{text}");
+    for width in [80usize, 120] {
+        let (code, text) = scripted(&repo, |console| {
+            ahu::commands::tasks_at(console, &discovered, width)
+        });
+        assert_eq!(code, 0, "{text}");
+        for line in text.lines() {
+            assert!(
+                line_width(line) <= width,
+                "{width}: {line:?} is {} wide\n{text}",
+                line_width(line)
+            );
+        }
+        // The handle is what the reader pastes into the next command, so it
+        // survives every width; the title is what gives way for it.
+        assert!(text.contains("@storage-cleanup"), "{width}: {text}");
+        assert!(text.contains('…'), "{width}: {text}");
+        assert!(
+            !text.contains("fit the task table to the terminal"),
+            "{width}: {text}"
+        );
+        // And a reader can still see which branch to go to.
+        assert!(text.contains("BRANCH"), "{width}: {text}");
+        assert!(text.contains(&branch[..20]), "{width}: {text}");
+        assert!(text.contains("Run `ahu task <handle>`"), "{text}");
+    }
+
+    // Wide enough for everything: nothing is dropped and nothing is cut.
+    let (_, wide) = scripted(&repo, |console| {
+        ahu::commands::tasks_at(console, &discovered, 240)
+    });
+    assert!(!wide.lines().next().unwrap().contains('…'), "{wide}");
+    for header in [
+        "HANDLE", "TITLE", "STATE", "AGENT", "MODE", "LIVE", "RUNTIME",
+    ] {
+        assert!(wide.contains(header), "{header}: {wide}");
+    }
+    assert!(wide.contains(&branch), "{wide}");
+    assert!(
+        wide.contains(
+            "Remove the redundant inspection command and fit the task table to the terminal"
+        ),
+        "{wide}"
+    );
+    assert!(wide.contains("claude-code / claude-opus-5"), "{wide}");
+
+    // Lower-value columns leave before the title becomes unreadable.
+    let (_, narrow) = scripted(&repo, |console| {
+        ahu::commands::tasks_at(console, &discovered, 80)
+    });
+    assert!(!narrow.contains("RUNTIME"), "{narrow}");
+    assert!(!narrow.contains("claude-code / claude-opus-5"), "{narrow}");
+}
+
+/// The table is a human surface. Nothing about how it is laid out or painted
+/// may reach the machine-readable one, at any width.
+#[test]
+fn task_listing_json_is_unaffected_by_width_and_color() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    listed(
+        &repo,
+        "storage-cleanup",
+        "Remove the redundant inspection command and fit the task table to the terminal",
+    );
+
+    let json = |columns: &str, color: &str| {
+        let output = common::ahu()
+            .arg(color)
+            .args(["tasks", "--output", "json"])
+            .current_dir(repo.path())
+            .env("COLUMNS", columns)
+            .env_remove("NO_COLOR")
+            .env("AHU_CMUX_BIN", repo.state_path().join("absent-cmux"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let baseline = json("80", "--color=never");
+    for (columns, color) in [("40", "--color=never"), ("400", "--color=always")] {
+        assert_eq!(json(columns, color), baseline, "{columns} {color}");
+    }
+    assert!(!baseline.contains(&0x1b));
+    let value: serde_json::Value = serde_json::from_slice(&baseline).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["tasks"][0]["task_handle"], "@storage-cleanup");
+    assert_eq!(
+        value["tasks"][0]["title"],
+        serde_json::Value::Null,
+        "titles stay out of JSON: {value}"
+    );
+}
+
+#[test]
+fn task_listing_paints_its_roles_only_when_color_is_in_effect() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let branch = listed(&repo, "storage-cleanup", "a current task");
+
+    let run = |color: &str, no_color: Option<&str>| {
+        let mut command = common::ahu();
+        command
+            .arg(color)
+            .arg("tasks")
+            .current_dir(repo.path())
+            .env("COLUMNS", "240")
+            .env("AHU_CMUX_BIN", repo.state_path().join("absent-cmux"));
+        match no_color {
+            Some(value) => command.env("NO_COLOR", value),
+            None => command.env_remove("NO_COLOR"),
+        };
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let painted = run("--color=always", None);
+    // The handle and the agent are the same role; the state is coloured by
+    // what it means, the runtime by being a runtime, and the branch is dim
+    // because it is where to go, not what to read.
+    assert!(
+        painted.contains("\x1b[1;36m@storage-cleanup\x1b[0m"),
+        "{painted:?}"
+    );
+    assert!(
+        painted.contains("\x1b[1;36mchris@1.0.0\x1b[0m"),
+        "{painted:?}"
+    );
+    assert!(painted.contains("\x1b[2mexited\x1b[0m"), "{painted:?}");
+    assert!(
+        painted.contains("\x1b[36mclaude-code / claude-opus-5\x1b[0m"),
+        "{painted:?}"
+    );
+    assert!(
+        painted.contains(&format!("\x1b[2m{branch}\x1b[0m")),
+        "{painted:?}"
+    );
+    // Liveness ahu could not read is dimmed rather than asserted.
+    assert!(painted.contains("\x1b[2munknown\x1b[0m"), "{painted:?}");
+    assert!(painted.contains("\x1b[1mHANDLE\x1b[0m"), "{painted:?}");
+    // Padding is never inside a styled span, so a colour never bleeds across
+    // a column boundary.
+    assert!(!painted.contains("\x1b[0m \x1b[0m"), "{painted:?}");
+
+    for text in [
+        run("--color=auto", Some("1")),
+        run("--color=never", None),
+        // Redirected stdout is not a terminal, so auto stays plain.
+        run("--color=auto", None),
+    ] {
+        assert!(!text.contains('\x1b'), "{text:?}");
+        assert!(text.contains("@storage-cleanup"), "{text}");
+    }
 }
 
 /// Every record unreadable: the absence claim must not be printed.

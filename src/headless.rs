@@ -1944,7 +1944,7 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
 
 /// Recorded `writes_outside_worktree` from a finished attempt's result
 /// envelope, if it exists and is non-empty. Never fails the caller.
-pub(crate) fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>> {
+pub fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>> {
     let spec: Spec = read_json(&dir.join("headless.json")).ok()?;
     let result_path = attempt_dir(dir, &spec).join("result.json");
     let result: Value = read_json(&result_path).ok()?;

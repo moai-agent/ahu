@@ -272,3 +272,12 @@ pub fn reference(repo: &Repo, id: &str) -> String {
         .flatten()
         .unwrap_or_else(|| crate::task_ref::display(id))
 }
+
+/// The shortest whole argument that still resolves this task: its handle, or
+/// the bare identifier, which task lookup accepts as readily as the canonical
+/// `ahu:task:` form. Only for a column where nine columns of constant prefix
+/// would come out of what the rest of the row has to say; suggested commands
+/// keep the canonical reference.
+pub fn column_reference(repo: &Repo, id: &str) -> String {
+    handle(repo, id).ok().flatten().unwrap_or_else(|| id.into())
+}

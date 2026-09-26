@@ -1,5 +1,5 @@
 mod common;
-use common::{TestRepo, git};
+use common::TestRepo;
 use std::process::Output;
 
 #[test]
@@ -249,8 +249,42 @@ fn task_json_is_small_unstyled_and_available_without_cmux_or_worktree() {
             .unwrap()
             .contains("[session running]")
     );
-    let diff = run(&repo, &["diff", "abc1"]);
-    assert_eq!(diff.status.code(), Some(5));
+}
+
+/// `ahu diff` was removed. Plain Git on the task's own checkout does the same
+/// job, so the word must fail like any other one ahu does not know rather than
+/// resolve a task and do something surprising with it.
+#[test]
+fn diff_is_not_a_command_and_task_offers_the_git_command_instead() {
+    let repo = TestRepo::new();
+    let dir = record(&repo, "abc1");
+    for args in [
+        vec!["diff"],
+        vec!["diff", "abc1"],
+        vec!["diff", "abc1", "--output", "json"],
+    ] {
+        let out = run(&repo, &args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("unknown command"), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        assert_eq!(
+            out.status.code(),
+            run(&repo, &["definitely-not-a-command"]).status.code(),
+            "{args:?}"
+        );
+    }
+
+    let saved: ahu::task::TaskRecord =
+        serde_json::from_slice(&std::fs::read(dir.join("task.json")).unwrap()).unwrap();
+    let text = String::from_utf8(run(&repo, &["task", "abc1"]).stdout).unwrap();
+    assert!(
+        text.contains(&format!(
+            "review    git -C '{}' diff {}",
+            saved.worktree.display(),
+            saved.base_commit.as_deref().unwrap()
+        )),
+        "{text}"
+    );
 }
 
 #[test]
@@ -259,75 +293,20 @@ fn lookup_rejects_ambiguity_including_unreadable_records_and_accepts_exact_ids()
     record(&repo, "abc1");
     let bad = record(&repo, "abc2");
     std::fs::write(bad.join("task.json"), "broken").unwrap();
-    for command in ["task", "diff"] {
-        let out = run(&repo, &[command, "abc"]);
-        assert_eq!(out.status.code(), Some(2));
-        assert!(String::from_utf8_lossy(&out.stderr).contains("ambiguous"));
-        assert_eq!(run(&repo, &[command, "abc2"]).status.code(), Some(5));
-        assert_eq!(run(&repo, &[command, "missing"]).status.code(), Some(2));
-        assert_eq!(run(&repo, &[command]).status.code(), Some(2));
-        assert_eq!(
-            run(&repo, &[command, "abc1", "--output", "yaml"])
-                .status
-                .code(),
-            Some(2)
-        );
-    }
+    let out = run(&repo, &["task", "abc"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ambiguous"));
+    assert_eq!(run(&repo, &["task", "abc2"]).status.code(), Some(5));
+    assert_eq!(run(&repo, &["task", "missing"]).status.code(), Some(2));
+    assert_eq!(run(&repo, &["task"]).status.code(), Some(2));
+    assert_eq!(
+        run(&repo, &["task", "abc1", "--output", "yaml"])
+            .status
+            .code(),
+        Some(2)
+    );
     record(&repo, "abc12");
     assert!(run(&repo, &["task", "abc1"]).status.success());
-}
-
-#[test]
-fn diff_covers_base_to_working_tree_without_executing_helpers_or_staging() {
-    let repo = TestRepo::new();
-    record(&repo, "abc1");
-    repo.write("committed.txt", "committed change\n");
-    repo.commit("task change");
-    repo.write("staged.txt", "staged change\n");
-    git(repo.path(), &["add", "staged.txt"]);
-    repo.write("README.md", "unstaged change\n");
-    repo.write("untracked.txt", "untracked change\n");
-    // An external helper would fail the test if invoked.
-    git(
-        repo.path(),
-        &["config", "diff.external", "/nonexistent-diff-helper"],
-    );
-    git(
-        repo.path(),
-        &["config", "diff.fixture.textconv", "/nonexistent-textconv"],
-    );
-    repo.write(".gitattributes", "*.txt diff=fixture\n");
-    let before = git(repo.path(), &["status", "--porcelain"]);
-    let output = run(&repo, &["diff", "abc1"]);
-    assert!(output.status.success(), "{:?}", output);
-    let patch = String::from_utf8(output.stdout).unwrap();
-    for expected in ["+committed change", "+staged change", "+unstaged change"] {
-        assert!(patch.contains(expected), "{patch}");
-    }
-    assert!(!patch.contains("untracked change"));
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("Untracked (not included in diff): untracked.txt")
-    );
-    assert_eq!(git(repo.path(), &["status", "--porcelain"]), before);
-}
-
-#[test]
-fn diff_refuses_foreign_checkouts_and_option_like_bases() {
-    let repo = TestRepo::new();
-    let foreign = TestRepo::new();
-    let path = record(&repo, "abc1").join("task.json");
-    let original: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    for (key, value) in [
-        ("worktree", foreign.path().to_str().unwrap()),
-        ("base_commit", "--output=unexpected"),
-    ] {
-        let mut record = original.clone();
-        record[key] = value.into();
-        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-        assert_eq!(run(&repo, &["diff", "abc1"]).status.code(), Some(5));
-    }
 }
 
 // The files a finished headless attempt leaves in the runtime store: the
@@ -364,8 +343,12 @@ fn plant_outside_writes(store: &std::path::Path, id: &str, outside: &[&str]) {
     .unwrap();
 }
 
+/// Removing `ahu diff` must not remove the one place ahu says that a session
+/// reported writing outside the worktree it was given. Looking only at the
+/// branch would show nothing and mean nothing; `ahu task` now carries the
+/// disclosure, and points at `ahu result` for the rest of it.
 #[test]
-fn diff_discloses_recorded_outside_writes_only_when_the_worktree_diff_is_empty() {
+fn task_discloses_recorded_writes_outside_the_worktree() {
     let repo = TestRepo::new();
     let identity = ahu::git::discover(repo.path()).unwrap().identity();
     let runtime = tempfile::TempDir::new().unwrap();
@@ -381,44 +364,53 @@ fn diff_discloses_recorded_outside_writes_only_when_the_worktree_diff_is_empty()
         let internal = record(&repo, id);
         // The checkout store wins ties in `task::list`, so the record has to
         // move, not be copied: a leftover internal entry would shadow the
-        // runtime one and the diff would never read the planted files.
+        // runtime one and the planted files would never be read.
         std::fs::rename(&internal, store.join(id)).unwrap();
     }
-    let escaped = runtime.path().join("escaped.txt");
-    plant_outside_writes(&store, "abc1", &[escaped.to_str().unwrap()]);
+    let escaped: Vec<String> = (0..5)
+        .map(|n| {
+            runtime
+                .path()
+                .join(format!("escaped-{n}.txt"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let borrowed: Vec<&str> = escaped.iter().map(String::as_str).collect();
+    plant_outside_writes(&store, "abc1", &borrowed);
     plant_outside_writes(&store, "abc2", &[]);
 
-    let out = run_with_runtime(&repo, runtime.path(), &["diff", "abc1"]);
+    let out = run_with_runtime(&repo, runtime.path(), &["task", "abc1"]);
     assert!(out.status.success(), "{:?}", out);
-    assert!(out.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stderr.contains(
-            "No changes in the task worktree, but write tool calls in the recorded event stream targeted paths outside it:"
+        text.contains(
+            "write tool calls in the recorded event stream targeted paths outside the task"
         ),
-        "{stderr}"
+        "{text}"
     );
-    assert!(stderr.contains("escaped.txt"), "{stderr}");
+    // Bounded, with the remainder named rather than silently dropped.
+    assert!(text.contains("escaped-0.txt"), "{text}");
+    assert!(text.contains("escaped-2.txt"), "{text}");
+    assert!(!text.contains("escaped-3.txt"), "{text}");
+    assert!(text.contains("... and 2 more"), "{text}");
     assert!(
-        stderr.contains("Run `ahu result ahu:task:abc1` for the full recorded list."),
-        "{stderr}"
+        text.contains("Run `ahu result ahu:task:abc1` for the full recorded list."),
+        "{text}"
     );
 
-    let out = run_with_runtime(&repo, runtime.path(), &["diff", "abc2"]);
+    // Nothing recorded, nothing claimed.
+    let out = run_with_runtime(&repo, runtime.path(), &["task", "abc2"]);
     assert!(out.status.success(), "{:?}", out);
-    assert!(out.stdout.is_empty());
-    assert!(out.stderr.is_empty());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("outside the task"), "{text}");
 
-    repo.write("README.md", "unstaged change\n");
-    let out = run_with_runtime(&repo, runtime.path(), &["diff", "abc1"]);
+    // The JSON contract is unchanged; the disclosure is a human-output line.
+    let out = run_with_runtime(&repo, runtime.path(), &["task", "abc1", "--output", "json"]);
     assert!(out.status.success(), "{:?}", out);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("+unstaged change"), "{stdout}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("No changes in the task worktree"),
-        "{stderr}"
-    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert!(value.get("writes_outside_worktree").is_none(), "{value}");
 }
 
 #[test]
