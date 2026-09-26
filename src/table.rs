@@ -69,6 +69,7 @@ fn tty_columns() -> Option<usize> {
 }
 
 /// One column's layout policy.
+#[derive(Clone, Copy)]
 pub struct Column {
     pub header: &'static str,
     /// The narrowest width this column is still worth reading at. Ignored when
@@ -201,30 +202,21 @@ fn plan(columns: &[Column], rows: &[Vec<Cell>], width: usize) -> Vec<Option<usiz
         kept[index] = false;
     }
 
-    // What the survivors did not need is shared out a column at a time rather
-    // than handed to the first claimant: the title and the branch both start
-    // far below the width they want, and a listing where one of them is whole
-    // and the other is an ellipsis reads worse than one where both are close.
+    // What the survivors did not need goes to the shrinkable columns in the
+    // order they are worth reading whole, each filled to its full width before
+    // the next is offered anything: a column that is nearly whole at its floor
+    // wants a few columns to be exact, and splitting the surplus evenly would
+    // leave every one of them an ellipsis short.
     let mut widths = floor;
     let growable: Vec<usize> = ordered(|column| column.shrink)
         .into_iter()
         .filter(|index| kept[*index])
         .collect();
     let mut surplus = width.saturating_sub(span(&kept, &widths));
-    while surplus > 0 {
-        let before = surplus;
-        for index in &growable {
-            if surplus == 0 {
-                break;
-            }
-            if widths[*index] < natural[*index] {
-                widths[*index] += 1;
-                surplus -= 1;
-            }
-        }
-        if surplus == before {
-            break;
-        }
+    for index in growable {
+        let want = natural[index].saturating_sub(widths[index]).min(surplus);
+        widths[index] += want;
+        surplus -= want;
     }
 
     kept.into_iter()
@@ -359,6 +351,49 @@ mod tests {
         // only column left that wanted more.
         assert_eq!(kept.lines().nth(1).unwrap(), "@a      a tit…  headless");
         assert_eq!(dropped.lines().nth(1).unwrap(), "@a      a title of som…");
+    }
+
+    #[test]
+    fn surplus_width_fills_the_column_worth_reading_whole_before_the_next_one() {
+        let columns = vec![
+            Column {
+                header: "HANDLE",
+                min: 0,
+                shrink: None,
+                drop: None,
+            },
+            Column {
+                header: "TITLE",
+                min: 6,
+                shrink: Some(1),
+                drop: Some(1),
+            },
+            Column {
+                header: "BRANCH",
+                min: 6,
+                shrink: Some(0),
+                drop: Some(0),
+            },
+        ];
+        let rows = vec![vec![
+            Cell::plain("@a"),
+            Cell::plain("a title of some considerable length"),
+            Cell::plain("ahu/chris/01a0df41"),
+        ]];
+        // The floor layout is 6 + 6 + 6 with two gaps; the twelve spare columns
+        // at 34 are exactly what the branch wants, and sharing them out evenly
+        // would have left both it and the title an ellipsis short.
+        let text = render(Style::plain(), 34, &columns, &rows);
+        assert_eq!(
+            text.lines().nth(1).unwrap(),
+            "@a      a tit…  ahu/chris/01a0df41"
+        );
+        // The next column over goes to the title, which wants more than is left.
+        let text = render(Style::plain(), 36, &columns, &rows);
+        assert_eq!(
+            text.lines().nth(1).unwrap(),
+            "@a      a title…  ahu/chris/01a0df41"
+        );
     }
 
     #[test]

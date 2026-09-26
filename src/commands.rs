@@ -865,15 +865,17 @@ pub fn tasks_at(console: &mut Console<'_>, repo: &Repo, width: usize) -> Result<
         // Every field here comes out of task.json, which was built from the
         // prompt and from repository configuration. `tasks` is as much a
         // disclosure surface as the launch preview, so it escapes the same way.
+        let handle = crate::task_handles::column_reference(repo, &record.task_id);
+        // A title the handle already carries word for word would spend the
+        // widest column in the table saying what the first column said.
+        let title = if crate::task_handles::title_adds_to_handle(&handle, &record.title) {
+            display_safe(&record.title)
+        } else {
+            String::new()
+        };
         rows.push(vec![
-            table::Cell::painted(
-                Role::Agent,
-                display_safe(&crate::task_handles::column_reference(
-                    repo,
-                    &record.task_id,
-                )),
-            ),
-            table::Cell::plain(display_safe(&record.title)),
+            table::Cell::painted(Role::Agent, display_safe(&handle)),
+            table::Cell::plain(title),
             table::Cell::painted(state_role(record.state.as_str()), record.state.as_str()),
             table::Cell::painted(Role::Agent, display_safe(&record.agent_label())),
             table::Cell::plain(mode),
@@ -890,11 +892,20 @@ pub fn tasks_at(console: &mut Console<'_>, repo: &Repo, width: usize) -> Result<
                     record.identity.harness, record.identity.model
                 )),
             ),
-            table::Cell::painted(Role::Hint, display_safe(&record.branch)),
+            table::Cell::painted(Role::Hint, display_safe(&short_branch(record))),
         ]);
         reviews.push(review);
     }
-    let mut lines = table::lines(style, width, TASK_COLUMNS, &rows).into_iter();
+    // A column of empty cells is a header and two blank columns of gap, so the
+    // title leaves the table entirely when no row had anything to put in it.
+    let mut columns = TASK_COLUMNS.to_vec();
+    if rows.iter().all(|row| row[TITLE_COLUMN].text.is_empty()) {
+        columns.remove(TITLE_COLUMN);
+        for row in &mut rows {
+            row.remove(TITLE_COLUMN);
+        }
+    }
+    let mut lines = table::lines(style, width, &columns, &rows).into_iter();
     if let Some(header) = lines.next() {
         console.say(&format!("{header}\n"))?;
     }
@@ -916,10 +927,12 @@ pub fn tasks_at(console: &mut Console<'_>, repo: &Repo, width: usize) -> Result<
 }
 
 /// The `ahu tasks` table. The handle is fixed: a truncated one does not
-/// resolve, and resolving it is the only reason the column is there. The
-/// branch is what the reader goes on to review, so it outranks everything but
-/// the title, and it carries the agent name already -- which is why `AGENT`
-/// gives way before it does.
+/// resolve, and resolving it is the only reason the column is there. What the
+/// reader cannot get anywhere else in the row keeps its width next: the state,
+/// the agent, and the runtime, which is the one column that shows a task ran on
+/// its own harness and model. The branch is held to a length it is worth
+/// printing rather than dropped, and the title gives way before either, because
+/// the handle was generated from it.
 const TASK_COLUMNS: &[table::Column] = &[
     table::Column {
         header: "HANDLE",
@@ -930,8 +943,8 @@ const TASK_COLUMNS: &[table::Column] = &[
     table::Column {
         header: "TITLE",
         min: 16,
-        shrink: Some(0),
-        drop: Some(5),
+        shrink: Some(1),
+        drop: Some(2),
     },
     table::Column {
         header: "STATE",
@@ -943,7 +956,7 @@ const TASK_COLUMNS: &[table::Column] = &[
         header: "AGENT",
         min: 0,
         shrink: None,
-        drop: Some(3),
+        drop: Some(4),
     },
     table::Column {
         header: "MODE",
@@ -961,19 +974,35 @@ const TASK_COLUMNS: &[table::Column] = &[
         header: "RUNTIME",
         min: 0,
         shrink: None,
-        drop: Some(2),
+        drop: Some(5),
     },
     table::Column {
         header: "BRANCH",
-        // `ahu/<agent>/<id>` cut here still names the agent and enough of the
-        // id to find the branch with, and a reader who needs it whole has
-        // `ahu task`. Losing the column entirely would leave the listing with
-        // nowhere to go next.
-        min: 20,
-        shrink: Some(1),
-        drop: Some(4),
+        // `ahu/<agent>/<id>` cut here still names the agent and the leading
+        // digits of the id, which is what a reader scanning `git branch` needs.
+        min: 12,
+        shrink: Some(0),
+        drop: Some(3),
     },
 ];
+
+/// The title's position in [`TASK_COLUMNS`].
+const TITLE_COLUMN: usize = 1;
+
+/// The branch, shortened to its prefix and the first eight characters of the
+/// task id.
+///
+/// The rest of the id is a UUID nobody reads across, and `ahu task <handle>`
+/// prints the whole branch name for anyone who wants to paste it.
+fn short_branch(record: &task::TaskRecord) -> String {
+    let Some(prefix) = record.branch.strip_suffix(&record.task_id) else {
+        return record.branch.clone();
+    };
+    match record.task_id.get(..8) {
+        Some(short) => format!("{prefix}{short}"),
+        None => record.branch.clone(),
+    }
+}
 
 /// A recorded session state, coloured by what it means for the reader: work
 /// that may still be running, work that stopped on its own, work that stopped

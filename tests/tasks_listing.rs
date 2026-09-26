@@ -187,9 +187,13 @@ fn tasks_lists_the_readable_record_and_reports_the_unreadable_one() {
     let (code, text) = scripted(&repo, |console| ahu::commands::tasks(console, &discovered));
     assert_eq!(code, 0, "{text}");
 
-    // The readable one is listed as usual.
+    // The readable one is listed as usual. Its title is a column the layout
+    // gives up first, so it is asserted at a width that has room for it.
     assert!(text.contains("006aa50000000000b2"), "{text}");
-    assert!(text.contains("a current task"), "{text}");
+    let (_, wide) = scripted(&repo, |console| {
+        ahu::commands::tasks_at(console, &discovered, 240)
+    });
+    assert!(wide.contains("a current task"), "{wide}");
 
     // And the refused one is reported, with its id and the reason.
     assert!(text.contains("006aa50000000000a1"), "{text}");
@@ -287,6 +291,38 @@ fn listed(repo: &TestRepo, name: &str, title: &str) -> String {
     format!("ahu/chris/{id}")
 }
 
+/// The branch as a listing row shows it: the prefix and the first eight
+/// characters of the task id.
+fn short_branch(branch: &str) -> String {
+    let (prefix, id) = branch.rsplit_once('/').unwrap();
+    format!("{prefix}/{}", &id[..8])
+}
+
+/// A listing of short-titled tasks, the shape a working repository has: every
+/// handle was generated from its own title, so the titles repeat the handles.
+fn listed_short(repo: &TestRepo) -> Vec<String> {
+    let dir = tasks_dir(repo);
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let mut branches = Vec::new();
+    for (title, state) in [
+        ("Fix flaky test", "running"),
+        ("Trim the cache", "exited"),
+        ("Ship the notes", "failed"),
+    ] {
+        let id = ahu::task::new_task_id().unwrap();
+        let path = write_current(&dir, repo, &id);
+        let record = path.join("task.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        value["title"] = title.into();
+        value["state"] = state.into();
+        std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
+        ahu::task_handles::reserve(&discovered, &id, None, title).unwrap();
+        branches.push(format!("ahu/chris/{id}"));
+    }
+    branches
+}
+
 /// Terminal columns a rendered line occupies, budgeted the way the layout
 /// budgets them: a non-ASCII glyph may be double width, bar the ellipsis.
 fn line_width(line: &str) -> usize {
@@ -312,7 +348,7 @@ fn task_listing_fits_the_terminal_and_keeps_handles_whole() {
     );
     let discovered = ahu::git::discover(repo.path()).unwrap();
 
-    for width in [80usize, 120] {
+    for width in [80usize, 88, 120] {
         let (code, text) = scripted(&repo, |console| {
             ahu::commands::tasks_at(console, &discovered, width)
         });
@@ -325,30 +361,49 @@ fn task_listing_fits_the_terminal_and_keeps_handles_whole() {
             );
         }
         // The handle is what the reader pastes into the next command, so it
-        // survives every width; the title is what gives way for it.
+        // survives every width; so does what the row cannot say twice.
         assert!(text.contains("@storage-cleanup"), "{width}: {text}");
-        assert!(text.contains('…'), "{width}: {text}");
-        assert!(
-            !text.contains("fit the task table to the terminal"),
-            "{width}: {text}"
-        );
-        // And a reader can still see which branch to go to.
+        for whole in ["exited", "chris@1.0.0", "claude-code / claude-opus-5"] {
+            assert!(text.contains(whole), "{width}: {whole} is cut:\n{text}");
+        }
+        // The branch is compact rather than absent: the prefix and enough of the
+        // id to recognise, never the whole UUID.
         assert!(text.contains("BRANCH"), "{width}: {text}");
-        assert!(text.contains(&branch[..20]), "{width}: {text}");
+        assert!(!text.contains(&branch), "{width}: {text}");
+        assert!(text.contains("ahu/chris/"), "{width}: {text}");
         assert!(text.contains("Run `ahu task <handle>`"), "{text}");
     }
 
-    // Wide enough for everything: nothing is dropped and nothing is cut.
+    // A title the handle does not carry earns a column once there is room for
+    // it, and gives up width before anything else does.
+    let (_, narrow) = scripted(&repo, |console| {
+        ahu::commands::tasks_at(console, &discovered, 88)
+    });
+    assert!(!narrow.contains("TITLE"), "{narrow}");
+    let (_, roomy) = scripted(&repo, |console| {
+        ahu::commands::tasks_at(console, &discovered, 120)
+    });
+    assert!(roomy.contains("TITLE"), "{roomy}");
+    assert!(roomy.contains("Remove the redun"), "{roomy}");
+    assert!(
+        !roomy.contains("fit the task table to the terminal"),
+        "{roomy}"
+    );
+    assert!(roomy.contains(&short_branch(&branch)), "{roomy}");
+
+    // Wide enough for everything: nothing is dropped and nothing is cut, and
+    // the branch is still the compact one -- `ahu task` prints it whole.
     let (_, wide) = scripted(&repo, |console| {
         ahu::commands::tasks_at(console, &discovered, 240)
     });
-    assert!(!wide.lines().next().unwrap().contains('…'), "{wide}");
+    assert!(!wide.contains('…'), "{wide}");
     for header in [
-        "HANDLE", "TITLE", "STATE", "AGENT", "MODE", "LIVE", "RUNTIME",
+        "HANDLE", "TITLE", "STATE", "AGENT", "MODE", "LIVE", "RUNTIME", "BRANCH",
     ] {
         assert!(wide.contains(header), "{header}: {wide}");
     }
-    assert!(wide.contains(&branch), "{wide}");
+    assert!(wide.contains(&short_branch(&branch)), "{wide}");
+    assert!(!wide.contains(&branch), "{wide}");
     assert!(
         wide.contains(
             "Remove the redundant inspection command and fit the task table to the terminal"
@@ -356,13 +411,86 @@ fn task_listing_fits_the_terminal_and_keeps_handles_whole() {
         "{wide}"
     );
     assert!(wide.contains("claude-code / claude-opus-5"), "{wide}");
+}
 
-    // Lower-value columns leave before the title becomes unreadable.
-    let (_, narrow) = scripted(&repo, |console| {
-        ahu::commands::tasks_at(console, &discovered, 80)
+/// Handles are generated from titles, so a short title comes through its handle
+/// whole. Spending the widest column in the table on the first column's words
+/// is what pushed the runtime out of an ordinary terminal.
+#[test]
+fn a_title_its_handle_already_carries_does_not_take_a_column() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let branches = listed_short(&repo);
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+
+    for width in [80usize, 88, 120, 240] {
+        let (code, text) = scripted(&repo, |console| {
+            ahu::commands::tasks_at(console, &discovered, width)
+        });
+        assert_eq!(code, 0, "{text}");
+        for line in text.lines() {
+            assert!(line_width(line) <= width, "{width}: {line:?}\n{text}");
+        }
+        assert!(!text.contains("TITLE"), "{width}: {text}");
+        assert!(!text.contains("Fix flaky test"), "{width}: {text}");
+        // What the handles do not say is what the row is for.
+        for whole in [
+            "@fix-flaky-test",
+            "running",
+            "chris@1.0.0",
+            "claude-code / claude-opus-5",
+        ] {
+            assert!(text.contains(whole), "{width}: {whole} is missing:\n{text}");
+        }
+    }
+
+    // From the width where the branch fits at all, it is the compact one.
+    let (_, text) = scripted(&repo, |console| {
+        ahu::commands::tasks_at(console, &discovered, 120)
     });
-    assert!(!narrow.contains("RUNTIME"), "{narrow}");
-    assert!(!narrow.contains("claude-code / claude-opus-5"), "{narrow}");
+    for branch in &branches {
+        assert!(text.contains(&short_branch(branch)), "{branch}: {text}");
+        assert!(!text.contains(branch), "{branch}: {text}");
+    }
+}
+
+/// One task whose title says more than its handle and one whose title does not:
+/// the column is worth keeping, and the row that has nothing to add is blank.
+#[test]
+fn only_the_rows_whose_titles_add_something_fill_the_title_column() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    listed_short(&repo);
+    listed(
+        &repo,
+        "storage-cleanup",
+        "Remove the redundant inspection command and fit the task table to the terminal",
+    );
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+
+    let (_, text) = scripted(&repo, |console| {
+        ahu::commands::tasks_at(console, &discovered, 240)
+    });
+    assert!(text.contains("TITLE"), "{text}");
+    assert!(
+        text.contains(
+            "Remove the redundant inspection command and fit the task table to the terminal"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Fix flaky test"), "{text}");
+    let row = text
+        .lines()
+        .find(|line| line.contains("@fix-flaky-test"))
+        .unwrap();
+    // The blank title cell leaves the handle and the state adjacent, separated
+    // by the column's own width and nothing else.
+    assert!(row.contains("@fix-flaky-test  "), "{row:?}");
+    assert!(row.contains("running"), "{row:?}");
 }
 
 /// The table is a human surface. Nothing about how it is laid out or painted
@@ -459,7 +587,7 @@ fn task_listing_paints_its_roles_only_when_color_is_in_effect() {
         "{painted:?}"
     );
     assert!(
-        painted.contains(&format!("\x1b[2m{branch}\x1b[0m")),
+        painted.contains(&format!("\x1b[2m{}\x1b[0m", short_branch(&branch))),
         "{painted:?}"
     );
     // Liveness ahu could not read is dimmed rather than asserted.

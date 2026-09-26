@@ -1171,24 +1171,37 @@ A running session may be awaiting input; a process exit does not verify success.
 `COLUMNS` when it is set, otherwise from the terminal itself, and is 80 when
 stdout is redirected or reports no size. No row ever wraps.
 
-Columns give way in a fixed order as the terminal narrows. The title gives up
-width first and is cut with an ellipsis; the branch does the same. Below that,
-whole columns leave the table: `MODE`, then `LIVE`, then `RUNTIME`, then
-`AGENT`, then `BRANCH`, and `TITLE` last. `HANDLE` and `STATE` always stay, and
-a handle is never shortened — a cut handle does not resolve, and resolving it
-is the only reason the column is there. Whatever the surviving columns do not
-need is shared back between the title and the branch.
+`HANDLE`, `STATE`, `AGENT`, and `RUNTIME` keep their full width in any terminal
+of 80 columns or more. Each says something no other column in the row does, and
+`RUNTIME` is where a reader sees that a task ran on its own harness and model. A
+handle is never shortened at any width — a cut handle does not resolve, and
+resolving it is the only reason the column is there.
+
+`BRANCH` is compact rather than whole: the branch prefix and the first eight
+characters of the task id, as in `ahu/builder/01a0df38`. `ahu task <handle>`
+prints the whole branch name for anyone who needs to paste it.
+
+`TITLE` appears only when the title says something its handle does not, and only
+when there is room left over. Handles are generated from titles, so a short title
+comes through its handle word for word; such a title is left out of its row, and
+a title column with nothing in any row leaves the table entirely.
+
+Whole columns leave the table in this order as the terminal narrows: `MODE`, then
+`LIVE`, then `TITLE`, then `BRANCH`, then `AGENT`, and `RUNTIME` last. Before a
+column leaves, the title and the branch are cut with an ellipsis. Whatever the
+surviving columns do not need goes to the branch until it is whole, and then to
+the title.
 
 | Column | What it holds |
 | --- | --- |
-| `HANDLE` | The task's `@name`, or `ahu:task:<id>` when it has none |
-| `TITLE` | The recorded task title |
+| `HANDLE` | The task's `@name`, or the task id when it has none |
+| `TITLE` | The recorded task title, when it adds something the handle does not |
 | `STATE` | The recorded session state |
 | `AGENT` | The agent and its version |
 | `MODE` | `cmux` or `headless` |
 | `LIVE` | The liveness observed at this moment: `live`, `stale`, or `unknown` |
 | `RUNTIME` | The pinned harness and model |
-| `BRANCH` | The task's branch — where the work is, and what to review |
+| `BRANCH` | The task's branch, prefix and the first eight characters of the task id |
 
 Colour, when stdout is a terminal and `NO_COLOR` is unset, carries meaning and
 nothing else: handles and agents are agent-coloured, the state is coloured by
