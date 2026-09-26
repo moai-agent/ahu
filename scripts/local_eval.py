@@ -90,25 +90,27 @@ def trend(args) -> int:
     groups: dict[tuple, list[dict]] = {}
     for row in rows:
         groups.setdefault((
-            row["case_id"], row.get("stage") or "candidate",
+            row["case_id"], row.get("corpus_version") or "unspecified",
+            row.get("stage") or "candidate",
             row.get("agent") or "unspecified", row.get("agent_version") or "unspecified",
             row.get("evaluator") or "unspecified", row.get("evaluator_version") or "unspecified",
             row["model"], row["harness"], row.get("harness_version") or "unspecified",
             row.get("ahu_revision") or "unspecified", row.get("skill_digest") or "unspecified",
         ), []).append(row)
     summaries = []
-    for (case_id, stage, agent, agent_version, evaluator, evaluator_version, model, harness,
+    for (case_id, corpus_version, stage, agent, agent_version, evaluator, evaluator_version, model, harness,
          harness_version, ahu_revision, skill_digest), items in sorted(groups.items()):
         scores = [item["score"] for item in items]
         summaries.append({
-            "case_id": case_id, "stage": stage, "model": model, "harness": harness,
+            "case_id": case_id, "corpus_version": corpus_version,
+            "stage": stage, "model": model, "harness": harness,
             "agent": agent, "agent_version": agent_version,
             "evaluator": evaluator, "evaluator_version": evaluator_version,
             "harness_version": harness_version,
             "ahu_revision": ahu_revision, "skill_digest": skill_digest,
             "runs": len(items), "mean_score": round(statistics.mean(scores), 4),
             "pass_rate": round(sum(item["passed"] for item in items) / len(items), 4),
-            "token_observations": sum(bool(item["reported_tokens"]) for item in items),
+            "token_observations": sum(bool(item.get("reported_tokens")) for item in items),
             "timing_observations": sum(item.get("elapsed_ms") is not None for item in items),
             "decision_call_observations": sum(item.get("decision_call_count") is not None for item in items),
         })
