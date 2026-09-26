@@ -20,6 +20,7 @@ use prost::Message;
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_TASKS: usize = 1024;
+const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 /// Span identities retained per task for duplicate-export detection.
 ///
 /// An OTLP exporter may resend a batch it is unsure reached the collector, so a
@@ -145,14 +146,39 @@ impl Receiver {
         let worker = thread::Builder::new()
             .name("ahu-eval-otlp".into())
             .spawn(move || {
+                let mut connections: Vec<JoinHandle<()>> = Vec::new();
                 while !thread_stopping.load(Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok((stream, _)) => handle_connection(stream, &thread_state),
+                        Ok((mut stream, _)) => {
+                            let mut pending = Vec::with_capacity(connections.len());
+                            for connection in connections.drain(..) {
+                                if connection.is_finished() {
+                                    let _ = connection.join();
+                                } else {
+                                    pending.push(connection);
+                                }
+                            }
+                            connections = pending;
+                            if connections.len() >= MAX_CONCURRENT_CONNECTIONS {
+                                respond(&mut stream, 503, "receiver busy");
+                                continue;
+                            }
+                            let connection_state = Arc::clone(&thread_state);
+                            if let Ok(connection) = thread::Builder::new()
+                                .name("ahu-eval-otlp-client".into())
+                                .spawn(move || handle_connection(stream, &connection_state))
+                            {
+                                connections.push(connection);
+                            }
+                        }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(10));
                         }
                         Err(_) => break,
                     }
+                }
+                for connection in connections {
+                    let _ = connection.join();
                 }
             })?;
         Ok(Self {
@@ -294,6 +320,7 @@ fn respond(stream: &mut TcpStream, status: u16, body: &str) {
         404 => "Not Found",
         411 => "Length Required",
         413 => "Payload Too Large",
+        503 => "Service Unavailable",
         _ => "Error",
     };
     let _ = write!(
@@ -707,15 +734,16 @@ mod tests {
         };
         let body = request.encode_to_vec();
         let mut stream = TcpStream::connect(("127.0.0.1", endpoint.port().unwrap())).unwrap();
-        write!(
-            stream,
+        let mut request_bytes = format!(
             "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
-        ).unwrap();
-        stream.write_all(&body).unwrap();
+        )
+        .into_bytes();
+        request_bytes.extend_from_slice(&body);
+        stream.write_all(&request_bytes).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
-        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
         for _ in 0..100 {
             if receiver
                 .state
@@ -735,6 +763,48 @@ mod tests {
                 .unwrap()
                 .tasks
                 .contains_key(&("task-http".into(), 1))
+        );
+    }
+
+    #[test]
+    fn local_receiver_accepts_a_second_export_while_one_client_is_stalled() {
+        fn http_request(task_id: &str, span_id: u8) -> Vec<u8> {
+            let body = export(task_id, vec![session_span(span_id, 0)]).encode_to_vec();
+            let header = format!(
+                "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let mut request = header.into_bytes();
+            request.extend_from_slice(&body);
+            request
+        }
+
+        let receiver = Receiver::start().unwrap();
+        let endpoint = receiver.endpoint().parse::<url::Url>().unwrap();
+        let address = ("127.0.0.1", endpoint.port().unwrap());
+
+        let stalled_stream = TcpStream::connect(address).unwrap();
+        stalled_stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        thread::sleep(Duration::from_millis(30));
+
+        let fast_request = http_request("task-fast", 22);
+        let mut fast_stream = TcpStream::connect(address).unwrap();
+        fast_stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        fast_stream.write_all(&fast_request).unwrap();
+        let mut fast_response = String::new();
+        fast_stream.read_to_string(&mut fast_response).unwrap();
+        assert!(
+            fast_response.starts_with("HTTP/1.1 200 OK"),
+            "{fast_response}"
+        );
+        drop(stalled_stream);
+        assert_eq!(
+            receiver.task("task-fast", 1).unwrap().coverage(),
+            Coverage::CompleteSession
         );
     }
 }

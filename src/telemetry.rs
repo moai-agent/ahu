@@ -260,7 +260,7 @@ pub fn configure_child(
 /// Evaluation capture is an internal, loopback-only override. It lets a
 /// single eval run receive OTLP directly, without requiring a collector
 /// backend or changing the project's checked-in telemetry policy.
-fn eval_endpoint_override() -> Option<String> {
+pub(crate) fn eval_endpoint_override() -> Option<String> {
     let raw = std::env::var("AHU_EVAL_OTEL_ENDPOINT").ok()?;
     let endpoint = raw.parse::<url::Url>().ok()?;
     let local = matches!(endpoint.host_str(), Some("localhost" | "127.0.0.1" | "::1"));

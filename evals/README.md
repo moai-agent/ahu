@@ -37,7 +37,9 @@ starts the configured `ahu mcp serve` entry, or the MCP process exits without
 exporting its session summary, the tool status for that run is **unknown** — not
 zero calls and not a clean abstention. Missing observations stay missing; they
 are never turned into zeroes, and an unknown tool status is not a pass on a
-`forbidden` expectation.
+`forbidden` expectation. A timeout or cancellation force-stops the attempt's
+process group, so an MCP subprocess may not flush its final summary; those runs
+retain partial or absent telemetry and an unknown tool status.
 
 ### Telemetry, without a collector
 

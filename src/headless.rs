@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+const EVAL_OTEL_CHILD_DRAIN: Duration = Duration::from_millis(750);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Options {
     pub background: bool,
@@ -2203,6 +2205,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         &record.identity.harness,
         &spec.harness_version,
     )?;
+    let eval_otel_capture = crate::telemetry::eval_endpoint_override().is_some();
     if let Some(parent) = &spec.parent_task {
         let parent_dir = lookup(&repo, parent)?;
         if parent_dir.join("cancel.json").exists() {
@@ -2385,6 +2388,13 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             heartbeat = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+    // When a harness exits, its MCP subprocess sees stdio EOF and needs a
+    // moment to emit its session summary and flush OTLP before we kill any
+    // remaining descendants. Keep this grace limited to local eval capture;
+    // cancelled and timed-out attempts still follow their termination path.
+    if stop.is_none() && eval_otel_capture {
+        std::thread::sleep(EVAL_OTEL_CHILD_DRAIN);
     }
     durable_json(
         &attempt.join("admission-closed.json"),

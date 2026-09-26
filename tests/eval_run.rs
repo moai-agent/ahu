@@ -82,8 +82,13 @@ requests = [
     {'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}},
     {'jsonrpc':'2.0','id':3,'method':'tools/call','params':{'name':'ahu_agents_list','arguments':{}}},
 ]
-completed = subprocess.run([os.environ['AHU_BIN'], 'mcp', 'serve'], input=''.join(json.dumps(row)+'\n' for row in requests), text=True, capture_output=True, check=True)
-assert 'ahu_agents_list' in completed.stdout
+server = subprocess.Popen([os.environ['AHU_BIN'], 'mcp', 'serve'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+server.stdin.write(''.join(json.dumps(row)+'\n' for row in requests))
+server.stdin.flush()
+# Keep MCP stdin open past harness exit. The headless supervisor must allow the
+# server to see EOF and flush its session summary before cleaning descendants.
+subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(0.2)'], stdin=server.stdin, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+server.stdin.close()
 session = os.environ['AHU_PARENT_TASK']
 def emit(kind, part):
     print(json.dumps({'type':kind,'timestamp':1,'sessionID':session,'part':part}), flush=True)
@@ -263,7 +268,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     );
     let comparison: Value = serde_json::from_slice(&report.stdout).unwrap();
     assert_eq!(comparison["schema_version"], 2);
-    assert_eq!(comparison["groups"][0]["lineage"], "v2");
+    assert_eq!(comparison["groups"][0]["case_schema_version"], "2");
     assert_eq!(
         comparison["groups"][0]["fingerprint_completeness"],
         "complete"
