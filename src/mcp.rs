@@ -28,6 +28,10 @@ const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 pub const CONTEXT_HYGIENE_SKILL: &str = "context-hygiene";
 
+/// Skills `ahu mcp setup` writes into a user's repository, and the set doctor
+/// verifies. `.agents/skills/` in this repository also holds skills about
+/// building and releasing ahu itself; those are for ahu's own agents and are
+/// deliberately not shipped to other projects.
 pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
     (
         "discover-requirements",
@@ -40,14 +44,6 @@ pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
     (
         CONTEXT_HYGIENE_SKILL,
         include_str!("../.agents/skills/context-hygiene/SKILL.md"),
-    ),
-    (
-        "ahu-architecture",
-        include_str!("../.agents/skills/ahu-architecture/SKILL.md"),
-    ),
-    (
-        "release",
-        include_str!("../.agents/skills/release/SKILL.md"),
     ),
 ];
 
@@ -593,7 +589,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        BUNDLED_SKILLS, MAX_FRAME_BYTES, TOOL_NAMES, read_frame, skill_path,
+        BUNDLED_SKILLS, CONTEXT_HYGIENE_SKILL, MAX_FRAME_BYTES, TOOL_NAMES, read_frame, skill_path,
         tool_definitions_digest, tools, verify_bundled_skills,
     };
 
@@ -703,6 +699,22 @@ mod tests {
             assert!(!keys["description"].is_empty(), "empty description: {name}");
             assert!(body > 0, "empty skill body: {name}");
         }
+    }
+
+    #[test]
+    fn the_bundle_ships_only_skills_meant_for_other_repositories() {
+        // `ahu-architecture` and `release` stay in this repository's skill tree
+        // for ahu's own agents; setup and doctor must not carry them into a
+        // user's repository.
+        let bundled: Vec<&str> = BUNDLED_SKILLS.iter().map(|&(name, _)| name).collect();
+        assert_eq!(
+            bundled,
+            vec![
+                "discover-requirements",
+                "direct-agents",
+                CONTEXT_HYGIENE_SKILL
+            ]
+        );
     }
 
     #[test]

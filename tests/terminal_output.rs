@@ -77,7 +77,7 @@ fn doctor_reports_hygiene_telemetry_and_verified_skills_in_one_place() {
         "{text}"
     );
     assert!(
-        text.contains("skills       5/5 bundled skills verified; 0 missing, 0 changed"),
+        text.contains("skills       3/3 bundled skills verified; 0 missing, 0 changed"),
         "{text}"
     );
     assert!(
