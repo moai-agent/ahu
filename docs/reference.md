@@ -105,11 +105,17 @@ references or grant permission to retrieve provider history.
 ## MCP integration
 
 `ahu mcp serve` starts a local newline-delimited JSON request/response server on stdin and
-stdout. Its first tools are read-only and repository-scoped:
+stdout. Its repository inspection tools are read-only and scoped to the current checkout:
 `ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get`. The server reports
 canonical task IDs and verified `@name` handles while using ahu's existing
 repository ownership and task-resolution rules. Protocol handles describe
 inspection operations and do not replace ahu launch records or identities.
+
+The optional `ahu_typed_decide` tool forwards a bounded typed-decision request
+to the loopback HTTP endpoint named by `AHU_DECISION_URL`. It uses a
+model-neutral JSON contract, does not persist calls as ahu tasks, and is not
+available for remote endpoints. See [typed decisions](typed-decisions.md) for
+the request and response shapes and service limits.
 
 `ahu mcp setup` materializes the skill bundle shipped with this ahu build into
 `.agents/skills/`. OpenCode and Codex discover that canonical tree natively;

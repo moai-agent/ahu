@@ -13,6 +13,9 @@ use crate::util::{Error, Result};
 #[path = "mcp_tasks.rs"]
 mod task_protocol;
 
+#[path = "mcp_decisions.rs"]
+mod decisions;
+
 const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const TASKS_EXTENSION: &str = "io.modelcontextprotocol/tasks";
@@ -391,6 +394,7 @@ fn tools() -> Vec<Value> {
             "description":"Inspect one ahu task by canonical ID, unique prefix, or exact @name handle.",
             "inputSchema":{"type":"object","properties":{"task":{"type":"string"}},"required":["task"],"additionalProperties":false}
         }),
+        decisions::tool_definition(),
     ]
 }
 
@@ -399,13 +403,16 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
         .as_str()
         .ok_or_else(|| Error::new("tools/call requires a string params.name"))?;
     let selector = match name {
-        "ahu_agents_list" | "ahu_tasks_list" => false,
+        "ahu_agents_list" | "ahu_tasks_list" | "ahu_typed_decide" => false,
         "ahu_task_get" => true,
         "ahu_task_inspect" if inspection_adapter => true,
         _ => return Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
     };
     let empty = json!({});
     let arguments = params.get("arguments").unwrap_or(&empty);
+    if name == "ahu_typed_decide" {
+        return decisions::validate_arguments(arguments);
+    }
     let object = arguments
         .as_object()
         .ok_or_else(|| Error::new("arguments must be an object"))?;
@@ -445,6 +452,7 @@ fn call_response(repo: &Repo, id: &Value, params: &Value, modern: bool) -> Value
         "ahu_agents_list" => agents(repo),
         "ahu_tasks_list" => tasks(repo),
         "ahu_task_get" => task_get(repo, &arguments),
+        "ahu_typed_decide" => decisions::call(&arguments),
         _ => Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
     };
     match result {

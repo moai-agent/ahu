@@ -1,7 +1,118 @@
 mod common;
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::process::Stdio;
+
+#[test]
+fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
+    let repo = common::TestRepo::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1/decisions", listener.local_addr().unwrap());
+    let service = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut headers = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            headers.push_str(&line);
+        }
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap();
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(request["questions"]["route"]["type"], "choice");
+        let response = serde_json::json!({
+            "answers":{"route":{"value":"billing","confidence":0.91}},
+            "adapter":"fixture"
+        })
+        .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response.len(),
+            response
+        )
+        .unwrap();
+        request
+    });
+
+    let mut child = common::ahu()
+        .args(["mcp", "serve"])
+        .current_dir(repo.path())
+        .env("AHU_DECISION_URL", endpoint)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let meta = serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{
+            "extensions":{"io.modelcontextprotocol/tasks":{}}
+        }
+    });
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":meta}
+        })
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"ahu_typed_decide",
+                "arguments":{
+                    "state":{"body":"Please refund the duplicate charge."},
+                    "questions":{"route":{
+                        "type":"choice","instructions":"Which team handles this?",
+                        "options":{"billing":"Invoices and refunds","other":"Everything else"}
+                    }}
+                },
+                "_meta":{
+                    "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities":{
+                        "extensions":{"io.modelcontextprotocol/tasks":{}}
+                    }
+                }
+            }
+        })
+    )
+    .unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[1]["result"]["resultType"], "complete");
+    assert_eq!(
+        rows[1]["result"]["structuredContent"]["answers"]["route"]["value"],
+        "billing"
+    );
+    let request = service.join().unwrap();
+    assert_eq!(
+        request["state"]["body"],
+        "Please refund the duplicate charge."
+    );
+}
 
 #[test]
 fn stdio_server_negotiates_and_lists_repository_agents_and_tasks() {
@@ -32,7 +143,7 @@ fn stdio_server_negotiates_and_lists_repository_agents_and_tasks() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(rows[0]["result"]["serverInfo"]["name"], "ahu");
-    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 4);
     assert_eq!(
         rows[2]["result"]["structuredContent"]["agents"][0]["name"],
         "@reviewer"
@@ -308,7 +419,6 @@ fn tasks_extension_returns_a_durable_handle_and_rejects_legacy_calls() {
 }
 
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader};
 use std::time::{Duration, Instant};
 
 const EXT: &str = "io.modelcontextprotocol/tasks";
@@ -747,7 +857,7 @@ fn conformance_notifications_are_silent_and_do_not_select_modes_or_queue_work() 
 fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
     let repo = common::TestRepo::new();
     let mut client = Client::new(&repo, "alice");
-    for (params, count) in [(modern_without_tasks(json!({})), 3), (modern(json!({})), 4)] {
+    for (params, count) in [(modern_without_tasks(json!({})), 4), (modern(json!({})), 5)] {
         let result = client.call("tools/list", params)["result"].clone();
         assert_eq!(result["resultType"], "complete");
         assert_eq!(result["tools"].as_array().unwrap().len(), count);
@@ -780,7 +890,7 @@ fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
         assert!(result.get("resultType").is_none(), "{result}");
         assert!(result.get("taskId").is_none());
         if method == "tools/list" {
-            assert_eq!(result["tools"].as_array().unwrap().len(), 3);
+            assert_eq!(result["tools"].as_array().unwrap().len(), 4);
         }
     }
     assert_eq!(
@@ -913,7 +1023,7 @@ fn conformance_failed_probes_allow_legacy_and_adapter_requires_both_opt_ins() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["id"], 0);
     assert_eq!(rows[0]["result"]["resultType"], "complete");
-    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 4);
     assert_eq!(rows[1]["id"], -1);
     assert_eq!(rows[1]["error"]["code"], -32602);
     assert_eq!(rows[2]["id"], "");

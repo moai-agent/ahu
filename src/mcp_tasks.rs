@@ -104,6 +104,11 @@ impl Session {
             return Some(response(id, json!({"resultType":"complete","tools":tools})));
         }
         if method == "tools/call" && capable(params) {
+            // Decision calls are synchronous service requests, not durable
+            // repository inspection jobs. Keep their MCP result direct.
+            if params["name"].as_str() == Some("ahu_typed_decide") {
+                return None;
+            }
             self.enabled = true;
             return Some(match self.create(repo, params) {
                 Ok(task) => match task.save(repo) {

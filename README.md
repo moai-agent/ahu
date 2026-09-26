@@ -220,10 +220,13 @@ cmux, coordinator shortcuts place their workspace in the repository's group
 before starting. See
 [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
-The initial MCP integration is local and repository-scoped. `ahu mcp serve`
-provides read-only agent and task inspection over stdio; `ahu mcp setup` copies
-the bundled skills into `.agents/skills/` as ordinary files that the project can
-review and commit. The skill bundle ships with ahu for now.
+The MCP integration is local and repository-scoped. `ahu mcp serve` provides
+agent and task inspection over stdio, and can expose the optional
+`ahu_typed_decide` tool to a configured local decision service. `ahu mcp setup`
+copies the bundled skills into `.agents/skills/` as ordinary files that the
+project can review and commit. The skill bundle ships with ahu for now. See the
+[typed-decision experiment](docs/typed-decisions.md) for its model-neutral
+service contract and limitations.
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON
 contracts, prompt transport, hooks, state, and delegation boundaries.
