@@ -35,8 +35,10 @@ pub fn repo_from_cwd() -> Result<Repo> {
     git::discover(&cwd).map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))
 }
 
-/// Open a coordinating session in the invoking terminal. Repository discovery
-/// registers executable exclusions before resolving the harness, just as for agents.
+/// Open a coordinating Codex session in the invoking terminal, on the project's
+/// top-ranked Codex model, with approval prompts and the sandbox bypassed.
+/// Repository discovery registers executable exclusions before resolving the
+/// harness, just as for agents.
 pub fn codex(repo: &Repo) -> Result<i32> {
     coordinating_session(
         repo,
@@ -46,7 +48,8 @@ pub fn codex(repo: &Repo) -> Result<i32> {
     )
 }
 
-/// Open Claude using its configured model with permission checks bypassed.
+/// Open Claude Code on the project's top-ranked Claude Code model with
+/// permission checks bypassed.
 pub fn claude(repo: &Repo) -> Result<i32> {
     coordinating_session(
         repo,
@@ -56,14 +59,18 @@ pub fn claude(repo: &Repo) -> Result<i32> {
     )
 }
 
-/// Open OpenCode using its configured model and permission behavior.
+/// Open OpenCode on the project's top-ranked OpenCode model with `--auto`, which
+/// auto-approves every permission OpenCode does not explicitly deny.
 ///
-/// This shortcut retains native permission settings and plugin loading.
+/// `--auto` is OpenCode's only permission-widening flag, so it is how this
+/// shortcut matches the other three. Permissions set to `deny` in OpenCode's own
+/// configuration still apply; ahu passes no `--pure`, so the user's plugins load.
 pub fn opencode(repo: &Repo) -> Result<i32> {
-    coordinating_session(repo, "opencode", "OpenCode", &[])
+    coordinating_session(repo, "opencode", "OpenCode", &["--auto"])
 }
 
-/// Open the Antigravity CLI in its unattended (YOLO) permission mode.
+/// Open the Antigravity CLI on the project's top-ranked Antigravity model, in
+/// its unattended (YOLO) permission mode.
 pub fn antigravity(repo: &Repo) -> Result<i32> {
     coordinating_session(
         repo,
@@ -73,17 +80,38 @@ pub fn antigravity(repo: &Repo) -> Result<i32> {
     )
 }
 
-fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) -> Result<i32> {
+/// Open a coordinating session: the project's top-ranked model for the harness,
+/// plus the shortcut's own approval-bypass flags, in the invoking terminal.
+///
+/// `bypass` is the approval widening the shortcut owns. The model comes from the
+/// project's `model_rankings`, through the same mapping the headless adapters use
+/// for the model option, so a coordinator and an agent on one harness cannot end
+/// up passing different flags for the same thing. A harness with no ranked model
+/// launches without a model option rather than on one ahu invented.
+fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]) -> Result<i32> {
     let harness = match program {
         "claude" => "claude-code",
         "agy" => "antigravity",
         other => other,
     };
     let loaded = config::load(&repo.root)?;
-    let model = loaded
+    let ranked = loaded
         .as_ref()
-        .and_then(|loaded| selection::ranked_models(loaded, harness).into_iter().next())
-        .unwrap_or_else(|| "unconfigured".to_string());
+        .and_then(|loaded| selection::ranked_models(loaded, harness).into_iter().next());
+    // Telemetry and cmux metadata still need a value for a harness with no
+    // ranked model; the argument list gets no model option in that case.
+    let model = ranked.clone().unwrap_or_else(|| "unconfigured".to_string());
+    let mut args: Vec<String> = match &ranked {
+        Some(ranked) => harness::model_args(harness, ranked)?,
+        None => Vec::new(),
+    };
+    args.extend(bypass.iter().map(|flag| flag.to_string()));
+    let model_note = ranked.is_none().then(|| {
+        format!(
+            "no model is ranked for {harness} in this project's configuration, so ahu passes no \
+             model option and {label} opens on whichever model it is configured with."
+        )
+    });
     if let Some(loaded) = &loaded {
         crate::telemetry::initialize(&loaded.config.telemetry)?;
     }
@@ -94,18 +122,21 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
     crate::state::ensure_checkout_state(&repo.root)?;
-    let placement = launch::group_coordinator(repo, &executable, label, harness, &model, args)?;
+    let placement = launch::group_coordinator(repo, &executable, label, harness, &model, &args)?;
     for note in placement.notes {
         eprintln!("ahu: {}", display_safe(&note));
+    }
+    if let Some(note) = &model_note {
+        eprintln!("ahu: {}", display_safe(note));
     }
     if placement.opened_workspace {
         return Ok(0);
     }
-    if !args.is_empty() {
-        eprintln!("{label} coordinator: {}", args.join(" "));
-    }
+    // The whole argument list, model included, so the line names exactly what
+    // was launched rather than only the approval flags.
+    eprintln!("{label} coordinator: {}", display_safe(&args.join(" ")));
     let mut command = std::process::Command::new(executable);
-    command.args(args).env("AHU_BIN", std::env::current_exe()?);
+    command.args(&args).env("AHU_BIN", std::env::current_exe()?);
     if let Some(loaded) = &loaded {
         crate::telemetry::configure_child(
             &mut command,

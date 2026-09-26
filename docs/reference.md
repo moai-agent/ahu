@@ -1107,9 +1107,11 @@ agent in a task worktree:
 ahu opencode
 ```
 
-That session inherits the terminal and the working directory, and ahu passes it
-no arguments at all: OpenCode's permission actions are its own configuration's
-to decide, and the only flag that would change them widens them.
+That session inherits the terminal and the working directory. ahu passes it
+`--model <provider>/<model>`, the project's top-ranked OpenCode model, and
+`--auto`, which approves every permission OpenCode does not explicitly deny,
+without asking. Permissions set to `deny` in OpenCode's own configuration still
+apply; `--auto` cannot widen past them.
 
 ### Troubleshooting
 
@@ -1587,11 +1589,31 @@ ahu's delegation contract travel as prompt text—delivery, not enforcement.
 
 ### Coordinator sessions
 
-`ahu codex` opens Codex in the invoking checkout with
-`--dangerously-bypass-approvals-and-sandbox`. `ahu claude` opens Claude Code with
-`--dangerously-skip-permissions`. Each prints its flag before starting and keeps
-the harness's configured model. These shortcuts explicitly request the harness
-permission bypass; any outer sandbox still applies.
+All four coordinator shortcuts open the same shape of session: the harness's own
+approval bypass, plus this project's top-ranked model for that harness, both
+passed explicitly on the command line.
+
+| Shortcut | Harness | Arguments ahu passes |
+| --- | --- | --- |
+| `ahu claude` | `claude-code` | `--model <m> --dangerously-skip-permissions` |
+| `ahu codex` | `codex` | `-m <m> --dangerously-bypass-approvals-and-sandbox` |
+| `ahu agy` | `antigravity` | `--model <m> --dangerously-skip-permissions` |
+| `ahu opencode` | `opencode` | `--model <provider>/<model> --auto` |
+
+`<m>` is the first entry for that harness in the project configuration's
+`[model_rankings]`. The model option comes from the same mapping the headless
+adapters use, so a coordinator and a registered agent on one harness cannot end
+up naming the model with different flags. Each shortcut prints its whole argument
+list, model included, before starting, so the disclosed line is exactly what was
+launched.
+
+A harness with no ranked model launches with **no model option at all**: ahu
+prints a note that the harness default is in use and starts the session on
+whichever model the harness is configured with. ahu does not substitute a model
+the project never agreed to.
+
+These shortcuts explicitly request the harness permission bypass; any outer
+sandbox still applies.
 
 Coordinator shortcuts accept no additional arguments, preserve the invoking
 directory and terminal, and set `AHU_BIN`. Inside cmux they place the invoking
@@ -1605,8 +1627,10 @@ Registered child agents retain their own manifest permissions, harness, and
 model. A coordinator's bypass does not alter a child's mapping or replace the
 child's required approval-widening flag or headless host grant.
 
-`ahu agy` opens Antigravity with `--dangerously-skip-permissions`, its unattended
-mode, while retaining the configured model. `ahu opencode` opens OpenCode
-without arguments, retaining native model and permission settings. OpenCode's
-plugins retain their native loading behavior; ahu passes neither `--auto` nor
-`--pure` here.
+`--dangerously-skip-permissions` is the Antigravity CLI's unattended mode.
+`--auto` is OpenCode's only permission-widening flag and the only way an
+`ahu opencode` session can match the other three: it approves every permission
+OpenCode does not **explicitly deny**, without asking. Permissions set to `deny` in
+OpenCode's own configuration or agent frontmatter still apply, and ahu cannot
+widen past them. OpenCode's plugins retain their native loading behavior; ahu
+passes no `--pure` here.

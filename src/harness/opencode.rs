@@ -61,35 +61,7 @@ impl Adapter for OpenCode {
     }
 
     fn launch_command(&self, request: &LaunchRequest<'_>) -> Result<LaunchCommand> {
-        if request.model.is_empty() {
-            bail!("the OpenCode adapter requires an exact model identifier.");
-        }
-        if request.model.starts_with('-') {
-            bail!(
-                "model identifier {:?} would be read as an option by the OpenCode CLI.",
-                request.model
-            );
-        }
-        // OpenCode documents `--model` as `provider/model`. An unqualified
-        // identifier is a silent-misroute risk: which provider it would reach
-        // depends on the user's configuration, and ahu will not guess one.
-        let qualified = request
-            .model
-            .split_once('/')
-            .filter(|(provider, model)| {
-                !provider.is_empty() && !model.is_empty() && !model.contains('/')
-            })
-            .is_some();
-        if !qualified {
-            bail!(
-                "model identifier {:?} is not provider-qualified. OpenCode's --model takes \
-                 <provider>/<model>, where the provider half names one of the providers \
-                 OpenCode's own configuration defines. ahu will not guess which provider an \
-                 unqualified identifier means; name it in the manifest.",
-                request.model
-            );
-        }
-        let mut args = vec!["--model".to_string(), request.model.to_string()];
+        let mut args = super::model_args(self.id(), request.model)?;
         // Verified against `opencode --help`: --auto auto-approves every
         // permission that is not explicitly denied. There is no accept-edits
         // equivalent; permission actions are static configuration.
