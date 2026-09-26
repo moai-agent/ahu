@@ -77,14 +77,18 @@ Commands:
   mcp serve              Serve read-only ahu inspection tools over stdio MCP
   mcp setup              Materialize ahu's bundled skills into this repository
   doctor                Check repository, configuration, harness, and cmux
-  agy                   Open the Antigravity CLI here using its configured model
-                        in YOLO mode (--dangerously-skip-permissions)
-  claude                Open Claude here with permission checks bypassed
-                        (uses Claude's configured model)
-  codex                 Open Codex here with approval prompts and sandbox bypassed
-                        (uses Codex's configured model)
-  opencode              Open OpenCode here using its configured model and
-                        permissions (ahu passes no --auto and no --pure)
+  agy                   Open the Antigravity CLI here on this project's
+                        top-ranked Antigravity model, in YOLO mode
+                        (--dangerously-skip-permissions)
+  claude                Open Claude here on this project's top-ranked
+                        Claude Code model, with permission checks bypassed
+                        (--dangerously-skip-permissions)
+  codex                 Open Codex here on this project's top-ranked Codex
+                        model, with approval prompts and the sandbox bypassed
+                        (--dangerously-bypass-approvals-and-sandbox)
+  opencode              Open OpenCode here on this project's top-ranked OpenCode
+                        model, auto-approving every permission it does not deny
+                        (--auto; ahu passes no --pure)
   run-task              Internal: run a prepared task (used by cmux)
 
 Task references:
