@@ -13,17 +13,31 @@ use tempfile::TempDir;
 fn fixture_case(path: &Path) {
     std::fs::write(
         path,
-        r#"{
-          "schema_version": 1,
-          "id": "eval-smoke-001",
-          "corpus_version": "1.0.0",
-          "purpose": "synthetic routing smoke test",
-          "state": {"subject":"duplicate charge"},
-          "questions": {"route":{"type":"choice","instructions":"Select the team","options":{"billing":"Payments"}}},
-          "expected": {"route":"billing"},
-          "rubric": {"route":"Routes the duplicate charge to payments"},
-          "scoring": {"route":1.0,"exact_match_pass_threshold":1.0}
-        }"#,
+        r#"---
+okf_version: "0.2"
+type: ahu:eval-case
+schema_version: 1
+id: eval-smoke-001
+corpus_version: "1.0.0"
+state:
+  subject: duplicate charge
+questions:
+  route:
+    type: choice
+    instructions: Select the team
+    options:
+      billing: Payments
+expected:
+  route: billing
+rubric:
+  route: Routes the duplicate charge to payments
+scoring:
+  route: 1.0
+  exact_match_pass_threshold: 1.0
+---
+
+Synthetic routing smoke test.
+"#,
     )
     .unwrap();
 }
@@ -72,7 +86,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     )
     .unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let case = external.path().join("case.json");
+    let case = external.path().join("case.md");
     fixture_case(&case);
     let records = external.path().join("runs.jsonl");
     let home = external.path().canonicalize().unwrap().join("home");

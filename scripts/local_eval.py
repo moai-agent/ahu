@@ -10,6 +10,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import yaml
+except ImportError:  # The Rust runner has no Python dependency.
+    yaml = None
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -17,6 +21,30 @@ REPO = Path(__file__).resolve().parents[1]
 def read_json(path: Path):
     with path.open(encoding="utf-8") as stream:
         return json.load(stream)
+
+
+def read_case(path: Path):
+    if yaml is None:
+        raise ValueError(
+            "reading OKF Markdown cases with this helper requires PyYAML; "
+            "install requirements-evals.txt"
+        )
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        raise ValueError("evaluation case must be OKF Markdown with YAML front matter")
+    frontmatter_text, separator, body = text[4:].partition("\n---\n")
+    if not separator:
+        raise ValueError("evaluation case is missing its closing front matter delimiter")
+    frontmatter = yaml.safe_load(frontmatter_text)
+    if (
+        not isinstance(frontmatter, dict)
+        or frontmatter.get("okf_version") != "0.2"
+        or frontmatter.get("type") != "ahu:eval-case"
+    ):
+        raise ValueError("evaluation case must declare okf_version 0.2 and type ahu:eval-case")
+    if not body.strip():
+        raise ValueError("evaluation case Markdown body must describe the case")
+    return frontmatter
 
 
 def score(case: dict, answer: dict, result: dict, decision_calls: int | None, elapsed_ms: int | None) -> dict:
@@ -58,7 +86,7 @@ def record(args) -> int:
     output = args.output.expanduser().resolve()
     if output == REPO or REPO in output.parents:
         raise ValueError("run records must be stored outside the repository")
-    case = read_json(args.case)
+    case = read_case(args.case)
     answer = read_json(args.answer)
     result = read_json(args.result)
     if not isinstance(answer, dict):
@@ -164,7 +192,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     add = commands.add_parser("record", help="score one ahu result and append a compact external record")
-    add.add_argument("--case", type=Path, default=REPO / "evals/cases/decision-routing.json")
+    add.add_argument("--case", type=Path, default=REPO / "evals/cases/decision-routing.md")
     add.add_argument("--answer", type=Path, required=True, help="synthetic answer artifact produced by the agent")
     add.add_argument("--result", type=Path, required=True, help="JSON from ahu result --output json")
     add.add_argument("--model", required=True)

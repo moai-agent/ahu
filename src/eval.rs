@@ -648,10 +648,13 @@ pub fn render_json(report: &Report) -> Result<String> {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EvalCase {
+    okf_version: String,
+    #[serde(rename = "type")]
+    kind: String,
     schema_version: u32,
     id: String,
     corpus_version: String,
-    #[serde(default)]
+    #[serde(skip)]
     purpose: String,
     state: serde_json::Value,
     questions: serde_json::Map<String, serde_json::Value>,
@@ -661,14 +664,47 @@ struct EvalCase {
     rubric: Option<BTreeMap<String, String>>,
 }
 
+fn split_eval_case(bytes: &[u8]) -> Result<(&[u8], &str)> {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        Error::new("evaluation case is not UTF-8 Markdown").with_kind(ErrorKind::Usage)
+    })?;
+    let Some(rest) = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))
+    else {
+        bail!(kind: ErrorKind::Usage, "evaluation case must begin with YAML front matter delimited by --- lines");
+    };
+    let mut offset = 0;
+    let mut closing = None;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            closing = Some((offset, line.len()));
+            break;
+        }
+        offset += line.len();
+    }
+    let Some((front_len, delimiter_len)) = closing else {
+        bail!(kind: ErrorKind::Usage, "evaluation case YAML front matter is missing its closing --- delimiter");
+    };
+    let frontmatter = &rest.as_bytes()[..front_len];
+    let body = rest[front_len + delimiter_len..].trim();
+    if body.is_empty() {
+        bail!(kind: ErrorKind::Usage, "evaluation case Markdown body must describe the case");
+    }
+    Ok((frontmatter, body))
+}
+
 impl EvalCase {
     fn validate(&self) -> Result<()> {
-        if self.schema_version != 1
+        if self.okf_version != crate::agent::OKF_VERSION
+            || self.kind != "ahu:eval-case"
+            || self.schema_version != 1
             || !safe_eval_identifier(&self.id)
             || !safe_eval_identifier(&self.corpus_version)
             || self.expected.is_empty()
             || self.expected.keys().ne(self.questions.keys())
-            || self.purpose.len() > 2048
+            || self.purpose.is_empty()
+            || self.purpose.len() > 8192
             || !simple_json(&self.state, 0)
         {
             bail!(kind: ErrorKind::Usage, "evaluation case schema, identity, questions, or expected answer is invalid");
@@ -754,9 +790,12 @@ pub fn run(
     if case_bytes.len() > 256 * 1024 {
         bail!(kind: ErrorKind::Usage, "evaluation case exceeds the 256 KiB limit");
     }
-    let case: EvalCase = serde_json::from_slice(&case_bytes).map_err(|_| {
-        Error::new("evaluation case is not a valid supported JSON case").with_kind(ErrorKind::Usage)
+    let (frontmatter, purpose) = split_eval_case(&case_bytes)?;
+    let mut case: EvalCase = yaml_serde::from_slice(frontmatter).map_err(|_| {
+        Error::new("evaluation case front matter is not valid supported YAML")
+            .with_kind(ErrorKind::Usage)
     })?;
+    case.purpose = purpose.to_owned();
     case.validate()?;
     if evaluator_name.is_some() && case.rubric.is_none() {
         bail!(kind: ErrorKind::Usage, "--evaluator requires a case `rubric` object with one criterion per scored answer field");
@@ -1473,7 +1512,9 @@ mod tests {
     }
 
     fn evaluation_case() -> EvalCase {
-        serde_json::from_value(serde_json::json!({
+        let mut case: EvalCase = serde_json::from_value(serde_json::json!({
+            "okf_version":"0.2",
+            "type":"ahu:eval-case",
             "schema_version":1,
             "id":"routing-1",
             "corpus_version":"1.0.0",
@@ -1482,7 +1523,40 @@ mod tests {
             "expected":{"route":"billing"},
             "rubric":{"route":"Route the duplicate charge to payments"},
             "scoring":{"route":1.0,"exact_match_pass_threshold":1.0}
-        })).unwrap()
+        }))
+        .unwrap();
+        case.purpose = "synthetic routing test".to_owned();
+        case
+    }
+
+    #[test]
+    fn okf_markdown_case_loads_yaml_metadata_and_uses_markdown_body_as_purpose() {
+        let source = b"---\nokf_version: '0.2'\ntype: ahu:eval-case\nschema_version: 1\nid: routing-1\ncorpus_version: '1.0.0'\nstate: {subject: duplicate charge}\nquestions: {route: {type: choice}}\nexpected: {route: billing}\nrubric: {route: routes to billing}\nscoring: {route: 1.0, exact_match_pass_threshold: 1.0}\n---\n\nA duplicate-charge routing case.\n";
+        let (frontmatter, body) = split_eval_case(source).unwrap();
+        let mut case: EvalCase = yaml_serde::from_slice(frontmatter).unwrap();
+        case.purpose = body.to_owned();
+        case.validate().unwrap();
+        assert_eq!(case.kind, "ahu:eval-case");
+        assert_eq!(case.purpose, "A duplicate-charge routing case.");
+
+        for invalid in [
+            b"{\"id\":\"json-is-not-okf\"}".as_slice(),
+            b"---\nokf_version: '0.2'\ntype: ahu:wrong\n---\nbody",
+            b"---\nokf_version: '0.2'\ntype: ahu:eval-case\n",
+            b"---\nokf_version: '0.2'\ntype: ahu:eval-case\n---\n  ",
+        ] {
+            assert!(
+                split_eval_case(invalid).is_err() || {
+                    let (frontmatter, body) = split_eval_case(invalid).unwrap();
+                    !yaml_serde::from_slice::<EvalCase>(frontmatter)
+                        .ok()
+                        .is_some_and(|mut case| {
+                            case.purpose = body.to_owned();
+                            case.validate().is_ok()
+                        })
+                }
+            );
+        }
     }
 
     #[test]

@@ -133,8 +133,8 @@ eval report options:
                         evaluator
 
 eval run options:
-  --case <path>         Versioned JSON evaluation case; answer values stay hidden
-                        from the candidate
+  --case <path>         OKF Markdown case with YAML front matter; expected
+                        answer values stay hidden from the candidate
   --agent @name         Registered candidate agent (required)
   --evaluator @name     Optional separate registered evaluator agent
   --records <path>      External JSONL destination; prompts and artifacts are

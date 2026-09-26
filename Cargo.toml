@@ -27,6 +27,7 @@ opentelemetry-proto = { version = "0.33", default-features = false, features = [
 prost = "0.14"
 url = "2"
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json"] }
+yaml_serde = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

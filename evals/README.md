@@ -10,7 +10,8 @@ ahu evaluator agent. It validates answer and score artifacts, writes compact
 JSONL records, and captures ahu OpenTelemetry spans through a temporary local
 receiver. `ahu eval report` compares those records. The lower-level
 `scripts/local_eval.py record` and `trend` commands remain available for manual
-or older workflows.
+or older workflows. The manual recorder reads case front matter with PyYAML;
+install its dependency with `python3 -m pip install -r requirements-evals.txt`.
 
 ## What is measured
 
@@ -62,7 +63,7 @@ pointing at the case file in the ahu checkout:
 
 ```sh
 ahu --repo "$EVAL_WORKSPACE" eval run \
-  --case "$AHU_CHECKOUT/evals/cases/decision-routing.json" \
+  --case "$AHU_CHECKOUT/evals/cases/decision-routing.md" \
   --agent @triage --evaluator @judge --runs 5 \
   --records "$EVAL_HOME/runs.jsonl" --output json
 ```
@@ -81,11 +82,15 @@ run fully local: an Ollama model name must have local weights and its provider
 endpoint must be localhost. `ahu` pins the manifest's harness and model but
 does not prove that a provider alias routes only to local inference.
 
-The initial case is `cases/decision-routing.json`. The expected decision is
-known, so its score is deterministic and can be compared over time. Add cases
-that probe separate skills and decision types rather than making one large
-benchmark prompt. Version changes to cases or scoring rules explicitly; do not
-silently change the baseline.
+The initial case is `cases/decision-routing.md`. Cases use OKF Markdown: YAML
+front matter declares `okf_version: "0.2"` and `type: ahu:eval-case`, followed
+by case identity, questions, expected values, scoring, and an optional evaluator
+rubric. The Markdown body describes the scenario and is shown to the candidate;
+expected values and rubric remain front-matter metadata and are withheld. The
+expected decision is known, so its score is deterministic and can be compared
+over time. Add cases that probe separate skills and decision types rather than
+making one large benchmark prompt. Version changes to cases or scoring rules
+explicitly; do not silently change the baseline.
 
 ## Longitudinal record
 
