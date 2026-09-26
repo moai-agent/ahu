@@ -24,6 +24,7 @@ pub mod cmux;
 pub mod commands;
 pub mod config;
 pub mod drift;
+pub mod eval;
 pub mod explain;
 pub mod git;
 pub mod harness;

@@ -192,6 +192,17 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 commands::knowledge_lint(console, &repo, output_json)
             })
         }
+        // The records are outside the checkout by policy, but the repository
+        // still has to be located: locating it is what makes that check real.
+        Command::EvalReport {
+            records,
+            output_json,
+        } => {
+            let repo = commands::repo_from_cwd()?;
+            commands::with_stdio_output(output_json, |console| {
+                commands::eval_report(console, &repo, &records, output_json)
+            })
+        }
         Command::CmuxStatus { output_json } => {
             let cwd = std::env::current_dir()?;
             let root = commands::repo_from_cwd().map(|r| r.root).unwrap_or(cwd);
@@ -271,6 +282,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Antigravity
                 | Command::Launch { .. }
                 | Command::KnowledgeLint { .. }
+                | Command::EvalReport { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })
         }

@@ -1888,6 +1888,26 @@ pub fn knowledge_lint(console: &mut Console<'_>, repo: &Repo, json: bool) -> Res
     ))
 }
 
+/// `ahu eval report --records <path>` — compare local evaluation runs.
+///
+/// Read-only, and only outside the checkout: the records are run evidence, and
+/// `evals/README.md` keeps that in a user-owned directory. Like every other
+/// `--output json` command, the machine contract owns stdout and the readable
+/// report goes to stderr when JSON was asked for.
+pub fn eval_report(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    records: &std::path::Path,
+    json: bool,
+) -> Result<i32> {
+    let report = crate::eval::report(repo, records)?;
+    if json {
+        println!("{}", crate::eval::render_json(&report)?);
+    }
+    console.say(&crate::eval::render(&report))?;
+    Ok(0)
+}
+
 /// `ahu cancel <task-id>` — request cancellation of a running task.
 ///
 /// A headless task is delegated to the headless supervisor's cancel flow

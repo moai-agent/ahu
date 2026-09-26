@@ -45,6 +45,9 @@ Commands:
   knowledge lint [--output json]
                         Check the OKF bundles named in [knowledge] with okf.
                         Reads only; nothing is fetched, indexed, or rewritten
+  eval report --records <path> [--output json]
+                        Compare local evaluation runs from an external JSONL
+                        record file. Reads only, and only outside this checkout
   tasks                 List tasks launched from this repository
   task <task-id> [--output json]
                         Inspect a task's recorded session state and locations
@@ -112,6 +115,19 @@ knowledge lint options:
                         stderr. Bundles come from [knowledge] in the project
                         configuration; knowledge.fail_on_warnings decides whether
                         warnings fail the check. Errors always do.
+
+eval report options:
+  --records <path>      JSONL run records written by scripts/local_eval.py.
+                        Required, and refused when it resolves inside this
+                        repository: run evidence stays in a user-owned directory
+  --output json         Emit a versioned JSON comparison on stdout, the readable
+                        report on stderr. Rows are grouped by case and corpus
+                        version, stage, agent/version, evaluator/version, model,
+                        harness/version, ahu revision, and skill digest. Token,
+                        timing, and decision-call figures are reported as
+                        coverage counts, so a missing observation is not a zero.
+                        `eval report` reads records; it runs no candidate and no
+                        evaluator
 
 launcher options:
   --no-focus            Do not switch to the new session after launching
@@ -218,6 +234,10 @@ pub enum Command {
         agent: Option<String>,
     },
     KnowledgeLint {
+        output_json: bool,
+    },
+    EvalReport {
+        records: PathBuf,
         output_json: bool,
     },
     Tasks,
@@ -490,6 +510,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             agent: optional_agent(&args[1..])?,
         }),
         "knowledge" => parse_knowledge(&args[1..]),
+        "eval" => parse_eval(&args[1..]),
         "launch" => parse_launch_backend(&args[1..], stdin_available),
         direct if direct.starts_with('@') => {
             if args.len() == 1 && !stdin_available {
@@ -559,6 +580,49 @@ fn parse_knowledge(rest: &[String]) -> Result<Command> {
         index += 1;
     }
     Ok(Command::KnowledgeLint { output_json })
+}
+
+/// `eval` takes a subcommand so the orchestration commands sketched in
+/// `evals/README.md` can be added without changing this one's shape.
+fn parse_eval(rest: &[String]) -> Result<Command> {
+    match rest.first().map(String::as_str) {
+        None => bail!("`ahu eval` needs a subcommand; the only one is `report`."),
+        Some("report") => {}
+        Some("run") => bail!(
+            "`ahu eval run` is not implemented: ahu does not orchestrate candidate or evaluator \
+             agents yet. `ahu eval report --records <path>` compares records that \
+             scripts/local_eval.py already wrote."
+        ),
+        Some(other) => bail!("unknown subcommand {other:?} for `ahu eval`; expected `report`."),
+    }
+    let mut records = None;
+    let mut output_json = false;
+    let mut index = 1;
+    while index < rest.len() {
+        match rest[index].as_str() {
+            "--records" if records.is_none() => {
+                records = Some(PathBuf::from(value_for("--records", rest, &mut index)?));
+            }
+            "--output" if !output_json => {
+                let value = value_for("--output", rest, &mut index)?;
+                if value != "json" {
+                    bail!("unsupported --output {value:?}; expected json.");
+                }
+                output_json = true;
+            }
+            other => bail!("unknown or repeated option {other:?} for `ahu eval report`."),
+        }
+        index += 1;
+    }
+    let records = records.ok_or_else(|| {
+        crate::util::Error::new(
+            "`ahu eval report` needs --records <path> naming a JSONL run record file outside this repository.",
+        )
+    })?;
+    Ok(Command::EvalReport {
+        records,
+        output_json,
+    })
 }
 
 fn parse_onboard(rest: &[String]) -> Result<Command> {
