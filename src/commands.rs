@@ -116,6 +116,7 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
             None,
             selection::installed_version(program).as_deref(),
             None,
+            None,
         );
     }
     // Inherit the terminal and cwd. Replacing ahu gives the harness terminal signals

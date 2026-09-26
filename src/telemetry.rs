@@ -5,6 +5,7 @@
 //! never receive these variables.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,12 @@ use crate::util::{Error, Result};
 pub mod private;
 
 static PROVIDER: OnceLock<Mutex<Option<SdkTracerProvider>>> = OnceLock::new();
+static MCP_REQUESTS: AtomicU64 = AtomicU64::new(0);
+static MCP_TOOL_CALLS: AtomicU64 = AtomicU64::new(0);
+static MCP_DECISION_CALLS: AtomicU64 = AtomicU64::new(0);
+static MCP_TOOL_ERRORS: AtomicU64 = AtomicU64::new(0);
+static MCP_LIST_REQUESTS: AtomicU64 = AtomicU64::new(0);
+static MCP_TRANSPORT_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 fn provider_slot() -> &'static Mutex<Option<SdkTracerProvider>> {
     PROVIDER.get_or_init(|| Mutex::new(None))
@@ -59,6 +66,15 @@ pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
 
 /// Enable ahu's own spans when project telemetry is enabled.
 pub fn initialize(config: &TelemetryConfig) -> Result<()> {
+    initialize_named(config, "ahu")
+}
+
+/// Initialize the independently launched stdio MCP server as its own service.
+pub(crate) fn initialize_mcp(config: &TelemetryConfig) -> Result<()> {
+    initialize_named(config, "ahu-mcp")
+}
+
+fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Result<()> {
     if !config.enabled
         || provider_slot()
             .lock()
@@ -85,10 +101,13 @@ pub fn initialize(config: &TelemetryConfig) -> Result<()> {
             return Ok(());
         }
     };
-    let resource = Resource::builder()
-        .with_service_name("ahu")
-        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
-        .build();
+    let mut resource = Resource::builder()
+        .with_service_name(service_name)
+        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")));
+    for (key, value) in ahu_resource_attributes() {
+        resource = resource.with_attribute(KeyValue::new(key, value));
+    }
+    let resource = resource.build();
     let provider = SdkTracerProvider::builder()
         .with_resource(resource)
         .with_batch_exporter(exporter)
@@ -96,6 +115,92 @@ pub fn initialize(config: &TelemetryConfig) -> Result<()> {
     global::set_tracer_provider(provider.clone());
     *provider_slot().lock().expect("telemetry mutex poisoned") = Some(provider);
     Ok(())
+}
+
+/// Read only ahu's bounded identity attributes from the launch environment.
+/// Other inherited OTEL attributes may contain private values and are excluded.
+fn ahu_resource_attributes() -> Vec<(&'static str, String)> {
+    std::env::var("OTEL_RESOURCE_ATTRIBUTES")
+        .ok()
+        .map(|raw| parse_ahu_resource_attributes(&raw))
+        .unwrap_or_default()
+}
+
+fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
+    const ALLOWED: &[&str] = &[
+        "ahu.agent.name",
+        "ahu.agent.version",
+        "ahu.eval.case_id",
+        "ahu.eval.corpus_version",
+        "ahu.eval.run_id",
+        "ahu.eval.stage",
+        "ahu.harness",
+        "ahu.harness.version",
+        "ahu.model",
+        "ahu.task.id",
+        "ahu.task.attempt",
+        "ahu.version",
+    ];
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pair = String::new();
+    let mut escaped = false;
+    let mut pairs = Vec::new();
+    for ch in raw.chars() {
+        if escaped {
+            pair.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == ',' {
+            pairs.push(std::mem::take(&mut pair));
+        } else {
+            pair.push(ch);
+        }
+    }
+    if escaped {
+        pair.push('\\');
+    }
+    pairs.push(pair);
+    for pair in pairs {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if ALLOWED.contains(&key) && safe_resource_value(key, value) && seen.insert(key.to_string())
+        {
+            out.push((
+                ALLOWED
+                    .iter()
+                    .copied()
+                    .find(|allowed| *allowed == key)
+                    .unwrap(),
+                value.to_string(),
+            ));
+        }
+    }
+    out
+}
+
+fn safe_resource_value(key: &str, value: &str) -> bool {
+    if value.is_empty() || value.len() > 128 || !value.is_ascii() {
+        return false;
+    }
+    if key == "ahu.task.attempt" {
+        return value.bytes().all(|byte| byte.is_ascii_digit());
+    }
+    if key.starts_with("ahu.eval.") {
+        return safe_eval_identifier(value);
+    }
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte))
+}
+
+fn safe_eval_identifier(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
 /// Apply project telemetry only to a child process ahu is about to start.
@@ -109,6 +214,7 @@ pub fn configure_child(
     agent_version: Option<&str>,
     harness_version: Option<&str>,
     task_id: Option<&str>,
+    attempt: Option<u32>,
 ) {
     if !config.enabled {
         return;
@@ -140,11 +246,13 @@ pub fn configure_child(
                 agent_version,
                 harness_version,
                 task_id,
+                attempt,
                 std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
             ),
         );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resource_attributes(
     agent: &str,
     harness: &str,
@@ -152,6 +260,7 @@ fn resource_attributes(
     agent_version: Option<&str>,
     harness_version: Option<&str>,
     task_id: Option<&str>,
+    attempt: Option<u32>,
     inherited: Option<&str>,
 ) -> String {
     let mut values = vec![
@@ -168,6 +277,9 @@ fn resource_attributes(
     }
     if let Some(task_id) = task_id {
         values.push(format!("ahu.task.id={}", escape(task_id)));
+    }
+    if let Some(attempt) = attempt {
+        values.push(format!("ahu.task.attempt={attempt}"));
     }
     if let Some(inherited) = inherited.filter(|value| !value.is_empty()) {
         values.push(inherited.to_string());
@@ -253,6 +365,12 @@ pub struct SpanGuard {
 }
 
 impl SpanGuard {
+    fn set_attribute(&mut self, attribute: KeyValue) {
+        if let Some(span) = self.span.as_mut() {
+            span.set_attribute(attribute);
+        }
+    }
+
     pub fn set_string(&mut self, key: &'static str, value: impl Into<String>) {
         if let Some(span) = self.span.as_mut() {
             span.set_attribute(KeyValue::new(key, Value::from(value.into())));
@@ -262,6 +380,20 @@ impl SpanGuard {
     pub fn set_u64(&mut self, key: &'static str, value: u64) {
         if let Some(span) = self.span.as_mut() {
             span.set_attribute(KeyValue::new(key, value as i64));
+        }
+    }
+
+    pub fn set_f64(&mut self, key: &'static str, value: f64) {
+        if value.is_finite()
+            && let Some(span) = self.span.as_mut()
+        {
+            span.set_attribute(KeyValue::new(key, value));
+        }
+    }
+
+    pub fn set_bool(&mut self, key: &'static str, value: bool) {
+        if let Some(span) = self.span.as_mut() {
+            span.set_attribute(KeyValue::new(key, value));
         }
     }
 }
@@ -293,6 +425,380 @@ pub fn span(
     }
 }
 
+/// Begin a payload-free observation for every parsed MCP request/notification.
+pub(crate) fn mcp_request_span(request: &serde_json::Value) -> SpanGuard {
+    let method = request
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(if request.is_null() {
+            "invalid_json"
+        } else {
+            "unknown"
+        });
+    let operation = match method {
+        "initialize" => "ahu.mcp.initialize",
+        "ping" => "ahu.mcp.ping",
+        "server/discover" => "ahu.mcp.server.discover",
+        "tools/list" => "ahu.mcp.tools.list",
+        "tools/call" => "ahu.mcp.tool.call",
+        "tasks/get" | "tasks/update" | "tasks/cancel" => "ahu.mcp.tasks.operation",
+        "subscriptions/listen" => "ahu.mcp.subscriptions.listen",
+        "notifications/initialized"
+        | "notifications/cancelled"
+        | "notifications/progress"
+        | "notifications/roots/list_changed" => "ahu.mcp.notification",
+        "invalid_json" => "ahu.mcp.invalid_request",
+        _ => "ahu.mcp.request",
+    };
+    let mut span = span(operation, []);
+    let method = match method {
+        "initialize"
+        | "ping"
+        | "server/discover"
+        | "tools/list"
+        | "tools/call"
+        | "tasks/get"
+        | "tasks/update"
+        | "tasks/cancel"
+        | "subscriptions/listen"
+        | "notifications/initialized"
+        | "notifications/cancelled"
+        | "notifications/progress"
+        | "notifications/roots/list_changed"
+        | "invalid_json" => method,
+        _ => "unknown",
+    };
+    span.set_string("ahu.mcp.method", method);
+    if method == "tools/call" {
+        let params = request.get("params").unwrap_or(&serde_json::Value::Null);
+        let name = params
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let arguments = params.get("arguments").unwrap_or(&serde_json::Value::Null);
+        for attribute in mcp_tool_attributes(name, arguments) {
+            span.set_attribute(attribute);
+        }
+    }
+    span
+}
+
+fn mcp_tool_attributes(name: &str, arguments: &serde_json::Value) -> Vec<KeyValue> {
+    let name = match name {
+        "ahu_agents_list" | "ahu_tasks_list" | "ahu_task_get" | "ahu_typed_decide" => name,
+        _ => "unknown",
+    };
+    let mut attributes = vec![KeyValue::new("ahu.mcp.tool.name", name.to_string())];
+    if name == "ahu_typed_decide" {
+        let questions = arguments
+            .get("questions")
+            .and_then(serde_json::Value::as_object);
+        if let Some(questions) = questions {
+            attributes.push(KeyValue::new(
+                "ahu.mcp.decision.questions.count",
+                questions.len() as i64,
+            ));
+            let mut types = questions
+                .values()
+                .filter_map(|question| question.get("type").and_then(serde_json::Value::as_str))
+                .filter(|kind| ["choice", "score", "probability"].contains(kind))
+                .collect::<Vec<_>>();
+            types.sort_unstable();
+            types.dedup();
+            if !types.is_empty() {
+                attributes.push(KeyValue::new(
+                    "ahu.mcp.decision.questions.types",
+                    types.join(","),
+                ));
+            }
+            let mut keys = questions
+                .values()
+                .filter_map(|question| {
+                    question
+                        .get("telemetry_key")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .filter(|key| safe_eval_identifier(key))
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            keys.dedup();
+            if !keys.is_empty() {
+                attributes.push(KeyValue::new(
+                    "ahu.mcp.decision.telemetry_keys",
+                    keys.join(","),
+                ));
+            }
+        }
+    }
+    attributes
+}
+
+/// Add bounded protocol metadata without copying content into telemetry.
+pub(crate) fn finish_mcp_request_span(
+    span: &mut SpanGuard,
+    request: &serde_json::Value,
+    response: Option<&serde_json::Value>,
+) {
+    let method = request
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(if request.is_null() {
+            "invalid_json"
+        } else {
+            "unknown"
+        });
+    let name = request
+        .pointer("/params/name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let Some(response) = response else {
+        MCP_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        span.set_string(
+            "ahu.mcp.outcome",
+            if method.starts_with("notifications/") {
+                "notification"
+            } else {
+                "no_response"
+            },
+        );
+        return;
+    };
+    MCP_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    if method == "tools/list" {
+        MCP_LIST_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    }
+    if method == "tools/call" {
+        MCP_TOOL_CALLS.fetch_add(1, Ordering::Relaxed);
+        if name == "ahu_typed_decide" {
+            MCP_DECISION_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        if response.get("error").is_some()
+            || response.pointer("/result/isError") == Some(&serde_json::Value::Bool(true))
+        {
+            MCP_TOOL_ERRORS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    for attribute in mcp_result_attributes(method, name, response) {
+        span.set_attribute(attribute);
+    }
+}
+
+/// Emit bounded per-process coverage so an evaluator can distinguish no MCP
+/// traffic from a set of successfully exported per-request spans.
+pub(crate) fn mcp_session_summary(telemetry_configured: bool) {
+    let mut span = span("ahu.mcp.session", []);
+    span.set_u64(
+        "ahu.mcp.requests.count",
+        MCP_REQUESTS.load(Ordering::Relaxed),
+    );
+    span.set_u64(
+        "ahu.mcp.tool.calls.count",
+        MCP_TOOL_CALLS.load(Ordering::Relaxed),
+    );
+    span.set_u64(
+        "ahu.mcp.decision.calls.count",
+        MCP_DECISION_CALLS.load(Ordering::Relaxed),
+    );
+    span.set_u64(
+        "ahu.mcp.tool.errors.count",
+        MCP_TOOL_ERRORS.load(Ordering::Relaxed),
+    );
+    span.set_u64(
+        "ahu.mcp.transport.errors.count",
+        MCP_TRANSPORT_ERRORS.load(Ordering::Relaxed),
+    );
+    span.set_u64(
+        "ahu.mcp.tools.list.count",
+        MCP_LIST_REQUESTS.load(Ordering::Relaxed),
+    );
+    span.set_bool("ahu.mcp.telemetry.configured", telemetry_configured);
+    span.set_bool("ahu.mcp.telemetry.exporter_ready", exporter_ready());
+}
+
+pub(crate) fn mcp_transport_error() {
+    MCP_TRANSPORT_ERRORS.fetch_add(1, Ordering::Relaxed);
+    let mut span = span("ahu.mcp.transport.error", []);
+    span.set_string("ahu.mcp.outcome", "error");
+    span.set_string("ahu.mcp.error.category", "transport_error");
+}
+
+fn exporter_ready() -> bool {
+    provider_slot()
+        .lock()
+        .expect("telemetry mutex poisoned")
+        .is_some()
+}
+
+fn mcp_result_attributes(method: &str, name: &str, response: &serde_json::Value) -> Vec<KeyValue> {
+    let failed = response.get("error").is_some()
+        || response.pointer("/result/isError") == Some(&serde_json::Value::Bool(true));
+    let mut attributes = vec![KeyValue::new(
+        "ahu.mcp.outcome",
+        if failed { "error" } else { "success" },
+    )];
+    if failed {
+        attributes.push(KeyValue::new(
+            "ahu.mcp.error.category",
+            mcp_error_category(method, name, response),
+        ));
+    }
+    if method == "tools/list"
+        && let Some(tools) = response
+            .pointer("/result/tools")
+            .and_then(serde_json::Value::as_array)
+    {
+        attributes.push(KeyValue::new("ahu.mcp.tools.count", tools.len() as i64));
+        let mut names = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+            .filter(|tool| {
+                [
+                    "ahu_agents_list",
+                    "ahu_tasks_list",
+                    "ahu_task_get",
+                    "ahu_typed_decide",
+                ]
+                .contains(tool)
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        if !names.is_empty() {
+            attributes.push(KeyValue::new("ahu.mcp.tools.available", names.join(",")));
+        }
+    }
+    if method == "initialize"
+        && let Some(version) = response
+            .pointer("/result/protocolVersion")
+            .and_then(serde_json::Value::as_str)
+        && version.len() <= 32
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+    {
+        attributes.push(KeyValue::new(
+            "ahu.mcp.protocol.version",
+            version.to_string(),
+        ));
+    }
+    if response.pointer("/result/isError") == Some(&serde_json::Value::Bool(true))
+        || response.get("error").is_some()
+    {
+        return attributes;
+    }
+    if method != "tools/call" || name != "ahu_typed_decide" {
+        if method == "tools/call" {
+            let pointer = match name {
+                "ahu_agents_list" => "/result/structuredContent/agents",
+                "ahu_tasks_list" => "/result/structuredContent/tasks",
+                _ => "",
+            };
+            if !pointer.is_empty()
+                && let Some(rows) = response
+                    .pointer(pointer)
+                    .and_then(serde_json::Value::as_array)
+            {
+                attributes.push(KeyValue::new(
+                    "ahu.mcp.tool.result_count",
+                    rows.len() as i64,
+                ));
+            }
+            if name == "ahu_task_get"
+                && let Some(state) = response
+                    .pointer("/result/structuredContent/session_state")
+                    .and_then(serde_json::Value::as_str)
+                && ["queued", "running", "completed", "failed", "cancelled"].contains(&state)
+            {
+                attributes.push(KeyValue::new("ahu.mcp.task.state", state.to_string()));
+            }
+        }
+        return attributes;
+    }
+    let Some(service) = response
+        .pointer("/result/structuredContent/service")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return attributes;
+    };
+    for (input, output) in [
+        ("backend", "ahu.mcp.decision.backend"),
+        ("model", "ahu.mcp.decision.model"),
+    ] {
+        if let Some(value) = service.get(input).and_then(serde_json::Value::as_str)
+            && !value.is_empty()
+            && value.len() <= 128
+            && safe_resource_value(output, value)
+        {
+            attributes.push(KeyValue::new(output, value.to_string()));
+        }
+    }
+    for (input, output) in [
+        ("prompt_tokens", "ahu.mcp.decision.tokens.input"),
+        ("generated_tokens", "ahu.mcp.decision.tokens.output"),
+    ] {
+        if let Some(value) = service.get(input).and_then(serde_json::Value::as_u64) {
+            attributes.push(KeyValue::new(output, value.min(i64::MAX as u64) as i64));
+        }
+    }
+    for (input, output) in [
+        ("duration_ms", "ahu.mcp.decision.duration_ms"),
+        ("load_ms", "ahu.mcp.decision.load_ms"),
+        ("prompt_eval_ms", "ahu.mcp.decision.prompt_eval_ms"),
+        ("generation_ms", "ahu.mcp.decision.generation_ms"),
+    ] {
+        if let Some(value) = service.get(input).and_then(serde_json::Value::as_f64)
+            && value >= 0.0
+        {
+            attributes.push(KeyValue::new(output, value));
+        }
+    }
+    attributes
+}
+
+fn mcp_error_category(method: &str, name: &str, response: &serde_json::Value) -> &'static str {
+    if let Some(code) = response
+        .pointer("/error/code")
+        .and_then(serde_json::Value::as_i64)
+    {
+        return match code {
+            -32700 => "parse_error",
+            -32600 => "invalid_request",
+            -32601 => "method_not_found",
+            -32602 => "invalid_arguments",
+            _ => "protocol_error",
+        };
+    }
+    if method == "tools/call" && name == "ahu_typed_decide" {
+        let message = response
+            .pointer("/result/content/0/text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if message.starts_with("ahu_typed_decide requires")
+            || message.starts_with("invalid AHU_DECISION_URL")
+            || message.starts_with("AHU_DECISION_URL must")
+            || message.starts_with("cannot create decision client")
+        {
+            "decision_configuration"
+        } else if message.starts_with("decision service request failed") {
+            "decision_service_unavailable"
+        } else if message.starts_with("decision service returned HTTP") {
+            "decision_service_http_error"
+        } else if message.starts_with("decision service returned invalid JSON")
+            || message.starts_with("decision service response")
+            || message.starts_with("decision service answers")
+            || message.starts_with("answer ")
+        {
+            "decision_service_invalid_response"
+        } else {
+            "tool_error"
+        }
+    } else if method == "tools/call" {
+        "tool_error"
+    } else {
+        "protocol_error"
+    }
+}
+
 pub fn shutdown() {
     if let Some(provider) = provider_slot()
         .lock()
@@ -305,8 +811,12 @@ pub fn shutdown() {
 
 #[cfg(test)]
 mod tests {
-    use super::{configure_child, validate_config};
+    use super::{
+        configure_child, mcp_result_attributes, mcp_tool_attributes, parse_ahu_resource_attributes,
+        validate_config,
+    };
     use crate::config::TelemetryConfig;
+    use opentelemetry::{KeyValue, Value};
     use std::path::Path;
 
     #[test]
@@ -334,7 +844,7 @@ mod tests {
         );
         let mut child = std::process::Command::new("true");
         configure_child(
-            &mut child, &config, "agent", "codex", "model", None, None, None,
+            &mut child, &config, "agent", "codex", "model", None, None, None, None,
         );
         assert_eq!(child.get_envs().count(), 0);
     }
@@ -363,6 +873,7 @@ mod tests {
             None,
             None,
             Some("task"),
+            Some(2),
         );
         assert!(
             disabled
@@ -384,6 +895,7 @@ mod tests {
             None,
             None,
             Some("task"),
+            Some(2),
         );
         let env: std::collections::BTreeMap<_, _> = command
             .get_envs()
@@ -391,5 +903,208 @@ mod tests {
             .collect();
         assert_eq!(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://127.0.0.1:4318");
         assert!(env["OTEL_RESOURCE_ATTRIBUTES"].contains("ahu.harness=codex"));
+        assert!(env["OTEL_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=2"));
+    }
+
+    #[test]
+    fn mcp_decision_attributes_are_payload_free_and_capture_use_and_usage() {
+        let arguments = serde_json::json!({
+            "state":{"body":"private decision payload"},
+            "questions":{
+                "route":{"type":"choice","instructions":"private instruction","telemetry_key":"department"},
+                "risk":{"type":"probability","instructions":"private proposition","telemetry_key":"refund_requested"}
+            }
+        });
+        let attributes = mcp_tool_attributes("ahu_typed_decide", &arguments);
+        assert_eq!(
+            string_attr(&attributes, "ahu.mcp.tool.name"),
+            Some("ahu_typed_decide".into())
+        );
+        assert_eq!(
+            integer_attr(&attributes, "ahu.mcp.decision.questions.count"),
+            Some(2)
+        );
+        assert_eq!(
+            string_attr(&attributes, "ahu.mcp.decision.questions.types"),
+            Some("choice,probability".into())
+        );
+        assert_eq!(
+            string_attr(&attributes, "ahu.mcp.decision.telemetry_keys"),
+            Some("department,refund_requested".into())
+        );
+        let serialized = format!("{attributes:?}");
+        assert!(!serialized.contains("private decision payload"));
+        assert!(!serialized.contains("private instruction"));
+
+        let result = serde_json::json!({"result":{"structuredContent":{
+            "answers":{"route":{"value":"billing"}},
+            "service":{"backend":"ollama","model":"qwen-local", "prompt_tokens":31,
+                "generated_tokens":9,"duration_ms":123.5,"private":"private response payload"}
+        }}});
+        let result_attributes = mcp_result_attributes("tools/call", "ahu_typed_decide", &result);
+        assert_eq!(
+            string_attr(&result_attributes, "ahu.mcp.outcome"),
+            Some("success".into())
+        );
+        assert_eq!(
+            string_attr(&result_attributes, "ahu.mcp.decision.backend"),
+            Some("ollama".into())
+        );
+        assert_eq!(
+            string_attr(&result_attributes, "ahu.mcp.decision.model"),
+            Some("qwen-local".into())
+        );
+        assert_eq!(
+            integer_attr(&result_attributes, "ahu.mcp.decision.tokens.input"),
+            Some(31)
+        );
+        assert_eq!(
+            integer_attr(&result_attributes, "ahu.mcp.decision.tokens.output"),
+            Some(9)
+        );
+        assert_eq!(
+            float_attr(&result_attributes, "ahu.mcp.decision.duration_ms"),
+            Some(123.5)
+        );
+        assert!(!format!("{result_attributes:?}").contains("private response payload"));
+        assert_eq!(
+            mcp_result_attributes("tools/call", "ahu_agents_list", &result).len(),
+            1
+        );
+
+        let error = mcp_result_attributes(
+            "tools/call",
+            "ahu_typed_decide",
+            &serde_json::json!({"result":{"isError":true}}),
+        );
+        assert_eq!(string_attr(&error, "ahu.mcp.outcome"), Some("error".into()));
+        assert_eq!(error.len(), 2);
+        assert_eq!(
+            string_attr(&error, "ahu.mcp.error.category"),
+            Some("tool_error".into())
+        );
+
+        let unavailable = mcp_result_attributes(
+            "tools/call",
+            "ahu_typed_decide",
+            &serde_json::json!({"result":{"isError":true,"content":[{"text":"decision service request failed: private-marker"}]}}),
+        );
+        assert_eq!(
+            string_attr(&unavailable, "ahu.mcp.error.category"),
+            Some("decision_service_unavailable".into())
+        );
+        assert!(!format!("{unavailable:?}").contains("private-marker"));
+        let invalid = mcp_result_attributes(
+            "tools/call",
+            "ahu_typed_decide",
+            &serde_json::json!({"error":{"code":-32602,"message":"private-marker"}}),
+        );
+        assert_eq!(
+            string_attr(&invalid, "ahu.mcp.error.category"),
+            Some("invalid_arguments".into())
+        );
+    }
+
+    #[test]
+    fn mcp_tool_names_are_bounded_and_resource_identity_is_allowlisted() {
+        let unknown = mcp_tool_attributes(
+            "attacker-supplied-private-tool-name",
+            &serde_json::json!({}),
+        );
+        assert_eq!(
+            string_attr(&unknown, "ahu.mcp.tool.name"),
+            Some("unknown".into())
+        );
+        let attributes = parse_ahu_resource_attributes(
+            "ahu.harness=opencode,ahu.model=ollama/qwen,ahu.eval.run_id=run-001,ahu.eval.case_id=case-001,ahu.eval.stage=candidate,private.marker=secret,ahu.task.id=task-123",
+        );
+        assert_eq!(attributes.len(), 6);
+        assert!(!format!("{attributes:?}").contains("secret"));
+        let escaped = parse_ahu_resource_attributes(
+            r"ahu.agent.name=agent\,with\,commas,private.marker=secret",
+        );
+        assert!(escaped.is_empty());
+        let duplicate =
+            parse_ahu_resource_attributes("ahu.model=qwen-local,ahu.model=private-marker");
+        assert_eq!(duplicate, vec![("ahu.model", "qwen-local".to_string())]);
+    }
+
+    #[test]
+    fn mcp_protocol_spans_include_offered_tools_and_protocol_outcomes() {
+        let tools = mcp_result_attributes(
+            "tools/list",
+            "unknown",
+            &serde_json::json!({"result":{"tools":[
+                {"name":"ahu_agents_list"},{"name":"ahu_typed_decide"},
+                {"name":"private-tool-name"}
+            ]}}),
+        );
+        assert_eq!(integer_attr(&tools, "ahu.mcp.tools.count"), Some(3));
+        assert_eq!(
+            string_attr(&tools, "ahu.mcp.tools.available"),
+            Some("ahu_agents_list,ahu_typed_decide".into())
+        );
+        assert!(!format!("{tools:?}").contains("private-tool-name"));
+        let initialized = mcp_result_attributes(
+            "initialize",
+            "unknown",
+            &serde_json::json!({"result":{"protocolVersion":"2026-07-28"}}),
+        );
+        assert_eq!(
+            string_attr(&initialized, "ahu.mcp.protocol.version"),
+            Some("2026-07-28".into())
+        );
+
+        let listed = mcp_result_attributes(
+            "tools/call",
+            "ahu_agents_list",
+            &serde_json::json!({"result":{"structuredContent":{"agents":[
+                {"name":"private-agent-name"}
+            ]}}}),
+        );
+        assert_eq!(integer_attr(&listed, "ahu.mcp.tool.result_count"), Some(1));
+        assert!(!format!("{listed:?}").contains("private-agent-name"));
+        let inspected = mcp_result_attributes(
+            "tools/call",
+            "ahu_task_get",
+            &serde_json::json!({"result":{"structuredContent":{
+                "task_id":"private-task-id", "session_state":"completed"
+            }}}),
+        );
+        assert_eq!(
+            string_attr(&inspected, "ahu.mcp.task.state"),
+            Some("completed".into())
+        );
+        assert!(!format!("{inspected:?}").contains("private-task-id"));
+    }
+
+    fn string_attr(attributes: &[KeyValue], name: &str) -> Option<String> {
+        attributes
+            .iter()
+            .find(|attr| attr.key.as_str() == name)
+            .and_then(|attr| match &attr.value {
+                Value::String(value) => Some(value.to_string()),
+                _ => None,
+            })
+    }
+
+    fn integer_attr(attributes: &[KeyValue], name: &str) -> Option<i64> {
+        attributes
+            .iter()
+            .find(|attr| attr.key.as_str() == name)
+            .and_then(|attr| match attr.value {
+                Value::I64(value) => Some(value),
+                _ => None,
+            })
+    }
+
+    fn float_attr(attributes: &[KeyValue], name: &str) -> Option<f64> {
+        attributes
+            .iter()
+            .find(|attr| attr.key.as_str() == name)
+            .and_then(|attr| match attr.value {
+                Value::F64(value) => Some(value),
+                _ => None,
+            })
     }
 }

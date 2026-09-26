@@ -21,6 +21,7 @@ pub(super) fn tool_definition() -> Value {
                     "additionalProperties":{
                         "type":"object","properties":{
                             "type":{"type":"string","enum":["choice","score","probability"],"description":"choice selects one option; score estimates a number between min and max; probability estimates whether the instruction is true, from 0 to 1."},
+                            "telemetry_key":{"type":"string","pattern":"^[a-z][a-z0-9_.-]{0,47}$","description":"Optional stable, non-sensitive evaluation dimension; recorded in telemetry, never used as an instruction."},
                             "instructions":{"type":"string","minLength":1,"maxLength":2048},
                             "options":{"type":"object","minProperties":2,"maxProperties":32,"description":"Required for choice; map each stable answer key to a short description.","additionalProperties":{"type":"string"}},
                             "min":{"type":"number","description":"Required for score; inclusive lower bound."},"max":{"type":"number","description":"Required for score; inclusive upper bound."}
@@ -56,6 +57,7 @@ pub(super) fn validate_arguments(arguments: &Value) -> Result<()> {
         .and_then(Value::as_object)
         .filter(|questions| !questions.is_empty() && questions.len() <= 20)
         .ok_or_else(|| Error::new("questions must be a nonempty object with at most 20 entries"))?;
+    let mut telemetry_keys = std::collections::BTreeSet::new();
     for (name, question) in questions {
         if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
             return Err(Error::new("invalid typed decision question name"));
@@ -63,12 +65,41 @@ pub(super) fn validate_arguments(arguments: &Value) -> Result<()> {
         let q = question
             .as_object()
             .ok_or_else(|| Error::new(format!("question {name:?} must be an object")))?;
-        if q.keys()
-            .any(|key| !["type", "instructions", "options", "min", "max"].contains(&key.as_str()))
-        {
+        if q.keys().any(|key| {
+            ![
+                "type",
+                "instructions",
+                "telemetry_key",
+                "options",
+                "min",
+                "max",
+            ]
+            .contains(&key.as_str())
+        }) {
             return Err(Error::new(format!(
                 "question {name:?} has an unknown field"
             )));
+        }
+        if let Some(key) = q.get("telemetry_key") {
+            let key = key
+                .as_str()
+                .filter(|key| {
+                    (1..=48).contains(&key.len())
+                        && key.as_bytes()[0].is_ascii_lowercase()
+                        && key.bytes().all(|byte| {
+                            byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit()
+                                || matches!(byte, b'_' | b'.' | b'-')
+                        })
+                })
+                .ok_or_else(|| {
+                    Error::new("telemetry_key must be a lowercase non-sensitive identifier")
+                })?;
+            if !telemetry_keys.insert(key) {
+                return Err(Error::new(
+                    "telemetry_key values must be unique within a decision request",
+                ));
+            }
         }
         let kind = q["type"]
             .as_str()
@@ -231,4 +262,44 @@ pub(super) fn call(arguments: &Value) -> Result<Value> {
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_arguments;
+    use serde_json::{Value, json};
+
+    fn request(key: Value) -> Value {
+        json!({
+            "state": {},
+            "questions": {
+                "route": {
+                    "type": "choice",
+                    "instructions": "Pick a route",
+                    "options": {"a":"Route A", "b":"Route B"},
+                    "telemetry_key": key
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn telemetry_key_accepts_only_bounded_lowercase_identifiers() {
+        assert!(validate_arguments(&request(json!("routing.v1"))).is_ok());
+        assert!(validate_arguments(&request(json!("Private label"))).is_err());
+        assert!(validate_arguments(&request(json!("1route"))).is_err());
+        assert!(validate_arguments(&request(json!("a".repeat(49)))).is_err());
+        assert!(validate_arguments(&request(json!(17))).is_err());
+    }
+
+    #[test]
+    fn telemetry_keys_must_be_unique_per_request() {
+        let mut arguments = request(json!("route"));
+        arguments["questions"]["risk"] = json!({
+            "type":"probability",
+            "instructions":"Estimate risk",
+            "telemetry_key":"route"
+        });
+        assert!(validate_arguments(&arguments).is_err());
+    }
 }

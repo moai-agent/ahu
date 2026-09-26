@@ -2245,6 +2245,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         record.identity.agent_version.as_deref(),
         Some(&spec.harness_version),
         Some(&record.task_id),
+        Some(spec.attempt),
     );
     command
         .env("AHU_BIN", std::env::current_exe()?)

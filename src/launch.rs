@@ -1357,6 +1357,7 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             record.identity.agent_version.as_deref(),
             record.enforcement.harness_version.as_deref(),
             Some(&record.task_id),
+            None,
         );
         command
             // The run-task parent owns the harness's fresh process group, so

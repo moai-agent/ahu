@@ -774,6 +774,27 @@ children, and the exporter SDK can read ambient OpenTelemetry configuration.
 Keep sensitive data out of that configuration; these settings are not a
 redaction boundary.
 
+The separately launched `ahu mcp serve` process also initializes the same
+project-configured local exporter. It emits a span for every parsed inbound MCP
+request, including initialization, discovery, tool listing, tool calls, task
+operations, subscriptions, notifications, and protocol errors. `tools/list`
+spans report the count and names of ahu tools offered; `tools/call` spans use
+the `ahu.mcp.tool.call` name and record bounded tool name and success/error
+outcome. Typed-decision spans additionally report question count and types,
+stable `telemetry_key` dimensions, decision backend/model identifiers,
+reported input/output tokens, adapter timing, and fixed error categories. The
+MCP process also emits an `ahu.mcp.session` summary on normal shutdown with
+request, tool-call, and transport-error counts plus SDK exporter initialization
+status (not collector receipt). It omits request state,
+instructions, question names, answer values, and error text. Ahu-launched
+harnesses pass agent, harness, model, task ID, and attempt as allowlisted
+resource attributes to MCP child processes; optional eval run, case, corpus,
+and stage identifiers can be passed as `ahu.eval.*` resource attributes. These
+fields group calls by harness and join them to task results. MCP spans cover
+requests that reach ahu's MCP server, not harness-internal tools or tools
+provided by other servers. No prompts or transcript content are exported by
+these spans.
+
 Harness event streams are not identical. Codex, Claude Code, Antigravity, and
 OpenCode use different event names and terminal records, so ahu normalizes
 terminal status and the common usage keys where they are present. Provider

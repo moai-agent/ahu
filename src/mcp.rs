@@ -90,6 +90,10 @@ pub fn verify_bundled_skills(repo_root: &std::path::Path) -> Result<(usize, usiz
 
 /// Serve newline-delimited JSON-RPC messages on stdin/stdout.
 pub fn serve(repo: &Repo) -> Result<i32> {
+    let telemetry = crate::config::load(&repo.root)?
+        .map(|loaded| loaded.config.telemetry)
+        .unwrap_or_default();
+    crate::telemetry::initialize_mcp(&telemetry)?;
     let (send, receive) = std::sync::mpsc::sync_channel(32);
     std::thread::spawn(move || {
         let mut input = std::io::stdin().lock();
@@ -121,36 +125,36 @@ pub fn serve(repo: &Repo) -> Result<i32> {
                 let request: Value = match serde_json::from_str(&line) {
                     Ok(value) => value,
                     Err(error) => {
-                        write_response(
-                            &mut stdout,
-                            &rpc_error(&Value::Null, -32700, error.to_string()),
-                        )?;
+                        let mut span = crate::telemetry::mcp_request_span(&Value::Null);
+                        let failure = rpc_error(&Value::Null, -32700, error.to_string());
+                        crate::telemetry::finish_mcp_request_span(
+                            &mut span,
+                            &Value::Null,
+                            Some(&failure),
+                        );
+                        write_response(&mut stdout, &failure)?;
                         continue;
                     }
                 };
-                if let Some(response) = validate_envelope(&request) {
-                    write_response(&mut stdout, &response)?;
-                    continue;
+                let mut span = crate::telemetry::mcp_request_span(&request);
+                let mut response = validate_envelope(&request);
+                if response.is_none() && request.get("id").is_some() {
+                    response = validate_request(&request, &mut session);
+                    if response.is_none() {
+                        response = handle(repo, &request, &mut session);
+                        // Work starts only after the durable handle has been flushed.
+                        session.start_worker(repo);
+                    }
                 }
-                // Notifications never receive responses or invoke request-only operations.
-                // Currently all supported inbound notifications are advisory no-ops.
-                if request.get("id").is_some() {
-                    if let Some(response) = validate_request(&request, &mut session) {
-                        write_response(&mut stdout, &response)?;
-                        continue;
-                    }
-                    if let Some(response) = handle(repo, &request, &mut session) {
-                        write_response(&mut stdout, &response)?;
-                    }
-                    // Work starts only after the durable handle has been flushed.
-                    session.start_worker(repo);
+                crate::telemetry::finish_mcp_request_span(&mut span, &request, response.as_ref());
+                if let Some(response) = response {
+                    write_response(&mut stdout, &response)?;
                 }
             }
             Ok(Err(error)) => {
-                write_response(
-                    &mut stdout,
-                    &rpc_error(&Value::Null, -32600, error.to_string()),
-                )?;
+                crate::telemetry::mcp_transport_error();
+                let failure = rpc_error(&Value::Null, -32600, error.to_string());
+                write_response(&mut stdout, &failure)?;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -159,6 +163,7 @@ pub fn serve(repo: &Repo) -> Result<i32> {
             write_response(&mut stdout, &notification)?;
         }
     }
+    crate::telemetry::mcp_session_summary(telemetry.enabled);
     Ok(0)
 }
 
@@ -597,7 +602,15 @@ mod tests {
             .into_iter()
             .map(|tool| tool["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names, ["ahu_agents_list", "ahu_tasks_list", "ahu_task_get"]);
+        assert_eq!(
+            names,
+            [
+                "ahu_agents_list",
+                "ahu_tasks_list",
+                "ahu_task_get",
+                "ahu_typed_decide"
+            ]
+        );
     }
 
     #[test]

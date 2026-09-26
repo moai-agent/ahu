@@ -92,6 +92,17 @@ def response_schema(request: dict) -> dict:
     }
 
 
+def model_input(request: dict) -> dict:
+    """Keep evaluation grouping labels out of model context and inference."""
+    return {
+        "state": request["state"],
+        "questions": {
+            name: {key: value for key, value in question.items() if key != "telemetry_key"}
+            for name, question in request["questions"].items()
+        },
+    }
+
+
 def verify_local_model(opener, ollama_url: str, model: str) -> None:
     response = opener.open(ollama_url + "/api/tags", timeout=5)
     tags = json.loads(response.read(MAX_RESPONSE_BYTES + 1))
@@ -127,7 +138,7 @@ class DecisionHandler(BaseHTTPRequestHandler):
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {
                         "role": "user",
-                        "content": json.dumps(request, ensure_ascii=False, separators=(",", ":")),
+                        "content": json.dumps(model_input(request), ensure_ascii=False, separators=(",", ":")),
                     },
                 ],
                 "format": schema,

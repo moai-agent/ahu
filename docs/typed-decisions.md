@@ -126,6 +126,31 @@ the declared JSON types and ranges, but a generated probability is still the
 model's estimate, not a calibrated confidence. The adapter reports local Ollama
 token counts so we can compare usage, latency, and answers across agent runs.
 
+When project OpenTelemetry is enabled, the separately launched `ahu mcp serve`
+process exports a span for each parsed MCP request, including initialize,
+discovery, tool listing, tool calls, and task/subscription operations. Tool
+calls use the `ahu.mcp.tool.call` span name. A typed decision span records the
+tool name, success/error outcome, question count,
+unique question types, stable `telemetry_key` dimensions, backend and model
+identifiers, reported prompt/generated token counts, service timings, and a
+fixed error category. A `telemetry_key` is an optional lowercase identifier
+such as `department` or `refund_requested`; use stable, non-sensitive labels
+from a small vocabulary. The Ollama adapter removes these keys before sending
+questions to the model. The span never records state, instructions, question
+names, answer values, or error text. The resource carries the ahu agent,
+harness, model, task ID, headless attempt, and optional `ahu.eval.run_id`,
+`ahu.eval.case_id`, `ahu.eval.corpus_version`, and `ahu.eval.stage` identifiers
+when ahu launched the session. This supports grouping across harnesses and
+correlating MCP calls to the task result. MCP spans cover inbound requests;
+they do not describe harness-internal tool use that bypasses ahu MCP. Directly
+started MCP servers have no ahu task identity unless their launcher supplies
+the corresponding allowlisted resource attributes. On normal server shutdown,
+an `ahu.mcp.session` span summarizes request, tool-call, decision-call, error,
+tool-list and transport-error counts and whether the SDK exporter provider was
+initialized. This does not establish that a collector received the spans. A
+missing summary can indicate an abrupt exit or failed export; it is not proof
+of zero activity.
+
 The request stays local: the adapter accepts only loopback Ollama URLs, disables
 environment-configured HTTP proxies, binds its HTTP listener to loopback, and
 rejects models that are not installed locally. Requests and decisions are not
