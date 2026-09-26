@@ -110,11 +110,12 @@ impl Cell {
 }
 
 /// Terminal columns a character occupies, budgeted conservatively: a non-ASCII
-/// glyph may be double width. The ellipsis this module appends is the one
-/// exception; terminals render it narrow.
+/// glyph may be double width. The two glyphs ahu lays tables out with are the
+/// exception -- the ellipsis this module appends, and the em dash a caller
+/// puts in a cell nothing was measured for; terminals render both narrow.
 fn char_width(c: char) -> usize {
     match c {
-        '…' => 1,
+        '…' | '—' => 1,
         c if c.is_ascii() => 1,
         _ => 2,
     }
@@ -451,6 +452,22 @@ mod tests {
         // A terminal too narrow to lay out is not honored in either source.
         assert_eq!(resolve(Some(4), || None), MIN_COLUMNS);
         assert_eq!(resolve(None, || Some(4)), MIN_COLUMNS);
+    }
+
+    #[test]
+    fn the_glyphs_a_table_is_laid_out_with_are_budgeted_as_one_column_each() {
+        // An em dash marks a cell nothing was measured for. Budgeted as two
+        // columns it would pad one short and skew every column after it.
+        assert_eq!(width_of("\u{2014}"), 1);
+        assert_eq!(width_of("\u{2026}"), 1);
+        let columns = columns_fixture();
+        let rows = vec![row("@a", "\u{2014}", "cmux"), row("@b", "measured", "cmux")];
+        let text = render(Style::plain(), 200, &columns, &rows);
+        let lines: Vec<&str> = text.lines().collect();
+        // The dash row and the measured row start their last column at the
+        // same terminal column, which is not the same as the same byte offset.
+        let mode_column = |line: &str| width_of(&line[..line.find("cmux").expect("the mode cell")]);
+        assert_eq!(mode_column(lines[1]), mode_column(lines[2]), "{text}");
     }
 
     #[test]

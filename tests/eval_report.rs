@@ -76,16 +76,55 @@ fn records_outside(dir: &Path, rows: &[Row]) -> PathBuf {
 
 /// Run `ahu eval report` from `repo` with a clean, harness-free environment.
 fn run(repo: &TestRepo, args: &[&str]) -> std::process::Output {
-    common::ahu()
+    run_at(repo, args, Some("80"), true)
+}
+
+/// The same, laid out for an explicit terminal width and with colour chosen.
+///
+/// `COLUMNS` is set on every run so a developer's own terminal size cannot
+/// change what these tests read, and the table's layout is the test's to pick.
+fn run_at(
+    repo: &TestRepo,
+    args: &[&str],
+    width: Option<&str>,
+    no_color: bool,
+) -> std::process::Output {
+    let mut command = common::ahu();
+    command
         .current_dir(repo.path())
         .arg("eval")
         .arg("report")
         .args(args)
-        .env("NO_COLOR", "1")
+        .env_remove("COLUMNS")
+        .env_remove("NO_COLOR")
         .env("AHU_CMUX_BIN", repo.state.path().join("missing-cmux"))
-        .stdin(Stdio::null())
-        .output()
-        .expect("ahu runs")
+        .stdin(Stdio::null());
+    if let Some(width) = width {
+        command.env("COLUMNS", width);
+    }
+    if no_color {
+        command.env("NO_COLOR", "1");
+    }
+    command.output().expect("ahu runs")
+}
+
+/// Terminal columns a rendered line occupies. Every fixture here is ASCII
+/// apart from the ellipsis and the em dash, which are one column each.
+fn columns_of(line: &str) -> usize {
+    line.chars().count()
+}
+
+/// The comparison table: the header line and the rows under it.
+///
+/// The header is found by its own column names rather than by position,
+/// because a painted header begins with a style escape rather than with
+/// `CASE`.
+fn summary_table(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .skip_while(|line| !(line.contains("CASE") && line.contains("TOKENS")))
+        .take_while(|line| !line.trim().is_empty())
+        .collect()
 }
 
 #[test]
@@ -874,4 +913,276 @@ fn the_report_says_what_it_does_not_claim() {
         stdout.contains("All records use evaluation schema 2."),
         "{stdout}"
     );
+}
+
+/// Two candidates on one case, as a reader comparing agents would record them.
+fn two_candidate_rows() -> Vec<String> {
+    let mut rows = Vec::new();
+    for (elapsed, total, tools) in [(41_000, 18_000, "pass"), (46_000, 19_400, "fail")] {
+        rows.push(v2_row(&[
+            ("case_id", "\"synthetic-ticket-routing-001\""),
+            ("agent", "\"@triage\""),
+            ("model", "\"ollama/fixture-model\""),
+            ("elapsed_ms", &elapsed.to_string()),
+            (
+                "reported_tokens",
+                &format!(
+                    "{{\"ahu.tokens.input\":{{\"kind\":\"observed\",\"value\":14000}},\
+                      \"ahu.tokens.total\":{{\"kind\":\"observed\",\"value\":{total}}},\
+                      \"ahu.tokens.cached\":{{\"kind\":\"unavailable\"}}}}"
+                ),
+            ),
+            ("tool_expectation_status", &format!("\"{tools}\"")),
+            ("input_fingerprint", &format!("\"{}\"", "1".repeat(64))),
+        ]));
+    }
+    // A second candidate that reported no timing, no tokens, and no decidable
+    // tool expectation: every one of its measurements is missing, not zero.
+    for passed in ["true", "false"] {
+        rows.push(v2_row(&[
+            ("case_id", "\"synthetic-ticket-routing-001\""),
+            ("agent", "\"@sorter\""),
+            ("model", "\"ollama/other-model\""),
+            ("passed", passed),
+            ("answer_passed", passed),
+            ("score", if passed == "true" { "1.0" } else { "0.0" }),
+            ("answer_score", if passed == "true" { "1.0" } else { "0.0" }),
+            ("tool_expectation_status", "\"unknown\""),
+            ("input_fingerprint", &format!("\"{}\"", "2".repeat(64))),
+        ]));
+    }
+    rows
+}
+
+#[test]
+fn the_report_opens_with_a_table_that_fits_the_terminal_and_never_wraps() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let records = write_lines(outside.path(), &two_candidate_rows());
+
+    for width in ["88", "120"] {
+        let output = run_at(
+            &repo,
+            &["--records", records.to_str().unwrap()],
+            Some(width),
+            true,
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{stderr}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let table = summary_table(&stdout);
+        assert_eq!(
+            table.len(),
+            3,
+            "a header and one row per candidate: {stdout}"
+        );
+        let width: usize = width.parse().expect("a width");
+        for line in &table {
+            assert!(
+                columns_of(line) <= width,
+                "{line:?} is wider than {width} columns"
+            );
+        }
+        // The table leads the report: the detail blocks come after it.
+        let table_end = stdout.find(table[2]).expect("the last row");
+        let first_block = stdout.find("  agent      ").expect("a detail block");
+        assert!(table_end < first_block, "{stdout}");
+
+        let triage = table
+            .iter()
+            .find(|line| line.contains("@triage"))
+            .expect("the @triage row");
+        assert!(triage.contains("@triage@1.0.0"), "{triage}");
+        // Mean of 41.0s and 46.0s, and of 18000 and 19400 total tokens.
+        assert!(triage.contains("43.5s"), "{triage}");
+        assert!(triage.contains("18.7k"), "{triage}");
+        let sorter = table
+            .iter()
+            .find(|line| line.contains("@sorter"))
+            .expect("the @sorter row");
+        // Nothing timed, nothing counted, nothing decided: three dashes, and
+        // the answer rate it did measure.
+        assert_eq!(sorter.matches('\u{2014}').count(), 3, "{sorter}");
+        assert!(sorter.contains("1/2"), "{sorter}");
+    }
+
+    // At 120 every column is shown whole; at 88 the case id is cut first,
+    // because it is the same on both rows while the rest is what they differ by.
+    let wide = run_at(
+        &repo,
+        &["--records", records.to_str().unwrap()],
+        Some("120"),
+        true,
+    );
+    let wide = String::from_utf8_lossy(&wide.stdout);
+    let wide = summary_table(&wide);
+    assert!(
+        wide.iter().all(|line| !line.contains('\u{2026}')),
+        "{wide:?}"
+    );
+    assert!(
+        wide[0].split_whitespace().collect::<Vec<_>>()
+            == [
+                "CASE", "AGENT", "RUNTIME", "ANSWER", "TOOLS", "TIME", "TOKENS"
+            ],
+        "{:?}",
+        wide[0]
+    );
+    let narrow = run_at(
+        &repo,
+        &["--records", records.to_str().unwrap()],
+        Some("88"),
+        true,
+    );
+    let narrow = String::from_utf8_lossy(&narrow.stdout);
+    let narrow = summary_table(&narrow);
+    assert!(narrow[1].starts_with("synthetic-tic\u{2026}"), "{narrow:?}");
+    assert!(narrow[1].contains("@sorter@1.0.0"), "{narrow:?}");
+}
+
+#[test]
+fn the_table_honors_no_color_and_paints_its_roles_when_colour_is_asked_for() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let records = write_lines(outside.path(), &two_candidate_rows());
+    let args = ["--records", records.to_str().unwrap()];
+
+    // NO_COLOR is honoured even when stdout would otherwise be painted.
+    let plain = run_at(&repo, &args, Some("120"), true);
+    let plain = String::from_utf8_lossy(&plain.stdout);
+    assert!(!plain.contains('\u{1b}'), "{plain}");
+    assert!(summary_table(&plain)[0].starts_with("CASE"), "{plain}");
+    assert_eq!(summary_table(&plain).len(), 3, "{plain}");
+
+    // Asked for explicitly, the table carries the same roles as `ahu tasks`:
+    // a bold header, the agent and the runtime, and the gap role on a metric
+    // no run reported.
+    let painted = run_at(
+        &repo,
+        &["--color", "always", args[0], args[1]],
+        Some("120"),
+        true,
+    );
+    let painted = String::from_utf8_lossy(&painted.stdout);
+    let table = summary_table(&painted);
+    assert!(
+        table[0].starts_with("\u{1b}[1mCASE\u{1b}[0m"),
+        "{:?}",
+        table[0]
+    );
+    let sorter = table
+        .iter()
+        .find(|line| line.contains("@sorter"))
+        .expect("the @sorter row");
+    assert!(
+        sorter.contains("\u{1b}[1;36m@sorter@1.0.0\u{1b}[0m"),
+        "{sorter:?}"
+    );
+    assert!(
+        sorter.contains("\u{1b}[36mopencode / ollama/other-model\u{1b}[0m"),
+        "{sorter:?}"
+    );
+    assert!(
+        sorter.contains("\u{1b}[1;33m\u{2014}\u{1b}[0m"),
+        "{sorter:?}"
+    );
+    // A painted row still ends in content rather than styled padding.
+    assert!(!sorter.ends_with(' '), "{sorter:?}");
+}
+
+#[test]
+fn mean_token_amounts_are_reported_per_field_and_never_derived() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let records = write_lines(
+        outside.path(),
+        &[
+            v2_row(&[(
+                "reported_tokens",
+                "{\"ahu.tokens.input\":{\"kind\":\"observed\",\"value\":100},\
+                  \"ahu.tokens.output\":{\"kind\":\"observed\",\"value\":40},\
+                  \"ahu.tokens.total\":{\"kind\":\"observed\",\"value\":150},\
+                  \"ahu.tokens.cached\":{\"kind\":\"unavailable\"}}",
+            )]),
+            v2_row(&[(
+                "reported_tokens",
+                "{\"ahu.tokens.input\":300,\"ahu.tokens.output\":60,\"ahu.tokens.total\":370}",
+            )]),
+            v2_row(&[]),
+        ],
+    );
+    let observed = &report_json(&repo, &records)["groups"][0]["observed"];
+    // The field names the older contract carried are still there.
+    assert_eq!(
+        observed["token_fields"],
+        serde_json::json!([
+            "ahu.tokens.cached",
+            "ahu.tokens.input",
+            "ahu.tokens.output",
+            "ahu.tokens.total"
+        ])
+    );
+    assert_eq!(observed["mean_tokens"]["ahu.tokens.input"], 200.0);
+    assert_eq!(observed["mean_tokens"]["ahu.tokens.total"], 260.0);
+    assert_eq!(observed["mean_total_tokens"], 260.0);
+    assert_eq!(observed["token_field_observations"]["ahu.tokens.input"], 2);
+    // A field one recorder named but neither measured has no mean at all.
+    assert!(
+        observed["mean_tokens"].get("ahu.tokens.cached").is_none(),
+        "{observed}"
+    );
+
+    // The readable block prints the amounts against the sample behind each.
+    let output = run_at(
+        &repo,
+        &["--records", records.to_str().unwrap()],
+        Some("120"),
+        true,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ahu.tokens.input 200 (2/3)"), "{stdout}");
+    assert!(stdout.contains("ahu.tokens.total 260 (2/3)"), "{stdout}");
+    assert!(
+        stdout.contains("ahu.tokens.cached \u{2014} (0/3)"),
+        "{stdout}"
+    );
+
+    // Without a reported total, no total is derived from input plus output.
+    let records = write_lines(
+        outside.path(),
+        &[v2_row(&[(
+            "reported_tokens",
+            "{\"ahu.tokens.input\":100,\"ahu.tokens.output\":40}",
+        )])],
+    );
+    let observed = &report_json(&repo, &records)["groups"][0]["observed"];
+    assert!(observed["mean_total_tokens"].is_null(), "{observed}");
+    let output = run_at(
+        &repo,
+        &["--records", records.to_str().unwrap()],
+        Some("120"),
+        true,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = summary_table(&stdout)[1];
+    assert!(
+        row.ends_with('\u{2014}'),
+        "{row} must not report 140 tokens"
+    );
+}
+
+#[test]
+fn a_negative_token_amount_is_refused_by_line() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    for tokens in [
+        r#"{"ahu.tokens.input":-1}"#,
+        r#"{"ahu.tokens.input":{"kind":"observed","value":-1}}"#,
+    ] {
+        let records = write_lines(outside.path(), &[v2_row(&[("reported_tokens", tokens)])]);
+        let output = run(&repo, &["--records", records.to_str().unwrap()]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("runs.jsonl:1:"), "{stderr}");
+    }
 }

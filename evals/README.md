@@ -199,15 +199,26 @@ and a human can each read one.
 
 A report distinguishes two kinds of identity. The **case fingerprint** covers
 the case and corpus version, so a case edit never averages into the baseline it
-should be compared against. The **input fingerprint** covers what the candidate
-was actually given and run under — agent and version, model, harness and
-version, ahu build digest, target repository head, skill digest, stage, and tool
-definitions. Any difference in either is a separate row.
+should be compared against. The **input fingerprint** covers what each agent
+was given and run under — candidate and evaluator identities, models, harnesses
+and versions, ahu build digest, target and evaluator repository heads, candidate
+and evaluator skill digests, stage, and tool definitions. Any difference in
+either is a separate row.
 
 Each row reports the answer outcome and the tool-behaviour outcome separately,
 retains the judge's per-criterion scores and its reason codes, and gives a 95%
 Wilson score interval for binary pass rates. Reason codes are short identifiers,
 which is what makes them safe to keep in a record that holds no prose.
+
+The terminal report starts with a comparison table containing case, agent,
+runtime, answer pass count, tool pass count, mean time, and mean token amount.
+It fits the available terminal width without wrapping rows; columns are removed
+when they do not fit. A dash means no run reported that measurement. The detail
+blocks include Wilson intervals and one mean per reported token field, with the
+number of runs that supplied that field. Token totals are shown only when the
+recorder supplied a total; input and output amounts are never added to invent
+one. The JSON report remains schema version 2 and adds optional token summary
+fields under `observed`.
 
 ### What the interval does and does not tell you
 
@@ -225,7 +236,9 @@ that a change helped.
 
 ### Coverage versus means
 
-Score and pass rate are taken over every run in a row. Token, timing,
+Pass rate is taken over every run in a row, including failed or unscored
+trials. Mean score uses only trials that produced a score and reports its own
+observation count. Token, timing,
 decision-call, and MCP figures are not: each is reported as a coverage count
 (`timing 1/2`) alongside a mean over only the runs that carried the
 measurement, so a configuration that reported nothing is visibly uncovered
@@ -292,6 +305,12 @@ checkout and treat it as private.
 
 Report mean score, pass rate, and coverage separately, so a missing observation
 never reads as a zero.
+
+A candidate that launches but omits an answer, writes malformed JSON, or
+produces an answer outside the declared question type is recorded as a failed,
+unscored trial. The remaining trials in the matrix still run. A scored mean
+therefore does not disguise these failures; inspect both `score_observations`
+and the terminal-status counts.
 
 Cases and JSONL run records use schema version 2. Earlier experimental schema
 versions were never released and are not accepted by the runner or report.
