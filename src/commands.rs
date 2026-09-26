@@ -236,32 +236,78 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
             std::collections::BTreeSet::new()
         }
     };
-    console.say("AGENT                 HARNESS       MODEL                         STATUS\n")?;
-    for agent in &agents {
-        let label = if drifted.contains(&agent.manifest.name) {
-            format!(
-                "@{} {} [drifted]",
-                agent.manifest.name, agent.manifest.version
-            )
-        } else {
-            format!("@{} {}", agent.manifest.name, agent.manifest.version)
-        };
-        console.say(&format!(
-            "{:<22} {:<13} {:<29} {}\n",
-            style.paint(Role::Agent, &display_safe(&label)),
-            style.paint(Role::Runtime, &display_safe(&agent.manifest.harness)),
-            style.paint(Role::Runtime, &display_safe(&agent.manifest.model)),
-            display_safe(
-                &agent
-                    .source_path
-                    .strip_prefix(&repo.root)
-                    .unwrap_or(&agent.source_path)
-                    .to_string_lossy()
-            ),
-        ))?;
-    }
+    let rows: Vec<Vec<table::Cell>> = agents
+        .iter()
+        .map(|agent| {
+            let label = if drifted.contains(&agent.manifest.name) {
+                format!(
+                    "@{} {} [drifted]",
+                    agent.manifest.name, agent.manifest.version
+                )
+            } else {
+                format!("@{} {}", agent.manifest.name, agent.manifest.version)
+            };
+            vec![
+                table::Cell::painted(Role::Agent, display_safe(&label)),
+                table::Cell::painted(Role::Runtime, display_safe(&agent.manifest.harness)),
+                table::Cell::painted(Role::Runtime, display_safe(&agent.manifest.model)),
+                table::Cell::plain(display_safe(
+                    &agent
+                        .source_path
+                        .strip_prefix(&repo.root)
+                        .unwrap_or(&agent.source_path)
+                        .to_string_lossy(),
+                )),
+            ]
+        })
+        .collect();
+    console.say(&table::render(
+        style,
+        table::columns(),
+        AGENT_COLUMNS,
+        &rows,
+    ))?;
     Ok(0)
 }
+
+/// The `ahu agents` table. The agent cell is what a reader types into
+/// `ahu launch`, and a truncated handle selects nothing, so it is fixed. The
+/// harness and model are the identity a manifest pins -- the reason the listing
+/// exists -- and neither says anything in part, so they are fixed too.
+///
+/// The source path gives up width first and leaves the table first. It is the
+/// one column that survives being cut: the file name only repeats the agent's
+/// own name, while the leading directory is what the column is really saying --
+/// whether the instructions live in a native definition or in the manifest
+/// itself -- and that is the part a cut keeps. Then the model goes, and the
+/// harness outlasts it: it is the shorter column and it names the CLI that has
+/// to run the assignment.
+const AGENT_COLUMNS: &[table::Column] = &[
+    table::Column {
+        header: "AGENT",
+        min: 0,
+        shrink: None,
+        drop: None,
+    },
+    table::Column {
+        header: "HARNESS",
+        min: 0,
+        shrink: None,
+        drop: Some(2),
+    },
+    table::Column {
+        header: "MODEL",
+        min: 0,
+        shrink: None,
+        drop: Some(1),
+    },
+    table::Column {
+        header: "STATUS",
+        min: 12,
+        shrink: Some(0),
+        drop: Some(0),
+    },
+];
 
 fn agent_drift(
     repo: &Repo,

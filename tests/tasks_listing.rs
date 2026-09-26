@@ -242,6 +242,114 @@ fn agent_listing_uses_a_table_and_marks_configuration_drift() {
     assert!(text.contains(".claude/agents/chris.md"), "{text}");
 }
 
+/// Every visible cell start in a table line, found by splitting on the gap.
+///
+/// A cell's own text never holds two spaces in a row, so a run of two or more is
+/// the gap between columns and nothing else.
+fn cell_offsets(line: &str) -> Vec<usize> {
+    let bytes: Vec<char> = line.chars().collect();
+    let mut offsets = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == ' ' {
+            let start = index;
+            while index < bytes.len() && bytes[index] == ' ' {
+                index += 1;
+            }
+            if index - start >= 2 && index < bytes.len() {
+                offsets.push(index);
+            }
+        } else {
+            if offsets.is_empty() && index == 0 {
+                offsets.push(0);
+            }
+            index += 1;
+        }
+    }
+    offsets
+}
+
+/// Drop every SGR sequence, leaving what the terminal actually shows.
+fn visible(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        assert_eq!(chars.next(), Some('['), "only SGR sequences are expected");
+        for c in chars.by_ref() {
+            if c == 'm' {
+                break;
+            }
+            assert!(
+                c.is_ascii_digit() || c == ';',
+                "only SGR sequences are expected"
+            );
+        }
+    }
+    out
+}
+
+/// `ahu agents` padded each cell with `{:<22}` over the *styled* string, so in a
+/// terminal the escape bytes were counted as visible columns and every row after
+/// the first cell collapsed to a single space. The table module pads by visible
+/// width, so the coloured table and the plain one are the same table.
+#[test]
+fn the_agent_table_lines_up_identically_coloured_and_plain() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    // Two agents of different widths, one of them drifted, so a padding bug
+    // cannot be hidden by cells that happen to be the same length.
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.add_agent_on("dana", "0.2.1", "codex", "gpt-6-astra");
+    repo.commit("fixture");
+    let dir = tasks_dir(&repo);
+    write_current(&dir, &repo, &ahu::task::new_task_id().unwrap());
+
+    let run = |color: &str, no_color: Option<&str>| {
+        let mut command = common::ahu();
+        command
+            .args(["agents", color])
+            .current_dir(repo.path())
+            .env("COLUMNS", "120");
+        match no_color {
+            Some(value) => command.env("NO_COLOR", value),
+            None => command.env_remove("NO_COLOR"),
+        };
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let coloured = run("--color=always", None);
+    let plain = run("--color=auto", Some("1"));
+
+    assert!(coloured.contains('\x1b'), "{coloured:?}");
+    assert!(!plain.contains('\x1b'), "{plain:?}");
+    // The drifted marker is inside the widest cell, so it is the one that sets
+    // the first column's width in both runs.
+    assert!(plain.contains("@chris 1.0.0 [drifted]"), "{plain}");
+    assert!(plain.contains("@dana 0.2.1  "), "{plain}");
+
+    // What a terminal shows for the coloured run is the plain table, byte for
+    // byte: same widths, same gaps, same column positions.
+    assert_eq!(visible(&coloured), plain);
+
+    // And the positions are a real table in their own right, rather than two
+    // outputs that agree on being wrong: every row's cells start where the
+    // header's do.
+    let header = cell_offsets(plain.lines().next().unwrap());
+    assert_eq!(header.len(), 4, "{plain}");
+    for line in visible(&coloured).lines().skip(1) {
+        assert_eq!(cell_offsets(line), header, "{line:?} in {coloured:?}");
+    }
+}
+
 #[test]
 fn launch_displays_a_prominent_drift_warning() {
     let repo = TestRepo::new();
