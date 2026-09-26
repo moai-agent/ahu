@@ -4,8 +4,9 @@
 The contract: every skill lives in one directory directly under
 .agents/skills/, the directory is named after the skill, it holds exactly one
 SKILL.md, and that file's frontmatter contains only the portable keys
-"name" and "description". The compiled bundle in src/mcp.rs must carry the
-same set of skills as the tree.
+"name" and "description". The compiled bundle in src/mcp.rs must carry every
+skill in the tree except the repository-only skills listed below, which are
+about building and releasing ahu itself and are not shipped to other projects.
 """
 
 import re
@@ -14,6 +15,8 @@ import sys
 
 FRONTMATTER_LINE = re.compile(r"(?P<key>[A-Za-z0-9_-]+): (?P<value>.*)")
 NAME_GRAMMAR = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+# Skills for ahu's own agents; `ahu mcp setup` must not write them elsewhere.
+REPOSITORY_ONLY_SKILLS = {"ahu-architecture", "release"}
 BUNDLE_ENTRY = re.compile(
     r'\(\s*(?:"(?P<literal>[^"]+)"|(?P<const>[A-Z][A-Z0-9_]*))'
     r'\s*,\s*include_str!\("(?P<path>[^"]+)"\)\s*,?\s*\)\s*,?'
@@ -103,11 +106,18 @@ def check_bundle(source: Path, descriptions: dict[str, str]) -> None:
         if path != expected:
             raise ValueError(f"bundled skill {name} points at {path}, expected {expected}")
         bundled[name] = path
-    missing = sorted(set(descriptions) - set(bundled))
-    extra = sorted(set(bundled) - set(descriptions))
+    absent = sorted(REPOSITORY_ONLY_SKILLS - set(descriptions))
+    if absent:
+        raise ValueError(f"repository-only skills missing from the tree: {absent}")
+    shippable = set(descriptions) - REPOSITORY_ONLY_SKILLS
+    missing = sorted(shippable - set(bundled))
+    extra = sorted(set(bundled) - shippable)
     if missing:
         raise ValueError(f"skills missing from BUNDLED_SKILLS: {missing}")
     if extra:
+        shipped = sorted(set(bundled) & REPOSITORY_ONLY_SKILLS)
+        if shipped:
+            raise ValueError(f"repository-only skills must not be bundled: {shipped}")
         raise ValueError(f"bundled skills missing from the tree: {extra}")
 
 
