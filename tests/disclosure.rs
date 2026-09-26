@@ -698,12 +698,21 @@ fn a_frontmatter_only_edit_is_drift_and_is_named_as_a_file_change() {
     );
 
     let previous = record_for(&repo, &before);
+    // The same root the launch path hands drift, so the path is the
+    // repository-relative one a reviewer would type.
+    let root = git::discover(repo.path()).unwrap().root;
+    let source = after.relative_source(&root);
     let found = ahu::drift::detect(
         "sable@1.0.0",
-        Some(ahu::drift::AgentDigests {
-            identity: &after.identity_digest(),
-            source: &after.source_digest,
-            instructions: &after.instructions_digest,
+        Some(ahu::drift::AgentIdentity {
+            version: &after.manifest.version,
+            harness: &after.manifest.harness,
+            model: &after.manifest.model,
+            permissions: after.manifest.permissions,
+            instructions_source: Some(&source),
+            identity_digest: &after.identity_digest(),
+            source_digest: &after.source_digest,
+            instructions_digest: &after.instructions_digest,
         }),
         &previous.config_snapshot_digest.clone(),
         &previous.policy_digest.clone(),
@@ -713,18 +722,20 @@ fn a_frontmatter_only_edit_is_drift_and_is_named_as_a_file_change() {
     .expect("a frontmatter edit is still drift");
     let rendered = ahu::drift::render(&found);
 
+    // The file is named, not only digested: a reader can open it.
     assert!(
-        rendered.contains("the agent's source file changed"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("the text ahu delivers is unchanged"),
+        rendered.contains(
+            "- instructions: .claude/agents/sable.md changed, frontmatter or \
+             metadata only -- the text ahu delivers is unchanged"
+        ),
         "the distinction is the whole point: {rendered}"
     );
     assert!(
-        !rendered.contains("the instruction text ahu delivers changed"),
+        !rendered.contains("changed, text ahu delivers"),
         "{rendered}"
     );
+    // The label is what drift exists to contradict, so it is said outright.
+    assert!(rendered.contains("(version still 1.0.0)"), "{rendered}");
 }
 
 /// A minimal previous-launch record for `drift::detect`.
@@ -1183,10 +1194,17 @@ fn delivery_layout_and_nonce_changes_are_not_agent_version_drift() {
         assert!(
             ahu::drift::detect(
                 &record.agent_label(),
-                Some(ahu::drift::AgentDigests {
-                    identity: &agent.identity_digest(),
-                    source: &agent.source_digest,
-                    instructions: &agent.instructions_digest
+                Some(ahu::drift::AgentIdentity {
+                    version: &agent.manifest.version,
+                    harness: &agent.manifest.harness,
+                    model: &agent.manifest.model,
+                    permissions: agent.manifest.permissions,
+                    instructions_source: Some(
+                        &agent.relative_source(&git::discover(repo.path()).unwrap().root)
+                    ),
+                    identity_digest: &agent.identity_digest(),
+                    source_digest: &agent.source_digest,
+                    instructions_digest: &agent.instructions_digest
                 }),
                 &record.config_snapshot_digest,
                 &record.policy_digest,

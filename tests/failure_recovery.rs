@@ -651,10 +651,15 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
 
     let found = drift::detect(
         "chris@1.0.0",
-        Some(ahu::drift::AgentDigests {
-            identity: &agent.identity_digest(),
-            source: &agent.source_digest,
-            instructions: &agent.instructions_digest,
+        Some(ahu::drift::AgentIdentity {
+            version: &agent.manifest.version,
+            harness: &agent.manifest.harness,
+            model: &agent.manifest.model,
+            permissions: agent.manifest.permissions,
+            instructions_source: Some(&agent.relative_source(&discovered.root)),
+            identity_digest: &agent.identity_digest(),
+            source_digest: &agent.source_digest,
+            instructions_digest: &agent.instructions_digest,
         }),
         &plan.snapshot.digest(),
         &loaded.digest,
@@ -663,24 +668,18 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
     )
     .expect("drift detected");
     let rendered = drift::render(&found);
-    // Drift names which digest moved, and what that digest covers. "the agent's
-    // instructions or manifest changed" could not distinguish an edit to the
-    // delivered text from an edit to frontmatter, and a reader comparing a
-    // digest against a file has to know which bytes it covers.
+    // Drift names the file and which of its bytes moved. A digest pair alone
+    // could not distinguish an edit to the delivered text from an edit to
+    // frontmatter, and neither one tells a reader which file to open.
     assert!(
-        rendered.contains("the instruction text ahu delivers changed"),
+        rendered.contains("- instructions: .claude/agents/chris.md changed, text ahu delivers"),
         "{rendered}"
     );
+    // A digest pair for the agent's own files is now redundant with the line
+    // above, so the report does not carry one.
+    assert!(!rendered.contains("frontmatter included"), "{rendered}");
     assert!(
-        rendered.contains("after any frontmatter is stripped"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("the agent's source file changed"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("the whole file, frontmatter included"),
+        rendered.contains("the repository agent configuration changed:"),
         "{rendered}"
     );
     assert!(rendered.contains("bump the agent's version"), "{rendered}");
@@ -765,10 +764,15 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
 
     let found = drift::detect(
         "chris@1.0.0",
-        Some(ahu::drift::AgentDigests {
-            identity: &agent.identity_digest(),
-            source: &agent.source_digest,
-            instructions: &agent.instructions_digest,
+        Some(ahu::drift::AgentIdentity {
+            version: &agent.manifest.version,
+            harness: &agent.manifest.harness,
+            model: &agent.manifest.model,
+            permissions: agent.manifest.permissions,
+            instructions_source: Some(&agent.relative_source(&discovered.root)),
+            identity_digest: &agent.identity_digest(),
+            source_digest: &agent.source_digest,
+            instructions_digest: &agent.instructions_digest,
         }),
         &plan.snapshot.digest(),
         &loaded.digest,
@@ -780,6 +784,10 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
     assert!(rendered.contains("configuration changed"), "{rendered}");
     assert!(rendered.contains("hooks in effect changed"), "{rendered}");
     assert!(rendered.contains("project policy changed"), "{rendered}");
+    // The record carries no agent digests to compare, so nothing is claimed
+    // about the agent's own files -- and the version note still lands.
+    assert!(!rendered.contains("instructions:"), "{rendered}");
+    assert!(rendered.contains("(version still 1.0.0)"), "{rendered}");
 }
 
 /// A catalog lookup that a refactor could break must surface as an error the

@@ -235,8 +235,20 @@ fn agent_drift(
     repo: &Repo,
     agents: &[ResolvedAgent],
 ) -> Result<std::collections::BTreeSet<String>> {
+    Ok(agent_drift_details(repo, agents)?
+        .into_iter()
+        .map(|drifted| drifted.agent_name)
+        .collect())
+}
+
+/// Every drifted agent with the detail the launch path reports.
+///
+/// `ahu agents` only needs the names; `ahu doctor` shows what changed, so the
+/// same comparison produces both rather than doctor repeating the walk with a
+/// different definition of drift.
+fn agent_drift_details(repo: &Repo, agents: &[ResolvedAgent]) -> Result<Vec<drift::Drifted>> {
     let Some(loaded) = config::load(&repo.root)? else {
-        return Ok(std::collections::BTreeSet::new());
+        return Ok(Vec::new());
     };
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let previous = task::list(repo)?;
@@ -246,25 +258,34 @@ fn agent_drift(
             previous.unreadable.len()
         )));
     }
-    let mut drifted = std::collections::BTreeSet::new();
+    let mut drifted = Vec::new();
     for agent in agents {
         let found_hooks = hooks::collect(&repo.root, &agent.manifest.harness)?;
         let identity = agent.identity_digest();
-        if drift::detect(
+        let source = agent.relative_source(&repo.root);
+        if let Some(found) = drift::detect(
             &agent.label(),
-            Some(drift::AgentDigests {
-                identity: &identity,
-                source: &agent.source_digest,
-                instructions: &agent.instructions_digest,
+            Some(drift::AgentIdentity {
+                version: &agent.manifest.version,
+                harness: &agent.manifest.harness,
+                model: &agent.manifest.model,
+                permissions: agent.manifest.permissions,
+                instructions_source: Some(&source),
+                identity_digest: &identity,
+                source_digest: &agent.source_digest,
+                instructions_digest: &agent.instructions_digest,
             }),
             &snapshot.digest(),
             &loaded.digest,
             &found_hooks.digest(),
             &previous.records,
-        )
-        .is_some()
-        {
-            drifted.insert(agent.manifest.name.clone());
+        ) {
+            drifted.push(drift::Drifted {
+                agent_name: agent.manifest.name.clone(),
+                agent_version: agent.manifest.version.clone(),
+                previous_task: crate::task_handles::reference(repo, &found.previous_task_id),
+                drift: found,
+            });
         }
     }
     Ok(drifted)
@@ -559,22 +580,13 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             }
         }
 
-        match agent_drift(repo, &registered_agents) {
-            Ok(names) if names.is_empty() => {
+        match agent_drift_details(repo, &registered_agents) {
+            Ok(drifted) if drifted.is_empty() => {
                 console.say("drift        no registered agents are drifted\n")?;
             }
-            Ok(names) => {
+            Ok(drifted) => {
                 warnings += 1;
-                console.say(&format!(
-                    "drift        {}\n",
-                    display_safe(
-                        &names
-                            .into_iter()
-                            .map(|name| format!("@{name}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                ))?;
+                console.say(&drift::render_doctor(&drifted))?;
             }
             Err(error) => {
                 warnings += 1;
@@ -2331,15 +2343,21 @@ pub(crate) fn preflight(
         ))?;
     }
     let agent_identity = plan.agent.as_ref().map(|a| a.identity_digest());
+    let agent_source = plan.agent.as_ref().map(|a| a.relative_source(&repo.root));
     if let Some(found) = drift::detect(
         &key,
         plan.agent
             .as_ref()
             .zip(agent_identity.as_deref())
-            .map(|(a, identity)| drift::AgentDigests {
-                identity,
-                source: &a.source_digest,
-                instructions: &a.instructions_digest,
+            .map(|(a, identity)| drift::AgentIdentity {
+                version: &a.manifest.version,
+                harness: &a.manifest.harness,
+                model: &a.manifest.model,
+                permissions: a.manifest.permissions,
+                instructions_source: agent_source.as_deref(),
+                identity_digest: identity,
+                source_digest: &a.source_digest,
+                instructions_digest: &a.instructions_digest,
             }),
         &plan.snapshot.digest(),
         &loaded.digest,

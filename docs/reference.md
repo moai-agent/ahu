@@ -918,7 +918,8 @@ Every named agent needs a semantic version. `ahu` does not manage releases for
 you, but it reports when a version label has stopped matching its inputs:
 if `chris@1.2.0` launches with different instructions or a different repository
 configuration than the last `chris@1.2.0` launch, that drift is reported as a
-pending behavior change for the next version bump.
+pending behavior change for the next version bump. The report names the fields
+that moved—see [drift names what changed](#drift-names-what-changed).
 
 ## OpenCode with Ollama-hosted models
 
@@ -1218,6 +1219,40 @@ The complete delivery has a separate integrity digest. Its layout, nonce, and
 digest alone are not agent-version drift inputs. Drift compares agent identity,
 source and instruction digests, repository configuration, project policy, and
 known hooks.
+
+### Drift names what changed
+
+A digest pair says that something moved, not what to do about it. A task record
+stores the identity the launch ran with—version, harness, model, permissions,
+instruction source and its digests—so drift compares those fields with the
+agent's manifest as it stands now and reports the ones that differ, in words,
+before any digest:
+
+```
+drift        1 registered agent drifted
+  @chris 1.0.0  since task @fix-flaky-test (2026-09-24)
+    - model: claude-sonnet-5 -> claude-opus-5 (version still 1.0.0)
+  Bump the version in the agent's manifest and record what changed, or restore it.
+```
+
+`(version still 1.0.0)` rides on the first change because that is the case drift
+exists to catch: the inputs moved and the label did not.
+
+An edit to the agent's files is named the same way, by file rather than by
+digest, and says which bytes moved—`instructions: .claude/agents/chris.md
+changed, text ahu delivers`, or `… changed, frontmatter or metadata only -- the
+text ahu delivers is unchanged` when the delivered instructions are untouched.
+
+Digest pairs remain for the inputs no manifest field names, each with the inputs
+it spans said in words: `the repository agent configuration changed`, `the hooks
+in effect changed`, `the project policy changed`. A record written before ahu
+split the two file digests has nothing to name, so it falls back to the combined
+identity digest.
+
+The launch-time warning and the `ahu doctor` drift section are the same
+comparison rendered twice, so the two cannot disagree about what moved. Naming a
+field does not change what counts as drift: a moved digest still decides that,
+and drift still warns rather than blocking a launch.
 
 Exiting the harness keeps the worktree, the branch, and the task record. A
 process exit is not evidence that the task succeeded, and `ahu` never deletes
