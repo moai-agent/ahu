@@ -11,13 +11,19 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 fn fixture_case(path: &Path) {
+    fixture_case_named(path, "eval-smoke-001", "");
+}
+
+/// A schema 2 case, with `extra` front-matter lines appended.
+fn fixture_case_named(path: &Path, id: &str, extra: &str) {
     std::fs::write(
         path,
-        r#"---
+        format!(
+            r#"---
 okf_version: "0.2"
 type: ahu:eval-case
-schema_version: 1
-id: eval-smoke-001
+schema_version: 2
+id: {id}
 corpus_version: "1.0.0"
 state:
   subject: duplicate charge
@@ -34,10 +40,11 @@ rubric:
 scoring:
   route: 1.0
   exact_match_pass_threshold: 1.0
----
+{extra}---
 
 Synthetic routing smoke test.
-"#,
+"#
+        ),
     )
     .unwrap();
 }
@@ -130,11 +137,27 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
         );
     }
     let summary: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(summary["runs"][0]["score"], 1.0);
-    assert_eq!(summary["runs"][0]["passed"], true);
-    assert_eq!(summary["runs"][0]["mcp_observed"], true);
-    assert_eq!(summary["runs"][0]["decision_calls"], 0);
+    let trial = &summary["trials"][0];
+    assert_eq!(trial["score"], 1.0);
+    assert_eq!(trial["passed"], true);
+    assert_eq!(trial["score_source"], "judge");
+    assert_eq!(trial["answer_passed"], true);
+    assert_eq!(trial["judge_status"], "scored");
+    assert_eq!(trial["telemetry_coverage"], "complete_session");
+    // The case states no tool expectation, so its tool score is not_applicable
+    // rather than a pass by absence.
+    assert_eq!(trial["tool_expectation_status"], "not_applicable");
     assert_eq!(summary["evaluator"], "@judge");
+    assert_eq!(summary["planned_trials"], 1);
+    assert_eq!(summary["planned_launches"], 2);
+    assert_eq!(summary["blinding"], "prompt_only");
+    assert!(
+        summary["blinding_caveat"]
+            .as_str()
+            .unwrap()
+            .contains("not environmental isolation"),
+        "the run output says what prompt-level blinding does not claim"
+    );
 
     let rows: Vec<Value> = std::fs::read_to_string(&records)
         .unwrap()
@@ -142,11 +165,60 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["schema_version"], 2);
     assert_eq!(rows[0]["mcp_tool_call_count"], 1);
     assert_eq!(rows[0]["mcp_tools"]["ahu_agents_list"], 1);
     assert_eq!(rows[0]["evaluator"], "judge");
     assert_eq!(rows[0]["score"], 1.0);
     assert_eq!(rows[0]["deterministic_score"], 1.0);
+    assert_eq!(rows[0]["answer_score"], 1.0);
+    assert_eq!(rows[0]["answer_passed"], true);
+    assert_eq!(rows[0]["score_source"], "judge");
+    // The judge's own evidence is retained, not collapsed into its number.
+    assert_eq!(rows[0]["judge_status"], "scored");
+    assert_eq!(rows[0]["judge_score"], 1.0);
+    assert_eq!(rows[0]["judge_criterion_scores"]["route"], 1.0);
+    assert_eq!(
+        rows[0]["judge_reason_codes"],
+        serde_json::json!(["routed_to_billing"])
+    );
+    assert_eq!(rows[0]["judge_calibration"], "single_judge_uncalibrated");
+    // Exact input identity, with the build identity kept apart from the HEAD of
+    // the checkout under evaluation.
+    assert_eq!(rows[0]["case_schema_version"], 2);
+    assert_eq!(rows[0]["prompt_profile"], "tool_neutral_v2");
+    for field in [
+        "case_digest",
+        "agent_manifest_digest",
+        "agent_source_digest",
+        "agent_instructions_digest",
+        "agent_identity_digest",
+        "evaluator_manifest_digest",
+        "evaluator_identity_digest",
+        "tool_definitions_digest",
+        "ahu_build_digest",
+        "skill_digest",
+        "target_repo_head",
+        "input_fingerprint",
+    ] {
+        assert_eq!(
+            rows[0][field].as_str().map(str::len),
+            Some(if field == "target_repo_head" { 40 } else { 64 }),
+            "{field} must be recorded as a digest"
+        );
+    }
+    assert_eq!(rows[0]["ahu_version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        rows[0].get("ahu_revision").is_none(),
+        "the ambiguous v1 field is not written"
+    );
+    assert_eq!(rows[0]["fingerprint_completeness"], "complete");
+    assert_eq!(rows[0]["blinding"], "prompt_only");
+    assert_eq!(rows[0]["telemetry_coverage"], "complete_session");
+    assert_eq!(rows[0]["tool_expectation_status"], "not_applicable");
+    assert_eq!(rows[0]["terminal_status"], "candidate_scored");
+    assert_eq!(rows[0]["attempts"], 1);
+    assert_eq!(rows[0]["trial_index"], 1);
     assert_eq!(rows[0]["evaluator_model"], "ollama/glm-5.3:cloud");
     assert_eq!(rows[0]["evaluator_harness"], "opencode");
     assert_eq!(rows[0]["evaluator_harness_version"], "1.18.32");
@@ -190,6 +262,22 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
         String::from_utf8_lossy(&report.stderr)
     );
     let comparison: Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(comparison["schema_version"], 2);
+    assert_eq!(comparison["groups"][0]["lineage"], "v2");
+    assert_eq!(
+        comparison["groups"][0]["fingerprint_completeness"],
+        "complete"
+    );
+    assert_eq!(comparison["groups"][0]["answer"]["pass_rate"], 1.0);
+    assert_eq!(
+        comparison["groups"][0]["answer"]["pass_interval"]["samples"],
+        1
+    );
+    assert_eq!(comparison["groups"][0]["judge"]["scored"], 1);
+    assert_eq!(
+        comparison["groups"][0]["judge"]["criterion_means"]["route"],
+        1.0
+    );
     assert_eq!(comparison["groups"][0]["coverage"]["mcp_observations"], 1);
     assert_eq!(
         comparison["groups"][0]["observed"]["mean_mcp_tool_calls"],

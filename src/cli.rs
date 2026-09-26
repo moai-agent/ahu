@@ -45,9 +45,10 @@ Commands:
   knowledge lint [--output json]
                         Check the OKF bundles named in [knowledge] with okf.
                         Reads only; nothing is fetched, indexed, or rewritten
-  eval run --case <path> --agent @name --records <path> [options]
+  eval run (--case <path> | --suite <path>) --agent @name [--agent @other]
+           --records <path> [options]
                         Run candidates (and optionally a blind agent evaluator)
-                        from an external evaluation case
+                        over an external evaluation case or suite
   eval report --records <path> [--output json]
                         Compare local evaluation runs from an external JSONL
                         record file. Reads only, and only outside this checkout
@@ -76,18 +77,14 @@ Commands:
   mcp serve              Serve read-only ahu inspection tools over stdio MCP
   mcp setup              Materialize ahu's bundled skills into this repository
   doctor                Check repository, configuration, harness, and cmux
-  agy                   Open the Antigravity CLI here on this project's top-ranked
-                        Antigravity model, in YOLO mode
-                        (--model <m> --dangerously-skip-permissions)
-  claude                Open Claude here on this project's top-ranked Claude Code
-                        model, with permission checks bypassed
-                        (--model <m> --dangerously-skip-permissions)
-  codex                 Open Codex here on this project's top-ranked Codex model,
-                        with approval prompts and sandbox bypassed
-                        (-m <m> --dangerously-bypass-approvals-and-sandbox)
-  opencode              Open OpenCode here on this project's top-ranked OpenCode
-                        model, auto-approving everything it does not explicitly
-                        deny (--model <provider/model> --auto; no --pure)
+  agy                   Open the Antigravity CLI here using its configured model
+                        in YOLO mode (--dangerously-skip-permissions)
+  claude                Open Claude here with permission checks bypassed
+                        (uses Claude's configured model)
+  codex                 Open Codex here with approval prompts and sandbox bypassed
+                        (uses Codex's configured model)
+  opencode              Open OpenCode here using its configured model and
+                        permissions (ahu passes no --auto and no --pure)
   run-task              Internal: run a prepared task (used by cmux)
 
 Task references:
@@ -124,13 +121,17 @@ knowledge lint options:
                         warnings fail the check. Errors always do.
 
 eval report options:
-  --records <path>      JSONL run records written by scripts/local_eval.py.
+  --records <path>      JSONL run records from `ahu eval run`; legacy records
+                        from scripts/local_eval.py are also accepted.
                         Required, and refused when it resolves inside this
                         repository: run evidence stays in a user-owned directory
   --output json         Emit a versioned JSON comparison on stdout, the readable
                         report on stderr. Rows are grouped by case and corpus
                         version, stage, agent/version, evaluator/version, model,
-                        harness/version, ahu revision, and skill digest. Token,
+                        harness/version, every input fingerprint, and skill
+                        digest. Binary answer and tool-expectation pass rates
+                        carry 95% Wilson intervals. Record schema 1 rows stay in
+                        separate legacy groups. Token,
                         timing, and decision-call figures are reported as
                         coverage counts, so a missing observation is not a zero.
                         `eval report` reads records; it runs no candidate and no
@@ -138,9 +139,21 @@ eval report options:
 
 eval run options:
   --case <path>         OKF Markdown case with YAML front matter; expected
-                        answer values stay hidden from the candidate
-  --agent @name         Registered candidate agent (required)
+                        answer values, rubric, and tool expectations stay hidden
+                        from the candidate. Schema 2 prompts tool-neutrally;
+                        schema 1 is legacy and forces the typed-decision tool
+  --suite <path>        OKF Markdown suite (type ahu:eval-suite) naming cases by
+                        relative path with fixed weights. An alternative to
+                        --case. The whole case x agent x run matrix is validated
+                        and capped before any model launches
+  --agent @name         Registered candidate agent (required, repeatable). The
+                        order given is the order the trials run in
   --evaluator @name     Optional separate registered evaluator agent
+  --evaluator-repo <path>
+                        Run the evaluator from a separately prepared checkout,
+                        recorded as blinding `isolated`. Without it the
+                        evaluator is blinded at the prompt level only
+                        (`prompt_only`), which is not environment isolation
   --records <path>      External JSONL destination; prompts and artifacts are
                         written to a private sibling run directory
   --runs <count>        Repetitions from 1 to 100 (default 1)
@@ -262,9 +275,14 @@ pub enum Command {
         output_json: bool,
     },
     EvalRun {
-        case: PathBuf,
-        agent: String,
+        /// A single case. Exactly one of `case` and `suite` is set.
+        case: Option<PathBuf>,
+        suite: Option<PathBuf>,
+        /// Candidate agents in the order named, which is the execution order.
+        agents: Vec<String>,
         evaluator: Option<String>,
+        /// A separately prepared checkout the evaluator runs from.
+        evaluator_repo: Option<PathBuf>,
         records: PathBuf,
         runs: u32,
         timeout_seconds: u64,
@@ -655,8 +673,10 @@ fn parse_eval(rest: &[String]) -> Result<Command> {
 
 fn parse_eval_run(rest: &[String]) -> Result<Command> {
     let mut case = None;
-    let mut agent = None;
+    let mut suite = None;
+    let mut agents: Vec<String> = Vec::new();
     let mut evaluator = None;
+    let mut evaluator_repo = None;
     let mut records = None;
     let mut runs = 1u32;
     let mut timeout_seconds = 1800u64;
@@ -670,9 +690,21 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
             "--case" if case.is_none() => {
                 case = Some(PathBuf::from(value_for("--case", rest, &mut index)?))
             }
-            "--agent" if agent.is_none() => agent = Some(value_for("--agent", rest, &mut index)?),
+            "--suite" if suite.is_none() => {
+                suite = Some(PathBuf::from(value_for("--suite", rest, &mut index)?))
+            }
+            // Repeatable: each occurrence adds a candidate, and the order is
+            // kept because it is the order the trials run in.
+            "--agent" => agents.push(value_for("--agent", rest, &mut index)?),
             "--evaluator" if evaluator.is_none() => {
                 evaluator = Some(value_for("--evaluator", rest, &mut index)?)
+            }
+            "--evaluator-repo" if evaluator_repo.is_none() => {
+                evaluator_repo = Some(PathBuf::from(value_for(
+                    "--evaluator-repo",
+                    rest,
+                    &mut index,
+                )?))
             }
             "--records" if records.is_none() => {
                 records = Some(PathBuf::from(value_for("--records", rest, &mut index)?))
@@ -716,25 +748,49 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
         }
         index += 1;
     }
-    let case =
-        case.ok_or_else(|| crate::util::Error::new("`ahu eval run` needs --case <path>."))?;
-    let agent =
-        agent.ok_or_else(|| crate::util::Error::new("`ahu eval run` needs --agent @name."))?;
-    if !agent.starts_with('@') || agent.len() < 2 {
-        bail!("--agent must name a registered agent as @name");
+    match (&case, &suite) {
+        (None, None) => bail!("`ahu eval run` needs --case <path> or --suite <path>."),
+        (Some(_), Some(_)) => {
+            bail!("--case and --suite are alternatives for `ahu eval run`; pass one.")
+        }
+        _ => {}
+    }
+    if agents.is_empty() {
+        bail!("`ahu eval run` needs --agent @name; repeat it to compare candidates.");
+    }
+    if agents.len() > 16 {
+        bail!("`ahu eval run` accepts at most 16 --agent candidates.");
+    }
+    for agent in &agents {
+        if !agent.starts_with('@') || agent.len() < 2 {
+            bail!("--agent must name a registered agent as @name");
+        }
+    }
+    // Two spellings of the same agent are a duplicate, and the matrix would run
+    // it twice and report it as two candidates.
+    let mut seen = std::collections::BTreeSet::new();
+    for agent in &agents {
+        if !seen.insert(agent.trim_start_matches('@')) {
+            bail!("--agent {agent} is named more than once.");
+        }
     }
     if let Some(evaluator) = &evaluator
         && (!evaluator.starts_with('@') || evaluator.len() < 2)
     {
         bail!("--evaluator must name a registered agent as @name");
     }
+    if evaluator_repo.is_some() && evaluator.is_none() {
+        bail!("--evaluator-repo needs --evaluator @name: it names where that evaluator runs from.");
+    }
     let records = records.ok_or_else(|| {
         crate::util::Error::new("`ahu eval run` needs --records <external-jsonl-path>.")
     })?;
     Ok(Command::EvalRun {
         case,
-        agent,
+        suite,
+        agents,
         evaluator,
+        evaluator_repo,
         records,
         runs,
         timeout_seconds,

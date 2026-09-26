@@ -1,151 +1,185 @@
 # Local agent evaluations
 
-This is a small, repeatable starting point for comparing ahu-launched local
-agents. The checked-in cases are synthetic. Run evidence and OpenTelemetry
-traces belong in a user-owned directory outside this checkout; never commit
-prompts, transcripts, task results, or trace exports.
+A small, repeatable way to compare ahu-launched local agents on synthetic cases.
+Every checked-in case is invented. Run evidence — prompts, answers, judge
+artifacts, task results, and OpenTelemetry traces — belongs in a user-owned
+directory outside this checkout and is never committed.
 
-`ahu eval run` orchestrates repeated candidate runs and optionally a separate
+`ahu eval run` orchestrates repeated candidate runs and, optionally, a separate
 ahu evaluator agent. It validates answer and score artifacts, writes compact
 JSONL records, and captures ahu OpenTelemetry spans through a temporary local
-receiver. `ahu eval report` compares those records. The lower-level
-`scripts/local_eval.py record` and `trend` commands remain available for manual
-or older workflows. The manual recorder reads case front matter with PyYAML;
-install its dependency with `python3 -m pip install -r requirements-evals.txt`.
+receiver. `ahu eval report` compares those records.
 
 ## What is measured
 
-Each run records the case and corpus version, model identifier, harness and
-ahu versions, skill bundle revision, task outcome, a deterministic case score,
-and reported token and timing metrics when available. Keep the same case set
-and scoring rules when comparing model or skill changes. Compare repeated runs
-as well as averages: model output can vary between attempts.
+Two independent things:
+
+- **Answer outcome** — the candidate's `answer.json` against the case's
+  deterministic `expected` values and weights, plus the evaluator's rubric
+  scores when an evaluator ran.
+- **Tool-behaviour outcome** — the tools the candidate actually called against
+  the case's `tool_expectations`.
+
+Neither outcome gates the other. A candidate can answer correctly while
+reaching for a tool the case forbids, or abstain correctly while getting the
+answer wrong, and the report shows both. Weighing them against each other is a
+judgement for the reader, not something the scorer folds into one number.
+
+Each record also carries the case and corpus identity, the candidate and
+evaluator agent/model/harness identities, ahu version and build digest, target
+repository head, the skill bundle digest, task outcome, and observed token and
+timing metrics.
+
+### Tool status can be unknown
+
+Tool-behaviour scoring depends on MCP session telemetry. If the harness never
+starts the configured `ahu mcp serve` entry, or the MCP process exits without
+exporting its session summary, the tool status for that run is **unknown** — not
+zero calls and not a clean abstention. Missing observations stay missing; they
+are never turned into zeroes, and an unknown tool status is not a pass on a
+`forbidden` expectation.
+
+### Telemetry, without a collector
 
 ahu's headless and MCP spans are the observability stream. `ahu eval run`
 temporarily routes candidate and evaluator OTLP/HTTP exports to a receiver bound
 to loopback on an ephemeral port. It needs no collector binary, backend, or
-query API and does not change the project's saved telemetry settings. The
+query API, and does not change the project's saved telemetry settings. The
 receiver holds only bounded ahu identifiers, trace IDs, durations, and MCP
-counters in memory; raw spans and payload text are discarded. The normal ahu
-spans report lifecycle, token usage, skills, tool listings and calls, failures,
-and typed-decision outcomes. MCP spans are joined to task attempts through
-`ahu.task.id` and `ahu.task.attempt`; eval case, corpus, run, and stage IDs are
-also attached as resource attributes.
+counters in memory; raw spans and payload text are discarded.
 
-MCP counters are observed only when the MCP process exports its session summary.
-If the harness does not start the configured `ahu mcp serve` entry or telemetry
-is unavailable, the record marks MCP coverage as missing. Missing values stay
-missing; they are never turned into zero. The eval runner also enables ahu's
-local token projection for its result envelope, without changing repository
-configuration. This reports only the harness's observed counters, not provider
-billing totals.
+ahu spans report lifecycle, token usage, skills, tool listings and calls,
+failures, and typed-decision outcomes. MCP spans are joined to task attempts
+through `ahu.task.id` and `ahu.task.attempt`; eval case, corpus, run, and stage
+IDs ride along as resource attributes. The runner also enables ahu's local token
+projection for its result envelope, again without touching repository
+configuration; those are the harness's observed counters, not provider billing.
 
-OTLP has no vendor-neutral query API. The runner avoids that dependency by
-receiving the exports directly for the duration of each eval command and
-projecting the relevant fields into the run record. `ahu eval report` reads
-those compact records only; it never queries or retains traces.
+OTLP has no vendor-neutral query API, so the runner receives the exports
+directly for the duration of each eval command and projects the relevant fields
+into the record. `ahu eval report` reads those compact records only; it never
+queries or retains traces.
 
-## Running a case
+## Case files
 
-Use a disposable Git repository for every run. This keeps ahu's task state,
-worktrees, prompts, and harness-created artifacts outside the source checkout.
+A case is OKF Markdown. The YAML front matter declares `okf_version: "0.2"`,
+`type: ahu:eval-case`, and `schema_version: 2`, then the case identity and
+scoring:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Stable case identifier. |
+| `corpus_version` | Version of the authored content and scoring rules. |
+| `state` | Scenario data shown to the candidate. |
+| `questions` | Typed questions: `choice`, `score`, or `probability`. |
+| `expected` | Deterministic reference answer, one key per question. |
+| `scoring` | Per-question weight plus `exact_match_pass_threshold`. |
+| `rubric` | One criterion per scored field; required by `--evaluator`. |
+| `tool_expectations` | Optional `required` and `forbidden` tool name lists. |
+
+`tool_expectations` names only tools ahu exposes over MCP: `ahu_agents_list`,
+`ahu_tasks_list`, `ahu_task_get`, and `ahu_typed_decide`. Both lists are
+optional; a case with neither makes no claim about tool use.
+
+The Markdown body is shown to the candidate, so it states the request and its
+data and nothing else. `expected`, `rubric`, and `tool_expectations` stay in
+front matter and are withheld. A body must not reveal the expected answer, and
+must not hint at which tools the case wants or refuses — a body that says "use
+the typed-decision tool here" measures instruction-following, not tool
+selection. Keep every tool label in front matter and in the grader.
+
+The two authored cases pull against each other on the same tool:
+
+- `cases/decision-routing.md` asks two judgement questions about a support
+  ticket, neither of them answerable by copying text, and **requires**
+  `ahu_typed_decide`.
+- `cases/direct-extraction.md` asks two questions a single logistics record
+  already answers in its own words, and **forbids** `ahu_typed_decide`.
+
+Neither body mentions a tool. A candidate has to read the shape of the task.
+
+The candidate prompt does not tell every candidate to always use the
+typed-decision tool. Choosing it is part of what the suite measures, so a case
+that wants it says so in `tool_expectations` and an agent that reaches for it
+everywhere loses the abstention case.
+
+Add cases that probe separate skills and decision types rather than growing one
+large benchmark prompt. Keep them synthetic, balanced, explicit, and
+answerable from the state alone. Version any change to authored content or
+scoring rules: bump `corpus_version` instead of silently moving the baseline.
+
+## Suite files
+
+A suite collects cases and their weights. It is OKF Markdown with front matter
+declaring `okf_version: "0.2"`, `type: ahu:eval-suite`, `schema_version: 1`, an
+`id`, a `version`, and a `cases` list whose entries are
+`{path: <relative markdown case path>, weight: <positive number>}`. Paths
+resolve relative to the suite file. They may move up one directory, but cannot
+escape that parent or traverse a symlink.
+
+`suites/agent-tool-selection.md` pairs the two authored cases at equal weight,
+so an agent that always calls the typed-decision tool and an agent that never
+calls it each fail half the suite. The report keeps one row per case and records
+each weight; it does not currently calculate a weighted suite-wide score.
+
+## Running
+
+Use a disposable Git repository for every run. That keeps ahu's task state,
+worktrees, prompts, and harness-created artifacts out of the source checkout.
 Configure the temporary project with:
 
-- an OpenCode agent manifest pinned to the local Ollama model;
-- the same skill bundle that the tested agents should receive;
-- an OpenCode local MCP server entry that launches `ahu mcp serve` and sets
+- an agent manifest pinned to the local model under test;
+- the same skill bundle the tested agents should receive;
+- a local MCP server entry that launches `ahu mcp serve` and sets
   `AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions`;
-- A registered candidate and, optionally, evaluator agent.
+- the candidate agents and, optionally, an evaluator agent.
 
-Start Ollama and `python3 examples/ollama_decision_service.py --model <installed-local-model>`
-outside the checkout. Run the suite against the disposable project while
-pointing at the case file in the ahu checkout:
+Start Ollama and the decision service outside the checkout:
+
+```sh
+python3 examples/ollama_decision_service.py --model <installed-local-model>
+```
+
+Compare two registered agent variants over the whole suite by repeating
+`--agent`. Each agent runs every case `--runs` times:
 
 ```sh
 ahu --repo "$EVAL_WORKSPACE" eval run \
-  --case "$AHU_CHECKOUT/evals/cases/decision-routing.md" \
-  --agent @triage --evaluator @judge --runs 5 \
-  --records "$EVAL_HOME/runs.jsonl" --output json
+  --suite "$AHU_CHECKOUT/evals/suites/agent-tool-selection.md" \
+  --agent @triage-baseline --agent @triage-candidate \
+  --evaluator @judge --runs 5 \
+  --records "$EVAL_HOME/runs.jsonl"
 ```
 
-Omit `--evaluator @judge` to use the case's deterministic expected-answer score.
-With an evaluator, the candidate receives only the case state and typed
-questions; its `answer.json` is checked against deterministic expected values
-and the blinded evaluator scores the rubric without candidate identity, model,
-harness, trace, or expected answer. The score artifact must match the versioned
-schema. Repeated runs are separate ahu tasks and contribute independent records.
-
-The command never widens manifest approvals implicitly. Pass
-`--allow-widened-approvals` only when the candidate or evaluator manifest
-explicitly requires that permission and you intend to grant it. Keep each agent
-run fully local: an Ollama model name must have local weights and its provider
-endpoint must be localhost. `ahu` pins the manifest's harness and model but
-does not prove that a provider alias routes only to local inference.
-
-The initial case is `cases/decision-routing.md`. Cases use OKF Markdown: YAML
-front matter declares `okf_version: "0.2"` and `type: ahu:eval-case`, followed
-by case identity, questions, expected values, scoring, and an optional evaluator
-rubric. The Markdown body describes the scenario and is shown to the candidate;
-expected values and rubric remain front-matter metadata and are withheld. The
-expected decision is known, so its score is deterministic and can be compared
-over time. Add cases that probe separate skills and decision types rather than
-making one large benchmark prompt. Version changes to cases or scoring rules
-explicitly; do not silently change the baseline.
-
-## Longitudinal record
-
-Store one compact JSON object per run in an external JSONL file. Include the
-case ID and version, timestamp, model (including quantization/tag), harness
-and version, ahu version/commit, skill digest, task ID/attempt, outcome, score,
-observed token fields, elapsed time, decision-call count, and the corresponding
-OTel trace ID. Keep this record numeric and non-sensitive: omit prompts,
-subjects, answers, paths, issue references, and transcripts. Report mean score,
-pass rate, and token/time coverage separately so a missing observation does
-not look like a zero.
-
-## Record and compare
-
-`ahu eval run` writes each accepted answer, task result, optional judge score,
-and prompt into a private (`0700` directory, `0600` files on Unix) run folder
-next to the external JSONL file. Each JSONL row omits prompts, transcripts,
-paths, and answer values. It contains scores, task IDs, compact token fields,
-timing and MCP observations. Keep that folder and records outside the checkout.
-
-For manual scoring, `scripts/local_eval.py record` still accepts a structured
-answer such as `{"department":"billing","refund_requested":0.96}` and an
-`ahu result --output json` envelope:
+`--case` still runs a single case:
 
 ```sh
-python3 scripts/local_eval.py record \
-  --answer "$EVAL_HOME/current/answer.json" \
-  --result "$EVAL_HOME/current/result.json" \
-  --agent '@triage' --agent-version 1.0.0 \
-  --evaluator '@judge' --evaluator-version 1.0.0 \
-  --run-id "$EVAL_RUN_ID" --stage candidate \
-  --model 'ollama/qwen3.6:35b-mlx' \
-  --harness opencode --harness-version 1.18.32 \
-  --ahu-revision "$(git rev-parse --short HEAD)" \
-  --skill-digest '<digest-of-tested-skill-bundle>' \
-  --trace-id '<matching-otel-trace-id>' \
-  --elapsed-ms '<elapsed-ms-from-otel>' \
-  --output "$EVAL_HOME/runs.jsonl"
+ahu --repo "$EVAL_WORKSPACE" eval run \
+  --case "$AHU_CHECKOUT/evals/cases/direct-extraction.md" \
+  --agent @triage-candidate --runs 5 \
+  --records "$EVAL_HOME/runs.jsonl"
 ```
 
-When evaluating manually, use matching MCP spans to populate `--decision-calls`
-with the number of `ahu_typed_decide` calls. A nonzero count is evidence that
-the tool was invoked, not that its result was followed correctly; the case score
-measures the output. The recorder refuses to write its run file inside the ahu
-checkout.
+Omit `--evaluator` to score only against the case's deterministic expected
+answer. With an evaluator, the candidate receives the case state and typed
+questions, its `answer.json` is checked against the expected values, and the
+evaluator scores the rubric from a prompt that withholds candidate identity,
+model, harness, trace, and expected answer. The score artifact must match the
+versioned schema.
 
-Two readers summarize the accumulated records. `scripts/local_eval.py trend`
-prints a Python summary of the same records:
+Execution is sequential: one case, one agent, one trial at a time, each in a
+clean ahu task. There is no concurrency and no automatic retry — a failed trial
+is recorded as a failure rather than quietly run again. Repeated runs are
+independent records, which is what makes a pass rate meaningful.
 
-```sh
-python3 scripts/local_eval.py trend --records "$EVAL_HOME/runs.jsonl"
-```
+`ahu eval run` never widens manifest approvals implicitly. Pass
+`--allow-widened-approvals` only when a manifest explicitly requires that
+permission and you intend to grant it. Keep each run local: an Ollama model
+name must have local weights and its provider endpoint must be localhost. ahu
+pins the manifest's harness and model, but cannot prove that a provider alias
+routes only to local inference.
 
-`ahu eval report` is the native reader. It groups by corpus version and
-surfaces MCP/tool coverage alongside scores:
+## Reading reports
 
 ```sh
 ahu eval report --records "$EVAL_HOME/runs.jsonl"
@@ -154,90 +188,138 @@ ahu eval report --records "$EVAL_HOME/runs.jsonl" --output json
 
 Without `--output json` the readable report owns stdout. With it, the versioned
 JSON comparison goes to stdout and the readable report to stderr, so a pipeline
-can consume one while a human reads the other.
+and a human can each read one.
 
-### What `ahu eval report` does and does not do
+A report distinguishes two kinds of identity. The **case fingerprint** covers
+the case and corpus version, so a case edit never averages into the baseline it
+should be compared against. The **input fingerprint** covers what the candidate
+was actually given and run under — agent and version, model, harness and
+version, ahu build digest, target repository head, skill digest, stage, and tool
+definitions. Any difference in either is a separate row.
 
-It is a reader. It never launches a candidate or an evaluator, never queries a
-collector, and never writes anything — not the record file, not the checkout.
+Each row reports the answer outcome and the tool-behaviour outcome separately,
+retains the judge's per-criterion scores and its reason codes, and gives a 95%
+Wilson score interval for binary pass rates. Reason codes are short identifiers,
+which is what makes them safe to keep in a record that holds no prose.
 
-`--records` is required and must resolve *outside* the repository. The path is
-canonicalised before the comparison, so a relative path and a symlink that
-points back into the checkout are both refused, as are the primary checkout and
-every task worktree beneath it. Run evidence stays in a user-owned directory;
-summarizing a record file must not be a way to make it repository content.
+### What the interval does and does not tell you
 
-Records are external input, so every field is validated. A malformed line fails
-as a usage error naming the file and the line number it is on — blank lines are
-skipped but still counted, so the number is the one in your editor. A record
-missing a field the report groups or scores by is refused by name rather than
-guessed at. An unknown field is ignored, so a newer recorder stays readable
-here. A record declaring a `schema_version` this ahu does not read is refused
-rather than reinterpreted under the old field meanings. Record content is
-escaped before it reaches the terminal.
+A Wilson interval quantifies how much sampling uncertainty is left in an
+*observed* pass rate at the number of runs you actually did. Five runs at 4/5
+leave a wide interval; the interval narrows as runs accumulate.
 
-### Grouping
-
-One row per comparable configuration. Records are grouped by case ID and corpus
-version, stage, candidate agent and version, evaluator agent and version,
-candidate/evaluator model and harness identities, ahu revision, and skill digest. Any difference in
-that identity is a separate row, so a skill-bundle or harness-version change
-never averages into the baseline it should be compared against. A field the
-recorder left unset, null, or empty reads as `unspecified` (stage defaults to
-`candidate`), and those records group together.
+It is not evidence that one configuration caused an improvement in another.
+Non-overlapping intervals on two rows are a reason to look closer, not a result.
+Sequential local runs share machine state, model loading, and time of day; a
+case corpus of two is a small sample of behaviour; and an LLM judge has its own
+bias and variance. Spot-check individual answers and judge scores by hand, and
+calibrate the judge against answers you have scored yourself, before reporting
+that a change helped.
 
 ### Coverage versus means
 
-Score and pass rate are taken over every run in the group. Token, timing, and
-decision-call figures are not: each is reported as a coverage count
-(`timing 1/2`) alongside a mean taken only over the runs that carried the
-measurement. A configuration that reported nothing is visibly uncovered rather
-than silently cheap and fast.
+Score and pass rate are taken over every run in a row. Token, timing,
+decision-call, and MCP figures are not: each is reported as a coverage count
+(`timing 1/2`) alongside a mean over only the runs that carried the
+measurement, so a configuration that reported nothing is visibly uncovered
+rather than silently cheap and fast.
 
 A reported zero is an observation; an absent field is not. Two runs where one
-reports `elapsed_ms: 0` and the other reports no timing at all give
-`timing 1/2` with a mean of `0`, never `timing 2/2`. In the terminal a metric
-nothing reported prints as `none observed`; in JSON it is `null`, never `0`.
+reports `elapsed_ms: 0` and the other reports no timing give `timing 1/2` with a
+mean of `0`, never `timing 2/2`. In the terminal a metric nothing reported
+prints as `none observed`; in JSON it is `null`, never `0`.
 
-### JSON contract
+### `ahu eval report` is only a reader
 
-`--output json` emits a single object with `schema_version` 1, `command`,
-`record_count`, and `groups`. Each group carries the full identity above,
-`runs`, `passed`, `mean_score`, `pass_rate`, a `coverage` object for token,
-timing, decision-call, and MCP observations, and an `observed` object with
-timing, decision, MCP session/tool/error means, per-tool call means, and token
-fields. Per-tool means include observed zero calls when MCP telemetry exists.
+It never launches a candidate or an evaluator, never queries a collector, and
+never writes anything — not the record file, not the checkout.
 
-The contract deliberately carries **no local path**: the caller already supplied
-the records location, and the record content itself is free of paths and
-transcripts. Candidate, model, harness, and skill identifiers can still reveal
-project details, so review the report before sharing it outside the intended
-audience.
+`--records` is required and must resolve *outside* the repository. The path is
+canonicalised before the comparison, so a relative path and a symlink pointing
+back into the checkout are both refused, as are the primary checkout and every
+task worktree beneath it. Summarizing a record file must not be a way to make it
+repository content.
 
-## Agent evaluators and local OTel
+Records are external input, so every field is validated. A malformed line fails
+as a usage error naming the file and the line number as your editor counts it —
+blank lines are skipped but still counted. A record missing a field the report
+groups or scores by is refused by name rather than guessed at. An unknown field
+is ignored, so a newer recorder stays readable. A record declaring a
+`schema_version` this ahu does not read is refused rather than reinterpreted
+under the old field meanings. Record content is escaped before it reaches the
+terminal.
 
-`ahu eval run` runs a versioned case through a registered candidate agent and,
-when `--evaluator` is supplied, a separate registered evaluator agent. The
-candidate sees the task and output schema, but not the expected answer or rubric.
-The evaluator sees the rubric and candidate JSON but not candidate identity,
-model, harness, trace, or deterministic reference answer. It must return a
-versioned `score.json`; deterministic checks are recorded alongside its scores.
-Use `--runs` to repeat a case. The command appends one record per completed
-candidate run to the JSONL file passed with `--records`.
+The JSON contract deliberately carries **no local path**: the caller already
+supplied the records location, and record content is free of paths and
+transcripts. Agent, model, harness, and skill identifiers can still reveal
+project details, so review a report before sharing it.
 
-During each candidate task, ahu directs OTLP spans to a temporary loopback
-receiver and aggregates task timing, MCP session counters, and calls/errors for
-the known ahu tools. It stores the compact metrics with the score record and
-discards received spans; it does not persist traces or send them to a remote
-collector. Local token metrics are included when the selected harness exposes
-them. Missing telemetry remains uncovered rather than being reported as zero.
-`ahu eval report` compares candidate and evaluator identities and summarizes
-MCP coverage and tool use as well as scores and timing.
+## Blinding is prompt-only
 
-Run artifacts, including prompts and harness diagnostics, are written outside
-the checkout beside the records file. Treat that directory as private. The first
-iteration runs one case per command, requires candidate output in `answer.json`
-and evaluator output in `score.json`, and does not calculate confidence
-intervals or repeat evaluator judgments. A local model choice depends on the
-registered agent and harness configuration; the command cannot guarantee that
-an agent alias routes only to local inference.
+The evaluator's prompt omits candidate identity, model, harness, tool trace, and
+the deterministic expected answer, and presents the candidate JSON as untrusted
+data rather than instructions. That is the whole of the blinding.
+
+It is not environment isolation. When the evaluator runs against the same
+repository as the candidate, it can still read the agent registry under
+`.agents/`, Git history, task state, and any other repository-visible material,
+and could infer which configuration produced an answer. Treat the judge as
+prompt-blinded, never as blind. If a comparison turns on the judge's
+impartiality, run the evaluator against a checkout that carries the cases and
+nothing identifying the candidates, and say in your write-up which of the two
+you did.
+
+## Longitudinal record
+
+Store one compact JSON object per run in an external JSONL file. Keep it
+numeric and non-sensitive: case and corpus identity, model (including
+quantization or tag), harness and version, ahu version and build digest, target
+repository head, skill digest, task ID and attempt, outcome, scores, tool-expectation outcome,
+observed token fields, elapsed time, and the matching OTel trace ID — and no
+prompts, subjects, answers, paths, issue references, or transcripts.
+
+`ahu eval run` writes each accepted answer, task result, optional judge score,
+and prompt into a private run folder (`0700` directory, `0600` files on Unix)
+next to the external JSONL file. Keep that folder and the records outside the
+checkout and treat it as private.
+
+Report mean score, pass rate, and coverage separately, so a missing observation
+never reads as a zero.
+
+### Legacy records
+
+Records written before case schema v2 — including everything produced by
+`scripts/local_eval.py record` — are **legacy**. They carry no tool-behaviour
+outcome, and they were produced under a candidate prompt that told every
+candidate to use the typed-decision tool. Keep them if you want the history,
+but do not put them beside v2 rows and read the difference as a change in the
+agent: the case corpus, the scoring surface, and the prompt all moved. Compare
+v2 against v2.
+
+The manual path still exists for one-off scoring. It reads case front matter
+with PyYAML — `python3 -m pip install -r requirements-evals.txt` — and takes a
+structured answer plus an `ahu result --output json` envelope:
+
+```sh
+python3 scripts/local_eval.py record \
+  --case "$AHU_CHECKOUT/evals/cases/decision-routing.md" \
+  --answer "$EVAL_HOME/current/answer.json" \
+  --result "$EVAL_HOME/current/result.json" \
+  --agent '@triage' --agent-version 1.0.0 \
+  --run-id "$EVAL_RUN_ID" --stage candidate \
+  --model 'ollama/example-model:8b' \
+  --harness opencode --harness-version 1.18.32 \
+  --ahu-revision "$(git rev-parse --short HEAD)" \
+  --skill-digest '<digest-of-tested-skill-bundle>' \
+  --trace-id '<matching-otel-trace-id>' \
+  --elapsed-ms '<elapsed-ms-from-otel>' \
+  --output "$EVAL_HOME/runs.jsonl"
+
+python3 scripts/local_eval.py trend --records "$EVAL_HOME/runs.jsonl"
+```
+
+It scores the answer only; it does not read `tool_expectations`, so it cannot
+tell a correct abstention from a missing observation. Use matching MCP spans to
+fill `--decision-calls` by hand if you need a count, remembering that a nonzero
+count is evidence the tool was invoked, not that its result was followed. The
+recorder refuses to write its run file inside the ahu checkout.

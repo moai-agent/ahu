@@ -403,6 +403,26 @@ fn tools() -> Vec<Value> {
     ]
 }
 
+/// Every read-only tool name an ahu MCP session can expose.
+///
+/// Evaluation case tool expectations and evaluation record validation are both
+/// bounded by this list, so neither can name a tool that does not exist.
+pub const TOOL_NAMES: [&str; 4] = [
+    "ahu_agents_list",
+    "ahu_tasks_list",
+    "ahu_task_get",
+    "ahu_typed_decide",
+];
+
+/// SHA-256 over the served tool definitions, descriptions and schemas included.
+///
+/// A comparison between agents is only a comparison of the agents when the
+/// tools they were offered were the same, so the definitions are fingerprinted
+/// rather than assumed stable across ahu builds.
+pub fn tool_definitions_digest() -> String {
+    crate::util::digest_bytes(&serde_json::to_vec(&tools()).unwrap_or_default())
+}
+
 fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
     let name = params["name"]
         .as_str()
@@ -573,7 +593,8 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        BUNDLED_SKILLS, MAX_FRAME_BYTES, read_frame, skill_path, tools, verify_bundled_skills,
+        BUNDLED_SKILLS, MAX_FRAME_BYTES, TOOL_NAMES, read_frame, skill_path,
+        tool_definitions_digest, tools, verify_bundled_skills,
     };
 
     #[test]
@@ -611,6 +632,12 @@ mod tests {
                 "ahu_typed_decide"
             ]
         );
+        // The exported name list is what bounds evaluation tool expectations,
+        // so it has to stay the served set rather than a copy of it.
+        assert_eq!(names, TOOL_NAMES);
+        let digest = tool_definitions_digest();
+        assert_eq!(digest.len(), 64);
+        assert_eq!(digest, tool_definitions_digest());
     }
 
     #[test]

@@ -116,8 +116,27 @@ def record(args) -> int:
     return 0
 
 
+# This helper writes and reads record schema 1 only. Schema 2 rows carry the
+# answer/judge split, tool expectations, and the input fingerprint that replaced
+# `ahu_revision`; summarising them here would average fields this reader does not
+# understand and silently pool forced-tool runs with tool-neutral ones.
+MANUAL_RECORD_SCHEMA_VERSION = 1
+
+
+def reject_newer_records(rows: list[dict]) -> None:
+    for number, row in enumerate(rows, start=1):
+        version = row.get("schema_version", MANUAL_RECORD_SCHEMA_VERSION)
+        if not isinstance(version, int) or version > MANUAL_RECORD_SCHEMA_VERSION:
+            raise ValueError(
+                f"line {number}: record schema_version {version!r} is newer than this helper "
+                f"reads ({MANUAL_RECORD_SCHEMA_VERSION}). Use `ahu eval report --records ...`, "
+                "which reads both schemas and keeps them in separate groups."
+            )
+
+
 def trend(args) -> int:
     rows = [json.loads(line) for line in args.records.expanduser().read_text(encoding="utf-8").splitlines() if line.strip()]
+    reject_newer_records(rows)
     groups: dict[tuple, list[dict]] = {}
     for row in rows:
         groups.setdefault((

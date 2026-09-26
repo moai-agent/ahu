@@ -5,7 +5,7 @@
 //! exports in memory, immediately projects them onto a fixed allowlist of
 //! numeric counters and bounded identifiers, and retains no raw spans.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +20,13 @@ use prost::Message;
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_TASKS: usize = 1024;
+/// Span identities retained per task for duplicate-export detection.
+///
+/// An OTLP exporter may resend a batch it is unsure reached the collector, so a
+/// counter that simply adds every export would report work that happened once
+/// as having happened twice. Identities are bounded: beyond this, a span is
+/// still projected, it just is not deduplicated.
+const MAX_SPAN_IDS_PER_TASK: usize = 4096;
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct TaskTelemetry {
@@ -33,9 +40,73 @@ pub struct TaskTelemetry {
     pub tool_errors: u64,
     pub typed_decision_calls: u64,
     pub typed_decision_errors: u64,
+    /// True once an `ahu.mcp.session` summary span arrived for this task.
+    ///
+    /// The summary is what carries the session's own totals, so without it the
+    /// per-call spans below are a floor rather than a count.
     pub mcp_observed: bool,
     pub tool_calls_by_name: BTreeMap<String, u64>,
     pub tool_errors_by_name: BTreeMap<String, u64>,
+    /// Every span accepted for this task, whatever its name.
+    ///
+    /// Distinguishes "nothing was observed" from "spans arrived but no session
+    /// summary did", which are different claims about a run.
+    pub spans_recorded: u64,
+    /// `ahu.mcp.session` summary spans seen. More than one is an anomaly worth
+    /// seeing rather than hiding behind the boolean above.
+    pub session_summaries: u64,
+    /// `ahu.mcp.tool.call` spans seen, before name filtering.
+    pub tool_call_spans: u64,
+    /// Spans dropped because their identity had already been projected.
+    pub duplicate_spans: u64,
+    /// Span identities already projected, so a resent export is not counted
+    /// twice. Never serialized: it is bookkeeping, not an observation.
+    #[serde(skip)]
+    pub(crate) seen_span_ids: BTreeSet<Vec<u8>>,
+}
+
+impl TaskTelemetry {
+    /// How much of the session this telemetry actually describes.
+    pub fn coverage(&self) -> Coverage {
+        if self.session_summaries > 0 {
+            Coverage::CompleteSession
+        } else if self.spans_recorded > 0 {
+            Coverage::PartialSpans
+        } else {
+            Coverage::None
+        }
+    }
+
+    /// Whether every tool call the session summary counted is attributable to a
+    /// named tool.
+    ///
+    /// Only then can an absence be read as proof that a tool was not called:
+    /// a call the projection could not name leaves the question open.
+    pub fn tool_calls_fully_named(&self) -> bool {
+        self.session_summaries > 0
+            && self.tool_calls_by_name.values().sum::<u64>() == self.tool_calls
+    }
+}
+
+/// What a run's telemetry supports being read as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// No span reached the receiver for this task at all.
+    None,
+    /// Spans arrived, but no session summary: counts are a floor, not a total.
+    PartialSpans,
+    /// The session summary arrived, so its totals are the session's totals.
+    CompleteSession,
+}
+
+impl Coverage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Coverage::None => "none",
+            Coverage::PartialSpans => "partial_spans",
+            Coverage::CompleteSession => "complete_session",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -282,6 +353,20 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                     attempt,
                     ..TaskTelemetry::default()
                 });
+                // A resent export repeats span identities. Projecting one twice
+                // would inflate every counter below, so it is counted as a
+                // duplicate instead. A span with no identity cannot be
+                // recognised, so it is projected as it arrives.
+                if !span.span_id.is_empty() {
+                    if task.seen_span_ids.contains(&span.span_id) {
+                        task.duplicate_spans = task.duplicate_spans.saturating_add(1);
+                        continue;
+                    }
+                    if task.seen_span_ids.len() < MAX_SPAN_IDS_PER_TASK {
+                        task.seen_span_ids.insert(span.span_id.clone());
+                    }
+                }
+                task.spans_recorded = task.spans_recorded.saturating_add(1);
                 match span.name.as_str() {
                     "ahu.harness.run" => {
                         if span.end_time_unix_nano >= span.start_time_unix_nano {
@@ -300,6 +385,7 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                     }
                     "ahu.mcp.tools.list" => (),
                     "ahu.mcp.tool.call" => {
+                        task.tool_call_spans = task.tool_call_spans.saturating_add(1);
                         if let Some(name) = attrs.get("ahu.mcp.tool.name") {
                             let count = task.tool_calls_by_name.entry(name.clone()).or_default();
                             *count = count.saturating_add(1);
@@ -319,6 +405,7 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                     }
                     "ahu.mcp.session" => {
                         task.mcp_observed = true;
+                        task.session_summaries = task.session_summaries.saturating_add(1);
                         for (attribute, target) in [
                             ("ahu.mcp.requests.count", &mut task.mcp_requests),
                             ("ahu.mcp.tools.list.count", &mut task.tool_list_calls),
@@ -496,6 +583,104 @@ mod tests {
         assert_eq!(task.tool_calls_by_name.get("ahu_typed_decide"), Some(&1));
         assert_eq!(task.typed_decision_errors, 1);
         assert!(!format!("{task:?}").contains("must not be retained"));
+    }
+
+    /// One request carrying `spans` under a task resource, for coverage tests.
+    fn export(task: &str, spans: Vec<Span>) -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![string_attribute("ahu.task.id", task)],
+                    ..Resource::default()
+                }),
+                scope_spans: vec![ScopeSpans {
+                    spans,
+                    ..ScopeSpans::default()
+                }],
+                ..ResourceSpans::default()
+            }],
+        }
+    }
+
+    fn session_span(span_id: u8, tool_calls: i64) -> Span {
+        Span {
+            name: "ahu.mcp.session".into(),
+            span_id: vec![span_id; 8],
+            attributes: vec![count_attribute("ahu.mcp.tool.calls.count", tool_calls)],
+            ..Span::default()
+        }
+    }
+
+    fn tool_call_span(span_id: u8, tool: &str) -> Span {
+        Span {
+            name: "ahu.mcp.tool.call".into(),
+            span_id: vec![span_id; 8],
+            attributes: vec![string_attribute("ahu.mcp.tool.name", tool)],
+            ..Span::default()
+        }
+    }
+
+    #[test]
+    fn coverage_separates_no_observation_from_partial_spans_and_a_session_summary() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        // No span at all for a task the caller asks about.
+        assert!(
+            !state
+                .lock()
+                .unwrap()
+                .tasks
+                .contains_key(&("absent".into(), 1))
+        );
+
+        // Tool spans without the session summary: a floor, not a total.
+        consume(
+            export("partial", vec![tool_call_span(1, "ahu_agents_list")]),
+            &state,
+        );
+        let partial = state.lock().unwrap().tasks[&("partial".into(), 1)].clone();
+        assert_eq!(partial.coverage(), Coverage::PartialSpans);
+        assert_eq!(partial.coverage().as_str(), "partial_spans");
+        assert!(!partial.mcp_observed);
+        assert!(!partial.tool_calls_fully_named());
+        assert_eq!(partial.tool_call_spans, 1);
+
+        // With the summary, the session's own totals are available.
+        consume(
+            export(
+                "complete",
+                vec![session_span(2, 1), tool_call_span(3, "ahu_agents_list")],
+            ),
+            &state,
+        );
+        let complete = state.lock().unwrap().tasks[&("complete".into(), 1)].clone();
+        assert_eq!(complete.coverage(), Coverage::CompleteSession);
+        assert_eq!(complete.session_summaries, 1);
+        assert!(complete.tool_calls_fully_named());
+
+        // A summary counting more calls than the projection can name leaves the
+        // question of which tools ran open.
+        consume(export("unnamed", vec![session_span(4, 3)]), &state);
+        let unnamed = state.lock().unwrap().tasks[&("unnamed".into(), 1)].clone();
+        assert_eq!(unnamed.coverage(), Coverage::CompleteSession);
+        assert!(!unnamed.tool_calls_fully_named());
+    }
+
+    #[test]
+    fn a_resent_export_is_counted_as_a_duplicate_rather_than_as_more_work() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let spans = vec![session_span(9, 1), tool_call_span(10, "ahu_typed_decide")];
+        consume(export("retried", spans.clone()), &state);
+        consume(export("retried", spans), &state);
+        let task = state.lock().unwrap().tasks[&("retried".into(), 1)].clone();
+        assert_eq!(
+            task.session_summaries, 1,
+            "the session summary arrived once"
+        );
+        assert_eq!(task.tool_calls, 1);
+        assert_eq!(task.tool_calls_by_name.get("ahu_typed_decide"), Some(&1));
+        assert_eq!(task.duplicate_spans, 2);
+        assert_eq!(task.spans_recorded, 2);
+        assert!(task.tool_calls_fully_named());
     }
 
     #[test]

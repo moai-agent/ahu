@@ -205,8 +205,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         }
         Command::EvalRun {
             case,
-            agent,
+            suite,
+            agents,
             evaluator,
+            evaluator_repo,
             records,
             runs,
             timeout_seconds,
@@ -214,19 +216,20 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             output_json,
         } => {
             let repo = commands::repo_from_cwd()?;
+            let request = ahu::eval::RunRequest {
+                case: case.as_deref(),
+                suite: suite.as_deref(),
+                agents: &agents,
+                evaluator: evaluator.as_deref(),
+                evaluator_repo: evaluator_repo.as_deref(),
+                records: &records,
+                runs,
+                timeout_seconds,
+                allow_widened_approvals,
+                json_output: output_json,
+            };
             commands::with_stdio_output(output_json, |console| {
-                ahu::eval::run(
-                    console,
-                    &repo,
-                    &case,
-                    &agent,
-                    evaluator.as_deref(),
-                    &records,
-                    runs,
-                    timeout_seconds,
-                    allow_widened_approvals,
-                    output_json,
-                )
+                ahu::eval::run(console, &repo, &request)
             })
         }
         Command::CmuxStatus { output_json } => {
