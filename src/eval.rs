@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 
 use crate::bail;
+use crate::table;
 use crate::util::{Error, ErrorKind, Result, display_path, display_safe};
 
 pub mod case;
@@ -283,6 +284,13 @@ pub struct Group {
     pub mean_decision_calls: Option<f64>,
     /// Every token metric name observed anywhere in the group.
     pub token_fields: BTreeSet<String>,
+    /// Mean reported amount per token field, over the runs that reported a
+    /// number for it. A field a recorder named but could not measure has no
+    /// mean here, and nothing in this report derives one.
+    pub mean_tokens: BTreeMap<String, f64>,
+    /// How many runs reported an amount for each token field, so a mean is
+    /// read against the sample it was taken over rather than the run count.
+    pub token_field_observations: BTreeMap<String, usize>,
     pub mean_mcp_requests: Option<f64>,
     pub mean_mcp_tool_lists: Option<f64>,
     pub mean_mcp_tool_calls: Option<f64>,
@@ -320,6 +328,20 @@ pub struct Group {
     pub terminal_statuses: BTreeMap<String, usize>,
 }
 
+impl Group {
+    /// The mean total tokens, when a recorder reported a total.
+    ///
+    /// Only a field the recorder itself called a total counts. Adding the
+    /// input and output fields that happened to be reported would be an
+    /// estimate, and this report makes none.
+    pub fn mean_total_tokens(&self) -> Option<f64> {
+        self.mean_tokens
+            .iter()
+            .find(|(field, _)| *field == "total" || field.ends_with(".total"))
+            .map(|(_, mean)| *mean)
+    }
+}
+
 /// The whole comparison, sorted by group key.
 #[derive(Debug, Clone)]
 pub struct Report {
@@ -331,6 +353,28 @@ pub struct Report {
 }
 
 use stats::{mean, round4};
+
+/// The amount a recorder reported for one token field, if it reported one.
+///
+/// Two shapes are in use. `ahu eval run` writes the local-metrics measurement,
+/// `{"kind": "observed", "value": n}`, whose `unavailable` form is a field the
+/// harness named but never measured; a helper that projects only what it saw
+/// writes the bare number. Anything else is not an amount, and nothing here
+/// turns an absent one into a zero.
+fn token_amount(value: &serde_json::Value) -> Option<f64> {
+    let amount = match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::Object(fields) => {
+            if fields.get("kind").and_then(serde_json::Value::as_str) == Some("observed") {
+                fields.get("value").and_then(serde_json::Value::as_f64)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    amount.filter(|amount| amount.is_finite() && *amount >= 0.0)
+}
 
 /// A recorder field that may be absent, null, or empty, with its substitute.
 fn or_unspecified(value: &Option<String>, fallback: &str) -> String {
@@ -503,6 +547,18 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
             || record
                 .attempts
                 .is_some_and(|value| !value.is_finite() || value < 0.0)
+            // A reported token amount is a count. A non-numeric value stays
+            // tolerated -- it is simply not an amount -- but a number that is
+            // not a count is bad input rather than a metric to average.
+            || record.reported_tokens.as_ref().is_some_and(|tokens| {
+                tokens.values().any(|value| {
+                    value.as_f64().is_some_and(|amount| !amount.is_finite() || amount < 0.0)
+                        || value
+                            .get("value")
+                            .and_then(serde_json::Value::as_f64)
+                            .is_some_and(|amount| !amount.is_finite() || amount < 0.0)
+                })
+            })
         {
             return Err(malformed_text(
                 path,
@@ -588,6 +644,7 @@ fn group(records: &[Record]) -> Vec<Group> {
             let total: f64 = items.iter().map(|item| item.score).sum();
             let mut coverage = Coverage::default();
             let mut token_fields = BTreeSet::new();
+            let mut token_amounts: BTreeMap<String, Vec<f64>> = BTreeMap::new();
             let mut elapsed = Vec::new();
             let mut calls = Vec::new();
             let mut mcp_requests = Vec::new();
@@ -674,6 +731,13 @@ fn group(records: &[Record]) -> Vec<Group> {
                 {
                     coverage.tokens += 1;
                     token_fields.extend(tokens.keys().cloned());
+                    for (field, value) in tokens {
+                        // A field named but not measured is not an amount of
+                        // zero, so only a reported number joins the mean.
+                        if let Some(amount) = token_amount(value) {
+                            token_amounts.entry(field.clone()).or_default().push(amount);
+                        }
+                    }
                 }
                 // A reported zero is an observation; only an absent field is not.
                 if let Some(value) = item.elapsed_ms {
@@ -721,6 +785,10 @@ fn group(records: &[Record]) -> Vec<Group> {
                 }
             }
             let tool_decided = tool_pass + tool_fail;
+            let token_field_observations = token_amounts
+                .iter()
+                .map(|(field, amounts)| (field.clone(), amounts.len()))
+                .collect();
             Group {
                 key,
                 runs,
@@ -732,6 +800,11 @@ fn group(records: &[Record]) -> Vec<Group> {
                 mean_elapsed_ms: mean(&elapsed),
                 mean_decision_calls: mean(&calls),
                 token_fields,
+                mean_tokens: token_amounts
+                    .into_iter()
+                    .filter_map(|(field, amounts)| mean(&amounts).map(|value| (field, value)))
+                    .collect(),
+                token_field_observations,
                 mean_mcp_requests: mean(&mcp_requests),
                 mean_mcp_tool_lists: mean(&mcp_tool_lists),
                 mean_mcp_tool_calls: mean(&mcp_tool_calls),
@@ -774,8 +847,13 @@ fn group(records: &[Record]) -> Vec<Group> {
         .collect()
 }
 
-/// The terminal view: one block per comparable configuration.
+/// The terminal view: a comparison table, then one block per configuration.
 pub fn render(report: &Report) -> String {
+    render_at(report, table::columns())
+}
+
+/// The terminal view, laid out for an explicit width.
+pub fn render_at(report: &Report, width: usize) -> String {
     use crate::style::{self, Role};
     let style = style::stdout();
     let mut out = format!(
@@ -791,6 +869,13 @@ pub fn render(report: &Report) -> String {
         ));
         return out;
     }
+    out.push('\n');
+    out.push_str(&table::render(
+        style,
+        width,
+        SUMMARY_COLUMNS,
+        &summary_rows(&report.groups),
+    ));
     for group in &report.groups {
         let key = &group.key;
         // Every value below is external record content, so all of it is escaped.
@@ -894,28 +979,51 @@ pub fn render(report: &Report) -> String {
             group.runs
         ));
         out.push_str(&format!(
-            "  observed   elapsed ms {}  decision calls {}  MCP requests {}  tool calls {} (errors {})  typed-decision errors {}  token fields {}\n",
+            "  observed   elapsed ms {}  decision calls {}  MCP requests {}  tool calls {} (errors {})  typed-decision errors {}\n",
             measurement(group.mean_elapsed_ms),
             measurement(group.mean_decision_calls),
             measurement(group.mean_mcp_requests),
             measurement(group.mean_mcp_tool_calls),
             measurement(group.mean_mcp_tool_errors),
             measurement(group.mean_typed_decision_errors),
+        ));
+        // Mean amount per field, with the sample it was taken over. A field the
+        // recorder named but could not measure keeps its name and shows no
+        // amount: nothing here sums or derives one.
+        out.push_str(&format!(
+            "  tokens     {}\n",
             if group.token_fields.is_empty() {
                 style.paint(Role::Gap, "none observed")
             } else {
                 group
                     .token_fields
                     .iter()
-                    .map(|field| display_safe(field))
+                    .map(|field| {
+                        format!(
+                            "{} {} ({}/{})",
+                            display_safe(field),
+                            match group.mean_tokens.get(field) {
+                                Some(mean) => format!("{mean}"),
+                                None => style.paint(Role::Gap, MISSING),
+                            },
+                            group
+                                .token_field_observations
+                                .get(field)
+                                .copied()
+                                .unwrap_or(0),
+                            group.runs
+                        )
+                    })
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join("  ")
             }
         ));
     }
     out.push_str(&style.paint(
         Role::Hint,
-        "\nMeans cover only the runs that reported the measurement.\n\
+        "\nA dash in the table is a metric no run reported, never a measured zero;\n\
+         the blocks above give each mean the coverage it was taken over.\n\
+         Means cover only the runs that reported the measurement.\n\
          Coverage below the run count is missing observation, not a measured zero.\n\
          Intervals are 95% Wilson over the runs shown; the tool rate covers only\n\
          the runs telemetry could decide, and `unknown` is neither a pass nor a fail.\n\
@@ -924,6 +1032,150 @@ pub fn render(report: &Report) -> String {
          All records use evaluation schema 2.\n",
     ));
     out
+}
+
+/// What any cell shows when no run reported the metric it holds.
+///
+/// Never a zero. The whole point of the coverage counts below the table is
+/// that a configuration which measured nothing must not read as one that
+/// measured none, and the table would undo that in a single character.
+const MISSING: &str = "\u{2014}";
+
+/// The comparison table the report opens with.
+///
+/// A reader comes to this report asking which configuration did better, and
+/// the detailed blocks answer that only by being read end to end. So the
+/// columns naming *which* configuration keep their width before the ones
+/// saying *how well*: the agent and the runtime are what a comparison is
+/// between, while the case id is usually the same the whole way down and is
+/// the first to be cut. The measurements leave in reverse priority -- tokens,
+/// then time, then the tool rate, then the runtime -- and the answer rate
+/// never leaves, because a table without it compares nothing. The intervals
+/// stay in the blocks: a table is for spotting a difference, not for
+/// concluding one.
+const SUMMARY_COLUMNS: &[table::Column] = &[
+    table::Column {
+        header: "CASE",
+        min: 14,
+        shrink: Some(2),
+        drop: None,
+    },
+    table::Column {
+        header: "AGENT",
+        min: 10,
+        shrink: Some(0),
+        drop: None,
+    },
+    table::Column {
+        header: "RUNTIME",
+        min: 12,
+        shrink: Some(1),
+        drop: Some(3),
+    },
+    table::Column {
+        header: "ANSWER",
+        min: 0,
+        shrink: None,
+        drop: None,
+    },
+    table::Column {
+        header: "TOOLS",
+        min: 0,
+        shrink: None,
+        drop: Some(2),
+    },
+    table::Column {
+        header: "TIME",
+        min: 0,
+        shrink: None,
+        drop: Some(1),
+    },
+    table::Column {
+        header: "TOKENS",
+        min: 0,
+        shrink: None,
+        drop: Some(0),
+    },
+];
+
+/// One table row per comparable configuration.
+///
+/// Every value is external record content, so all of it is escaped before it
+/// reaches a cell.
+fn summary_rows(groups: &[Group]) -> Vec<Vec<table::Cell>> {
+    use crate::style::Role;
+    groups
+        .iter()
+        .map(|group| {
+            let key = &group.key;
+            // The version is what distinguishes two rows for the same agent, so
+            // it travels with the name rather than in a column of its own.
+            let agent = if key.agent_version == UNSPECIFIED {
+                key.agent.clone()
+            } else {
+                format!("{}@{}", key.agent, key.agent_version)
+            };
+            vec![
+                table::Cell::plain(display_safe(&key.case_id)),
+                table::Cell::painted(Role::Agent, display_safe(&agent)),
+                table::Cell::painted(
+                    Role::Runtime,
+                    display_safe(&format!("{} / {}", key.harness, key.model)),
+                ),
+                fraction(group.answer_passes, group.runs),
+                // Over the decided runs only, as the block below reports it.
+                fraction(group.tool_pass, group.tool_pass + group.tool_fail),
+                measured(group.mean_elapsed_ms.map(human_duration)),
+                measured(group.mean_total_tokens().map(human_tokens)),
+            ]
+        })
+        .collect()
+}
+
+/// A pass count over the runs it was taken over, or a dash when no run was
+/// decidable: an undecided sample is not a rate of zero.
+fn fraction(passes: usize, decided: usize) -> table::Cell {
+    if decided == 0 {
+        missing()
+    } else {
+        table::Cell::plain(format!("{passes}/{decided}"))
+    }
+}
+
+/// A measurement, or the dash that says no run reported one.
+fn measured(value: Option<String>) -> table::Cell {
+    value.map_or_else(missing, table::Cell::plain)
+}
+
+fn missing() -> table::Cell {
+    table::Cell::painted(crate::style::Role::Gap, MISSING)
+}
+
+/// A mean elapsed time in the unit that makes it comparable at a glance.
+///
+/// One significant decimal is all a mean over a handful of runs supports; the
+/// millisecond figure stays in the block below for anyone who wants it.
+fn human_duration(ms: f64) -> String {
+    if ms < 1000.0 {
+        format!("{}ms", ms.round())
+    } else if ms < 60_000.0 {
+        format!("{:.1}s", ms / 1000.0)
+    } else if ms < 3_600_000.0 {
+        format!("{:.1}m", ms / 60_000.0)
+    } else {
+        format!("{:.1}h", ms / 3_600_000.0)
+    }
+}
+
+/// A mean token count, abbreviated once it stops being worth reading in full.
+fn human_tokens(tokens: f64) -> String {
+    if tokens < 1000.0 {
+        format!("{}", tokens.round())
+    } else if tokens < 1_000_000.0 {
+        format!("{:.1}k", tokens / 1000.0)
+    } else {
+        format!("{:.1}M", tokens / 1_000_000.0)
+    }
 }
 
 /// A Wilson interval that may have had nothing to measure.
@@ -2006,6 +2258,12 @@ fn group_json(group: &Group) -> serde_json::Value {
             "mcp_tool_errors": group.mcp_tool_errors,
             "mean_attempts": group.mean_attempts,
             "token_fields": group.token_fields,
+            // Added alongside the field names, never in place of them: a
+            // reader of the older contract keeps what it read, and one that
+            // wants amounts gets them only for the fields a run measured.
+            "mean_tokens": group.mean_tokens,
+            "token_field_observations": group.token_field_observations,
+            "mean_total_tokens": group.mean_total_tokens(),
         },
     }));
     serde_json::Value::Object(object)
@@ -2231,6 +2489,294 @@ mod tests {
         assert!(!rendered.contains('\u{1b}'), "{rendered}");
         assert!(rendered.contains("none observed"), "{rendered}");
         assert!(rendered.contains("timing 0/1"), "{rendered}");
+    }
+
+    /// The report for `lines`, as `render_at` and `render_json` see it.
+    fn report_of(lines: &[String]) -> Report {
+        let text = lines.join("\n") + "\n";
+        let records = parse_records(Path::new("runs.jsonl"), &text).expect("parses");
+        Report {
+            records: PathBuf::from("runs.jsonl"),
+            record_count: records.len(),
+            groups: group(&records),
+        }
+    }
+
+    /// Terminal columns a rendered line occupies. Every fixture here is ASCII
+    /// apart from the ellipsis and the em dash, which are one column each.
+    fn columns_of(line: &str) -> usize {
+        line.chars().count()
+    }
+
+    /// Two candidates on one case: the comparison the table exists for. One
+    /// reported tokens and decidable tool expectations; the other reported
+    /// neither.
+    fn two_candidates() -> Vec<String> {
+        let measured = |elapsed: u32, input: u32, total: u32, tools: &str| {
+            record(&[
+                ("case_id", "\"synthetic-ticket-routing-001\""),
+                ("agent", "\"@triage\""),
+                ("agent_version", "\"1.0.0\""),
+                ("model", "\"ollama/fixture-model\""),
+                ("harness", "\"opencode\""),
+                ("elapsed_ms", &elapsed.to_string()),
+                (
+                    "reported_tokens",
+                    &format!(
+                        "{{\"ahu.tokens.input\":{{\"kind\":\"observed\",\"value\":{input}}},\
+                          \"ahu.tokens.total\":{{\"kind\":\"observed\",\"value\":{total}}},\
+                          \"ahu.tokens.cached\":{{\"kind\":\"unavailable\"}}}}"
+                    ),
+                ),
+                ("tool_expectation_status", &format!("\"{tools}\"")),
+            ])
+        };
+        let bare = |passed: bool| {
+            record(&[
+                ("case_id", "\"synthetic-ticket-routing-001\""),
+                ("agent", "\"@sorter\""),
+                ("agent_version", "\"1.0.0\""),
+                ("model", "\"ollama/other-model\""),
+                ("harness", "\"opencode\""),
+                ("score", if passed { "1.0" } else { "0.0" }),
+                ("passed", if passed { "true" } else { "false" }),
+                ("tool_expectation_status", "\"unknown\""),
+            ])
+        };
+        vec![
+            measured(41_000, 14_000, 18_000, "pass"),
+            measured(46_000, 15_000, 19_400, "pass"),
+            measured(43_000, 14_500, 18_700, "fail"),
+            bare(true),
+            bare(false),
+        ]
+    }
+
+    #[test]
+    fn the_report_opens_with_a_comparison_row_per_configuration() {
+        let report = report_of(&two_candidates());
+        let rendered = render_at(&report, 120);
+        let mut lines = rendered
+            .lines()
+            .skip_while(|line| !line.starts_with("CASE"));
+        let header = lines.next().expect("a header line");
+        assert_eq!(
+            header.split_whitespace().collect::<Vec<_>>(),
+            [
+                "CASE", "AGENT", "RUNTIME", "ANSWER", "TOOLS", "TIME", "TOKENS"
+            ]
+        );
+        // Sorted by group key, so @sorter precedes @triage.
+        let sorter = lines.next().expect("the @sorter row");
+        let triage = lines.next().expect("the @triage row");
+        assert_eq!(
+            sorter.split_whitespace().collect::<Vec<_>>(),
+            [
+                "synthetic-ticket-routing-001",
+                "@sorter@1.0.0",
+                "opencode",
+                "/",
+                "ollama/other-model",
+                "1/2",
+                // Nothing timed, nothing decided, nothing counted.
+                MISSING,
+                MISSING,
+                MISSING,
+            ]
+        );
+        assert_eq!(
+            triage.split_whitespace().collect::<Vec<_>>(),
+            [
+                "synthetic-ticket-routing-001",
+                "@triage@1.0.0",
+                "opencode",
+                "/",
+                "ollama/fixture-model",
+                // The answer rate and the tool rate are separate metrics: all
+                // three answers were right, one tool expectation was not.
+                "3/3",
+                "2/3",
+                "43.3s",
+                "18.7k",
+            ]
+        );
+        // The table leads: the first detail block comes after it.
+        let table_end = rendered.find(triage).expect("the row is in the report");
+        let first_block = rendered.find("  agent      ").expect("a detail block");
+        assert!(table_end < first_block, "{rendered}");
+    }
+
+    #[test]
+    fn the_table_fits_its_width_and_never_wraps() {
+        let report = report_of(&two_candidates());
+        for width in [88, 104, 120] {
+            let rendered = render_at(&report, width);
+            let table: Vec<&str> = rendered
+                .lines()
+                .skip_while(|line| !line.starts_with("CASE"))
+                .take(3)
+                .collect();
+            assert_eq!(table.len(), 3, "{rendered}");
+            for line in &table {
+                assert!(
+                    columns_of(line) <= width,
+                    "{line:?} is wider than {width} columns"
+                );
+            }
+        }
+        // Wide enough for every column at its natural width, so nothing is cut.
+        let wide = render_at(&report, 120);
+        let row = wide
+            .lines()
+            .find(|line| line.contains("@triage"))
+            .expect("the @triage row");
+        assert!(!row.contains('\u{2026}'), "{row}");
+        assert!(row.contains("synthetic-ticket-routing-001"), "{row}");
+
+        // At 88 the case id gives up width first: it is the same on every row,
+        // while the agent and the runtime are what the rows differ by.
+        let narrow = render_at(&report, 88);
+        let row = narrow
+            .lines()
+            .find(|line| line.contains("@triage"))
+            .expect("the @triage row");
+        assert!(row.starts_with("synthetic-tic\u{2026}"), "{row}");
+        assert!(row.contains("@triage@1.0.0"), "{row}");
+        assert!(row.contains("2/3"), "{row}");
+        assert!(row.contains("43.3s"), "{row}");
+        assert!(row.contains("18.7k"), "{row}");
+    }
+
+    #[test]
+    fn a_metric_no_run_reported_is_a_dash_in_the_table_rather_than_a_zero() {
+        // One run that measured nothing at all.
+        let report = report_of(&[record(&[("agent", "\"@quiet\"")])]);
+        let row = render_at(&report, 120)
+            .lines()
+            .find(|line| line.contains("@quiet"))
+            .expect("the row")
+            .to_string();
+        assert_eq!(row.matches(MISSING).count(), 3, "{row}");
+        assert!(
+            !row.contains(" 0 "),
+            "{row} must not read as a measured zero"
+        );
+        // The answer rate was measured, so it is a fraction rather than a dash.
+        assert!(row.contains("1/1"), "{row}");
+    }
+
+    #[test]
+    fn token_amounts_are_averaged_per_field_and_a_named_field_without_one_is_absent() {
+        let report = report_of(&[
+            record(&[(
+                "reported_tokens",
+                "{\"ahu.tokens.input\":{\"kind\":\"observed\",\"value\":100},\
+                  \"ahu.tokens.total\":{\"kind\":\"observed\",\"value\":150},\
+                  \"ahu.tokens.cached\":{\"kind\":\"unavailable\"}}",
+            )]),
+            // The bare-number shape a projecting recorder writes.
+            record(&[(
+                "reported_tokens",
+                "{\"ahu.tokens.input\":200,\"ahu.tokens.total\":250}",
+            )]),
+            // A run that reported no tokens at all.
+            record(&[]),
+        ]);
+        let only = &report.groups[0];
+        assert_eq!(only.runs, 3);
+        assert_eq!(only.coverage.tokens, 2);
+        assert_eq!(only.mean_tokens.get("ahu.tokens.input"), Some(&150.0));
+        assert_eq!(only.mean_tokens.get("ahu.tokens.total"), Some(&200.0));
+        // Named by one recorder, measured by neither: no mean is invented, and
+        // the field keeps its place in the names the group observed.
+        assert_eq!(only.mean_tokens.get("ahu.tokens.cached"), None);
+        assert!(only.token_fields.contains("ahu.tokens.cached"));
+        assert_eq!(
+            only.token_field_observations.get("ahu.tokens.input"),
+            Some(&2)
+        );
+        assert_eq!(only.mean_total_tokens(), Some(200.0));
+
+        // The block prints the amounts with the sample each was taken over.
+        let rendered = render_at(&report, 120);
+        assert!(
+            rendered.contains("tokens     ahu.tokens.cached \u{2014} (0/3)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("ahu.tokens.input 150 (2/3)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("ahu.tokens.total 200 (2/3)"),
+            "{rendered}"
+        );
+
+        // The JSON contract keeps the field names and adds the amounts.
+        let json: serde_json::Value =
+            serde_json::from_str(&render_json(&report).expect("renders")).expect("valid JSON");
+        let observed = &json["groups"][0]["observed"];
+        assert_eq!(
+            observed["token_fields"],
+            serde_json::json!(["ahu.tokens.cached", "ahu.tokens.input", "ahu.tokens.total"])
+        );
+        assert_eq!(observed["mean_tokens"]["ahu.tokens.input"], 150.0);
+        assert_eq!(observed["token_field_observations"]["ahu.tokens.total"], 2);
+        assert_eq!(observed["mean_total_tokens"], 200.0);
+        assert!(
+            observed["mean_tokens"].get("ahu.tokens.cached").is_none(),
+            "{observed}"
+        );
+    }
+
+    #[test]
+    fn a_total_is_never_derived_from_the_fields_that_were_reported() {
+        let report = report_of(&[record(&[(
+            "reported_tokens",
+            "{\"ahu.tokens.input\":100,\"ahu.tokens.output\":40}",
+        )])]);
+        let only = &report.groups[0];
+        assert_eq!(only.mean_tokens.get("ahu.tokens.input"), Some(&100.0));
+        assert_eq!(only.mean_total_tokens(), None);
+        let row = render_at(&report, 120)
+            .lines()
+            .find(|line| line.starts_with("c1"))
+            .expect("the row")
+            .to_string();
+        assert!(row.ends_with(MISSING), "{row} must not report 140 tokens");
+    }
+
+    #[test]
+    fn a_token_amount_that_is_not_a_count_is_refused_by_line() {
+        for tokens in [
+            r#"{"ahu.tokens.input":-1}"#,
+            r#"{"ahu.tokens.input":{"kind":"observed","value":-1}}"#,
+        ] {
+            let text = format!("{}\n", record(&[("reported_tokens", tokens)]));
+            let error = parse_records(Path::new("runs.jsonl"), &text).expect_err("refused");
+            assert_eq!(error.kind(), ErrorKind::Usage);
+            assert!(error.to_string().starts_with("runs.jsonl:1: "), "{error}");
+        }
+        // A value that is not a number at all stays tolerated: it is simply not
+        // an amount, and the field is still a name the recorder reported.
+        let text = format!("{}\n", record(&[("reported_tokens", r#"{"input":"n/a"}"#)]));
+        let records = parse_records(Path::new("runs.jsonl"), &text).expect("parses");
+        let only = &group(&records)[0];
+        assert!(only.token_fields.contains("input"));
+        assert!(only.mean_tokens.is_empty());
+    }
+
+    #[test]
+    fn measurements_are_shown_in_units_a_reader_can_compare() {
+        assert_eq!(human_duration(0.0), "0ms");
+        assert_eq!(human_duration(845.4), "845ms");
+        assert_eq!(human_duration(43_500.0), "43.5s");
+        assert_eq!(human_duration(128_833.3), "2.1m");
+        assert_eq!(human_duration(7_200_000.0), "2.0h");
+        assert_eq!(human_tokens(0.0), "0");
+        assert_eq!(human_tokens(999.4), "999");
+        assert_eq!(human_tokens(18_200.0), "18.2k");
+        assert_eq!(human_tokens(2_500_000.0), "2.5M");
     }
 
     #[test]
