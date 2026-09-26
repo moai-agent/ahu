@@ -33,6 +33,7 @@ questions:
     instructions: Select the team
     options:
       billing: Payments
+      technical: Product issues
 expected:
   route: billing
 rubric:

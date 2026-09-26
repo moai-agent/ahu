@@ -273,6 +273,55 @@ impl EvalCase {
             || threshold.is_none_or(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
             || self.expected.values().any(|value| !simple_json(value, 0))
             || self.questions.values().any(|value| !simple_json(value, 0))
+            || self.questions.iter().any(|(key, question)| {
+                let Some(object) = question.as_object() else {
+                    return true;
+                };
+                let Some(kind) = object.get("type").and_then(serde_json::Value::as_str) else {
+                    return true;
+                };
+                let instruction_ok = object
+                    .get("instructions")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty() && text.len() <= 2000);
+                let expected = &self.expected[key];
+                let expected_ok = if kind == "choice" {
+                    let Some(options) =
+                        object.get("options").and_then(serde_json::Value::as_object)
+                    else {
+                        return true;
+                    };
+                    (2..=32).contains(&options.len())
+                        && options.values().all(|value| {
+                            value
+                                .as_str()
+                                .is_some_and(|text| !text.trim().is_empty() && text.len() <= 500)
+                        })
+                        && expected
+                            .as_str()
+                            .is_some_and(|value| options.contains_key(value))
+                } else if kind == "probability" {
+                    expected
+                        .get("minimum")
+                        .and_then(serde_json::Value::as_f64)
+                        .is_some_and(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+                } else if kind == "score" {
+                    let min = object.get("min").and_then(serde_json::Value::as_f64);
+                    let max = object.get("max").and_then(serde_json::Value::as_f64);
+                    min.zip(max).is_some_and(|(min, max)| {
+                        min.is_finite()
+                            && max.is_finite()
+                            && min < max
+                            && expected
+                                .get("minimum")
+                                .and_then(serde_json::Value::as_f64)
+                                .is_some_and(|v| v.is_finite() && v >= min && v <= max)
+                    })
+                } else {
+                    false
+                };
+                !instruction_ok || !expected_ok
+            })
             || self.rubric.as_ref().is_some_and(|rubric| {
                 rubric.keys().collect::<BTreeSet<_>>() != expected_keys
                     || rubric
@@ -398,6 +447,38 @@ pub fn validate_answer(case: &EvalCase, answer: &serde_json::Value) -> Result<()
         bail!(
             "answer.json must contain exactly the expected question keys and bounded JSON values"
         );
+    }
+    for (key, question) in &case.questions {
+        let actual = &object[key];
+        match question.get("type").and_then(serde_json::Value::as_str) {
+            Some("choice")
+                if question
+                    .get("options")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|options| {
+                        actual
+                            .as_str()
+                            .is_some_and(|choice| options.contains_key(choice))
+                    }) => {}
+            Some("probability")
+                if actual
+                    .as_f64()
+                    .is_some_and(|value| value.is_finite() && (0.0..=1.0).contains(&value)) => {}
+            Some("score") => {
+                let min = question.get("min").and_then(serde_json::Value::as_f64);
+                let max = question.get("max").and_then(serde_json::Value::as_f64);
+                if !actual
+                    .as_f64()
+                    .zip(min.zip(max))
+                    .is_some_and(|(value, (min, max))| {
+                        value.is_finite() && value >= min && value <= max
+                    })
+                {
+                    bail!("answer for {key:?} is outside its score range");
+                }
+            }
+            _ => bail!("answer for {key:?} does not match its declared question type"),
+        }
     }
     Ok(())
 }
@@ -527,7 +608,7 @@ mod tests {
             "---\nokf_version: '0.2'\ntype: ahu:eval-case\nschema_version: {schema_version}\n\
              id: routing-1\ncorpus_version: '1.0.0'\n\
              state: {{subject: duplicate charge}}\n\
-             questions: {{route: {{type: choice}}}}\n\
+             questions: {{route: {{type: choice, instructions: Select a route, options: {{billing: Payments, technical: Products}}}}}}\n\
              expected: {{route: billing}}\n\
              rubric: {{route: Route the duplicate charge to payments}}\n\
              scoring: {{route: 1.0, exact_match_pass_threshold: 1.0}}\n{extra}---\n\n\

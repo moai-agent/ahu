@@ -122,6 +122,12 @@ impl TaskTelemetry {
         self.session_summaries > 0
             && self.tool_calls_by_name.values().sum::<u64>() == self.tool_calls
     }
+
+    /// Whether the session summary attributed every tool error to a named tool.
+    pub fn tool_errors_fully_named(&self) -> bool {
+        self.session_summaries > 0
+            && self.tool_errors_by_name.values().sum::<u64>() == self.tool_errors
+    }
 }
 
 /// What a run's telemetry supports being read as.

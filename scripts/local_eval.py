@@ -52,6 +52,36 @@ def read_case(path: Path):
 def score(case: dict, answer: dict, result: dict, decision_calls: int | None, elapsed_ms: int | None, case_digest: str) -> dict:
     expected = case["expected"]
     weights = case["scoring"]
+    if not isinstance(expected, dict) or not isinstance(answer, dict) or answer.keys() != expected.keys():
+        raise ValueError("answer must contain exactly the case's expected question keys")
+    question_weights = {key: value for key, value in weights.items() if key != "exact_match_pass_threshold"}
+    threshold = weights.get("exact_match_pass_threshold")
+    if question_weights.keys() != expected.keys() or any(
+        not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0
+        for value in question_weights.values()
+    ) or not isinstance(threshold, (int, float)) or isinstance(threshold, bool) or not 0 <= threshold <= 1:
+        raise ValueError("case scoring weights or pass threshold are invalid")
+    total_weight = sum(question_weights.values())
+    if total_weight <= 0:
+        raise ValueError("case scoring weights must sum to more than zero")
+    questions = case.get("questions", {})
+    if not isinstance(questions, dict) or questions.keys() != expected.keys():
+        raise ValueError("case questions must match expected answer keys")
+    for name, question in questions.items():
+        actual = answer[name]
+        kind = question.get("type") if isinstance(question, dict) else None
+        if kind == "choice":
+            options = question.get("options")
+            valid = isinstance(options, dict) and actual in options
+        elif kind == "probability":
+            valid = isinstance(actual, (int, float)) and not isinstance(actual, bool) and 0 <= actual <= 1
+        elif kind == "score":
+            valid = (isinstance(actual, (int, float)) and not isinstance(actual, bool)
+                     and question.get("min") <= actual <= question.get("max"))
+        else:
+            valid = False
+        if not valid:
+            raise ValueError(f"answer for {name!r} does not match its declared question type")
     parts = {}
     for name, wanted in expected.items():
         observed = answer.get(name)
@@ -59,12 +89,14 @@ def score(case: dict, answer: dict, result: dict, decision_calls: int | None, el
         if isinstance(wanted, dict) and "minimum" in wanted:
             correct = isinstance(observed, (int, float)) and not isinstance(observed, bool) and observed >= wanted["minimum"]
         parts[name] = (1.0 if correct else 0.0) * weights[name]
-    value = sum(parts.values())
+    value = sum(parts.values()) / total_weight
     metrics = result.get("metrics", {}).get("values", {})
     usage = {
         name: entry["value"]
         for name, entry in metrics.items()
-        if isinstance(entry, dict) and entry.get("kind") == "observed"
+        if (isinstance(entry, dict) and entry.get("kind") == "observed"
+            and isinstance(entry.get("value"), (int, float)) and not isinstance(entry.get("value"), bool))
+        or (isinstance(entry, (int, float)) and not isinstance(entry, bool))
     }
     expectations = case.get("tool_expectations")
     has_tool_expectations = bool(expectations and (expectations.get("required") or expectations.get("forbidden")))
@@ -182,20 +214,24 @@ def trend(args) -> int:
             row.get("input_fingerprint") or "unspecified",
             row.get("fingerprint_completeness") or "unspecified",
             row.get("skill_digest") or "unspecified",
+            row.get("evaluator_skill_digest") or "unspecified",
+            row.get("evaluator_repo_head") or "unspecified",
         ), []).append(row)
     summaries = []
     for (case_id, corpus_version, stage, agent, agent_version, evaluator, evaluator_version,
          evaluator_model, evaluator_harness, evaluator_harness_version, model, harness,
          harness_version, case_digest, prompt_profile, input_fingerprint,
-         fingerprint_completeness, skill_digest), items in sorted(groups.items()):
-        scores = [item["score"] for item in items]
+         fingerprint_completeness, skill_digest, evaluator_skill_digest, evaluator_repo_head), items in sorted(groups.items()):
+        scores = [item["score"] for item in items if isinstance(item.get("score"), (int, float))]
         token_fields = set()
         token_observations = 0
         for item in items:
             metrics = item.get("reported_tokens")
             if isinstance(metrics, dict):
                 observed = {name for name, entry in metrics.items()
-                            if isinstance(entry, dict) and entry.get("kind") == "observed"}
+                            if (isinstance(entry, dict) and entry.get("kind") == "observed"
+                                and isinstance(entry.get("value"), (int, float)) and not isinstance(entry.get("value"), bool))
+                            or (isinstance(entry, (int, float)) and not isinstance(entry, bool))}
                 if observed:
                     token_observations += 1
                     token_fields.update(observed)
@@ -206,6 +242,20 @@ def trend(args) -> int:
             return round(statistics.mean(values), 4) if values else None
 
         known_tools = ("ahu_agents_list", "ahu_tasks_list", "ahu_task_get", "ahu_typed_decide")
+        tool_values = {name: [] for name in known_tools}
+        for item in measured:
+            named = item.get("mcp_tools")
+            if not isinstance(named, dict):
+                continue
+            fully_named = (isinstance(item.get("mcp_tool_call_count"), (int, float))
+                           and sum(value for value in named.values()
+                                   if isinstance(value, (int, float)) and not isinstance(value, bool)
+                                   ) == item["mcp_tool_call_count"])
+            for name in known_tools:
+                if name in named and isinstance(named[name], (int, float)) and not isinstance(named[name], bool):
+                    tool_values[name].append(named[name])
+                elif fully_named:
+                    tool_values[name].append(0)
         summaries.append({
             "case_id": case_id, "corpus_version": corpus_version,
             "stage": stage, "model": model, "harness": harness,
@@ -219,7 +269,10 @@ def trend(args) -> int:
             "input_fingerprint": input_fingerprint,
             "fingerprint_completeness": fingerprint_completeness,
             "skill_digest": skill_digest,
-            "runs": len(items), "mean_score": round(statistics.mean(scores), 4),
+            "evaluator_skill_digest": evaluator_skill_digest,
+            "evaluator_repo_head": evaluator_repo_head,
+            "runs": len(items), "score_observations": len(scores),
+            "mean_score": round(statistics.mean(scores), 4) if scores else None,
             "pass_rate": round(sum(item["passed"] for item in items) / len(items), 4),
             "token_observations": token_observations,
             "token_fields": sorted(token_fields),
@@ -232,9 +285,9 @@ def trend(args) -> int:
             "mean_mcp_tool_errors": mean_field("mcp_tool_error_count", measured),
             "mean_typed_decision_errors": mean_field("typed_decision_error_count", measured),
             "mcp_tools": {
-                name: round(statistics.mean([item.get("mcp_tools", {}).get(name, 0)
-                                             for item in measured]), 4)
+                name: round(statistics.mean(values), 4)
                 for name in known_tools
+                if (values := tool_values[name])
             } if measured else {},
         })
     print(json.dumps(summaries, indent=2))

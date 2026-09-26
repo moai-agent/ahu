@@ -75,7 +75,7 @@ struct Record {
     case_id: String,
     model: String,
     harness: String,
-    score: f64,
+    score: Option<f64>,
     passed: bool,
     #[serde(default)]
     corpus_version: Option<String>,
@@ -147,6 +147,10 @@ struct Record {
     agent_identity_digest: Option<String>,
     #[serde(default)]
     evaluator_identity_digest: Option<String>,
+    #[serde(default)]
+    evaluator_skill_digest: Option<String>,
+    #[serde(default)]
+    evaluator_repo_head: Option<String>,
     #[serde(default)]
     blinding: Option<String>,
     #[serde(default)]
@@ -232,6 +236,8 @@ pub struct GroupKey {
     pub suite_digest: String,
     pub agent_identity_digest: String,
     pub evaluator_identity_digest: String,
+    pub evaluator_skill_digest: String,
+    pub evaluator_repo_head: String,
     pub blinding: String,
     pub tool_definitions_digest: String,
     pub ahu_version: String,
@@ -272,7 +278,9 @@ pub struct Group {
     pub key: GroupKey,
     pub runs: usize,
     pub passes: usize,
-    pub mean_score: f64,
+    /// Mean over trials that produced a score; failed/unscored trials are excluded.
+    pub mean_score: Option<f64>,
+    pub score_observations: usize,
     pub pass_rate: f64,
     pub coverage: Coverage,
     /// Receiver-level export drops/errors observed across runs with counters.
@@ -340,6 +348,15 @@ fn or_unspecified(value: &Option<String>, fallback: &str) -> String {
         .filter(|text| !text.is_empty())
         .unwrap_or(fallback)
         .to_string()
+}
+
+fn observed_token(value: &serde_json::Value) -> bool {
+    let number = value.as_f64().or_else(|| {
+        (value.get("kind").and_then(serde_json::Value::as_str) == Some("observed"))
+            .then(|| value.get("value").and_then(serde_json::Value::as_f64))
+            .flatten()
+    });
+    number.is_some_and(|number| number.is_finite() && number >= 0.0)
 }
 
 /// Confirm the record file is outside this repository, and return its real path.
@@ -453,7 +470,7 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
                 ),
             ));
         }
-        if !record.score.is_finite()
+        if record.score.is_some_and(|score| !score.is_finite())
             || [
                 record.elapsed_ms,
                 record.decision_call_count,
@@ -565,6 +582,8 @@ fn key_for(record: &Record) -> GroupKey {
         suite_digest: or_unspecified(&record.suite_digest, "none"),
         agent_identity_digest: or_unspecified(&record.agent_identity_digest, UNSPECIFIED),
         evaluator_identity_digest: or_unspecified(&record.evaluator_identity_digest, UNSPECIFIED),
+        evaluator_skill_digest: or_unspecified(&record.evaluator_skill_digest, UNSPECIFIED),
+        evaluator_repo_head: or_unspecified(&record.evaluator_repo_head, UNSPECIFIED),
         blinding: or_unspecified(&record.blinding, UNSPECIFIED),
         tool_definitions_digest: or_unspecified(&record.tool_definitions_digest, UNSPECIFIED),
         ahu_version: or_unspecified(&record.ahu_version, UNSPECIFIED),
@@ -585,7 +604,7 @@ fn group(records: &[Record]) -> Vec<Group> {
         .map(|(key, items)| {
             let runs = items.len();
             let passes = items.iter().filter(|item| item.passed).count();
-            let total: f64 = items.iter().map(|item| item.score).sum();
+            let scores: Vec<f64> = items.iter().filter_map(|item| item.score).collect();
             let mut coverage = Coverage::default();
             let mut token_fields = BTreeSet::new();
             let mut elapsed = Vec::new();
@@ -669,11 +688,15 @@ fn group(records: &[Record]) -> Vec<Group> {
                         .or_default()
                         .push(*count);
                 }
-                if let Some(tokens) = &item.reported_tokens
-                    && !tokens.is_empty()
-                {
-                    coverage.tokens += 1;
-                    token_fields.extend(tokens.keys().cloned());
+                if let Some(tokens) = &item.reported_tokens {
+                    let observed: Vec<_> = tokens
+                        .iter()
+                        .filter_map(|(name, value)| observed_token(value).then_some(name.clone()))
+                        .collect();
+                    if !observed.is_empty() {
+                        coverage.tokens += 1;
+                        token_fields.extend(observed);
+                    }
                 }
                 // A reported zero is an observation; only an absent field is not.
                 if let Some(value) = item.elapsed_ms {
@@ -725,7 +748,8 @@ fn group(records: &[Record]) -> Vec<Group> {
                 key,
                 runs,
                 passes,
-                mean_score: round4(total / runs as f64),
+                mean_score: mean(&scores),
+                score_observations: scores.len(),
                 pass_rate: round4(passes as f64 / runs as f64),
                 coverage,
                 telemetry_receiver: (coverage.telemetry_receiver > 0).then_some(telemetry_receiver),
@@ -838,8 +862,14 @@ pub fn render(report: &Report) -> String {
             }
         ));
         out.push_str(&format!(
-            "  runs {}  mean score {:.4}  pass rate {:.4} ({}/{})\n",
-            group.runs, group.mean_score, group.pass_rate, group.passes, group.runs
+            "  runs {}  mean score {}  pass rate {:.4} ({}/{})\n",
+            group.runs,
+            group
+                .mean_score
+                .map_or_else(|| "unscored".to_owned(), |score| format!("{score:.4}")),
+            group.pass_rate,
+            group.passes,
+            group.runs
         ));
         out.push_str(&format!(
             "  answer     pass rate {:.4} ({}/{})  95% CI {}\n",
@@ -1155,8 +1185,10 @@ pub fn run(
             evaluator: evaluator.as_ref().map(fingerprint::AgentFingerprint::of),
             blinding,
             skill_digest: None,
+            evaluator_skill_digest: None,
             build: build.clone(),
             target_repo_head: repo.head.clone(),
+            evaluator_repo_head: None,
         };
 
         let candidate_result = match launch_eval_agent(
@@ -1216,21 +1248,101 @@ pub fn run(
                 .map(str::to_owned),
         );
         print.skill_digest = skill_digest(&candidate_result);
-
-        let answer_path = safe_artifact(Path::new(worktree), "answer.json")?;
-        let answer_bytes = std::fs::read(&answer_path).map_err(|error| {
-            Error::new(format!("candidate did not produce answer.json: {error}"))
-        })?;
-        if answer_bytes.len() > 64 * 1024 {
-            bail!("candidate answer.json exceeds the 64 KiB artifact limit");
-        }
-        let answer: serde_json::Value = serde_json::from_slice(&answer_bytes)
-            .map_err(|_| Error::new("candidate answer.json is not valid JSON"))?;
-        case::validate_answer(case, &answer)?;
         write_private_file(
             &run_dir.join("candidate-result.json"),
             &serde_json::to_vec(&candidate_result)?,
         )?;
+        let answer_artifact = (|| -> Result<(Vec<u8>, serde_json::Value)> {
+            let path = safe_artifact(Path::new(worktree), "answer.json")?;
+            let bytes = std::fs::read(path)?;
+            if bytes.len() > 64 * 1024 {
+                bail!("answer too large");
+            }
+            let answer: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|_| Error::new("invalid answer JSON"))?;
+            case::validate_answer(case, &answer)?;
+            Ok((bytes, answer))
+        })();
+        let (answer_bytes, answer) = match answer_artifact {
+            Ok(answer) => answer,
+            Err(error) => {
+                let status = if error.to_string().contains("too large") {
+                    "candidate_answer_too_large"
+                } else if error.to_string().contains("JSON") {
+                    "candidate_answer_invalid_json"
+                } else if error.to_string().contains("answer.json") {
+                    "candidate_answer_missing"
+                } else {
+                    "candidate_answer_invalid"
+                };
+                let mut record = print.record_fields();
+                record.extend(base_fields(&run_id, trial, "candidate"));
+                record.extend(outcome_fields(status, Some("candidate_answer_invalid")));
+                record.insert("task_id".into(), candidate_task.into());
+                record.insert("attempt".into(), attempt.into());
+                let telemetry = receiver.task(candidate_task, attempt);
+                let coverage = telemetry
+                    .as_ref()
+                    .map_or(crate::eval_otel::Coverage::None, |item| item.coverage());
+                record.insert("telemetry_coverage".into(), coverage.as_str().into());
+                record.insert(
+                    "mcp_observed".into(),
+                    telemetry
+                        .as_ref()
+                        .is_some_and(|item| item.mcp_observed)
+                        .into(),
+                );
+                for (name, pick) in [
+                    ("mcp_request_count", 0),
+                    ("mcp_tool_list_count", 1),
+                    ("mcp_tool_call_count", 2),
+                    ("mcp_tool_error_count", 3),
+                ] {
+                    let count = telemetry
+                        .as_ref()
+                        .filter(|item| item.mcp_observed)
+                        .map(|item| match pick {
+                            0 => item.mcp_requests,
+                            1 => item.tool_list_calls,
+                            2 => item.tool_calls,
+                            _ => item.tool_errors,
+                        });
+                    if let Some(count) = count {
+                        record.insert(name.into(), count.into());
+                    }
+                }
+                if let Some(item) = telemetry.as_ref().filter(|item| item.mcp_observed) {
+                    record.insert(
+                        "mcp_tools".into(),
+                        serde_json::to_value(&item.tool_calls_by_name)?,
+                    );
+                    record.insert(
+                        "mcp_tool_errors_by_name".into(),
+                        serde_json::to_value(&item.tool_errors_by_name)?,
+                    );
+                    if item.tool_errors_fully_named() {
+                        record.insert(
+                            "typed_decision_error_count".into(),
+                            item.typed_decision_errors.into(),
+                        );
+                    }
+                }
+                if let Some(tokens) = candidate_result.pointer("/metrics/values") {
+                    record.insert("reported_tokens".into(), tokens.clone());
+                }
+                record.insert(
+                    "telemetry_receiver".into(),
+                    serde_json::to_value(receiver.receiver_stats().since(receiver_stats_before))?,
+                );
+                append_jsonl(&records, &serde_json::Value::Object(record))?;
+                outputs.push(serde_json::json!({
+                    "trial": trial.index, "case_id": case.id,
+                    "agent": candidate.manifest.name, "run_index": trial.run_index,
+                    "task_id": candidate_task, "terminal_status": status,
+                }));
+                continue;
+            }
+        };
         write_private_file(&run_dir.join("answer.json"), &answer_bytes)?;
 
         let (answer_score, answer_passed) = case::deterministic_score(case, &answer)?;
@@ -1289,6 +1401,8 @@ pub fn run(
                                 .map(str::to_owned),
                         ),
                     );
+                    print.evaluator_skill_digest = skill_digest(&result);
+                    print.evaluator_repo_head = evaluator_root.head.clone();
                     evaluator_task = result
                         .get("task_id")
                         .and_then(serde_json::Value::as_str)
@@ -1437,13 +1551,14 @@ pub fn run(
             let value = telemetry
                 .as_ref()
                 .filter(|t| t.mcp_observed)
-                .map(|t| match pick {
-                    0 => t.typed_decision_calls,
-                    1 => t.mcp_requests,
-                    2 => t.tool_list_calls,
-                    3 => t.tool_calls,
-                    4 => t.tool_errors,
-                    _ => t.typed_decision_errors,
+                .and_then(|t| match pick {
+                    0 => Some(t.typed_decision_calls),
+                    1 => Some(t.mcp_requests),
+                    2 => Some(t.tool_list_calls),
+                    3 => Some(t.tool_calls),
+                    4 => Some(t.tool_errors),
+                    _ if t.tool_errors_fully_named() => Some(t.typed_decision_errors),
+                    _ => None,
                 });
             put(key, value.map_or(serde_json::Value::Null, Into::into));
         }
@@ -1944,6 +2059,8 @@ fn group_json(group: &Group) -> serde_json::Value {
         "suite_digest": key.suite_digest,
         "agent_identity_digest": key.agent_identity_digest,
         "evaluator_identity_digest": key.evaluator_identity_digest,
+        "evaluator_skill_digest": key.evaluator_skill_digest,
+        "evaluator_repo_head": key.evaluator_repo_head,
         "blinding": key.blinding,
         "tool_definitions_digest": key.tool_definitions_digest,
         "ahu_version": key.ahu_version,
@@ -1956,6 +2073,7 @@ fn group_json(group: &Group) -> serde_json::Value {
         "runs": group.runs,
         "passed": group.passes,
         "mean_score": group.mean_score,
+        "score_observations": group.score_observations,
         "pass_rate": group.pass_rate,
         "answer": {
             "passed": group.answer_passes,
@@ -2052,6 +2170,37 @@ mod tests {
     }
 
     #[test]
+    fn unscored_failed_trials_remain_in_pass_rate_without_a_fake_zero_score() {
+        let text = record(&[("score", "null"), ("passed", "false")]);
+        let records = parse_records(Path::new("runs.jsonl"), &text).expect("failure row parses");
+        let groups = group(&records);
+        assert_eq!(groups[0].runs, 1);
+        assert_eq!(groups[0].passes, 0);
+        assert_eq!(groups[0].pass_rate, 0.0);
+        assert_eq!(groups[0].mean_score, None);
+        assert_eq!(groups[0].score_observations, 0);
+    }
+
+    #[test]
+    fn unavailable_token_entries_do_not_claim_coverage() {
+        let text = format!(
+            "{}\n{}\n",
+            record(&[("reported_tokens", r#"{"input":{"kind":"unavailable"}}"#)]),
+            record(&[(
+                "reported_tokens",
+                r#"{"output":{"kind":"observed","value":0}}"#
+            )])
+        );
+        let rows = parse_records(Path::new("runs.jsonl"), &text).expect("token rows parse");
+        let groups = group(&rows);
+        assert_eq!(groups[0].coverage.tokens, 1);
+        assert_eq!(
+            groups[0].token_fields,
+            BTreeSet::from(["output".to_owned()])
+        );
+    }
+
+    #[test]
     fn a_null_identity_field_groups_with_an_absent_one() {
         let text = format!(
             "{}\n{}\n",
@@ -2075,6 +2224,8 @@ mod tests {
             ("harness_version", "\"9\""),
             ("target_repo_head", "\"deadbee\""),
             ("skill_digest", "\"sha256:1\""),
+            ("evaluator_skill_digest", "\"sha256:2\""),
+            ("evaluator_repo_head", "\"feedbee\""),
             ("stage", "\"evaluator\""),
             ("corpus_version", "\"2.0.0\""),
             ("case_id", "\"c2\""),
@@ -2126,7 +2277,7 @@ mod tests {
         let records = parse_records(Path::new("runs.jsonl"), &text).expect("parses");
         let only = &group(&records)[0];
         assert_eq!(only.runs, 3);
-        assert_eq!(only.mean_score, 0.6667);
+        assert_eq!(only.mean_score, Some(0.6667));
         assert_eq!(only.pass_rate, 0.6667);
         // 100 and 300 over the two runs that timed, not over all three.
         assert_eq!(only.mean_elapsed_ms, Some(200.0));

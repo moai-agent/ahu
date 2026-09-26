@@ -182,10 +182,14 @@ pub struct InputFingerprint {
     /// Digest over the skills the candidate's harness was given. Absent when the
     /// launch reported no skill catalog.
     pub skill_digest: Option<String>,
+    /// Digest over the skills provided to the evaluator.
+    pub evaluator_skill_digest: Option<String>,
     pub build: BuildIdentity,
     /// HEAD of the checkout under evaluation. Absent in a repository with no
     /// commit yet.
     pub target_repo_head: Option<String>,
+    /// HEAD of the checkout from which the evaluator ran.
+    pub evaluator_repo_head: Option<String>,
 }
 
 impl InputFingerprint {
@@ -200,6 +204,12 @@ impl InputFingerprint {
         }
         if self.skill_digest.is_none() {
             missing.push("skill_digest");
+        }
+        if self.evaluator.is_some() && self.evaluator_skill_digest.is_none() {
+            missing.push("evaluator_skill_digest");
+        }
+        if self.evaluator.is_some() && self.evaluator_repo_head.is_none() {
+            missing.push("evaluator_repo_head");
         }
         if self.candidate.harness_version.is_none() {
             missing.push("harness_version");
@@ -242,10 +252,12 @@ impl InputFingerprint {
             "evaluator": self.evaluator.as_ref().map(AgentFingerprint::canonical),
             "blinding": self.blinding.as_str(),
             "skill_digest": self.skill_digest,
+            "evaluator_skill_digest": self.evaluator_skill_digest,
             "ahu_version": self.build.version,
             "ahu_build_digest": self.build.binary_digest,
             "tool_definitions_digest": self.build.tool_definitions_digest,
             "target_repo_head": self.target_repo_head,
+            "evaluator_repo_head": self.evaluator_repo_head,
         })
     }
 
@@ -371,6 +383,12 @@ impl InputFingerprint {
                 .clone()
                 .map_or(serde_json::Value::Null, Into::into),
         );
+        put(
+            "evaluator_skill_digest",
+            self.evaluator_skill_digest
+                .clone()
+                .map_or(serde_json::Value::Null, Into::into),
+        );
         put("ahu_version", self.build.version.clone().into());
         put(
             "ahu_build_digest",
@@ -386,6 +404,12 @@ impl InputFingerprint {
         put(
             "target_repo_head",
             self.target_repo_head
+                .clone()
+                .map_or(serde_json::Value::Null, Into::into),
+        );
+        put(
+            "evaluator_repo_head",
+            self.evaluator_repo_head
                 .clone()
                 .map_or(serde_json::Value::Null, Into::into),
         );
@@ -440,12 +464,14 @@ mod tests {
             evaluator: Some(agent("judge")),
             blinding: Blinding::PromptOnly,
             skill_digest: Some("f".repeat(64)),
+            evaluator_skill_digest: Some("9".repeat(64)),
             build: BuildIdentity {
                 version: "0.5.0".into(),
                 binary_digest: Some("1".repeat(64)),
                 tool_definitions_digest: "2".repeat(64),
             },
             target_repo_head: Some("deadbeef".into()),
+            evaluator_repo_head: Some("feedface".into()),
         }
     }
 
@@ -475,6 +501,14 @@ mod tests {
             (
                 Box::new(|f: &mut InputFingerprint| f.skill_digest = None),
                 "skill_digest",
+            ),
+            (
+                Box::new(|f: &mut InputFingerprint| f.evaluator_skill_digest = None),
+                "evaluator_skill_digest",
+            ),
+            (
+                Box::new(|f: &mut InputFingerprint| f.evaluator_repo_head = None),
+                "evaluator_repo_head",
             ),
             (
                 Box::new(|f: &mut InputFingerprint| f.candidate.harness_version = None),

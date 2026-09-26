@@ -216,7 +216,7 @@ mod tests {
         format!(
             "---\nokf_version: '0.2'\ntype: ahu:eval-case\nschema_version: 2\nid: {id}\n\
              corpus_version: '1.0.0'\nstate: {{subject: s}}\n\
-             questions: {{route: {{type: choice}}}}\nexpected: {{route: billing}}\n\
+             questions: {{route: {{type: choice, instructions: Select a route, options: {{billing: Payments, technical: Products}}}}}}\nexpected: {{route: billing}}\n\
              rubric: {{route: routes to billing}}\n\
              scoring: {{route: 1.0, exact_match_pass_threshold: 1.0}}\n---\n\nA case.\n"
         )
