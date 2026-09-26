@@ -366,11 +366,16 @@ fn task_listing_fits_the_terminal_and_keeps_handles_whole() {
         for whole in ["exited", "chris@1.0.0", "claude-code / claude-opus-5"] {
             assert!(text.contains(whole), "{width}: {whole} is cut:\n{text}");
         }
-        // The branch is compact rather than absent: the prefix and enough of the
-        // id to recognise, never the whole UUID.
-        assert!(text.contains("BRANCH"), "{width}: {text}");
+        // Wherever the branch appears it is the whole compact one -- the prefix
+        // and enough of the id to recognise, never the whole UUID and never cut
+        // shorter than that, because a cut branch name matches nothing. This
+        // handle is wide enough that 80 columns cannot hold the column at all.
         assert!(!text.contains(&branch), "{width}: {text}");
-        assert!(text.contains("ahu/chris/"), "{width}: {text}");
+        if text.contains("BRANCH") {
+            assert!(text.contains(&short_branch(&branch)), "{width}: {text}");
+        } else {
+            assert!(!text.contains("ahu/chris/"), "{width}: {text}");
+        }
         assert!(text.contains("Run `ahu task <handle>`"), "{text}");
     }
 
@@ -380,6 +385,9 @@ fn task_listing_fits_the_terminal_and_keeps_handles_whole() {
         ahu::commands::tasks_at(console, &discovered, 88)
     });
     assert!(!narrow.contains("TITLE"), "{narrow}");
+    // The title leaves before the branch does, and the branch it leaves room
+    // for is the whole compact one.
+    assert!(narrow.contains(&short_branch(&branch)), "{narrow}");
     let (_, roomy) = scripted(&repo, |console| {
         ahu::commands::tasks_at(console, &discovered, 120)
     });
@@ -872,4 +880,60 @@ fn a_launch_says_when_drift_could_not_read_earlier_records() {
         "{text}"
     );
     assert!(text.contains("drift was"), "{text}");
+}
+
+/// Spare width belongs to the compact branch before it belongs to the two
+/// columns a reader can infer from the rest of the row.
+///
+/// At 96 to 100 columns the layout used to keep MODE and LIVE and pay for them
+/// out of the branch, printing `ahu/chris/01a0df…`: a name that matches nothing
+/// the reader can look up. The branch column is worth its full compact width or
+/// nothing at all.
+#[test]
+fn the_compact_branch_is_whole_before_mode_and_liveness_are_shown() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let branches = listed_short(&repo);
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+
+    // 100 is one column short of the whole table, so MODE leaves rather than the
+    // branch giving up the digits that identify it; 104 has room for both.
+    for width in [100usize, 104] {
+        let (code, text) = scripted(&repo, |console| {
+            ahu::commands::tasks_at(console, &discovered, width)
+        });
+        assert_eq!(code, 0, "{text}");
+        for line in text.lines() {
+            assert!(line_width(line) <= width, "{width}: {line:?}\n{text}");
+        }
+        assert!(text.contains("BRANCH"), "{width}: {text}");
+        for branch in &branches {
+            assert!(
+                text.contains(&short_branch(branch)),
+                "{width}: the compact {branch} is cut:\n{text}"
+            );
+            assert!(!text.contains(branch), "{width}: {branch}\n{text}");
+        }
+        // Nothing the reader cannot get elsewhere was traded for it either.
+        for whole in ["@fix-flaky-test", "running", "chris@1.0.0"] {
+            assert!(text.contains(whole), "{width}: {whole}\n{text}");
+        }
+        assert!(
+            text.contains("claude-code / claude-opus-5"),
+            "{width}: {text}"
+        );
+    }
+
+    let (_, narrow) = scripted(&repo, |console| {
+        ahu::commands::tasks_at(console, &discovered, 100)
+    });
+    assert!(!narrow.contains("MODE"), "{narrow}");
+    assert!(narrow.contains("LIVE"), "{narrow}");
+    let (_, roomy) = scripted(&repo, |console| {
+        ahu::commands::tasks_at(console, &discovered, 104)
+    });
+    assert!(roomy.contains("MODE"), "{roomy}");
+    assert!(roomy.contains("LIVE"), "{roomy}");
 }

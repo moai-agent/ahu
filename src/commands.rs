@@ -930,9 +930,10 @@ pub fn tasks_at(console: &mut Console<'_>, repo: &Repo, width: usize) -> Result<
 /// resolve, and resolving it is the only reason the column is there. What the
 /// reader cannot get anywhere else in the row keeps its width next: the state,
 /// the agent, and the runtime, which is the one column that shows a task ran on
-/// its own harness and model. The branch is held to a length it is worth
-/// printing rather than dropped, and the title gives way before either, because
-/// the handle was generated from it.
+/// its own harness and model. The branch comes next, whole or not at all, and
+/// the title gives way before it, because the handle was generated from it.
+/// Mode and liveness are the first to go: both are one short word a reader can
+/// infer from the rest of the row.
 const TASK_COLUMNS: &[table::Column] = &[
     table::Column {
         header: "HANDLE",
@@ -977,11 +978,15 @@ const TASK_COLUMNS: &[table::Column] = &[
         drop: Some(5),
     },
     table::Column {
+        // The cell is already the shortest branch worth printing: the prefix and
+        // the leading digits of the id, which is what a reader scanning
+        // `git branch` matches against. Cutting into that leaves a name that
+        // matches nothing, so this column does not shrink -- spare width goes to
+        // the whole branch before mode, liveness or the title see any of it, and
+        // a table too narrow for it loses the column rather than its meaning.
         header: "BRANCH",
-        // `ahu/<agent>/<id>` cut here still names the agent and the leading
-        // digits of the id, which is what a reader scanning `git branch` needs.
-        min: 12,
-        shrink: Some(0),
+        min: 0,
+        shrink: None,
         drop: Some(3),
     },
 ];
