@@ -172,3 +172,80 @@ pub fn render(drift: &Drift) -> String {
     );
     out
 }
+
+/// One drifted agent as `ahu doctor` reports it.
+///
+/// `ahu doctor` names the agent the way `ahu agents` does and shows the launch
+/// the comparison is against, so the two commands can be read together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Drifted {
+    /// The manifest name, without the sigil.
+    pub agent_name: String,
+    /// The manifest version, which is exactly what drift says is now inaccurate.
+    pub agent_version: String,
+    /// The previous launch, by task handle when one is recorded, else its id.
+    pub previous_task: String,
+    pub drift: Drift,
+}
+
+/// How many drifted agents `ahu doctor` describes in full.
+///
+/// A repository with a dozen registered agents can drift all of them at once —
+/// a user-scoped hooks edit does it — and the diagnostic report has other
+/// sections after this one.
+const DOCTOR_DETAIL_LIMIT: usize = 3;
+
+/// The `drift` section of `ahu doctor`, header line included.
+///
+/// Empty input has no section: doctor says "no registered agents are drifted"
+/// itself, because that line is not about any particular agent.
+pub fn render_doctor(drifted: &[Drifted]) -> String {
+    let mut out = String::new();
+    if drifted.is_empty() {
+        return out;
+    }
+    out.push_str(&format!(
+        "drift        {} registered agent{} drifted\n",
+        drifted.len(),
+        if drifted.len() == 1 { "" } else { "s" }
+    ));
+    for entry in drifted.iter().take(DOCTOR_DETAIL_LIMIT) {
+        out.push_str(&format!(
+            "  @{} {}  since task {} ({})\n",
+            display_safe(&entry.agent_name),
+            display_safe(&entry.agent_version),
+            display_safe(&entry.previous_task),
+            display_safe(launch_day(&entry.drift.previous_launched_at))
+        ));
+        for change in &entry.drift.changes {
+            out.push_str(&format!("    - {}\n", display_safe(change)));
+        }
+    }
+    if let Some(rest) = drifted
+        .len()
+        .checked_sub(DOCTOR_DETAIL_LIMIT)
+        .filter(|n| *n > 0)
+    {
+        out.push_str(&format!(
+            "  {rest} more drifted agent{} not shown; `ahu agents` lists every drifted agent.\n",
+            if rest == 1 { " is" } else { "s are" }
+        ));
+    }
+    out.push_str(
+        "  Bump the version in the agent's manifest and record what changed, or restore it.\n",
+    );
+    out
+}
+
+/// The calendar day of an RFC 3339 launch timestamp.
+///
+/// Doctor has one line per agent, and the day is what a reader needs to place
+/// the comparison. A record is an ordinary file, so a value that is not a
+/// timestamp is shown whole rather than truncated into something that looks
+/// like a date.
+fn launch_day(timestamp: &str) -> &str {
+    match timestamp.split_once('T') {
+        Some((day, _)) if day.len() == 10 => day,
+        _ => timestamp,
+    }
+}

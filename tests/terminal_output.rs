@@ -848,3 +848,183 @@ fn selector_styling_contains_hostile_fields_and_preserves_selection() {
     assert!(plain.contains("range 1–1"));
     assert!(plain.contains(&format!("Valid agents: @{safe}")));
 }
+
+/// A previous launch of `chris@1.0.0` whose recorded agent digests no longer
+/// match the checkout, with every other drift input left matching.
+///
+/// Written by hand rather than through a launch: the point is what doctor says
+/// about an existing record, and a real launch would need cmux and a session.
+fn record_a_drifted_launch(repo: &common::TestRepo, task_id: &str) {
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
+    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
+    let (delivered, delivery) =
+        ahu::orchestration::deliver(Some("You are chris."), "earlier work").unwrap();
+    let record = ahu::task::TaskRecord {
+        schema_version: ahu::task::TASK_SCHEMA_VERSION,
+        task_id: task_id.to_string(),
+        title: "an earlier task".to_string(),
+        summary: String::new(),
+        created_at: "2026-09-24T09:15:00Z".to_string(),
+        repo_identity: discovered.identity(),
+        repo_root: discovered.root.clone(),
+        branch: format!("ahu/chris/{task_id}"),
+        worktree: discovered.root.join(format!(".worktrees/{task_id}")),
+        base_commit: discovered.head.clone(),
+        identity: ahu::task::LaunchIdentity {
+            mode: ahu::task::LaunchMode::Named,
+            agent: "chris".to_string(),
+            agent_version: Some("1.0.0".to_string()),
+            permissions: Default::default(),
+            harness: "claude-code".to_string(),
+            model: "claude-opus-5".to_string(),
+            instructions_source: Some(".claude/agents/chris.md".to_string()),
+            source_digest: Some("3f9c1a2b".repeat(8)),
+            instructions_digest: Some("8a1d4e07".repeat(8)),
+            identity_digest: Some("5c2b9f10".repeat(8)),
+            selection_basis: None,
+        },
+        // The repository configuration and the policy have not moved, so the
+        // agent's own digests are the only thing doctor has to explain.
+        policy_digest: loaded.digest.clone(),
+        catalog_version: loaded.config.catalog_version.clone(),
+        config_snapshot: Default::default(),
+        config_snapshot_digest: ahu::snapshot::collect(repo.path()).unwrap().digest(),
+        hooks: Default::default(),
+        hooks_digest: String::new(),
+        materialize: Default::default(),
+        launch_command: adapter
+            .launch_command(&ahu::harness::LaunchRequest {
+                model: "claude-opus-5",
+                prompt: &delivered,
+                cwd: &discovered.root,
+                permissions: Default::default(),
+            })
+            .unwrap()
+            .redacted(),
+        delivery,
+        prompt_digest: ahu::util::digest_bytes(b"earlier work"),
+        harness_executable: std::path::PathBuf::from("/usr/local/bin/claude"),
+        reliability_warning: None,
+        enforcement: adapter
+            .enforcement("claude-opus-5", Default::default())
+            .unwrap(),
+        cmux_group_id: None,
+        cmux_workspace_id: None,
+        cmux_window_id: None,
+        state: ahu::task::TaskState::Exited,
+    };
+    let tasks = ahu::storage::CheckoutStorage::new(repo.path())
+        .tasks_dir(&discovered.identity())
+        .unwrap();
+    ahu::task::save(&tasks.join(task_id), &record, "earlier work").unwrap();
+}
+
+/// Naming the drifted agents is not enough to act on: doctor has to say what
+/// changed, against which launch, and what to do about it.
+#[test]
+fn doctor_explains_what_drifted_rather_than_only_naming_the_agent() {
+    let repo = common::TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let task_id = "019a4f00-0000-7000-8000-00000000c0de";
+    record_a_drifted_launch(&repo, task_id);
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    // A recorded handle is how a reader refers to that launch, so it is what
+    // doctor shows; the id is the fallback, not the first choice.
+    ahu::task_handles::reserve(
+        &discovered,
+        task_id,
+        Some("fix-flaky-test"),
+        "an earlier task",
+    )
+    .unwrap();
+
+    let mut output: Vec<u8> = Vec::new();
+    let mut input = std::io::Cursor::new(Vec::new());
+    let repo_result = Ok(discovered);
+    let _ = ahu::commands::doctor(
+        &mut ahu::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: false,
+        },
+        &repo_result,
+    );
+    let text = String::from_utf8_lossy(&output).to_string();
+
+    assert!(
+        text.contains("drift        1 registered agent drifted\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  @chris 1.0.0  since task @fix-flaky-test (2026-09-24)\n"),
+        "{text}"
+    );
+    // Each change from the launch path, verbatim, so the two surfaces cannot
+    // disagree about what moved.
+    assert!(
+        text.contains("    - the instruction text ahu delivers changed: 8a1d4e078a1d ->"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    - the agent's source file changed: 3f9c1a2b3f9c ->"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  Bump the version in the agent's manifest and record what changed, or restore it.\n"
+        ),
+        "{text}"
+    );
+    // The time is the launch day, not a whole timestamp, and drift stays a
+    // warning: it never becomes a problem that blocks a launch.
+    assert!(!text.contains("2026-09-24T09:15:00Z"), "{text}");
+    assert!(!text.contains("drift        @chris\n"), "{text}");
+}
+
+/// A user-scoped hooks edit drifts every registered agent at once. The section
+/// stays bounded, and says where the rest can be seen.
+#[test]
+fn doctor_bounds_the_drift_section_and_points_at_the_full_list() {
+    let drifted: Vec<_> = (1..=5)
+        .map(|n| ahu::drift::Drifted {
+            agent_name: format!("agent-{n}"),
+            agent_version: "1.0.0".to_string(),
+            previous_task: format!("@task-{n}"),
+            drift: ahu::drift::Drift {
+                agent_label: format!("agent-{n}@1.0.0"),
+                previous_task_id: format!("id-{n}"),
+                previous_launched_at: "2026-09-24T09:15:00Z".to_string(),
+                changes: vec!["the hooks in effect changed: aaaa -> bbbb".to_string()],
+            },
+        })
+        .collect();
+    let rendered = ahu::drift::render_doctor(&drifted);
+    assert!(
+        rendered.contains("drift        5 registered agents drifted\n"),
+        "{rendered}"
+    );
+    for shown in 1..=3 {
+        assert!(
+            rendered.contains(&format!(
+                "  @agent-{shown} 1.0.0  since task @task-{shown} (2026-09-24)\n"
+            )),
+            "{rendered}"
+        );
+    }
+    for hidden in 4..=5 {
+        assert!(
+            !rendered.contains(&format!("@agent-{hidden} ")),
+            "{rendered}"
+        );
+    }
+    assert!(
+        rendered.contains(
+            "  2 more drifted agents are not shown; `ahu agents` lists every drifted agent.\n"
+        ),
+        "{rendered}"
+    );
+    assert_eq!(ahu::drift::render_doctor(&[]), "");
+}
