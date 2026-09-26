@@ -203,6 +203,32 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 commands::eval_report(console, &repo, &records, output_json)
             })
         }
+        Command::EvalRun {
+            case,
+            agent,
+            evaluator,
+            records,
+            runs,
+            timeout_seconds,
+            allow_widened_approvals,
+            output_json,
+        } => {
+            let repo = commands::repo_from_cwd()?;
+            commands::with_stdio_output(output_json, |console| {
+                ahu::eval::run(
+                    console,
+                    &repo,
+                    &case,
+                    &agent,
+                    evaluator.as_deref(),
+                    &records,
+                    runs,
+                    timeout_seconds,
+                    allow_widened_approvals,
+                    output_json,
+                )
+            })
+        }
         Command::CmuxStatus { output_json } => {
             let cwd = std::env::current_dir()?;
             let root = commands::repo_from_cwd().map(|r| r.root).unwrap_or(cwd);
@@ -283,6 +309,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Launch { .. }
                 | Command::KnowledgeLint { .. }
                 | Command::EvalReport { .. }
+                | Command::EvalRun { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })
         }

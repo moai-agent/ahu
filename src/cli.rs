@@ -45,6 +45,9 @@ Commands:
   knowledge lint [--output json]
                         Check the OKF bundles named in [knowledge] with okf.
                         Reads only; nothing is fetched, indexed, or rewritten
+  eval run --case <path> --agent @name --records <path> [options]
+                        Run candidates (and optionally a blind agent evaluator)
+                        from an external evaluation case
   eval report --records <path> [--output json]
                         Compare local evaluation runs from an external JSONL
                         record file. Reads only, and only outside this checkout
@@ -128,6 +131,20 @@ eval report options:
                         coverage counts, so a missing observation is not a zero.
                         `eval report` reads records; it runs no candidate and no
                         evaluator
+
+eval run options:
+  --case <path>         Versioned JSON evaluation case; answer values stay hidden
+                        from the candidate
+  --agent @name         Registered candidate agent (required)
+  --evaluator @name     Optional separate registered evaluator agent
+  --records <path>      External JSONL destination; prompts and artifacts are
+                        written to a private sibling run directory
+  --runs <count>        Repetitions from 1 to 100 (default 1)
+  --timeout <seconds>   Per-agent headless timeout from 1 to 86400 (default 1800)
+  --allow-widened-approvals
+                        Explicitly authorize a candidate or evaluator manifest
+                        that widens harness approvals
+  --output json         Emit a versioned summary to stdout
 
 launcher options:
   --no-focus            Do not switch to the new session after launching
@@ -238,6 +255,16 @@ pub enum Command {
     },
     EvalReport {
         records: PathBuf,
+        output_json: bool,
+    },
+    EvalRun {
+        case: PathBuf,
+        agent: String,
+        evaluator: Option<String>,
+        records: PathBuf,
+        runs: u32,
+        timeout_seconds: u64,
+        allow_widened_approvals: bool,
         output_json: bool,
     },
     Tasks,
@@ -582,18 +609,15 @@ fn parse_knowledge(rest: &[String]) -> Result<Command> {
     Ok(Command::KnowledgeLint { output_json })
 }
 
-/// `eval` takes a subcommand so the orchestration commands sketched in
-/// `evals/README.md` can be added without changing this one's shape.
+/// Parse eval orchestration and reporting commands.
 fn parse_eval(rest: &[String]) -> Result<Command> {
     match rest.first().map(String::as_str) {
-        None => bail!("`ahu eval` needs a subcommand; the only one is `report`."),
+        None => bail!("`ahu eval` needs a subcommand: `run` or `report`."),
+        Some("run") => return parse_eval_run(&rest[1..]),
         Some("report") => {}
-        Some("run") => bail!(
-            "`ahu eval run` is not implemented: ahu does not orchestrate candidate or evaluator \
-             agents yet. `ahu eval report --records <path>` compares records that \
-             scripts/local_eval.py already wrote."
-        ),
-        Some(other) => bail!("unknown subcommand {other:?} for `ahu eval`; expected `report`."),
+        Some(other) => {
+            bail!("unknown subcommand {other:?} for `ahu eval`; expected `run` or `report`.")
+        }
     }
     let mut records = None;
     let mut output_json = false;
@@ -621,6 +645,96 @@ fn parse_eval(rest: &[String]) -> Result<Command> {
     })?;
     Ok(Command::EvalReport {
         records,
+        output_json,
+    })
+}
+
+fn parse_eval_run(rest: &[String]) -> Result<Command> {
+    let mut case = None;
+    let mut agent = None;
+    let mut evaluator = None;
+    let mut records = None;
+    let mut runs = 1u32;
+    let mut timeout_seconds = 1800u64;
+    let mut saw_runs = false;
+    let mut saw_timeout = false;
+    let mut allow_widened_approvals = false;
+    let mut output_json = false;
+    let mut index = 0;
+    while index < rest.len() {
+        match rest[index].as_str() {
+            "--case" if case.is_none() => {
+                case = Some(PathBuf::from(value_for("--case", rest, &mut index)?))
+            }
+            "--agent" if agent.is_none() => agent = Some(value_for("--agent", rest, &mut index)?),
+            "--evaluator" if evaluator.is_none() => {
+                evaluator = Some(value_for("--evaluator", rest, &mut index)?)
+            }
+            "--records" if records.is_none() => {
+                records = Some(PathBuf::from(value_for("--records", rest, &mut index)?))
+            }
+            "--runs" if !saw_runs => {
+                saw_runs = true;
+                runs = value_for("--runs", rest, &mut index)?
+                    .parse()
+                    .map_err(|_| {
+                        crate::util::Error::new("--runs must be an integer from 1 to 100")
+                    })?;
+                if !(1..=100).contains(&runs) {
+                    bail!("--runs must be an integer from 1 to 100");
+                }
+            }
+            "--timeout" if !saw_timeout => {
+                saw_timeout = true;
+                timeout_seconds =
+                    value_for("--timeout", rest, &mut index)?
+                        .parse()
+                        .map_err(|_| {
+                            crate::util::Error::new(
+                                "--timeout must be an integer from 1 to 86400 seconds",
+                            )
+                        })?;
+                if !(1..=86_400).contains(&timeout_seconds) {
+                    bail!("--timeout must be an integer from 1 to 86400 seconds");
+                }
+            }
+            "--allow-widened-approvals" if !allow_widened_approvals => {
+                allow_widened_approvals = true
+            }
+            "--output" if !output_json => {
+                let value = value_for("--output", rest, &mut index)?;
+                if value != "json" {
+                    bail!("unsupported --output {value:?}; expected json.");
+                }
+                output_json = true;
+            }
+            other => bail!("unknown or repeated option {other:?} for `ahu eval run`."),
+        }
+        index += 1;
+    }
+    let case =
+        case.ok_or_else(|| crate::util::Error::new("`ahu eval run` needs --case <path>."))?;
+    let agent =
+        agent.ok_or_else(|| crate::util::Error::new("`ahu eval run` needs --agent @name."))?;
+    if !agent.starts_with('@') || agent.len() < 2 {
+        bail!("--agent must name a registered agent as @name");
+    }
+    if let Some(evaluator) = &evaluator
+        && (!evaluator.starts_with('@') || evaluator.len() < 2)
+    {
+        bail!("--evaluator must name a registered agent as @name");
+    }
+    let records = records.ok_or_else(|| {
+        crate::util::Error::new("`ahu eval run` needs --records <external-jsonl-path>.")
+    })?;
+    Ok(Command::EvalRun {
+        case,
+        agent,
+        evaluator,
+        records,
+        runs,
+        timeout_seconds,
+        allow_widened_approvals,
         output_json,
     })
 }

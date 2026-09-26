@@ -145,14 +145,90 @@ fn parsing_requires_a_records_path_and_accepts_only_json_output() {
     }
 }
 
-/// The orchestration sketched in `evals/README.md` is not implemented, so the
-/// command that would run it has to say so rather than look unrecognised.
 #[test]
-fn eval_run_is_refused_as_unimplemented_rather_than_unknown() {
-    let error = cli::parse(["eval", "run", "suite"]).expect_err("refused");
-    let message = error.to_string();
-    assert!(message.contains("not implemented"), "{message}");
-    assert!(message.contains("eval report"), "{message}");
+fn eval_run_requires_named_candidate_case_and_external_records_options() {
+    assert_eq!(
+        cli::parse([
+            "eval",
+            "run",
+            "--case",
+            "/outside/case.json",
+            "--agent",
+            "@triage",
+            "--records",
+            "/outside/runs.jsonl",
+            "--evaluator",
+            "@judge",
+            "--runs",
+            "3",
+            "--timeout",
+            "120",
+            "--output",
+            "json"
+        ])
+        .unwrap(),
+        Command::EvalRun {
+            case: PathBuf::from("/outside/case.json"),
+            agent: "@triage".into(),
+            evaluator: Some("@judge".into()),
+            records: PathBuf::from("/outside/runs.jsonl"),
+            runs: 3,
+            timeout_seconds: 120,
+            allow_widened_approvals: false,
+            output_json: true,
+        }
+    );
+    for args in [
+        vec!["eval", "run"],
+        vec![
+            "eval",
+            "run",
+            "--case",
+            "/case.json",
+            "--agent",
+            "triage",
+            "--records",
+            "/runs.jsonl",
+        ],
+        vec![
+            "eval",
+            "run",
+            "--case",
+            "/case.json",
+            "--agent",
+            "@triage",
+            "--records",
+            "/runs.jsonl",
+            "--runs",
+            "101",
+        ],
+        vec![
+            "eval",
+            "run",
+            "--case",
+            "/case.json",
+            "--agent",
+            "@triage",
+            "--records",
+            "/runs.jsonl",
+            "--timeout",
+            "0",
+        ],
+        vec![
+            "eval",
+            "run",
+            "--case",
+            "/case.json",
+            "--agent",
+            "@triage",
+            "--records",
+            "/runs.jsonl",
+            "--verbose",
+        ],
+    ] {
+        let error = cli::parse(args.clone()).expect_err("invalid eval run options refused");
+        assert_eq!(error.kind(), ahu::util::ErrorKind::Usage, "{args:?}");
+    }
 }
 
 #[test]

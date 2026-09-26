@@ -71,6 +71,9 @@ def record(args) -> int:
         "agent_version": args.agent_version,
         "evaluator": args.evaluator,
         "evaluator_version": args.evaluator_version,
+        "evaluator_model": args.evaluator_model,
+        "evaluator_harness": args.evaluator_harness,
+        "evaluator_harness_version": args.evaluator_harness_version,
         "model": args.model, "harness": args.harness,
         "harness_version": args.harness_version,
         "ahu_revision": args.ahu_revision,
@@ -94,25 +97,64 @@ def trend(args) -> int:
             row.get("stage") or "candidate",
             row.get("agent") or "unspecified", row.get("agent_version") or "unspecified",
             row.get("evaluator") or "unspecified", row.get("evaluator_version") or "unspecified",
+            row.get("evaluator_model") or "unspecified",
+            row.get("evaluator_harness") or "unspecified",
+            row.get("evaluator_harness_version") or "unspecified",
             row["model"], row["harness"], row.get("harness_version") or "unspecified",
             row.get("ahu_revision") or "unspecified", row.get("skill_digest") or "unspecified",
         ), []).append(row)
     summaries = []
-    for (case_id, corpus_version, stage, agent, agent_version, evaluator, evaluator_version, model, harness,
+    for (case_id, corpus_version, stage, agent, agent_version, evaluator, evaluator_version,
+         evaluator_model, evaluator_harness, evaluator_harness_version, model, harness,
          harness_version, ahu_revision, skill_digest), items in sorted(groups.items()):
         scores = [item["score"] for item in items]
+        token_fields = set()
+        token_observations = 0
+        for item in items:
+            metrics = item.get("reported_tokens")
+            if isinstance(metrics, dict):
+                observed = {name for name, entry in metrics.items()
+                            if isinstance(entry, dict) and entry.get("kind") == "observed"}
+                # Old manual records store only the observed numeric values.
+                if not any(isinstance(entry, dict) for entry in metrics.values()):
+                    observed = set(metrics)
+                if observed:
+                    token_observations += 1
+                    token_fields.update(observed)
+        measured = [item for item in items if item.get("mcp_observed") is True]
+
+        def mean_field(field, subset=items):
+            values = [item[field] for item in subset if item.get(field) is not None]
+            return round(statistics.mean(values), 4) if values else None
+
+        known_tools = ("ahu_agents_list", "ahu_tasks_list", "ahu_task_get", "ahu_typed_decide")
         summaries.append({
             "case_id": case_id, "corpus_version": corpus_version,
             "stage": stage, "model": model, "harness": harness,
             "agent": agent, "agent_version": agent_version,
             "evaluator": evaluator, "evaluator_version": evaluator_version,
+            "evaluator_model": evaluator_model,
+            "evaluator_harness": evaluator_harness,
+            "evaluator_harness_version": evaluator_harness_version,
             "harness_version": harness_version,
             "ahu_revision": ahu_revision, "skill_digest": skill_digest,
             "runs": len(items), "mean_score": round(statistics.mean(scores), 4),
             "pass_rate": round(sum(item["passed"] for item in items) / len(items), 4),
-            "token_observations": sum(bool(item.get("reported_tokens")) for item in items),
+            "token_observations": token_observations,
+            "token_fields": sorted(token_fields),
             "timing_observations": sum(item.get("elapsed_ms") is not None for item in items),
             "decision_call_observations": sum(item.get("decision_call_count") is not None for item in items),
+            "mcp_observations": len(measured),
+            "mean_mcp_requests": mean_field("mcp_request_count", measured),
+            "mean_mcp_tool_lists": mean_field("mcp_tool_list_count", measured),
+            "mean_mcp_tool_calls": mean_field("mcp_tool_call_count", measured),
+            "mean_mcp_tool_errors": mean_field("mcp_tool_error_count", measured),
+            "mean_typed_decision_errors": mean_field("typed_decision_error_count", measured),
+            "mcp_tools": {
+                name: round(statistics.mean([item.get("mcp_tools", {}).get(name, 0)
+                                             for item in measured]), 4)
+                for name in known_tools
+            } if measured else {},
         })
     print(json.dumps(summaries, indent=2))
     return 0
@@ -130,6 +172,9 @@ def main() -> int:
     add.add_argument("--agent-version", default="unspecified")
     add.add_argument("--evaluator", default="unspecified", help="registered ahu evaluator when agent judging is used")
     add.add_argument("--evaluator-version", default="unspecified")
+    add.add_argument("--evaluator-model", default="unspecified")
+    add.add_argument("--evaluator-harness", default="unspecified")
+    add.add_argument("--evaluator-harness-version", default="unspecified")
     add.add_argument("--run-id")
     add.add_argument("--stage", choices=("candidate", "evaluator"), default="candidate")
     add.add_argument("--harness", required=True)

@@ -75,7 +75,9 @@ pub(crate) fn initialize_mcp(config: &TelemetryConfig) -> Result<()> {
 }
 
 fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Result<()> {
-    if !config.enabled
+    let endpoint = eval_endpoint_override().unwrap_or_else(|| config.endpoint.clone());
+    let enabled = config.enabled || std::env::var_os("AHU_EVAL_OTEL_ENDPOINT").is_some();
+    if !enabled
         || provider_slot()
             .lock()
             .expect("telemetry mutex poisoned")
@@ -86,10 +88,7 @@ fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Res
     let exporter = SpanExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(format!(
-            "{}/v1/traces",
-            config.endpoint.trim_end_matches('/')
-        ))
+        .with_endpoint(format!("{}/v1/traces", endpoint.trim_end_matches('/')))
         .with_timeout(Duration::from_millis(500))
         .build();
     let exporter = match exporter {
@@ -216,10 +215,13 @@ pub fn configure_child(
     task_id: Option<&str>,
     attempt: Option<u32>,
 ) {
-    if !config.enabled {
+    let Some(endpoint) =
+        eval_endpoint_override().or_else(|| config.enabled.then(|| config.endpoint.clone()))
+    else {
         return;
-    }
+    };
     command
+        .env_remove("AHU_EVAL_LOCAL_METRICS")
         .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
         .env_remove("OTEL_EXPORTER_OTLP_METRICS_HEADERS")
@@ -227,12 +229,15 @@ pub fn configure_child(
         .env_remove("OTEL_EXPORTER_OTLP_CERTIFICATE")
         .env_remove("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE")
         .env_remove("OTEL_EXPORTER_OTLP_CLIENT_KEY")
+        .env_remove("OTEL_EXPORTER_OTLP_COMPRESSION")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-        .env("OTEL_EXPORTER_OTLP_ENDPOINT", &config.endpoint)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
         .env("OTEL_EXPORTER_OTLP_TIMEOUT", "500")
+        .env("OTEL_EXPORTER_OTLP_COMPRESSION", "none")
         .env("OTEL_TRACES_EXPORTER", "otlp")
         .env("OTEL_METRICS_EXPORTER", "none")
         .env("OTEL_LOGS_EXPORTER", "none")
@@ -250,6 +255,31 @@ pub fn configure_child(
                 std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
             ),
         );
+}
+
+/// Evaluation capture is an internal, loopback-only override. It lets a
+/// single eval run receive OTLP directly, without requiring a collector
+/// backend or changing the project's checked-in telemetry policy.
+fn eval_endpoint_override() -> Option<String> {
+    let raw = std::env::var("AHU_EVAL_OTEL_ENDPOINT").ok()?;
+    let endpoint = raw.parse::<url::Url>().ok()?;
+    let local = matches!(endpoint.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    if endpoint.scheme() != "http"
+        || !local
+        || endpoint.port().is_none()
+        || endpoint.username() != ""
+        || endpoint.password().is_some()
+        || !matches!(endpoint.path(), "" | "/")
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return None;
+    }
+    Some(format!(
+        "http://{}:{}",
+        endpoint.host_str()?,
+        endpoint.port()?
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -341,22 +371,24 @@ pub(crate) fn local_metrics(
     config: &TelemetryConfig,
     usage: &crate::headless::TokenUsage,
 ) -> Option<LocalMetrics> {
-    config.local_metrics.then(|| LocalMetrics {
-        schema_version: 1,
-        // The normalizer retains maxima across reports. These are observations,
-        // not additive task totals or provider billing measurements.
-        token_aggregation: "maximum-reported-per-field",
-        values: usage
-            .normalized_fields()
-            .into_iter()
-            .map(|(key, value)| {
-                (
-                    key,
-                    value.map_or(Measurement::Unavailable, Measurement::Observed),
-                )
-            })
-            .collect(),
-    })
+    (config.local_metrics || std::env::var("AHU_EVAL_LOCAL_METRICS").as_deref() == Ok("1")).then(
+        || LocalMetrics {
+            schema_version: 1,
+            // The normalizer retains maxima across reports. These are observations,
+            // not additive task totals or provider billing measurements.
+            token_aggregation: "maximum-reported-per-field",
+            values: usage
+                .normalized_fields()
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        key,
+                        value.map_or(Measurement::Unavailable, Measurement::Observed),
+                    )
+                })
+                .collect(),
+        },
+    )
 }
 
 pub struct SpanGuard {

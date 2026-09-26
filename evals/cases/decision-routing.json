@@ -26,6 +26,10 @@
     "department": "billing",
     "refund_requested": { "minimum": 0.8 }
   },
+  "rubric": {
+    "department": "Does the candidate route the duplicate charge and refund request to the team responsible for payments and refunds?",
+    "refund_requested": "Does the candidate identify that the customer explicitly requests a refund?"
+  },
   "scoring": {
     "department": 0.5,
     "refund_requested": 0.5,
