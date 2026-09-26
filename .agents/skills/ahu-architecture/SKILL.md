@@ -328,7 +328,7 @@ structured results, frozen inputs, native stores, branches and worktrees.
 Task worktrees are siblings under `.worktrees/` in the primary checkout.
 An interactive task's record and prompt live in `.ahu/state/` in its worktree, chosen
 by ahu at launch and passed to the session, so removing that worktree removes
-them with it. `ahu tasks`, `task`, `diff` and `focus` find them by looking through
+them with it. `ahu tasks`, `task` and `focus` find them by looking through
 `.worktrees/`, from the primary checkout or from any sibling. The launch lock,
 cmux group mapping, headless coordination and task index belong to the primary;
 hygiene timestamps stay in the checkout they were recorded from. `.ahu/` ignores

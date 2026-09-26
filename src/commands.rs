@@ -22,6 +22,7 @@ use crate::launcher::{self, Console};
 use crate::onboard;
 use crate::selection::{self, ResolvedPair};
 use crate::style::{self, Role};
+use crate::table;
 use crate::task;
 use crate::util::{Error, Result, display_path, display_safe, display_safe_block};
 
@@ -825,6 +826,11 @@ fn session_owner(
 
 /// `ahu tasks`
 pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
+    tasks_at(console, repo, table::columns())
+}
+
+/// `ahu tasks`, laid out for an explicit width.
+pub fn tasks_at(console: &mut Console<'_>, repo: &Repo, width: usize) -> Result<i32> {
     let listing = if std::env::var("AHU_EXECUTION_BACKEND").ok().as_deref() == Some("headless")
         || !crate::headless::discover(repo)?.is_empty()
     {
@@ -845,9 +851,9 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         return Ok(0);
     }
     let workspaces = liveness_workspaces(&listing.records);
-    console.say(
-        "TASK HANDLE             TITLE                        STATE     AGENT                  MODE     LIVE    RUNTIME                         WORKTREE\n",
-    )?;
+    let style = style::stdout();
+    let mut reviews = Vec::with_capacity(listing.records.len());
+    let mut rows = Vec::with_capacity(listing.records.len());
     for (dir, record) in &listing.records {
         let review = if crate::headless::review::is_headless(dir) {
             Some(crate::headless::inspection(dir)?)
@@ -855,53 +861,165 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
             None
         };
         let mode = if review.is_some() { "headless" } else { "cmux" };
+        let live = task::observed_liveness(session_owner(dir, record, workspaces.as_ref()));
         // Every field here comes out of task.json, which was built from the
         // prompt and from repository configuration. `tasks` is as much a
         // disclosure surface as the launch preview, so it escapes the same way.
-        let live = task::observed_liveness(session_owner(dir, record, workspaces.as_ref()));
-        let runtime = format!("{} / {}", record.identity.harness, record.identity.model);
-        let worktree = repo_relative_path(repo, &record.worktree);
-        console.say(&format!(
-            "{} {} {} {} {} {} {} {}\n",
-            table_cell(
-                &display_safe(&crate::task_handles::label(repo, &record.task_id)),
-                22
+        let handle = crate::task_handles::column_reference(repo, &record.task_id);
+        // A title the handle already carries word for word would spend the
+        // widest column in the table saying what the first column said.
+        let title = if crate::task_handles::title_adds_to_handle(&handle, &record.title) {
+            display_safe(&record.title)
+        } else {
+            String::new()
+        };
+        rows.push(vec![
+            table::Cell::painted(Role::Agent, display_safe(&handle)),
+            table::Cell::plain(title),
+            table::Cell::painted(state_role(record.state.as_str()), record.state.as_str()),
+            table::Cell::painted(Role::Agent, display_safe(&record.agent_label())),
+            table::Cell::plain(mode),
+            match live {
+                task::ObservedLiveness::Live => table::Cell::plain(live.as_str()),
+                // Not a verdict on the task: it is what ahu could see, and
+                // dimming says so without inventing a state.
+                _ => table::Cell::painted(Role::Hint, live.as_str()),
+            },
+            table::Cell::painted(
+                Role::Runtime,
+                display_safe(&format!(
+                    "{} / {}",
+                    record.identity.harness, record.identity.model
+                )),
             ),
-            table_cell(&display_safe(&record.title), 28),
-            table_cell(record.state.as_str(), 9),
-            table_cell(&display_safe(&record.agent_label()), 22),
-            table_cell(mode, 8),
-            table_cell(live.as_str(), 7),
-            table_cell(&display_safe(&runtime), 30),
-            display_safe(&worktree),
-        ))?;
-        if let Some(review) = &review {
+            table::Cell::painted(Role::Hint, display_safe(&short_branch(record))),
+        ]);
+        reviews.push(review);
+    }
+    // A column of empty cells is a header and two blank columns of gap, so the
+    // title leaves the table entirely when no row had anything to put in it.
+    let mut columns = TASK_COLUMNS.to_vec();
+    if rows.iter().all(|row| row[TITLE_COLUMN].text.is_empty()) {
+        columns.remove(TITLE_COLUMN);
+        for row in &mut rows {
+            row.remove(TITLE_COLUMN);
+        }
+    }
+    let mut lines = table::lines(style, width, &columns, &rows).into_iter();
+    if let Some(header) = lines.next() {
+        console.say(&format!("{header}\n"))?;
+    }
+    for (((dir, _), review), line) in listing.records.iter().zip(&reviews).zip(lines) {
+        console.say(&format!("{line}\n"))?;
+        if let Some(review) = review {
             console.say(&crate::headless::review::render(review, true))?;
         }
         if let Some(question) = question_excerpt(dir) {
             console.say(&format!("  question  {question}\n"))?;
         }
     }
-    console.say(&style::stdout().paint(
+    console.say(&style.paint(
         Role::Warning,
         &render_unreadable_tasks(repo, &listing.unreadable),
     ))?;
-    console.say("Run `ahu task <handle>` for task details.\n")?;
+    console.say("Run `ahu task <handle>` for a task's full branch, worktree and launch base.\n")?;
     Ok(0)
 }
 
-fn table_cell(value: &str, width: usize) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
-    let cell = if chars.len() <= width {
-        value.to_string()
-    } else {
-        chars
-            .into_iter()
-            .take(width.saturating_sub(1))
-            .collect::<String>()
-            + "…"
+/// The `ahu tasks` table. The handle is fixed: a truncated one does not
+/// resolve, and resolving it is the only reason the column is there. What the
+/// reader cannot get anywhere else in the row keeps its width next: the state,
+/// the agent, and the runtime, which is the one column that shows a task ran on
+/// its own harness and model. The branch comes next, whole or not at all, and
+/// the title gives way before it, because the handle was generated from it.
+/// Mode and liveness are the first to go: both are one short word a reader can
+/// infer from the rest of the row.
+const TASK_COLUMNS: &[table::Column] = &[
+    table::Column {
+        header: "HANDLE",
+        min: 0,
+        shrink: None,
+        drop: None,
+    },
+    table::Column {
+        header: "TITLE",
+        min: 16,
+        shrink: Some(1),
+        drop: Some(2),
+    },
+    table::Column {
+        header: "STATE",
+        min: 0,
+        shrink: None,
+        drop: None,
+    },
+    table::Column {
+        header: "AGENT",
+        min: 0,
+        shrink: None,
+        drop: Some(4),
+    },
+    table::Column {
+        header: "MODE",
+        min: 0,
+        shrink: None,
+        drop: Some(0),
+    },
+    table::Column {
+        header: "LIVE",
+        min: 0,
+        shrink: None,
+        drop: Some(1),
+    },
+    table::Column {
+        header: "RUNTIME",
+        min: 0,
+        shrink: None,
+        drop: Some(5),
+    },
+    table::Column {
+        // The cell is already the shortest branch worth printing: the prefix and
+        // the leading digits of the id, which is what a reader scanning
+        // `git branch` matches against. Cutting into that leaves a name that
+        // matches nothing, so this column does not shrink -- spare width goes to
+        // the whole branch before mode, liveness or the title see any of it, and
+        // a table too narrow for it loses the column rather than its meaning.
+        header: "BRANCH",
+        min: 0,
+        shrink: None,
+        drop: Some(3),
+    },
+];
+
+/// The title's position in [`TASK_COLUMNS`].
+const TITLE_COLUMN: usize = 1;
+
+/// The branch, shortened to its prefix and the first eight characters of the
+/// task id.
+///
+/// The rest of the id is a UUID nobody reads across, and `ahu task <handle>`
+/// prints the whole branch name for anyone who wants to paste it.
+fn short_branch(record: &task::TaskRecord) -> String {
+    let Some(prefix) = record.branch.strip_suffix(&record.task_id) else {
+        return record.branch.clone();
     };
-    format!("{cell:<width$}")
+    match record.task_id.get(..8) {
+        Some(short) => format!("{prefix}{short}"),
+        None => record.branch.clone(),
+    }
+}
+
+/// A recorded session state, coloured by what it means for the reader: work
+/// that may still be running, work that stopped on its own, work that stopped
+/// because something went wrong, and work whose supervisor went away.
+fn state_role(state: &str) -> Role {
+    match state {
+        "starting" | "running" => Role::Success,
+        "failed" | "cancelled" => Role::Error,
+        "interrupted" => Role::Warning,
+        // `exited` and anything a later schema adds: stopped, nothing claimed.
+        _ => Role::Hint,
+    }
 }
 
 fn repo_relative_path(repo: &Repo, path: &Path) -> String {
@@ -1286,6 +1404,8 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
                 display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none"))
             ))?;
         }
+        console.say(&format!("  review    {}\n", review_command(&record)))?;
+        console.say(&outside_writes_notice(repo, &dir, &record))?;
         if let Some(body) = read_artifact(&dir, "result.md") {
             match body {
                 ArtifactBody::Content(body) => {
@@ -1340,6 +1460,51 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
         }
     }
     Ok(0)
+}
+
+/// The plain Git command that shows what a task changed.
+///
+/// ahu has no diff of its own: the task's own checkout and its recorded launch
+/// base are everything Git needs, and a reader who can see the command can
+/// also vary it. Quoted because a checkout path is repository-controlled.
+fn review_command(record: &task::TaskRecord) -> String {
+    let worktree = crate::util::shell_single_quote(&record.worktree.to_string_lossy());
+    match record.base_commit.as_deref() {
+        Some(base) => display_safe(&format!("git -C {worktree} diff {base}")),
+        // Without a base there is nothing to diff against; the branch is still
+        // where the work is.
+        None => display_safe(&format!(
+            "git -C {worktree} log {}",
+            crate::util::shell_single_quote(&record.branch)
+        )),
+    }
+}
+
+/// What the attempt's own event stream said it wrote outside the worktree.
+///
+/// A reader who looks at the branch and sees nothing has not established that
+/// nothing happened: an unsandboxed harness can name any absolute path, and
+/// the recorded targets are the only place that shows up. This is post-run
+/// disclosure, not a boundary, and reported targets are not proof of writes.
+fn outside_writes_notice(repo: &Repo, dir: &Path, record: &task::TaskRecord) -> String {
+    let Some(outside) = crate::headless::recorded_writes_outside_worktree(dir) else {
+        return String::new();
+    };
+    let mut out = String::from(
+        "\n!! write tool calls in the recorded event stream targeted paths outside the task\n\
+         \x20  worktree, so the branch alone does not show everything the session touched:\n",
+    );
+    for path in outside.iter().take(3) {
+        out.push_str(&format!("     {}\n", display_safe(path)));
+    }
+    if outside.len() > 3 {
+        out.push_str(&format!("     ... and {} more\n", outside.len() - 3));
+    }
+    out.push_str(&format!(
+        "   Run `ahu result {}` for the full recorded list.\n",
+        display_safe(&crate::task_handles::reference(repo, &record.task_id))
+    ));
+    style::stdout().paint(Role::Warning, &out)
 }
 
 /// The most inbox entries a task directory accepts.
@@ -1523,89 +1688,6 @@ fn read_artifact(dir: &Path, file: &str) -> Option<ArtifactBody> {
     Some(ArtifactBody::Content(display_safe_block(
         &String::from_utf8_lossy(&body),
     )))
-}
-
-/// Compare the task checkout to its launch base without staging or running diff helpers.
-pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32> {
-    use std::io::IsTerminal;
-    let (dir, record, owner_identity, via_index) = match resolve_task(repo, id)? {
-        Located::Listing(dir, record) => (dir, record, repo.identity(), false),
-        Located::Pointer(entry, dir, record) => (dir, record, entry.repo_identity.clone(), true),
-        Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
-        Located::NoMatch { .. } => {
-            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {id:?}.")
-        }
-    };
-    let task_repo = git::discover(&record.worktree)?;
-    if task_repo.identity() != owner_identity
-        || task_repo.root.canonicalize()? != record.worktree.canonicalize()?
-    {
-        if via_index {
-            bail!(
-                "task worktree does not belong to the repository that launched it or is not a checkout root."
-            );
-        }
-        bail!("task worktree does not belong to this repository or is not a checkout root.");
-    }
-    let base = record
-        .base_commit
-        .as_deref()
-        .filter(|base| matches!(base.len(), 40 | 64) && base.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| crate::util::Error::new("task has no valid launch base commit."))?;
-    let run = |args: &[&str]| -> Result<Vec<u8>> {
-        let output = git::run(&record.worktree, args)?;
-        if !output.status.success() {
-            bail!(
-                "cannot inspect task diff: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Ok(output.stdout)
-    };
-    let patch = run(&[
-        "--no-pager",
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-color",
-        "--binary",
-        base,
-        "--",
-    ])?;
-    let untracked = run(&["ls-files", "--others", "--exclude-standard", "-z"])?;
-    let untracked: Vec<String> = untracked
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| display_safe(&String::from_utf8_lossy(p)))
-        .collect();
-    for path in &untracked {
-        eprintln!("Untracked (not included in diff): {path}");
-    }
-    if patch.is_empty()
-        && untracked.is_empty()
-        && let Some(outside) = crate::headless::recorded_writes_outside_worktree(&dir)
-    {
-        eprintln!(
-            "No changes in the task worktree, but write tool calls in the recorded event stream targeted paths outside it:"
-        );
-        for path in outside.iter().take(3) {
-            eprintln!("  {}", display_safe(path));
-        }
-        if outside.len() > 3 {
-            eprintln!("... and {} more", outside.len() - 3);
-        }
-        eprintln!(
-            "Run `ahu result {}` for the full recorded list.",
-            display_safe(&crate::task_handles::reference(repo, &record.task_id))
-        );
-    }
-    if std::io::stdout().is_terminal() {
-        console.say(&display_safe_block(&String::from_utf8_lossy(&patch)))?;
-    } else {
-        // Redirected output stays a byte-exact patch, including non-UTF-8 data.
-        console.output.write_all(&patch)?;
-    }
-    Ok(0)
 }
 
 /// `ahu focus <task-id>`

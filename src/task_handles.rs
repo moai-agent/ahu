@@ -272,3 +272,91 @@ pub fn reference(repo: &Repo, id: &str) -> String {
         .flatten()
         .unwrap_or_else(|| crate::task_ref::display(id))
 }
+
+/// The shortest whole argument that still resolves this task: its handle, or
+/// the bare identifier, which task lookup accepts as readily as the canonical
+/// `ahu:task:` form. Only for a column where nine columns of constant prefix
+/// would come out of what the rest of the row has to say; suggested commands
+/// keep the canonical reference.
+pub fn column_reference(repo: &Repo, id: &str) -> String {
+    handle(repo, id).ok().flatten().unwrap_or_else(|| id.into())
+}
+
+/// Whether a title still says something its handle does not.
+///
+/// A generated handle is the title's own words, so a short title survives into
+/// it whole and a column holding both says the same thing twice. Only what the
+/// handle had to leave out makes the title worth its own column: words past the
+/// fourth, characters past the thirty-second, a script the slug could not
+/// carry, or a name the launcher chose instead of the title.
+pub fn title_adds_to_handle(handle: &str, title: &str) -> bool {
+    if title.trim().is_empty() {
+        return false;
+    }
+    // A handle is an ASCII slug, so any other script in the title is a word
+    // only the title has.
+    if title
+        .chars()
+        .any(|c| c.is_alphanumeric() && !c.is_ascii_alphanumeric())
+    {
+        return true;
+    }
+    let slug = title
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_ascii_lowercase();
+    let name = handle.strip_prefix('@').unwrap_or(handle);
+    // A trailing number is ahu's answer to a collision, not a word of the title.
+    let base = match name.rsplit_once('-') {
+        Some((base, suffix))
+            if !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_digit()) =>
+        {
+            base
+        }
+        _ => name,
+    };
+    // `generated_name` prefixes a slug that cannot open a handle.
+    let prefixed = format!("work-{slug}");
+    ![slug.as_str(), prefixed.as_str()].contains(&name)
+        && ![slug.as_str(), prefixed.as_str()].contains(&base)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_title_its_generated_handle_carries_whole_adds_nothing() {
+        for title in ["Fix flaky test", "fix flaky test", "Fix flaky test!"] {
+            let handle = format!("@{}", generated_name(title));
+            assert!(!title_adds_to_handle(&handle, title), "{title}");
+        }
+        // A collision suffix is ahu's, so the title behind it still adds nothing.
+        assert!(!title_adds_to_handle("@fix-flaky-test-2", "Fix flaky test"));
+        // Nor does a title with no words to print.
+        assert!(!title_adds_to_handle("@work", "  "));
+    }
+
+    #[test]
+    fn a_title_the_handle_had_to_cut_still_adds_something() {
+        let title = "Remove the redundant inspection command and fit the table to the terminal";
+        // Words past the fourth.
+        assert!(title_adds_to_handle(
+            &format!("@{}", generated_name(title)),
+            title
+        ));
+        // Characters past the thirty-second.
+        let long = "Refactor the configuration snapshot digest";
+        assert!(title_adds_to_handle(
+            &format!("@{}", generated_name(long)),
+            long
+        ));
+        // A name the launcher chose instead of the title.
+        assert!(title_adds_to_handle("@storage-cleanup", "a current task"));
+        // A script the slug could not carry, whole or in part.
+        assert!(title_adds_to_handle("@work", "キャッシュを削る"));
+        assert!(title_adds_to_handle("@fix", "Fix キャッシュ"));
+    }
+}

@@ -422,7 +422,6 @@ fn redirected_commands_match_explicit_plain_output() {
         &["tasks"],
         &["task", "missing"],
         &["task", "missing", "--output", "json"],
-        &["diff", "missing"],
         &["codex"],
         &["doctor"],
         &["knowledge", "lint"],

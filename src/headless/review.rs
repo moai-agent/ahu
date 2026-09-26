@@ -130,6 +130,19 @@ pub(super) fn validate_result(value: &Value, id: &str, attempt: u32) -> Result<(
     Ok(())
 }
 
+/// The plain Git command that shows what this task changed, when the record
+/// names both a checkout and a launch base. The checkout path is
+/// repository-controlled and the reader is expected to paste the line, so it
+/// is quoted as one shell word.
+fn review_command(dir: &Path) -> Option<String> {
+    let record: crate::task::TaskRecord = read(&dir.join("task.json")).ok()?;
+    let base = record.base_commit?;
+    Some(format!(
+        "git -C {} diff {base}",
+        crate::util::shell_single_quote(&record.worktree.to_string_lossy())
+    ))
+}
+
 pub(super) fn projection(
     dir: &Path,
     spec: Option<&Spec>,
@@ -193,12 +206,17 @@ pub(super) fn projection(
         .clone()
         .unwrap_or_else(|| crate::task_ref::display(&id));
     let commands = if !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
-        vec![
+        let mut commands = vec![
             format!("ahu task {reference}"),
             format!("ahu result {reference} --output json"),
-            format!("ahu diff {reference}"),
             format!("ahu wait {reference} --output json"),
-        ]
+        ];
+        // Reviewing the work itself is plain Git against the task's own
+        // checkout and its recorded launch base; ahu offers no diff of its own.
+        if let Some(review) = review_command(dir) {
+            commands.push(review);
+        }
+        commands
     } else {
         Vec::new()
     };

@@ -256,9 +256,14 @@ fn live_tasks_are_discovered_from_the_primary_checkout_and_from_a_sibling() {
         second_dir.join("task.json").to_string_lossy()
     );
 
-    // And a diff against the launch base runs in the task's own checkout.
-    let diff = ahu_in(repo.path(), &["diff", first]);
-    assert!(diff.status.success(), "{}", text_of(&diff));
+    // And the task's own record names the checkout and base that plain Git
+    // needs; ahu no longer wraps that in a command of its own.
+    let inspected = ahu_in(repo.path(), &["task", first, "--output", "json"]);
+    let value: serde_json::Value = serde_json::from_str(text_of(&inspected).trim()).expect("json");
+    let worktree = value["worktree"].as_str().unwrap();
+    let base = value["base_commit"].as_str().unwrap();
+    let diff = common::git(std::path::Path::new(worktree), &["diff", "--stat", base]);
+    assert!(diff.is_empty() || diff.contains('|'), "{diff}");
 }
 
 /// Removing the worktree removes the task's state, and the listing stops

@@ -126,8 +126,15 @@ ahu tasks
 task_id=abc123  # replace with a full task ID from ahu tasks
 ahu task "$task_id"
 ahu result "$task_id"  # headless tasks
-ahu diff "$task_id"
 ahu focus "$task_id"  # interactive cmux tasks
+```
+
+Reviewing the changes is plain Git. `ahu task` prints the task's branch,
+worktree, and launch base; run Git against those directly:
+
+```sh
+git -C .worktrees/"$task_id" diff "$base_commit"   # base commit from ahu task
+git -C .worktrees/"$task_id" status
 ```
 
 Headless inspection shows the attempt outcome, observed ownership, blockers,
@@ -207,8 +214,8 @@ require explicit user permission.
 | `ahu mcp serve` | Serve repository-scoped agent and task inspection over stdio MCP |
 | `ahu mcp setup` | Materialize ahu's bundled skills into the project for review and commit |
 
-Advanced inspection commands such as `ahu inventory`, `ahu hygiene`, and
-`ahu diff` remain available; run `ahu <command> --help` for their options.
+Advanced inspection commands such as `ahu inventory` and `ahu hygiene` remain
+available; run `ahu <command> --help` for their options.
 
 All four shortcuts open the same way: approvals bypassed, on this project's
 top-ranked model for that harness, both passed explicitly on the command line.

@@ -294,7 +294,6 @@ fn task_handles_round_trip_through_controls_siblings_and_resume_without_reassign
         assert_eq!(inspected["task_handle"], "@storage-cleanup");
     }
     for args in [
-        vec!["diff", "@storage-cleanup"],
         vec!["message", "@storage-cleanup", "hello"],
         vec!["cleanup", "@storage-cleanup"],
         vec!["cancel", "@storage-cleanup"],

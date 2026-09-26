@@ -293,9 +293,6 @@ pub enum Command {
         task_id: String,
         output_json: bool,
     },
-    Diff {
-        task_id: String,
-    },
     Focus {
         task_id: String,
     },
@@ -502,26 +499,19 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             expect_no_more(&args[1..])?;
             Ok(Command::Antigravity)
         }
-        "task" | "diff" => {
+        "task" => {
             let task_id = args
                 .get(1)
                 .filter(|id| !id.is_empty() && !id.starts_with('-'))
                 .cloned()
-                .ok_or_else(|| {
-                    crate::util::Error::new(format!("`ahu {first}` needs a task id."))
-                })?;
-            let output_json = first == "task"
-                && args.get(2).map(String::as_str) == Some("--output")
+                .ok_or_else(|| crate::util::Error::new("`ahu task` needs a task id."))?;
+            let output_json = args.get(2).map(String::as_str) == Some("--output")
                 && args.get(3).map(String::as_str) == Some("json");
             expect_no_more(&args[if output_json { 4 } else { 2 }..])?;
-            if first == "task" {
-                Ok(Command::Task {
-                    task_id,
-                    output_json,
-                })
-            } else {
-                Ok(Command::Diff { task_id })
-            }
+            Ok(Command::Task {
+                task_id,
+                output_json,
+            })
         }
         "focus" => {
             let task_id = args
@@ -1262,17 +1252,25 @@ mod direct_agent_tests {
     }
 
     #[test]
-    fn help_hides_inventory_and_diff_and_positional_prompt_conflicts_are_rejected() {
+    fn help_hides_inventory_and_positional_prompt_conflicts_are_rejected() {
         assert!(
             !HELP
                 .lines()
                 .any(|line| line.trim_start().starts_with("inventory "))
         );
-        assert!(
-            !HELP
-                .lines()
-                .any(|line| line.trim_start().starts_with("diff "))
-        );
         assert!(parse(["@dev-glm", "positional", "--prompt", "flag"]).is_err());
+    }
+
+    /// `ahu diff` was removed; plain git on the task's branch does the same
+    /// job. It must now fail exactly like any other word ahu does not know,
+    /// not be quietly re-parsed as something else.
+    #[test]
+    fn diff_is_no_longer_a_command() {
+        let unknown = parse(["not-a-command"]).expect_err("parsed");
+        for args in [vec!["diff"], vec!["diff", "abc1"]] {
+            let error = parse(args.clone()).unwrap_err();
+            assert_eq!(error.kind(), unknown.kind(), "{args:?}");
+            assert!(error.to_string().contains("unknown command"), "{error}");
+        }
     }
 }
