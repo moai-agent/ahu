@@ -210,14 +210,29 @@ require explicit user permission.
 Advanced inspection commands such as `ahu inventory`, `ahu hygiene`, and
 `ahu diff` remain available; run `ahu <command> --help` for their options.
 
-`ahu codex` passes `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
-and `ahu agy` pass `--dangerously-skip-permissions`, the Antigravity CLI's
-unattended mode. Each shortcut names the installed executable (`codex`,
-`claude`, `agy`, `opencode`), accepts no additional arguments, discloses the
-flag it passes, and retains the harness's configured model. Registered child
-agents keep their own manifest permissions and launch requirements. Inside
-cmux, coordinator shortcuts place their workspace in the repository's group
-before starting. See
+All four shortcuts open the same way: approvals bypassed, on this project's
+top-ranked model for that harness, both passed explicitly on the command line.
+
+| Shortcut | Arguments ahu passes |
+| --- | --- |
+| `ahu agy` | `--model <m> --dangerously-skip-permissions` |
+| `ahu claude` | `--model <m> --dangerously-skip-permissions` |
+| `ahu codex` | `-m <m> --dangerously-bypass-approvals-and-sandbox` |
+| `ahu opencode` | `--model <provider>/<model> --auto` |
+
+`<m>` is the first model listed for that harness in `[model_rankings]`, and each
+shortcut prints its whole argument list before starting, so the disclosed line is
+exactly what was launched. When a harness has no ranked model, ahu passes no
+model option, says so on stderr, and the harness opens on whichever model it is
+configured with; ahu does not invent an identifier. OpenCode's `--auto` approves
+every permission OpenCode does not *explicitly deny*, without asking. Permissions
+set to `deny` in OpenCode's own configuration or agent frontmatter still apply,
+and ahu passes no `--pure`, so the user's plugins still load.
+
+Each shortcut names the installed executable (`codex`, `claude`, `agy`,
+`opencode`) and accepts no additional arguments. Registered child agents keep
+their own manifest permissions and launch requirements. Inside cmux, coordinator
+shortcuts place their workspace in the repository's group before starting. See
 [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
 The MCP integration is local and repository-scoped. `ahu mcp serve` provides

@@ -732,7 +732,7 @@ pub fn group_coordinator(
     label: &str,
     harness: &str,
     model: &str,
-    args: &[&str],
+    args: &[String],
 ) -> Result<CoordinatorPlacement> {
     let Some(workspace) = std::env::var("CMUX_WORKSPACE_ID")
         .ok()

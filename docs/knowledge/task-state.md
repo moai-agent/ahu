@@ -112,15 +112,19 @@ the name-to-ID binding must agree before lookup. Removal retains reservations;
 old handles cannot name newly created tasks. Existing task IDs and unique ID
 prefixes still resolve, and older tasks are not renamed.[^launch][^commands]
 
-Coordinator shortcuts preserve the invoking directory and configured model.
-Inside cmux they join the repository's group before starting the harness,
-using the same primary-owned mapping as task launches. A grouping failure
-prevents startup. Outside cmux they retain the current terminal.
+Coordinator shortcuts preserve the invoking directory and pass the project's
+top-ranked model for the harness explicitly, using the same model-option mapping
+as the headless adapters. Inside cmux they join the repository's group before
+starting the harness, using the same primary-owned mapping as task launches. A
+grouping failure prevents startup. Outside cmux they retain the current terminal.
 `ahu codex` requests `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
 and `ahu agy` request `--dangerously-skip-permissions`, the Antigravity CLI's
-unattended mode. Each discloses its flag and accepts no additional arguments.
-These sessions create no task or worktree; registered children keep their own
-manifest permissions and required launch grants.[^commands]
+unattended mode; `ahu opencode` requests `--auto`, which approves every
+permission OpenCode does not explicitly deny, without asking. Each discloses its whole argument
+list, model included, and accepts no additional arguments. A harness with no
+ranked model gets no model option and a disclosed note that its own default is
+in use. These sessions create no task or worktree; registered children keep their
+own manifest permissions and required launch grants.[^commands]
 
 Headless inspection separates recorded session state from observed supervisor
 ownership. It reports attempt number and outcome, blockers, known native session

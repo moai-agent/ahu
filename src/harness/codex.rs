@@ -22,7 +22,6 @@
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::agent::Permissions;
-use crate::bail;
 use crate::util::Result;
 
 pub struct Codex;
@@ -33,18 +32,9 @@ impl Adapter for Codex {
     }
 
     fn launch_command(&self, request: &LaunchRequest<'_>) -> Result<LaunchCommand> {
-        if request.model.is_empty() {
-            bail!("the Codex adapter requires an exact model identifier.");
-        }
-        if request.model.starts_with('-') {
-            bail!(
-                "model identifier {:?} would be read as an option by the Codex CLI.",
-                request.model
-            );
-        }
         // `--` closes the option list so a prompt starting with `-` is still a
         // prompt, and the prompt itself stays a single argv element.
-        let mut args = vec!["-m".to_string(), request.model.to_string()];
+        let mut args = super::model_args(self.id(), request.model)?;
         // Verified against `codex --help`: --approve-for-me routes approvals
         // through automatic review in the workspace-write sandbox, and
         // `--ask-for-approval never` stops Codex asking at all.
