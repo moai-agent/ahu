@@ -29,6 +29,41 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 /// still projected, it just is not deduplicated.
 const MAX_SPAN_IDS_PER_TASK: usize = 4096;
 
+/// Receiver-side telemetry losses/errors for one eval interval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReceiverStats {
+    pub rejected_spans: u64,
+    pub rejected_requests: u64,
+    pub rejected_connections: u64,
+    pub accept_errors: u64,
+}
+
+impl ReceiverStats {
+    pub fn add(&mut self, other: Self) {
+        self.rejected_spans = self.rejected_spans.saturating_add(other.rejected_spans);
+        self.rejected_requests = self
+            .rejected_requests
+            .saturating_add(other.rejected_requests);
+        self.rejected_connections = self
+            .rejected_connections
+            .saturating_add(other.rejected_connections);
+        self.accept_errors = self.accept_errors.saturating_add(other.accept_errors);
+    }
+
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            rejected_spans: self.rejected_spans.saturating_sub(earlier.rejected_spans),
+            rejected_requests: self
+                .rejected_requests
+                .saturating_sub(earlier.rejected_requests),
+            rejected_connections: self
+                .rejected_connections
+                .saturating_sub(earlier.rejected_connections),
+            accept_errors: self.accept_errors.saturating_sub(earlier.accept_errors),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct TaskTelemetry {
     pub task_id: String,
@@ -113,7 +148,7 @@ impl Coverage {
 #[derive(Default)]
 struct CaptureState {
     tasks: BTreeMap<(String, u32), TaskTelemetry>,
-    rejected_spans: u64,
+    receiver_stats: ReceiverStats,
     expected_run_id: Option<String>,
     expected_case_id: Option<String>,
 }
@@ -160,6 +195,10 @@ impl Receiver {
                             }
                             connections = pending;
                             if connections.len() >= MAX_CONCURRENT_CONNECTIONS {
+                                increment_stats(&thread_state, |stats| {
+                                    stats.rejected_connections =
+                                        stats.rejected_connections.saturating_add(1);
+                                });
                                 respond(&mut stream, 503, "receiver busy");
                                 continue;
                             }
@@ -169,12 +208,22 @@ impl Receiver {
                                 .spawn(move || handle_connection(stream, &connection_state))
                             {
                                 connections.push(connection);
+                            } else {
+                                increment_stats(&thread_state, |stats| {
+                                    stats.rejected_connections =
+                                        stats.rejected_connections.saturating_add(1);
+                                });
                             }
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(10));
                         }
-                        Err(_) => break,
+                        Err(_) => {
+                            increment_stats(&thread_state, |stats| {
+                                stats.accept_errors = stats.accept_errors.saturating_add(1);
+                            });
+                            break;
+                        }
                     }
                 }
                 for connection in connections {
@@ -202,11 +251,11 @@ impl Receiver {
             .cloned()
     }
 
-    pub fn rejected_spans(&self) -> u64 {
+    pub fn receiver_stats(&self) -> ReceiverStats {
         self.state
             .lock()
-            .map(|state| state.rejected_spans)
-            .unwrap_or(0)
+            .map(|state| state.receiver_stats)
+            .unwrap_or_default()
     }
 }
 
@@ -220,9 +269,20 @@ impl Drop for Receiver {
 }
 
 fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<CaptureState>>) {
+    // Some platforms pass the listener's nonblocking mode to accepted sockets.
+    // The parser relies on read/write timeouts, so restore blocking mode here.
+    if stream.set_nonblocking(false).is_err() {
+        increment_stats(state, |stats| {
+            stats.rejected_requests = stats.rejected_requests.saturating_add(1);
+        });
+        return;
+    }
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let Ok((headers, mut body)) = read_request(&mut stream) else {
+        increment_stats(state, |stats| {
+            stats.rejected_requests = stats.rejected_requests.saturating_add(1);
+        });
         respond(&mut stream, 400, "bad request");
         return;
     };
@@ -231,16 +291,25 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<CaptureState>>) {
             .to_ascii_lowercase()
             .contains("content-type: application/x-protobuf")
     {
+        increment_stats(state, |stats| {
+            stats.rejected_requests = stats.rejected_requests.saturating_add(1);
+        });
         respond(&mut stream, 404, "unsupported OTLP request");
         return;
     }
     let Some(length) =
         header_value(&headers, "content-length").and_then(|value| value.parse::<usize>().ok())
     else {
+        increment_stats(state, |stats| {
+            stats.rejected_requests = stats.rejected_requests.saturating_add(1);
+        });
         respond(&mut stream, 411, "content-length required");
         return;
     };
     if length > MAX_BODY_BYTES || body.len() > length {
+        increment_stats(state, |stats| {
+            stats.rejected_requests = stats.rejected_requests.saturating_add(1);
+        });
         respond(&mut stream, 413, "OTLP request too large");
         return;
     }
@@ -248,6 +317,9 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<CaptureState>>) {
         let remaining = length - body.len();
         let mut rest = vec![0; remaining];
         if stream.read_exact(&mut rest).is_err() {
+            increment_stats(state, |stats| {
+                stats.rejected_requests = stats.rejected_requests.saturating_add(1);
+            });
             respond(&mut stream, 400, "truncated OTLP request");
             return;
         }
@@ -259,7 +331,18 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<CaptureState>>) {
             consume(request, state);
             respond(&mut stream, 200, "");
         }
-        Err(_) => respond(&mut stream, 400, "invalid OTLP protobuf"),
+        Err(_) => {
+            increment_stats(state, |stats| {
+                stats.rejected_requests = stats.rejected_requests.saturating_add(1);
+            });
+            respond(&mut stream, 400, "invalid OTLP protobuf");
+        }
+    }
+}
+
+fn increment_stats(state: &Arc<Mutex<CaptureState>>, update: impl FnOnce(&mut ReceiverStats)) {
+    if let Ok(mut state) = state.lock() {
+        update(&mut state.receiver_stats);
     }
 }
 
@@ -372,7 +455,8 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                     .unwrap_or(resource_attempt);
                 let key = (task_id.clone(), attempt);
                 if !state.tasks.contains_key(&key) && state.tasks.len() >= MAX_TASKS {
-                    state.rejected_spans = state.rejected_spans.saturating_add(1);
+                    state.receiver_stats.rejected_spans =
+                        state.receiver_stats.rejected_spans.saturating_add(1);
                     continue;
                 }
                 let task = state.tasks.entry(key).or_insert_with(|| TaskTelemetry {
@@ -693,6 +777,34 @@ mod tests {
     }
 
     #[test]
+    fn a_span_attempt_attribute_overrides_the_default_attempt() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let mut harness = Span {
+            name: "ahu.harness.run".into(),
+            ..Span::default()
+        };
+        harness.attributes = vec![
+            string_attribute("ahu.task.id", "retry-task"),
+            count_attribute("ahu.task.attempt", 2),
+        ];
+        consume(
+            ExportTraceServiceRequest {
+                resource_spans: vec![ResourceSpans {
+                    scope_spans: vec![ScopeSpans {
+                        spans: vec![harness],
+                        ..ScopeSpans::default()
+                    }],
+                    ..ResourceSpans::default()
+                }],
+            },
+            &state,
+        );
+        let state = state.lock().unwrap();
+        assert!(!state.tasks.contains_key(&("retry-task".into(), 1)));
+        assert_eq!(state.tasks[&("retry-task".into(), 2)].attempt, 2);
+    }
+
+    #[test]
     fn a_resent_export_is_counted_as_a_duplicate_rather_than_as_more_work() {
         let state = Arc::new(Mutex::new(CaptureState::default()));
         let spans = vec![session_span(9, 1), tool_call_span(10, "ahu_typed_decide")];
@@ -806,5 +918,47 @@ mod tests {
             receiver.task("task-fast", 1).unwrap().coverage(),
             Coverage::CompleteSession
         );
+    }
+
+    #[test]
+    fn local_receiver_counts_connection_rejections_at_capacity() {
+        let receiver = Receiver::start().unwrap();
+        let endpoint = receiver.endpoint().parse::<url::Url>().unwrap();
+        let address = ("127.0.0.1", endpoint.port().unwrap());
+        let stalled: Vec<_> = (0..MAX_CONCURRENT_CONNECTIONS)
+            .map(|_| {
+                let mut stream = TcpStream::connect(address).unwrap();
+                stream.write_all(b"POST /v1/traces HTTP/1.1\r\n").unwrap();
+                stream
+            })
+            .collect();
+        thread::sleep(Duration::from_millis(50));
+
+        let mut rejected = TcpStream::connect(address).unwrap();
+        rejected
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let mut response = String::new();
+        rejected.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "response: {response:?}"
+        );
+        assert_eq!(receiver.receiver_stats().rejected_connections, 1);
+        drop(stalled);
+    }
+
+    #[test]
+    fn local_receiver_counts_rejected_requests() {
+        let receiver = Receiver::start().unwrap();
+        let endpoint = receiver.endpoint().parse::<url::Url>().unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", endpoint.port().unwrap())).unwrap();
+        stream
+            .write_all(b"GET /not-traces HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+        assert_eq!(receiver.receiver_stats().rejected_requests, 1);
     }
 }

@@ -2235,6 +2235,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             ("ahu.task.id", record.task_id.clone()),
         ],
     );
+    telemetry_span.set_u64("ahu.task.attempt", u64::from(spec.attempt));
     if let Some(version) = record.identity.agent_version.as_deref() {
         telemetry_span.set_string("ahu.agent.version", version);
     }

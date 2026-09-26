@@ -92,10 +92,11 @@ def score(case: dict, answer: dict, result: dict, decision_calls: int | None, el
         "tool_expectation_status": "unknown" if has_tool_expectations else "not_applicable",
         "tool_expectation_required": (expectations or {}).get("required", []),
         "tool_expectation_forbidden": (expectations or {}).get("forbidden", []),
-        "telemetry_coverage": "partial_spans" if decision_calls is not None else "none",
+        # This helper records optional manual counts; it does not collect OTLP.
+        "telemetry_coverage": "none",
         "score_parts": parts,
         "reported_tokens": usage,
-        "mcp_observed": decision_calls is not None,
+        "mcp_observed": False,
         "decision_call_count": decision_calls,
         "elapsed_ms": elapsed_ms,
         "skill_observation": result.get("harness", {}).get("skill_observation"),

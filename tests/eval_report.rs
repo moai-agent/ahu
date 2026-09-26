@@ -809,6 +809,43 @@ fn tool_error_counts_are_retained_by_name_and_separately_from_call_counts() {
 }
 
 #[test]
+fn unknown_per_tool_counts_remain_absent_even_with_a_session_summary() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let records = write_lines(
+        outside.path(),
+        &[v2_row(&[
+            ("mcp_observed", "true"),
+            ("mcp_tool_call_count", "3"),
+            ("mcp_tools", "{\"ahu_typed_decide\":1}"),
+        ])],
+    );
+    let tools = &report_json(&repo, &records)["groups"][0]["observed"]["mcp_tools"];
+    assert_eq!(tools["ahu_typed_decide"], 1.0);
+    assert!(tools.get("ahu_agents_list").is_none());
+    assert!(tools.get("ahu_task_get").is_none());
+    assert!(tools.get("ahu_tasks_list").is_none());
+}
+
+#[test]
+fn receiver_drop_counts_are_preserved_and_summarized() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let records = write_lines(
+        outside.path(),
+        &[v2_row(&[(
+            "telemetry_receiver",
+            "{\"rejected_spans\":2,\"rejected_requests\":1,\"rejected_connections\":3,\"accept_errors\":0}",
+        )])],
+    );
+    let group = &report_json(&repo, &records)["groups"][0];
+    assert_eq!(group["coverage"]["telemetry_receiver"], 1);
+    assert_eq!(group["telemetry_receiver"]["rejected_spans"], 2);
+    assert_eq!(group["telemetry_receiver"]["rejected_requests"], 1);
+    assert_eq!(group["telemetry_receiver"]["rejected_connections"], 3);
+}
+
+#[test]
 fn the_report_says_what_it_does_not_claim() {
     let repo = TestRepo::new();
     let outside = tempfile::TempDir::new().expect("temp dir");

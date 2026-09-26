@@ -56,6 +56,11 @@ through `ahu.task.id` and `ahu.task.attempt`; eval case, corpus, run, and stage
 IDs ride along as resource attributes. The runner also enables ahu's local token
 projection for its result envelope, again without touching repository
 configuration; those are the harness's observed counters, not provider billing.
+Each run record also carries receiver-side counters for spans rejected at the
+task cap, malformed or oversized requests, connections rejected at capacity,
+and listener errors. The report keeps those counters separate from agent tool
+counts and shows how many runs supplied them; older or manually recorded rows
+without receiver counters remain unobserved.
 
 OTLP has no vendor-neutral query API, so the runner receives the exports
 directly for the duration of each eval command and projects the relevant fields
@@ -315,6 +320,8 @@ python3 scripts/local_eval.py trend --records "$EVAL_HOME/runs.jsonl"
 It writes schema 2 records with a partial fingerprint and the
 `manual_unverified` prompt profile. If the case has tool expectations, their
 status remains unknown because the helper does not evaluate MCP spans. The
-manual record stays in its own report group, separate from fully orchestrated
-runs. Use `ahu eval run` for comparable agent evaluations. The recorder refuses
-to write its run file inside the ahu checkout.
+helper's optional `--decision-calls` value is a manually supplied count; it does
+not mark telemetry as observed or change `telemetry_coverage`, which remains
+`none`. The manual record stays in its own report group, separate from fully
+orchestrated runs. Use `ahu eval run` for comparable agent evaluations. The
+recorder refuses to write its run file inside the ahu checkout.

@@ -124,6 +124,8 @@ struct Record {
     mcp_tools: Option<BTreeMap<String, f64>>,
     #[serde(default)]
     mcp_tool_errors_by_name: Option<BTreeMap<String, f64>>,
+    #[serde(default)]
+    telemetry_receiver: Option<crate::eval_otel::ReceiverStats>,
     // Version 2 evaluation evidence.
     #[serde(default)]
     case_schema_version: Option<u64>,
@@ -260,6 +262,8 @@ pub struct Coverage {
     pub telemetry_partial: usize,
     /// Runs for which no telemetry arrived at all.
     pub telemetry_none: usize,
+    /// Runs that recorded local OTLP receiver drop/error counters.
+    pub telemetry_receiver: usize,
 }
 
 /// One comparable configuration.
@@ -271,6 +275,8 @@ pub struct Group {
     pub mean_score: f64,
     pub pass_rate: f64,
     pub coverage: Coverage,
+    /// Receiver-level export drops/errors observed across runs with counters.
+    pub telemetry_receiver: Option<crate::eval_otel::ReceiverStats>,
     /// Mean over the runs that reported a time; `None` when none did.
     pub mean_elapsed_ms: Option<f64>,
     /// Mean over the runs that reported a count; `None` when none did.
@@ -604,6 +610,7 @@ fn group(records: &[Record]) -> Vec<Group> {
             let mut tool_unknown = 0usize;
             let mut tool_not_applicable = 0usize;
             let mut terminal_statuses: BTreeMap<String, usize> = BTreeMap::new();
+            let mut telemetry_receiver = crate::eval_otel::ReceiverStats::default();
             for item in &items {
                 let status = item.terminal_status.as_deref().unwrap_or(UNSPECIFIED);
                 *terminal_statuses.entry(status.to_owned()).or_default() += 1;
@@ -694,15 +701,23 @@ fn group(records: &[Record]) -> Vec<Group> {
                     if let Some(value) = item.typed_decision_error_count {
                         typed_decision_errors.push(value);
                     }
-                    for name in crate::mcp::TOOL_NAMES {
-                        let count = item
-                            .mcp_tools
-                            .as_ref()
-                            .and_then(|tools| tools.get(name))
-                            .copied()
-                            .unwrap_or(0.0);
-                        mcp_tools.entry(name.to_owned()).or_default().push(count);
+                    if let Some(tools) = &item.mcp_tools {
+                        let named_calls: f64 = tools.values().sum();
+                        let all_calls_named = item
+                            .mcp_tool_call_count
+                            .is_some_and(|total| total == named_calls);
+                        for name in crate::mcp::TOOL_NAMES {
+                            if let Some(count) = tools.get(name) {
+                                mcp_tools.entry(name.to_owned()).or_default().push(*count);
+                            } else if all_calls_named {
+                                mcp_tools.entry(name.to_owned()).or_default().push(0.0);
+                            }
+                        }
                     }
+                }
+                if let Some(stats) = item.telemetry_receiver {
+                    coverage.telemetry_receiver += 1;
+                    telemetry_receiver.add(stats);
                 }
             }
             let tool_decided = tool_pass + tool_fail;
@@ -713,6 +728,7 @@ fn group(records: &[Record]) -> Vec<Group> {
                 mean_score: round4(total / runs as f64),
                 pass_rate: round4(passes as f64 / runs as f64),
                 coverage,
+                telemetry_receiver: (coverage.telemetry_receiver > 0).then_some(telemetry_receiver),
                 mean_elapsed_ms: mean(&elapsed),
                 mean_decision_calls: mean(&calls),
                 token_fields,
@@ -854,6 +870,18 @@ pub fn render(report: &Report) -> String {
             group.coverage.telemetry_partial,
             group.coverage.telemetry_none
         ));
+        if let Some(receiver) = group.telemetry_receiver {
+            out.push_str(&format!(
+                "  OTLP recv  observed {}  rejected spans {}  requests {}  connections {}  accept errors {}\n",
+                group.coverage.telemetry_receiver,
+                receiver.rejected_spans,
+                receiver.rejected_requests,
+                receiver.rejected_connections,
+                receiver.accept_errors,
+            ));
+        } else {
+            out.push_str("  OTLP recv  none observed\n");
+        }
         out.push_str(&format!(
             "  coverage   tokens {}/{}  timing {}/{}  decision calls {}/{}  MCP {}/{}\n",
             group.coverage.tokens,
@@ -1105,6 +1133,7 @@ pub fn run(
     let build = fingerprint::BuildIdentity::detect();
     let mut outputs = Vec::new();
     for trial in &plan {
+        let receiver_stats_before = receiver.receiver_stats();
         let entry = &cases[trial.case_index];
         let case = &entry.case;
         let candidate = candidates[trial.agent_index];
@@ -1152,6 +1181,10 @@ pub fn run(
                     "candidate_launch_failed",
                     Some("candidate_run_failed"),
                 ));
+                record.insert(
+                    "telemetry_receiver".into(),
+                    serde_json::to_value(receiver.receiver_stats().since(receiver_stats_before))?,
+                );
                 append_jsonl(&records, &serde_json::Value::Object(record))?;
                 outputs.push(serde_json::json!({
                     "trial": trial.index,
@@ -1389,6 +1422,10 @@ pub fn run(
                 .map_or(serde_json::Value::Null, Into::into),
         );
         put("mcp_observed", mcp_observed.into());
+        put(
+            "telemetry_receiver",
+            serde_json::to_value(receiver.receiver_stats().since(receiver_stats_before))?,
+        );
         for (key, pick) in [
             ("decision_call_count", 0usize),
             ("mcp_request_count", 1),
@@ -1954,7 +1991,9 @@ fn group_json(group: &Group) -> serde_json::Value {
             "telemetry_complete_session": group.coverage.telemetry_complete,
             "telemetry_partial_spans": group.coverage.telemetry_partial,
             "telemetry_absent": group.coverage.telemetry_none,
+            "telemetry_receiver": group.coverage.telemetry_receiver,
         },
+        "telemetry_receiver": group.telemetry_receiver,
         "observed": {
             "mean_elapsed_ms": group.mean_elapsed_ms,
             "mean_decision_calls": group.mean_decision_calls,
