@@ -417,13 +417,7 @@ pub(crate) fn prepared_record(
             permissions: plan.permissions,
             harness: plan.pair.harness.clone(),
             model: plan.pair.model.clone(),
-            instructions_source: plan.agent.as_ref().map(|a| {
-                a.source_path
-                    .strip_prefix(&repo.root)
-                    .unwrap_or(&a.source_path)
-                    .to_string_lossy()
-                    .to_string()
-            }),
+            instructions_source: plan.agent.as_ref().map(|a| a.relative_source(&repo.root)),
             source_digest: plan.agent.as_ref().map(|a| a.source_digest.clone()),
             instructions_digest: plan.agent.as_ref().map(|a| a.instructions_digest.clone()),
             identity_digest: plan.agent.as_ref().map(|a| a.identity_digest()),

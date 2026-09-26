@@ -855,12 +855,27 @@ fn selector_styling_contains_hostile_fields_and_preserves_selection() {
 /// Written by hand rather than through a launch: the point is what doctor says
 /// about an existing record, and a real launch would need cmux and a session.
 fn record_a_drifted_launch(repo: &common::TestRepo, task_id: &str) {
+    record_a_launch(repo, task_id, |identity| {
+        identity.source_digest = Some("3f9c1a2b".repeat(8));
+        identity.instructions_digest = Some("8a1d4e07".repeat(8));
+        identity.identity_digest = Some("5c2b9f10".repeat(8));
+    });
+}
+
+/// A previous launch of `chris@1.0.0` with everything drift compares matching
+/// the checkout, until `tweak` moves one of them.
+fn record_a_launch(
+    repo: &common::TestRepo,
+    task_id: &str,
+    tweak: impl FnOnce(&mut ahu::task::LaunchIdentity),
+) {
     let discovered = ahu::git::discover(repo.path()).unwrap();
+    let agent = ahu::agent::find(&discovered.root, "chris").unwrap();
     let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
     let adapter = ahu::harness::adapter_for("claude-code").unwrap();
     let (delivered, delivery) =
         ahu::orchestration::deliver(Some("You are chris."), "earlier work").unwrap();
-    let record = ahu::task::TaskRecord {
+    let mut record = ahu::task::TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: task_id.to_string(),
         title: "an earlier task".to_string(),
@@ -878,10 +893,10 @@ fn record_a_drifted_launch(repo: &common::TestRepo, task_id: &str) {
             permissions: Default::default(),
             harness: "claude-code".to_string(),
             model: "claude-opus-5".to_string(),
-            instructions_source: Some(".claude/agents/chris.md".to_string()),
-            source_digest: Some("3f9c1a2b".repeat(8)),
-            instructions_digest: Some("8a1d4e07".repeat(8)),
-            identity_digest: Some("5c2b9f10".repeat(8)),
+            instructions_source: Some(agent.relative_source(&discovered.root)),
+            source_digest: Some(agent.source_digest.clone()),
+            instructions_digest: Some(agent.instructions_digest.clone()),
+            identity_digest: Some(agent.identity_digest()),
             selection_basis: None,
         },
         // The repository configuration and the policy have not moved, so the
@@ -914,6 +929,7 @@ fn record_a_drifted_launch(repo: &common::TestRepo, task_id: &str) {
         cmux_window_id: None,
         state: ahu::task::TaskState::Exited,
     };
+    tweak(&mut record.identity);
     let tasks = ahu::storage::CheckoutStorage::new(repo.path())
         .tasks_dir(&discovered.identity())
         .unwrap();
@@ -963,15 +979,19 @@ fn doctor_explains_what_drifted_rather_than_only_naming_the_agent() {
         "{text}"
     );
     // Each change from the launch path, verbatim, so the two surfaces cannot
-    // disagree about what moved.
+    // disagree about what moved -- and named in words, with the file a reader
+    // has to open.
     assert!(
-        text.contains("    - the instruction text ahu delivers changed: 8a1d4e078a1d ->"),
+        text.contains(
+            "    - instructions: .claude/agents/chris.md changed, text ahu delivers \
+             (version still 1.0.0)\n"
+        ),
         "{text}"
     );
-    assert!(
-        text.contains("    - the agent's source file changed: 3f9c1a2b3f9c ->"),
-        "{text}"
-    );
+    // A digest pair is what the reader could not act on, so the agent's own
+    // files no longer contribute one.
+    assert!(!text.contains("8a1d4e078a1d"), "{text}");
+    assert!(!text.contains("3f9c1a2b3f9c"), "{text}");
     assert!(
         text.contains(
             "  Bump the version in the agent's manifest and record what changed, or restore it.\n"
@@ -1027,4 +1047,66 @@ fn doctor_bounds_the_drift_section_and_points_at_the_full_list() {
         "{rendered}"
     );
     assert_eq!(ahu::drift::render_doctor(&[]), "");
+}
+
+/// The case drift exists to catch: a manifest field moved and the version label
+/// did not. Doctor has to say which field, with both values, because that is the
+/// change a reader can act on -- a digest pair for the same edit is not.
+#[test]
+fn doctor_names_a_changed_model_and_says_the_version_did_not_move() {
+    let repo = common::TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let task_id = "019a4f00-0000-7000-8000-00000000d0de";
+    // The earlier launch ran the same version of the same agent on the other
+    // model, so the identity digest is that launch's, not the checkout's.
+    record_a_launch(&repo, task_id, |identity| {
+        identity.model = "claude-sonnet-5".to_string();
+        identity.identity_digest = Some(ahu::util::digest_bytes(
+            format!(
+                "chris\n1.0.0\nclaude-code\nclaude-sonnet-5\n{}\n{}",
+                identity.source_digest.as_deref().unwrap(),
+                identity.instructions_digest.as_deref().unwrap()
+            )
+            .as_bytes(),
+        ));
+    });
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+
+    let mut output: Vec<u8> = Vec::new();
+    let mut input = std::io::Cursor::new(Vec::new());
+    let repo_result = Ok(discovered);
+    let _ = ahu::commands::doctor(
+        &mut ahu::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: false,
+        },
+        &repo_result,
+    );
+    let text = String::from_utf8_lossy(&output).to_string();
+
+    assert!(
+        text.contains("drift        1 registered agent drifted\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    - model: claude-sonnet-5 -> claude-opus-5 (version still 1.0.0)\n"),
+        "{text}"
+    );
+    // The model is the only thing that moved, so nothing else is reported --
+    // least of all a digest pair the reader would have to resolve themselves.
+    for silent in [
+        "instructions:",
+        "the agent's identity changed",
+        "configuration changed",
+        "hooks in effect",
+        "project policy",
+    ] {
+        assert!(
+            !text.contains(silent),
+            "only the model moved, but doctor also claimed {silent}: {text}"
+        );
+    }
 }

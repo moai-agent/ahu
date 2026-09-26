@@ -421,6 +421,20 @@ impl ResolvedAgent {
         format!("{}@{}", self.manifest.name, self.manifest.version)
     }
 
+    /// The instruction source as a reviewer refers to it: repository-relative
+    /// when the file is inside the checkout, absolute when it somehow is not.
+    ///
+    /// Task records store this form, and drift names the file that changed, so
+    /// both go through one conversion rather than each spelling a path its own
+    /// way.
+    pub fn relative_source(&self, repo_root: &Path) -> String {
+        self.source_path
+            .strip_prefix(repo_root)
+            .unwrap_or(&self.source_path)
+            .to_string_lossy()
+            .to_string()
+    }
+
     /// Digest binding the manifest and the native definition together.
     ///
     /// Both file digests are mixed in. The file digest alone would miss nothing

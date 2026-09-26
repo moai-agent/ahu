@@ -262,12 +262,18 @@ fn agent_drift_details(repo: &Repo, agents: &[ResolvedAgent]) -> Result<Vec<drif
     for agent in agents {
         let found_hooks = hooks::collect(&repo.root, &agent.manifest.harness)?;
         let identity = agent.identity_digest();
+        let source = agent.relative_source(&repo.root);
         if let Some(found) = drift::detect(
             &agent.label(),
-            Some(drift::AgentDigests {
-                identity: &identity,
-                source: &agent.source_digest,
-                instructions: &agent.instructions_digest,
+            Some(drift::AgentIdentity {
+                version: &agent.manifest.version,
+                harness: &agent.manifest.harness,
+                model: &agent.manifest.model,
+                permissions: agent.manifest.permissions,
+                instructions_source: Some(&source),
+                identity_digest: &identity,
+                source_digest: &agent.source_digest,
+                instructions_digest: &agent.instructions_digest,
             }),
             &snapshot.digest(),
             &loaded.digest,
@@ -2337,15 +2343,21 @@ pub(crate) fn preflight(
         ))?;
     }
     let agent_identity = plan.agent.as_ref().map(|a| a.identity_digest());
+    let agent_source = plan.agent.as_ref().map(|a| a.relative_source(&repo.root));
     if let Some(found) = drift::detect(
         &key,
         plan.agent
             .as_ref()
             .zip(agent_identity.as_deref())
-            .map(|(a, identity)| drift::AgentDigests {
-                identity,
-                source: &a.source_digest,
-                instructions: &a.instructions_digest,
+            .map(|(a, identity)| drift::AgentIdentity {
+                version: &a.manifest.version,
+                harness: &a.manifest.harness,
+                model: &a.manifest.model,
+                permissions: a.manifest.permissions,
+                instructions_source: agent_source.as_deref(),
+                identity_digest: identity,
+                source_digest: &a.source_digest,
+                instructions_digest: &a.instructions_digest,
             }),
         &plan.snapshot.digest(),
         &loaded.digest,
