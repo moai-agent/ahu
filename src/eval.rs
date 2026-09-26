@@ -48,58 +48,10 @@ pub use suite::EvalSuite;
 static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Version of the `--output json` report contract.
-///
-/// Bumped to 2 when the report gained the answer/judge split, tool-expectation
-/// scoring, the input fingerprint fields, and the Wilson intervals. A consumer
-/// written against version 1 reads a version 1 report's fields unchanged, but
-/// the group identity is wider, so the version says so rather than letting a
-/// reader assume its old grouping still holds.
 pub const REPORT_SCHEMA_VERSION: u32 = 2;
 
-/// Record schema versions this report knows how to read.
-///
-/// A record that declares a newer schema is refused rather than interpreted
-/// under the old field meanings. Version 1 records stay readable, and are kept
-/// in groups of their own — see [`Lineage`].
-pub const SUPPORTED_RECORD_SCHEMA_VERSIONS: [u64; 2] = [1, 2];
-
-/// Version of the record schema `ahu eval run` writes.
+/// Current JSONL record schema version.
 pub const RECORD_SCHEMA_VERSION: u64 = 2;
-
-/// Which generation of the evaluation contract a record belongs to.
-///
-/// The two are never pooled. A version 1 run was prompted to use the
-/// typed-decision tool for every question, so its answer score measures the
-/// agent under a tool ahu chose for it; a version 2 run was prompted neutrally
-/// and has its tool behaviour scored separately. Averaging the two would
-/// average two different measurements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Lineage {
-    /// Record schema 1: legacy, forced-tool prompt.
-    LegacyForcedToolV1,
-    /// Record schema 2: tool-neutral prompt, tool behaviour scored separately.
-    V2,
-}
-
-impl Lineage {
-    fn of(schema_version: Option<u64>) -> Self {
-        match schema_version {
-            Some(version) if version >= 2 => Lineage::V2,
-            _ => Lineage::LegacyForcedToolV1,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Lineage::LegacyForcedToolV1 => "legacy_forced_tool_v1",
-            Lineage::V2 => "v2",
-        }
-    }
-
-    pub fn is_legacy(self) -> bool {
-        self == Lineage::LegacyForcedToolV1
-    }
-}
 
 /// Largest record file this command will read.
 ///
@@ -119,10 +71,7 @@ const DEFAULT_STAGE: &str = "candidate";
 /// only has to keep meaning the same thing for the ones it reads.
 #[derive(Debug, Clone, Deserialize)]
 struct Record {
-    /// Absent on records written before the field existed; when present it must
-    /// be a version this report understands.
-    #[serde(default)]
-    schema_version: Option<u64>,
+    schema_version: u64,
     case_id: String,
     model: String,
     harness: String,
@@ -148,8 +97,6 @@ struct Record {
     evaluator_harness_version: Option<String>,
     #[serde(default)]
     harness_version: Option<String>,
-    #[serde(default)]
-    ahu_revision: Option<String>,
     #[serde(default)]
     skill_digest: Option<String>,
     /// Observed token metrics, keyed by the recorder's metric names. An empty
@@ -177,8 +124,7 @@ struct Record {
     mcp_tools: Option<BTreeMap<String, f64>>,
     #[serde(default)]
     mcp_tool_errors_by_name: Option<BTreeMap<String, f64>>,
-    // Everything below arrives with record schema 2. A version 1 record leaves
-    // them absent, which is what puts it in a legacy group of its own.
+    // Version 2 evaluation evidence.
     #[serde(default)]
     case_schema_version: Option<u64>,
     #[serde(default)]
@@ -239,16 +185,7 @@ struct Record {
 }
 
 impl Record {
-    fn lineage(&self) -> Lineage {
-        Lineage::of(self.schema_version)
-    }
-
     /// Whether this run's answer passed, as a binary outcome.
-    ///
-    /// Version 2 records say so directly. A version 1 record has only the
-    /// headline `passed`, which is the judge's verdict when one ran; it is used
-    /// here because a legacy group is never pooled with a version 2 group, so
-    /// the looser meaning stays inside its own rows.
     fn answer_pass(&self) -> bool {
         self.answer_passed.unwrap_or(self.passed)
     }
@@ -269,9 +206,6 @@ impl Record {
 /// Ordered as the report prints it, so sorting the map sorts the report.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GroupKey {
-    /// Which generation of the contract these runs belong to. First in the key,
-    /// so a legacy row can never sort into the middle of the version 2 rows.
-    pub lineage: Lineage,
     pub case_id: String,
     pub corpus_version: String,
     pub stage: String,
@@ -285,10 +219,6 @@ pub struct GroupKey {
     pub model: String,
     pub harness: String,
     pub harness_version: String,
-    /// Version 1 only: the old field that conflated the checkout under
-    /// evaluation with the ahu that ran the evaluation. Version 2 records leave
-    /// it `unspecified` and carry the two fields below instead.
-    pub ahu_revision: String,
     pub skill_digest: String,
     pub case_schema_version: String,
     pub case_digest: String,
@@ -507,19 +437,13 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
         }
         let record: Record =
             serde_json::from_str(line).map_err(|error| malformed(path, number, &error))?;
-        if let Some(version) = record.schema_version
-            && !SUPPORTED_RECORD_SCHEMA_VERSIONS.contains(&version)
-        {
+        if record.schema_version != RECORD_SCHEMA_VERSION {
             return Err(malformed_text(
                 path,
                 number,
                 &format!(
-                    "record schema_version {version} is not one this ahu reads ({})",
-                    SUPPORTED_RECORD_SCHEMA_VERSIONS
-                        .iter()
-                        .map(u64::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "record schema_version {} is unsupported; expected {RECORD_SCHEMA_VERSION}",
+                    record.schema_version
                 ),
             ));
         }
@@ -611,7 +535,6 @@ fn key_for(record: &Record) -> GroupKey {
         value.map_or_else(|| UNSPECIFIED.to_owned(), |value| value.to_string())
     };
     GroupKey {
-        lineage: record.lineage(),
         case_id: record.case_id.clone(),
         corpus_version: or_unspecified(&record.corpus_version, UNSPECIFIED),
         stage: or_unspecified(&record.stage, DEFAULT_STAGE),
@@ -625,7 +548,6 @@ fn key_for(record: &Record) -> GroupKey {
         model: record.model.clone(),
         harness: record.harness.clone(),
         harness_version: or_unspecified(&record.harness_version, UNSPECIFIED),
-        ahu_revision: or_unspecified(&record.ahu_revision, UNSPECIFIED),
         skill_digest: or_unspecified(&record.skill_digest, UNSPECIFIED),
         case_schema_version: number(record.case_schema_version),
         case_digest: or_unspecified(&record.case_digest, UNSPECIFIED),
@@ -849,7 +771,7 @@ pub fn render(report: &Report) -> String {
     if report.groups.is_empty() {
         out.push_str(&style.paint(
             Role::Hint,
-            "\nNo run records. Append one with `scripts/local_eval.py record`.\n",
+            "\nNo run records. Append one with `ahu eval run`.\n",
         ));
         return out;
     }
@@ -857,15 +779,10 @@ pub fn render(report: &Report) -> String {
         let key = &group.key;
         // Every value below is external record content, so all of it is escaped.
         out.push_str(&format!(
-            "\n{}  corpus {}  stage {}  lineage {}\n",
+            "\n{}  corpus {}  stage {}\n",
             style.paint(Role::Heading, &display_safe(&key.case_id)),
             display_safe(&key.corpus_version),
-            display_safe(&key.stage),
-            if key.lineage.is_legacy() {
-                style.paint(Role::Gap, key.lineage.as_str())
-            } else {
-                key.lineage.as_str().to_owned()
-            }
+            display_safe(&key.stage)
         ));
         out.push_str(&format!(
             "  agent      {} {}\n  evaluator  {} {} ({}, {} {})\n  model      {}\n  harness    {} {}\n  ahu        {}  skill digest {}\n",
@@ -879,7 +796,7 @@ pub fn render(report: &Report) -> String {
             style.paint(Role::Runtime, &display_safe(&key.model)),
             display_safe(&key.harness),
             display_safe(&key.harness_version),
-            display_safe(&key.ahu_revision),
+            display_safe(&key.ahu_version),
             display_safe(&key.skill_digest)
         ));
         out.push_str(&format!(
@@ -976,8 +893,7 @@ pub fn render(report: &Report) -> String {
          the runs telemetry could decide, and `unknown` is neither a pass nor a fail.\n\
          A judge score is one uncalibrated observation; no interval is claimed for\n\
          the weighted mean score.\n\
-         Legacy lineage rows were prompted to use the typed-decision tool and are\n\
-         never pooled with v2 rows.\n",
+         All records use evaluation schema 2.\n",
     ));
     out
 }
@@ -1014,7 +930,6 @@ pub fn render_json(report: &Report) -> Result<String> {
             "judge_calibration": "single_judge_uncalibrated",
             "judge_repeats": "not_implemented",
             "mean_score_interval": "not_reported: a weighted continuous mean is not a binomial proportion, so no inferential interval is claimed for it in this report version",
-            "legacy_records": "record schema 1 rows are grouped separately as legacy_forced_tool_v1 and are never pooled with v2",
         },
         "groups": report.groups.iter().map(group_json).collect::<Vec<_>>(),
     });
@@ -1966,8 +1881,6 @@ fn group_json(group: &Group) -> serde_json::Value {
         }
     };
     merge(serde_json::json!({
-        "lineage": key.lineage.as_str(),
-        "legacy": key.lineage.is_legacy(),
         "case_id": key.case_id,
         "corpus_version": key.corpus_version,
         "stage": key.stage,
@@ -1983,7 +1896,6 @@ fn group_json(group: &Group) -> serde_json::Value {
         "harness_version": key.harness_version,
     }));
     merge(serde_json::json!({
-        "ahu_revision": key.ahu_revision,
         "skill_digest": key.skill_digest,
         "case_schema_version": key.case_schema_version,
         "case_digest": key.case_digest,
@@ -2070,7 +1982,7 @@ mod tests {
     /// refuses those, which is the point of building the fixture this way.
     fn record(overrides: &[(&str, &str)]) -> String {
         let mut fields: BTreeMap<&str, &str> = BTreeMap::from([
-            ("schema_version", "1"),
+            ("schema_version", "2"),
             ("case_id", "\"c1\""),
             ("corpus_version", "\"1.0.0\""),
             ("model", "\"m\""),
@@ -2122,7 +2034,7 @@ mod tests {
             ("evaluator_harness", "\"judge-harness\""),
             ("evaluator_harness_version", "\"2.0.0\""),
             ("harness_version", "\"9\""),
-            ("ahu_revision", "\"deadbee\""),
+            ("target_repo_head", "\"deadbee\""),
             ("skill_digest", "\"sha256:1\""),
             ("stage", "\"evaluator\""),
             ("corpus_version", "\"2.0.0\""),
@@ -2190,20 +2102,20 @@ mod tests {
             (format!("{good}\n[]\n"), 2, "expected a JSON object"),
             (
                 format!(
-                    "{good}\n{{\"model\":\"m\",\"harness\":\"h\",\"score\":1,\"passed\":true}}\n"
+                    "{good}\n{{\"schema_version\":2,\"model\":\"m\",\"harness\":\"h\",\"score\":1,\"passed\":true}}\n"
                 ),
                 2,
                 "missing field `case_id`",
             ),
             (
-                "{\"case_id\":\"c\",\"model\":\"m\",\"harness\":\"h\",\"score\":\"high\",\"passed\":true}\n"
+                "{\"schema_version\":2,\"case_id\":\"c\",\"model\":\"m\",\"harness\":\"h\",\"score\":\"high\",\"passed\":true}\n"
                     .to_string(),
                 1,
                 "expected f64 at column",
             ),
             (
                 format!(
-                    "{good}\n{{\"case_id\":\"a\",\"case_id\":\"b\",\"model\":\"m\",\"harness\":\"h\",\"score\":1,\"passed\":true}}\n"
+                    "{good}\n{{\"schema_version\":2,\"case_id\":\"a\",\"case_id\":\"b\",\"model\":\"m\",\"harness\":\"h\",\"score\":1,\"passed\":true}}\n"
                 ),
                 2,
                 "duplicate field `case_id`",
@@ -2269,7 +2181,7 @@ mod tests {
 
     #[test]
     fn the_terminal_view_escapes_record_content_and_names_uncovered_metrics() {
-        let text = "{\"case_id\":\"c\\u001b[31m1\",\"model\":\"m\",\"harness\":\"h\",\
+        let text = "{\"schema_version\":2,\"case_id\":\"c\\u001b[31m1\",\"model\":\"m\",\"harness\":\"h\",\
                     \"score\":1,\"passed\":true}";
         let records = parse_records(Path::new("runs.jsonl"), text).expect("parses");
         let rendered = render(&Report {

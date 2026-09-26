@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
 import sys
@@ -40,14 +41,15 @@ def read_case(path: Path):
         not isinstance(frontmatter, dict)
         or frontmatter.get("okf_version") != "0.2"
         or frontmatter.get("type") != "ahu:eval-case"
+        or frontmatter.get("schema_version") != 2
     ):
-        raise ValueError("evaluation case must declare okf_version 0.2 and type ahu:eval-case")
+        raise ValueError("evaluation case must use schema_version 2 and declare okf_version 0.2 and type ahu:eval-case")
     if not body.strip():
         raise ValueError("evaluation case Markdown body must describe the case")
     return frontmatter
 
 
-def score(case: dict, answer: dict, result: dict, decision_calls: int | None, elapsed_ms: int | None) -> dict:
+def score(case: dict, answer: dict, result: dict, decision_calls: int | None, elapsed_ms: int | None, case_digest: str) -> dict:
     expected = case["expected"]
     weights = case["scoring"]
     parts = {}
@@ -64,18 +66,36 @@ def score(case: dict, answer: dict, result: dict, decision_calls: int | None, el
         for name, entry in metrics.items()
         if isinstance(entry, dict) and entry.get("kind") == "observed"
     }
+    expectations = case.get("tool_expectations")
+    has_tool_expectations = bool(expectations and (expectations.get("required") or expectations.get("forbidden")))
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "case_id": case["id"],
         "corpus_version": case["corpus_version"],
+        "case_schema_version": 2,
+        "case_digest": case_digest,
+        "prompt_profile": "manual_unverified",
+        "prompt_version": None,
+        "scoring_version": 2,
+        "input_fingerprint": None,
+        "fingerprint_completeness": "partial",
         "task_id": result.get("task_id"),
         "attempt": result.get("attempt"),
         "outcome": result.get("outcome", "unknown"),
         "score": round(value, 4),
         "passed": value >= weights["exact_match_pass_threshold"],
+        "answer_score": round(value, 4),
+        "answer_passed": value >= weights["exact_match_pass_threshold"],
+        "score_source": "manual_deterministic",
+        "judge_status": "not_run",
+        "tool_expectation_status": "unknown" if has_tool_expectations else "not_applicable",
+        "tool_expectation_required": (expectations or {}).get("required", []),
+        "tool_expectation_forbidden": (expectations or {}).get("forbidden", []),
+        "telemetry_coverage": "partial_spans" if decision_calls is not None else "none",
         "score_parts": parts,
         "reported_tokens": usage,
+        "mcp_observed": decision_calls is not None,
         "decision_call_count": decision_calls,
         "elapsed_ms": elapsed_ms,
         "skill_observation": result.get("harness", {}).get("skill_observation"),
@@ -87,11 +107,12 @@ def record(args) -> int:
     if output == REPO or REPO in output.parents:
         raise ValueError("run records must be stored outside the repository")
     case = read_case(args.case)
+    case_digest = hashlib.sha256(args.case.read_bytes()).hexdigest()
     answer = read_json(args.answer)
     result = read_json(args.result)
     if not isinstance(answer, dict):
         raise ValueError("answer artifact must be a JSON object")
-    row = score(case, answer, result, args.decision_calls, args.elapsed_ms)
+    row = score(case, answer, result, args.decision_calls, args.elapsed_ms, case_digest)
     row.update({
         "run_id": args.run_id,
         "stage": args.stage,
@@ -104,9 +125,19 @@ def record(args) -> int:
         "evaluator_harness_version": args.evaluator_harness_version,
         "model": args.model, "harness": args.harness,
         "harness_version": args.harness_version,
-        "ahu_revision": args.ahu_revision,
         "skill_digest": args.skill_digest,
     })
+    fingerprint_inputs = {
+        key: row.get(key)
+        for key in (
+            "case_digest", "case_id", "corpus_version", "prompt_profile",
+            "agent", "agent_version", "model", "harness", "harness_version",
+            "skill_digest", "stage",
+        )
+    }
+    row["input_fingerprint"] = hashlib.sha256(
+        json.dumps(fingerprint_inputs, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     if args.trace_id:
         row["trace_id"] = args.trace_id
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -116,27 +147,25 @@ def record(args) -> int:
     return 0
 
 
-# This helper writes and reads record schema 1 only. Schema 2 rows carry the
-# answer/judge split, tool expectations, and the input fingerprint that replaced
-# `ahu_revision`; summarising them here would average fields this reader does not
-# understand and silently pool forced-tool runs with tool-neutral ones.
-MANUAL_RECORD_SCHEMA_VERSION = 1
+# Manual records use the current schema, but remain visibly partial because this
+# path cannot establish the prompt, agent definition, ahu build, or full tool
+# telemetry used by `ahu eval run`.
+MANUAL_RECORD_SCHEMA_VERSION = 2
 
 
-def reject_newer_records(rows: list[dict]) -> None:
+def reject_unsupported_records(rows: list[dict]) -> None:
     for number, row in enumerate(rows, start=1):
-        version = row.get("schema_version", MANUAL_RECORD_SCHEMA_VERSION)
-        if not isinstance(version, int) or version > MANUAL_RECORD_SCHEMA_VERSION:
+        version = row.get("schema_version")
+        if not isinstance(version, int) or version != MANUAL_RECORD_SCHEMA_VERSION:
             raise ValueError(
-                f"line {number}: record schema_version {version!r} is newer than this helper "
-                f"reads ({MANUAL_RECORD_SCHEMA_VERSION}). Use `ahu eval report --records ...`, "
-                "which reads both schemas and keeps them in separate groups."
+                f"line {number}: record schema_version {version!r} is not the current schema "
+                f"({MANUAL_RECORD_SCHEMA_VERSION}). Use `ahu eval report --records ...` for current records."
             )
 
 
 def trend(args) -> int:
     rows = [json.loads(line) for line in args.records.expanduser().read_text(encoding="utf-8").splitlines() if line.strip()]
-    reject_newer_records(rows)
+    reject_unsupported_records(rows)
     groups: dict[tuple, list[dict]] = {}
     for row in rows:
         groups.setdefault((
@@ -148,12 +177,16 @@ def trend(args) -> int:
             row.get("evaluator_harness") or "unspecified",
             row.get("evaluator_harness_version") or "unspecified",
             row["model"], row["harness"], row.get("harness_version") or "unspecified",
-            row.get("ahu_revision") or "unspecified", row.get("skill_digest") or "unspecified",
+            row.get("case_digest") or "unspecified", row.get("prompt_profile") or "unspecified",
+            row.get("input_fingerprint") or "unspecified",
+            row.get("fingerprint_completeness") or "unspecified",
+            row.get("skill_digest") or "unspecified",
         ), []).append(row)
     summaries = []
     for (case_id, corpus_version, stage, agent, agent_version, evaluator, evaluator_version,
          evaluator_model, evaluator_harness, evaluator_harness_version, model, harness,
-         harness_version, ahu_revision, skill_digest), items in sorted(groups.items()):
+         harness_version, case_digest, prompt_profile, input_fingerprint,
+         fingerprint_completeness, skill_digest), items in sorted(groups.items()):
         scores = [item["score"] for item in items]
         token_fields = set()
         token_observations = 0
@@ -162,9 +195,6 @@ def trend(args) -> int:
             if isinstance(metrics, dict):
                 observed = {name for name, entry in metrics.items()
                             if isinstance(entry, dict) and entry.get("kind") == "observed"}
-                # Old manual records store only the observed numeric values.
-                if not any(isinstance(entry, dict) for entry in metrics.values()):
-                    observed = set(metrics)
                 if observed:
                     token_observations += 1
                     token_fields.update(observed)
@@ -184,7 +214,10 @@ def trend(args) -> int:
             "evaluator_harness": evaluator_harness,
             "evaluator_harness_version": evaluator_harness_version,
             "harness_version": harness_version,
-            "ahu_revision": ahu_revision, "skill_digest": skill_digest,
+            "case_digest": case_digest, "prompt_profile": prompt_profile,
+            "input_fingerprint": input_fingerprint,
+            "fingerprint_completeness": fingerprint_completeness,
+            "skill_digest": skill_digest,
             "runs": len(items), "mean_score": round(statistics.mean(scores), 4),
             "pass_rate": round(sum(item["passed"] for item in items) / len(items), 4),
             "token_observations": token_observations,
@@ -226,7 +259,6 @@ def main() -> int:
     add.add_argument("--stage", choices=("candidate", "evaluator"), default="candidate")
     add.add_argument("--harness", required=True)
     add.add_argument("--harness-version", default="unspecified")
-    add.add_argument("--ahu-revision", default="unspecified")
     add.add_argument("--skill-digest", default="unspecified")
     add.add_argument("--trace-id", help="OTel trace ID for this task/attempt")
     add.add_argument("--decision-calls", type=int, help="aggregate count from a verified tool-call observation")

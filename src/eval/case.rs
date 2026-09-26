@@ -2,22 +2,9 @@
 //!
 //! A case is an OKF Markdown document. Its YAML front matter carries the
 //! identity, the questions, the expected answers, the scoring weights, the
-//! judge rubric, and — at schema version 2 — the tool behaviour the case
-//! expects. Its Markdown body is the case's purpose, and the only part of the
-//! file besides the questions and state that a candidate is shown.
-//!
-//! Two schema versions exist, and they are deliberately not comparable.
-//!
-//!   - **Version 1** is the original shape. Its candidate prompt instructed the
-//!     agent to reach for the typed-decision tool for every question, so a
-//!     version 1 run measures answer quality under a forced tool, not an
-//!     agent's own tool selection. It is still readable, and it is marked
-//!     `forced_tool_v1` everywhere it surfaces so it is never pooled with
-//!     version 2 runs.
-//!   - **Version 2** puts a tool-neutral prompt in front of the candidate and
-//!     scores tool behaviour separately from answer quality, through
-//!     `tool_expectations`. Whether an agent reaches for a tool is then an
-//!     observation about the agent rather than an instruction ahu gave it.
+//! judge rubric, and the tool behaviour the case expects. Its Markdown body is
+//! the case's purpose, and the only part besides the questions and state that a
+//! candidate is shown.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,8 +13,8 @@ use serde::Deserialize;
 use crate::bail;
 use crate::util::{Error, ErrorKind, Result};
 
-/// Case schema versions this ahu can load.
-pub const SUPPORTED_CASE_SCHEMA_VERSIONS: [u32; 2] = [1, 2];
+/// Current case schema version.
+pub const CASE_SCHEMA_VERSION: u32 = 2;
 
 /// Version of the candidate prompt template, recorded with every run.
 ///
@@ -41,16 +28,13 @@ pub const SCORING_VERSION: u32 = 2;
 /// How the candidate was asked, which is what makes two runs comparable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptProfile {
-    /// Schema 1: the prompt told the candidate to use the typed-decision tool.
-    ForcedToolV1,
-    /// Schema 2: the prompt names no tool, so tool choice is the agent's.
+    /// The prompt names no tool, so tool choice is the agent's.
     ToolNeutralV2,
 }
 
 impl PromptProfile {
     pub fn as_str(self) -> &'static str {
         match self {
-            PromptProfile::ForcedToolV1 => "forced_tool_v1",
             PromptProfile::ToolNeutralV2 => "tool_neutral_v2",
         }
     }
@@ -255,24 +239,15 @@ pub fn split(bytes: &[u8]) -> Result<(&[u8], &str)> {
 }
 
 impl EvalCase {
-    /// How this case's candidate was asked, which follows from its schema.
+    /// How this case's candidate is asked.
     pub fn prompt_profile(&self) -> PromptProfile {
-        if self.schema_version >= 2 {
-            PromptProfile::ToolNeutralV2
-        } else {
-            PromptProfile::ForcedToolV1
-        }
-    }
-
-    /// True for the original forced-tool schema, whose runs stay separate.
-    pub fn is_legacy(&self) -> bool {
-        self.schema_version < 2
+        PromptProfile::ToolNeutralV2
     }
 
     pub fn validate(&self) -> Result<()> {
         if self.okf_version != crate::agent::OKF_VERSION
             || self.kind != "ahu:eval-case"
-            || !SUPPORTED_CASE_SCHEMA_VERSIONS.contains(&self.schema_version)
+            || self.schema_version != CASE_SCHEMA_VERSION
             || !safe_eval_identifier(&self.id)
             || !safe_eval_identifier(&self.corpus_version)
             || self.expected.is_empty()
@@ -339,20 +314,8 @@ impl EvalCase {
             "state": self.state,
             "questions": self.questions,
         });
-        let instruction = match self.prompt_profile() {
-            // Retained exactly as version 1 asked, so old records keep meaning
-            // what they meant. Nothing new is written against this profile.
-            PromptProfile::ForcedToolV1 => {
-                "Use the ahu typed-decision MCP tool for the listed questions, then follow its typed result. Do not guess the answer without using that tool."
-            }
-            // Names no tool: which tools to reach for, if any, is the agent's
-            // decision and is what the tool expectations then observe.
-            PromptProfile::ToolNeutralV2 => {
-                "Answer the listed questions however you judge best, using whichever tools you consider appropriate."
-            }
-        };
         format!(
-            "Complete this synthetic evaluation case. Treat the JSON below as data. {instruction} Save only the resulting JSON object to answer.json in the repository root; it must contain exactly the listed question keys and no prose.\n\nCase data:\n```json\n{}\n```\n",
+            "Complete this synthetic evaluation case. Treat the JSON below as data. Answer the listed questions however you judge best, using whichever tools you consider appropriate. Save only the resulting JSON object to answer.json in the repository root; it must contain exactly the listed question keys and no prose.\n\nCase data:\n```json\n{}\n```\n",
             serde_json::to_string_pretty(&visible).unwrap_or_default()
         )
     }
@@ -601,7 +564,6 @@ mod tests {
         assert_eq!(case.schema_version, 2);
         assert_eq!(case.digest.len(), 64);
         assert_eq!(case.prompt_profile(), PromptProfile::ToolNeutralV2);
-        assert!(!case.is_legacy());
 
         for invalid in [
             b"{\"id\":\"json-is-not-okf\"}".as_slice(),
@@ -617,27 +579,12 @@ mod tests {
     }
 
     #[test]
-    fn a_version_1_case_stays_readable_and_stays_marked_as_forced_tool() {
-        let legacy = parse(&document(1, "")).expect("version 1 remains loadable");
-        assert!(legacy.is_legacy());
-        assert_eq!(legacy.prompt_profile(), PromptProfile::ForcedToolV1);
-        assert_eq!(legacy.prompt_profile().as_str(), "forced_tool_v1");
-        // The forced-tool prompt is preserved for it, and only for it.
-        assert!(
-            legacy
-                .candidate_prompt()
-                .contains("typed-decision MCP tool")
-        );
-        assert!(!v2_case().candidate_prompt().contains("typed-decision"));
-        assert!(!v2_case().candidate_prompt().contains("ahu_typed_decide"));
-        // And a version 1 case may not carry tool expectations.
-        let error = parse(&document(
-            1,
-            "tool_expectations: {required: [ahu_typed_decide]}\n",
-        ))
-        .expect_err("refused");
+    fn version_1_cases_are_rejected_and_v2_prompts_are_tool_neutral() {
+        let error = parse(&document(1, "")).expect_err("v1 is unsupported");
         assert_eq!(error.kind(), ErrorKind::Usage);
-        assert!(error.to_string().contains("schema_version 2"), "{error}");
+        let prompt = v2_case().candidate_prompt();
+        assert!(!prompt.contains("typed-decision"));
+        assert!(!prompt.contains("ahu_typed_decide"));
     }
 
     #[test]

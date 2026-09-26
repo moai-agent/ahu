@@ -514,8 +514,7 @@ mod tests {
         let base = complete().digest();
         let mutations: Vec<Mutation> = vec![
             Box::new(|f| f.case_digest = "9".repeat(64)),
-            Box::new(|f| f.case_schema_version = 1),
-            Box::new(|f| f.prompt_profile = super::super::case::PromptProfile::ForcedToolV1),
+            Box::new(|f| f.case_schema_version = 3),
             Box::new(|f| f.prompt_version += 1),
             Box::new(|f| f.scoring_version += 1),
             Box::new(|f| f.candidate.instructions_digest = "9".repeat(64)),

@@ -1,7 +1,7 @@
 //! `ahu eval report`: argument parsing, the repository boundary for run
 //! evidence, and what the two output surfaces say about coverage.
 //!
-//! The records are the compact JSONL rows `scripts/local_eval.py record`
+//! The records are the compact JSONL rows `ahu eval run`
 //! appends. Every fixture here is synthetic and lives in a `tempfile::TempDir`
 //! outside the checkout under test, which is also what the boundary test
 //! inverts deliberately.
@@ -38,7 +38,7 @@ impl Row {
 
     fn json(&self) -> String {
         let mut fields = vec![
-            "\"schema_version\":1".to_string(),
+            "\"schema_version\":2".to_string(),
             "\"case_id\":\"synthetic-ticket-routing-001\"".to_string(),
             "\"corpus_version\":\"1.0.0\"".to_string(),
             "\"stage\":\"candidate\"".to_string(),
@@ -49,7 +49,6 @@ impl Row {
             "\"model\":\"ollama/fixture-model\"".to_string(),
             "\"harness\":\"opencode\"".to_string(),
             "\"harness_version\":\"1.0.0\"".to_string(),
-            "\"ahu_revision\":\"abc1234\"".to_string(),
             "\"skill_digest\":\"sha256:fixture\"".to_string(),
             format!("\"score\":{}", self.score),
             format!("\"passed\":{}", self.passed),
@@ -460,7 +459,7 @@ fn a_malformed_record_names_its_line_and_fails_as_a_usage_error() {
     // A record missing a field the report groups by is refused by name.
     std::fs::write(
         &records,
-        "{\"model\":\"m\",\"harness\":\"h\",\"score\":1,\"passed\":true}\n",
+        "{\"schema_version\":2,\"model\":\"m\",\"harness\":\"h\",\"score\":1,\"passed\":true}\n",
     )
     .expect("write records");
     let output = run(&repo, &["--records", records.to_str().unwrap()]);
@@ -554,66 +553,24 @@ fn write_lines(dir: &Path, lines: &[String]) -> PathBuf {
 }
 
 #[test]
-fn schema_one_records_stay_readable_in_their_own_legacy_groups() {
+fn records_must_use_schema_two() {
     let repo = TestRepo::new();
     let outside = tempfile::TempDir::new().expect("temp dir");
-    // The same case and the same agent, one row per record generation.
-    let legacy = Row::candidate("triage", 1.0, true).json();
-    let records = write_lines(
-        outside.path(),
-        &[
-            legacy,
-            v2_row(&[("case_id", "\"synthetic-ticket-routing-001\"")]),
-        ],
-    );
-    let report = report_json(&repo, &records);
-    let groups = report["groups"].as_array().expect("groups");
-    assert_eq!(
-        groups.len(),
-        2,
-        "a forced-tool row never pools with a v2 row"
-    );
-
-    let lineages: Vec<&str> = groups
-        .iter()
-        .map(|group| group["lineage"].as_str().expect("lineage"))
-        .collect();
-    assert!(lineages.contains(&"legacy_forced_tool_v1"), "{lineages:?}");
-    assert!(lineages.contains(&"v2"), "{lineages:?}");
-    let legacy_group = groups
-        .iter()
-        .find(|group| group["lineage"] == "legacy_forced_tool_v1")
-        .expect("legacy group");
-    assert_eq!(legacy_group["legacy"], true);
-    // The legacy row keeps its old ambiguous field and has none of the new ones.
-    assert_eq!(legacy_group["ahu_revision"], "abc1234");
-    assert_eq!(legacy_group["ahu_build_digest"], "unspecified");
-    assert_eq!(legacy_group["target_repo_head"], "unspecified");
-    assert_eq!(legacy_group["prompt_profile"], "unspecified");
-
-    let v2 = groups
-        .iter()
-        .find(|group| group["lineage"] == "v2")
-        .expect("v2 group");
-    assert_eq!(v2["legacy"], false);
-    assert_eq!(v2["ahu_revision"], "unspecified");
-    assert_eq!(v2["target_repo_head"], "deadbeef");
-    assert_eq!(v2["prompt_profile"], "tool_neutral_v2");
-    assert_eq!(
-        report["caveats"]["legacy_records"],
-        "record schema 1 rows are grouped separately as legacy_forced_tool_v1 and are never pooled with v2"
-    );
-}
-
-#[test]
-fn a_record_schema_this_ahu_does_not_read_is_refused_rather_than_reinterpreted() {
-    let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
-    let records = write_lines(outside.path(), &[v2_row(&[("schema_version", "3")])]);
-    let output = run(&repo, &["--records", records.to_str().unwrap()]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("schema_version 3"), "{stderr}");
+    for (row, expected) in [
+        (v2_row(&[("schema_version", "1")]), "expected 2"),
+        (v2_row(&[("schema_version", "3")]), "expected 2"),
+        (
+            "{\"case_id\":\"c\",\"model\":\"m\",\"harness\":\"h\",\"score\":1,\"passed\":true}"
+                .into(),
+            "schema_version",
+        ),
+    ] {
+        let records = write_lines(outside.path(), &[row]);
+        let output = run(&repo, &["--records", records.to_str().unwrap()]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+    }
 }
 
 #[test]
@@ -622,8 +579,8 @@ fn any_differing_input_fingerprint_splits_a_group() {
     let outside = tempfile::TempDir::new().expect("temp dir");
     for field in [
         ("case_digest", format!("\"{}\"", "9".repeat(64))),
-        ("case_schema_version", "1".to_string()),
-        ("prompt_profile", "\"forced_tool_v1\"".to_string()),
+        ("case_schema_version", "3".to_string()),
+        ("prompt_profile", "\"manual_unverified\"".to_string()),
         ("prompt_version", "3".to_string()),
         ("scoring_version", "3".to_string()),
         ("agent_identity_digest", format!("\"{}\"", "9".repeat(64))),
@@ -876,5 +833,8 @@ fn the_report_says_what_it_does_not_claim() {
     assert!(stdout.contains("95% Wilson"), "{stdout}");
     assert!(stdout.contains("uncalibrated"), "{stdout}");
     assert!(stdout.contains("neither a pass nor a fail"), "{stdout}");
-    assert!(stdout.contains("never pooled with v2"), "{stdout}");
+    assert!(
+        stdout.contains("All records use evaluation schema 2."),
+        "{stdout}"
+    );
 }

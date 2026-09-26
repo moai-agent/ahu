@@ -121,8 +121,7 @@ knowledge lint options:
                         warnings fail the check. Errors always do.
 
 eval report options:
-  --records <path>      JSONL run records from `ahu eval run`; legacy records
-                        from scripts/local_eval.py are also accepted.
+  --records <path>      JSONL run records written with schema version 2.
                         Required, and refused when it resolves inside this
                         repository: run evidence stays in a user-owned directory
   --output json         Emit a versioned JSON comparison on stdout, the readable
@@ -130,8 +129,8 @@ eval report options:
                         version, stage, agent/version, evaluator/version, model,
                         harness/version, every input fingerprint, and skill
                         digest. Binary answer and tool-expectation pass rates
-                        carry 95% Wilson intervals. Record schema 1 rows stay in
-                        separate legacy groups. Token,
+                        carry 95% Wilson intervals. Only schema version 2
+                        records are accepted. Token,
                         timing, and decision-call figures are reported as
                         coverage counts, so a missing observation is not a zero.
                         `eval report` reads records; it runs no candidate and no
@@ -141,7 +140,7 @@ eval run options:
   --case <path>         OKF Markdown case with YAML front matter; expected
                         answer values, rubric, and tool expectations stay hidden
                         from the candidate. Schema 2 prompts tool-neutrally;
-                        schema 1 is legacy and forces the typed-decision tool
+                        candidates receive a tool-neutral prompt
   --suite <path>        OKF Markdown suite (type ahu:eval-suite) naming cases by
                         relative path with fixed weights. An alternative to
                         --case. The whole case x agent x run matrix is validated

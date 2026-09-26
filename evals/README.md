@@ -286,19 +286,12 @@ checkout and treat it as private.
 Report mean score, pass rate, and coverage separately, so a missing observation
 never reads as a zero.
 
-### Legacy records
+Cases and JSONL run records use schema version 2. Earlier experimental schema
+versions were never released and are not accepted by the runner or report.
 
-Records written before case schema v2 — including everything produced by
-`scripts/local_eval.py record` — are **legacy**. They carry no tool-behaviour
-outcome, and they were produced under a candidate prompt that told every
-candidate to use the typed-decision tool. Keep them if you want the history,
-but do not put them beside v2 rows and read the difference as a change in the
-agent: the case corpus, the scoring surface, and the prompt all moved. Compare
-v2 against v2.
-
-The manual path still exists for one-off scoring. It reads case front matter
-with PyYAML — `python3 -m pip install -r requirements-evals.txt` — and takes a
-structured answer plus an `ahu result --output json` envelope:
+For one-off manual scoring, `scripts/local_eval.py record` reads case front
+matter with PyYAML — `python3 -m pip install -r requirements-evals.txt` — and
+takes a structured answer plus an `ahu result --output json` envelope:
 
 ```sh
 python3 scripts/local_eval.py record \
@@ -309,7 +302,6 @@ python3 scripts/local_eval.py record \
   --run-id "$EVAL_RUN_ID" --stage candidate \
   --model 'ollama/example-model:8b' \
   --harness opencode --harness-version 1.18.32 \
-  --ahu-revision "$(git rev-parse --short HEAD)" \
   --skill-digest '<digest-of-tested-skill-bundle>' \
   --trace-id '<matching-otel-trace-id>' \
   --elapsed-ms '<elapsed-ms-from-otel>' \
@@ -318,8 +310,9 @@ python3 scripts/local_eval.py record \
 python3 scripts/local_eval.py trend --records "$EVAL_HOME/runs.jsonl"
 ```
 
-It scores the answer only; it does not read `tool_expectations`, so it cannot
-tell a correct abstention from a missing observation. Use matching MCP spans to
-fill `--decision-calls` by hand if you need a count, remembering that a nonzero
-count is evidence the tool was invoked, not that its result was followed. The
-recorder refuses to write its run file inside the ahu checkout.
+It writes schema 2 records with a partial fingerprint and the
+`manual_unverified` prompt profile. If the case has tool expectations, their
+status remains unknown because the helper does not evaluate MCP spans. The
+manual record stays in its own report group, separate from fully orchestrated
+runs. Use `ahu eval run` for comparable agent evaluations. The recorder refuses
+to write its run file inside the ahu checkout.
