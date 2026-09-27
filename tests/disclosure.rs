@@ -1120,3 +1120,53 @@ fn delivery_layout_and_nonce_changes_are_not_agent_version_drift() {
         );
     }
 }
+
+#[test]
+fn launch_display_validation_and_json_warnings_are_reviewable() {
+    if !common::in_harness_fixture("launch_display_validation_and_json_warnings_are_reviewable") {
+        return;
+    }
+    let repo = repo_on("claude-code", "claude-opus-5");
+    repo.commit("fixture");
+    let (_, mut plan) = plan_for(&repo, "claude-code", "claude-opus-5");
+    assert!(
+        plan.apply_display(&launch::DisplayMetadata {
+            title: Some("   ".into()),
+            ..Default::default()
+        })
+        .is_err()
+    );
+    plan.apply_display(&launch::DisplayMetadata {
+        name: Some("clear-name".into()),
+        title: Some("A concise title".into()),
+        summary: Some("A useful summary".into()),
+    })
+    .unwrap();
+    assert_eq!(plan.task_name.as_deref(), Some("clear-name"));
+    assert_eq!(plan.title, "A concise title");
+    assert_eq!(plan.summary, "A useful summary");
+
+    plan.parent_dirty = true;
+    plan.hooks.unreadable.push("settings.json".into());
+    plan.snapshot.skipped_directories.push(".private".into());
+    plan.snapshot.unscanned_config.push("mystery.json".into());
+    plan.snapshot.symlinks.push(".agents/external".into());
+    let value: serde_json::Value =
+        serde_json::from_str(&launch::render_json(&plan, "work on it").unwrap()).unwrap();
+    let warnings = value["warnings"].as_array().unwrap();
+    for phrase in [
+        "uncommitted changes",
+        "Hook configuration could not be read",
+        "Directories not scanned",
+        "Configuration carried by the checkout",
+        "Configuration symlinks",
+    ] {
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.as_str().unwrap().contains(phrase)),
+            "missing warning {phrase}: {warnings:?}"
+        );
+    }
+    assert_eq!(value["executed"], false);
+}

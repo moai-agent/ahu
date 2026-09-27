@@ -301,3 +301,118 @@ pub fn branches_matching(repo: &Repo, pattern: &str) -> Result<Vec<String>> {
         .map(str::to_string)
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "ahu test")
+            .env("GIT_AUTHOR_EMAIL", "ahu-test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "ahu test")
+            .env("GIT_COMMITTER_EMAIL", "ahu-test@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn committed_repo() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(root.path().join("README.md"), "base\n").unwrap();
+        git(root.path(), &["add", "README.md"]);
+        git(root.path(), &["commit", "-q", "-m", "base"]);
+        root
+    }
+
+    #[test]
+    fn discovery_dirty_state_identity_and_display_name() {
+        let root = committed_repo();
+        let repo = discover(root.path()).unwrap();
+        assert_eq!(repo.root, root.path().canonicalize().unwrap());
+        assert_eq!(
+            repo.primary_root().unwrap(),
+            root.path().canonicalize().unwrap()
+        );
+        assert!(!repo.identity().is_empty());
+        assert_eq!(
+            repo.display_name(),
+            root.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(!is_dirty(&repo).unwrap());
+        std::fs::write(root.path().join("README.md"), "changed\n").unwrap();
+        assert!(is_dirty(&repo).unwrap());
+        assert!(discover(&root.path().join("missing")).is_err());
+        assert!(
+            run_ok(root.path(), &["not-a-git-subcommand"])
+                .unwrap_err()
+                .to_string()
+                .contains("git not-a-git-subcommand failed")
+        );
+    }
+
+    #[test]
+    fn worktree_and_merged_branch_lifecycle_is_non_destructive() {
+        let root = committed_repo();
+        let repo = discover(root.path()).unwrap();
+        let worktree = root.path().join(".worktrees/feature-checkout");
+        add_worktree(&repo, &worktree, "ahu/test-task", "HEAD").unwrap();
+        assert_eq!(
+            discover(&worktree).unwrap().primary_root().unwrap(),
+            root.path().canonicalize().unwrap()
+        );
+        assert!(branch_exists(&repo, "ahu/test-task").unwrap());
+        assert_eq!(
+            branches_matching(&repo, "ahu/*task").unwrap(),
+            ["ahu/test-task"]
+        );
+        assert!(branch_merged_into_primary_head(&repo, "ahu/test-task").unwrap());
+        remove_task_worktree(&repo, &worktree).unwrap();
+        assert!(branch_exists(&repo, "ahu/test-task").unwrap());
+        delete_task_branch(&root.path(), "ahu/test-task").unwrap();
+        assert!(!branch_exists(&repo, "ahu/test-task").unwrap());
+        assert!(branches_matching(&repo, "ahu/*task").unwrap().is_empty());
+    }
+
+    #[test]
+    fn dirty_worktree_and_unmerged_branch_are_preserved() {
+        let root = committed_repo();
+        let repo = discover(root.path()).unwrap();
+        let worktree = root.path().join(".worktrees/dirty-checkout");
+        add_worktree(&repo, &worktree, "ahu/dirty-task", "HEAD").unwrap();
+        std::fs::write(worktree.join("new-file"), "keep this\n").unwrap();
+        assert!(remove_task_worktree(&repo, &worktree).is_err());
+        assert!(worktree.join("new-file").exists());
+
+        git(root.path(), &["checkout", "-q", "-b", "ahu/unmerged"]);
+        std::fs::write(root.path().join("unmerged.txt"), "unmerged\n").unwrap();
+        git(root.path(), &["add", "unmerged.txt"]);
+        git(root.path(), &["commit", "-q", "-m", "unmerged"]);
+        git(root.path(), &["checkout", "-q", "main"]);
+        assert!(!branch_merged_into_primary_head(&repo, "ahu/unmerged").unwrap());
+        assert!(delete_task_branch(root.path(), "ahu/unmerged").is_err());
+        assert!(branch_exists(&repo, "ahu/unmerged").unwrap());
+    }
+
+    #[test]
+    fn add_worktree_failure_names_invalid_base_and_cleanup_is_safe() {
+        let root = committed_repo();
+        let repo = discover(root.path()).unwrap();
+        let bad = root.path().join(".worktrees/bad");
+        assert!(add_worktree(&repo, &bad, "ahu/bad", "missing-commit").is_err());
+        let good = root.path().join(".worktrees/good");
+        add_worktree(&repo, &good, "ahu/good", "HEAD").unwrap();
+        remove_worktree(&repo, &good, "ahu/good").unwrap();
+        assert!(!branch_exists(&repo, "ahu/good").unwrap());
+        assert!(remove_task_worktree(&repo, &good).is_err());
+    }
+}

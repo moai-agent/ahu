@@ -110,6 +110,8 @@ struct Record {
     #[serde(default)]
     elapsed_ms: Option<f64>,
     #[serde(default)]
+    decision_service_duration_ms: Option<f64>,
+    #[serde(default)]
     mcp_observed: Option<bool>,
     #[serde(default)]
     mcp_request_count: Option<f64>,
@@ -290,6 +292,8 @@ pub struct Group {
     pub mean_elapsed_ms: Option<f64>,
     /// Mean over the runs that reported a count; `None` when none did.
     pub mean_decision_calls: Option<f64>,
+    /// Mean sum of successful typed-decision service durations per run.
+    pub mean_decision_service_duration_ms: Option<f64>,
     /// Every token metric name observed anywhere in the group.
     pub token_fields: BTreeSet<String>,
     /// Mean reported amount per token field, over the runs that reported a
@@ -517,6 +521,7 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
         if record.score.is_some_and(|score| !score.is_finite())
             || [
                 record.elapsed_ms,
+                record.decision_service_duration_ms,
                 record.decision_call_count,
                 record.mcp_request_count,
                 record.mcp_tool_list_count,
@@ -666,6 +671,7 @@ fn group(records: &[Record]) -> Vec<Group> {
             let mut token_amounts: BTreeMap<String, Vec<f64>> = BTreeMap::new();
             let mut elapsed = Vec::new();
             let mut calls = Vec::new();
+            let mut decision_service_durations = Vec::new();
             let mut mcp_requests = Vec::new();
             let mut mcp_tool_lists = Vec::new();
             let mut mcp_tool_calls = Vec::new();
@@ -771,6 +777,9 @@ fn group(records: &[Record]) -> Vec<Group> {
                     coverage.decision_calls += 1;
                     calls.push(value);
                 }
+                if let Some(value) = item.decision_service_duration_ms {
+                    decision_service_durations.push(value);
+                }
                 if item.mcp_observed == Some(true) {
                     coverage.mcp += 1;
                     if let Some(value) = item.mcp_request_count {
@@ -823,6 +832,7 @@ fn group(records: &[Record]) -> Vec<Group> {
                 telemetry_receiver: (coverage.telemetry_receiver > 0).then_some(telemetry_receiver),
                 mean_elapsed_ms: mean(&elapsed),
                 mean_decision_calls: mean(&calls),
+                mean_decision_service_duration_ms: mean(&decision_service_durations),
                 token_fields,
                 mean_tokens: token_amounts
                     .into_iter()
@@ -1009,9 +1019,10 @@ pub fn render_at(report: &Report, width: usize) -> String {
             group.runs
         ));
         out.push_str(&format!(
-            "  observed   elapsed ms {}  decision calls {}  MCP requests {}  tool calls {} (errors {})  typed-decision errors {}\n",
+            "  observed   elapsed ms {}  decision calls {}  decision service ms {}  MCP requests {}  tool calls {} (errors {})  typed-decision errors {}\n",
             measurement(group.mean_elapsed_ms),
             measurement(group.mean_decision_calls),
+            measurement(group.mean_decision_service_duration_ms),
             measurement(group.mean_mcp_requests),
             measurement(group.mean_mcp_tool_calls),
             measurement(group.mean_mcp_tool_errors),
@@ -1787,6 +1798,13 @@ pub fn run(
                 .and_then(|t| t.elapsed_ms)
                 .map_or(serde_json::Value::Null, Into::into),
         );
+        put(
+            "decision_service_duration_ms",
+            telemetry
+                .as_ref()
+                .and_then(|t| t.decision_duration_ms)
+                .map_or(serde_json::Value::Null, Into::into),
+        );
         put("mcp_observed", mcp_observed.into());
         put(
             "telemetry_receiver",
@@ -1830,12 +1848,28 @@ pub fn run(
                 .map(|t| serde_json::to_value(&t.tool_errors_by_name).unwrap_or_default())
                 .unwrap_or(serde_json::Value::Null),
         );
+        let mut reported_tokens = candidate_result
+            .pointer("/metrics/values")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(telemetry) = &telemetry {
+            for (name, value) in [
+                ("decision_service.input", telemetry.decision_input_tokens),
+                ("decision_service.output", telemetry.decision_output_tokens),
+            ] {
+                if let Some(value) = value {
+                    reported_tokens.insert(name.to_owned(), value.into());
+                }
+            }
+        }
         put(
             "reported_tokens",
-            candidate_result
-                .pointer("/metrics/values")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
+            if reported_tokens.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::Object(reported_tokens)
+            },
         );
         record.retain(|_, value| !value.is_null());
         append_jsonl(&records, &serde_json::Value::Object(record))?;
@@ -2369,6 +2403,7 @@ fn group_json(group: &Group) -> serde_json::Value {
         "observed": {
             "mean_elapsed_ms": group.mean_elapsed_ms,
             "mean_decision_calls": group.mean_decision_calls,
+            "mean_decision_service_duration_ms": group.mean_decision_service_duration_ms,
             "mean_mcp_requests": group.mean_mcp_requests,
             "mean_mcp_tool_lists": group.mean_mcp_tool_lists,
             "mean_mcp_tool_calls": group.mean_mcp_tool_calls,
@@ -2880,6 +2915,51 @@ mod tests {
         assert!(
             observed["mean_tokens"].get("ahu.tokens.cached").is_none(),
             "{observed}"
+        );
+    }
+
+    #[test]
+    fn decision_service_usage_is_separate_from_agent_time_and_tokens() {
+        let report = report_of(&[
+            record(&[
+                ("elapsed_ms", "1000"),
+                ("decision_service_duration_ms", "250.0"),
+                (
+                    "reported_tokens",
+                    r#"{"ahu.tokens.total":800,"decision_service.input":120,"decision_service.output":20}"#,
+                ),
+            ]),
+            record(&[
+                ("elapsed_ms", "1500"),
+                ("decision_service_duration_ms", "350.0"),
+                (
+                    "reported_tokens",
+                    r#"{"ahu.tokens.total":1000,"decision_service.input":140,"decision_service.output":30}"#,
+                ),
+            ]),
+        ]);
+        let group = &report.groups[0];
+        assert_eq!(group.mean_elapsed_ms, Some(1250.0));
+        assert_eq!(group.mean_decision_service_duration_ms, Some(300.0));
+        assert_eq!(group.mean_tokens.get("ahu.tokens.total"), Some(&900.0));
+        assert_eq!(
+            group.mean_tokens.get("decision_service.input"),
+            Some(&130.0)
+        );
+        assert_eq!(
+            group.mean_tokens.get("decision_service.output"),
+            Some(&25.0)
+        );
+        assert_eq!(group.mean_total_tokens(), Some(900.0));
+        let json: serde_json::Value = serde_json::from_str(&render_json(&report).unwrap()).unwrap();
+        let observed = &json["groups"][0]["observed"];
+        assert_eq!(observed["mean_decision_service_duration_ms"], 300.0);
+        assert_eq!(observed["mean_total_tokens"], 900.0);
+        let terminal = render_at(&report, 200);
+        assert!(terminal.contains("decision service ms 300"), "{terminal}");
+        assert!(
+            terminal.contains("decision_service.input 130 (2/2)"),
+            "{terminal}"
         );
     }
 

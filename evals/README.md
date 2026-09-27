@@ -28,7 +28,12 @@ judgement for the reader, not something the scorer folds into one number.
 Each record also carries the case and corpus identity, the candidate and
 evaluator agent/model/harness identities, ahu version and build digest, target
 repository head, the skill bundle digest, task outcome, and observed token and
-timing metrics.
+timing metrics. When the decision response reports usage, the record keeps
+`decision_service.input` and `decision_service.output` token observations
+separate from the local agent's token counters. It also reports the sum of
+successful decision calls' `decision_service_duration_ms` separately from the
+agent's end-to-end elapsed time. It never adds unlike counters into a synthetic
+total.
 
 ### Tool status can be unknown
 
@@ -95,13 +100,15 @@ must not hint at which tools the case wants or refuses — a body that says "use
 the typed-decision tool here" measures instruction-following, not tool
 selection. Keep every tool label in front matter and in the grader.
 
-The two authored cases pull against each other on the same tool:
+The authored cases pull against each other on the same tool:
 
 - `cases/decision-routing.md` asks two judgement questions about a support
   ticket, neither of them answerable by copying text, and **requires**
   `ahu_typed_decide`.
 - `cases/direct-extraction.md` asks two questions a single logistics record
   already answers in its own words, and **forbids** `ahu_typed_decide`.
+- `cases/priority-triage.md` asks the agent to apply a short impact policy to a
+  support ticket and **requires** `ahu_typed_decide`.
 
 Neither body mentions a tool. A candidate has to read the shape of the task.
 
@@ -114,6 +121,39 @@ Add cases that probe separate skills and decision types rather than growing one
 large benchmark prompt. Keep them synthetic, balanced, explicit, and
 answerable from the state alone. Version any change to authored content or
 scoring rules: bump `corpus_version` instead of silently moving the baseline.
+
+## Measuring typed-decision efficiency
+
+Compare two agents on the same local harness, model, permissions, MCP setup,
+and suite: a baseline without the `typed-decisions` skill and a treatment with
+that skill installed and available to the harness. Keep every other input
+identical. `ahu setup` installs the bundled skill for detected harnesses; its
+presence does not prove that a harness loaded it. Inspect the harness's actual
+skill behavior and compare the recorded agent context fingerprints before
+interpreting a run.
+
+Run repeated trials and compare answer pass rate, required and forbidden tool
+outcomes, local agent token fields, agent elapsed time,
+`decision_service.input` and `decision_service.output`, and
+`decision_service_duration_ms`. Decision service usage stays separate because
+TypeSafe's token counts and local harness counters may come from different
+models and are not interchangeable. End-to-end elapsed time includes the tool
+round trip; service duration shows the portion spent in the decision service.
+
+Use at least 10 runs per variant as an initial look, then increase repetitions
+if results are close or variable. Alternate which variant runs first across
+separate invocations to reduce warm-cache and time-order effects. Keep records
+outside the repository and inspect per-case results, intervals, and telemetry
+coverage. Treat a lower count or shorter time as an observed association until
+repeated trials and human review support its interpretation. This synthetic
+suite is a starting point, not proof of a general speedup.
+
+The candidate agent may run locally while TypeSafe Jev evaluates each decision
+over HTTPS. That is not a fully local inference path: decision state and
+questions leave the machine, and TypeSafe-reported usage may incur separate
+provider costs. Use only synthetic data for these cases. To evaluate a fully
+local decision path, set `AHU_DECISION_URL` to the loopback Ollama adapter and
+keep that provider choice constant across variants.
 
 ## Suite files
 

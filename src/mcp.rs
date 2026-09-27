@@ -45,6 +45,10 @@ pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
         AGENT_CONTEXT_CRITIC_SKILL,
         include_str!("../.agents/skills/agent-context-critic/SKILL.md"),
     ),
+    (
+        "typed-decisions",
+        include_str!("../.agents/skills/typed-decisions/SKILL.md"),
+    ),
 ];
 
 pub fn skill_path(name: &str) -> String {
@@ -473,7 +477,7 @@ fn call_response(repo: &Repo, id: &Value, params: &Value, modern: bool) -> Value
         "ahu_agents_list" => agents(repo),
         "ahu_tasks_list" => tasks(repo),
         "ahu_task_get" => task_get(repo, &arguments),
-        "ahu_typed_decide" => decisions::call(&arguments),
+        "ahu_typed_decide" => decisions::call(&arguments, repo),
         _ => Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
     };
     match result {
@@ -748,7 +752,8 @@ mod tests {
             vec![
                 "discover-requirements",
                 "direct-agents",
-                AGENT_CONTEXT_CRITIC_SKILL
+                AGENT_CONTEXT_CRITIC_SKILL,
+                "typed-decisions"
             ]
         );
     }

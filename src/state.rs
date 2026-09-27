@@ -767,6 +767,168 @@ pub fn read_private_file(path: &Path) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn git_repo() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        root
+    }
+
+    #[test]
+    fn checkout_state_is_created_private_and_requires_a_bare_ignore_all() {
+        let root = tempfile::tempdir().unwrap();
+        let state = ensure_checkout_state(root.path()).unwrap();
+        assert!(state.is_dir());
+        assert!(ignores_everything(
+            &std::fs::read_to_string(root.path().join(".ahu/.gitignore")).unwrap()
+        ));
+
+        std::fs::write(root.path().join(".ahu/.gitignore"), "*\n!keep\n").unwrap();
+        assert!(
+            ensure_checkout_state(root.path())
+                .unwrap_err()
+                .to_string()
+                .contains("no negations")
+        );
+
+        std::fs::remove_dir_all(root.path().join(".ahu")).unwrap();
+        std::fs::write(root.path().join(".ahu"), "not a directory").unwrap();
+        assert!(checkout_root(root.path()).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn checkout_state_refuses_redirecting_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join(".ahu")).unwrap();
+        assert!(ensure_checkout_state(root.path()).is_err());
+
+        std::fs::remove_file(root.path().join(".ahu")).unwrap();
+        std::fs::create_dir(root.path().join(".ahu")).unwrap();
+        symlink(outside.path(), root.path().join(".ahu/state")).unwrap();
+        assert!(checkout_root(root.path()).is_err());
+
+        std::fs::remove_file(root.path().join(".ahu/state")).unwrap();
+        std::fs::create_dir(root.path().join(".ahu/state")).unwrap();
+        symlink(outside.path(), root.path().join(".ahu/.gitignore")).unwrap();
+        assert!(ensure_checkout_state(root.path()).is_err());
+    }
+
+    #[test]
+    fn private_state_files_round_trip_and_missing_json_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let state_root = ensure_checkout_state(root.path()).unwrap();
+        let dir = state_root.join("repos/example/tasks");
+        create_private_dir_all(&dir).unwrap();
+        confine_existing_dir(&dir).unwrap();
+        let path = dir.join("record.json");
+        assert_eq!(
+            read_json::<Vec<String>>(&path).unwrap(),
+            Vec::<String>::new()
+        );
+        write_json(&path, &vec!["one".to_string()]).unwrap();
+        assert_eq!(read_json::<Vec<String>>(&path).unwrap(), vec!["one"]);
+        write_private_file(&dir.join("prompt.md"), b"task prompt").unwrap();
+        assert_eq!(
+            read_private_file(&dir.join("prompt.md")).unwrap(),
+            b"task prompt"
+        );
+        assert!(read_private_file(&dir.join("missing.md")).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn state_file_reads_refuse_symlinks_and_non_regular_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let state_root = ensure_checkout_state(root.path()).unwrap();
+        let dir = state_root.join("repos");
+        create_private_dir_all(&dir).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = dir.join("redirect.json");
+        symlink(outside.path().join("secret"), &link).unwrap();
+        assert!(read_json::<Vec<String>>(&link).is_err());
+        std::fs::remove_file(&link).unwrap();
+        std::fs::create_dir(&link).unwrap();
+        assert!(
+            confine_file(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_temporary_file_replaces_stale_file_but_refuses_links_and_directories() {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("record.tmp");
+        std::fs::write(&stale, "stale").unwrap();
+        create_new_private_file(&stale)
+            .unwrap()
+            .write_all(b"fresh")
+            .unwrap();
+        assert_eq!(std::fs::read(&stale).unwrap(), b"fresh");
+
+        let target = root.path().join("target");
+        std::fs::write(&target, "safe").unwrap();
+        let link = root.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert!(create_new_private_file(&link).is_err());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "safe");
+
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(create_new_private_file(&directory).is_err());
+    }
+
+    #[test]
+    fn worktrees_directory_is_self_ignored_and_worktrees_are_confined() {
+        let root = git_repo();
+        let worktrees = ensure_worktrees_root(root.path()).unwrap();
+        assert!(ignores_everything(
+            &std::fs::read_to_string(worktrees.join(".gitignore")).unwrap()
+        ));
+        let inside = worktrees.join("task");
+        std::fs::create_dir(&inside).unwrap();
+        verify_worktree_inside_repo(root.path(), &inside).unwrap();
+
+        let outside_root = tempfile::tempdir().unwrap();
+        let outside = outside_root.path().join("task");
+        std::fs::create_dir(&outside).unwrap();
+        assert!(verify_worktree_inside_repo(root.path(), &outside).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn worktrees_refuse_a_symlink_or_incomplete_ignore_policy() {
+        use std::os::unix::fs::symlink;
+
+        let root = git_repo();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join(WORKTREES_DIR)).unwrap();
+        assert!(ensure_worktrees_root(root.path()).is_err());
+        std::fs::remove_file(root.path().join(WORKTREES_DIR)).unwrap();
+        std::fs::create_dir(root.path().join(WORKTREES_DIR)).unwrap();
+        std::fs::write(
+            root.path().join(WORKTREES_DIR).join(".gitignore"),
+            "# no ignore\n",
+        )
+        .unwrap();
+        assert!(ensure_worktrees_root(root.path()).is_err());
+    }
+
     #[test]
     #[cfg(unix)]
     fn permission_errors_explain_state_location_and_sandbox_recovery() {

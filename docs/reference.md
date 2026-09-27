@@ -121,11 +121,15 @@ canonical task IDs and verified `@name` handles while using ahu's existing
 repository ownership and task-resolution rules. Protocol handles describe
 inspection operations and do not replace ahu launch records or identities.
 
-The optional `ahu_typed_decide` tool forwards a bounded typed-decision request
-to the loopback HTTP endpoint named by `AHU_DECISION_URL`. It uses a
-model-neutral JSON contract, does not persist calls as ahu tasks, and is not
-available for remote endpoints. See [typed decisions](typed-decisions.md) for
-the request and response shapes and service limits.
+The optional `ahu_typed_decide` tool uses TypeSafe Jev over HTTPS by default,
+reading `TYPESAFE_API_KEY` from the MCP process
+environment or the primary checkout's ignored `.env`. Setting
+`AHU_DECISION_URL` explicitly selects a credential-free loopback decision
+service instead. Decision calls are not persisted as ahu tasks; the tool
+telemetry excludes their payloads and credentials. Jev receives the state and
+questions, so review TypeSafe's data policy before sending sensitive content.
+See [typed decisions](typed-decisions.md) for the provider mapping and secret
+handling details.
 
 `ahu setup` is the only setup command. It detects installed supported harnesses,
 asks for a model per detected harness, creates an ahu `dev-<harness>` agent for

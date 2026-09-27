@@ -54,8 +54,27 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         .with_kind(crate::util::ErrorKind::Prerequisite));
     }
 
+    run_detected(
+        console,
+        repo,
+        &detected,
+        crate::launcher::run_setup_with_available_models,
+        check_mcp_server,
+    )
+}
+
+/// Finish configuration for an already detected set of harnesses. Keeping
+/// environment discovery at the edge makes the setup transaction testable
+/// without faking PATH or launching harness binaries.
+fn run_detected(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    detected: &[Detected],
+    configure_project: fn(&mut Console<'_>) -> Result<Option<crate::config::ProjectConfig>>,
+    check_server: fn(&Repo) -> Result<()>,
+) -> Result<i32> {
     console.say(&style::stdout().paint(Role::Heading, "Detected harnesses\n"))?;
-    for h in &detected {
+    for h in detected {
         console.say(&format!(
             "  {}{} ({})\n",
             h.id,
@@ -72,7 +91,7 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
     // developer agents created below.
     let loaded = config::load(&repo.root)?;
     let (new_config, existing_config) = if loaded.is_none() {
-        let Some(config) = crate::launcher::run_setup_with_available_models(console)? else {
+        let Some(config) = configure_project(console)? else {
             console.say("Cancelled. Nothing was changed.\n")?;
             return Ok(1);
         };
@@ -82,7 +101,7 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
     };
 
     let mut chosen_models: Vec<(&'static str, String)> = Vec::new();
-    for h in &detected {
+    for h in detected {
         if let Some(model) = new_config
             .as_ref()
             .and_then(|config| config.model_rankings.get(h.id))
@@ -160,7 +179,7 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
 
     // Make sure the exact server binary configured in the project can start and
     // speak MCP before writing any project files.
-    check_mcp_server(repo)?;
+    check_server(repo)?;
 
     let mut writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     if let Some(config) = new_config {
@@ -544,7 +563,18 @@ fn check_mcp_server(repo: &Repo) -> Result<()> {
 mod tests {
     use std::path::Path;
 
-    use super::{Detected, add_client_configurations, dev_agent, verify_client_configurations};
+    use super::{
+        Detected, add_client_configurations, add_codex_server, add_json_server, apply_plan,
+        dev_agent, run, run_detected, safe_new_path, verify_client_configurations,
+    };
+
+    fn detected(id: &'static str) -> Detected {
+        Detected {
+            id,
+            executable: id.into(),
+            version: None,
+        }
+    }
 
     #[test]
     fn each_supported_harness_gets_its_native_project_mcp_shape() {
@@ -595,6 +625,390 @@ mod tests {
             assert_eq!(manifest.model, model);
             assert_eq!(manifest.permissions, crate::agent::Permissions::Prompt);
             assert!(body.contains("ahu MCP tools"));
+        }
+    }
+
+    #[test]
+    fn json_server_preserves_existing_settings_and_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".mcp.json"), r#"{"custom":{"keep":true}}"#).unwrap();
+        let mut plan = Vec::new();
+        add_json_server(root.path(), ".mcp.json", "mcpServers", "claude", &mut plan).unwrap();
+        assert_eq!(plan.len(), 1);
+        let value: serde_json::Value = serde_json::from_slice(&plan[0].1).unwrap();
+        assert_eq!(value["custom"]["keep"], true);
+        assert_eq!(value["mcpServers"]["ahu"]["args"][1], "serve");
+        std::fs::write(&plan[0].0, &plan[0].1).unwrap();
+        let mut second_plan = Vec::new();
+        add_json_server(
+            root.path(),
+            ".mcp.json",
+            "mcpServers",
+            "claude",
+            &mut second_plan,
+        )
+        .unwrap();
+        assert!(second_plan.is_empty());
+    }
+
+    #[test]
+    fn json_server_rejects_unsafe_or_conflicting_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let mut plan = Vec::new();
+        std::fs::write(root.path().join("opencode.jsonc"), "{} // comment\n").unwrap();
+        assert!(
+            add_json_server(root.path(), "opencode.json", "mcp", "opencode", &mut plan)
+                .unwrap_err()
+                .to_string()
+                .contains("opencode.jsonc")
+        );
+        std::fs::remove_file(root.path().join("opencode.jsonc")).unwrap();
+
+        std::fs::write(root.path().join("config.json"), "not json").unwrap();
+        assert!(
+            add_json_server(root.path(), "config.json", "mcp", "claude", &mut plan)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid JSON")
+        );
+        std::fs::write(root.path().join("config.json"), "[]").unwrap();
+        assert!(
+            add_json_server(root.path(), "config.json", "mcp", "claude", &mut plan)
+                .unwrap_err()
+                .to_string()
+                .contains("JSON object")
+        );
+        std::fs::write(root.path().join("config.json"), r#"{"mcp":[]}"#).unwrap();
+        assert!(
+            add_json_server(root.path(), "config.json", "mcp", "claude", &mut plan)
+                .unwrap_err()
+                .to_string()
+                .contains("must be an object")
+        );
+        std::fs::write(
+            root.path().join("config.json"),
+            r#"{"mcp":{"ahu":{"command":"other"}}}"#,
+        )
+        .unwrap();
+        assert!(
+            add_json_server(root.path(), "config.json", "mcp", "claude", &mut plan)
+                .unwrap_err()
+                .to_string()
+                .contains("will not replace it")
+        );
+    }
+
+    #[test]
+    fn codex_server_handles_empty_existing_and_conflicting_toml() {
+        let root = tempfile::tempdir().unwrap();
+        let mut plan = Vec::new();
+        add_codex_server(root.path(), &mut plan).unwrap();
+        assert!(
+            String::from_utf8(plan.pop().unwrap().1)
+                .unwrap()
+                .contains("[mcp_servers.ahu]")
+        );
+
+        std::fs::create_dir_all(root.path().join(".codex")).unwrap();
+        let path = root.path().join(".codex/config.toml");
+        std::fs::write(&path, "model = 'x'\n").unwrap();
+        let mut plan = Vec::new();
+        add_codex_server(root.path(), &mut plan).unwrap();
+        assert!(
+            String::from_utf8(plan[0].1.clone())
+                .unwrap()
+                .starts_with("model = 'x'")
+        );
+        std::fs::write(&path, &plan[0].1).unwrap();
+        let mut idempotent = Vec::new();
+        add_codex_server(root.path(), &mut idempotent).unwrap();
+        assert!(idempotent.is_empty());
+
+        std::fs::write(&path, "[mcp_servers.ahu]\ncommand='other'\n").unwrap();
+        assert!(
+            add_codex_server(root.path(), &mut Vec::new())
+                .unwrap_err()
+                .to_string()
+                .contains("will not replace it")
+        );
+        std::fs::write(&path, "invalid = [\n").unwrap();
+        assert!(
+            add_codex_server(root.path(), &mut Vec::new())
+                .unwrap_err()
+                .to_string()
+                .contains("invalid TOML")
+        );
+    }
+
+    #[test]
+    fn setup_plan_creates_files_and_rolls_back_partial_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: true,
+        };
+        let created = root.path().join("nested/first.txt");
+        apply_plan(&mut console, &[(created.clone(), b"first".to_vec())]).unwrap();
+        assert_eq!(std::fs::read(&created).unwrap(), b"first");
+
+        let blocking_file = root.path().join("blocker");
+        std::fs::write(&blocking_file, "not a directory").unwrap();
+        let before_failure = root.path().join("before-failure.txt");
+        let blocked = blocking_file.join("child.txt");
+        assert!(
+            apply_plan(
+                &mut console,
+                &[
+                    (before_failure.clone(), b"temporary".to_vec()),
+                    (blocked, b"fail".to_vec())
+                ]
+            )
+            .is_err()
+        );
+        assert!(!before_failure.exists());
+    }
+
+    #[test]
+    fn safe_new_path_rejects_parent_escape_and_symlink_escape() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(safe_new_path(root.path(), "../outside").is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = tempfile::tempdir().unwrap();
+            symlink(outside.path(), root.path().join("escape")).unwrap();
+            assert!(safe_new_path(root.path(), "escape/file").is_err());
+        }
+    }
+
+    #[test]
+    fn client_configuration_verification_reports_missing_or_malformed_entries() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(verify_client_configurations(root.path(), &[detected("claude-code")]).is_err());
+        std::fs::write(root.path().join(".mcp.json"), "not json").unwrap();
+        assert!(verify_client_configurations(root.path(), &[detected("claude-code")]).is_err());
+
+        std::fs::create_dir_all(root.path().join(".codex")).unwrap();
+        std::fs::write(root.path().join(".codex/config.toml"), "model='x'\n").unwrap();
+        assert!(
+            verify_client_configurations(root.path(), &[detected("codex")])
+                .unwrap_err()
+                .to_string()
+                .contains("did not read back")
+        );
+        std::fs::write(root.path().join(".codex/config.toml"), "invalid = [\n").unwrap();
+        assert!(verify_client_configurations(root.path(), &[detected("codex")]).is_err());
+    }
+
+    #[test]
+    fn unknown_harnesses_do_not_create_client_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let mut plan = Vec::new();
+        add_client_configurations(root.path(), &[detected("future-harness")], &mut plan).unwrap();
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn noninteractive_setup_fails_before_inspecting_harnesses_or_writing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: false,
+        };
+        let repo = crate::git::Repo {
+            root: root.path().to_path_buf(),
+            common_dir: root.path().join(".git"),
+            head: None,
+        };
+        let error = run(&mut console, &repo).unwrap_err();
+        assert!(error.to_string().contains("needs a terminal"));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn setup_plan_skips_identical_existing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("already.md");
+        std::fs::write(&path, "same").unwrap();
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: true,
+        };
+        apply_plan(&mut console, &[(path.clone(), b"same".to_vec())]).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"same");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn detected_harness_setup_writes_a_complete_consistent_project_plan() {
+        fn configure(
+            _: &mut crate::launcher::Console<'_>,
+        ) -> crate::util::Result<Option<crate::config::ProjectConfig>> {
+            Ok(Some(project_config()))
+        }
+        fn mcp_handshake_ok(_: &crate::git::Repo) -> crate::util::Result<()> {
+            Ok(())
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(root.path()).unwrap();
+
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: true,
+        };
+        assert_eq!(
+            run_detected(
+                &mut console,
+                &repo,
+                &[detected("codex")],
+                configure,
+                mcp_handshake_ok
+            )
+            .unwrap(),
+            0
+        );
+        assert!(
+            root.path()
+                .join(crate::config::CONFIG_RELATIVE_PATH)
+                .is_file()
+        );
+        assert!(
+            root.path()
+                .join(".agents/ahu/agents/dev-codex.md")
+                .is_file()
+        );
+        assert!(root.path().join(".codex/config.toml").is_file());
+        assert!(
+            root.path()
+                .join(".agents/skills/direct-agents/SKILL.md")
+                .is_file()
+        );
+        assert!(root.path().join(crate::context_lock::LOCK_PATH).is_file());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("MCP stdio handshake passed"));
+        assert!(output.contains("Refreshed"));
+    }
+
+    #[test]
+    fn detected_harness_setup_stops_before_writes_on_mcp_handshake_failure() {
+        fn configure(
+            _: &mut crate::launcher::Console<'_>,
+        ) -> crate::util::Result<Option<crate::config::ProjectConfig>> {
+            Ok(Some(project_config()))
+        }
+        fn mcp_handshake_fails(_: &crate::git::Repo) -> crate::util::Result<()> {
+            Err(crate::util::Error::new("injected MCP handshake failure"))
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(root.path()).unwrap();
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: true,
+        };
+        assert!(
+            run_detected(
+                &mut console,
+                &repo,
+                &[detected("codex")],
+                configure,
+                mcp_handshake_fails
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("injected MCP handshake failure")
+        );
+        assert!(!root.path().join(".codex/config.toml").exists());
+        assert!(
+            !root
+                .path()
+                .join(crate::config::CONFIG_RELATIVE_PATH)
+                .exists()
+        );
+        assert!(!root.path().join(".agents/ahu/agents/dev-codex.md").exists());
+    }
+
+    #[test]
+    fn detected_setup_cancellation_leaves_the_project_untouched() {
+        fn configure(
+            _: &mut crate::launcher::Console<'_>,
+        ) -> crate::util::Result<Option<crate::config::ProjectConfig>> {
+            Ok(None)
+        }
+        fn mcp_handshake_ok(_: &crate::git::Repo) -> crate::util::Result<()> {
+            Ok(())
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(root.path()).unwrap();
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: true,
+        };
+        assert_eq!(
+            run_detected(
+                &mut console,
+                &repo,
+                &[detected("codex")],
+                configure,
+                mcp_handshake_ok
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        assert!(String::from_utf8(output).unwrap().contains("Cancelled"));
+    }
+
+    fn project_config() -> crate::config::ProjectConfig {
+        crate::config::ProjectConfig {
+            schema_version: crate::config::SUPPORTED_SCHEMA_VERSION,
+            harness_preferences: vec!["codex".into()],
+            model_selection: "project-ranked".into(),
+            catalog_version: crate::catalog::CATALOG_VERSION.into(),
+            model_rankings: std::collections::BTreeMap::from([(
+                "codex".into(),
+                vec![crate::catalog::models_for("codex")[0].model.into()],
+            )]),
+            knowledge: Default::default(),
+            telemetry: Default::default(),
         }
     }
 }

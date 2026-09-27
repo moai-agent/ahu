@@ -2884,3 +2884,160 @@ mod doctor_tests {
         assert!(!local_collector_reachable(address));
     }
 }
+
+#[cfg(test)]
+mod artifact_and_inbox_tests {
+    use super::*;
+
+    #[test]
+    fn inbox_names_accept_only_ahu_numbered_markdown_entries() {
+        assert_eq!(parse_inbox_entry("0001.md"), Some(1));
+        assert_eq!(parse_inbox_entry("0100.md"), Some(100));
+        for name in ["1.md", "000.md", "0001.txt", "readme.md", "0001.md.bak"] {
+            assert_eq!(parse_inbox_entry(name), None, "{name}");
+        }
+        assert_eq!(parse_inbox_entry("000999999999999999999999.md"), None);
+    }
+
+    #[test]
+    fn inbox_delivery_appends_safely_and_refuses_unrecognized_or_nonfiles() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(deliver_inbox_message(root.path(), "first").unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("inbox/0001.md")).unwrap(),
+            "first"
+        );
+        assert_eq!(deliver_inbox_message(root.path(), "second").unwrap(), 2);
+
+        let unknown = tempfile::tempdir().unwrap();
+        std::fs::create_dir(unknown.path().join("inbox")).unwrap();
+        std::fs::write(
+            unknown.path().join("inbox/notes.md"),
+            "do not overwrite beside",
+        )
+        .unwrap();
+        assert!(deliver_inbox_message(unknown.path(), "message").is_err());
+
+        let nonfile = tempfile::tempdir().unwrap();
+        std::fs::create_dir(nonfile.path().join("inbox")).unwrap();
+        std::fs::create_dir(nonfile.path().join("inbox/0001.md")).unwrap();
+        assert!(deliver_inbox_message(nonfile.path(), "message").is_err());
+    }
+
+    #[test]
+    fn inbox_delivery_enforces_entry_and_total_byte_budgets() {
+        let full = tempfile::tempdir().unwrap();
+        let inbox = full.path().join("inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        for number in 1..=INBOX_MAX_ENTRIES {
+            std::fs::write(inbox.join(format!("{number:04}.md")), "x").unwrap();
+        }
+        assert!(
+            deliver_inbox_message(full.path(), "next")
+                .unwrap_err()
+                .to_string()
+                .contains("full")
+        );
+
+        let oversized = tempfile::tempdir().unwrap();
+        let inbox = oversized.path().join("inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        std::fs::write(
+            inbox.join("0001.md"),
+            vec![b'x'; INBOX_MAX_TOTAL_BYTES as usize],
+        )
+        .unwrap();
+        assert!(
+            deliver_inbox_message(oversized.path(), "x")
+                .unwrap_err()
+                .to_string()
+                .contains("bytes")
+        );
+    }
+
+    #[test]
+    fn question_and_result_artifacts_are_bounded_and_display_safe() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(question_excerpt(root.path()).is_none());
+        assert!(read_artifact(root.path(), "result.md").is_none());
+
+        std::fs::write(root.path().join("question.md"), "  first line\nsecond\n").unwrap();
+        assert_eq!(question_excerpt(root.path()).as_deref(), Some("first line"));
+        std::fs::write(root.path().join("question.md"), "\n  \n").unwrap();
+        assert_eq!(
+            question_excerpt(root.path()).as_deref(),
+            Some("present, empty")
+        );
+        std::fs::write(
+            root.path().join("question.md"),
+            vec![b'x'; TASK_ARTIFACT_LIMIT as usize + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            question_excerpt(root.path()).as_deref(),
+            Some("present, larger than the display bound")
+        );
+
+        std::fs::write(root.path().join("result.md"), "result\u{202e}").unwrap();
+        match read_artifact(root.path(), "result.md").unwrap() {
+            ArtifactBody::Content(body) => assert!(body.contains("\\u{202e}")),
+            _ => panic!("expected bounded result content"),
+        }
+        std::fs::write(
+            root.path().join("result.md"),
+            vec![b'x'; TASK_ARTIFACT_LIMIT as usize + 1],
+        )
+        .unwrap();
+        assert!(matches!(
+            read_artifact(root.path(), "result.md"),
+            Some(ArtifactBody::Oversized)
+        ));
+    }
+
+    #[test]
+    fn unreadable_task_report_groups_reasons_and_recovers_worktree_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(root.path()).unwrap();
+        let unreadable = ["task-one", "task-two"].map(|task_id| {
+            let dir = root
+                .path()
+                .join(".ahu/state/repos/identity/tasks")
+                .join(task_id);
+            let worktree = crate::state::worktree_dir(root.path(), task_id).unwrap();
+            std::fs::create_dir_all(&worktree).unwrap();
+            task::UnreadableTask {
+                dir: dir.clone(),
+                task_id: task_id.into(),
+                reason: format!("{}: unsupported record", dir.join("task.json").display()),
+            }
+        });
+        assert!(render_unreadable_tasks(&repo, &[]).is_empty());
+        let rendered = render_unreadable_tasks(&repo, &unreadable);
+        assert!(rendered.contains("2 task(s)"));
+        assert_eq!(rendered.matches("unsupported record").count(), 1);
+        assert!(rendered.contains("task-one [unreadable]"));
+        assert!(rendered.contains(".worktrees/task-two"));
+        assert!(rendered.contains("branch    none found"));
+        assert!(rendered.contains("authoritative listing"));
+    }
+
+    #[test]
+    fn task_state_roles_and_record_path_prefixes_are_stable() {
+        assert!(matches!(state_role("running"), Role::Success));
+        assert!(matches!(state_role("failed"), Role::Error));
+        assert!(matches!(state_role("interrupted"), Role::Warning));
+        assert!(matches!(state_role("new-future-state"), Role::Hint));
+        let dir = Path::new("/tmp/task");
+        assert_eq!(
+            strip_record_path("/tmp/task/task.json: invalid schema", dir),
+            "invalid schema"
+        );
+        assert_eq!(strip_record_path("different path", dir), "different path");
+    }
+}

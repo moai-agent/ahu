@@ -1052,6 +1052,147 @@ fn parse_hooks(value: &serde_json::Value, scope: Scope, source: &str) -> Option<
     Some(found)
 }
 
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn scope_policy_and_worktree_properties_are_distinct() {
+        assert!(Scope::Project.is_project_policy());
+        assert!(Scope::Project.travels_into_worktree());
+        assert!(!Scope::ProjectLocal.is_project_policy());
+        assert!(Scope::ProjectLocal.travels_into_worktree());
+        assert!(!Scope::User.travels_into_worktree());
+        assert!(!Scope::Managed.travels_into_worktree());
+        assert!(
+            Scope::User
+                .why_not_project_policy()
+                .contains("home directory")
+        );
+        assert!(
+            Scope::Managed
+                .why_not_project_policy()
+                .contains("machine policy")
+        );
+        assert_eq!(Scope::ProjectLocal.as_str(), "project-local");
+    }
+
+    #[test]
+    fn claude_settings_capture_policy_and_only_environment_names() {
+        let facts = parse_claude_settings(
+            &json!({
+                "permissions": {
+                    "defaultMode": "acceptEdits",
+                    "allow": ["Read", 7],
+                    "deny": ["Bash(rm *)"],
+                    "ask": ["Write"],
+                    "additionalDirectories": ["../shared"]
+                },
+                "enabledPlugins": ["lint"],
+                "enableAllProjectMcpServers": true,
+                "enabledMcpjsonServers": ["docs"],
+                "env": {"API_TOKEN": "super-secret"},
+                "futureSetting": true
+            }),
+            Scope::Project,
+            "settings.json",
+        );
+        assert_eq!(facts.default_mode.as_deref(), Some("acceptEdits"));
+        assert_eq!(facts.allow, ["Read", "7"]);
+        assert_eq!(facts.deny, ["Bash(rm *)"]);
+        assert_eq!(facts.ask, ["Write"]);
+        assert_eq!(facts.additional_directories, ["../shared"]);
+        assert_eq!(facts.enabled_plugins, ["lint"]);
+        assert_eq!(facts.enable_all_project_mcp_servers, Some(true));
+        assert_eq!(facts.enabled_mcpjson_servers, ["docs"]);
+        assert_eq!(facts.env_names, ["API_TOKEN"]);
+        assert_eq!(facts.uninterpreted_keys, ["futureSetting"]);
+        assert!(facts.widens_approvals());
+        assert!(!format!("{facts:?}").contains("super-secret"));
+    }
+
+    #[test]
+    fn opencode_permission_alias_and_action_map_are_interpreted() {
+        let facts = parse_opencode_settings(
+            &json!({
+                "permission": {
+                    "read": "allow",
+                    "write": "ask",
+                    "shell": "deny",
+                    "unknown": "prompt",
+                    "additionalDirectories": ["/tmp/work"]
+                },
+                "plugins": ["plugin-a"],
+                "env": {"SECRET": "private"},
+                "newKey": 1
+            }),
+            Scope::User,
+            "opencode.json",
+        );
+        assert!(facts.allow.contains(&"read".to_string()));
+        assert!(facts.ask.contains(&"write".to_string()));
+        assert!(facts.deny.contains(&"shell".to_string()));
+        assert_eq!(facts.enabled_plugins, Vec::<String>::new());
+        assert_eq!(facts.env_names, ["SECRET"]);
+        assert_eq!(facts.uninterpreted_keys, ["newKey"]);
+        assert!(facts.widens_approvals());
+        assert!(!facts.is_empty());
+    }
+
+    #[test]
+    fn approval_fact_detection_is_conservative_but_ignores_deny_and_ask() {
+        for mode in ["bypassPermissions", "acceptEdits", "auto", "dontAsk"] {
+            let mut facts = SettingsFacts::new("settings", Scope::Project);
+            facts.default_mode = Some(mode.to_string());
+            assert!(facts.widens_approvals(), "mode {mode}");
+        }
+        let mut narrow = SettingsFacts::new("settings", Scope::Project);
+        narrow.deny.push("Bash".into());
+        narrow.ask.push("Write".into());
+        assert!(!narrow.widens_approvals());
+    }
+
+    #[test]
+    fn hook_parser_handles_nested_and_bare_shapes_and_rejects_malformed_events() {
+        let hooks = parse_hooks(
+            &json!({"hooks": {
+                "PreToolUse": [{"matcher": "Bash", "hooks": [
+                    {"type": "command", "command": "checker --token secret"},
+                    {"command": "second"}
+                ]}],
+                "SessionStart": [{"type": "prompt", "command": "hello"}]
+            }}),
+            Scope::Project,
+            "settings.json",
+        )
+        .unwrap();
+        assert_eq!(hooks.len(), 3);
+        assert_eq!(hooks[0].event, "PreToolUse");
+        assert_eq!(hooks[0].matcher.as_deref(), Some("Bash"));
+        assert!(hooks[0].label().contains("checker …"));
+        assert!(!hooks[0].label().contains("secret"));
+        assert_eq!(hooks[1].kind, "unknown");
+        assert_eq!(hooks[2].kind, "prompt");
+        assert!(parse_hooks(&json!({"hooks": []}), Scope::Project, "x").is_none());
+        assert!(parse_hooks(&json!({"hooks": {"event": {}}}), Scope::Project, "x").is_none());
+        assert!(
+            parse_hooks(&json!({}), Scope::Project, "x")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn command_labels_hide_assignments_and_truncate_by_characters() {
+        assert_eq!(program_label("  "), "<empty command>");
+        assert!(program_label("TOKEN='two words' checker").contains("digest only"));
+        assert_eq!(truncate("alpha\n beta", 20), "alpha beta");
+        assert!(truncate("é".repeat(60).as_str(), 48).chars().count() <= 48);
+        assert_eq!(string_list(Some(&json!("not-array"))), Vec::<String>::new());
+    }
+}
+
 /// The warning shown when hooks outside project policy are in effect.
 pub const NON_PROJECT_HOOK_WARNING: &str =
     "Hooks configured outside this project are not project policy.";

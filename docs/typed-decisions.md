@@ -1,20 +1,39 @@
 # Typed decisions over ahu MCP
 
-This is an exploratory, model-neutral interface for letting any ahu-launched
-MCP-capable agent ask a local decision service for bounded typed answers. ahu
-does not load a model or run an agent loop. The service process and any
-model-specific adapter run separately.
+This is an exploratory, model-neutral MCP interface for letting an ahu agent
+ask a configured decision provider for bounded typed answers. The default
+provider is TypeSafe Jev; an explicit local provider can still be selected for
+offline experiments. ahu does not run an agent loop. The bundled
+[`typed-decisions` skill](../.agents/skills/typed-decisions/SKILL.md) guides
+agents on when to use the tool and how to handle its output and data boundary.
 
 ## MCP tool
 
-`ahu mcp serve` advertises `ahu_typed_decide`. Set `AHU_DECISION_URL` in the
-environment of that MCP server to a credential-free `http://` address using a
-local IP literal such as `127.0.0.1` or `[::1]`.
-The tool is available without the variable, but calls return a clear
-configuration error. For example, a harness MCP entry can set the environment
-while starting `ahu mcp serve`; the exact configuration format is harness
-specific. ahu copies recognized project MCP configuration into task worktrees,
-but does not author or install native harness settings.
+`ahu mcp serve` advertises `ahu_typed_decide`. With no `AHU_DECISION_URL`, it
+uses TypeSafe Jev. A local-only service URL set through `AHU_DECISION_URL`
+explicitly selects the existing provider-neutral HTTP adapter path instead.
+
+For Jev, ahu checks the MCP process environment for `TYPESAFE_API_KEY`, then
+the `.env` file in the repository's primary checkout. Environment values take precedence. Ahu reads
+only those key names from `.env`; it does not source the file, evaluate shell
+code, or put other `.env` values into the process environment. Keep `.env`
+untracked, restrict it to your account (`chmod 600 .env` on macOS/Linux), and
+never put API keys in `.mcp.json`, agent manifests, prompts, or committed
+configuration. `.env` and `.env.*` are ignored; `.env.example` and
+`.env.template` remain available for safe placeholders.
+
+```sh
+# .env (local file; do not commit)
+TYPESAFE_API_KEY=your-key
+```
+
+When Jev is selected, the state and questions are sent to TypeSafe AI over
+HTTPS. Do not send secrets or other data to Jev unless your use of TypeSafe is
+approved for that data. TypeSafe's [privacy policy](https://typesafe.ai/legal/privacy-policy)
+says it collects prompts and other input, does not train or fine-tune on them,
+and retains personal data as reasonably necessary to provide its services.
+Review the current policy and your organization's requirements before sending
+sensitive inputs.
 
 The endpoint receives one JSON request using the HTTP POST method. It must return a JSON object with an
 `answers` object containing exactly the requested question names. Other response
@@ -63,12 +82,19 @@ Example response:
 Question types are `choice` (2–32 named options with short descriptions),
 `score` (finite `min` and `max` with `min < max`), and `probability` (an
 instruction describing the proposition to estimate). Each question also needs
-an instruction. `state` can be text or a JSON object. Requests are limited to
-64 KiB, responses to 1 MiB, and a call times out after 30 seconds. ahu refuses
-non-loopback URLs and redirects, and bypasses configured HTTP proxies, so this
-first experiment cannot silently send decision inputs to a remote host.
+an instruction. `state` can be text, a JSON object, or an array. Requests are
+limited to 64 KiB and responses to 1 MiB. Jev calls use a 30-second timeout,
+HTTPS to the fixed TypeSafe endpoint, no redirects, and no environment-configured
+proxy. The API key is sent only in the Authorization header and is never
+included in the MCP result or telemetry.
 
-## Run the Ollama adapter
+Jev's `choice`, `score`, and `noul` responses are translated back to ahu's
+stable `choice`, `score`, and `probability` result values. Ahu maps a score
+between Jev's two-point min/max rubric back to the requested numeric range.
+Telemetry reports TypeSafe's returned input/output token counts and the
+round-trip duration; it does not include request or answer contents.
+
+## Optional local Ollama provider
 
 The repository includes a small standard-library adapter for a local Ollama
 model. It binds only to `127.0.0.1`, verifies that the selected model is
@@ -114,7 +140,8 @@ took 21.1 seconds cold (18.0 seconds to load) and 1.1 seconds warm. This is one
 example for plumbing and timing, not an accuracy comparison. The adapter keeps
 the chosen model loaded for five minutes after a call.
 
-Configure the environment of each harness's `ahu mcp serve` process with:
+To select the local Ollama adapter instead of Jev, configure the environment
+of each harness's `ahu mcp serve` process with:
 
 ```text
 AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions
@@ -126,8 +153,8 @@ the declared JSON types and ranges, but a generated probability is still the
 model's estimate, not a calibrated confidence. The adapter reports local Ollama
 token counts for comparing usage, latency, and answers across agent runs.
 
-When project OpenTelemetry is enabled, the separately launched `ahu mcp serve`
-process exports a span for each parsed MCP request, including initialize,
+When project OpenTelemetry is enabled, the `ahu mcp serve` process exports a
+span for each parsed MCP request, including initialize,
 discovery, tool listing, tool calls, and task/subscription operations. Tool
 calls use the `ahu.mcp.tool.call` span name. A typed decision span records the
 tool name, success/error outcome, question count,
@@ -135,8 +162,9 @@ unique question types, stable `telemetry_key` dimensions, service and model
 identifiers, reported prompt/generated token counts, service timings, and a
 fixed error category. A `telemetry_key` is an optional lowercase identifier
 such as `department` or `refund_requested`; use stable, non-sensitive labels
-from a small vocabulary. The Ollama adapter removes these keys before sending
-questions to the model. The span never records state, instructions, question
+from a small vocabulary. The local Ollama adapter removes these keys before
+sending questions to the model; the Jev adapter does not send them upstream.
+The span never records state, instructions, question
 names, answer values, or error text. The resource carries the ahu agent,
 harness, model, task ID, headless attempt, and optional `ahu.eval.run_id`,
 `ahu.eval.case_id`, `ahu.eval.corpus_version`, and `ahu.eval.stage` identifiers
@@ -151,23 +179,38 @@ initialized. This does not establish that a collector received the spans. A
 missing summary can indicate an abrupt exit or failed export; it is not proof
 of zero activity.
 
-The request stays local: the adapter accepts only loopback Ollama URLs, disables
-environment-configured HTTP proxies, binds its HTTP listener to loopback, and
-rejects models that are not installed locally. Requests and decisions are not
-logged.
+For the local Ollama provider, the request stays on the machine: the adapter
+accepts only loopback Ollama URLs, disables environment-configured HTTP proxies,
+and binds its listener to loopback. For TypeSafe Jev, the state and questions
+leave the machine over HTTPS as described above.
 
 ## Service and model boundary
 
-The HTTP contract belongs to the decision service, not to any particular model.
-A provider adapter translates this request into its native API and translates
-the result back to the `answers` shape. That keeps ahu and the MCP schema
-independent of Ollama, Laya, Jev, or a future local model. The included Ollama
-adapter is a separate local process; ahu itself does not manage model downloads,
-runtime dependencies, device selection, or service lifecycle.
+The MCP contract remains provider-neutral. Ahu translates it to TypeSafe's
+native API by default, or to the local service contract when
+`AHU_DECISION_URL` is explicitly set. The included Ollama adapter remains an
+optional local process; ahu itself does not manage model downloads, runtime
+dependencies, device selection, or service lifecycle.
 
 Tool calls are synchronous MCP calls; they are not recorded as ahu tasks. The
 agent gets the service result as evidence and remains responsible for deciding
-what to do. Probabilities are estimates and may not be calibrated. Harnesses that expose
-ahu MCP can use the same tool contract, though each harness still needs its own
-native MCP server declaration. Cross-harness usability must be checked against
-the harness versions and configurations in use.
+what to do. Probabilities are model estimates, not guarantees. Harnesses that
+expose ahu MCP can use the same tool contract, though each harness still needs
+its own native MCP server declaration. Cross-harness usability must be checked
+against the harness versions and configurations in use.
+
+## Secret boundary
+
+MCP stdio servers run as local subprocesses with the privileges and inherited
+environment their host gives them. Ahu does not load the full `.env` or add
+its contents to the process environment. For Jev it reads only the API key when
+the decision tool is called, preferring the process environment and then the
+primary checkout's `.env`; it sends that key only to the fixed TypeSafe HTTPS
+endpoint. The key is not included in MCP responses, OTEL attributes, task
+records, or agent prompts.
+
+The ignored `.env` is a convenience, not a security boundary against another
+process running as the same OS user. An agent or tool that can read the primary
+checkout can also read this file. Keep task agents in their worktrees, use the
+harness's filesystem restrictions, and use a user-level secret manager or a
+server-scoped environment injection when stronger isolation is required.

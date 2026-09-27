@@ -806,18 +806,37 @@ fn mcp_error_category(method: &str, name: &str, response: &serde_json::Value) ->
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
         if message.starts_with("ahu_typed_decide requires")
+            || message.starts_with("ahu_typed_decide needs")
+            || message.starts_with(".env")
+            || message.starts_with("cannot safely read .env")
+            || message.starts_with("cannot inspect .env")
+            || message.starts_with("cannot parse .env")
+            || message.starts_with("TypeSafe API key")
             || message.starts_with("invalid AHU_DECISION_URL")
             || message.starts_with("AHU_DECISION_URL must")
             || message.starts_with("cannot create decision client")
+            || message.starts_with("cannot create TypeSafe decision client")
         {
             "decision_configuration"
-        } else if message.starts_with("decision service request failed") {
+        } else if message.starts_with("decision service request failed")
+            || message.starts_with("TypeSafe decision request failed")
+        {
             "decision_service_unavailable"
-        } else if message.starts_with("decision service returned HTTP") {
+        } else if message.starts_with("decision service returned HTTP")
+            || message.starts_with("TypeSafe decision API returned HTTP")
+        {
             "decision_service_http_error"
         } else if message.starts_with("decision service returned invalid JSON")
             || message.starts_with("decision service response")
             || message.starts_with("decision service answers")
+            || message.starts_with("TypeSafe decision response")
+            || message.starts_with("TypeSafe response")
+            || message.starts_with("TypeSafe answers")
+            || message.starts_with("TypeSafe answer")
+            || message.starts_with("TypeSafe choice")
+            || message.starts_with("TypeSafe score")
+            || message.starts_with("TypeSafe noul")
+            || message.starts_with("TypeSafe confidence")
             || message.starts_with("answer ")
         {
             "decision_service_invalid_response"
@@ -1039,6 +1058,23 @@ mod tests {
             (
                 "invalid AHU_DECISION_URL: private-marker",
                 "decision_configuration",
+            ),
+            (
+                "TypeSafe API key is empty or malformed",
+                "decision_configuration",
+            ),
+            (".env permissions are too broad", "decision_configuration"),
+            (
+                "TypeSafe decision request failed",
+                "decision_service_unavailable",
+            ),
+            (
+                "TypeSafe decision API returned HTTP 401",
+                "decision_service_http_error",
+            ),
+            (
+                "TypeSafe decision response is invalid JSON",
+                "decision_service_invalid_response",
             ),
             (
                 "decision service returned HTTP 503",

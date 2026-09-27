@@ -722,6 +722,108 @@ mod presentation_tests {
     use super::*;
 
     #[cfg(unix)]
+    fn fake_cmux(root: &Path, script: &str) -> Cmux {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = root.join("fake-cmux");
+        std::fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        Cmux {
+            executable,
+            socket_path: None,
+        }
+    }
+
+    #[test]
+    fn group_parser_requires_identity_and_defaults_optional_fields() {
+        let parsed = parse_group(&serde_json::json!({
+            "id":"group-1", "anchor_workspace_id":"anchor",
+            "member_workspace_ids":["anchor", 3, "task"], "is_collapsed":true
+        }))
+        .unwrap();
+        assert_eq!(parsed.name, "");
+        assert_eq!(parsed.member_workspace_ids, ["anchor", "task"]);
+        assert!(parsed.is_collapsed);
+        assert!(parse_group(&serde_json::json!({"anchor_workspace_id":"a"})).is_err());
+        assert!(parse_group(&serde_json::json!({"id":"g"})).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capability_check_accepts_required_group_support_and_explains_missing_support() {
+        let root = tempfile::tempdir().unwrap();
+        let supported = fake_cmux(
+            root.path(),
+            "printf '%s\\n' '{\"capabilities\":[\"workspace.groups.v1\",\"workspace.group_create.v1\",\"workspace.create_in_group.v1\",\"extra\"]}'",
+        );
+        let capabilities = supported.check_capabilities().unwrap();
+        assert!(capabilities.contains(&"extra".to_string()));
+
+        let unsupported = fake_cmux(root.path(), "printf '%s\\n' '{\"capabilities\":[]} '");
+        assert!(
+            unsupported
+                .check_capabilities()
+                .unwrap_err()
+                .to_string()
+                .contains("workspace.group_create.v1")
+        );
+
+        let failed = fake_cmux(root.path(), "echo unavailable >&2; exit 2");
+        assert!(
+            failed
+                .check_capabilities()
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_listing_falls_back_from_window_filter_and_validates_rpc_json() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("first-call");
+        let script = format!(
+            "if [ \\\"$2\\\" = workspace.group.list ] && [ ! -f {} ]; then touch {}; echo unsupported >&2; exit 1; fi\nprintf '%s\\n' '{{\"groups\":[{{\"id\":\"g\",\"anchor_workspace_id\":\"a\"}}]}}'",
+            shell_single_quote(&marker.to_string_lossy()),
+            shell_single_quote(&marker.to_string_lossy())
+        );
+        let client = fake_cmux(root.path(), &script);
+        assert_eq!(
+            client.find_group("g", Some("window")).unwrap().unwrap().id,
+            "g"
+        );
+        assert!(client.find_group("missing", None).unwrap().is_none());
+
+        let malformed = fake_cmux(root.path(), "echo not-json");
+        assert!(
+            malformed
+                .list_groups(None)
+                .unwrap_err()
+                .to_string()
+                .contains("could not parse as JSON")
+        );
+        let invalid_shape = fake_cmux(root.path(), "printf '%s\\n' '{}' ");
+        assert!(
+            invalid_shape
+                .list_groups(None)
+                .unwrap_err()
+                .to_string()
+                .contains("no `groups` array")
+        );
+    }
+
+    #[test]
+    fn task_startup_command_quotes_both_owned_paths() {
+        let command = startup_command(Path::new("/tmp/ahu agent"), Path::new("/tmp/task's dir"));
+        assert_eq!(
+            command,
+            "'/tmp/ahu agent' run-task --task-dir '/tmp/task'\\''s dir'"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn concurrent_task_creation_identifies_the_workspace_in_the_target_window() {
         use std::os::unix::fs::PermissionsExt;

@@ -230,6 +230,45 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_decision_selection_suite_loads_all_three_cases() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let suite = load(&root.join("evals/suites/agent-tool-selection.md")).unwrap();
+        assert_eq!(suite.id, "agent-tool-selection");
+        assert_eq!(suite.suite_version, "1.1.0");
+        assert_eq!(suite.cases.len(), 3);
+        assert_eq!(
+            suite
+                .cases
+                .iter()
+                .filter(
+                    |entry| entry.case.tool_expectations.as_ref().is_some_and(|expect| {
+                        expect
+                            .required
+                            .iter()
+                            .any(|name| name == "ahu_typed_decide")
+                    })
+                )
+                .count(),
+            2
+        );
+        assert_eq!(
+            suite
+                .cases
+                .iter()
+                .filter(
+                    |entry| entry.case.tool_expectations.as_ref().is_some_and(|expect| {
+                        expect
+                            .forbidden
+                            .iter()
+                            .any(|name| name == "ahu_typed_decide")
+                    })
+                )
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn a_suite_loads_its_cases_in_order_with_their_declared_weights() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         write(dir.path(), "cases/one.md", &case_document("case-one"));

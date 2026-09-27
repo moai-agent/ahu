@@ -7,3 +7,9 @@
 # vocabulary under .vale/styles/config/ is tracked.
 /.vale/styles/*
 !/.vale/styles/config/
+
+# Local secrets and environment overrides. Keep checked-in examples explicit.
+.env
+.env.*
+!.env.example
+!.env.template

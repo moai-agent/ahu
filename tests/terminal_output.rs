@@ -72,7 +72,7 @@ fn doctor_reports_context_lock_telemetry_and_verified_skills_in_one_place() {
         "{text}"
     );
     assert!(
-        text.contains("skills       3/3 bundled skills verified; 0 missing, 0 changed"),
+        text.contains("skills       4/4 bundled skills verified; 0 missing, 0 changed"),
         "{text}"
     );
     assert!(

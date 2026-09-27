@@ -593,3 +593,145 @@ mod sidebar_tests {
         assert!(label.chars().count() <= 60);
     }
 }
+
+#[cfg(test)]
+mod behavior_tests {
+    use super::*;
+
+    #[test]
+    fn safe_names_semver_and_display_escaping_reject_hostile_values() {
+        for value in ["agent-1", "a_b", "0123456789"] {
+            assert!(is_safe_name(value));
+        }
+        for value in [
+            "",
+            "-agent",
+            "_agent",
+            "Agent",
+            "agent.name",
+            "a/b",
+            &"x".repeat(65),
+        ] {
+            assert!(!is_safe_name(value), "{value:?}");
+        }
+        for value in ["0.1.0", "1.2.3-rc.1+build.5", "1.2.3-alpha-beta"] {
+            assert!(is_semver(value), "{value}");
+        }
+        for value in [
+            "",
+            "01.2.3",
+            "1.2",
+            "1.2.3.4",
+            "1.2.3-",
+            "1.2.3+",
+            "1.2.3-a..b",
+            "1.2.3-\u{001b}",
+        ] {
+            assert!(!is_semver(value), "{value:?}");
+        }
+        assert_eq!(display_safe("a\u{001b}[2J\u{202e}b"), "a\\x1b[2J\\u{202e}b");
+        assert_eq!(
+            display_safe_block("one\ntwo\r\u{2028}"),
+            "one\ntwo\\x0d\\u{2028}"
+        );
+        assert_eq!(display_path(Path::new("a\u{001b}b")), "a\\x1bb");
+    }
+
+    #[test]
+    fn task_titles_and_sidebar_text_strip_markdown_and_bound_output() {
+        assert_eq!(
+            sidebar_text(
+                "# Heading\n- [x] **done** and [label](https://example.invalid/a(b))\n~~~ignored~~~",
+                160
+            ),
+            "Heading done and label"
+        );
+        assert_eq!(sidebar_text("   \n", 20), "");
+        assert_eq!(sidebar_text("long value", 0), "");
+        assert_eq!(sidebar_text("first line\nsecond", 7), "first…");
+        assert_eq!(
+            task_title_from_prompt("\n\u{202e}\nUseful title\nrest"),
+            "Useful title"
+        );
+        assert_eq!(task_title_from_prompt("\u{202e}\n"), "untitled task");
+    }
+
+    #[test]
+    fn repository_path_resolution_handles_missing_non_directory_and_escape_paths() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(resolve_within(root.path(), "", false).is_err());
+        assert!(resolve_within(root.path(), "../outside", false).is_err());
+        assert!(resolve_existing_within(root.path(), "./file").is_err());
+        assert!(
+            resolve_existing_within(root.path(), "missing/file")
+                .unwrap()
+                .is_none()
+        );
+
+        let file = root.path().join("not-a-directory");
+        std::fs::write(&file, "file").unwrap();
+        assert!(resolve_within(root.path(), "not-a-directory/child", true).is_err());
+        assert!(resolve_existing_within(root.path(), "not-a-directory/child").is_err());
+
+        let created = resolve_within(root.path(), "new/nested/file", true).unwrap();
+        assert_eq!(created, root.path().join("new/nested/file"));
+        assert!(created.parent().unwrap().is_dir());
+        std::fs::write(&created, "content").unwrap();
+        assert_eq!(
+            resolve_existing_within(root.path(), "new/nested/file").unwrap(),
+            Some(created)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn repository_path_resolution_refuses_symlinks_at_parent_and_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("parent-link")).unwrap();
+        symlink(outside.path().join("target"), root.path().join("leaf-link")).unwrap();
+        assert!(resolve_within(root.path(), "parent-link/file", true).is_err());
+        assert!(resolve_existing_within(root.path(), "parent-link/file").is_err());
+        assert!(resolve_within(root.path(), "leaf-link", true).is_err());
+        assert!(resolve_existing_within(root.path(), "leaf-link").is_err());
+    }
+
+    #[test]
+    fn digest_reader_hashes_streams_and_enforces_read_errors_and_size_limit() {
+        assert_eq!(
+            digest_bytes(b"ahu"),
+            digest_reader(&mut &b"ahu"[..], Path::new("fixture")).unwrap()
+        );
+        struct FailingReader;
+        impl std::io::Read for FailingReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("read failed"))
+            }
+        }
+        let error = digest_reader(&mut FailingReader, Path::new("broken"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("broken"));
+        assert!(error.contains("read failed"));
+
+        struct LargeReader(u64);
+        impl std::io::Read for LargeReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.0.min(buffer.len() as u64) as usize;
+                buffer[..count].fill(0);
+                self.0 -= count as u64;
+                Ok(count)
+            }
+        }
+        let mut large = LargeReader(MAX_CONFIG_BYTES + 1);
+        assert!(
+            digest_reader(&mut large, Path::new("large-config"))
+                .unwrap_err()
+                .to_string()
+                .contains("64 MiB")
+        );
+        assert!(digest_file(Path::new("missing-config")).is_err());
+    }
+}

@@ -454,3 +454,44 @@ pub fn require_version(pinned: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_lookups_and_rankings_are_harness_scoped() {
+        assert!(harness("codex").is_some());
+        assert!(harness("unknown").is_none());
+        assert!(supports("codex", Feature::InteractiveLaunch));
+        assert!(!supports("unknown", Feature::InteractiveLaunch));
+        let models = models_for("codex");
+        assert!(!models.is_empty());
+        assert!(
+            models
+                .windows(2)
+                .all(|pair| pair[0].quality_rank <= pair[1].quality_rank)
+        );
+        assert!(model("codex", models[0].model).is_some());
+        assert!(model("opencode", models[0].model).is_none());
+        assert!(models_for("unknown").is_empty());
+    }
+
+    #[test]
+    fn isolation_profiles_and_headless_versions_fail_closed() {
+        for harness in ["codex", "opencode", "claude-code", "antigravity"] {
+            let profile = isolation_profile(harness).unwrap();
+            assert!(!profile.version_policy.is_empty());
+            assert!(!profile.evidence.is_empty());
+            assert!(!profile.limitations.is_empty());
+            let version = profile.headless_verified_versions[0];
+            check_headless_version(harness, version).unwrap();
+            check_headless_version(harness, &format!("{harness} {version} (reviewed)")).unwrap();
+            assert!(check_headless_version(harness, "").is_err());
+            assert!(check_headless_version(harness, "999.0.0").is_err());
+        }
+        assert!(isolation_profile("unknown").is_none());
+        assert!(require_version(CATALOG_VERSION).is_ok());
+        assert!(require_version("unreleased-catalog").is_err());
+    }
+}

@@ -76,6 +76,9 @@ pub struct TaskTelemetry {
     pub tool_errors: u64,
     pub typed_decision_calls: u64,
     pub typed_decision_errors: u64,
+    pub decision_input_tokens: Option<u64>,
+    pub decision_output_tokens: Option<u64>,
+    pub decision_duration_ms: Option<f64>,
     /// True once an `ahu.mcp.session` summary span arrived for this task.
     ///
     /// The summary is what carries the session's own totals, so without it the
@@ -447,6 +450,7 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
             for span in scope.spans {
                 let attrs = string_attributes(&span.attributes);
                 let integers = integer_attributes(&span.attributes);
+                let numbers = number_attributes(&span.attributes);
                 let Some(task_id) = resource_task_id
                     .clone()
                     .or_else(|| attrs.get("ahu.task.id").cloned())
@@ -517,6 +521,22 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                                     task.typed_decision_errors =
                                         task.typed_decision_errors.saturating_add(1);
                                 }
+                            }
+                            if name == "ahu_typed_decide"
+                                && attrs.get("ahu.mcp.outcome").is_some_and(|v| v == "success")
+                            {
+                                add_counter(
+                                    &mut task.decision_input_tokens,
+                                    integers.get("ahu.mcp.decision.tokens.input").copied(),
+                                );
+                                add_counter(
+                                    &mut task.decision_output_tokens,
+                                    integers.get("ahu.mcp.decision.tokens.output").copied(),
+                                );
+                                add_duration(
+                                    &mut task.decision_duration_ms,
+                                    numbers.get("ahu.mcp.decision.duration_ms").copied(),
+                                );
                             }
                         }
                     }
@@ -612,6 +632,34 @@ fn integer_attributes(
         .collect()
 }
 
+fn number_attributes(
+    attributes: &[opentelemetry_proto::tonic::common::v1::KeyValue],
+) -> BTreeMap<String, f64> {
+    attributes
+        .iter()
+        .filter_map(|attribute| {
+            let value = match attribute.value.as_ref()?.value.as_ref()? {
+                AnyValue::DoubleValue(value) => *value,
+                AnyValue::IntValue(value) if *value >= 0 => *value as f64,
+                _ => return None,
+            };
+            (value.is_finite() && value >= 0.0).then(|| (attribute.key.clone(), value))
+        })
+        .collect()
+}
+
+fn add_counter(total: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or_default().saturating_add(value));
+    }
+}
+
+fn add_duration(total: &mut Option<f64>, value: Option<f64>) {
+    if let Some(value) = value.filter(|value| value.is_finite() && *value >= 0.0) {
+        *total = Some(total.unwrap_or_default() + value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +684,16 @@ mod tests {
             key: key.into(),
             value: Some(AnyValue {
                 value: Some(AnyValueValue::IntValue(value)),
+            }),
+            key_strindex: 0,
+        }
+    }
+
+    fn double_attribute(key: &str, value: f64) -> KeyValue {
+        KeyValue {
+            key: key.into(),
+            value: Some(AnyValue {
+                value: Some(AnyValueValue::DoubleValue(value)),
             }),
             key_strindex: 0,
         }
@@ -684,6 +742,17 @@ mod tests {
                             ],
                             ..Span::default()
                         },
+                        Span {
+                            name: "ahu.mcp.tool.call".into(),
+                            attributes: vec![
+                                string_attribute("ahu.mcp.tool.name", "ahu_typed_decide"),
+                                string_attribute("ahu.mcp.outcome", "success"),
+                                count_attribute("ahu.mcp.decision.tokens.input", 10),
+                                count_attribute("ahu.mcp.decision.tokens.output", 4),
+                                double_attribute("ahu.mcp.decision.duration_ms", 12.5),
+                            ],
+                            ..Span::default()
+                        },
                     ],
                 }],
                 schema_url: String::new(),
@@ -697,8 +766,11 @@ mod tests {
         assert_eq!(task.trace_id.as_deref(), Some(expected_trace_id.as_str()));
         assert!(task.mcp_observed);
         assert_eq!(task.mcp_requests, 8);
-        assert_eq!(task.tool_calls_by_name.get("ahu_typed_decide"), Some(&1));
+        assert_eq!(task.tool_calls_by_name.get("ahu_typed_decide"), Some(&2));
         assert_eq!(task.typed_decision_errors, 1);
+        assert_eq!(task.decision_input_tokens, Some(10));
+        assert_eq!(task.decision_output_tokens, Some(4));
+        assert_eq!(task.decision_duration_ms, Some(12.5));
         assert!(!format!("{task:?}").contains("must not be retained"));
     }
 

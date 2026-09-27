@@ -200,3 +200,65 @@ pub fn adapter_for(harness_id: &str) -> Result<Box<dyn Adapter>> {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_lookup_fails_closed_for_unregistered_harnesses() {
+        assert!(adapter_for("codex").is_ok());
+        assert!(
+            adapter_for("unknown")
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("no validated adapter")
+        );
+    }
+
+    #[test]
+    fn model_arguments_require_an_exact_safe_catalog_model() {
+        assert_eq!(model_args("codex", "gpt-5.5").unwrap(), ["-m", "gpt-5.5"]);
+        assert_eq!(
+            model_args("claude-code", "claude-sonnet").unwrap(),
+            ["--model", "claude-sonnet"]
+        );
+        assert!(
+            model_args("missing", "model")
+                .unwrap_err()
+                .to_string()
+                .contains("no entry for harness")
+        );
+        assert!(
+            model_args("codex", "")
+                .unwrap_err()
+                .to_string()
+                .contains("exact model")
+        );
+        assert!(
+            model_args("codex", "--help")
+                .unwrap_err()
+                .to_string()
+                .contains("option")
+        );
+        assert!(
+            model_args("opencode", "model-without-provider")
+                .unwrap_err()
+                .to_string()
+                .contains("provider-qualified")
+        );
+        assert!(
+            model_args("opencode", "/model")
+                .unwrap_err()
+                .to_string()
+                .contains("provider-qualified")
+        );
+        assert!(
+            model_args("opencode", "provider/")
+                .unwrap_err()
+                .to_string()
+                .contains("provider-qualified")
+        );
+    }
+}

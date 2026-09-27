@@ -1490,6 +1490,43 @@ mod focused_help_tests {
             Command::Doctor { verbose: true }
         );
     }
+
+    #[test]
+    fn help_topics_and_slices_are_consistent() {
+        for topic in ["--help", "-h", "ahu tasks"] {
+            assert!(!help_for(Some(topic)).unwrap().is_empty());
+        }
+        assert_eq!(help_for(Some("all")).unwrap(), HELP_ALL);
+        for (topic, expected) in [
+            ("setup", "Detect installed harnesses"),
+            ("lock", "--update refreshes the lock"),
+            ("cmux status", "native integration evidence"),
+            ("cmux install", "Preview or delegate"),
+            ("mcp serve", "stdio MCP"),
+            ("resume", "recorded native session"),
+            ("run-task", "Internal worker"),
+            ("supervise", "Internal supervisor"),
+        ] {
+            assert!(help_for(Some(topic)).unwrap().contains(expected), "{topic}");
+        }
+        for (topic, starts_with) in [
+            ("eval run", "eval run options:"),
+            ("eval report", "eval report options:"),
+            ("launch", "launch options:"),
+            ("explain", "explain options:"),
+            ("onboard", "onboard options:"),
+            ("knowledge lint", "knowledge lint options:"),
+        ] {
+            assert!(
+                help_for(Some(topic)).unwrap().starts_with(starts_with),
+                "{topic}"
+            );
+        }
+        assert!(help_for(Some("agents")).unwrap().contains("ahu agents"));
+        assert!(help_for(Some("unknown")).is_err());
+        assert!(help_section("absent:", "also absent:").is_empty());
+        assert!(help_line_for("unlisted").is_none());
+    }
 }
 
 #[cfg(test)]

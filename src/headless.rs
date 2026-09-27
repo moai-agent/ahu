@@ -3191,3 +3191,372 @@ mod ownership_tests {
         assert!(!Lock::is_owned(&path).unwrap());
     }
 }
+
+#[cfg(test)]
+mod write_tracking_tests {
+    use super::*;
+
+    #[test]
+    fn write_path_discovery_handles_normalized_keys_nested_tools_and_embedded_json() {
+        let event = serde_json::json!({
+            "outer": [{
+                "tool_name": "WriteFile",
+                "arguments": r#"{"file_path":"/tmp/project/../outside/new.txt"}"#
+            }],
+            "tool": "Read",
+            "path": "/tmp/not-a-write.txt"
+        });
+        let paths = collect_write_paths(&event);
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == "/tmp/project/../outside/new.txt")
+        );
+        assert!(!paths.iter().any(|path| path == "/tmp/not-a-write.txt"));
+        assert_eq!(
+            resolve_write_path("/tmp/project/../outside/new.txt").unwrap(),
+            PathBuf::from("/tmp/outside/new.txt")
+        );
+        assert!(resolve_write_path("").is_none());
+        assert!(resolve_write_path("relative/file.txt").is_none());
+    }
+
+    #[test]
+    fn observed_write_events_record_only_unique_paths_outside_the_worktree() {
+        let worktree = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let inside_path = worktree.path().join("edited.txt");
+        let outside_path = outside.path().join("edited.txt");
+        let event = serde_json::json!({
+            "tool": "Write",
+            "input": {"filePath": inside_path, "targetFile": outside_path}
+        });
+        let encoded = serde_json::to_vec(&event).unwrap();
+        let mut events = Events::default();
+        observe_writes(&mut events, &encoded, worktree.path());
+        observe_writes(&mut events, &encoded, worktree.path());
+        assert_eq!(events.writes_outside_worktree.len(), 1);
+        assert!(events.writes_outside_worktree[0].ends_with("edited.txt"));
+
+        observe_writes(&mut events, b"not json", worktree.path());
+        assert_eq!(events.writes_outside_worktree.len(), 1);
+    }
+
+    #[test]
+    fn native_metadata_is_projected_to_only_supported_helper_fields() {
+        let progress = native_metadata(
+            "claude-code",
+            &serde_json::json!({
+                "type":"system", "subtype":"task_progress", "task_id":"child",
+                "usage":{"total_tokens":12}, "secret":"ignore"
+            }),
+        );
+        assert_eq!(progress["task_id"], "child");
+        assert_eq!(progress["usage"]["total_tokens"], 12);
+        assert!(progress.get("secret").is_none());
+
+        let result = native_metadata(
+            "claude-code",
+            &serde_json::json!({
+                "type":"result", "subagent_stats":{
+                    "spawned":2, "completed":1, "max_depth":3,
+                    "refused":{"budget":4, "secret":9},
+                    "by_type":{"worker":1, "invalid":"x"}
+                }, "huge_payload":"ignored"
+            }),
+        );
+        assert_eq!(result["subagent_stats"]["spawned"], 2);
+        assert_eq!(result["subagent_stats"]["refused"]["budget"], 4);
+        assert!(result["subagent_stats"]["refused"].get("secret").is_none());
+        assert!(result.get("huge_payload").is_none());
+
+        assert_eq!(
+            native_metadata("codex", &serde_json::json!({"type":"item.started"})),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            native_metadata("codex", &serde_json::json!({"type":"collab.started"})),
+            serde_json::json!({"type":"collab"})
+        );
+    }
+
+    #[test]
+    fn native_metadata_bounds_and_session_validation_fail_closed() {
+        assert!(bounded_native_metadata(
+            &serde_json::json!({"a": [1, true, null]})
+        ));
+        assert!(!bounded_native_metadata(&serde_json::json!(
+            "x".repeat(4097)
+        )));
+        assert!(!bounded_native_metadata(&serde_json::json!(vec![0; 257])));
+        assert!(!bounded_native_metadata(&serde_json::json!(u64::MAX)));
+        assert!(valid_session("session-1"));
+        assert!(!valid_session(" \n"));
+        assert!(!valid_session("bad\nlocator"));
+        assert!(!valid_session(&"x".repeat(4097)));
+    }
+
+    #[test]
+    fn stream_capture_checkpoints_sessions_and_classifies_incomplete_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(dir.path()).unwrap();
+        let store = crate::storage::HeadlessStore::for_repo(&repo).unwrap();
+        let checkpoint = store.directory.join("task-1/attempt-2/session.json");
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        capture(
+            std::io::Cursor::new(
+                b"{\"type\":\"step_start\",\"sessionID\":\"opencode-session\"}\n".to_vec(),
+            ),
+            checkpoint.clone(),
+            dir.path().to_path_buf(),
+            Some(SessionOwner {
+                task_id: "task-1".into(),
+                attempt: 2,
+                harness: "opencode".into(),
+            }),
+            shared.clone(),
+            tx,
+        );
+        rx.recv().unwrap().unwrap();
+        assert_eq!(
+            shared.lock().unwrap().session.as_deref(),
+            Some("opencode-session")
+        );
+        let saved: SessionCheckpoint =
+            serde_json::from_slice(&std::fs::read(checkpoint).unwrap()).unwrap();
+        assert_eq!(saved.task_id, "task-1");
+        assert_eq!(saved.attempt, 2);
+
+        let incomplete = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        capture(
+            std::io::Cursor::new(b"{\"type\":\"turn.started\"}".to_vec()),
+            dir.path().join("unused.json"),
+            dir.path().to_path_buf(),
+            Some(SessionOwner {
+                task_id: "task-1".into(),
+                attempt: 2,
+                harness: "codex".into(),
+            }),
+            incomplete.clone(),
+            tx,
+        );
+        rx.recv().unwrap().unwrap();
+        assert!(incomplete.lock().unwrap().failed);
+        assert!(
+            incomplete
+                .lock()
+                .unwrap()
+                .blockers
+                .contains(&"unterminated event stream".into())
+        );
+    }
+
+    #[test]
+    fn stderr_capture_keeps_only_categories_or_a_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        capture(
+            std::io::Cursor::new(b"permission denied\nordinary diagnostic\n\n".to_vec()),
+            dir.path().join("unused.json"),
+            dir.path().to_path_buf(),
+            None,
+            events.clone(),
+            tx,
+        );
+        rx.recv().unwrap().unwrap();
+        let events = events.lock().unwrap();
+        assert!(events.failed);
+        assert_eq!(events.stderr_diagnostics, ["permission denial"]);
+        assert_eq!(events.stderr_unclassified_lines, 1);
+    }
+}
+
+#[cfg(test)]
+mod profile_and_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn schema_reader_accepts_only_supported_headless_spec_versions() {
+        #[derive(Deserialize)]
+        struct Version {
+            #[serde(deserialize_with = "read_spec_version")]
+            schema_version: u32,
+        }
+        for version in [1, 2] {
+            let parsed: Version =
+                serde_json::from_value(json!({"schema_version":version})).unwrap();
+            assert_eq!(parsed.schema_version, version);
+        }
+        for version in [0, 3, 99] {
+            assert!(serde_json::from_value::<Version>(json!({"schema_version":version})).is_err());
+        }
+    }
+
+    #[test]
+    fn skill_catalog_is_sorted_and_excludes_hidden_or_incomplete_entries() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [
+            ".agents/skills/zeta",
+            ".agents/skills/alpha",
+            ".claude/skills/native",
+        ] {
+            std::fs::create_dir_all(root.path().join(path)).unwrap();
+        }
+        std::fs::create_dir_all(root.path().join(".agents/skills/.hidden")).unwrap();
+        std::fs::write(root.path().join(".agents/skills/zeta/SKILL.md"), "zeta").unwrap();
+        std::fs::write(root.path().join(".agents/skills/alpha/SKILL.md"), "alpha").unwrap();
+        std::fs::write(root.path().join(".claude/skills/native/SKILL.md"), "native").unwrap();
+        let catalog = skill_catalog(root.path());
+        assert_eq!(catalog.len(), 3);
+        assert!(
+            catalog
+                .windows(2)
+                .all(|pair| pair[0].source <= pair[1].source)
+        );
+        assert!(catalog.iter().all(|entry| !entry.name.starts_with('.')));
+        assert_eq!(
+            catalog
+                .iter()
+                .find(|entry| entry.name == "zeta")
+                .unwrap()
+                .digest,
+            digest_bytes(b"zeta")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_validation_rejects_repository_binaries_and_cmux_wrappers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo_root = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo_root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(repo_root.path()).unwrap();
+        let inside = repo_root.path().join("agent");
+        std::fs::write(&inside, "#!/bin/sh\necho ok\n").unwrap();
+        let mut permissions = std::fs::metadata(&inside).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&inside, permissions.clone()).unwrap();
+        assert!(
+            validate_executable(&inside, &repo)
+                .unwrap_err()
+                .to_string()
+                .contains("outside the repository")
+        );
+
+        let outside_root = tempfile::tempdir().unwrap();
+        let wrapper = outside_root.path().join("wrapper");
+        std::fs::write(&wrapper, "#!/bin/sh\n# cmux wrapper\n").unwrap();
+        std::fs::set_permissions(&wrapper, permissions.clone()).unwrap();
+        assert!(
+            validate_executable(&wrapper, &repo)
+                .unwrap_err()
+                .to_string()
+                .contains("script wrapper")
+        );
+
+        let valid = outside_root.path().join("agent");
+        std::fs::write(&valid, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::set_permissions(&valid, permissions).unwrap();
+        assert_eq!(
+            validate_executable(&valid, &repo).unwrap(),
+            valid.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_result_reports_supervisor_liveness_without_claiming_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let task_dir = root.path().join("task-1");
+        let spec = sample_spec();
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let owner = Lock::acquire(&task_dir.join("owner.lock")).unwrap();
+        let running = result_attempt(&task_dir, &spec).unwrap();
+        assert_eq!(running["outcome"], "running");
+        assert_eq!(running["acceptance"], "not assessed");
+        assert_eq!(running["completion_verified"], false);
+        drop(owner);
+        let interrupted = result_attempt(&task_dir, &spec).unwrap();
+        assert_eq!(interrupted["outcome"], "interrupted");
+        assert!(
+            interrupted["blockers"][0]
+                .as_str()
+                .unwrap()
+                .contains("no live supervisor")
+        );
+    }
+
+    #[test]
+    fn recorded_write_paths_ignore_missing_malformed_and_empty_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(root.path()).unwrap();
+        let store = crate::storage::HeadlessStore::for_repo(&repo).unwrap();
+        let task_dir = store.directory.join("task-1");
+        state::create_private_dir_all(&task_dir).unwrap();
+        assert!(recorded_writes_outside_worktree(&task_dir).is_none());
+        state::write_private_file(&task_dir.join("headless.json"), b"bad json").unwrap();
+        assert!(recorded_writes_outside_worktree(&task_dir).is_none());
+
+        let spec = sample_spec();
+        state::write_private_file(
+            &task_dir.join("headless.json"),
+            &serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        let result_file = attempt_dir(&task_dir, &spec).join("result.json");
+        state::create_private_dir_all(result_file.parent().unwrap()).unwrap();
+        state::write_private_file(&result_file, br#"{"writes_outside_worktree":[]}"#).unwrap();
+        assert!(recorded_writes_outside_worktree(root.path()).is_none());
+        state::write_private_file(
+            &result_file,
+            br#"{"writes_outside_worktree":["/outside/a",4,"/outside/b"]}"#,
+        )
+        .unwrap();
+        let _: Value = read_json(&result_file).unwrap();
+        assert_eq!(
+            recorded_writes_outside_worktree(&task_dir).unwrap(),
+            ["/outside/a", "/outside/b"]
+        );
+    }
+
+    fn sample_spec() -> Spec {
+        Spec {
+            schema_version: 2,
+            options: Options::default(),
+            harness_version: "1.0.0".into(),
+            executable_digest: "digest".into(),
+            parent_task: None,
+            parent_attempt: None,
+            root_task: None,
+            broker_request: None,
+            child_grants: Vec::new(),
+            depth: 0,
+            attempt: 1,
+            session: None,
+            broker_dir: None,
+            native_profile: None,
+            native_controls: Vec::new(),
+            gaps: Vec::new(),
+        }
+    }
+}

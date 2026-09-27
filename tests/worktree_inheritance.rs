@@ -230,6 +230,23 @@ fn a_repository_with_no_agent_configuration_produces_an_empty_snapshot() {
     assert_eq!(taken.digest().len(), 64);
 }
 
+#[test]
+fn dotenv_secrets_are_not_agent_configuration_or_task_inheritance() {
+    let repo = TestRepo::new();
+    repo.write(".env", "TYPESAFE_API_KEY=synthetic-secret\n");
+    repo.write(".env.local", "OTHER_SECRET=synthetic-secret\n");
+    repo.write(".env.example", "TYPESAFE_API_KEY=replace-me\n");
+
+    let snapshot = snapshot::collect(repo.path()).unwrap();
+    assert!(
+        snapshot
+            .entries
+            .iter()
+            .all(|entry| !entry.path.starts_with(".env"))
+    );
+    assert!(!snapshot.digest().contains("synthetic-secret"));
+}
+
 /// A repository must never be able to direct ahu's writes outside the worktree.
 ///
 /// The full chain, using only real Git operations: an attacker commits a symlink
