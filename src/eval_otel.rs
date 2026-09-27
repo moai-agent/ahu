@@ -967,4 +967,35 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 404 Not Found"));
         assert_eq!(receiver.receiver_stats().rejected_requests, 1);
     }
+
+    #[test]
+    fn local_receiver_rejects_missing_length_oversize_malformed_and_truncated_bodies() {
+        fn exchange(port: u16, request: &[u8]) -> String {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream.write_all(request).unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        }
+
+        let receiver = Receiver::start().unwrap();
+        let endpoint = receiver.endpoint().parse::<url::Url>().unwrap();
+        let port = endpoint.port().unwrap();
+        let missing_length = b"POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\n\r\n";
+        assert!(exchange(port, missing_length).starts_with("HTTP/1.1 411"));
+
+        let too_large = format!(
+            "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        assert!(exchange(port, too_large.as_bytes()).starts_with("HTTP/1.1 413"));
+
+        let malformed = b"POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 1\r\n\r\nx";
+        assert!(exchange(port, malformed).starts_with("HTTP/1.1 400"));
+
+        let truncated = b"POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 4\r\n\r\nx";
+        assert!(exchange(port, truncated).starts_with("HTTP/1.1 400"));
+        assert_eq!(receiver.receiver_stats().rejected_requests, 4);
+    }
 }

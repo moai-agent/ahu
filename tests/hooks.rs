@@ -59,7 +59,7 @@ fn doctor_separates_project_hook_inventory_from_all_harness_integration_status()
         )
         .unwrap();
         let output = common::ahu()
-            .arg("doctor")
+            .args(["doctor", "--verbose"])
             .current_dir(repo.path())
             .env("HOME", home.path())
             .env("AHU_CMUX_BIN", home.path().join("missing-cmux"))

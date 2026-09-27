@@ -1003,6 +1003,15 @@ mod tests {
             mcp_result_attributes("tools/call", "ahu_agents_list", &result).len(),
             1
         );
+        let without_service = mcp_result_attributes(
+            "tools/call",
+            "ahu_typed_decide",
+            &serde_json::json!({"result":{"structuredContent":{"answers":{}}}}),
+        );
+        assert_eq!(
+            string_attr(&without_service, "ahu.mcp.outcome"),
+            Some("success".into())
+        );
 
         let error = mcp_result_attributes(
             "tools/call",
@@ -1026,6 +1035,30 @@ mod tests {
             Some("decision_service_unavailable".into())
         );
         assert!(!format!("{unavailable:?}").contains("private-marker"));
+        for (message, category) in [
+            (
+                "invalid AHU_DECISION_URL: private-marker",
+                "decision_configuration",
+            ),
+            (
+                "decision service returned HTTP 503",
+                "decision_service_http_error",
+            ),
+            (
+                "decision service returned invalid JSON",
+                "decision_service_invalid_response",
+            ),
+        ] {
+            let attributes = mcp_result_attributes(
+                "tools/call",
+                "ahu_typed_decide",
+                &serde_json::json!({"result":{"isError":true,"content":[{"text":message}]}}),
+            );
+            assert_eq!(
+                string_attr(&attributes, "ahu.mcp.error.category"),
+                Some(category.into())
+            );
+        }
         let invalid = mcp_result_attributes(
             "tools/call",
             "ahu_typed_decide",

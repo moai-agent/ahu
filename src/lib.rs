@@ -56,4 +56,5 @@ pub mod headless;
 pub mod broker;
 
 pub mod mcp;
+pub mod models;
 pub mod native;

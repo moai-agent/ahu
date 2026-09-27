@@ -47,9 +47,7 @@ impl Session {
             // SAFETY: geteuid has no preconditions.
             format!("local-uid:{}", unsafe { libc::geteuid() })
         });
-        if owner.is_empty() || owner.len() > 256 || owner.chars().any(char::is_control) {
-            return Err(Error::new("invalid AHU_MCP_CALLER"));
-        }
+        validate_owner(&owner)?;
         Ok(Self {
             owner,
             legacy: false,
@@ -279,6 +277,13 @@ impl Session {
             }
         });
     }
+}
+
+fn validate_owner(owner: &str) -> Result<()> {
+    if owner.is_empty() || owner.len() > 256 || owner.chars().any(char::is_control) {
+        return Err(Error::new("invalid AHU_MCP_CALLER"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -524,5 +529,122 @@ impl Drop for Lock {
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task() -> StoredTask {
+        StoredTask {
+            task_id: "00000000-0000-4000-8000-000000000000".into(),
+            owner: "test".into(),
+            repository: "repo".into(),
+            checkout: PathBuf::from("/repo"),
+            status: "input_required".into(),
+            created_at: "now".into(),
+            last_updated_at: "now".into(),
+            ttl_ms: None,
+            revision: 0,
+            cancel_requested: false,
+            name: "ahu_task_get".into(),
+            arguments: json!({}),
+            request_input: true,
+            input_requests: Some(json!({"task-selection":{}})),
+            result: None,
+            error: None,
+        }
+    }
+
+    fn update(action: Value) -> Value {
+        json!({
+            "taskId":"00000000-0000-4000-8000-000000000000",
+            "_meta":{"io.modelcontextprotocol/clientCapabilities":{"elicitation":{"form":{}}}},
+            "inputResponses":{"task-selection":action}
+        })
+    }
+
+    #[test]
+    fn elicitation_updates_validate_shape_action_and_selector_before_mutation() {
+        for params in [
+            json!(null),
+            json!({"taskId":"x","unexpected":true,"inputResponses":{}}),
+            json!({"taskId":"x","inputResponses":[]} ),
+            update(json!({"action":"unknown"})),
+            update(json!({"action":"accept"})),
+            update(json!({"action":"accept","content":{"task":""}})),
+            update(json!({"action":"accept","content":{"task":"@x","extra":true}})),
+            update(json!({"action":"accept","content":{"task":"@x"},"extra":true})),
+        ] {
+            assert!(
+                task().update(&params).is_err(),
+                "accepted elicitation: {params}"
+            );
+        }
+
+        let mut no_form = update(json!({"action":"accept","content":{"task":"@x"}}));
+        no_form["_meta"]["io.modelcontextprotocol/clientCapabilities"] = json!({});
+        assert!(task().update(&no_form).is_err());
+
+        let mut no_answer = task();
+        assert!(
+            no_answer
+                .update(&json!({"inputResponses":{"other":{}}}))
+                .is_ok()
+        );
+        assert_eq!(no_answer.revision, 0);
+
+        let mut already_done = task();
+        already_done.status = "completed".into();
+        assert!(
+            already_done
+                .update(&update(json!({"action":"unknown"})))
+                .is_ok()
+        );
+        assert_eq!(already_done.revision, 0);
+
+        for action in ["decline", "cancel"] {
+            let mut waiting = task();
+            assert!(waiting.update(&update(json!({"action":action}))).is_ok());
+            assert_eq!(waiting.status, "cancelled");
+            assert!(waiting.cancel_requested);
+            assert!(waiting.input_requests.is_none());
+            assert!(!waiting.request_input);
+        }
+    }
+
+    #[test]
+    fn task_locks_are_exclusive_and_reject_symlink_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("task.lock");
+        let first = Lock::try_acquire(&path).unwrap().expect("first lock");
+        assert!(Lock::try_acquire(&path).unwrap().is_none());
+        assert!(
+            Lock::acquire(&path)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("busy")
+        );
+        drop(first);
+        assert!(Lock::try_acquire(&path).unwrap().is_some());
+
+        #[cfg(unix)]
+        {
+            let outside = temp.path().join("outside");
+            std::fs::write(&outside, b"not a lock").unwrap();
+            let symlink = temp.path().join("linked.lock");
+            std::os::unix::fs::symlink(outside, &symlink).unwrap();
+            assert!(Lock::try_acquire(&symlink).is_err());
+        }
+    }
+
+    #[test]
+    fn owner_identity_validation_rejects_empty_long_and_control_values() {
+        assert!(validate_owner("").is_err());
+        assert!(validate_owner("bad\nidentity").is_err());
+        assert!(validate_owner(&"x".repeat(257)).is_err());
+        assert!(validate_owner(&"x".repeat(256)).is_ok());
     }
 }

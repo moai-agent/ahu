@@ -41,8 +41,8 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         })?;
     }
     match command {
-        Command::Help => {
-            println!("{}", cli::HELP);
+        Command::Help { topic } => {
+            println!("{}", cli::help_for(topic.as_deref())?);
             Ok(0)
         }
         Command::Version => {
@@ -247,9 +247,9 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             ahu::mcp::serve(&repo)
         }
         // `doctor` reports on a missing repository rather than failing on one.
-        Command::Doctor => {
+        Command::Doctor { verbose } => {
             let repo = commands::repo_from_cwd();
-            commands::with_stdio(|console| commands::doctor(console, &repo))
+            commands::with_stdio(|console| commands::doctor_with_verbosity(console, &repo, verbose))
         }
         other => {
             let repo = commands::repo_from_cwd()?;
@@ -273,7 +273,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                     &version,
                 ),
                 Command::Lock { update } => commands::lock_cmd(console, &repo, update),
-                Command::Tasks => commands::tasks(console, &repo),
+                Command::Tasks { limit } => commands::tasks_with_limit(console, &repo, limit),
                 Command::Task {
                     task_id,
                     output_json,
@@ -283,14 +283,14 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 Command::Message { task_id, text } => {
                     commands::message_cmd(console, &repo, &task_id, &text)
                 }
-                Command::Help
+                Command::Help { .. }
                 | Command::HeadlessLaunch { .. }
                 | Command::BatchControl { .. }
                 | Command::BatchSupervisor { .. }
                 | Command::TasksJson
                 | Command::Version
                 | Command::Explain { .. }
-                | Command::Doctor
+                | Command::Doctor { .. }
                 | Command::CmuxStatus { .. }
                 | Command::CmuxInstall { .. }
                 | Command::McpServe

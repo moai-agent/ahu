@@ -165,7 +165,11 @@ pub(super) fn call(arguments: &Value) -> Result<Value> {
     let endpoint = std::env::var("AHU_DECISION_URL").map_err(|_| {
         Error::new("ahu_typed_decide requires AHU_DECISION_URL to name a local decision service")
     })?;
-    let url = url::Url::parse(&endpoint)
+    call_endpoint(arguments, &endpoint)
+}
+
+fn call_endpoint(arguments: &Value, endpoint: &str) -> Result<Value> {
+    let url = url::Url::parse(endpoint)
         .map_err(|error| Error::new(format!("invalid AHU_DECISION_URL: {error}")))?;
     if url.scheme() != "http"
         || url.username() != ""
@@ -272,6 +276,8 @@ fn validate_response(arguments: &Value, result: Value) -> Result<Value> {
 mod tests {
     use super::{validate_arguments, validate_response};
     use serde_json::{Value, json};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     fn request(key: Value) -> Value {
         json!({
@@ -414,5 +420,130 @@ mod tests {
             options.insert(format!("extra_{index}"), json!("Extra route"));
         }
         assert!(validate_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn argument_validation_rejects_each_question_shape_before_dispatch() {
+        let mut request = typed_request();
+        request["questions"]["bad\nname"] = request["questions"]["route"].clone();
+        assert!(validate_arguments(&request).is_err());
+
+        let mut request = typed_request();
+        request["questions"]["route"]["unexpected"] = json!(true);
+        assert!(validate_arguments(&request).is_err());
+
+        let mut request = typed_request();
+        request["questions"]["route"]["type"] = json!("freeform");
+        assert!(validate_arguments(&request).is_err());
+
+        let mut request = typed_request();
+        request["questions"]["route"]["instructions"] = json!("  ");
+        assert!(validate_arguments(&request).is_err());
+
+        for options in [json!({}), json!({"a":"A"}), json!({"a":"A","b":" "})] {
+            let mut request = typed_request();
+            request["questions"]["route"]["options"] = options;
+            assert!(validate_arguments(&request).is_err());
+        }
+
+        let mut request = typed_request();
+        request["questions"]["route"]["min"] = json!(0);
+        assert!(validate_arguments(&request).is_err());
+
+        let mut request = typed_request();
+        request["questions"]["urgency"]["options"] = json!({"a":"A"});
+        assert!(validate_arguments(&request).is_err());
+
+        let mut request = typed_request();
+        request["questions"]["refund"]["max"] = json!(1);
+        assert!(validate_arguments(&request).is_err());
+    }
+
+    #[test]
+    fn response_validation_requires_object_answers_and_typed_values() {
+        for response in [json!({}), json!({"answers": []})] {
+            assert!(validate_response(&typed_request(), response).is_err());
+        }
+
+        for answer in [
+            json!(null),
+            json!({}),
+            json!({"value":"billing","confidence":-0.1}),
+        ] {
+            let mut response = valid_response();
+            response["answers"]["route"] = answer;
+            assert!(validate_response(&typed_request(), response).is_err());
+        }
+
+        let mut response = valid_response();
+        response["answers"]["route"]["value"] = json!(false);
+        assert!(validate_response(&typed_request(), response).is_err());
+    }
+
+    fn serve_once(response: &'static [u8]) -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = format!("http://{}/decide", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let (status, body) = if response == b"oversized" {
+                ("200 OK", Vec::new())
+            } else if response == b"bad-status" {
+                ("503 Service Unavailable", b"{}".to_vec())
+            } else {
+                ("200 OK", response.to_vec())
+            };
+            let length = if response == b"oversized" {
+                1_048_577
+            } else {
+                body.len()
+            };
+            let mut output = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n").into_bytes();
+            output.extend(body);
+            stream.write_all(&output).unwrap();
+        });
+        address
+    }
+
+    #[test]
+    fn decision_http_boundary_accepts_valid_results_and_rejects_bad_status_and_size() {
+        for (endpoint, needle) in [
+            ("not a URL", "invalid AHU_DECISION_URL"),
+            ("ftp://127.0.0.1", "loopback IP literal"),
+            ("http://localhost", "loopback IP literal"),
+            ("http://user@127.0.0.1", "loopback IP literal"),
+        ] {
+            assert!(
+                super::call_endpoint(&typed_request(), endpoint)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(needle)
+            );
+        }
+        for (body, expected_error) in [
+            (br#"{"answers":{"route":{"value":"billing"},"urgency":{"value":1.5},"refund":{"value":0.8}}}"#.as_slice(), None),
+            (b"bad-status".as_slice(), Some("HTTP 503")),
+            (b"invalid-json".as_slice(), Some("invalid JSON")),
+            (b"oversized".as_slice(), Some("exceeds 1 MiB")),
+        ] {
+            let url = serve_once(body);
+            let result = super::call_endpoint(&typed_request(), &url);
+            if let Some(needle) = expected_error {
+                assert!(result.unwrap_err().to_string().contains(needle));
+            } else {
+                assert_eq!(result.unwrap()["answers"]["route"]["value"], "billing");
+            }
+        }
     }
 }

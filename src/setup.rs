@@ -11,7 +11,8 @@ use crate::config;
 use crate::git::Repo;
 use crate::launcher::Console;
 use crate::selection;
-use crate::util::{Error, Result};
+use crate::style::{self, Role};
+use crate::util::{Error, Result, display_path};
 
 struct Detected {
     id: &'static str,
@@ -53,7 +54,7 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         .with_kind(crate::util::ErrorKind::Prerequisite));
     }
 
-    console.say("Detected harnesses:\n")?;
+    console.say(&style::stdout().paint(Role::Heading, "Detected harnesses\n"))?;
     for h in &detected {
         console.say(&format!(
             "  {}{} ({})\n",
@@ -69,14 +70,15 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
     // Establish project-wide selection policy only when this project has none.
     // This remains a shared, explicit choice, separate from the per-harness
     // developer agents created below.
-    let new_config = if config::load(&repo.root)?.is_none() {
-        let Some(config) = crate::launcher::run_setup(console)? else {
+    let loaded = config::load(&repo.root)?;
+    let (new_config, existing_config) = if loaded.is_none() {
+        let Some(config) = crate::launcher::run_setup_with_available_models(console)? else {
             console.say("Cancelled. Nothing was changed.\n")?;
             return Ok(1);
         };
-        Some(config)
+        (Some(config), None)
     } else {
-        None
+        (None, loaded.map(|config| config.config))
     };
 
     let mut chosen_models: Vec<(&'static str, String)> = Vec::new();
@@ -93,16 +95,23 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
             chosen_models.push((h.id, model.clone()));
             continue;
         }
-        let models = catalog::models_for(h.id);
+        let options = crate::models::for_harness(h.id);
+        let models = options.models;
         if models.is_empty() {
             return Err(Error::new(format!(
-                "the ahu model catalog has no selectable models for detected harness {}. Nothing was changed.",
+                "no currently available model for {} is in ahu's validated compatibility catalog. Nothing was changed.",
                 h.id
             )));
         }
-        console.say(&format!(
-            "\nModels listed for {} by this ahu release:\n",
-            h.id
+        let source = match options.source {
+            crate::models::Source::Harness => "listed by this harness",
+            crate::models::Source::Catalog => {
+                "listed in the ahu catalog (account availability is not checked)"
+            }
+        };
+        console.say(&style::stdout().paint(
+            Role::Heading,
+            &format!("\nModels for {} ({source}):\n", h.id),
         ))?;
         for (index, model) in models.iter().enumerate() {
             console.say(&format!(
@@ -112,12 +121,34 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
                 model.display_name
             ))?;
         }
-        let Some(answer) = console.ask(&format!("Choose the model for dev-{}: ", h.id))? else {
+        let preferred = existing_config
+            .as_ref()
+            .and_then(|config| config.model_rankings.get(h.id))
+            .and_then(|ranking| ranking.first())
+            .and_then(|preferred| models.iter().position(|model| model.model == preferred));
+        let prompt = match preferred {
+            Some(index) => format!(
+                "Choose the model for dev-{} [{}] (blank keeps it): ",
+                h.id,
+                index + 1
+            ),
+            None => format!("Choose the model for dev-{} [1]: ", h.id),
+        };
+        let Some(answer) = console.ask(&prompt)? else {
             console.say("Cancelled. Nothing was changed.\n")?;
             return Ok(1);
         };
-        let index = answer.trim().parse::<usize>().ok().filter(|n| *n > 0);
-        let Some(model) = index.and_then(|n| models.get(n - 1)) else {
+        let index = if answer.trim().is_empty() {
+            Some(preferred.unwrap_or(0))
+        } else {
+            answer
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .map(|n| n - 1)
+        };
+        let Some(model) = index.and_then(|n| models.get(n)) else {
             return Err(Error::new(format!(
                 "choose a listed model number for {}; nothing was changed.",
                 h.id
@@ -151,7 +182,7 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         }
     }
     for (harness, model) in &chosen_models {
-        let agent = dev_agent(*harness, model);
+        let agent = dev_agent(harness, model);
         let path = safe_new_path(&repo.root, &format!(".agents/ahu/agents/dev-{harness}.md"))?;
         crate::agent::parse_manifest(&agent, &path)?;
         writes.push((path, agent.into_bytes()));
@@ -238,7 +269,11 @@ fn apply_plan(console: &mut Console<'_>, writes: &[(PathBuf, Vec<u8>)]) -> Resul
             )));
         }
         created.push(path.clone());
-        console.say(&format!("Created {}\n", path.display()))?;
+        console.say(&format!(
+            "{} {}\n",
+            style::stdout().paint(Role::Success, "created"),
+            display_path(path)
+        ))?;
     }
     Ok(())
 }

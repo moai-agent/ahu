@@ -299,3 +299,271 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     );
     assert_eq!(comparison["groups"][0]["evaluator_harness"], "opencode");
 }
+
+#[test]
+fn eval_run_records_invalid_candidate_answers_without_scoring_them_as_zero() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent_on("triage", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    repo.add_agent_on("judge", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    repo.commit("evaluation agent");
+
+    let external = TempDir::new().unwrap();
+    let bin = external.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let harness = bin.join("opencode");
+    std::fs::write(
+        &harness,
+        r##"#!/usr/bin/env python3
+import json, os, subprocess, sys
+if '--version' in sys.argv:
+    print('1.18.32')
+    raise SystemExit(0)
+mode = os.environ['AHU_TEST_ANSWER']
+if mode == 'launch_failed':
+    raise SystemExit(1)
+elif mode == 'invalid_json':
+    with open('answer.json', 'w', encoding='utf-8') as answer:
+        answer.write('{ malformed')
+elif mode == 'too_large':
+    with open('answer.json', 'w', encoding='utf-8') as answer:
+        answer.write('x' * 65537)
+elif mode == 'invalid_value':
+    with open('answer.json', 'w', encoding='utf-8') as answer:
+        json.dump({'route':'unknown'}, answer)
+requests = [
+    {'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
+    {'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}},
+    {'jsonrpc':'2.0','id':3,'method':'tools/call','params':{'name':'ahu_agents_list','arguments':{}}},
+]
+server = subprocess.Popen([os.environ['AHU_BIN'], 'mcp', 'serve'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+server.stdin.write(''.join(json.dumps(row)+'\n' for row in requests))
+server.stdin.close()
+server.wait(timeout=5)
+session = os.environ['AHU_PARENT_TASK']
+print(json.dumps({'type':'text','timestamp':1,'sessionID':session,'part':{'type':'text','text':'saved invalid answer'}}), flush=True)
+print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':{'type':'step-finish','reason':'stop','usage':{'input_tokens':1,'output_tokens':1,'total_tokens':2},'model':'fixture'}}), flush=True)
+"##,
+    )
+    .unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let case = external.path().join("case.md");
+    fixture_case(&case);
+    let home = external.path().canonicalize().unwrap().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    for (mode, status, category) in [
+        (
+            "launch_failed",
+            "candidate_launch_failed",
+            "candidate_run_failed",
+        ),
+        (
+            "invalid_json",
+            "candidate_answer_invalid_json",
+            "candidate_answer_invalid",
+        ),
+        (
+            "too_large",
+            "candidate_answer_too_large",
+            "candidate_answer_invalid",
+        ),
+        (
+            "invalid_value",
+            "candidate_answer_invalid",
+            "candidate_answer_invalid",
+        ),
+        (
+            "missing",
+            "candidate_answer_missing",
+            "candidate_answer_invalid",
+        ),
+    ] {
+        let records = external.path().join(format!("{mode}.jsonl"));
+        let output = common::ahu()
+            .current_dir(repo.path())
+            .args([
+                "eval",
+                "run",
+                "--case",
+                case.to_str().unwrap(),
+                "--agent",
+                "@triage",
+                "--records",
+                records.to_str().unwrap(),
+                "--runs",
+                "1",
+                "--output",
+                "json",
+            ])
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
+            .env("AHU_TEST_ANSWER", mode)
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let summary: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(summary["trials"][0]["terminal_status"], status);
+        let row: Value = std::fs::read_to_string(records)
+            .unwrap()
+            .lines()
+            .next()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .unwrap();
+        assert_eq!(row["terminal_status"], status);
+        assert_eq!(row["failure_category"], category);
+        assert_eq!(row["outcome"], "failed");
+        assert_eq!(row["judge_status"], "not_reached");
+        assert_eq!(row["score"], Value::Null);
+        assert_eq!(row["passed"], false);
+        assert_eq!(row["answer_passed"], false);
+        if mode != "launch_failed" {
+            assert_eq!(row["mcp_observed"], true);
+            assert_eq!(row["mcp_tool_call_count"], 1);
+            assert_eq!(row["mcp_tools"]["ahu_agents_list"], 1);
+        }
+    }
+}
+
+#[test]
+fn eval_run_refuses_invalid_matrix_and_checkout_combinations_before_launch() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent_on("triage", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    repo.add_agent_on("judge", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    repo.add_agent_on("writer", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    repo.commit("evaluation agent");
+    let external = TempDir::new().unwrap();
+    let case = external.path().join("case.md");
+    fixture_case(&case);
+    let case_without_rubric = external.path().join("case-without-rubric.md");
+    fixture_case_named(&case_without_rubric, "without-rubric", "");
+    let case_without_rubric_text = std::fs::read_to_string(&case_without_rubric).unwrap();
+    std::fs::write(
+        &case_without_rubric,
+        case_without_rubric_text.replace(
+            "rubric:\n  route: Routes the duplicate charge to payments\n",
+            "",
+        ),
+    )
+    .unwrap();
+    let case_arg = case.to_str().unwrap();
+    let no_rubric_arg = case_without_rubric.to_str().unwrap();
+    let external_arg = external.path().to_str().unwrap();
+    let records_arg = external.path().join("preflight-runs.jsonl");
+    let records_arg = records_arg.to_str().unwrap();
+    let cases = vec![
+        (vec!["eval", "run", "--agent", "@triage"], "--case"),
+        (vec!["eval", "run", "--case", case_arg], "--agent @name"),
+        (
+            vec![
+                "eval", "run", "--case", case_arg, "--agent", "@triage", "--agent", "@triage",
+            ],
+            "named more than once",
+        ),
+        (
+            vec!["eval", "run", "--case", case_arg, "--agent", "@missing"],
+            "not a registered ahu agent",
+        ),
+        (
+            vec![
+                "eval",
+                "run",
+                "--case",
+                case_arg,
+                "--agent",
+                "@triage",
+                "--evaluator",
+                "@missing",
+            ],
+            "not a registered ahu agent",
+        ),
+        (
+            vec![
+                "eval",
+                "run",
+                "--case",
+                no_rubric_arg,
+                "--agent",
+                "@triage",
+                "--evaluator",
+                "@judge",
+            ],
+            "requires a case `rubric` object",
+        ),
+        (
+            vec![
+                "eval",
+                "run",
+                "--case",
+                case_arg,
+                "--agent",
+                "@triage",
+                "--evaluator",
+                "@judge",
+                "--evaluator-repo",
+                external_arg,
+            ],
+            "not a Git checkout",
+        ),
+        (
+            vec![
+                "eval", "run", "--case", case_arg, "--agent", "@triage", "--agent", "@judge",
+                "--agent", "@writer", "--runs", "100",
+            ],
+            "beyond the",
+        ),
+        (
+            vec![
+                "eval",
+                "run",
+                "--case",
+                case_arg,
+                "--suite",
+                "also-a-suite.md",
+                "--agent",
+                "@triage",
+            ],
+            "alternatives",
+        ),
+        (
+            vec![
+                "eval",
+                "run",
+                "--case",
+                case_arg,
+                "--agent",
+                "@triage",
+                "--evaluator-repo",
+                external_arg,
+            ],
+            "needs --evaluator",
+        ),
+    ];
+    for (args, expected) in cases {
+        let output = common::ahu()
+            .current_dir(repo.path())
+            .args(args.iter().copied())
+            .args(["--records", records_arg])
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "accepted args: {args:?}");
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains(expected), "{args:?}: {diagnostic}");
+    }
+}

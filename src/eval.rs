@@ -1936,9 +1936,11 @@ fn outcome_fields(
     if let Some(category) = failure_category {
         fields.insert("failure_category".into(), category.into());
     }
-    if terminal_status == "candidate_launch_failed" {
-        // No answer means no answer score. Recording 0 here would be a claim the
-        // candidate answered wrongly, which is not what happened.
+    if terminal_status == "candidate_launch_failed"
+        || terminal_status.starts_with("candidate_answer_")
+    {
+        // No valid answer means no answer score. Recording 0 here would be a
+        // claim the candidate answered wrongly, which is not what happened.
         fields.insert("outcome".into(), "failed".into());
         fields.insert("judge_status".into(), "not_reached".into());
         fields.insert(

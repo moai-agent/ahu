@@ -552,7 +552,8 @@ mod tests {
 
     use super::{
         AGENT_CONTEXT_CRITIC_SKILL, BUNDLED_SKILLS, MAX_FRAME_BYTES, TOOL_NAMES, read_frame,
-        skill_path, tool_definitions_digest, tools, verify_bundled_skills,
+        skill_path, tool_definitions_digest, tools, validate_envelope, validate_tool_call,
+        verify_bundled_skills,
     };
 
     #[test]
@@ -572,6 +573,79 @@ mod tests {
         assert_eq!(
             read_frame(&mut reader).unwrap().as_deref(),
             Some("{\"jsonrpc\":\"2.0\"}\n")
+        );
+
+        let mut unterminated_oversize = Cursor::new(vec![b'x'; MAX_FRAME_BYTES + 1]);
+        assert!(read_frame(&mut unterminated_oversize).is_err());
+        assert!(read_frame(&mut unterminated_oversize).unwrap().is_none());
+
+        let streamed = Cursor::new(vec![b'x'; MAX_FRAME_BYTES + 8192]);
+        let mut streamed = std::io::BufReader::with_capacity(4096, streamed);
+        assert!(read_frame(&mut streamed).is_err());
+        assert!(read_frame(&mut streamed).unwrap().is_none());
+    }
+
+    #[test]
+    fn frame_reader_rejects_invalid_utf8_and_returns_an_unterminated_final_frame() {
+        let mut invalid = Cursor::new(vec![0xff, b'\n']);
+        assert_eq!(
+            read_frame(&mut invalid).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let mut final_frame = Cursor::new(b"{}".to_vec());
+        assert_eq!(read_frame(&mut final_frame).unwrap().as_deref(), Some("{}"));
+        assert!(read_frame(&mut final_frame).unwrap().is_none());
+    }
+
+    #[test]
+    fn envelope_and_tool_argument_validation_reject_malformed_requests() {
+        for request in [
+            serde_json::json!(null),
+            serde_json::json!({"jsonrpc":"1.0","method":"ping","id":1}),
+            serde_json::json!({"jsonrpc":"2.0","method":1,"id":1}),
+            serde_json::json!({"jsonrpc":"2.0","method":"ping","id":null}),
+            serde_json::json!({"jsonrpc":"2.0","method":"ping","id":1.5}),
+            serde_json::json!({"jsonrpc":"2.0","method":"ping","id":1,"result":{}}),
+        ] {
+            assert!(validate_envelope(&request).is_some(), "accepted {request}");
+        }
+        assert!(
+            validate_envelope(&serde_json::json!({"jsonrpc":"2.0","method":"ping","id":"ok"}))
+                .is_none()
+        );
+
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"name":"ahu_task_get"}),
+            serde_json::json!({"name":"ahu_task_get","arguments":{"task":""}}),
+            serde_json::json!({"name":"ahu_task_get","arguments":{"task":"x","extra":true}}),
+            serde_json::json!({"name":"not_a_tool","arguments":{}}),
+        ] {
+            assert!(
+                validate_tool_call(&params, false).is_err(),
+                "accepted {params}"
+            );
+        }
+        assert!(
+            validate_tool_call(
+                &serde_json::json!({"name":"ahu_task_get","arguments":{"task":"t-1"}}),
+                false
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_tool_call(
+                &serde_json::json!({"name":"ahu_task_inspect","arguments":{"task":"t-1"}}),
+                true
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_tool_call(
+                &serde_json::json!({"name":"ahu_task_inspect","arguments":{"task":"t-1"}}),
+                false
+            )
+            .is_err()
         );
     }
 
@@ -702,6 +776,16 @@ mod tests {
             verify_bundled_skills(root).unwrap(),
             (0, BUNDLED_SKILLS.len() - 1, 1)
         );
+    }
+
+    #[test]
+    fn skill_verification_marks_non_file_entries_as_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let (name, _) = BUNDLED_SKILLS[0];
+        let path = temp.path().join(skill_path(name));
+        std::fs::create_dir_all(path).unwrap();
+        let (_, _, changed) = verify_bundled_skills(temp.path()).unwrap();
+        assert_eq!(changed, 1);
     }
 
     #[cfg(unix)]

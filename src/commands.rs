@@ -434,6 +434,14 @@ pub fn onboard_cmd(
 
 /// `ahu doctor`
 pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
+    doctor_with_verbosity(console, repo, false)
+}
+
+pub fn doctor_with_verbosity(
+    console: &mut Console<'_>,
+    repo: &Result<Repo>,
+    verbose: bool,
+) -> Result<i32> {
     let mut problems = 0;
     let mut warnings = 0;
     let mut project_harnesses = std::collections::BTreeSet::new();
@@ -441,14 +449,17 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
     let mut registered_agents = Vec::new();
     match repo {
         Ok(repo) => {
-            console.say(&format!(
-                "repository   {}\n  identity   {}\n  group name {}\n  HEAD       {}\n",
-                display_path(&repo.root),
-                repo.identity(),
-                // Derived from a directory name, which ahu does not choose.
-                display_safe(&repo.display_name()),
-                display_safe(repo.head.as_deref().unwrap_or("(no commits)"))
-            ))?;
+            if verbose {
+                console.say(&format!(
+                    "repository   {}\n  identity   {}\n  group name {}\n  HEAD       {}\n",
+                    display_path(&repo.root),
+                    repo.identity(),
+                    display_safe(&repo.display_name()),
+                    display_safe(repo.head.as_deref().unwrap_or("(no commits)"))
+                ))?;
+            } else {
+                console.say(&format!("repository   {}\n", display_path(&repo.root)))?;
+            }
         }
         Err(e) => {
             problems += 1;
@@ -464,13 +475,17 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             Ok(Some(loaded)) => {
                 project_harnesses.extend(loaded.config.harness_preferences.iter().cloned());
                 loaded_config = Some(loaded.clone());
-                console.say(&format!(
-                    "config       {} ({})\n  catalog    {}\n  harnesses  {}\n",
-                    display_path(&loaded.path),
-                    loaded.short_digest(),
-                    display_safe(&loaded.config.catalog_version),
-                    display_safe(&loaded.config.harness_preferences.join(", "))
-                ))?;
+                if verbose {
+                    console.say(&format!(
+                        "config       {} ({})\n  catalog    {}\n  harnesses  {}\n",
+                        display_path(&loaded.path),
+                        loaded.short_digest(),
+                        display_safe(&loaded.config.catalog_version),
+                        display_safe(&loaded.config.harness_preferences.join(", "))
+                    ))?;
+                } else {
+                    console.say(&format!("config       {}\n", display_path(&loaded.path)))?;
+                }
             }
             Ok(None) => console.say("config       not initialized; run `ahu setup`\n")?,
             Err(e) => {
@@ -511,26 +526,28 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                         console.say(&format!(
                             "hooks        {display_name}: {count} configured\n",
                         ))?;
-                        for hook in &found.hooks {
-                            console.say(&format!(
-                                "  {:<12} {}\n",
-                                hook.scope.as_str(),
-                                hook.label()
-                            ))?;
-                        }
-                        for plugin in &found.declared_plugins {
-                            let scope = if plugin.source.starts_with('/')
-                                || plugin.source.starts_with('~')
-                            {
-                                "user"
-                            } else {
-                                "project"
-                            };
-                            console.say(&format!(
-                                "  {:<12} plugin → {}\n",
-                                scope,
-                                display_safe(&plugin.module)
-                            ))?;
+                        if verbose {
+                            for hook in &found.hooks {
+                                console.say(&format!(
+                                    "  {:<12} {}\n",
+                                    hook.scope.as_str(),
+                                    hook.label()
+                                ))?;
+                            }
+                            for plugin in &found.declared_plugins {
+                                let scope = if plugin.source.starts_with('/')
+                                    || plugin.source.starts_with('~')
+                                {
+                                    "user"
+                                } else {
+                                    "project"
+                                };
+                                console.say(&format!(
+                                    "  {:<12} plugin → {}\n",
+                                    scope,
+                                    display_safe(&plugin.module)
+                                ))?;
+                            }
                         }
                         for unreadable in &found.unreadable {
                             warnings += 1;
@@ -584,21 +601,33 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
 
         match crate::context_lock::check(repo, &crate::snapshot::collect(&repo.root)?) {
             Ok(status) if status.current => {
-                console.say(&format!("context lock {}\n", status.detail))?
+                if verbose {
+                    console.say(&format!("context lock {}\n", status.detail))?;
+                } else {
+                    console.say("context lock current\n")?;
+                }
             }
             Ok(status) => {
                 problems += 1;
-                console.say(&format!(
-                    "context lock stale: {}\n",
-                    display_safe_block(&status.detail)
-                ))?;
+                if verbose {
+                    console.say(&format!(
+                        "context lock stale: {}\n",
+                        display_safe_block(&status.detail)
+                    ))?;
+                } else {
+                    console.say("context lock stale; run `ahu lock` for details\n")?;
+                }
             }
             Err(error) => {
                 problems += 1;
-                console.say(&format!(
-                    "context lock invalid: {}\n",
-                    display_safe_block(&error.to_string())
-                ))?;
+                if verbose {
+                    console.say(&format!(
+                        "context lock invalid: {}\n",
+                        display_safe_block(&error.to_string())
+                    ))?;
+                } else {
+                    console.say("context lock invalid; run `ahu lock` for details\n")?;
+                }
             }
         }
 
@@ -629,7 +658,14 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             }
             Ok(drifted) => {
                 warnings += 1;
-                console.say(&drift::render_doctor(&drifted))?;
+                if verbose {
+                    console.say(&drift::render_doctor(&drifted))?;
+                } else {
+                    console.say(&format!(
+                        "drift        {} registered agent(s) drifted; run `ahu agents` for details\n",
+                        drifted.len()
+                    ))?;
+                }
             }
             Err(error) => {
                 warnings += 1;
@@ -664,9 +700,29 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         {
             warnings += 1;
         }
-        console.say(&format!("cmux integration {}:\n", display_safe(harness)))?;
-        console.say(&cmux::integration::render_summary(&status))?;
-        if let Some(reason) = status.headless.reasons.first() {
+        if verbose {
+            console.say(&format!("cmux integration {}:\n", display_safe(harness)))?;
+            console.say(&cmux::integration::render_summary(&status))?;
+        } else {
+            let verified = status
+                .components
+                .iter()
+                .filter(|component| {
+                    component.registration == cmux::integration::Registration::Installed
+                })
+                .count();
+            let unknown = status.components.len().saturating_sub(verified);
+            console.say(&format!(
+                "cmux         {}: {verified} verified, {unknown} unknown; headless {}\n",
+                display_safe(harness),
+                if status.headless.allowed {
+                    "ready"
+                } else {
+                    "needs review"
+                }
+            ))?;
+        }
+        if verbose && let Some(reason) = status.headless.reasons.first() {
             let safe = display_safe(reason);
             let mut shown: String = safe.chars().take(240).collect();
             if safe.chars().count() > 240 {
@@ -674,16 +730,18 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             }
             console.say(&format!("  headless   {shown}\n"))?;
         }
-        let installer = cmux::integration::installation_plan(harness, &native_cli)?;
-        console.say(&format!(
-            "  installer  {}; inspect: ahu cmux install --harness {} --dry-run\n",
-            if installer.available {
-                "available"
-            } else {
-                "unavailable/unknown"
-            },
-            display_safe(harness)
-        ))?;
+        if verbose {
+            let installer = cmux::integration::installation_plan(harness, &native_cli)?;
+            console.say(&format!(
+                "  installer  {}; inspect: ahu cmux install --harness {} --dry-run\n",
+                if installer.available {
+                    "available"
+                } else {
+                    "unavailable/unknown"
+                },
+                display_safe(harness)
+            ))?;
+        }
     }
 
     match Cmux::discover() {
@@ -837,11 +895,28 @@ fn session_owner(
 
 /// `ahu tasks`
 pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
-    tasks_at(console, repo, table::columns())
+    tasks_with_limit(console, repo, Some(20))
 }
 
-/// `ahu tasks`, laid out for an explicit width.
+pub fn tasks_with_limit(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    limit: Option<usize>,
+) -> Result<i32> {
+    tasks_limited_at(console, repo, table::columns(), limit)
+}
+
+/// `ahu tasks`, laid out for an explicit width and without a row limit.
 pub fn tasks_at(console: &mut Console<'_>, repo: &Repo, width: usize) -> Result<i32> {
+    tasks_limited_at(console, repo, width, None)
+}
+
+fn tasks_limited_at(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    width: usize,
+    limit: Option<usize>,
+) -> Result<i32> {
     let listing = if std::env::var("AHU_EXECUTION_BACKEND").ok().as_deref() == Some("headless")
         || !crate::headless::discover(repo)?.is_empty()
     {
@@ -865,7 +940,10 @@ pub fn tasks_at(console: &mut Console<'_>, repo: &Repo, width: usize) -> Result<
     let style = style::stdout();
     let mut reviews = Vec::with_capacity(listing.records.len());
     let mut rows = Vec::with_capacity(listing.records.len());
-    for (dir, record) in &listing.records {
+    let shown = limit
+        .unwrap_or(listing.records.len())
+        .min(listing.records.len());
+    for (dir, record) in listing.records.iter().take(shown) {
         let review = if crate::headless::review::is_headless(dir) {
             Some(crate::headless::inspection(dir)?)
         } else {
@@ -920,7 +998,7 @@ pub fn tasks_at(console: &mut Console<'_>, repo: &Repo, width: usize) -> Result<
     if let Some(header) = lines.next() {
         console.say(&format!("{header}\n"))?;
     }
-    for (((dir, _), review), line) in listing.records.iter().zip(&reviews).zip(lines) {
+    for (((dir, _), review), line) in listing.records.iter().take(shown).zip(&reviews).zip(lines) {
         console.say(&format!("{line}\n"))?;
         if let Some(review) = review {
             console.say(&crate::headless::review::render(review, true))?;
@@ -934,6 +1012,15 @@ pub fn tasks_at(console: &mut Console<'_>, repo: &Repo, width: usize) -> Result<
         &render_unreadable_tasks(repo, &listing.unreadable),
     ))?;
     console.say("Run `ahu task <handle>` for a task's full branch, worktree and launch base.\n")?;
+    if shown < listing.records.len() {
+        console.say(&style.paint(
+            Role::Hint,
+            &format!(
+                "Showing {shown} of {} tasks. Use `ahu tasks --all` to show the full list.\n",
+                listing.records.len()
+            ),
+        ))?;
+    }
     Ok(0)
 }
 

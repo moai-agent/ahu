@@ -51,9 +51,11 @@ ahu doctor
 ahu
 ```
 
-On first use, setup writes the project's harness order, model rankings, and
-catalog pin to `.agents/ahu/config.toml`. Share that policy through Git; ahu
-does not stage, commit, or push it.
+Run `ahu setup` once in each project. It detects installed harnesses, asks you
+to choose models for their ahu dev agents, installs the bundled skills, adds
+project MCP entries, and writes `.agents/ahu/config.toml` and `ahu.lock`.
+Review and commit the generated files so future ahu commands can use the same
+project setup. ahu does not stage, commit, or push them.
 
 In the launcher, select an agent by number, `@name`, or bare name. Leave the
 selection blank for the project's automatic harness/model choice. The resolved
@@ -198,14 +200,14 @@ require explicit user permission.
 | `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness dev agents, and refresh `ahu.lock` |
 | `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
 | `ahu launch @agent [options]` | Backward-compatible launch alias with `--prompt` and `--prompt-file` support |
-| `ahu doctor` | Check repository, configuration, committed context lock, harness, cmux, telemetry, skills, and drift |
+| `ahu doctor` | Concise readiness summary; add `--verbose` for component diagnostics |
 | `ahu lock` | Check that recognized agent context and `ahu.lock` are committed and current |
 | `ahu lock --update` | Fingerprint current recognized context into `ahu.lock` for review and commit |
 | `ahu agents` | List registered agents and detected drift |
-| `ahu tasks` | List tasks in a compact table |
+| `ahu tasks` | List the 20 most recent tasks; use `--limit N` or `--all` to change the range |
 | `ahu cmux status` | Inspect native integration evidence and headless isolation |
 | `ahu cmux install --harness codex --dry-run` | Preview an explicit native installation |
-| `ahu help` | Options, prompt sources, and exit codes |
+| `ahu help [COMMAND]` | Compact command list or focused help; use `ahu help all` for the full option reference |
 | `ahu onboard` | Read-only preview of native definitions available for registration |
 | `ahu knowledge lint` | Validate and lint configured OKF bundles with installed `okf` |
 | `ahu explain` | Built-in architecture overview |
@@ -214,7 +216,7 @@ require explicit user permission.
 | `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
-| `ahu mcp serve` | Serve repository-scoped agent and task inspection over stdio MCP |
+| `ahu mcp serve` | Serve repository-scoped agent, task, and typed-decision tools over stdio MCP |
 
 Use the bundled `agent-context-critic` skill with `ahu eval run` and
 `ahu eval report` to investigate context changes against measured outcomes.
@@ -223,7 +225,8 @@ harness loaded them. `ahu.lock` covers recognized repository inputs only;
 harness, user, managed, and provider context remains outside that guarantee.
 The eval cases, OTel observations, and private run artifacts should stay outside
 the candidate checkout when they contain information the candidate should not
-see. `ahu help` lists the CLI commands and their supported options.
+see. `ahu help` lists commands, `ahu help COMMAND` shows focused options, and
+`ahu help all` prints the full reference.
 
 All four shortcuts open the same way: approvals bypassed, on this project's
 top-ranked model for that harness, both passed explicitly on the command line.
@@ -260,6 +263,11 @@ project files before launching. Claude Code asks before using project MCP
 servers, and Codex must trust the repository before loading project config. See the
 [typed-decision experiment](docs/typed-decisions.md) for its model-neutral
 service contract and limitations.
+
+External issue tracking is optional and remains policy in skills and tracker
+tools, not in ahu's task CLI. The bundled `direct-agents` skill lets a project
+choose whether to use tracker records and, when configured, link those records
+to ahu task IDs on the provider side.
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON
 contracts, prompt transport, hooks, state, and delegation boundaries.

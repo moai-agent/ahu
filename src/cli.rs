@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::bail;
 use crate::util::Result;
 
-pub const HELP: &str = "ahu - The moai-agent command-line interface
+pub const HELP_ALL: &str = "ahu - The moai-agent command-line interface
 
 Launch repository-defined agents in fresh Git worktrees and organise their
 interactive sessions in cmux. Use --headless for unattended execution with
@@ -30,7 +30,7 @@ real flags is the harness, the exact model, and any permission widening a
 manifest asks for.
 
 Commands:
-  help                  Print this help message
+  help [COMMAND|all]    Print command help or the full option reference
   explain               Architecture overview and Mermaid diagrams
   setup                 Configure ahu, harness MCP access, skills, and dev agents
   @agent [prompt]       Assign work to an agent; quote multi-word prompts.
@@ -53,7 +53,8 @@ Commands:
   eval report --records <path> [--output json]
                         Compare local evaluation runs from an external JSONL
                         record file. Reads only, and only outside this checkout
-  tasks                 List tasks launched from this repository
+  tasks [--limit N|--all]
+                        List recent tasks or the full history
   task <task-id> [--output json]
                         Inspect a task's recorded session state and locations
   wait <task-id> [--output json]    Wait for a headless attempt to stop
@@ -76,7 +77,7 @@ Commands:
   cmux install --harness ID [--dry-run]
                         Preview or explicitly delegate a native cmux installation
   mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
-  doctor                Check repository, configuration, harness, and cmux
+  doctor [--verbose]    Check repository, configuration, harness, and cmux
   agy                   Open the Antigravity CLI here on this project's
                         top-ranked Antigravity model, in YOLO mode
                         (--dangerously-skip-permissions)
@@ -99,6 +100,7 @@ Task references:
   In `launch @name`, @name selects a registered agent instead.
 
 Options:
+  help [COMMAND]        Print focused help for a command; use `help all` for this reference
   -h, --help            Print this help message
   -V, --version         Print the version
   --repo <path>         Select a repository checkout before the command.
@@ -168,6 +170,14 @@ eval run options:
                         that widens harness approvals
   --output json         Emit a versioned summary to stdout
 
+tasks options:
+  --limit <count>       Show the most recent 1 to 500 tasks (default 20)
+  --all                 Show the full task history
+  --output json         Emit the complete task list as JSON; cannot be combined with --limit/--all
+
+doctor options:
+  --verbose             Show component-level cmux, hook, drift, and context-lock details
+
 launcher options:
   --no-focus            Do not switch to the new session after launching
 
@@ -209,6 +219,123 @@ Exit codes:
 run-task options:
   --task-dir <path>     Directory holding the prepared task record";
 
+pub const HELP: &str = "ahu — launch and coordinate repository agents
+
+Usage: ahu [--repo PATH] [COMMAND]
+
+Start the launcher with `ahu`, or run a registered agent with
+`ahu @agent 'task prompt'`.
+
+Commands:
+  setup                 Configure this project for ahu
+  agents                List registered agents
+  onboard               Preview native agent definitions
+  doctor [--verbose]    Check project and harness readiness
+  lock [--update]       Check or refresh committed agent context
+  tasks [--limit N]     List recent tasks; use --all for the full list
+  task ID               Inspect a task
+  wait|result|cancel ID Control or inspect a task
+  resume ID --prompt-file PATH
+  cleanup|remove ID     Clean captures or remove a completed task
+  focus|message ID ...  Focus a task or send it a message
+  eval run|report       Run and compare local agent evaluations
+  knowledge lint        Check configured OKF bundles
+  cmux status|install   Inspect or install native cmux integration
+  mcp serve             Serve repository tools over stdio MCP
+  explain               Show the architecture overview
+  @agent [PROMPT]       Assign work to a registered agent
+  launch @agent         Backward-compatible launch alias
+  agy|claude|codex|opencode
+                        Open a coordinating harness session
+
+Use `ahu help COMMAND` or `ahu COMMAND --help` for focused help.
+Use `ahu help all` for the full command and option reference.
+
+Global options: --repo PATH, --color auto|always|never, --help, --version
+Docs: docs/reference.md";
+
+/// Help for a command or a command group. Detailed flag sections are sliced
+/// from the complete help text so there is one source of truth.
+pub fn help_for(topic: Option<&str>) -> Result<String> {
+    let Some(topic) = topic else {
+        return Ok(HELP.to_string());
+    };
+    let topic = topic.trim().trim_start_matches("ahu ");
+    if matches!(topic, "--help" | "-h") {
+        return Ok(HELP.to_string());
+    }
+    if matches!(topic, "all" | "--all") {
+        return Ok(HELP_ALL.to_string());
+    }
+    let help = match topic {
+        "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh ahu.lock. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
+        "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
+        "eval run" => help_section("eval run options:", "launcher options:"),
+        "eval report" => help_section("eval report options:", "eval run options:"),
+        "launch" | "@agent" => help_section("launch options:", "Exit codes:"),
+        "explain" => help_section("explain options:", "onboard options:"),
+        "onboard" => help_section("onboard options:", "knowledge lint options:"),
+        "knowledge lint" => help_section("knowledge lint options:", "eval report options:"),
+        "doctor" => "Usage: ahu doctor\n\nSummarize project, context-lock, skills, harness, telemetry, and cmux readiness. Use --verbose for component-level diagnostics.\n".to_string(),
+        "lock" => "Usage: ahu lock [--update]\n\nChecks that recognized agent context matches committed ahu.lock. --update refreshes the lock for review and commit.\n".to_string(),
+        "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
+        "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
+        "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
+        "task" => "Usage: ahu task ID [--output json]\n\nInspect a task's state, branch, worktree, and launch evidence.\n".to_string(),
+        "wait" => "Usage: ahu wait TASK [--output json]\n\nWait for a headless task to reach a terminal state.\n".to_string(),
+        "result" => "Usage: ahu result TASK [--output json]\n\nRead the durable process and harness outcomes for a headless task.\n".to_string(),
+        "cancel" => "Usage: ahu cancel TASK\n\nRequest cancellation of the task and its ahu descendants.\n".to_string(),
+        "resume" => "Usage: ahu resume TASK --prompt-file PATH [--output json]\n\nResume a root headless task using its recorded native session.\n".to_string(),
+        "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after termination is known.\n".to_string(),
+        "remove" => "Usage: ahu remove TASK\n\nRemove a completed task's record, worktree, and branch when safe.\n".to_string(),
+        "focus" => "Usage: ahu focus TASK\n\nBring an interactive task's cmux session to the front.\n".to_string(),
+        "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
+        "run-task" => "Usage: ahu run-task --task-dir PATH\n\nInternal worker command started by ahu's task supervisor.\n".to_string(),
+        "supervise" => "Usage: ahu supervise --task-dir PATH\n\nInternal supervisor command for detached headless tasks.\n".to_string(),
+        "agents" | "eval" | "knowledge" | "cmux" | "mcp" | "agy" | "claude" | "codex" | "opencode" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
+        other => return Err(crate::util::Error::new(format!("unknown help topic {other:?}; run `ahu help` for commands."))),
+    };
+    Ok(help)
+}
+
+fn help_section(start: &str, end: &str) -> String {
+    let lines: Vec<_> = HELP_ALL.lines().collect();
+    let Some(first) = lines.iter().position(|line| line.starts_with(start)) else {
+        return String::new();
+    };
+    let last = lines[first + 1..]
+        .iter()
+        .position(|line| line.starts_with(end))
+        .map(|offset| first + 1 + offset)
+        .unwrap_or(lines.len());
+    lines[first..last].join("\n") + "\n"
+}
+
+fn help_line_for(topic: &str) -> Option<&'static str> {
+    Some(match topic {
+        "agents" => "ahu agents — list registered agents",
+        "setup" => "ahu setup — configure this project",
+        "tasks" => "ahu tasks — list recent tasks",
+        "doctor" => "ahu doctor — check project readiness",
+        "lock" => "ahu lock — check committed agent context",
+        "eval" => "ahu eval — run or compare evaluations",
+        "knowledge" => "ahu knowledge lint — validate configured knowledge bundles",
+        "cmux" => "ahu cmux — inspect or install cmux integration",
+        "mcp" => "ahu mcp serve — start the MCP server",
+        "explain" => "ahu explain — show the architecture overview",
+        "onboard" => "ahu onboard — preview native agent definitions",
+        "agy" => "ahu agy — open Antigravity",
+        "claude" => "ahu claude — open Claude Code",
+        "codex" => "ahu codex — open Codex",
+        "opencode" => "ahu opencode — open OpenCode",
+        "launch" => "ahu launch @agent — backward-compatible launch alias",
+        "help" => "ahu help — show command help",
+        "run-task" => "ahu run-task — internal task worker",
+        "supervise" => "ahu supervise — internal task supervisor",
+        _ => return None,
+    })
+}
+
 /// How `ahu explain` should present itself.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ExplainFormat {
@@ -224,7 +351,9 @@ pub enum ExplainFormat {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    Help,
+    Help {
+        topic: Option<String>,
+    },
     Version,
     Explain {
         format: ExplainFormat,
@@ -291,7 +420,9 @@ pub enum Command {
         allow_widened_approvals: bool,
         output_json: bool,
     },
-    Tasks,
+    Tasks {
+        limit: Option<usize>,
+    },
     Task {
         task_id: String,
         output_json: bool,
@@ -314,7 +445,9 @@ pub enum Command {
         dry_run: bool,
     },
     McpServe,
-    Doctor,
+    Doctor {
+        verbose: bool,
+    },
     Codex,
     Claude,
     OpenCode,
@@ -389,10 +522,12 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             agent: None,
         });
     };
+    if let Some(help) = help_request(&args)? {
+        return Ok(help);
+    }
     match first {
         "help" | "-h" | "--help" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Help)
+            unreachable!("help requests are handled before command parsing")
         }
         "-V" | "--version" => {
             expect_no_more(&args[1..])?;
@@ -465,25 +600,58 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 json,
             })
         }
-        "tasks" if args.get(1).map(String::as_str) == Some("--output") => {
-            if args.len() != 3 || args[2] != "json" {
-                bail!("expected tasks --output json");
-            }
-            Ok(Command::TasksJson)
-        }
         "tasks" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Tasks)
+            let mut limit = Some(20usize);
+            let mut saw_limit = false;
+            let mut output_json = false;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--all" if limit == Some(20) && !saw_limit => limit = None,
+                    "--limit" if !saw_limit && limit.is_some() => {
+                        let value = value_for("--limit", &args, &mut index)?;
+                        let parsed = value
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|n| (1..=500).contains(n));
+                        limit = Some(parsed.ok_or_else(|| {
+                            crate::util::Error::new("--limit must be between 1 and 500")
+                        })?);
+                        saw_limit = true;
+                    }
+                    "--output" if !output_json => {
+                        if value_for("--output", &args, &mut index)? != "json" {
+                            bail!("expected json");
+                        }
+                        output_json = true;
+                    }
+                    other => {
+                        bail!("unexpected option {other:?} for `ahu tasks`; use `ahu help tasks`.")
+                    }
+                }
+                index += 1;
+            }
+            if output_json {
+                if saw_limit || limit.is_none() {
+                    bail!(
+                        "`ahu tasks --output json` returns the complete list; remove --all or --limit."
+                    );
+                }
+                Ok(Command::TasksJson)
+            } else {
+                Ok(Command::Tasks { limit })
+            }
         }
         "cmux" => parse_cmux(&args[1..]),
         "mcp" => match args.get(1).map(String::as_str) {
             Some("serve") if args.len() == 2 => Ok(Command::McpServe),
             _ => bail!("expected ahu mcp serve"),
         },
-        "doctor" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Doctor)
-        }
+        "doctor" => match &args[1..] {
+            [] => Ok(Command::Doctor { verbose: false }),
+            [flag] if flag == "--verbose" => Ok(Command::Doctor { verbose: true }),
+            _ => bail!("expected ahu doctor [--verbose]"),
+        },
         "claude" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Claude)
@@ -573,6 +741,75 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         }
         other => bail!("unknown command {other:?}.\n\nRun 'ahu help' for usage."),
     }
+}
+
+fn help_request(args: &[String]) -> Result<Option<Command>> {
+    if args.first().is_some_and(|arg| arg == "help") {
+        if args.len() > 3 {
+            bail!("usage: ahu help [COMMAND]");
+        }
+        return Ok(Some(Command::Help {
+            topic: (args.len() > 1).then(|| args[1..].join(" ")),
+        }));
+    }
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "-h" | "--help"))
+    {
+        if args.len() == 1 {
+            return Ok(Some(Command::Help { topic: None }));
+        }
+        bail!("use `ahu help COMMAND` for command help");
+    }
+    if args
+        .last()
+        .is_none_or(|last| last != "--help" && last != "-h")
+        || args.first().is_some_and(|first| first == "message")
+    {
+        return Ok(None);
+    }
+    let before_help = &args[..args.len() - 1];
+    if before_help.last().is_some_and(|flag| {
+        matches!(
+            flag.as_str(),
+            "--prompt"
+                | "--prompt-file"
+                | "--records"
+                | "--case"
+                | "--suite"
+                | "--agent"
+                | "--evaluator"
+                | "--evaluator-repo"
+                | "--runs"
+                | "--timeout"
+                | "--name"
+                | "--title"
+                | "--summary"
+                | "--model"
+                | "--task-dir"
+                | "--harness"
+                | "--register"
+                | "--remove"
+                | "--agent-version"
+                | "--output"
+                | "--allow-child"
+                | "--allow-child-widened"
+                | "--native-helpers"
+        )
+    }) {
+        return Ok(None);
+    }
+    let Some(first) = before_help.first() else {
+        return Ok(Some(Command::Help { topic: None }));
+    };
+    let count = if matches!(first.as_str(), "eval" | "knowledge" | "cmux" | "mcp") {
+        before_help.len().min(2)
+    } else {
+        1
+    };
+    Ok(Some(Command::Help {
+        topic: Some(before_help[..count].join(" ")),
+    }))
 }
 
 fn expect_no_more(rest: &[String]) -> Result<()> {
@@ -1088,6 +1325,7 @@ pub fn extract_color(
                     | "--summary"
                     | "--prompt-file"
                     | "--output"
+                    | "--limit"
                     | "--register"
                     | "--remove"
                     | "--model"
@@ -1191,6 +1429,66 @@ mod color_tests {
                 assert_eq!(args, ["launch", "@fixture", option, value]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod focused_help_tests {
+    use super::*;
+
+    fn parse_args(args: &[&str]) -> Result<Command> {
+        parse(args.iter().copied())
+    }
+
+    #[test]
+    fn help_is_short_by_default_and_focused_by_command() {
+        assert!(help_for(None).unwrap().len() < HELP_ALL.len() / 3);
+        assert!(
+            help_for(Some("tasks"))
+                .unwrap()
+                .contains("default limit: 20")
+        );
+        assert!(help_for(Some("doctor")).unwrap().contains("--verbose"));
+        assert!(help_for(Some("all")).unwrap().contains("eval run options:"));
+        assert!(
+            parse_args(&["setup", "--help"]).unwrap()
+                == Command::Help {
+                    topic: Some("setup".into())
+                }
+        );
+        assert!(
+            parse_args(&["help", "tasks"]).unwrap()
+                == Command::Help {
+                    topic: Some("tasks".into())
+                }
+        );
+    }
+
+    #[test]
+    fn task_limits_and_doctor_verbosity_are_parsed_explicitly() {
+        assert_eq!(
+            parse_args(&["tasks"]).unwrap(),
+            Command::Tasks { limit: Some(20) }
+        );
+        assert_eq!(
+            parse_args(&["tasks", "--all"]).unwrap(),
+            Command::Tasks { limit: None }
+        );
+        assert_eq!(
+            parse_args(&["tasks", "--limit", "7"]).unwrap(),
+            Command::Tasks { limit: Some(7) }
+        );
+        assert!(parse_args(&["tasks", "--limit", "0"]).is_err());
+        assert!(parse_args(&["tasks", "--limit", "501"]).is_err());
+        assert!(parse_args(&["tasks", "--all", "--limit", "4"]).is_err());
+        assert_eq!(
+            parse_args(&["doctor"]).unwrap(),
+            Command::Doctor { verbose: false }
+        );
+        assert_eq!(
+            parse_args(&["doctor", "--verbose"]).unwrap(),
+            Command::Doctor { verbose: true }
+        );
     }
 }
 

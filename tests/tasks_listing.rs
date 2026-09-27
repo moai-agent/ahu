@@ -225,6 +225,42 @@ fn tasks_lists_the_readable_record_and_reports_the_unreadable_one() {
 }
 
 #[test]
+fn task_limit_keeps_recent_rows_bounded_and_all_keeps_the_full_list() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("chris", "1.0.0", "claude-opus-5");
+    repo.commit("fixture");
+    let dir = tasks_dir(&repo);
+    let ids: Vec<_> = (0..3)
+        .map(|_| {
+            let id = ahu::task::new_task_id().unwrap();
+            write_current(&dir, &repo, &id);
+            id
+        })
+        .collect();
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+
+    let (code, limited) = scripted(&repo, |console| {
+        ahu::commands::tasks_with_limit(console, &discovered, Some(1))
+    });
+    assert_eq!(code, 0, "{limited}");
+    assert!(limited.contains("Showing 1 of 3 tasks"), "{limited}");
+    assert_eq!(
+        ids.iter()
+            .filter(|id| limited.contains(id.as_str()))
+            .count(),
+        1
+    );
+
+    let (code, all) = scripted(&repo, |console| {
+        ahu::commands::tasks_with_limit(console, &discovered, None)
+    });
+    assert_eq!(code, 0, "{all}");
+    assert!(ids.iter().all(|id| all.contains(id)), "{all}");
+    assert!(!all.contains("Showing 3 of 3 tasks"), "{all}");
+}
+
+#[test]
 fn agent_listing_uses_a_table_and_marks_configuration_drift() {
     let repo = TestRepo::new();
     repo.init_config();

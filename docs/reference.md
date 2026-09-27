@@ -1,7 +1,9 @@
 # CLI and context reference
 
-[Back to README](../README.md). Run `ahu help` for option syntax and
-`ahu explain` for the built-in architecture overview.
+[Back to README](../README.md). Run `ahu help` for the concise command list,
+`ahu help COMMAND` for focused options, or `ahu help all` for the full option
+reference. The [MCP protocol details](mcp-protocol.md) describe tool contracts
+and transport. Run `ahu explain` for the built-in architecture overview.
 
 ## Repository and task selection
 
@@ -14,13 +16,17 @@ explicit lookup of old stores.
 
 ## CLI entry points
 
-Run `ahu --help` for the current public command list. `ahu doctor` checks
+Run `ahu --help` for the concise public command list. `ahu doctor` gives a
+concise readiness summary; `ahu doctor --verbose` shows component-level
+details. It checks
 repository and harness readiness, the committed context lock, bundled skill
 bytes, telemetry configuration, and registered-agent configuration drift. For a
 configured local telemetry endpoint, doctor reports TCP reachability only; it
 does not verify OTLP delivery. `ahu agents` displays the registered agents, pinned
 harnesses and models, manifest paths, and detected drift in a table. `ahu tasks`
-prints a task table laid out for the terminal; see [the task
+lists the 20 most recent tasks by default. Use `--limit N` for a bounded count,
+`--all` for the full history, or `--output json` for the complete machine-readable
+list. It prints a task table laid out for the terminal; see [the task
 list](#the-task-list).
 
 To launch work directly, use a registered agent name followed by a quoted
@@ -80,7 +86,7 @@ in full; `@parser` is not a prefix match for `@parser-cleanup`.
 
 Handles are immutable and scoped to the repository. Linked checkouts share them;
 use `ahu --repo <checkout>` for another repository. All task controls accept them,
-including `task`, `focus`, `diff`, `message`, `wait`, `result`, `cancel`, `resume`,
+including `task`, `focus`, `message`, `wait`, `result`, `cancel`, `resume`,
 `cleanup`, and `remove`. Resume retains the same task identity and handle.
 
 Reservations remain after removal or a failed launch. They are not recycled or
@@ -123,11 +129,14 @@ the request and response shapes and service limits.
 
 `ahu setup` is the only setup command. It detects installed supported harnesses,
 asks for a model per detected harness, creates an ahu `dev-<harness>` agent for
-each, installs the bundled skills in harness-discoverable project locations,
-and adds a local `ahu mcp serve` entry to each harness's project configuration.
-Codex, OpenCode, and Antigravity use `.agents/skills/`; Claude Code uses
-`.claude/skills/`. The canonical bundle remains `.agents/skills/` and Claude's
-copy is an ordinary project file. Setup checks the local MCP process with an
+each, installs bundled skills in project locations, and adds a local `ahu mcp
+serve` entry to each harness's project configuration. Setup uses a harness's
+available-model list when that command is supported, intersected with ahu's
+reviewed catalog. Otherwise it offers catalog models and says account access
+is not checked. Codex, OpenCode, and Antigravity use `.agents/skills/`; Claude
+Code uses `.claude/skills/`. The
+canonical bundle remains `.agents/skills/`; for Claude, setup creates ordinary
+project-file copies. Setup checks the local MCP process with an
 initialize/tools-list handshake, validates existing files before writing, and
 refuses conflicting skill, agent, or MCP entries. It refreshes `ahu.lock` after
 creating the project context. Review and commit the files and lock before
@@ -140,151 +149,40 @@ needed to establish that the client connected and exposed its tools. Skill
 presence does not prove that a particular run loaded the skill. See
 [skill verification](skill-verification.md) for per-harness discovery evidence.
 
-The canonical tree follows a strict contract: one
-directory per skill directly under `.agents/skills/`, named after the skill,
-holding exactly one `SKILL.md`. The frontmatter carries only the portable keys
-`name` (equal to the directory name) and `description` (a one-line summary).
-Skill names use lowercase letters, digits, and hyphens. `scripts/check-skills.py`
-verifies the tree shape, the frontmatter, unique names, and that the compiled
-bundle in `src/mcp.rs` carries the same set of skills as the tree; CI runs it on
-every change.
+The canonical tree follows a strict contract: one directory per skill directly
+under `.agents/skills/`, named after the skill, holding exactly one `SKILL.md`.
+The frontmatter carries `name` (equal to the directory name) and `description`
+(a one-line summary). `scripts/check-skills.py` verifies the tree shape,
+frontmatter, unique names, and that the compiled user-facing skill bundle in
+`src/mcp.rs` matches the source files; CI runs it on every change.
 
 When the same skill name appears in more than one discovered location, each
-harness resolves the collision by its own discovery precedence, which ahu
-neither controls nor emulates: the harness picks its winner, and ahu reports
-what it finds rather than overriding that choice. The repository contract keeps
-collisions rare instead: `.agents/skills/` is the canonical location, `ahu mcp
-setup` never duplicates skills into harness-owned locations such as
-`.claude/skills/`, and any copy there is an ordinary file the operator can
-review and remove. Skill discovery precedence and whether a skill was actually
-loaded remain harness-owned; the repository lock covers only recognized project
-files, not user, managed, or provider context.
+harness resolves the collision according to its own discovery precedence. ahu
+does not control that choice. Claude's `.claude/skills/` copies are ordinary
+project files created by setup and are fingerprinted by `ahu.lock`. Skill
+presence does not prove that a run loaded it; user, managed, and provider
+context remains outside the repository lock.
 
-The modern path targets the [2026-07-28 MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
-and its [Tasks extension](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks).
-Modern stdio requests do not use `initialize`: every request carries
-`io.modelcontextprotocol/protocolVersion: "2026-07-28"` and an object-valued
-`io.modelcontextprotocol/clientCapabilities` in `params._meta`. `server/discover`
-returns `resultType: "complete"`, supported versions, capabilities, cache hints,
-and server identity under `_meta["io.modelcontextprotocol/serverInfo"]`.
-
-Declare `io.modelcontextprotocol/tasks: {}` inside
-`params._meta["io.modelcontextprotocol/clientCapabilities"].extensions` on every
-Tasks request. Inspection calls return a persisted `working` handle before
-execution. `tasks/get` returns the current state and its final tool result or
-JSON-RPC error. A tool execution failure is a completed tool result with
-`isError: true`; `failed` and `error` are reserved for protocol/execution
-infrastructure failures. `tasks/update` answers outstanding input requests, and
-`tasks/cancel` durably cancels an active inspection. Cancellation is idempotent;
-completed results remain completed. Neither terminal protocol status nor an
-inspection result accepts, merges, or approves harness work. No MCP tool
-launches or changes harness permissions.
-
-The stdio binding is newline-delimited UTF-8 JSON-RPC: each line is one request,
-notification, or response, and stdout contains no other bytes. Diagnostics go
-to stderr. Frames are limited to 1 MiB, including the newline; an overlarge
-frame receives `-32600` and is discarded through its newline so later frames can
-still be processed. A dual-era client may probe `server/discover` and fall back to the
-legacy handshake when the probe is not understood. Malformed JSON receives
-`-32700`; invalid envelopes (including batches, missing/wrong `jsonrpc`, missing
-or non-string methods, response-shaped messages, and invalid IDs) receive
-`-32600` with a null ID. Request IDs must be strings or integers, not null,
-true/false values, arrays, objects, or fractional numbers. This server sends no requests
-to clients and does not accept response envelopes. Method parameters, when
-present, must be objects (`-32602` otherwise).
-
-An envelope with no ID is a notification, regardless of its method name. Valid
-notification envelopes receive no response, even with unknown methods, invalid
-parameters, or absent modern metadata. Supported inbound notifications are
-advisory no-ops: notifications never select a protocol mode, queue inspections,
-cancel Tasks, or change subscriptions. Use requests with IDs for those operations.
-A `notifications/*` method sent with an ID receives `-32601`.
-
-Unknown methods receive `-32601`. Unknown tools, missing/non-string tool names,
-and invalid tool arguments receive `-32602` in both synchronous and Tasks paths,
-before any handle is created. Arguments must be objects matching the advertised
-schema: list tools accept no keys, `ahu_task_get` requires `task`, and only the
-experimental adapter permits its omission. Selectors must be nonempty strings
-of at most 256 UTF-8 bytes; arguments are limited to 8 KiB. Failures while
-executing a valid inspection (such as a missing repository task) return text
-content with `isError: true`, not a top-level JSON-RPC error. Modern synchronous
-results, including tool errors and every `tools/list` variant, carry
-`resultType: "complete"`; queued calls carry `resultType: "task"`, and their
-stored final tool results carry `resultType: "complete"`.
-
-Modern requests require version/capability metadata on every request (`-32022`
-when absent or unsupported). A validated modern request locks out `initialize`
-(`-32601`). A failed metadata/discovery-parameter check does not select a mode.
-Legacy initialization locks out `server/discover` (`-32601`) and Tasks methods
-(`-32021`). Subsequent modern metadata on a legacy connection is ignored: it
-cannot opt into modern result shapes, asynchronous calls, or experimental tools.
-
-The stdio host supplies `AHU_MCP_CALLER` as a stable authenticated principal for
-each caller; without it, the effective local OS user is the principal. The host
-must choose this value, retain it across reconnects, and use separate processes
-for separate callers. Client metadata cannot set or override it. This is a
-local transport boundary, not remote authentication: clients with the same OS
-account and direct filesystem/process access already share that account's
-trust. Handles are bound to this principal, repository identity, and checkout.
-Old handles without ownership metadata are refused rather than reassigned.
-
-The queue under the private repository coordination store (`mcp/tasks`) retains
-ownership, operation arguments, status, timestamps, cancellation, and final
-result/error. Atomic writes sync files and their directory before acknowledgement.
-TTL is persisted as `null` (unlimited); there is no automatic retention cleanup.
-On reconnect, a modern Tasks request starts recovery of that caller's queued
-inspections in the same checkout. Workers use OS locks to avoid duplicate
-execution and recheck cancellation before publishing results. A process crash
-can replay an interrupted read-only inspection. Work pauses while no server
-for that caller is running; this transport does not install a daemon.
-
-For stdio notifications, send `subscriptions/listen` with
-`notifications.taskIds` (up to 64 authorized IDs) and the Tasks capability.
-The server emits `notifications/subscriptions/acknowledged` followed by
-`notifications/tasks` snapshots when subscribed state changes, including changes
-from another connection. Each listen replaces this connection's subscriptions;
-reconnects require a new listen. Every subscription notification carries the
-originating `subscriptions/listen` request ID in
-`_meta["io.modelcontextprotocol/subscriptionId"]`. Notifications may coalesce
-intermediate states; `tasks/get` remains authoritative. Task payloads are never
-broadcast to other callers.
-
-The optional experimental adapter is enabled by the host with
-`AHU_MCP_TASKS_ADAPTER=inspection-v1`. It exposes `ahu_task_inspect` to modern
-clients. A provided `task` selector behaves like `ahu_task_get`; omission requests
-selection through `input_required`. When omitting the selector, the creating
-client must also advertise `elicitation.form: {}`. Reply through
-`tasks/update.inputResponses` with
-`{"task-selection":{"action":"accept","content":{"task":"@reviewer"}}}`
-and both capabilities. `decline` or `cancel` cancels the inspection. Updates
-are limited to 8 KiB, selectors to 256 bytes, and the response can only fill that
-pending selector. Unknown or already answered input keys are ignored; identity,
-permissions, tool, and repository fields cannot be updated.
-
-`initialize` selects the isolated `2025-11-25` (or an older requested handshake
-revision) legacy inspection path for the connection. It always returns ordinary
-synchronous tool results and refuses Tasks methods even if later requests
-include modern capabilities. `tasks/list` and `tasks/result` are not
-implemented.
+See the [MCP protocol reference](mcp-protocol.md) for protocol negotiation,
+tool validation, task delivery, and transport details.
 
 ### Long-running task records
 
-Long-running or failure-prone work should have a durable record in the project's
-private tracker before an ahu task is launched. An issue, task, milestone item,
-or equivalent provider object records acceptance criteria, evidence, failures,
-and disposition; ahu task state records execution details and is not the roadmap
-record. Use the provider's native labels, tags, or fields for coordination: one
-lifecycle state (planned, active, review, blocked, or done) and one marker for
-the registered agent handling the current attempt. Do not use assignees for this
-single-maintainer
-workflow.
+Follow the repository's tracking policy for long-running or failure-prone work.
+It may require an issue, task, milestone item, or another provider record; it
+may choose to use ahu's task record alone. Ahu records execution state, not
+acceptance criteria or roadmap status, and it has no built-in issue-tracker
+integration. The bundled `direct-agents` skill describes how to keep tracker
+work optional or link a provider-side work item to an ahu task ID without
+assuming GitHub or a private roadmap.
 
-The coordinator owns comments, label changes, and closure. A task process
-exiting successfully is not sufficient to close a record: inspect its report,
-diff, validation, and delivery state first. Keep private tracker content out of
-this public repository and its knowledge base. Before writing, verify the
-provider's record, project, and linked-object visibility; a private project does
-not necessarily make a linked public record private.
+When a provider record is used, its skills and tools define lifecycle fields,
+comments, visibility checks, and closure. A task process exiting successfully
+is not sufficient to close a record: inspect its report, diff, validation, and
+delivery state first. Keep private tracker content out of this public
+repository and its knowledge base. Before writing, verify the provider's record,
+project, and linked-object visibility; a private project does not necessarily
+make a linked public record private.
 
 ## Scriptable launch previews
 
@@ -1473,8 +1371,8 @@ candidate checkout are not secret merely because the prompt omits their answers.
 ## State and compatibility
 
 Headless tasks use primary-owned coordination; interactive tasks use their own
-worktree-local records. `tasks`, `task`, and `diff` include compatible legacy
-records as well. `focus` is for interactive cmux sessions.
+worktree-local records. `tasks` and `task` include compatible legacy records as
+well. `focus` is for interactive cmux sessions.
 
 Each interactive task stores `task.json` and `prompt.txt` under
 `<task-worktree>/.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Session status
@@ -1483,7 +1381,7 @@ state discovery uses explicit checkout paths. Removing the worktree removes
 its state. Task checkouts are siblings under the primary checkout's `.worktrees/`,
 including nested launches. State and worktree directories ignore themselves.
 
-`tasks`, `task`, `diff`, and `focus` discover task records through those worktrees
+`tasks`, `task`, and `focus` discover task records through those worktrees
 from the primary checkout or a sibling. Each managed worktree store accepts only
 its owner's task ID, matching repository identity and canonical worktree path.
 This rule applies on every scan, including from inside that worktree; its store

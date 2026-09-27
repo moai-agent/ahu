@@ -344,12 +344,9 @@ impl EvalCase {
         // Tool expectations describe behaviour under a tool-neutral prompt. A
         // version 1 case forced the tool, so an expectation there would score
         // ahu's own instruction rather than the agent.
-        match (&self.tool_expectations, self.schema_version) {
-            (Some(_), 1) => {
-                bail!(kind: ErrorKind::Usage, "evaluation case tool_expectations require schema_version 2; a version 1 case forces the typed-decision tool and cannot measure tool selection")
-            }
-            (Some(expectations), _) => expectations.validate()?,
-            (None, _) => {}
+        match &self.tool_expectations {
+            Some(expectations) => expectations.validate()?,
+            None => {}
         }
         Ok(())
     }
@@ -878,6 +875,118 @@ mod tests {
             serde_json::json!(["billing"]),
         ] {
             assert!(validate_answer(&case, &invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn bounded_json_and_answer_types_reject_oversized_or_mismatched_values() {
+        assert!(!simple_json(&serde_json::json!("x".repeat(2049)), 0));
+        assert!(!simple_json(&serde_json::json!(vec![0; 65]), 0));
+        assert!(!simple_json(&serde_json::json!({"x": vec![0; 65]}), 0));
+        assert!(!simple_json(&serde_json::json!("leaf"), 9));
+        let deep = serde_json::json!([[[[[[[[[0]]]]]]]]]);
+        assert!(!simple_json(&deep, 0));
+
+        let case = v2_case();
+        for answer in [
+            serde_json::json!("billing"),
+            serde_json::json!({"route":"unknown"}),
+            serde_json::json!({"route": ["billing"]}),
+        ] {
+            assert!(validate_answer(&case, &answer).is_err());
+        }
+
+        let mut probability = case.clone();
+        probability.questions.insert(
+            "route".into(),
+            serde_json::json!({"type":"probability","instructions":"Estimate likelihood"}),
+        );
+        for answer in [
+            serde_json::json!({"route":-0.1}),
+            serde_json::json!({"route":1.1}),
+        ] {
+            assert!(validate_answer(&probability, &answer).is_err());
+        }
+
+        let mut score = case;
+        score.questions.insert(
+            "route".into(),
+            serde_json::json!({"type":"score","instructions":"Estimate score","min":0,"max":3}),
+        );
+        assert!(validate_answer(&score, &serde_json::json!({"route":4})).is_err());
+    }
+
+    #[test]
+    fn case_schema_validation_rejects_bad_answers_weights_questions_and_rubrics() {
+        let valid = String::from_utf8(document(2, "")).unwrap();
+        for invalid in [
+            valid.replace("expected: {route: billing}", "expected: {route: unknown}"),
+            valid.replace("instructions: Select a route", "instructions: '  '"),
+            valid.replace(
+                "options: {billing: Payments, technical: Products}",
+                "options: {billing: Payments}",
+            ),
+            valid.replace(
+                "exact_match_pass_threshold: 1.0",
+                "exact_match_pass_threshold: -0.1",
+            ),
+            valid.replace(
+                "route: 1.0, exact_match_pass_threshold",
+                "route: 0.0, exact_match_pass_threshold",
+            ),
+            valid.replace(
+                "rubric: {route: Route the duplicate charge to payments}",
+                "rubric: {other: A different criterion}",
+            ),
+            valid.replace("Route the duplicate charge to payments", &"x".repeat(1001)),
+            valid.replace("type: choice", "type: unsupported"),
+        ] {
+            assert!(
+                parse(invalid.as_bytes()).is_err(),
+                "accepted case: {invalid}"
+            );
+        }
+        assert!(parse(&vec![b'x'; MAX_CASE_BYTES + 1]).is_err());
+        assert!(split(&[0xff]).is_err());
+        assert!(load(std::path::Path::new("missing-evaluation-case.md")).is_err());
+    }
+
+    #[test]
+    fn probability_and_score_cases_require_in_range_reference_values() {
+        let valid = String::from_utf8(document(2, "")).unwrap();
+        let choice_question = "questions: {route: {type: choice, instructions: Select a route, options: {billing: Payments, technical: Products}}}";
+        let probability = valid
+            .replace(
+                choice_question,
+                "questions: {route: {type: probability, instructions: Estimate likelihood}}",
+            )
+            .replace(
+                "expected: {route: billing}",
+                "expected: {route: {minimum: 0.8}}",
+            );
+        assert!(parse(probability.as_bytes()).is_ok());
+        let invalid_probability = probability.replace("minimum: 0.8", "minimum: 1.1");
+        assert!(parse(invalid_probability.as_bytes()).is_err());
+
+        let score = valid
+            .replace(
+                choice_question,
+                "questions: {route: {type: score, instructions: Estimate value, min: 0, max: 3}}",
+            )
+            .replace(
+                "expected: {route: billing}",
+                "expected: {route: {minimum: 2}}",
+            );
+        assert!(parse(score.as_bytes()).is_ok());
+        for invalid in [
+            score.replace("minimum: 2", "minimum: 4"),
+            score.replace("min: 0, max: 3", "min: 3, max: 3"),
+            score.replace("min: 0, max: 3", "min: 4, max: 3"),
+        ] {
+            assert!(
+                parse(invalid.as_bytes()).is_err(),
+                "accepted case: {invalid}"
+            );
         }
     }
 }

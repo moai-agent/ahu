@@ -67,7 +67,10 @@ fn doctor_reports_context_lock_telemetry_and_verified_skills_in_one_place() {
         text.contains("telemetry    off (local telemetry is opt-in)"),
         "{text}"
     );
-    assert!(text.contains("context lock stale:"), "{text}");
+    assert!(
+        text.contains("context lock stale; run `ahu lock` for details"),
+        "{text}"
+    );
     assert!(
         text.contains("skills       3/3 bundled skills verified; 0 missing, 0 changed"),
         "{text}"
@@ -951,13 +954,14 @@ fn doctor_explains_what_drifted_rather_than_only_naming_the_agent() {
     let mut output: Vec<u8> = Vec::new();
     let mut input = std::io::Cursor::new(Vec::new());
     let repo_result = Ok(discovered);
-    let _ = ahu::commands::doctor(
+    let _ = ahu::commands::doctor_with_verbosity(
         &mut ahu::launcher::Console {
             input: &mut input,
             output: &mut output,
             interactive: false,
         },
         &repo_result,
+        true,
     );
     let text = String::from_utf8_lossy(&output).to_string();
 
@@ -1068,13 +1072,14 @@ fn doctor_names_a_changed_model_and_says_the_version_did_not_move() {
     let mut output: Vec<u8> = Vec::new();
     let mut input = std::io::Cursor::new(Vec::new());
     let repo_result = Ok(discovered);
-    let _ = ahu::commands::doctor(
+    let _ = ahu::commands::doctor_with_verbosity(
         &mut ahu::launcher::Console {
             input: &mut input,
             output: &mut output,
             interactive: false,
         },
         &repo_result,
+        true,
     );
     let text = String::from_utf8_lossy(&output).to_string();
 

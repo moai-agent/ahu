@@ -291,6 +291,23 @@ fn legacy_initialize_echoes_a_supported_handshake_version() {
 }
 
 #[test]
+fn legacy_initialize_echoes_each_protocol_version_still_supported_by_ahu() {
+    let repo = common::TestRepo::new();
+    let versions = ["2025-06-18", "2025-03-26", "2024-11-05"];
+    let requests = versions
+        .iter()
+        .enumerate()
+        .map(|(index, version)| {
+            json!({"jsonrpc":"2.0","id":index + 1,"method":"initialize","params":{"protocolVersion":version}}).to_string()
+        })
+        .collect::<Vec<_>>();
+    let rows = exchange(&repo, &requests);
+    for (row, version) in rows.iter().zip(versions) {
+        assert_eq!(row["result"]["protocolVersion"], version);
+    }
+}
+
+#[test]
 fn mcp_setup_subcommand_is_replaced_by_the_single_setup_command() {
     let repo = common::TestRepo::new();
     let output = common::ahu()
@@ -489,13 +506,21 @@ impl Client {
         }
     }
     fn stop(&mut self) {
+        // EOF lets the server persist its normal shutdown summary and flush
+        // LLVM coverage counters. Tests that specifically model a crash call
+        // `crash` instead.
+        self.input.take();
+        let status = self.child.wait().unwrap();
+        assert!(status.success(), "MCP server exited with {status}");
+    }
+    fn crash(&mut self) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
     }
 }
 impl Drop for Client {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        self.input.take();
         let _ = self.child.wait();
     }
 }
@@ -506,7 +531,7 @@ fn asynchronous_handles_resume_after_process_loss_and_keep_results() {
     let mut first = Client::new(&repo, "alice");
     let id = first.create("ahu_agents_list", json!({}));
     let initial = first.task("tasks/get", &id)["result"].clone();
-    first.stop();
+    first.crash();
     let mut second = Client::new(&repo, "alice");
     let restored = second.task("tasks/get", &id)["result"].clone();
     assert_eq!(restored["createdAt"], initial["createdAt"]);
@@ -723,6 +748,25 @@ fn subscribed_stdio_clients_receive_authorized_durable_transitions() {
         .unwrap()
         .remove("io.modelcontextprotocol/subscriptionId");
     assert_eq!(cancelled["params"], other.task("tasks/get", &id)["result"]);
+}
+
+#[test]
+fn subscriptions_reject_missing_oversized_and_unowned_task_id_lists() {
+    let repo = common::TestRepo::new();
+    let mut client = Client::new(&repo, "alice");
+    for notifications in [
+        json!({}),
+        json!({"taskIds":vec!["00000000-0000-4000-8000-000000000000"; 65]}),
+        json!({"taskIds":[17]}),
+        json!({"taskIds":["00000000-0000-4000-8000-000000000000"]}),
+    ] {
+        let response = client.call(
+            "subscriptions/listen",
+            modern(json!({"notifications":notifications})),
+        );
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+    }
+    client.stop();
 }
 
 // EOF bounds the exchange: unexpected notification replies cannot hide behind

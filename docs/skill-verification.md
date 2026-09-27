@@ -3,8 +3,11 @@
 [Back to README](../README.md). This page records how to verify, for each
 supported harness, whether skills in the canonical `.agents/skills/` tree are
 discovered and can be invoked, and what this repository observed when it ran those
-probes. It exists so the portability claims about the canonical tree stay tied
-to reproducible commands and recorded evidence instead of assumptions.
+probes. The versioned results below are historical observations, not guarantees
+about current harness releases. Re-run the fixture probes before treating them as
+current compatibility claims. It exists so portability claims about the
+canonical tree stay tied to reproducible commands and recorded evidence instead
+of assumptions.
 
 `scripts/check-skills.py` verifies the tree contract deterministically in CI.
 The probes below verify that a specific installed harness
