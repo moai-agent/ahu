@@ -645,22 +645,21 @@ fn a_proposed_manifest_round_trips_through_the_loader() {
     }
 }
 
-/// Adding a harness to the catalog moves its version, and a project pinned to
-/// the previous one stops rather than being upgraded for free.
+/// Updating a verified harness version moves the catalog revision, and a
+/// project pinned to the previous one stops rather than being upgraded for free.
 ///
-/// That is the point of the pin: catalog `2026-09-13` offers a harness and a
-/// model that `2026-09-12` did not, so what an automatic launch resolves to can
-/// differ between them. Changing which catalog a project uses is a project
-/// decision, made by editing `catalog_version`, not a side effect of installing
-/// a newer ahu.
+/// That is the point of the pin: catalog `2026-09-27` records the Codex 0.157.1
+/// interactive compatibility check. Changing which catalog a project uses is a
+/// project decision, made by editing `catalog_version`, not a side effect of
+/// installing a newer ahu.
 #[test]
 fn a_project_pinned_to_the_previous_catalog_is_stopped_not_upgraded() {
-    assert_eq!(catalog::CATALOG_VERSION, "2026-09-13");
+    assert_eq!(catalog::CATALOG_VERSION, "2026-09-27");
 
-    let error = catalog::require_version("2026-09-12")
+    let error = catalog::require_version("2026-09-13")
         .expect_err("a superseded pin must not be silently accepted")
         .to_string();
-    assert!(error.contains("2026-09-12"), "{error}");
+    assert!(error.contains("2026-09-13"), "{error}");
     assert!(error.contains(catalog::CATALOG_VERSION), "{error}");
     assert!(error.contains("will not substitute"), "{error}");
     assert!(

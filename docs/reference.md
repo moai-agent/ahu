@@ -1499,7 +1499,7 @@ is on `PATH`, ahu runs and reports the one its own resolution picks; it does not
 search for a version that matches the catalog. An entry may name more than one
 verified version, comma-separated, and the prerequisite check accepts any of
 them. Headless admission uses its own explicit version profiles.
-Project configuration pins catalog `2026-09-13`; a mismatch is an error.
+Project configuration pins catalog `2026-09-27`; a mismatch is an error.
 
 Persisted task records use schema 3, whose IDs are hyphenated `UUID v7` values;
 records written with schema 2 remain readable unchanged, keeping their 18-character

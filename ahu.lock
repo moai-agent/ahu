@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "dfc9ce62eb884b67b42e96de4b8b9c225a19687b9d6bc6950ee346b62cf37e7c"
+digest = "cad64c4d94310e08589b0a082f8f6d30e79bb08f25ce05849fc198002a4a4209"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -106,7 +106,7 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/config.toml"
-digest = "da1cbca622d163ab8f8d1d122fbfe82eb4c247a1f42b57567ceb8e71a9c80b22"
+digest = "6775f4ad648bb79513316b0c34d4015e0caed350527c2fa1f49b3770d61dc2a6"
 bytes = 414
 executable = false
 

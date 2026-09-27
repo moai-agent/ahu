@@ -12,7 +12,7 @@ use crate::bail;
 use crate::util::Result;
 
 /// The catalog revision shipped with this ahu build.
-pub const CATALOG_VERSION: &str = "2026-09-13";
+pub const CATALOG_VERSION: &str = "2026-09-27";
 
 /// One capability a harness adapter has actually been validated to deliver.
 ///
@@ -247,7 +247,9 @@ pub const HARNESSES: &[HarnessEntry] = &[
         display_name: "Codex",
         adapter_available: true,
         executable: "codex",
-        verified_versions: "0.154.0",
+        // 0.157.1 was live-probed on 2026-09-27 through an ahu interactive
+        // launch: the pinned model was accepted and the task prompt was delivered.
+        verified_versions: "0.154.0, 0.157.1",
         // 0.155.1 retains the batch argv surface; a live JSON launch and
         // native-session resume both emitted the expected identity and terminal events.
         headless_verified_versions: &["0.154.0", "0.155.1"],
@@ -462,6 +464,10 @@ mod tests {
     #[test]
     fn catalog_lookups_and_rankings_are_harness_scoped() {
         assert!(harness("codex").is_some());
+        assert_eq!(
+            harness("codex").unwrap().verified_versions,
+            "0.154.0, 0.157.1"
+        );
         assert!(harness("unknown").is_none());
         assert!(supports("codex", Feature::InteractiveLaunch));
         assert!(!supports("unknown", Feature::InteractiveLaunch));
