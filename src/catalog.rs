@@ -220,10 +220,11 @@ pub const HARNESSES: &[HarnessEntry] = &[
         display_name: "Claude Code",
         adapter_available: true,
         executable: "claude",
-        verified_versions: "2.1.269",
-        // Interactive and headless surfaces were validated on different sets:
-        // the interactive adapter was checked on 2.1.269, the batch argument
-        // surface and event stream on both.
+        // 2.1.283 was live-probed on 2026-09-27 through an ahu interactive
+        // launch: the pinned model was accepted and the task prompt was delivered.
+        verified_versions: "2.1.269, 2.1.283",
+        // Interactive and headless surfaces were validated on different sets;
+        // the batch argument surface and event stream were checked on both.
         headless_verified_versions: &["2.1.269", "2.1.270"],
         enforces_model_for_session: false,
         features: &[
@@ -467,6 +468,10 @@ mod tests {
         assert_eq!(
             harness("codex").unwrap().verified_versions,
             "0.154.0, 0.157.1"
+        );
+        assert_eq!(
+            harness("claude-code").unwrap().verified_versions,
+            "2.1.269, 2.1.283"
         );
         assert!(harness("unknown").is_none());
         assert!(supports("codex", Feature::InteractiveLaunch));
