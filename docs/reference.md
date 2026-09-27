@@ -15,8 +15,8 @@ explicit lookup of old stores.
 ## CLI entry points
 
 Run `ahu --help` for the current public command list. `ahu doctor` checks
-repository and harness readiness, context-hygiene cadence, bundled skill bytes,
-telemetry configuration, and registered-agent configuration drift. For a
+repository and harness readiness, the committed context lock, bundled skill
+bytes, telemetry configuration, and registered-agent configuration drift. For a
 configured local telemetry endpoint, doctor reports TCP reachability only; it
 does not verify OTLP delivery. `ahu agents` displays the registered agents, pinned
 harnesses and models, manifest paths, and detected drift in a table. `ahu tasks`
@@ -38,9 +38,12 @@ ahu @reviewer
 The `ahu launch @name` form remains a backward-compatible alias. Both forms
 accept `--prompt`, `--prompt-file`, or piped stdin. Do not combine a positional
 prompt with either prompt flag. Direct prompts are passed as one literal
-argument; quote multi-word prompts in the shell. `ahu inventory` and
-`ahu hygiene` remain available for detailed inspection even though both are
-omitted from the short top-level command list.
+argument; quote multi-word prompts in the shell. `ahu lock` checks that the
+recognized repository context matches committed `ahu.lock`; `ahu lock --update`
+refreshes it for review. Every changed context input and the lock must be
+tracked, clean, and committed before an agent can run. The bundled
+`agent-context-critic` skill uses evals to test context hypotheses rather than
+claiming that ahu can enumerate everything a harness loaded.
 
 ## Installing and updating ahu safely
 
@@ -118,26 +121,26 @@ model-neutral JSON contract, does not persist calls as ahu tasks, and is not
 available for remote endpoints. See [typed decisions](typed-decisions.md) for
 the request and response shapes and service limits.
 
-`ahu mcp setup` materializes the skill bundle shipped with this ahu build into
-`.agents/skills/`. OpenCode and Codex discover that canonical tree natively;
-Claude Code does not discover it; its documented skill locations are `.claude/skills/` and
-harness-managed paths, and `ahu mcp setup` does not duplicate the bundle into
-`.claude/skills/`. Operators who want Claude Code to load a canonical skill can
-copy or symlink that skill's directory into `.claude/skills/` and commit it, as
-an ordinary project file. See [skill verification](skill-verification.md) for
-per-harness probe protocols and recorded evidence. The files are ordinary
-project files for review and commit. Setup refuses to overwrite a changed file,
-so local skill edits cannot be silently replaced. This is the temporary
-delivery path while installed harnesses lack verified native Skills-over-MCP
-support; the bundle can move to an independent repository later without
-changing the MCP task boundary.
+`ahu setup` is the only setup command. It detects installed supported harnesses,
+asks for a model per detected harness, creates an ahu `dev-<harness>` agent for
+each, installs the bundled skills in harness-discoverable project locations,
+and adds a local `ahu mcp serve` entry to each harness's project configuration.
+Codex, OpenCode, and Antigravity use `.agents/skills/`; Claude Code uses
+`.claude/skills/`. The canonical bundle remains `.agents/skills/` and Claude's
+copy is an ordinary project file. Setup checks the local MCP process with an
+initialize/tools-list handshake, validates existing files before writing, and
+refuses conflicting skill, agent, or MCP entries. It refreshes `ahu.lock` after
+creating the project context. Review and commit the files and lock before
+launching; setup does not stage, commit, or push them.
 
-Setup is additive and ordered. It refuses to overwrite a changed existing file;
-if a later bundled skill differs, earlier skills may already have been written
-before the command reports the refusal. Setup never removes skills that are no
-longer bundled, so removal remains an explicit repository edit.
+The MCP entry uses the `ahu` executable from `PATH`. Claude Code asks for
+approval before using a project MCP server. Codex reads project MCP settings
+only when the repository is trusted. Harness-level confirmation is still
+needed to establish that the client connected and exposed its tools. Skill
+presence does not prove that a particular run loaded the skill. See
+[skill verification](skill-verification.md) for per-harness discovery evidence.
 
-The canonical tree follows a strict contract so every harness can load it: one
+The canonical tree follows a strict contract: one
 directory per skill directly under `.agents/skills/`, named after the skill,
 holding exactly one `SKILL.md`. The frontmatter carries only the portable keys
 `name` (equal to the directory name) and `description` (a one-line summary).
@@ -153,8 +156,9 @@ what it finds rather than overriding that choice. The repository contract keeps
 collisions rare instead: `.agents/skills/` is the canonical location, `ahu mcp
 setup` never duplicates skills into harness-owned locations such as
 `.claude/skills/`, and any copy there is an ordinary file the operator can
-review and remove. `ahu inventory` lists skill sources, including duplicates,
-so a same-named skill outside the canonical tree stays visible.
+review and remove. Skill discovery precedence and whether a skill was actually
+loaded remain harness-owned; the repository lock covers only recognized project
+files, not user, managed, or provider context.
 
 The modern path targets the [2026-07-28 MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
 and its [Tasks extension](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks).
@@ -178,7 +182,7 @@ launches or changes harness permissions.
 
 The stdio binding is newline-delimited UTF-8 JSON-RPC: each line is one request,
 notification, or response, and stdout contains no other bytes. Diagnostics go
-to stderr. Frames are limited to 1 MiB, including the newline; an oversized
+to stderr. Frames are limited to 1 MiB, including the newline; an overlarge
 frame receives `-32600` and is discarded through its newline so later frames can
 still be processed. A dual-era client may probe `server/discover` and fall back to the
 legacy handshake when the probe is not understood. Malformed JSON receives
@@ -371,7 +375,7 @@ other launch checks.
 
 | Harness | Required native isolation evidence |
 | --- | --- |
-| Codex | Absent sources or exact reviewed hooks with disable guards. Plugin state, cloud authentication/configuration, and managed sources remain unresolved. |
+| Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Plugin state, cloud authentication/configuration, and managed sources remain unresolved. |
 | OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; authentication/account stores, declared modules, and substitutions remain unresolved. |
 | Claude Code | Direct executable avoids the cmux wrapper. Independent hooks, enabled plugins, and managed settings require separate evidence. |
 | Antigravity | Absent inspected hooks and an exact reviewed CLI version. Custom hooks, extensions, and overrides remain unverified. |
@@ -675,7 +679,7 @@ before the 16 MiB parsing limit is checked, so this is not a subprocess output
 or memory limit. See [validator boundaries](knowledge/knowledge-validation.md)
 for source provenance.
 
-## Local OpenTelemetry
+## Local traces
 
 For local numeric headless attempt metrics without an exporter, set
 `local_metrics = true` in `[telemetry]` and leave `enabled = false`.
@@ -729,7 +733,7 @@ unavailable attempts. A null maximum means no observation; zero remains observed
 Missing totals are never inferred and values are never summed: resumed sessions
 may repeat cumulative usage, and parent usage may overlap child usage. These are
 coverage statistics over supplied observations, not complete task totals or
-billing. Absent results, disabled collection, and undiscovered attempts are not
+billing. Absent results, collection set to off, and undiscovered attempts are not
 invented as observations. The caller must validate task ownership and extract
 only opted-in numeric projections; this primitive does not read result envelopes
 or prove completeness. No provider calls are involved.
@@ -739,7 +743,7 @@ host-owned location outside every checkout and configuration snapshot, verified
 tracker project and backing-record visibility, and owner-only,
 symlink-resistant, atomic storage with locking and conflict handling. Keep mapping
 keys out of task records, worktree names, prompts, MCP responses, shared configuration,
-OTEL attributes, and diagnostics. Bind through validated repository/task identity
+OTel attributes, and diagnostics. Bind through validated repository/task identity
 rather than caller-supplied paths; repository moves require explicit rebinding.
 Require explicit removal and retention independent of task cleanup, bounded reads,
 crash recovery, and failures that cannot affect launch or exporter outcomes.
@@ -748,7 +752,7 @@ confinement guarantee, or same-user process isolation is added by this primitive
 
 ### Local trace export
 
-Trace export is disabled unless the project opts in. When enabled, ahu exports its
+Trace export is off unless the project opts in. When enabled, ahu exports its
 own launch and harness lifecycle traces to the project-configured local OTLP
 collector and injects the same endpoint only into harness processes started by
 ahu. It never changes the invoking shell or harness sessions started directly.
@@ -783,13 +787,13 @@ operations, subscriptions, notifications, and protocol errors. `tools/list`
 spans report the count and names of ahu tools offered; `tools/call` spans use
 the `ahu.mcp.tool.call` name and record bounded tool name and success/error
 outcome. Typed-decision spans additionally report question count and types,
-stable `telemetry_key` dimensions, decision backend/model identifiers,
+stable `telemetry_key` dimensions, decision service/model identifiers,
 reported input/output tokens, adapter timing, and fixed error categories. The
 MCP process also emits an `ahu.mcp.session` summary on normal shutdown with
 request, tool-call, and transport-error counts plus SDK exporter initialization
 status (not collector receipt). It omits request state,
-instructions, question names, answer values, and error text. Ahu-launched
-harnesses pass agent, harness, model, task ID, and attempt as allowlisted
+instructions, question names, answer values, and error text. ahu-launched
+harnesses pass agent, harness, model, task ID, and attempt as approved
 resource attributes to MCP child processes; optional eval run, case, corpus,
 and stage identifiers can be passed as `ahu.eval.*` resource attributes. These
 fields group calls by harness and join them to task results. MCP spans cover
@@ -800,7 +804,7 @@ these spans.
 Harness event streams are not identical. Codex, Claude Code, Antigravity, and
 OpenCode use different event names and terminal records, so ahu normalizes
 terminal status and the common usage keys where they are present. Provider
-native OTEL spans, if a harness emits them, remain harness-owned and may use
+native OTel spans, if a harness emits them, remain harness-owned and may use
 different semantic conventions. Interactive sessions generally provide timing
 and process status; headless sessions additionally provide the structured event
 usage fields that ahu can normalize.
@@ -1174,7 +1178,7 @@ stdout is redirected or reports no size. No row ever wraps.
 `HANDLE`, `STATE`, `AGENT`, and `RUNTIME` keep their full width in any terminal
 of 80 columns or more. Each says something no other column in the row does, and
 `RUNTIME` is where a reader sees that a task ran on its own harness and model. A
-handle is never shortened at any width — a cut handle does not resolve, and
+handle is never shortened at any width: a cut handle does not resolve, and
 resolving it is the only reason the column is there.
 
 `BRANCH` is compact rather than whole: the branch prefix and the first eight
@@ -1203,11 +1207,11 @@ the title.
 | `RUNTIME` | The pinned harness and model |
 | `BRANCH` | The task's branch, prefix and the first eight characters of the task id |
 
-Colour, when stdout is a terminal and `NO_COLOR` is unset, carries meaning and
-nothing else: handles and agents are agent-coloured, the state is coloured by
+Color, when stdout is a terminal and `NO_COLOR` is unset, carries meaning and
+nothing else: handles and agents are agent-colored, the state is colored by
 what it means for the reader, liveness ahu could not confirm is dimmed rather
-than asserted, the runtime is runtime-coloured, and the branch is dim. `ahu
-tasks --output json` is unaffected by width and by colour alike.
+than asserted, the runtime is runtime-colored, and the branch is dim. `ahu
+tasks --output json` is unaffected by width and by color alike.
 
 ahu has no diff command. A task is an ordinary branch in an ordinary checkout,
 so Git reviews it directly and without an ahu-shaped wrapper around it. Text
@@ -1231,9 +1235,9 @@ the full recorded list.
   `.codex/`, `.agent/`, and `.opencode/` directories, plus `CLAUDE.md`,
   `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`, `.mcp.json`,
   `opencode.json`, and `opencode.jsonc` files, are
-  copied at their native paths, including uncommitted and Git-ignored files, and
-  configuration you have deleted locally stays deleted. Unrelated dirty source
-  files stay in your original checkout. Some of this is executable
+  copied at their native paths from the committed checkout. Launch admission
+  requires these inputs and `ahu.lock` to match clean Git state; uncommitted or
+  untracked context must be reviewed, locked, and committed before launch. Some of this is executable
   configuration—hooks, and OpenCode `plugin` modules—so it travels with the
   same trust consequences as the rest of the repository.
 - **The configured harness and model at launch.** The preview records the
@@ -1334,18 +1338,18 @@ under skipped paths still arrive through Git; local edits there are not copied.
 ## Hooks
 
 Hooks run on harness lifecycle events and can affect tool calls or context.
-ahu inventories Claude Code hook settings; general hook coverage for the other
+ahu inspects Claude Code hook settings; general hook coverage for the other
 harnesses remains incomplete. The separate cmux integration inspection recognizes
 exact reviewed native components. Ordinary launch and inspection do not install
 or edit hooks. The explicit [cmux installer](#cmux-native-integration) delegates
 changes to the native command.
 
 Only a hook's program is shown, never its arguments, and only its digest is
-stored in the task record—hook commands routinely carry tokens, and an
-inventory must not leak a credential merely to describe a hook.
+stored in the task record—hook commands routinely carry tokens, and a report
+must not leak a credential merely to describe a hook.
 
-For Claude Code, `ahu inventory` lists hooks ahu can read from
-`.claude/settings.json`, `.claude/settings.local.json`, `~/.claude/settings.json`,
+For Claude Code, the launch preview and `ahu doctor` describe hooks ahu can read
+from `.claude/settings.json`, `.claude/settings.local.json`, `~/.claude/settings.json`,
 and managed settings, with event, matcher, scope, and digest. `ahu doctor` shows
 this hook section only when the project harness preferences include Claude Code;
 it omits it for this repository's Codex-only preferences. Codex, Antigravity, and
@@ -1444,23 +1448,27 @@ The status report deliberately labels its evidence `locally_inspected;
 live_untested`. Do not infer four-harness live conformance from installation,
 static inspection, PTY coverage, or cmux plumbing.
 
-## Context inventory and hygiene
+## Committed agent context and evaluation
 
-`ahu inventory` lists what can influence an agent: its fixed identity, the
-repository instructions, skills, hooks, memory sources, MCP configuration,
-personal configuration from your home directory, managed policy, and the task
-prompt.
-Sources are marked `loaded`, `available`, `disabled`, `opaque`, or `absent`, and
-the report ends with what `ahu` cannot see. It is never labelled
-complete—`available` means the harness can discover a source, not that its
-contents reached the model.
+`ahu.lock` fingerprints the recognized repository context files ahu copies into
+task worktrees. `ahu lock --update` refreshes the lock from the current checkout;
+it never stages or commits. Review the context diff and lock diff together, then
+commit them before launching. `ahu lock` and `ahu doctor` report missing, stale,
+untracked, or locally modified inputs. Launch and eval candidate admission refuse
+until the recognized inputs and lock match committed `HEAD`.
 
-On an agent's first load, and then on the project's cadence
-(`context_hygiene.review_interval_days`, a project-wide setting), `ahu` reviews
-memory and skills that may be influencing the agent and shows a concrete cleanup
-proposal. It deletes nothing, disables nothing, and stages nothing. Where a
-source is shared with other agents or projects, it says so rather than presenting
-a global deletion as a local one.
+The lock is deliberately scoped. Harness built-ins, user and managed settings,
+provider memory, and context in skipped scan paths cannot be guaranteed by a
+repository file. A clean lock does not prove those sources are absent or that a
+harness loaded any particular skill. The lock's coverage limitations are part
+of the launch disclosure.
+
+Use the bundled `agent-context-critic` skill to examine a concrete behavior,
+form one context-change hypothesis, run the same OKF suite before and after the
+committed change, and compare results with `ahu eval report`. Prefer deterministic
+answer and OTel-backed tool checks; use agent evaluators for subjective rubric
+dimensions, and review a sample of their judgments. Eval files accessible from a
+candidate checkout are not secret merely because the prompt omits their answers.
 
 ## State and compatibility
 
@@ -1504,8 +1512,8 @@ paths. A retained worktree without a record appears as incomplete in `ahu tasks`
 Listing does not remove it or establish that its contents are safe to delete.
 
 The primary checkout owns the launch lock, cmux group mapping, headless
-coordination, and scoped task index. Hygiene timestamps and generated architecture
-documents use the invoking checkout’s `.ahu/state/`. All locations derive from
+coordination, and scoped task index. Generated architecture documents use the
+invoking checkout’s `.ahu/state/`. All locations derive from
 explicit repository discovery, not ambient storage selectors. Ownership requires
 positive Git verification, with filesystem checks before reusing process-local
 evidence. Normal primary and linked checkouts are supported. Separate Git-directory

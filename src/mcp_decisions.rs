@@ -215,6 +215,10 @@ pub(super) fn call(arguments: &Value) -> Result<Value> {
     }
     let result: Value = serde_json::from_slice(&bytes)
         .map_err(|error| Error::new(format!("decision service returned invalid JSON: {error}")))?;
+    validate_response(arguments, result)
+}
+
+fn validate_response(arguments: &Value, result: Value) -> Result<Value> {
     let answers = result
         .get("answers")
         .and_then(Value::as_object)
@@ -266,7 +270,7 @@ pub(super) fn call(arguments: &Value) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_arguments;
+    use super::{validate_arguments, validate_response};
     use serde_json::{Value, json};
 
     fn request(key: Value) -> Value {
@@ -300,6 +304,115 @@ mod tests {
             "instructions":"Estimate risk",
             "telemetry_key":"route"
         });
+        assert!(validate_arguments(&arguments).is_err());
+    }
+
+    fn typed_request() -> Value {
+        json!({
+            "state": {"text":"A duplicate charge"},
+            "questions": {
+                "route": {
+                    "type":"choice","instructions":"Choose a team",
+                    "options":{"billing":"Payments","other":"Everything else"}
+                },
+                "urgency": {
+                    "type":"score","instructions":"Estimate urgency",
+                    "min":0,"max":2
+                },
+                "refund": {
+                    "type":"probability","instructions":"Is a refund requested?"
+                }
+            }
+        })
+    }
+
+    fn valid_response() -> Value {
+        json!({
+            "answers": {
+                "route":{"value":"billing","confidence":0.9},
+                "urgency":{"value":1.5},
+                "refund":{"value":0.8}
+            },
+            "service":{"backend":"ollama","model":"fixture"}
+        })
+    }
+
+    #[test]
+    fn validates_each_typed_answer_and_keeps_service_metadata() {
+        let result = validate_response(&typed_request(), valid_response()).expect("valid response");
+        assert_eq!(result["answers"]["route"]["value"], "billing");
+        assert_eq!(result["service"]["model"], "fixture");
+    }
+
+    #[test]
+    fn rejects_incomplete_mismatched_and_out_of_range_decisions() {
+        let invalid = [
+            json!({"service":{"model":"fixture"}}),
+            json!({"answers":{"route":{"value":"billing"}}}),
+            json!({"answers":{
+                "route":{"value":"billing"},
+                "urgency":{"value":1.0},
+                "refund":{"value":0.5},
+                "extra":{"value":true}
+            }}),
+            json!({"answers":{
+                "route":{"value":"unknown"},
+                "urgency":{"value":1.0},"refund":{"value":0.5}
+            }}),
+            json!({"answers":{
+                "route":{"value":"billing"},
+                "urgency":{"value":2.1},"refund":{"value":0.5}
+            }}),
+            json!({"answers":{
+                "route":{"value":"billing"},
+                "urgency":{"value":1.0},"refund":{"value":1.1}
+            }}),
+            json!({"answers":{
+                "route":{"value":"billing","confidence":1.1},
+                "urgency":{"value":1.0},"refund":{"value":0.5}
+            }}),
+            json!({"answers":{
+                "route":{"value":"billing","confidence":"high"},
+                "urgency":{"value":1.0},"refund":{"value":0.5}
+            }}),
+        ];
+        for response in invalid {
+            assert!(
+                validate_response(&typed_request(), response).is_err(),
+                "invalid service response was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_invalid_argument_shapes_and_numeric_bounds() {
+        let mut arguments = typed_request();
+        arguments["state"] = json!(["not", "supported"]);
+        assert!(validate_arguments(&arguments).is_err());
+
+        let mut arguments = typed_request();
+        arguments["questions"]["urgency"]["min"] = json!(2);
+        assert!(validate_arguments(&arguments).is_err());
+
+        let mut arguments = typed_request();
+        arguments["questions"]["refund"]["min"] = json!(0);
+        assert!(validate_arguments(&arguments).is_err());
+
+        let mut arguments = typed_request();
+        arguments["unexpected"] = json!(true);
+        assert!(validate_arguments(&arguments).is_err());
+
+        let mut arguments = typed_request();
+        arguments["state"] = json!("x".repeat(64 * 1024));
+        assert!(validate_arguments(&arguments).is_err());
+
+        let mut arguments = typed_request();
+        let options = arguments["questions"]["route"]["options"]
+            .as_object_mut()
+            .expect("choice options");
+        for index in 2..=32 {
+            options.insert(format!("extra_{index}"), json!("Extra route"));
+        }
         assert!(validate_arguments(&arguments).is_err());
     }
 }

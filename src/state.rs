@@ -1,7 +1,7 @@
 //! ahu's local state directory.
 //!
 //! This module locates operational state: task records, task worktrees, the
-//! repository-to-cmux-group mapping, and hygiene review timestamps. None of it
+//! repository-to-cmux-group mapping. None of it
 //! is policy. Policy lives in the repository, the same for every user.
 
 use std::ffi::OsStr;
@@ -789,7 +789,7 @@ mod tests {
     #[test]
     fn failed_state_write_names_the_operation_and_preserves_previous_record() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hygiene.json");
+        let path = dir.path().join("task.json");
         std::fs::write(&path, "{}").unwrap();
         let error = crate::private_io::atomic_write_with(
             &path,

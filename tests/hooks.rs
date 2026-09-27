@@ -5,7 +5,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use ahu::hooks::{self, HookInventory, Locations, Scope};
-use ahu::{inventory, snapshot};
+use ahu::snapshot;
 use common::TestRepo;
 
 /// Locations pointing at a throwaway home, so a developer's own
@@ -339,73 +339,7 @@ fn a_mode_only_change_is_drift_and_is_synced_into_the_worktree() {
     assert!(!is_executable(&worktree.join(".claude/hooks/guard.sh")));
 }
 
-// --- inventory and preview reporting ---
-
-#[test]
-fn the_inventory_lists_hooks_as_their_own_category_with_scope() {
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    repo.write(
-        ".claude/settings.json",
-        &settings_with_hooks("PreToolUse", Some("Bash"), "guard"),
-    );
-    repo.commit("fixture");
-
-    let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
-    let agent = ahu::agent::find(repo.path(), "chris").unwrap();
-    let taken = snapshot::collect(repo.path()).unwrap();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let enforcement = adapter
-        .enforcement("claude-opus-5", Default::default())
-        .unwrap();
-    let home = tempfile::TempDir::new().unwrap();
-    let found = hooks::collect_in(repo.path(), &locations(home.path(), true)).unwrap();
-
-    let built = inventory::build(&inventory::Subject {
-        repo_root: repo.path(),
-        loaded_config: &loaded,
-        snapshot: &taken,
-        agent: Some(&agent),
-        harness: "claude-code",
-        model: "claude-opus-5",
-        enforcement: &enforcement,
-        hooks: &found,
-        prompt: None,
-    })
-    .unwrap();
-
-    let hook_items: Vec<_> = built.items_in(inventory::Category::Hook).collect();
-    assert_eq!(hook_items.len(), 2, "the project hook and the cmux wrapper");
-    let project = hook_items
-        .iter()
-        .find(|i| i.scope == "project")
-        .expect("project hook is inventoried");
-    assert_eq!(project.visibility, inventory::Visibility::Available);
-    assert!(
-        project
-            .notes
-            .iter()
-            .any(|n| n.contains("runs on PreToolUse"))
-    );
-    assert!(project.notes.iter().any(|n| n.contains("task worktree")));
-
-    let wrapper = hook_items
-        .iter()
-        .find(|i| i.visibility == inventory::Visibility::Opaque)
-        .expect("the cmux wrapper is inventoried as unreadable");
-    assert!(wrapper.name.contains("cmux"));
-
-    let rendered = inventory::render(&built);
-    assert!(
-        rendered.contains("Hooks (executable, run by the harness)"),
-        "{rendered}"
-    );
-    assert!(
-        built.coverage_gaps.iter().any(|g| g.contains("plugins")),
-        "plugin hooks are a known gap"
-    );
-}
+// --- hook preview reporting ---
 
 #[test]
 fn the_preview_warns_about_hooks_that_are_not_project_policy() {

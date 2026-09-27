@@ -11,7 +11,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use crate::agent::ResolvedAgent;
 use crate::bail;
 use crate::catalog;
-use crate::config::{ContextHygiene, ProjectConfig};
+use crate::config::ProjectConfig;
 use crate::selection;
 use crate::style::{self, Role};
 use crate::util::{Result, display_safe};
@@ -282,7 +282,7 @@ pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
         bail!(kind: crate::util::ErrorKind::Prerequisite,
             "this repository has no ahu configuration yet, and ahu was not run interactively.\n\
              Initialization records the project-agreed harness and model order, so ahu will not \
-             invent one. Run `ahu init` from a terminal.\n\
+             invent one. Run `ahu setup` from a terminal.\n\
              Nothing was changed."
         );
     }
@@ -414,31 +414,12 @@ pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
         model_rankings.insert(harness_id.clone(), chosen);
     }
 
-    let interval = loop {
-        let answer = console.ask("\nContext hygiene review interval in days [7]: ")?;
-        let Some(answer) = answer else {
-            return Ok(None);
-        };
-        let trimmed = answer.trim();
-        if trimmed.is_empty() {
-            break 7;
-        }
-        match trimmed.parse::<u32>() {
-            Ok(value) if value >= 1 => break value,
-            _ => console.say("Enter a whole number of days, at least 1.\n")?,
-        }
-    };
-
     let config = ProjectConfig {
         schema_version: crate::config::SUPPORTED_SCHEMA_VERSION,
         harness_preferences,
         model_selection: "project-ranked".to_string(),
         catalog_version: catalog::CATALOG_VERSION.to_string(),
         model_rankings,
-        context_hygiene: ContextHygiene {
-            review_on_first_load: true,
-            review_interval_days: interval,
-        },
         // Setup asks nothing about knowledge bundles: a new project has none to
         // name yet, and an empty list makes `ahu knowledge lint` say so.
         knowledge: crate::config::Knowledge::default(),

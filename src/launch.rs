@@ -208,13 +208,6 @@ pub fn plan(
     if prompt.trim().is_empty() {
         bail!(kind: crate::util::ErrorKind::Usage, "the task prompt is empty; nothing was launched.");
     }
-    let adapter = harness::adapter_for(&pair.harness)?;
-    let snapshot = snapshot::collect(&repo.root)?;
-    // Scanning for hooks is harness-specific: `hooks::collect` knows Claude
-    // Code's settings files and nothing else, so it is told which harness this
-    // launch is for and reports a coverage gap rather than "none found" when it
-    // has no implementation for it.
-    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
     let base_commit = repo.head.clone();
     if base_commit.is_none() {
         bail!(kind: crate::util::ErrorKind::Prerequisite,
@@ -222,6 +215,20 @@ pub fn plan(
              Make an initial commit first."
         );
     }
+    let adapter = harness::adapter_for(&pair.harness)?;
+    let snapshot = snapshot::collect(&repo.root)?;
+    let context_lock = crate::context_lock::check(repo, &snapshot)?;
+    if !context_lock.current {
+        bail!(kind: crate::util::ErrorKind::Prerequisite,
+            "agent context is not committed and locked: {}",
+            context_lock.detail
+        );
+    }
+    // Scanning for hooks is harness-specific: `hooks::collect` knows Claude
+    // Code's settings files and nothing else, so it is told which harness this
+    // launch is for and reports a coverage gap rather than "none found" when it
+    // has no implementation for it.
+    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
     let parent_dirty = git::is_dirty(repo)?;
     // Refuse early if `.worktrees` is a symlink, before anything is created.
     state::ensure_worktrees_root(&repo.root)?;

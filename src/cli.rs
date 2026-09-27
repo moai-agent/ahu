@@ -32,7 +32,7 @@ manifest asks for.
 Commands:
   help                  Print this help message
   explain               Architecture overview and Mermaid diagrams
-  init                  Record this project's agreed harness and model order
+  setup                 Configure ahu, harness MCP access, skills, and dev agents
   @agent [prompt]       Assign work to an agent; quote multi-word prompts.
                         Also accepts --prompt or --prompt-file.
   launch @name [options]
@@ -42,6 +42,7 @@ Commands:
                         With --title alone, the description also uses that title.
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
+  lock [--update]       Check committed agent context, or refresh ahu.lock before committing it
   knowledge lint [--output json]
                         Check the OKF bundles named in [knowledge] with okf.
                         Reads only; nothing is fetched, indexed, or rewritten
@@ -74,8 +75,7 @@ Commands:
                         Inspect native integration evidence and headless isolation
   cmux install --harness ID [--dry-run]
                         Preview or explicitly delegate a native cmux installation
-  mcp serve              Serve read-only ahu inspection tools over stdio MCP
-  mcp setup              Materialize ahu's bundled skills into this repository
+  mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
   doctor                Check repository, configuration, harness, and cmux
   agy                   Open the Antigravity CLI here on this project's
                         top-ranked Antigravity model, in YOLO mode
@@ -90,6 +90,8 @@ Commands:
                         model, auto-approving every permission it does not deny
                         (--auto; ahu passes no --pure)
   run-task              Internal: run a prepared task (used by cmux)
+  supervise --task-dir PATH
+                        Internal: supervise a detached headless task
 
 Task references:
   Use ahu:task:<id> to identify a task explicitly. Bare IDs and unique ID
@@ -231,7 +233,7 @@ pub enum Command {
         focus: bool,
         agent: Option<String>,
     },
-    Init,
+    Setup,
     Launch {
         agent: String,
         prompt: PromptSource,
@@ -264,11 +266,8 @@ pub enum Command {
         model: Option<String>,
         version: String,
     },
-    Inventory {
-        agent: Option<String>,
-    },
-    Hygiene {
-        agent: Option<String>,
+    Lock {
+        update: bool,
     },
     KnowledgeLint {
         output_json: bool,
@@ -315,7 +314,6 @@ pub enum Command {
         dry_run: bool,
     },
     McpServe,
-    McpSetup,
     Doctor,
     Codex,
     Claude,
@@ -413,9 +411,9 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             }
             Ok(Command::Explain { format })
         }
-        "init" => {
+        "setup" => {
             expect_no_more(&args[1..])?;
-            Ok(Command::Init)
+            Ok(Command::Setup)
         }
         "agents" => {
             expect_no_more(&args[1..])?;
@@ -480,8 +478,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         "cmux" => parse_cmux(&args[1..]),
         "mcp" => match args.get(1).map(String::as_str) {
             Some("serve") if args.len() == 2 => Ok(Command::McpServe),
-            Some("setup") if args.len() == 2 => Ok(Command::McpSetup),
-            _ => bail!("expected ahu mcp serve or ahu mcp setup"),
+            _ => bail!("expected ahu mcp serve"),
         },
         "doctor" => {
             expect_no_more(&args[1..])?;
@@ -545,12 +542,11 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             let text = args[2..].join(" ");
             Ok(Command::Message { task_id, text })
         }
-        "inventory" => Ok(Command::Inventory {
-            agent: optional_agent(&args[1..])?,
-        }),
-        "hygiene" => Ok(Command::Hygiene {
-            agent: optional_agent(&args[1..])?,
-        }),
+        "lock" => match args.get(1).map(String::as_str) {
+            None => Ok(Command::Lock { update: false }),
+            Some("--update") if args.len() == 2 => Ok(Command::Lock { update: true }),
+            Some(other) => bail!("unknown option {other:?} for `ahu lock`."),
+        },
         "knowledge" => parse_knowledge(&args[1..]),
         "eval" => parse_eval(&args[1..]),
         "launch" => parse_launch_backend(&args[1..], stdin_available),
@@ -584,18 +580,6 @@ fn expect_no_more(rest: &[String]) -> Result<()> {
         bail!("unexpected argument {extra:?}.\n\nRun 'ahu help' for usage.");
     }
     Ok(())
-}
-
-fn optional_agent(rest: &[String]) -> Result<Option<String>> {
-    let Some(first) = rest.first() else {
-        return Ok(None);
-    };
-    expect_no_more(&rest[1..])?;
-    let name = first.strip_prefix('@').unwrap_or(first);
-    if name.is_empty() {
-        bail!("`@` on its own is not an agent name.");
-    }
-    Ok(Some(name.to_string()))
 }
 
 /// `knowledge` takes a subcommand so later knowledge operations do not have to
@@ -1256,12 +1240,13 @@ mod direct_agent_tests {
     }
 
     #[test]
-    fn help_hides_inventory_and_positional_prompt_conflicts_are_rejected() {
+    fn help_documents_lock_and_positional_prompt_conflicts_are_rejected() {
         assert!(
-            !HELP
-                .lines()
-                .any(|line| line.trim_start().starts_with("inventory "))
+            HELP.lines()
+                .any(|line| line.trim_start().starts_with("lock [--update]"))
         );
+        assert!(parse(["inventory"]).is_err());
+        assert!(parse(["hygiene"]).is_err());
         assert!(parse(["@dev-glm", "positional", "--prompt", "flag"]).is_err());
     }
 

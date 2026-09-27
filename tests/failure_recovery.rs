@@ -33,6 +33,16 @@ fn scripted(
     }
 }
 
+fn policy_wizard(console: &mut Console<'_>, repo: &std::path::Path) -> ahu::util::Result<i32> {
+    match ahu::launcher::run_setup(console)? {
+        Some(config) => {
+            config::write_new(repo, &config)?;
+            Ok(0)
+        }
+        None => Ok(1),
+    }
+}
+
 /// The exact child-test fixture provides private state and an unavailable cmux.
 /// Keep each group of assertions together without mutating process globals.
 fn with_state<T>(_repo: &TestRepo, f: impl FnOnce() -> T) -> T {
@@ -380,35 +390,8 @@ fn the_resolved_harness_and_model_are_shown_before_the_prompt_is_entered() {
 }
 
 #[test]
-fn a_first_load_hygiene_review_runs_before_submission_and_deletes_nothing() {
-    if !common::in_harness_fixture(
-        "a_first_load_hygiene_review_runs_before_submission_and_deletes_nothing",
-    ) {
-        return;
-    }
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    repo.write(".claude/skills/review/SKILL.md", "a skill that may load\n");
-    repo.commit("fixture");
-    let discovered = git::discover(repo.path()).unwrap();
-
-    let (_, text) = with_state(&repo, || {
-        scripted("@chris\ndo the thing\n.\nn\n", |console| {
-            commands::interactive(console, &discovered, false, None)
-        })
-    });
-    assert!(text.contains("Context hygiene review"), "{text}");
-    assert!(text.contains("first load"), "{text}");
-    assert!(text.contains(".claude/skills/review/SKILL.md"), "{text}");
-    assert!(text.contains("Nothing has been changed"), "{text}");
-    // The skill is still there.
-    assert!(repo.path().join(".claude/skills/review/SKILL.md").exists());
-}
-
-#[test]
-fn a_noninteractive_first_run_asks_for_setup_and_writes_nothing() {
-    if !common::in_harness_fixture("a_noninteractive_first_run_asks_for_setup_and_writes_nothing") {
+fn a_noninteractive_first_run_requires_the_single_setup_command() {
+    if !common::in_harness_fixture("a_noninteractive_first_run_requires_the_single_setup_command") {
         return;
     }
     let repo = TestRepo::new();
@@ -426,8 +409,7 @@ fn a_noninteractive_first_run_asks_for_setup_and_writes_nothing() {
         })
     };
     let error = result.unwrap_err().to_string();
-    assert!(error.contains("not run interactively"), "{error}");
-    assert!(error.contains("Nothing was changed"), "{error}");
+    assert!(error.contains("run `ahu setup` first"), "{error}");
     assert!(!repo.path().join(".agents/ahu/config.toml").exists());
 }
 
@@ -437,10 +419,9 @@ fn cancelled_setup_writes_nothing() {
         return;
     }
     let repo = TestRepo::new();
-    let discovered = git::discover(repo.path()).unwrap();
-    // Choose Claude Code, accept catalog model order, default interval, then say no.
+    // Choose Claude Code, accept its catalog model order, then cancel.
     let (code, text) = with_state(&repo, || {
-        scripted("1\n\n\nn\n", |console| commands::init(console, &discovered))
+        scripted("1\n\n\nn\n", |console| policy_wizard(console, repo.path()))
     });
     assert_eq!(code, 1, "{text}");
     assert!(text.contains("Nothing was written"), "{text}");
@@ -453,9 +434,8 @@ fn setup_saves_only_the_config_file() {
         return;
     }
     let repo = TestRepo::new();
-    let discovered = git::discover(repo.path()).unwrap();
     let (code, text) = with_state(&repo, || {
-        scripted("1\n\n\ny\n", |console| commands::init(console, &discovered))
+        scripted("1\n\ny\n", |console| policy_wizard(console, repo.path()))
     });
     assert_eq!(code, 0, "{text}");
     let written = repo.read(".agents/ahu/config.toml");
@@ -474,14 +454,6 @@ fn setup_saves_only_the_config_file() {
     // It is usable immediately, uncommitted.
     let loaded = config::load(repo.path()).unwrap().unwrap();
     assert_eq!(loaded.config.harness_preferences, vec!["claude-code"]);
-
-    // Re-running reports the existing configuration rather than replacing it.
-    let (code, text) = with_state(&repo, || {
-        scripted("", |console| commands::init(console, &discovered))
-    });
-    assert_eq!(code, 0, "{text}");
-    assert!(text.contains("already initialized"), "{text}");
-    assert_eq!(repo.read(".agents/ahu/config.toml"), written);
 }
 
 #[test]
@@ -543,38 +515,6 @@ fn onboarding_is_additive_idempotent_and_reversible() {
     assert_eq!(code, 0);
     assert!(!repo.path().join(".agents/ahu/agents/sam.md").exists());
     assert_eq!(repo.read(".claude/agents/sam.md"), native_before);
-}
-
-#[test]
-fn the_inventory_separates_available_from_loaded_and_admits_its_gaps() {
-    if !common::in_harness_fixture(
-        "the_inventory_separates_available_from_loaded_and_admits_its_gaps",
-    ) {
-        return;
-    }
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    repo.write("CLAUDE.md", "repository guidance\n");
-    repo.write(".claude/skills/review/SKILL.md", "skill\n");
-    repo.commit("fixture");
-    let discovered = git::discover(repo.path()).unwrap();
-
-    let (code, text) = with_state(&repo, || {
-        scripted("", |console| {
-            commands::inventory_cmd(console, &discovered, Some("chris"))
-        })
-    });
-    assert_eq!(code, 0, "{text}");
-    assert!(text.contains("[loaded] chris@1.0.0"), "{text}");
-    assert!(text.contains("[available] CLAUDE.md"), "{text}");
-    assert!(
-        text.contains("[available] .claude/skills/review/SKILL.md"),
-        "{text}"
-    );
-    assert!(text.contains("[opaque]"), "{text}");
-    assert!(text.contains("What ahu cannot see"), "{text}");
-    assert!(text.contains("is not complete"), "{text}");
 }
 
 #[test]

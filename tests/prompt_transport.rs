@@ -613,9 +613,7 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
                  catalog_version = {:?}\n\
                  \n[model_rankings]\n\
                  {harness:?} = [{model:?}]\n\
-                 \n[context_hygiene]\n\
-                 review_on_first_load = false\n\
-                 review_interval_days = 7\n",
+",
                 ahu::catalog::CATALOG_VERSION
             ),
         );
@@ -657,7 +655,7 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
             !preview.contains("no harness enforces this agent's identity"),
             "{preview}"
         );
-        assert!(preview.contains("ahu inventory"), "{preview}");
+        assert!(preview.contains("ahu.lock"), "{preview}");
         // And it must still say where the instructions came from.
         assert!(
             preview.contains(".agents/ahu/agents/vela.md"),

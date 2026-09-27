@@ -14,7 +14,7 @@ mod common;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use common::{TestRepo, git};
+use common::TestRepo;
 use tempfile::TempDir;
 
 /// A directory outside any checkout, with one file whose bytes and mode the
@@ -106,49 +106,16 @@ fn link(target: &Path, at: PathBuf) {
     std::os::unix::fs::symlink(target, &at).expect("create link");
 }
 
-/// The reported escape: a tracked `repos` link and an ordinary `ahu hygiene`.
-#[test]
-fn a_tracked_repos_link_cannot_redirect_hygiene_writes_or_permissions() {
-    let repo = repo_with_state();
-    let external = External::new();
-    link(external.path(), repo.path().join(".ahu/state/repos"));
-    repo.commit("fixture with a tracked state link");
-    // The link is really in the repository, not just in the working tree: a
-    // fresh clone would check it out the same way.
-    assert!(
-        git(repo.path(), &["ls-files", "-s", ".ahu/state/repos"]).starts_with("120000"),
-        "the fixture must commit a symlink"
-    );
-
-    let output = ahu(&repo, &["hygiene", "@chris"]);
-    assert!(
-        !output.status.success(),
-        "hygiene must refuse the redirected store: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let message = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        message.contains("refusing ahu state path"),
-        "expected a refusal naming the state path, got: {message}"
-    );
-    external.assert_untouched();
-    assert!(!external.path().join(identity(&repo)).exists());
-}
-
 /// The same escape one and two levels deeper, where the caller joins the
 /// repository identity and then `tasks`.
 #[test]
 fn deeper_identity_and_tasks_links_are_refused_for_every_state_command() {
     // Each link is paired with the commands whose state paths actually run
-    // through it: hygiene writes `repos/<identity>/hygiene.json`, and `ahu
+    // through it: hygiene writes `repos/<identity>/task.json`, and `ahu
     // tasks` reads `repos/<identity>/tasks/`.
     for (relative, commands) in [
-        (".ahu/state/repos", &["hygiene", "tasks"][..]),
-        (".ahu/state/repos/IDENTITY", &["hygiene", "tasks"][..]),
+        (".ahu/state/repos", &["tasks"][..]),
+        (".ahu/state/repos/IDENTITY", &["tasks"][..]),
         (".ahu/state/repos/IDENTITY/tasks", &["tasks"][..]),
     ] {
         let repo = repo_with_state();
@@ -158,10 +125,7 @@ fn deeper_identity_and_tasks_links_are_refused_for_every_state_command() {
         repo.commit("fixture with a tracked state link");
 
         for command in commands {
-            let args = match *command {
-                "hygiene" => vec!["hygiene", "@chris"],
-                other => vec![other],
-            };
+            let args = vec![*command];
             let output = ahu(&repo, &args);
             let message = format!(
                 "{}{}",
@@ -181,40 +145,13 @@ fn deeper_identity_and_tasks_links_are_refused_for_every_state_command() {
     }
 }
 
-/// A link at the state file itself, rather than at a directory above it.
-#[test]
-fn a_leaf_state_file_link_is_refused_rather_than_written_through() {
-    let repo = repo_with_state();
-    let external = External::new();
-    let target = external.path().join("keep.txt");
-    let identity = identity(&repo);
-    link(
-        &target,
-        repo.path()
-            .join(".ahu/state/repos")
-            .join(&identity)
-            .join("hygiene.json"),
-    );
-    repo.commit("fixture with a tracked state file link");
-
-    let output = ahu(&repo, &["hygiene", "@chris"]);
-    let message = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!output.status.success(), "{message}");
-    assert!(message.contains("refusing ahu state path"), "{message}");
-    external.assert_untouched();
-}
-
 /// Private exclusive creation refuses a symlink and can replace a stale file.
 #[test]
 fn private_file_creation_refuses_a_link() {
     let repo = repo_with_state();
     let external = External::new();
     let state = repo.path().join(".ahu/state");
-    let record = state.join("hygiene.json");
+    let record = state.join("task.json");
     let temp = record.with_extension(format!("tmp{}", std::process::id()));
     link(&external.path().join("keep.txt"), temp.clone());
 
@@ -232,36 +169,6 @@ fn private_file_creation_refuses_a_link() {
     ahu::state::create_new_private_file(&temp).unwrap();
     assert!(temp.is_file());
     external.assert_untouched();
-}
-
-/// An inherited legacy override cannot redirect checkout state.
-#[test]
-fn an_inherited_state_override_cannot_redirect_state() {
-    let repo = repo_with_state();
-    let external = External::new();
-    let chosen = TempDir::new().unwrap();
-    link(external.path(), chosen.path().join("repos"));
-    let output = common::ahu()
-        .args(["hygiene", "@chris"])
-        .current_dir(repo.path())
-        .env("AHU_STATE_DIR", chosen.path())
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        repo.path()
-            .join(".ahu/state/repos")
-            .join(identity(&repo))
-            .join("hygiene.json")
-            .is_file()
-    );
-    external.assert_untouched();
-    assert_eq!(std::fs::read_dir(chosen.path()).unwrap().count(), 1);
 }
 
 /// Wait for a child with a deadline, killing it rather than blocking forever.
@@ -286,14 +193,16 @@ fn wait_bounded(mut child: std::process::Child, seconds: u64) -> std::process::O
 
 /// A named pipe where a state file should be is refused before it is opened.
 #[test]
-fn a_named_pipe_in_place_of_a_state_file_is_refused_without_blocking() {
+fn a_named_pipe_in_place_of_a_task_record_is_refused_without_blocking() {
     let repo = repo_with_state();
     let identity = identity(&repo);
     let record = repo
         .path()
         .join(".ahu/state/repos")
         .join(&identity)
-        .join("hygiene.json");
+        .join("tasks")
+        .join("01a0e2ee-7475-7ed7-835b-4bc000000001")
+        .join("task.json");
     std::fs::create_dir_all(record.parent().unwrap()).unwrap();
     let made = std::process::Command::new("mkfifo")
         .arg(&record)
@@ -302,10 +211,10 @@ fn a_named_pipe_in_place_of_a_state_file_is_refused_without_blocking() {
     assert!(made.success(), "the fixture needs a named pipe");
 
     let child = common::ahu()
-        .args(["hygiene", "@chris"])
+        .args(["tasks"])
         .current_dir(repo.path())
         .env_remove("AHU_STATE_DIR")
-        .env("XDG_STATE_HOME", repo.state_path())
+        .env("AHU_STATE_DIR", repo.path().join(".ahu/state"))
         .env("PATH", "/usr/bin:/bin")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -318,7 +227,7 @@ fn a_named_pipe_in_place_of_a_state_file_is_refused_without_blocking() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!output.status.success(), "{message}");
+    assert!(output.status.success(), "{message}");
     assert!(message.contains("refusing ahu state path"), "{message}");
     assert!(message.contains("named pipe"), "{message}");
     // Still a pipe: nothing replaced it, and nothing was written through it.
@@ -356,7 +265,7 @@ fn a_direct_record_read_validates_the_checkout_store_itself() {
 #[test]
 fn a_state_file_is_created_owner_only() {
     let repo = repo_with_state();
-    let record = repo.path().join(".ahu/state/repos/created/hygiene.json");
+    let record = repo.path().join(".ahu/state/repos/created/task.json");
     ahu::state::write_json(&record, &serde_json::json!({"written": true})).unwrap();
     assert_eq!(
         std::fs::symlink_metadata(&record)

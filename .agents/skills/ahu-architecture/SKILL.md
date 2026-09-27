@@ -193,13 +193,11 @@ flowchart TB
 ```
 
 Every task gets a unique id, a fresh branch `ahu/<agent>/<task-id>`, and a fresh
-worktree under .worktrees/ in the primary checkout. The worktree starts
-at the invoking checkout's HEAD, then receives its recognized agent
-configuration as it stands at submission — including uncommitted and Git-ignored
-files, with local deletions honoured. Scan skips and depth limits bound coverage;
-committed files under skipped paths still arrive through Git. Configuration
-symlinks are not followed. Unrelated dirty source files stay behind.
-Nothing is staged, committed, stashed, or reset in your checkout, ever.
+worktree under .worktrees/ in the primary checkout. The worktree starts at the invoking checkout's HEAD. Before planning the launch,
+ahu requires every recognized context input to be tracked and clean and checks
+that `ahu.lock` matches. Operators update and commit the lock with context edits;
+ahu never stages or commits. Scan skips and depth limits still bound coverage,
+and harness-managed or global context remains outside the repository lock.
 
 ## Context sources
 
@@ -229,10 +227,10 @@ flowchart LR
     style unseen fill:#fdf1e7,stroke:#b5651d
 ```
 
-`ahu inventory` marks each source loaded, available, disabled, opaque, or absent,
+`ahu.lock` records committed recognized context; it does not prove a harness loaded every source.
 and ends with what ahu cannot see. `available` means the harness can discover a
-source, not that its contents reached the model. The inventory is never labelled
-complete.
+source, not that its contents reached the model. The lock is never described as
+proof that the harness loaded the source.
 
 ## Hooks
 
@@ -331,7 +329,7 @@ by ahu at launch and passed to the session, so removing that worktree removes
 them with it. `ahu tasks`, `task` and `focus` find them by looking through
 `.worktrees/`, from the primary checkout or from any sibling. The launch lock,
 cmux group mapping, headless coordination and task index belong to the primary;
-hygiene timestamps stay in the checkout they were recorded from. `.ahu/` ignores
+`.ahu/` ignores
 itself in Git. Nested sessions discover state from their working checkout;
 coordination stays in the primary checkout. Legacy lookup reads the primary and
 invoking plain-checkout stores; managed worktree stores always enforce ownership.
@@ -363,7 +361,7 @@ and validates state paths before attempting cleanup. Listing never deletes them.
 - claim to know the effective approval boundary: the harness's own settings decide it, and ahu only reports what it read and which flags it passed
 - install, configure, or authenticate a harness on your behalf
 - delete a worktree, branch, or task record that may hold your work
-- call an inventory complete, or a behaviour change harmless
+- treat the recognized-context lock as proof of all harness-managed context
 
 ## Standing warnings
 

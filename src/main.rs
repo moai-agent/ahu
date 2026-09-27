@@ -246,10 +246,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             let repo = commands::repo_from_cwd()?;
             ahu::mcp::serve(&repo)
         }
-        Command::McpSetup => {
-            let repo = commands::repo_from_cwd()?;
-            ahu::mcp::setup(&repo)
-        }
         // `doctor` reports on a missing repository rather than failing on one.
         Command::Doctor => {
             let repo = commands::repo_from_cwd();
@@ -261,7 +257,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 Command::Interactive { focus, agent } => {
                     commands::interactive(console, &repo, focus, agent.as_deref())
                 }
-                Command::Init => commands::init(console, &repo),
+                Command::Setup => ahu::setup::run(console, &repo),
                 Command::Agents => commands::agents(console, &repo),
                 Command::Onboard {
                     register,
@@ -276,12 +272,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                     model.as_deref(),
                     &version,
                 ),
-                Command::Inventory { agent } => {
-                    commands::inventory_cmd(console, &repo, agent.as_deref())
-                }
-                Command::Hygiene { agent } => {
-                    commands::hygiene_cmd(console, &repo, agent.as_deref())
-                }
+                Command::Lock { update } => commands::lock_cmd(console, &repo, update),
                 Command::Tasks => commands::tasks(console, &repo),
                 Command::Task {
                     task_id,
@@ -303,7 +294,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::CmuxStatus { .. }
                 | Command::CmuxInstall { .. }
                 | Command::McpServe
-                | Command::McpSetup
                 | Command::Claude
                 | Command::Codex
                 | Command::OpenCode

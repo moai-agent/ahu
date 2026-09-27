@@ -90,7 +90,8 @@ fn the_overview_states_the_load_bearing_invariants() {
         "stage, commit, push, stash, reset, clean, or switch branches",
         "add, edit, or remove hooks",
         "one argument vector element",
-        "never labelled",
+        "`ahu.lock`",
+        "proof that the harness loaded the source",
         "pending behaviour change",
     ] {
         assert!(text.contains(claim), "overview should state: {claim}");

@@ -46,7 +46,6 @@ fn valid_config_loads_with_a_digest_over_its_exact_bytes() {
     repo.init_config();
     let loaded = config::load(repo.path()).unwrap().unwrap();
     assert_eq!(loaded.config.harness_preferences, vec!["claude-code"]);
-    assert_eq!(loaded.config.context_hygiene.review_interval_days, 7);
     assert_eq!(loaded.digest.len(), 64);
 
     // A byte change is a different policy snapshot, committed or not.
@@ -54,7 +53,10 @@ fn valid_config_loads_with_a_digest_over_its_exact_bytes() {
     let text = repo.read(".agents/ahu/config.toml");
     repo.write(
         ".agents/ahu/config.toml",
-        &text.replace("review_interval_days = 7", "review_interval_days = 14"),
+        &text.replace(
+            "catalog_version =",
+            "# byte-level policy change\ncatalog_version =",
+        ),
     );
     let after = config::load(repo.path()).unwrap().unwrap();
     assert_ne!(before, after.digest);
@@ -140,7 +142,6 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
         model_rankings: [("claude-code".to_string(), vec!["claude-opus-5".to_string()])]
             .into_iter()
             .collect(),
-        context_hygiene: config::ContextHygiene::default(),
         knowledge: config::Knowledge::default(),
         telemetry: config::TelemetryConfig::default(),
     };
@@ -170,10 +171,6 @@ fn rendered_config_round_trips() {
         )]
         .into_iter()
         .collect(),
-        context_hygiene: config::ContextHygiene {
-            review_on_first_load: true,
-            review_interval_days: 3,
-        },
         // A non-default knowledge section so the round trip proves it is
         // rendered, not silently dropped back to the default. The non-ASCII
         // paths are the reason the bundles are rendered as TOML rather than
@@ -410,9 +407,8 @@ fn a_project_order_naming_only_unsupported_harnesses_reports_a_policy_problem() 
              harness_preferences = [\"codex\"]\n\
              model_selection = \"project-ranked\"\n\
              catalog_version = \"{}\"\n\
-             \n[context_hygiene]\n\
-             review_on_first_load = true\n\
-             review_interval_days = 7\n",
+             \n[knowledge]\n\
+             bundles = []\n",
             catalog::CATALOG_VERSION
         ),
     );

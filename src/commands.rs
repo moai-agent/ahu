@@ -10,12 +10,11 @@ use crate::bail;
 use crate::catalog;
 use crate::cmux::{self, Cmux};
 use crate::config::{self, LoadedConfig};
+use crate::context_lock;
 use crate::drift;
 use crate::git::{self, Repo};
 use crate::harness;
 use crate::hooks;
-use crate::hygiene;
-use crate::inventory;
 use crate::knowledge;
 use crate::launch;
 use crate::launcher::{self, Console};
@@ -170,44 +169,33 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
     }
 }
 
-/// Load configuration, or run first-run setup, or explain why it cannot.
-fn config_or_setup(repo: &Repo, console: &mut Console<'_>) -> Result<Option<LoadedConfig>> {
-    if let Some(loaded) = config::load(&repo.root)? {
-        return Ok(Some(loaded));
-    }
-    let Some(new_config) = launcher::run_setup(console)? else {
-        console.say("Cancelled. Nothing was written.\n")?;
-        return Ok(None);
-    };
-    let path = config::write_new(&repo.root, &new_config)?;
-    console.say(&format!("\nWrote {}\n", path.display()))?;
-    console.say(
-        "The configuration is in effect now; it does not need to be committed to be used.\n\
-         Run `ahu onboard` to see native agent definitions you could register.\n\n",
-    )?;
-    config::load(&repo.root)?.map(Some).ok_or_else(|| {
-        crate::util::Error::new("configuration disappeared immediately after it was written")
-    })
+/// Load the project policy written by the one supported setup command.
+fn config_or_setup(repo: &Repo, _console: &mut Console<'_>) -> Result<Option<LoadedConfig>> {
+    config::load(&repo.root)?
+        .map(Some)
+        .ok_or_else(|| Error::new("this repository is not set up for ahu; run `ahu setup` first"))
 }
 
-/// `ahu init`
-pub fn init(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
-    if let Some(loaded) = config::load(&repo.root)? {
+/// Check or refresh `ahu.lock`. Refreshing never stages or commits.
+pub fn lock_cmd(console: &mut Console<'_>, repo: &Repo, update: bool) -> Result<i32> {
+    let snapshot = crate::snapshot::collect(&repo.root)?;
+    if update {
+        let path = context_lock::refresh(repo, &snapshot)?;
         console.say(&format!(
-            "ahu is already initialized in this repository.\n  {}\n  policy digest {}\n\
-             \nPreferences are edited in that file, not through ahu.\n",
-            loaded.path.display(),
-            loaded.short_digest()
+            "Wrote {} from the current recognized context. Review and commit it with every context change before launching an agent; ahu did not stage or commit.\n",
+            display_path(&path)
         ))?;
         return Ok(0);
     }
-    let Some(new_config) = launcher::run_setup(console)? else {
-        return Ok(1);
-    };
-    let path = config::write_new(&repo.root, &new_config)?;
-    console.say(&format!("\nWrote {}\n", path.display()))?;
-    console.say("Nothing else was created, registered, installed, staged, or committed.\n")?;
-    Ok(0)
+    let status = context_lock::check(repo, &snapshot)?;
+    if status.current {
+        console.say(&format!("{}\n", status.detail))?;
+        Ok(0)
+    } else {
+        console.say(&format!("Context is not launchable: {}\n", status.detail))?;
+        Err(Error::new("committed context lock is not current")
+            .with_kind(crate::util::ErrorKind::Prerequisite))
+    }
 }
 
 /// `ahu agents`
@@ -484,7 +472,7 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                     display_safe(&loaded.config.harness_preferences.join(", "))
                 ))?;
             }
-            Ok(None) => console.say("config       not initialized; run `ahu init`\n")?,
+            Ok(None) => console.say("config       not initialized; run `ahu setup`\n")?,
             Err(e) => {
                 problems += 1;
                 console.say(&format!(
@@ -594,46 +582,24 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         }
         console.say(&format!("telemetry    {label}\n"))?;
 
-        let review_state = match hygiene::load_state(repo) {
-            Ok(state) => state,
-            Err(error) => {
-                warnings += 1;
+        match crate::context_lock::check(repo, &crate::snapshot::collect(&repo.root)?) {
+            Ok(status) if status.current => {
+                console.say(&format!("context lock {}\n", status.detail))?
+            }
+            Ok(status) => {
+                problems += 1;
                 console.say(&format!(
-                    "hygiene      review cadence unavailable: {}\n",
+                    "context lock stale: {}\n",
+                    display_safe_block(&status.detail)
+                ))?;
+            }
+            Err(error) => {
+                problems += 1;
+                console.say(&format!(
+                    "context lock invalid: {}\n",
                     display_safe_block(&error.to_string())
                 ))?;
-                hygiene::ReviewState::default()
             }
-        };
-        let mut cadence_due = 0;
-        let cadence_agents: Vec<_> = if registered_agents.is_empty() {
-            vec![None]
-        } else {
-            registered_agents.iter().map(Some).collect()
-        };
-        for agent in cadence_agents {
-            let key = agent
-                .map(ResolvedAgent::label)
-                .unwrap_or_else(|| "auto".into());
-            let state = hygiene::due(loaded, &review_state, &key);
-            let status = match state {
-                hygiene::Trigger::FirstLoad => {
-                    cadence_due += 1;
-                    "due (first load)"
-                }
-                hygiene::Trigger::Overdue => {
-                    cadence_due += 1;
-                    "due (interval elapsed)"
-                }
-                hygiene::Trigger::NotDue => "current",
-                hygiene::Trigger::Requested => "current",
-            };
-            console.say(&format!("hygiene      {key}: {status}\n"))?;
-        }
-        if cadence_due > 0 {
-            warnings += 1;
-            console
-                .say("  Run `ahu hygiene` or launch the affected agent to review its context.\n")?;
         }
 
         match crate::mcp::verify_bundled_skills(&repo.root) {
@@ -644,9 +610,8 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                     ))?;
                 if missing + changed > 0 {
                     warnings += 1;
-                    console.say(
-                        "  Review with `ahu mcp setup`; changed skills are left untouched.\n",
-                    )?;
+                    console
+                        .say("  Review with `ahu setup`; changed skills are left untouched.\n")?;
                 }
             }
             Err(error) => {
@@ -1953,87 +1918,6 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     Ok(0)
 }
 
-/// `ahu inventory [@agent]`
-pub fn inventory_cmd(
-    console: &mut Console<'_>,
-    repo: &Repo,
-    agent_name: Option<&str>,
-) -> Result<i32> {
-    let Some(loaded) = config::load(&repo.root)? else {
-        bail!(kind: crate::util::ErrorKind::Prerequisite, "this repository is not initialized. Run `ahu init` first.");
-    };
-    let snapshot = crate::snapshot::collect(&repo.root)?;
-    let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
-    let adapter = harness::adapter_for(&pair.harness)?;
-    // Same permissions the launch would use, so this report describes the same
-    // flags a launch of this identity would actually pass.
-    let permissions = resolved
-        .as_ref()
-        .map(|a| a.manifest.permissions)
-        .unwrap_or_default();
-    let enforcement = adapter.enforcement(&pair.model, permissions)?;
-    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
-    let built = inventory::build(&inventory::Subject {
-        repo_root: &repo.root,
-        loaded_config: &loaded,
-        snapshot: &snapshot,
-        agent: resolved.as_ref(),
-        harness: &pair.harness,
-        model: &pair.model,
-        enforcement: &enforcement,
-        hooks: &found_hooks,
-        prompt: None,
-    })?;
-    console.say(&inventory::render(&built))?;
-    Ok(0)
-}
-
-/// `ahu hygiene [@agent]`
-pub fn hygiene_cmd(
-    console: &mut Console<'_>,
-    repo: &Repo,
-    agent_name: Option<&str>,
-) -> Result<i32> {
-    let Some(loaded) = config::load(&repo.root)? else {
-        bail!(kind: crate::util::ErrorKind::Prerequisite, "this repository is not initialized. Run `ahu init` first.");
-    };
-    let snapshot = crate::snapshot::collect(&repo.root)?;
-    let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
-    let adapter = harness::adapter_for(&pair.harness)?;
-    // Same permissions the launch would use, so this report describes the same
-    // flags a launch of this identity would actually pass.
-    let permissions = resolved
-        .as_ref()
-        .map(|a| a.manifest.permissions)
-        .unwrap_or_default();
-    let enforcement = adapter.enforcement(&pair.model, permissions)?;
-    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
-    let built = inventory::build(&inventory::Subject {
-        repo_root: &repo.root,
-        loaded_config: &loaded,
-        snapshot: &snapshot,
-        agent: resolved.as_ref(),
-        harness: &pair.harness,
-        model: &pair.model,
-        enforcement: &enforcement,
-        hooks: &found_hooks,
-        prompt: None,
-    })?;
-    let key = resolved
-        .as_ref()
-        .map(|a| a.label())
-        .unwrap_or_else(|| "auto".to_string());
-    let review_state = hygiene::load_state(repo)?;
-    let review = hygiene::review(&key, &built, &enforcement, &loaded, &review_state);
-    console.say(&hygiene::render(
-        &review,
-        hygiene::Trigger::Requested,
-        &loaded,
-    ))?;
-    hygiene::record_review(repo, &key)?;
-    Ok(0)
-}
-
 /// `ahu knowledge lint [--output json]`
 ///
 /// A check, so its exit status is the result: 0 when the bundles pass under the
@@ -2042,7 +1926,7 @@ pub fn hygiene_cmd(
 pub fn knowledge_lint(console: &mut Console<'_>, repo: &Repo, json: bool) -> Result<i32> {
     let loaded = config::load(&repo.root)?.ok_or_else(|| {
         crate::util::Error::new(
-            "project configuration is missing; run `ahu init` before checking knowledge bundles.",
+            "project configuration is missing; run `ahu setup` before checking knowledge bundles.",
         )
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
@@ -2327,7 +2211,7 @@ pub fn launch_cmd(
 ) -> Result<i32> {
     let loaded = config::load(&repo.root)?.ok_or_else(|| {
         crate::util::Error::new(
-            "project configuration is missing; run ahu init before assigning work.",
+            "project configuration is missing; run ahu setup before assigning work.",
         )
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
@@ -2408,7 +2292,7 @@ fn submit(
     }
     plan.apply_display(display)?;
 
-    preflight(console, repo, loaded, &plan, prompt, dry_run)?;
+    preflight(console, repo, loaded, &plan)?;
 
     // Generated here, after the prompt has been read and after the plan is
     // built, so nothing in the prompt can have contained it.
@@ -2461,33 +2345,8 @@ pub(crate) fn preflight(
     repo: &Repo,
     loaded: &LoadedConfig,
     plan: &launch::LaunchPlan,
-    prompt: &str,
-    dry_run: bool,
 ) -> Result<()> {
-    // First-load and overdue context hygiene review, before submission.
     let key = plan.agent_label();
-    let review_state = hygiene::load_state(repo)?;
-    let trigger = hygiene::due(loaded, &review_state, &key);
-    if trigger != hygiene::Trigger::NotDue {
-        let built = inventory::build(&inventory::Subject {
-            repo_root: &repo.root,
-            loaded_config: loaded,
-            snapshot: &plan.snapshot,
-            agent: plan.agent.as_ref(),
-            harness: &plan.pair.harness,
-            model: &plan.pair.model,
-            enforcement: &plan.enforcement,
-            hooks: &plan.hooks,
-            prompt: Some(prompt),
-        })?;
-        let review = hygiene::review(&key, &built, &plan.enforcement, loaded, &review_state);
-        console.say("\n")?;
-        console.say(&hygiene::render(&review, trigger, loaded))?;
-        if !dry_run {
-            hygiene::record_review(repo, &key)?;
-        }
-    }
-
     // Drift against the last launch of this same agent at this same version.
     let previous = task::list(repo)?;
     // Drift can only compare against records it can read. Saying nothing when
@@ -2535,7 +2394,7 @@ pub(crate) fn preflight(
 }
 
 /// The normal launch view contains decisions and next actions. Full audit
-/// details remain available through dry-run previews, JSON, and inventory.
+/// details remain available through dry-run previews and JSON.
 pub fn render_launch_preview(
     repo: &Repo,
     plan: &launch::LaunchPlan,
@@ -2591,7 +2450,7 @@ pub fn render_launch_preview(
     }
     if !plan.hooks.hooks.is_empty() {
         out.push_str(&format!(
-            "  hooks      {} configured; details: ahu inventory\n",
+            "  hooks      {} configured; review the launch JSON for details\n",
             plan.hooks.hooks.len()
         ));
     }
@@ -2599,7 +2458,7 @@ pub fn render_launch_preview(
         out.push_str(&style.paint(
             Role::Gap,
             &format!(
-                "  gaps       {} capability limit(s); details: ahu inventory\n",
+                "  gaps       {} capability limit(s); review the launch JSON for details\n",
                 plan.enforcement.gaps.len()
             ),
         ));
@@ -2632,7 +2491,7 @@ fn render_enforcement_gaps(plan: &launch::LaunchPlan) -> String {
         out.push_str(&style.paint(
             Role::Gap,
             &format!(
-                "  ! {} capability limit(s); details: ahu inventory\n",
+                "  ! {} capability limit(s); review the launch JSON for details\n",
                 plan.enforcement.gaps.len()
             ),
         ));
@@ -2769,9 +2628,9 @@ pub fn render_preview(
         plan.hooks.short_digest()
     ));
     out.push_str(
-        "\nThe task worktree starts at the base commit above and then receives this checkout's\n\
-         complete agent configuration as it stands right now, including uncommitted and ignored\n\
-         files, at their native paths.\n",
+        "\nThe task worktree starts at the base commit above. ahu.lock and every recognized\n\
+         repository context input must match committed HEAD before launch. Harness-level and\n\
+         provider-managed context remains outside this repository lock.\n",
     );
     if plan.parent_dirty {
         out.push_str(&style.paint(Role::Drift, "\nCheckout changes\n"));
@@ -2781,12 +2640,10 @@ pub fn render_preview(
         );
     }
     if !plan.snapshot.skipped_directories.is_empty() {
-        // Not "not inherited": the worktree is a checkout of the base commit,
-        // so committed files under these paths are in it either way. What the
-        // scan skipped is the inventory, not the inheritance.
+        // These paths exceed the bounded context scan; name them without
+        // suggesting the repository lock covers files the scanner did not read.
         out.push_str(&format!(
-            "Not scanned, so not inventoried; committed files under these paths are still present\n\
-             in the task worktree: {}\n",
+            "Context scan is bounded and does not lock nested inputs in these paths: {}\n",
             display_safe(&plan.snapshot.skipped_directories.join(", "))
         ));
     }
@@ -2846,7 +2703,6 @@ pub fn render_preview(
         ));
     }
     out.push_str(&render_enforcement_gaps(plan));
-    out.push_str("  Detailed runtime capabilities: ahu inventory\n");
     out.push_str(&format!(
         "\nCommand to be run in the worktree (the prompt is one argument, never shell input):\n  {} {}\n",
         display_path(&plan.harness_executable),

@@ -206,6 +206,7 @@ fn local_metrics_survive_attempt_persistence_without_an_exporter() {
     config.telemetry.local_metrics = true;
     f.repo
         .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo.commit("enable local metrics for fixture");
     let out = f.launch("success", &[]);
     assert!(
         out.status.success(),
@@ -235,6 +236,7 @@ fn exporter_setup_failure_does_not_block_headless_execution() {
     config.telemetry.local_metrics = true;
     f.repo
         .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo.commit("enable telemetry for fixture");
     let out = f
         .command()
         .env("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "gzip")
@@ -1106,6 +1108,7 @@ fn host_grants_reject_implicit_approval_widening_before_execution() {
         source.replace("permissions: prompt", "permissions: auto"),
     )
     .unwrap();
+    f.repo.commit("widen writer permissions for fixture");
     let out = f.launch("success", &["--allow-child", "@writer"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--allow-child-widened"));

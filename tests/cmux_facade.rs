@@ -545,7 +545,9 @@ fn headless_dry_run_uses_the_same_status_and_refuses_unknown_registration() {
     let result = launch();
     assert!(!result.status.success());
     assert!(
-        String::from_utf8_lossy(&result.stderr).contains("headless cmux isolation is unverified")
+        String::from_utf8_lossy(&result.stderr).contains("headless cmux isolation is unverified"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
     );
     assert!(!Path::new(preview["worktree"].as_str().unwrap()).exists());
 }

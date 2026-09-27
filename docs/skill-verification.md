@@ -7,14 +7,14 @@ probes. It exists so the portability claims about the canonical tree stay tied
 to reproducible commands and recorded evidence instead of assumptions.
 
 `scripts/check-skills.py` verifies the tree contract deterministically in CI.
-The probes below verify the other half: that a specific installed harness
+The probes below verify that a specific installed harness
 actually discovers and invokes those files; this requires the harness CLI and
 its credentials. They run on demand rather than in CI.
 
 ## Fixture
 
 Use a disposable git fixture with **one candidate location at a time**. A
-same-named skill in several roots makes a successful invocation ambiguous.
+same-named skill in multiple roots makes a successful invocation ambiguous.
 The provider-free helper creates only synthetic skill content; it never runs
 a harness, changes trust settings, or copies the repository's skills:
 
@@ -70,7 +70,7 @@ below retain the versions already recorded in this repository.
 
 ## OpenCode
 
-Discovery is observable without an LLM call:
+Discovery is observable without a large language model call:
 
 ```sh
 cd "$fixture" && opencode debug skill
@@ -89,7 +89,7 @@ listed skills. OpenCode discovers `.agents/skills/` natively.
 
 ## Codex
 
-Discovery is observable without an LLM call:
+Discovery is observable without a large language model call:
 
 ```sh
 cd "$fixture" && codex debug prompt-input
@@ -109,7 +109,7 @@ Observed (Codex CLI 0.155.1): `codex debug prompt-input` reported the skill root
 `PROBE_SKILL_OK`. `codex features list` showed `skill_search` as stable. Codex
 discovers `.agents/skills/` natively.
 
-## Claude code skill behavior
+**Claude Code skill behavior**
 
 Claude Code does not document `.agents/skills/` as a skill location; its
 locations are enterprise, personal, project (`.claude/skills/`), nested,
@@ -134,10 +134,11 @@ the four canonical skills were available to a Claude Code session.
 
 Per the [skills documentation][claude-skills], a project skill must live at
 `.claude/skills/<name>/SKILL.md`, and a same-named skill in another location
-does not replace it. `ahu mcp setup` therefore does not duplicate the bundle
-into `.claude/skills/`; operators who want Claude Code to load a canonical
-skill can copy or symlink that skill's directory into `.claude/skills/` and
-commit it, as an ordinary project file.
+does not replace it. `ahu setup` writes ordinary, byte-identical copies to
+`.claude/skills/` when Claude Code is detected. It refuses to replace a changed
+copy. The canonical source remains under `.agents/skills/`; Claude's copies are
+independently included in `ahu.lock` and reviewed/committed with the rest of
+setup.
 
 ## Antigravity
 
@@ -183,7 +184,7 @@ not claim a project skill was used when Antigravity does not expose one.
 
 - Antigravity skill discovery in a trusted folder or interactive session.
 - Claude Code interactive sessions, plugin distribution, managed settings, and
-  Claude.ai sync, all of which can carry skills by other paths.
+  Claude.ai sync. Each can carry skills by other paths.
 - Any harness other than the four preceding, and any version other than the
   recorded ones.
 - Probes of live harnesses in CI; the fixture protocol earlier is the manual
@@ -223,8 +224,8 @@ The normalizer accepts only these synthetic protocol shapes:
 | Antigravity | `type: tool_use`, `name: Skill`, `input`; or `event: step_update`, `step_update.tool_name` / `tool_info.name: Skill`, `tool_info.parameters` |
 
 Only `skill` (or `name` when `skill` is absent) is read from those input objects.
-Names must start with an ASCII letter or digit, contain only ASCII letters,
-digits, hyphens, underscores, dots, or colons, and fit in 128 bytes. At most 128
+Names must start with a letter or digit, contain only letters, digits, hyphens,
+underscores, dots, or colons, and fit in 128 bytes. At most 128
 reports are retained; exceeding that limit marks the attempt failed. No input
 objects, prompts, response text, tool arguments, arbitrary payloads, or
 credentials are copied into invocation records. Names are untrusted labels,
@@ -237,7 +238,7 @@ without IDs remain separate; counts do not establish unique successful execution
 
 The filesystem catalog remains separate. A same-named local file cannot prove
 which skill a harness loaded; new invocation records therefore leave the
-legacy `source` and `digest` fields unset. OTEL exports the same bounded names
+legacy `source` and `digest` fields unset. OTel exports the same bounded names
 and observation state, and emits an invocation count only when reports were
 observed. Missing evidence is not exported as zero. These provider-free tests
 establish parser behavior only; live skill invocation conformance for these
@@ -258,7 +259,7 @@ invocation adapters with the following explicit completion contracts:
 | Antigravity | `type: tool_result`, matching `tool_use_id`, Boolean `is_error`; or a recognized nested Skill snapshot with `step_update.state: DONE` or `ERROR`, correlated by `tool_info.id` when present |
 
 Separate results correlate with invocation `call_id` (Codex) or `id` (Claude
-Code and flat Antigravity). IDs are bounded to 128 ASCII graphic bytes and held
+Code and flat Antigravity). IDs are bounded to 128 graphic bytes and held
 only in memory, with at most one entry per retained invocation. They are never
 serialized. Ambiguous IDs cannot establish completion. Identical terminal
 reports are idempotent; contradictory results revoke completion evidence.
@@ -275,7 +276,7 @@ Parsing a stored record does not restore correlation state.
 `skill_unknown_events` counts malformed recognized skill inputs/statuses and
 unattributed, ambiguous, or conflicting result reports. Unattributed results may
 belong to ordinary tools; this counter is not a count of skill failures. Unknown
-outer envelopes continue to increment `unknown_events`. OTEL exposes the
+outer envelopes continue to increment `unknown_events`. OTel exposes the
 unclassified count and exports completed/failed counts only when explicit
 completion evidence exists. The invocation and catalog evidence remain separate.
 

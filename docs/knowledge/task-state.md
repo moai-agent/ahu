@@ -97,8 +97,7 @@ recordless worktree is visible as incomplete; listing does not delete it or
 prove its contents disposable.[^launch][^tests]
 
 The launch lock, cmux group mapping, task handle reservations, headless coordination, and scoped task index
-belong to the primary checkout’s state store. Hygiene and generated architecture text use the invoking
-checkout's store. Paths come from explicit checkout and repository discovery.
+belong to the primary checkout’s state store. Generated architecture text uses the invoking checkout's store. Paths come from explicit checkout and repository discovery.
 ahu neither resolves state through `AHU_STATE_DIR` nor injects it into sessions.
 The `--repo` prefix selects a checkout; `AHU_REPO_ROOT`, `AHU_STATE_DIR`,
 `AHU_RUNTIME_DIR`, and `AHU_TASK_INDEX_DIR` do not select stores. Conventional old

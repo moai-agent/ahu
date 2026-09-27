@@ -26,9 +26,9 @@ const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
 const SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
-pub const CONTEXT_HYGIENE_SKILL: &str = "context-hygiene";
+pub const AGENT_CONTEXT_CRITIC_SKILL: &str = "agent-context-critic";
 
-/// Skills `ahu mcp setup` writes into a user's repository, and the set doctor
+/// Skills `ahu setup` installs in a user's repository, and the set doctor
 /// verifies. `.agents/skills/` in this repository also holds skills about
 /// building and releasing ahu itself; those are for ahu's own agents and are
 /// deliberately not shipped to other projects.
@@ -42,8 +42,8 @@ pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
         include_str!("../.agents/skills/direct-agents/SKILL.md"),
     ),
     (
-        CONTEXT_HYGIENE_SKILL,
-        include_str!("../.agents/skills/context-hygiene/SKILL.md"),
+        AGENT_CONTEXT_CRITIC_SKILL,
+        include_str!("../.agents/skills/agent-context-critic/SKILL.md"),
     ),
 ];
 
@@ -545,52 +545,14 @@ fn task_get(repo: &Repo, arguments: &Value) -> Result<Value> {
     crate::commands::task_summary(&dir, &record, workspaces.as_ref())
 }
 
-/// Copy the bundled skill set into a repository for review and commit.
-pub fn setup(repo: &Repo) -> Result<i32> {
-    for &(name, content) in BUNDLED_SKILLS {
-        let path = crate::util::resolve_within(
-            &repo.root,
-            &format!(".agents/skills/{name}/SKILL.md"),
-            true,
-        )?;
-        match std::fs::read(&path) {
-            Ok(existing) => {
-                if existing != content.as_bytes() {
-                    return Err(Error::new(format!(
-                        "refusing to overwrite changed skill {}",
-                        path.display()
-                    )));
-                }
-                continue;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(Error::new(format!(
-                    "cannot read skill {}: {error}",
-                    path.display()
-                )));
-            }
-        }
-        std::fs::create_dir_all(path.parent().expect("skill path has parent"))?;
-        // A skill created since the read must not be truncated either.
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        file.write_all(content.as_bytes())?;
-        println!("Wrote {}", path.display());
-    }
-    Ok(0)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::io::Cursor;
 
     use super::{
-        BUNDLED_SKILLS, CONTEXT_HYGIENE_SKILL, MAX_FRAME_BYTES, TOOL_NAMES, read_frame, skill_path,
-        tool_definitions_digest, tools, verify_bundled_skills,
+        AGENT_CONTEXT_CRITIC_SKILL, BUNDLED_SKILLS, MAX_FRAME_BYTES, TOOL_NAMES, read_frame,
+        skill_path, tool_definitions_digest, tools, verify_bundled_skills,
     };
 
     #[test]
@@ -712,7 +674,7 @@ mod tests {
             vec![
                 "discover-requirements",
                 "direct-agents",
-                CONTEXT_HYGIENE_SKILL
+                AGENT_CONTEXT_CRITIC_SKILL
             ]
         );
     }

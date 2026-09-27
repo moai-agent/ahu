@@ -185,8 +185,8 @@ ahu delivers its contract, available execution facts, agent instructions, and
 assignment in nonce-bearing sections with raw bodies. This is prompt text,
 not an enforced system prompt. The harness controls the running session,
 including model changes, approvals, and context loading. ahu reports visible
-settings and gaps and never claims its inventory is complete. Ordinary launches
-do not alter native hooks or settings. Explicit `ahu cmux install` delegates a
+settings and gaps without claiming to know everything the harness loads.
+Ordinary launches do not alter native hooks or settings. Explicit `ahu cmux install` delegates a
 reviewable native installation to cmux.
 Private tracker material stays out of public files and reports; remote pushes
 require explicit user permission.
@@ -195,9 +195,12 @@ require explicit user permission.
 
 | Command | Purpose |
 | --- | --- |
+| `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness dev agents, and refresh `ahu.lock` |
 | `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
 | `ahu launch @agent [options]` | Backward-compatible launch alias with `--prompt` and `--prompt-file` support |
-| `ahu doctor` | Check repository, configuration, harness, cmux, hygiene cadence, telemetry, skills, and drift |
+| `ahu doctor` | Check repository, configuration, committed context lock, harness, cmux, telemetry, skills, and drift |
+| `ahu lock` | Check that recognized agent context and `ahu.lock` are committed and current |
+| `ahu lock --update` | Fingerprint current recognized context into `ahu.lock` for review and commit |
 | `ahu agents` | List registered agents and detected drift |
 | `ahu tasks` | List tasks in a compact table |
 | `ahu cmux status` | Inspect native integration evidence and headless isolation |
@@ -212,10 +215,15 @@ require explicit user permission.
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
 | `ahu mcp serve` | Serve repository-scoped agent and task inspection over stdio MCP |
-| `ahu mcp setup` | Materialize ahu's bundled skills into the project for review and commit |
 
-Advanced inspection commands such as `ahu inventory` and `ahu hygiene` remain
-available; run `ahu <command> --help` for their options.
+Use the bundled `agent-context-critic` skill with `ahu eval run` and
+`ahu eval report` to investigate context changes against measured outcomes.
+The skill treats repository files as declared context, not proof that a
+harness loaded them. `ahu.lock` covers recognized repository inputs only;
+harness, user, managed, and provider context remains outside that guarantee.
+The eval cases, OTel observations, and private run artifacts should stay outside
+the candidate checkout when they contain information the candidate should not
+see. `ahu help` lists the CLI commands and their supported options.
 
 All four shortcuts open the same way: approvals bypassed, on this project's
 top-ranked model for that harness, both passed explicitly on the command line.
@@ -244,9 +252,12 @@ shortcuts place their workspace in the repository's group before starting. See
 
 The MCP integration is local and repository-scoped. `ahu mcp serve` provides
 agent and task inspection over stdio, and can expose the optional
-`ahu_typed_decide` tool to a configured local decision service. `ahu mcp setup`
-copies the bundled skills into `.agents/skills/` as ordinary files that the
-project can review and commit. The skill bundle ships with ahu for now. See the
+`ahu_typed_decide` tool to a configured local decision service. `ahu setup`
+configures a project MCP entry for each detected harness, installs bundled
+skills in harness-supported paths, creates a `dev-<harness>` ahu agent using a
+model you choose, and refreshes `ahu.lock`. Review and commit the generated
+project files before launching. Claude Code asks before using project MCP
+servers, and Codex must trust the repository before loading project config. See the
 [typed-decision experiment](docs/typed-decisions.md) for its model-neutral
 service contract and limitations.
 

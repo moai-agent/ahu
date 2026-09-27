@@ -9,9 +9,6 @@ catalog_version = "2026-09-13"
 [model_rankings]
 "codex" = ["gpt-6-astra"]
 
-[context_hygiene]
-review_on_first_load = true
-review_interval_days = 7
 
 [knowledge]
 bundles = ["docs/knowledge", ".agents/ahu/agents"]

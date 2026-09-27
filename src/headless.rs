@@ -632,7 +632,7 @@ pub fn launch(
         return crate::broker::request(repo, agent, prompt, display, &options, allow, json_output);
     }
     let loaded = crate::config::load(&repo.root)?
-        .ok_or_else(|| Error::new("project configuration is missing; run ahu init"))?;
+        .ok_or_else(|| Error::new("project configuration is missing; run ahu setup"))?;
     let (agent, pair) = crate::commands::resolve_identity(repo, &loaded, Some(agent))?;
     if !options.native_helpers_explicit {
         match agent
@@ -825,7 +825,7 @@ pub fn launch(
     if !dry_run {
         confined(plan.task_dir.parent().expect("store"), true)?;
     }
-    crate::commands::preflight(console, repo, &loaded, &plan, prompt, dry_run)?;
+    crate::commands::preflight(console, repo, &loaded, &plan)?;
     let mut preview = json!({"schema_version":1,"backend":"headless","task_id":plan.task_id,"worktree":plan.worktree,
         "task_handle_candidate":format!("@{}",plan.task_name.clone().unwrap_or_else(||crate::task_handles::generated_name(&plan.title))), "task_handle_reserved":false,
         "branch":plan.branch,"command":plan.command.redacted(),"executable":plan.harness_executable,"capabilities":spec,

@@ -55,9 +55,7 @@ fn repo_on(harness: &str, model: &str) -> TestRepo {
              catalog_version = {:?}\n\
              \n[model_rankings]\n\
              {harness:?} = [{model:?}]\n\
-             \n[context_hygiene]\n\
-             review_on_first_load = false\n\
-             review_interval_days = 7\n",
+",
             ahu::catalog::CATALOG_VERSION
         ),
     );
@@ -800,68 +798,6 @@ fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::
 
 /// The inventory names both digests too — it is the other place a reader is
 /// handed one and has to know what it covers.
-#[test]
-fn the_inventory_labels_both_digests() {
-    let repo = repo_on("claude-code", "claude-opus-5");
-    repo.write(
-        ".claude/agents/sable.md",
-        "---\nname: sable\nmodel: claude-opus-5\n---\n\nYou are sable.\n",
-    );
-    // Overwrite the body-mode fixture with a source-mode manifest pointing at
-    // the claude-agent definition.
-    repo.write(
-        ".agents/ahu/agents/sable.md",
-        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: sable\ndescription: fixture agent\n\
-         status: stable\ntags: [agents]\nharness: claude-code\nmodel: claude-opus-5\n\
-         permissions: prompt\nversion: 1.0.0\nsource_format: claude-agent\n\
-         source_path: .claude/agents/sable.md\n\n---\n\nInstructions live in the native \
-         definition at `.claude/agents/sable.md`, referenced in place and never edited.\n",
-    );
-    repo.commit("fixture");
-
-    let loaded = config::load(repo.path()).unwrap().unwrap();
-    let found = agent::find(repo.path(), "sable").unwrap();
-    let taken = ahu::snapshot::collect(repo.path()).unwrap();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let enforcement = adapter
-        .enforcement("claude-opus-5", Default::default())
-        .unwrap();
-    let home = tempfile::TempDir::new().unwrap();
-    let hooks = hooks::collect_for(repo.path(), "claude-code", &locations(home.path())).unwrap();
-    let built = ahu::inventory::build(&ahu::inventory::Subject {
-        repo_root: repo.path(),
-        loaded_config: &loaded,
-        snapshot: &taken,
-        agent: Some(&found),
-        harness: "claude-code",
-        model: "claude-opus-5",
-        enforcement: &enforcement,
-        hooks: &hooks,
-        prompt: None,
-    })
-    .unwrap();
-    let rendered = ahu::inventory::render(&built);
-
-    assert!(
-        rendered.contains(&format!(
-            "file digest {} covers the whole file",
-            &found.source_digest[..12]
-        )),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains(&format!(
-            "instructions digest {} covers exactly the text ahu delivers",
-            &found.instructions_digest[..12]
-        )),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("with its YAML frontmatter stripped"),
-        "{rendered}"
-    );
-}
-
 /// A plugin module an `opencode.json` declares is named on the launch preview.
 ///
 /// The configuration snapshot carries the file and digests it, but that digest
@@ -1146,37 +1082,6 @@ fn the_catalog_records_the_validated_feature_surface_of_each_harness() {
 /// and gloss is present, so the report is the matrix rather than a summary of
 /// it. The glosses are the part that keeps a mark from reading as a stronger
 /// claim than the adapter validation made.
-#[test]
-fn the_feature_matrix_is_rendered_with_every_feature_and_gloss() {
-    use ahu::catalog::FEATURES;
-
-    let rendered = ahu::inventory::render_feature_matrix();
-    assert!(rendered.contains("Harness feature matrix"), "{rendered}");
-    for feature in FEATURES {
-        assert!(
-            rendered.contains(feature.as_str()),
-            "{:?} must be a row in the matrix:\n{rendered}",
-            feature
-        );
-        assert!(
-            rendered.contains(feature.gloss()),
-            "{:?} must carry its gloss so a mark cannot read as a stronger claim:\n{rendered}",
-            feature
-        );
-    }
-    for harness in ahu::catalog::HARNESSES {
-        assert!(
-            rendered.contains(harness.display_name),
-            "{} must be a column:\n{rendered}",
-            harness.display_name
-        );
-    }
-    assert!(
-        rendered.contains("live-validated adapter surface"),
-        "the matrix must say what a mark is:\n{rendered}"
-    );
-}
-
 #[test]
 fn delivery_layout_and_nonce_changes_are_not_agent_version_drift() {
     let repo = repo_on("claude-code", "claude-opus-5");

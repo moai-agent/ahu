@@ -7,6 +7,7 @@ use std::process::Stdio;
 #[test]
 fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
     let repo = common::TestRepo::new();
+    let receiver = ahu::eval_otel::Receiver::start().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/v1/decisions", listener.local_addr().unwrap());
     let service = std::thread::spawn(move || {
@@ -35,7 +36,13 @@ fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
         assert_eq!(request["questions"]["route"]["type"], "choice");
         let response = serde_json::json!({
             "answers":{"route":{"value":"billing","confidence":0.91}},
-            "adapter":"fixture"
+            "service":{
+                "backend":"ollama",
+                "model":"fixture-model",
+                "prompt_tokens":12,
+                "generated_tokens":3,
+                "duration_ms":25
+            }
         })
         .to_string();
         write!(
@@ -52,6 +59,11 @@ fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
         .args(["mcp", "serve"])
         .current_dir(repo.path())
         .env("AHU_DECISION_URL", endpoint)
+        .env("AHU_EVAL_OTEL_ENDPOINT", receiver.endpoint())
+        .env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "ahu.task.id=decision-fixture,ahu.task.attempt=1",
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -81,6 +93,7 @@ fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
                     "state":{"body":"Please refund the duplicate charge."},
                     "questions":{"route":{
                         "type":"choice","instructions":"Which team handles this?",
+                        "telemetry_key":"routing",
                         "options":{"billing":"Invoices and refunds","other":"Everything else"}
                     }}
                 },
@@ -112,6 +125,27 @@ fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
         request["state"]["body"],
         "Please refund the duplicate charge."
     );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let telemetry = loop {
+        if let Some(telemetry) = receiver.task("decision-fixture", 1)
+            && telemetry.session_summaries == 1
+        {
+            break telemetry;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "MCP OTel spans were not exported"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(
+        telemetry.coverage(),
+        ahu::eval_otel::Coverage::CompleteSession
+    );
+    assert!(telemetry.mcp_observed);
+    assert_eq!(telemetry.tool_calls, 1);
+    assert_eq!(telemetry.typed_decision_calls, 1);
+    assert_eq!(telemetry.tool_calls_by_name["ahu_typed_decide"], 1);
 }
 
 #[test]
@@ -257,83 +291,16 @@ fn legacy_initialize_echoes_a_supported_handshake_version() {
 }
 
 #[test]
-fn setup_refuses_to_write_through_a_skills_symlink() {
+fn mcp_setup_subcommand_is_replaced_by_the_single_setup_command() {
     let repo = common::TestRepo::new();
-    let external = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir_all(repo.path().join(".agents")).unwrap();
-    std::os::unix::fs::symlink(external.path(), repo.path().join(".agents/skills")).unwrap();
     let output = common::ahu()
         .args(["mcp", "setup"])
         .current_dir(repo.path())
         .output()
         .unwrap();
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("refusing to act through a symlink"),
-        "{}",
-        stderr
-    );
-    assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
-}
-
-#[test]
-fn setup_preserves_existing_non_utf8_skill_bytes() {
-    let repo = common::TestRepo::new();
-    let path = repo
-        .path()
-        .join(".agents/skills/discover-requirements/SKILL.md");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let original = b"local skill\n\xff\xfe";
-    std::fs::write(&path, original).unwrap();
-    let output = common::ahu()
-        .args(["mcp", "setup"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), original);
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("refusing to overwrite changed skill")
-    );
-}
-
-#[test]
-fn setup_materializes_the_bundled_skill_trees_without_overwriting_changes() {
-    let repo = common::TestRepo::new();
-    let output = common::ahu()
-        .args(["mcp", "setup"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let agents = repo.read(".agents/skills/discover-requirements/SKILL.md");
-    assert!(!repo.path().join(".claude/skills").exists());
-    assert!(agents.contains("# Discover requirements"));
-    let hygiene = repo.read(".agents/skills/context-hygiene/SKILL.md");
-    assert!(hygiene.contains("# Context hygiene"), "{hygiene}");
-
-    let repeated = common::ahu()
-        .args(["mcp", "setup"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    assert!(repeated.status.success());
-    assert!(repeated.stdout.is_empty());
-
-    repo.write(
-        ".agents/skills/discover-requirements/SKILL.md",
-        "local change\n",
-    );
-    let refused = common::ahu()
-        .args(["mcp", "setup"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    assert!(!refused.status.success());
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("refusing to overwrite changed skill")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("expected ahu mcp serve"));
+    assert!(!repo.path().join(".agents/skills").exists());
 }
 
 #[test]

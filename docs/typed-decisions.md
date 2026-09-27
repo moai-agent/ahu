@@ -3,20 +3,20 @@
 This is an exploratory, model-neutral interface for letting any ahu-launched
 MCP-capable agent ask a local decision service for bounded typed answers. ahu
 does not load a model or run an agent loop. The service process and any
-backend-specific adapter run separately.
+model-specific adapter run separately.
 
 ## MCP tool
 
 `ahu mcp serve` advertises `ahu_typed_decide`. Set `AHU_DECISION_URL` in the
-environment of that MCP server to a credential-free `http://` URL using a
-loopback IP literal such as `127.0.0.1` or `[::1]`.
+environment of that MCP server to a credential-free `http://` address using a
+local IP literal such as `127.0.0.1` or `[::1]`.
 The tool is available without the variable, but calls return a clear
 configuration error. For example, a harness MCP entry can set the environment
 while starting `ahu mcp serve`; the exact configuration format is harness
 specific. ahu copies recognized project MCP configuration into task worktrees,
 but does not author or install native harness settings.
 
-The endpoint receives one JSON POST. It must return a JSON object with an
+The endpoint receives one JSON request using the HTTP POST method. It must return a JSON object with an
 `answers` object containing exactly the requested question names. Other response
 fields are allowed and can carry service metadata.
 
@@ -109,7 +109,7 @@ curl --fail-with-body -sS http://127.0.0.1:8001/v1/decisions \
 
 The selected Qwen model was already present locally. In a spot check on this
 M1 Max, the same two-question request returned the same answers from Gemma 4
-12B and Qwen 3.6 35B. Gemma took 10.7 seconds cold and 4.2 seconds warm; Qwen
+with 12 billion parameters and Qwen 3.6 with 35 billion parameters. Gemma took 10.7 seconds cold and 4.2 seconds warm; Qwen
 took 21.1 seconds cold (18.0 seconds to load) and 1.1 seconds warm. This is one
 example for plumbing and timing, not an accuracy comparison. The adapter keeps
 the chosen model loaded for five minutes after a call.
@@ -124,14 +124,14 @@ The MCP call returns a typed JSON value; for example, the selected option and
 a numeric probability. Ollama's constrained output ensures the values match
 the declared JSON types and ranges, but a generated probability is still the
 model's estimate, not a calibrated confidence. The adapter reports local Ollama
-token counts so we can compare usage, latency, and answers across agent runs.
+token counts for comparing usage, latency, and answers across agent runs.
 
 When project OpenTelemetry is enabled, the separately launched `ahu mcp serve`
 process exports a span for each parsed MCP request, including initialize,
 discovery, tool listing, tool calls, and task/subscription operations. Tool
 calls use the `ahu.mcp.tool.call` span name. A typed decision span records the
 tool name, success/error outcome, question count,
-unique question types, stable `telemetry_key` dimensions, backend and model
+unique question types, stable `telemetry_key` dimensions, service and model
 identifiers, reported prompt/generated token counts, service timings, and a
 fixed error category. A `telemetry_key` is an optional lowercase identifier
 such as `department` or `refund_requested`; use stable, non-sensitive labels
@@ -156,10 +156,10 @@ environment-configured HTTP proxies, binds its HTTP listener to loopback, and
 rejects models that are not installed locally. Requests and decisions are not
 logged.
 
-## Service and backend boundary
+## Service and model boundary
 
 The HTTP contract belongs to the decision service, not to any particular model.
-A backend adapter translates this request into its native API and translates
+A provider adapter translates this request into its native API and translates
 the result back to the `answers` shape. That keeps ahu and the MCP schema
 independent of Ollama, Laya, Jev, or a future local model. The included Ollama
 adapter is a separate local process; ahu itself does not manage model downloads,
@@ -167,7 +167,7 @@ runtime dependencies, device selection, or service lifecycle.
 
 Tool calls are synchronous MCP calls; they are not recorded as ahu tasks. The
 agent gets the service result as evidence and remains responsible for deciding
-what to do. Probabilities are estimates, not guarantees. Harnesses that expose
+what to do. Probabilities are estimates and may not be calibrated. Harnesses that expose
 ahu MCP can use the same tool contract, though each harness still needs its own
 native MCP server declaration. Cross-harness usability must be checked against
 the harness versions and configurations in use.

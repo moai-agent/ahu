@@ -12,6 +12,9 @@ sources:
   - id: launch
     resource: ../../src/launch.rs
     title: Task worktree launch pipeline
+  - id: lock
+    resource: ../../src/context_lock.rs
+    title: Committed-context lock checks
   - id: inheritance-tests
     resource: ../../tests/worktree_inheritance.rs
     title: Worktree inheritance tests
@@ -19,18 +22,21 @@ sources:
 
 # Task configuration inheritance
 
-A task worktree starts from the parent checkout's HEAD. Recognized agent
-configuration is then materialized from a snapshot taken at submission, including
-uncommitted and ignored additions, modifications, and deletions. Unrelated dirty
-source files are not copied.[^launch][^snapshot]
+A task worktree starts from the parent checkout's HEAD. Before planning a launch,
+ahu compares the current recognized context with the committed `ahu.lock` and
+requires the lock and every recognized input to be tracked and clean. Context
+changes must be reviewed and committed before agents can use them. ahu never stages
+or commits these files.[^launch][^snapshot][^lock]
 
 The snapshot recognizes `.agents`, `.claude`, `.codex`, `.agent`, `.opencode`, and `.gemini`
 directories, along with supported instruction and configuration filenames,
 including `GEMINI.md`, `opencode.json` and `opencode.jsonc`. It records content
 digests and executable bits. Collection has a depth limit and skips directories
 such as `.git`, `.worktrees`, and build output; the scan is not an exhaustive
-inventory of every possible configuration location. Files already committed in
-skipped directories can still arrive through the base checkout.[^snapshot]
+complete scan of every possible configuration location. The lock records known
+unscanned configuration and symlinks and refuses those cases, but cannot discover
+all nested or harness-managed context. Committed files in skipped directories can
+still arrive through the base checkout.[^snapshot][^lock]
 
 Configuration symlinks are recorded separately and are not followed as snapshot
 entries. Materialization reconciles symlinks in the destination so configuration
@@ -43,3 +49,4 @@ within this configuration.
 [^snapshot]: Collection rules and materialization in src/snapshot.rs.
 [^launch]: Planning and execution in src/launch.rs.
 [^inheritance-tests]: Inheritance and containment cases in tests/worktree_inheritance.rs.
+[^lock]: Admission and lockfile logic in src/context_lock.rs.

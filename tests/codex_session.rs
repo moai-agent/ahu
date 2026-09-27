@@ -16,9 +16,7 @@ fn rank_all_harnesses(repo: &common::TestRepo) {
              \"codex\" = [\"gpt-6-astra\"]\n\
              \"antigravity\" = [\"gemini-3.1-pro-high\"]\n\
              \"opencode\" = [\"ollama/glm-5.3:cloud\"]\n\
-             \n[context_hygiene]\n\
-             review_on_first_load = true\n\
-             review_interval_days = 7\n",
+",
             ahu::catalog::CATALOG_VERSION
         ),
     );

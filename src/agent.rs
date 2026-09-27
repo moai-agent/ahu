@@ -407,7 +407,7 @@ pub struct ResolvedAgent {
     /// Separate digests let readers compare the source file and the delivered
     /// body without treating frontmatter as instruction text.
     pub instructions_digest: String,
-    /// Instructions the harness receives, for the context inventory.
+    /// Instructions the harness receives, for the committed-context snapshot.
     pub instructions: String,
     /// Model the native file declares, when it declares one.
     pub native_model: Option<String>,

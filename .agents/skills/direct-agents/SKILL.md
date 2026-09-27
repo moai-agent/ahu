@@ -95,5 +95,10 @@ it does not grant authority or change those checks. Report unavailable agents,
 denied launches, missing credentials, incomplete reports, and unjoined children
 as blockers. Never replace a configured harness or model after failure.
 
-Maintain this file at `.agents/skills/direct-agents/SKILL.md`; all supported
-harnesses load the canonical `.agents/skills/` tree directly.
+Maintain this file at `.agents/skills/direct-agents/SKILL.md`. Run `ahu setup`
+to install the user-facing skills in the paths supported by detected harnesses.
+Codex, OpenCode, and Antigravity use `.agents/skills/`; Claude Code uses
+`.claude/skills/`. A skill file being present does not prove that a harness
+loaded it. When the ahu MCP server is connected, its inspection tools are
+available alongside the ahu CLI; use `ahu_agents_list`, `ahu_tasks_list`, and
+`ahu_task_get` when they fit the task.

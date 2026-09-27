@@ -70,3 +70,11 @@ USD
 proselint
 Claude
 home director(y|ies)
+Qwen
+Laya
+Jev
+OTel
+eval
+loopback
+allowlisted
+liveness

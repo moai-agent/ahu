@@ -24,10 +24,17 @@ unused-license-exception = "deny"
 ignore = true
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 multiple-versions-include-dev = true
 wildcards = "deny"
 highlight = "all"
+skip = [
+    { crate = "base64@0.22.1", reason = "hyper-util and reqwest 0.13 require incompatible base64 minor versions" },
+    { crate = "getrandom@0.4.3", reason = "tempfile's test-only dependency uses 0.4 while OpenTelemetry uses 0.3" },
+    { crate = "r-efi@6.0.0", reason = "the two getrandom minor lines require incompatible EFI support versions" },
+    { crate = "syn@3.0.5", reason = "current proc-macro dependencies require both incompatible syn major versions" },
+    { crate = "winnow@0.7.15", reason = "toml's parser dependencies require incompatible winnow major versions" },
+]
 
 [sources]
 unknown-registry = "deny"

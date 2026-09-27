@@ -1,0 +1,153 @@
+schema_version = 1
+digest = "076429c680a9e160dd12054df535ce3f0b5058e3af848b3c8b2ed068d14f8be6"
+skipped_directories = [
+    ".ahu",
+    ".worktrees",
+    "target",
+]
+unscanned_config = []
+symlinks = []
+
+[[entries]]
+path = ".agents/ahu/agents/arch-astra.md"
+digest = "e99ca28091c7b73d6430ffc6758cd1f1d2b0fbc18fc8aa2fb705c7a8bbaa1e62"
+bytes = 4884
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/arch-glm.md"
+digest = "e4fe2971894e00e91624aee7c8e9df0c37150759788e5f5f4300a5f06ac00070"
+bytes = 4892
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/arch-opus.md"
+digest = "aaa66ea55ad416bac853c99fefe9e78023b6c19dc6371ef469b9240332c3e28f"
+bytes = 4888
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/defsec-astra.md"
+digest = "7906625f88d6b0849a33e58d26fa7854d2666e548547e378b93834eee84d7f90"
+bytes = 5912
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/defsec-glm.md"
+digest = "0d69a12b68945eef6ecef29c7afa81106e052e772642d30c21e02daf88d7cb76"
+bytes = 5918
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/defsec-opus.md"
+digest = "4bcf8081098293f58fb16dbf7b78a2fd4ee6d2bb39dbe3e1cbb25b9fa317d994"
+bytes = 5916
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/dev-agy.md"
+digest = "24f5e6e075d9004108705a2874bbccad416ed421912ec5a8be43dc0d8b216c5d"
+bytes = 4776
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/dev-astra.md"
+digest = "787e9b54723d3f4130e4188dcc8f4c413aaceb68079cfec293e33614c9fe17ce"
+bytes = 5823
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/dev-glm.md"
+digest = "14317ba28d5e2d602c6185d04e1cd01bef606ce29800adb9509c1ea6044502f8"
+bytes = 5827
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/dev-opus.md"
+digest = "9fdacae98a2185e5d33b6ef16b04c70c99d2393c761e2527f166324fb32f0762"
+bytes = 2411
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/docs-astra.md"
+digest = "c2a549b98fee441d5ccb7fddf3862ff6c734d0d012037d8d975b10d130b67b9f"
+bytes = 5637
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/docs-glm.md"
+digest = "12903a895817c4ab1f1b18c0768a560fa8f74de1aca1a7f8d36fe00c4a5313d8"
+bytes = 5643
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/docs-opus.md"
+digest = "9263a6b0fc780b651f5e3650251d183fdacc66cb22b2db617e09e570daa40510"
+bytes = 5642
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/offsec-astra.md"
+digest = "d43dd7b0aecf65f1fc9a750137458d93ef647530019098dc86efa0beca204393"
+bytes = 5385
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/roadmap-architect.md"
+digest = "7eba95263adea168cf3623cbe1a7b7e24064a0e36191801ea10e259f68a155dc"
+bytes = 2832
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/roadmap-product-manager.md"
+digest = "da2405f1443a780430eaeee4533c3493694e68c2316e9bdaa23d75c8a86ab260"
+bytes = 2941
+executable = false
+
+[[entries]]
+path = ".agents/ahu/config.toml"
+digest = "da1cbca622d163ab8f8d1d122fbfe82eb4c247a1f42b57567ceb8e71a9c80b22"
+bytes = 414
+executable = false
+
+[[entries]]
+path = ".agents/skills/agent-context-critic/SKILL.md"
+digest = "3b9ff398a311f83fac7e7c1b5f08e1188dcef552adbf1821c1e721e1f605ac4d"
+bytes = 5459
+executable = false
+
+[[entries]]
+path = ".agents/skills/ahu-architecture/SKILL.md"
+digest = "ea00b808882563d222b8b9709a71d1ad994c27000e3c190b47ea42d0d5fe72ed"
+bytes = 21245
+executable = false
+
+[[entries]]
+path = ".agents/skills/direct-agents/SKILL.md"
+digest = "89200e49f343083b166866f61ed4f9f08a86a6f1149889fe2c943d4a097e6514"
+bytes = 5396
+executable = false
+
+[[entries]]
+path = ".agents/skills/discover-requirements/SKILL.md"
+digest = "1bd9a9a94ef11612efc70b044a2ba12991b0699db71a0198737a2ba74eb01820"
+bytes = 5031
+executable = false
+
+[[entries]]
+path = ".agents/skills/release/SKILL.md"
+digest = "66aae80f9df7a2f3359feab94da83ae49dd42b3f1e721459066f9d30bfda1e13"
+bytes = 4271
+executable = false
+
+[[entries]]
+path = "AGENTS.md"
+digest = "1a94fad2a7eb0162dfcc562eaebd5f51dda8571e40191a012516fe21ec524678"
+bytes = 4110
+executable = false
+
+[[entries]]
+path = "opencode.json"
+digest = "5eaf946b41c1f89ca2d0722e16b35fa24dccc1d79c9e9c1a72b866503986e2f9"
+bytes = 468
+executable = false

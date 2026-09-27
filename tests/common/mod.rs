@@ -83,6 +83,16 @@ impl TestRepo {
             self.dir.path(),
             &["commit", "-q", "--allow-empty", "-m", message],
         );
+        // Fixture commits always carry the same lock a user would refresh and
+        // commit alongside recognized agent context.
+        let repo = ahu::git::discover(self.path()).unwrap();
+        let snapshot = ahu::snapshot::collect(self.path()).unwrap();
+        ahu::context_lock::refresh(&repo, &snapshot).unwrap();
+        git(self.dir.path(), &["add", "-f", "ahu.lock"]);
+        git(
+            self.dir.path(),
+            &["commit", "-q", "--amend", "--allow-empty", "--no-edit"],
+        );
     }
 
     /// A minimal, valid project configuration.
@@ -96,9 +106,7 @@ impl TestRepo {
                  catalog_version = \"{}\"\n\
                  \n[model_rankings]\n\
                  \"claude-code\" = [\"claude-opus-5\", \"claude-sonnet-5\"]\n\
-                 \n[context_hygiene]\n\
-                 review_on_first_load = true\n\
-                 review_interval_days = 7\n",
+",
                 ahu::catalog::CATALOG_VERSION
             ),
         );

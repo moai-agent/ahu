@@ -8,7 +8,7 @@ filter, including build and development dependencies.
 
 | Area | Rule |
 | --- | --- |
-| Licenses | Accept MIT, Apache-2.0 and Unicode-3.0 expressions; reject other or unidentified licenses. For an `OR` expression, an allowed alternative suffices. Unicode-3.0 covers the Unicode data license required by `unicode-ident`. Only unpublished workspace packages are exempt; this does not license ahu itself. |
+| Licenses | ahu is licensed under MIT. Accept MIT, Apache-2.0 and Unicode-3.0 dependency license expressions; reject other or unidentified licenses. For an `OR` expression, an allowed alternative suffices. Unicode-3.0 covers the Unicode data license required by `unicode-ident`. Only unpublished workspace packages are exempt from dependency license checks. |
 | Sources | Accept crates.io only; reject Git dependencies and other registries. Review local path dependencies and Cargo source replacement configuration manually. |
 | Advisories | Fail for known vulnerabilities regardless of severity or missing CVSS, unsoundness, unmaintained crates and yanked releases, including transitive dependencies. No advisory exceptions are configured. |
 | Duplicates | Warn, keeping dependency paths visible. Review compatibility, maintenance and size costs; duplicate versions alone are not evidence of a vulnerability. Do not force arbitrary downgrades to remove warnings. Wildcard dependency requirements fail. |
