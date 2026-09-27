@@ -502,6 +502,12 @@ fn verify_json_server(root: &Path, relative: &str, key: &str, opencode: bool) ->
 fn check_mcp_server(repo: &Repo) -> Result<()> {
     let executable =
         selection::resolve_executable("ahu").ok_or_else(|| Error::new("ahu is not on PATH"))?;
+    check_mcp_server_at(repo, Path::new(&executable), Duration::from_secs(10))
+}
+
+// Keep executable discovery at the edge so the protocol can be checked with
+// local deterministic servers without changing process-wide PATH.
+fn check_mcp_server_at(repo: &Repo, executable: &Path, timeout: Duration) -> Result<()> {
     let mut child = Command::new(executable)
         .args(["mcp", "serve"])
         .current_dir(&repo.root)
@@ -533,7 +539,7 @@ fn check_mcp_server(repo: &Repo) -> Result<()> {
         }
         let _ = tx.send(lines);
     });
-    let response = rx.recv_timeout(Duration::from_secs(10));
+    let response = rx.recv_timeout(timeout);
     let _ = child.kill();
     let _ = child.wait();
     let lines = response.map_err(|_| Error::new("ahu MCP handshake timed out"))?;
@@ -995,6 +1001,483 @@ mod tests {
         );
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
         assert!(String::from_utf8(output).unwrap().contains("Cancelled"));
+    }
+
+    fn setup_repo() -> (tempfile::TempDir, crate::git::Repo) {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repo = crate::git::discover(root.path()).unwrap();
+        (root, repo)
+    }
+
+    fn configure_project(
+        _: &mut crate::launcher::Console<'_>,
+    ) -> crate::util::Result<Option<crate::config::ProjectConfig>> {
+        Ok(Some(project_config()))
+    }
+
+    fn keep_existing_project(
+        _: &mut crate::launcher::Console<'_>,
+    ) -> crate::util::Result<Option<crate::config::ProjectConfig>> {
+        panic!("existing project policy must not be configured again")
+    }
+
+    fn handshake_ok(_: &crate::git::Repo) -> crate::util::Result<()> {
+        Ok(())
+    }
+
+    fn handshake_unreachable(_: &crate::git::Repo) -> crate::util::Result<()> {
+        panic!("invalid or cancelled model selection must not start MCP")
+    }
+
+    fn setup_with_input(
+        repo: &crate::git::Repo,
+        harnesses: &[Detected],
+        input: &str,
+        configure: fn(
+            &mut crate::launcher::Console<'_>,
+        ) -> crate::util::Result<Option<crate::config::ProjectConfig>>,
+        handshake: fn(&crate::git::Repo) -> crate::util::Result<()>,
+    ) -> (crate::util::Result<i32>, String) {
+        let mut input = std::io::Cursor::new(input.as_bytes());
+        let mut output = Vec::new();
+        let result = run_detected(
+            &mut crate::launcher::Console {
+                input: &mut input,
+                output: &mut output,
+                interactive: true,
+            },
+            repo,
+            harnesses,
+            configure,
+            handshake,
+        );
+        (result, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn existing_project_model_preference_and_explicit_choice_are_respected() {
+        let models = crate::catalog::models_for("codex");
+        assert!(models.len() > 1);
+        for (answer, expected) in [("\n", models[1].model), (" 1 \n", models[0].model)] {
+            let (root, repo) = setup_repo();
+            let mut config = project_config();
+            config
+                .model_rankings
+                .insert("codex".into(), vec![models[1].model.into()]);
+            let path = crate::config::write_new(root.path(), &config).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            let mut harness = detected("codex");
+            harness.version = Some("test-version".into());
+            let (result, output) = setup_with_input(
+                &repo,
+                &[harness],
+                answer,
+                keep_existing_project,
+                handshake_ok,
+            );
+            assert_eq!(result.unwrap(), 0);
+            assert!(output.contains("codex test-version (codex)"));
+            assert!(output.contains("[2] (blank keeps it)"));
+            assert!(output.contains("account availability is not checked"));
+            let agents = crate::agent::load_all(root.path()).unwrap();
+            assert_eq!(agents.len(), 1);
+            assert_eq!(agents[0].manifest.model, expected);
+            assert_eq!(std::fs::read(path).unwrap(), original);
+            assert!(root.path().join(crate::context_lock::LOCK_PATH).is_file());
+        }
+    }
+
+    #[test]
+    fn unranked_harness_defaults_to_first_model_and_installs_claude_skills() {
+        let (root, repo) = setup_repo();
+        let (result, output) = setup_with_input(
+            &repo,
+            &[detected("claude-code")],
+            "\n",
+            configure_project,
+            handshake_ok,
+        );
+        assert_eq!(result.unwrap(), 0);
+        assert!(output.contains("Choose the model for dev-claude-code [1]"));
+        let agents = crate::agent::load_all(root.path()).unwrap();
+        assert_eq!(
+            agents[0].manifest.model,
+            crate::catalog::models_for("claude-code")[0].model
+        );
+        for &(name, content) in crate::mcp::BUNDLED_SKILLS {
+            for directory in [".agents", ".claude"] {
+                assert_eq!(
+                    std::fs::read_to_string(
+                        root.path()
+                            .join(format!("{directory}/skills/{name}/SKILL.md"))
+                    )
+                    .unwrap(),
+                    content
+                );
+            }
+        }
+        verify_client_configurations(root.path(), &[detected("claude-code")]).unwrap();
+    }
+
+    #[test]
+    fn invalid_model_numbers_and_eof_leave_existing_policy_untouched() {
+        for answer in [
+            "0\n",
+            "-1\n",
+            "no\n",
+            "999999\n",
+            "184467440737095516160\n",
+            "",
+        ] {
+            let (root, repo) = setup_repo();
+            let path = crate::config::write_new(root.path(), &project_config()).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            let (result, output) = setup_with_input(
+                &repo,
+                &[detected("codex")],
+                answer,
+                keep_existing_project,
+                handshake_unreachable,
+            );
+            if answer.is_empty() {
+                assert_eq!(result.unwrap(), 1);
+                assert!(output.contains("Cancelled. Nothing was changed."));
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), crate::util::ErrorKind::Usage);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("choose a listed model number for codex")
+                );
+            }
+            assert_eq!(std::fs::read(path).unwrap(), original);
+            assert!(!root.path().join(".agents/skills").exists());
+            assert!(!root.path().join(".codex").exists());
+            assert!(!root.path().join(crate::context_lock::LOCK_PATH).exists());
+        }
+    }
+
+    #[test]
+    fn unsupported_model_catalog_stops_before_handshake_or_writes() {
+        let (root, repo) = setup_repo();
+        let (result, _) = setup_with_input(
+            &repo,
+            &[detected("future-harness")],
+            "",
+            configure_project,
+            handshake_unreachable,
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no currently available model for future-harness")
+        );
+        assert!(!root.path().join(".agents").exists());
+    }
+
+    #[test]
+    fn setup_conflicts_are_detected_before_any_planned_write() {
+        for directory in [false, true] {
+            let (root, repo) = setup_repo();
+            let path = root.path().join(".agents/skills/direct-agents/SKILL.md");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if directory {
+                std::fs::create_dir(&path).unwrap();
+            } else {
+                std::fs::write(&path, "user-authored skill").unwrap();
+            }
+            let (result, _) = setup_with_input(
+                &repo,
+                &[detected("codex")],
+                "",
+                configure_project,
+                handshake_ok,
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains(if directory {
+                    "cannot inspect"
+                } else {
+                    "will not overwrite existing project file"
+                }),
+                "{error}"
+            );
+            if directory {
+                assert!(path.is_dir());
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(path).unwrap(),
+                    "user-authored skill"
+                );
+            }
+            assert!(
+                !root
+                    .path()
+                    .join(crate::config::CONFIG_RELATIVE_PATH)
+                    .exists()
+            );
+            // Planning may create parent directories, but must not write files.
+            assert!(!root.path().join(".codex/config.toml").exists());
+            assert!(!root.path().join(".agents/ahu/agents/dev-codex.md").exists());
+            assert!(!root.path().join(crate::context_lock::LOCK_PATH).exists());
+        }
+    }
+
+    #[test]
+    fn setup_keeps_identical_bundled_skill_and_refuses_existing_developer_agent() {
+        let (root, repo) = setup_repo();
+        let (name, content) = crate::mcp::BUNDLED_SKILLS[0];
+        let skill = root.path().join(format!(".agents/skills/{name}/SKILL.md"));
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill, content).unwrap();
+        let (result, _) = setup_with_input(
+            &repo,
+            &[detected("codex")],
+            "",
+            configure_project,
+            handshake_ok,
+        );
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), content);
+        let agent = root.path().join(".agents/ahu/agents/dev-codex.md");
+        let original = std::fs::read(&agent).unwrap();
+        let (result, _) = setup_with_input(
+            &repo,
+            &[detected("codex")],
+            "\n",
+            keep_existing_project,
+            handshake_ok,
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("already exists at another path")
+        );
+        assert_eq!(std::fs::read(agent).unwrap(), original);
+    }
+
+    #[test]
+    fn native_config_read_failures_do_not_add_writes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".mcp.json")).unwrap();
+        std::fs::create_dir_all(root.path().join(".codex/config.toml")).unwrap();
+        let mut plan = Vec::new();
+        assert!(
+            add_json_server(root.path(), ".mcp.json", "mcpServers", "claude", &mut plan)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot read .mcp.json")
+        );
+        assert!(
+            add_codex_server(root.path(), &mut plan)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot read .codex/config.toml")
+        );
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn codex_append_preserves_unterminated_existing_line() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".codex")).unwrap();
+        let path = root.path().join(".codex/config.toml");
+        std::fs::write(&path, "model = 'x'").unwrap();
+        let mut plan = Vec::new();
+        add_codex_server(root.path(), &mut plan).unwrap();
+        let text = std::str::from_utf8(&plan[0].1).unwrap();
+        assert!(text.starts_with("model = 'x'\n\n[mcp_servers.ahu]"));
+        let parsed: toml::Value = toml::from_str(text).unwrap();
+        assert_eq!(parsed["model"].as_str(), Some("x"));
+        std::fs::write(path, text).unwrap();
+        verify_client_configurations(root.path(), &[detected("codex")]).unwrap();
+    }
+
+    #[test]
+    fn verification_rejects_wrong_native_commands_and_argument_shapes() {
+        let root = tempfile::tempdir().unwrap();
+        for (harness, path, key, entries) in [
+            (
+                "claude-code",
+                ".mcp.json",
+                "mcpServers",
+                vec![
+                    serde_json::json!({}),
+                    serde_json::json!({"command":"other", "args":["mcp","serve"]}),
+                    serde_json::json!({"command":"ahu", "args":"mcp serve"}),
+                    serde_json::json!({"command":"ahu", "args":["serve","mcp"]}),
+                ],
+            ),
+            (
+                "opencode",
+                "opencode.json",
+                "mcp",
+                vec![
+                    serde_json::json!({"type":"remote", "command":["ahu","mcp","serve"]}),
+                    serde_json::json!({"type":"local", "command":"ahu mcp serve"}),
+                    serde_json::json!({"type":"local", "command":["other","mcp","serve"]}),
+                ],
+            ),
+        ] {
+            for entry in entries {
+                std::fs::write(
+                    root.path().join(path),
+                    serde_json::to_vec(&serde_json::json!({key: {"ahu": entry}})).unwrap(),
+                )
+                .unwrap();
+                assert!(
+                    verify_client_configurations(root.path(), &[detected(harness)])
+                        .unwrap_err()
+                        .to_string()
+                        .contains("did not read back the ahu MCP entry")
+                );
+            }
+        }
+        std::fs::create_dir(root.path().join(".codex")).unwrap();
+        for server in [
+            "command='other'\nargs=['mcp','serve']",
+            "command='ahu'\nargs='mcp serve'",
+            "command='ahu'\nargs=['serve','mcp']",
+        ] {
+            std::fs::write(
+                root.path().join(".codex/config.toml"),
+                format!("[mcp_servers.ahu]\n{server}\n"),
+            )
+            .unwrap();
+            assert!(
+                verify_client_configurations(root.path(), &[detected("codex")])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("did not read back as expected")
+            );
+        }
+        verify_client_configurations(root.path(), &[detected("future-harness")]).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_plan_rolls_back_when_create_new_refuses_a_dangling_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let blocked = root.path().join("blocked");
+        let target = root.path().join("missing");
+        std::os::unix::fs::symlink(&target, &blocked).unwrap();
+        let mut input = std::io::Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: true,
+        };
+        let error = apply_plan(
+            &mut console,
+            &[
+                (first.clone(), b"first".to_vec()),
+                (blocked.clone(), b"blocked".to_vec()),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot create"));
+        assert!(!first.exists());
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_link(blocked).unwrap(), target);
+    }
+
+    #[cfg(unix)]
+    fn mcp_fixture(root: &Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = root.join("fixture-server");
+        // Checking arguments, working directory, and both requests makes this
+        // exercise the actual subprocess contract, not only response parsing.
+        let prefix = r#"#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = mcp ] && [ "$2" = serve ] || exit 10
+[ -f fixture-server ] || exit 11
+IFS= read -r initialize || exit 12
+IFS= read -r list || exit 13
+case "$initialize" in
+  *'"id":1,"method":"initialize"'*'"protocolVersion":"2025-11-25"'*) ;;
+  *) exit 14 ;;
+esac
+case "$list" in
+  *'"id":2,"method":"tools/list"'*) ;;
+  *) exit 15 ;;
+esac
+"#;
+        std::fs::write(&script, format!("{prefix}{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_handshake_accepts_initialize_and_tools_in_either_response_order() {
+        for responses in [
+            r#"printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'"#,
+            r#"printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"ahu_agents_list"}]}}' '{"jsonrpc":"2.0","id":1,"result":{}}'"#,
+        ] {
+            let (root, repo) = setup_repo();
+            let executable = mcp_fixture(root.path(), responses);
+            super::check_mcp_server_at(&repo, &executable, std::time::Duration::from_secs(2))
+                .unwrap();
+            assert!(!root.path().join(".agents").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_handshake_rejects_eof_malformed_errors_and_wrong_response_ids() {
+        for responses in [
+            "exit 0",
+            r#"printf '%s\n' 'not json' '{}'"#,
+            r#"printf '%s\n' '{"id":1,"result":{}}'"#,
+            r#"printf '%s\n' '{"id":1,"error":{"code":-32603}}' '{"id":2,"result":{"tools":[]}}'"#,
+            r#"printf '%s\n' '{"id":3,"result":{}}' '{"id":2,"result":{"tools":[]}}'"#,
+            r#"printf '%s\n' '{"id":1,"result":{}}' '{"id":3,"result":{"tools":[]}}'"#,
+            r#"printf '%s\n' '{"id":1,"result":{}}' '{"id":2,"result":{"tools":{}}}'"#,
+            r#"printf '%s\n' '{"id":1,"result":{}}' '{"id":2,"result":{}}'"#,
+        ] {
+            let (root, repo) = setup_repo();
+            let executable = mcp_fixture(root.path(), responses);
+            let error =
+                super::check_mcp_server_at(&repo, &executable, std::time::Duration::from_secs(2))
+                    .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("did not complete initialize and tools/list"),
+                "{responses}: {error}"
+            );
+            assert!(!root.path().join(".agents").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_handshake_times_out_and_reports_spawn_failure() {
+        let (root, repo) = setup_repo();
+        // A shell builtin loop has no grandchildren that could retain a pipe
+        // after the handshake kills and reaps the server process.
+        let executable = mcp_fixture(root.path(), "while :; do :; done");
+        let error =
+            super::check_mcp_server_at(&repo, &executable, std::time::Duration::from_millis(50))
+                .unwrap_err();
+        assert_eq!(error.to_string(), "ahu MCP handshake timed out");
+        std::fs::remove_file(&executable).unwrap();
+        assert!(
+            super::check_mcp_server_at(&repo, &executable, std::time::Duration::from_secs(2))
+                .is_err()
+        );
     }
 
     fn project_config() -> crate::config::ProjectConfig {
