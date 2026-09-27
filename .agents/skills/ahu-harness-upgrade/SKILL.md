@@ -23,6 +23,9 @@ do not add it to the skills bundled by `ahu setup` or `ahu mcp setup`.
 3. Check the vendor's current release notes and installation documentation for
    the supported stable release and update procedure. Do not treat a model name,
    ahu agent semantic version, IDE version, or prerelease as the CLI version.
+   If the installed version is numerically ahead of the public stable release,
+   do not downgrade it; establish its channel and provenance or report the
+   version discrepancy for review.
 4. Do not update a harness while an ahu task is actively using that executable.
    Let tasks finish, then update one harness at a time through its owning
    installer. Re-read `command -v` and the version after every update. Stop if
