@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "5a15ed622a14da43e9b4228167183212b9a30c8e616a5fbb1996c322e2ba5863"
+digest = "dfc9ce62eb884b67b42e96de4b8b9c225a19687b9d6bc6950ee346b62cf37e7c"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -124,8 +124,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-harness-upgrade/SKILL.md"
-digest = "c139d2ffe655b65379b2c96cebbf60e62c40e28ae99cff206670338196129b2d"
-bytes = 4471
+digest = "de5bef8a1e3289427f48e6cff36f34fb94fc54fc9e55bfd15d1c82149bd5390f"
+bytes = 4660
 executable = false
 
 [[entries]]
