@@ -3041,3 +3041,7 @@ mod artifact_and_inbox_tests {
         assert_eq!(strip_record_path("different path", dir), "different path");
     }
 }
+
+#[cfg(test)]
+#[path = "commands_tests.rs"]
+mod command_tests;
