@@ -743,9 +743,9 @@ mod tests {
 
     #[test]
     fn the_bundle_ships_only_skills_meant_for_other_repositories() {
-        // `ahu-architecture` and `release` stay in this repository's skill tree
-        // for ahu's own agents; setup and doctor must not carry them into a
-        // user's repository.
+        // These maintenance skills stay in this repository's skill tree for
+        // ahu's own agents; setup and doctor must not carry them into a user's
+        // repository.
         let bundled: Vec<&str> = BUNDLED_SKILLS.iter().map(|&(name, _)| name).collect();
         assert_eq!(
             bundled,
@@ -756,6 +756,7 @@ mod tests {
                 "typed-decisions"
             ]
         );
+        assert!(!bundled.contains(&"ahu-harness-upgrade"));
     }
 
     #[test]
