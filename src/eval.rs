@@ -112,6 +112,10 @@ struct Record {
     #[serde(default)]
     decision_service_duration_ms: Option<f64>,
     #[serde(default)]
+    decision_request_bytes: Option<u64>,
+    #[serde(default)]
+    decision_request_observations: u64,
+    #[serde(default)]
     mcp_observed: Option<bool>,
     #[serde(default)]
     mcp_request_count: Option<f64>,
@@ -338,6 +342,10 @@ pub struct Group {
     pub mean_decision_calls: Option<f64>,
     /// Mean sum of successful typed-decision service durations per run.
     pub mean_decision_service_duration_ms: Option<f64>,
+    /// Mean measured MCP argument byte sum per run, not tokens or provider bytes.
+    pub mean_decision_request_bytes: Option<f64>,
+    pub decision_request_runs: usize,
+    pub decision_request_observations: u64,
     /// Every token metric name observed anywhere in the group.
     pub token_fields: BTreeSet<String>,
     /// Mean reported amount per token field, over the runs that reported a
@@ -578,7 +586,8 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
                 ),
             ));
         }
-        if record.score.is_some_and(|score| !score.is_finite())
+        if record.decision_request_bytes.is_some() != (record.decision_request_observations > 0)
+            || record.score.is_some_and(|score| !score.is_finite())
             || [
                 record.elapsed_ms,
                 record.decision_service_duration_ms,
@@ -737,6 +746,8 @@ fn group(records: &[Record]) -> Vec<Group> {
             let mut elapsed = Vec::new();
             let mut calls = Vec::new();
             let mut decision_service_durations = Vec::new();
+            let mut decision_request_bytes = Vec::new();
+            let mut decision_request_observations = 0u64;
             let mut mcp_requests = Vec::new();
             let mut mcp_tool_lists = Vec::new();
             let mut mcp_tool_calls = Vec::new();
@@ -805,6 +816,11 @@ fn group(records: &[Record]) -> Vec<Group> {
                     ToolExpectationStatus::Fail => tool_fail += 1,
                     ToolExpectationStatus::Unknown => tool_unknown += 1,
                     ToolExpectationStatus::NotApplicable => tool_not_applicable += 1,
+                }
+                if let Some(bytes) = item.decision_request_bytes {
+                    decision_request_bytes.push(bytes as f64);
+                    decision_request_observations = decision_request_observations
+                        .saturating_add(item.decision_request_observations);
                 }
                 match item.telemetry_coverage.as_deref() {
                     Some("complete_session") => coverage.telemetry_complete += 1,
@@ -913,6 +929,9 @@ fn group(records: &[Record]) -> Vec<Group> {
                 mean_launch_elapsed_ms: mean(&launch_elapsed),
                 mean_decision_calls: mean(&calls),
                 mean_decision_service_duration_ms: mean(&decision_service_durations),
+                mean_decision_request_bytes: mean(&decision_request_bytes),
+                decision_request_runs: decision_request_bytes.len(),
+                decision_request_observations,
                 token_fields,
                 mean_tokens: token_amounts
                     .into_iter()
@@ -1165,6 +1184,15 @@ pub fn render_at(report: &Report, width: usize) -> String {
             measurement(group.mean_mcp_tool_errors),
             measurement(group.mean_typed_decision_errors),
         ));
+        if group.decision_request_runs > 0 {
+            out.push_str(&format!(
+                "  decisions  MCP argument bytes {} mean/run ({}/{} runs; {} measured calls)\n",
+                measurement(group.mean_decision_request_bytes),
+                group.decision_request_runs,
+                group.runs,
+                group.decision_request_observations,
+            ));
+        }
         // Mean amount per field, with the sample it was taken over. A field the
         // recorder named but could not measure keeps its name and shows no
         // amount: nothing here sums or derives one.
@@ -1995,6 +2023,27 @@ pub fn run(
                 .and_then(|t| t.decision_duration_ms)
                 .map_or(serde_json::Value::Null, Into::into),
         );
+        put(
+            "decision_request_bytes",
+            telemetry
+                .as_ref()
+                .and_then(|t| t.decision_request_bytes)
+                .map_or(serde_json::Value::Null, Into::into),
+        );
+        put(
+            "decision_request_observations",
+            telemetry
+                .as_ref()
+                .map_or(0, |t| t.decision_request_observations)
+                .into(),
+        );
+        put(
+            "decision_request_formats",
+            telemetry
+                .as_ref()
+                .map(|t| serde_json::to_value(&t.decision_request_formats).unwrap_or_default())
+                .unwrap_or(serde_json::Value::Null),
+        );
         put("mcp_observed", mcp_observed.into());
         put(
             "telemetry_receiver",
@@ -2186,6 +2235,17 @@ fn insert_telemetry_fields(
         if let Some(trace_id) = &item.trace_id {
             record.insert("trace_id".into(), trace_id.clone().into());
         }
+        if let Some(bytes) = item.decision_request_bytes {
+            record.insert("decision_request_bytes".into(), bytes.into());
+        }
+        record.insert(
+            "decision_request_observations".into(),
+            item.decision_request_observations.into(),
+        );
+        record.insert(
+            "decision_request_formats".into(),
+            serde_json::to_value(&item.decision_request_formats)?,
+        );
         // Timing and duration arrive with the spans, so they survive an attempt
         // that failed after exporting them.
         if let Some(elapsed) = item.elapsed_ms {
@@ -2762,6 +2822,9 @@ fn group_json(group: &Group) -> serde_json::Value {
             "mean_launch_elapsed_ms": group.mean_launch_elapsed_ms,
             "mean_decision_calls": group.mean_decision_calls,
             "mean_decision_service_duration_ms": group.mean_decision_service_duration_ms,
+            "mean_decision_request_bytes": group.mean_decision_request_bytes,
+            "decision_request_runs": group.decision_request_runs,
+            "decision_request_observations": group.decision_request_observations,
             "mean_mcp_requests": group.mean_mcp_requests,
             "mean_mcp_tool_lists": group.mean_mcp_tool_lists,
             "mean_mcp_tool_calls": group.mean_mcp_tool_calls,

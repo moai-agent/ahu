@@ -1485,3 +1485,54 @@ fn a_record_with_an_unknown_answer_status_is_refused_by_line() {
     let output = run(&repo, &["--records", records.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn decision_request_bytes_keep_measurement_coverage_and_failed_attempts() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().unwrap();
+    let records = write_lines(
+        outside.path(),
+        &[
+            v2_row(&[
+                ("decision_request_bytes", "1200"),
+                ("decision_request_observations", "1"),
+            ]),
+            no_answer_row(
+                "candidate_timed_out",
+                &[
+                    ("decision_request_bytes", "800"),
+                    ("decision_request_observations", "2"),
+                ],
+            ),
+            v2_row(&[]),
+        ],
+    );
+    let report = report_json(&repo, &records);
+    let observed = &report["groups"][0]["observed"];
+    assert_eq!(observed["mean_decision_request_bytes"], 1000.0);
+    assert_eq!(observed["decision_request_runs"], 2);
+    assert_eq!(observed["decision_request_observations"], 3);
+    let output = run(&repo, &["--records", records.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("MCP argument bytes 1000 mean/run (2/3 runs; 3 measured calls)")
+    );
+}
+
+#[test]
+fn decision_request_measurements_require_a_matching_observation_count() {
+    for fields in [
+        vec![("decision_request_bytes", "10")],
+        vec![("decision_request_observations", "1")],
+        vec![
+            ("decision_request_bytes", "-1"),
+            ("decision_request_observations", "1"),
+        ],
+    ] {
+        let repo = TestRepo::new();
+        let outside = tempfile::TempDir::new().unwrap();
+        let records = write_lines(outside.path(), &[v2_row(&fields)]);
+        let output = run(&repo, &["--records", records.to_str().unwrap()]);
+        assert!(!output.status.success());
+    }
+}

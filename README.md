@@ -255,7 +255,8 @@ shortcuts place their workspace in the repository's group before starting. See
 
 The MCP integration is local and repository-scoped. `ahu mcp serve` provides
 agent and task inspection over stdio, and can expose the optional
-`ahu_typed_decide` tool to a configured local decision service. `ahu setup`
+`ahu_typed_decide` tool for TypeSafe Jev over HTTPS or a configured local
+decision service. `ahu setup`
 configures a project MCP entry for each detected harness, installs bundled
 skills in harness-supported paths, creates a `dev-<harness>` ahu agent using a
 model you choose, and refreshes `ahu.lock`. Review and commit the generated

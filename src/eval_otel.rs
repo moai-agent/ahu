@@ -79,6 +79,10 @@ pub struct TaskTelemetry {
     pub decision_input_tokens: Option<u64>,
     pub decision_output_tokens: Option<u64>,
     pub decision_duration_ms: Option<f64>,
+    /// Serialized MCP argument bytes, not provider payload bytes or tokens.
+    pub decision_request_bytes: Option<u64>,
+    pub decision_request_observations: u64,
+    pub decision_request_formats: BTreeMap<String, u64>,
     /// True once an `ahu.mcp.session` summary span arrived for this task.
     ///
     /// The summary is what carries the session's own totals, so without it the
@@ -510,6 +514,24 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                         if let Some(name) = attrs.get("ahu.mcp.tool.name") {
                             let count = task.tool_calls_by_name.entry(name.clone()).or_default();
                             *count = count.saturating_add(1);
+                            if name == "ahu_typed_decide" {
+                                if let Some(bytes) =
+                                    integers.get("ahu.mcp.decision.arguments.bytes")
+                                {
+                                    add_counter(&mut task.decision_request_bytes, Some(*bytes));
+                                    task.decision_request_observations =
+                                        task.decision_request_observations.saturating_add(1);
+                                }
+                                if let Some(format) = attrs.get("ahu.mcp.decision.request.format")
+                                    && ["items", "questions"].contains(&format.as_str())
+                                {
+                                    let count = task
+                                        .decision_request_formats
+                                        .entry(format.clone())
+                                        .or_default();
+                                    *count = count.saturating_add(1);
+                                }
+                            }
                             if attrs
                                 .get("ahu.mcp.outcome")
                                 .is_some_and(|value| value == "error")
@@ -590,6 +612,7 @@ fn string_attributes(
                     | "ahu.mcp.method"
                     | "ahu.mcp.tool.name"
                     | "ahu.mcp.outcome"
+                    | "ahu.mcp.decision.request.format"
             )
             .then(|| (attribute.key.clone(), value.clone()))
         })
@@ -772,6 +795,50 @@ mod tests {
         assert_eq!(task.decision_output_tokens, Some(4));
         assert_eq!(task.decision_duration_ms, Some(12.5));
         assert!(!format!("{task:?}").contains("must not be retained"));
+    }
+
+    #[test]
+    fn decision_request_measurements_are_bounded_payload_free_and_include_errors() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let spans = vec![
+            Span {
+                name: "ahu.mcp.tool.call".into(),
+                span_id: vec![1; 8],
+                trace_id: vec![2; 16],
+                attributes: vec![
+                    string_attribute("ahu.mcp.tool.name", "ahu_typed_decide"),
+                    string_attribute("ahu.mcp.outcome", "error"),
+                    count_attribute("ahu.mcp.decision.arguments.bytes", 100),
+                    string_attribute("ahu.mcp.decision.request.format", "items"),
+                    string_attribute("ahu.mcp.decision.private", "secret-marker"),
+                ],
+                ..Span::default()
+            },
+            Span {
+                name: "ahu.mcp.tool.call".into(),
+                span_id: vec![3; 8],
+                trace_id: vec![2; 16],
+                attributes: vec![
+                    string_attribute("ahu.mcp.tool.name", "ahu_typed_decide"),
+                    count_attribute("ahu.mcp.decision.arguments.bytes", 250),
+                    string_attribute("ahu.mcp.decision.request.format", "secret-marker"),
+                ],
+                ..Span::default()
+            },
+        ];
+        consume(export("batch-test", spans.clone()), &state);
+        consume(export("batch-test", spans), &state);
+        let state = state.lock().unwrap();
+        let task = state.tasks.values().next().unwrap();
+        assert_eq!(task.decision_request_bytes, Some(350));
+        assert_eq!(task.decision_request_observations, 2);
+        assert_eq!(task.decision_request_formats.get("items"), Some(&1));
+        assert_eq!(task.decision_request_formats.len(), 1);
+        assert!(
+            !serde_json::to_string(task)
+                .unwrap()
+                .contains("secret-marker")
+        );
     }
 
     /// One request carrying `spans` under a task resource, for coverage tests.
