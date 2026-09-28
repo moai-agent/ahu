@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "c230cf2e7a6b4232b027ed377cb8affd4052646fae466307522186006d43cbfa"
+digest = "beac9fcb10bf2c9f362860a166aa9dbf024cb7178b79e9af615787526f77c474"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -156,6 +156,84 @@ executable = false
 path = "AGENTS.md"
 digest = "1a94fad2a7eb0162dfcc562eaebd5f51dda8571e40191a012516fe21ec524678"
 bytes = 4110
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/api-compatibility/SKILL.md"
+digest = "dbf2a9bc7af45c3d36b33d99b0f3d229d0f1dca44bf5e3ed123b135194c19c5a"
+bytes = 646
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/cache-invalidation/SKILL.md"
+digest = "1e0224bb9f1f8496c6a6b923d01ef96bcdda77d346d69de19be1d5f6ae028ba3"
+bytes = 664
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/data-redaction/SKILL.md"
+digest = "5c7c9876e87b97f43848bceffeef448127430dc42f29e9cc38b2d3d7a771d4d4"
+bytes = 714
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/dependency-upgrade/SKILL.md"
+digest = "0c548952f2a37223fcb522896ebf4a6d4896819da7b0cb6c49847c9e32ea2521"
+bytes = 616
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/deployment-rollback/SKILL.md"
+digest = "9a47401537fc0b1b82f46a5dfd90ab9b4cf089e0c6706d62eb0352d258cc4003"
+bytes = 670
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/documentation-contract/SKILL.md"
+digest = "ecf93444beeefa5d5f381eb6fc313ab62aa45c08aae0ac56adcb3cc6da8295d5"
+bytes = 618
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/evaluation-analysis/SKILL.md"
+digest = "76bb500dfaee19d12bb56029103fbbd58bb778622dc6d17ba83559e4a9b98df7"
+bytes = 651
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/event-logging/SKILL.md"
+digest = "725a3e1a75f1e133dd598b007659453ac249d8b795e38da3a78fc751b0abe05f"
+bytes = 636
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/mcp-diagnostics/SKILL.md"
+digest = "5147d245af64dd801bf2ef1adcccbfebec66e050a399eb08b696e9ada7e1d796"
+bytes = 686
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/queue-recovery/SKILL.md"
+digest = "1444725b6a9ca3acf98f3edf34a0f75e58bde4e8ee54fe7cf6f3b6d4191caaee"
+bytes = 598
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/release-readiness/SKILL.md"
+digest = "76e85d2787a83e2a7befb457906c009cff5d13d958ff8531420ebefc681236a0"
+bytes = 681
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/schema-migration/SKILL.md"
+digest = "4d73a8057719848a029e4eda97ca80a2231fc3d94a9288386a3baae0b75203f4"
+bytes = 708
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/AGENTS.md"
+digest = "9b4ffa45cde83ffb186408f2b50e96832dd06ce8eaa5f8a14658f0e8aa1b12f5"
+bytes = 255
 executable = false
 
 [[entries]]
