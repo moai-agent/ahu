@@ -127,6 +127,12 @@ pub fn batch_command(
     } else {
         None
     };
+    let isolation = crate::harness::isolation::profile(harness, &spec.harness_version);
+    if let Some(profile) = isolation
+        && !spec.native_controls.iter().any(|id| id == profile.id)
+    {
+        bail!("headless isolation profile is missing or differs from the frozen controls");
+    }
     let mut args: Vec<String> = Vec::new();
     let mut add = |values: &[&str]| args.extend(values.iter().map(|v| v.to_string()));
     let program = match harness {
@@ -181,6 +187,9 @@ pub fn batch_command(
                 "--permission-prompts",
                 "none",
             ]);
+            if let Some(profile) = isolation {
+                add(profile.args);
+            }
             if let Some(profile) = &native_profile {
                 add(&profile.args.iter().map(String::as_str).collect::<Vec<_>>());
             } else {
@@ -779,6 +788,11 @@ pub fn launch(
     ]);
     let profile = build_native_profile(&plan.pair.harness, &plan.pair.model, &spec)?;
     spec.native_controls = profile.control_ids();
+    if let Some(isolation) =
+        crate::harness::isolation::profile(&plan.pair.harness, &spec.harness_version)
+    {
+        spec.native_controls.push(isolation.id.into());
+    }
     spec.gaps.extend(profile.gaps.clone());
     spec.gaps.push("Native integration evidence is bounded; unsupported configuration and hooks are refused. ahu itself never invokes cmux in this backend; arbitrary shell commands remain outside integration inspection. Same-UID code is not isolated from supervisor state.".into());
     if !spec.child_grants.is_empty() {
@@ -1020,7 +1034,7 @@ fn validate_environment(
         }
     }
     crate::catalog::check_headless_version(harness, version)?;
-    Ok(crate::cmux::integration::enforce(config_root, harness)?.with_version(Some(version)))
+    crate::cmux::integration::enforce_headless(config_root, harness, version)
 }
 
 pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
@@ -4100,6 +4114,69 @@ mod profile_and_metadata_tests {
         }
         assert_eq!(super::result(&dir).unwrap(), result);
         assert_eq!(control(&repo, "cleanup", "abc", None, true).unwrap(), 0);
+    }
+
+    #[test]
+    fn isolation_owned_process_cancellation_reaps_child() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        for signal in [libc::SIGTERM, libc::SIGKILL] {
+            let mut child = Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            signal_group(child.id(), signal);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert_eq!(status.signal(), Some(signal));
+                    break;
+                }
+                if Instant::now() > deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("owned process did not terminate");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    fn isolation_profile_is_frozen_and_applies_on_resume_without_removing_context() {
+        let root = tempfile::tempdir().unwrap();
+        let request = LaunchRequest {
+            model: "synthetic-model",
+            prompt: "literal prompt",
+            cwd: root.path(),
+            permissions: crate::agent::Permissions::Prompt,
+        };
+        let mut spec = sample_spec();
+        spec.harness_version = "2.1.283 (Claude Code)".into();
+        assert!(batch_command("claude-code", &request, &spec).is_err());
+        let profile =
+            crate::harness::isolation::profile("claude-code", &spec.harness_version).unwrap();
+        spec.native_controls.push(profile.id.into());
+        for session in [None, Some("synthetic-session".into())] {
+            spec.session = session;
+            let command = batch_command("claude-code", &request, &spec).unwrap();
+            assert!(command.args.windows(2).any(|pair| pair == profile.args));
+            for forbidden in [
+                "--bare",
+                "--safe-mode",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--setting-sources",
+            ] {
+                assert!(!command.args.iter().any(|arg| arg == forbidden));
+            }
+            assert_eq!(command.args[command.prompt_arg.unwrap()], "literal prompt");
+        }
+        assert!(crate::harness::isolation::profile("codex", "0.157.1").is_none());
+        assert!(crate::harness::isolation::profile("claude-code", "2.1.284").is_none());
     }
 
     fn sample_spec() -> Spec {

@@ -160,7 +160,7 @@ pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
             "Absent native sources or the exact reviewed guarded Session plugin; Feed is unsafe, and authentication/account stores, substitutions and declared modules are unresolved."
         }
         "claude-code" => {
-            "Direct executable bypasses the cmux wrapper; separately configured hooks, enabled plugins and managed settings must be resolved."
+            "Direct executable bypasses the cmux wrapper; 2.1.283 headless invocations disable non-managed hooks with a frozen profile. Enabled plugins and managed settings must still be resolved."
         }
         "antigravity" => {
             "Absent inspected hook configuration; custom hooks, extensions and configuration overrides are unverified."
@@ -225,7 +225,9 @@ pub const HARNESSES: &[HarnessEntry] = &[
         verified_versions: "2.1.269, 2.1.283",
         // Interactive and headless surfaces were validated on different sets;
         // the batch argument surface and event stream were checked on both.
-        headless_verified_versions: &["2.1.269", "2.1.270"],
+        // 2.1.283: live prompt receipt/completion/exit/usage verified with
+        // the frozen non-managed-hook isolation profile on 2026-09-28.
+        headless_verified_versions: &["2.1.269", "2.1.270", "2.1.283"],
         enforces_model_for_session: false,
         features: &[
             Feature::InteractiveLaunch,

@@ -8,6 +8,7 @@
 pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
+pub mod isolation;
 pub mod opencode;
 
 use serde::{Deserialize, Serialize};

@@ -1192,6 +1192,46 @@ fn scan_plugin_config(path: &Path, scope: &str, out: &mut Vec<Component>) {
     out.push(c);
 }
 
+/// Apply only controls that batch_command also freezes and emits. Inspection
+/// without this explicit headless profile retains its interactive evidence.
+pub fn headless_status(mut status: Status, version: &str) -> Status {
+    if let Some(profile) = crate::harness::isolation::profile(&status.harness, version) {
+        for component in &mut status.components {
+            let evidence = &component.evidence[0];
+            if status.harness == "claude-code"
+                && matches!(
+                    evidence.scope.as_str(),
+                    "user" | "project" | "project local" | "project ancestor"
+                )
+                && evidence.digest.is_some()
+                && component.name.contains(" registration ")
+                && component.isolation == Isolation::Unknown
+            {
+                component.isolation = Isolation::VerifiedDisable;
+                component.activation = Activation::Disabled;
+                component.detail = format!(
+                    "disabled by invocation profile {}; managed policy is retained",
+                    profile.id
+                );
+            }
+        }
+        status = finish(&status.harness, status.components, status.gaps);
+        status.gaps.push(format!("Headless invocation profile: {}. Managed hooks and unresolved plugins remain admission blockers.", profile.id));
+    }
+    status.with_version(Some(version))
+}
+
+pub fn enforce_headless(repo: &Path, harness: &str, version: &str) -> Result<Status> {
+    let status = headless_status(inspect(repo, harness), version);
+    if !status.headless.allowed {
+        return Err(Error::new(format!(
+            "headless cmux isolation is unverified for {harness}:\n{}",
+            status.headless.reasons.join("\n")
+        )));
+    }
+    Ok(status)
+}
+
 pub fn enforce(repo: &Path, harness: &str) -> Result<Status> {
     let status = inspect(repo, harness);
     if !status.headless.allowed {
