@@ -1,6 +1,25 @@
 use std::path::Path;
 
 #[test]
+fn evaluation_guide_case_is_executable_and_scores_its_documented_answer() {
+    let guide = include_str!("../docs/evaluations.md");
+    let document = guide
+        .split_once("```markdown\n")
+        .unwrap()
+        .1
+        .split_once("\n```")
+        .unwrap()
+        .0;
+    let case = ahu::eval::case::parse(document.as_bytes()).unwrap();
+    let answer = serde_json::json!({"owner":"technical"});
+    ahu::eval::case::validate_answer(&case, &answer).unwrap();
+    assert_eq!(
+        ahu::eval::case::deterministic_score(&case, &answer).unwrap(),
+        (1.0, true)
+    );
+}
+
+#[test]
 fn impact_cases_score_answers_independently_of_tool_usage() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("evals/impact");
     let suite = ahu::eval::suite::load(&root.join("suites/typed-decision-impact.md")).unwrap();

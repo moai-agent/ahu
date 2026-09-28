@@ -46,8 +46,16 @@ Preserve failed trials; do not silently replace them. Stop on infrastructure
 failure and report an incomplete matrix before changing its frozen inputs.
 
 ```sh
-ahu --repo "$CANDIDATE_REPO" eval run   --suite "$AHU_SOURCE/evals/batching/suites/typed-decision-batching.md"   --agent @direct --agent @inline --agent @shared --runs 1   --timeout 180 --allow-widened-approvals   --records "$EXPERIMENT_DIR/first.jsonl"
-ahu --repo "$CANDIDATE_REPO" eval run   --suite "$AHU_SOURCE/evals/batching/suites/typed-decision-batching.md"   --agent @shared --agent @inline --agent @direct --runs 1   --timeout 180 --allow-widened-approvals   --records "$EXPERIMENT_DIR/second.jsonl"
+ahu --repo "$CANDIDATE_REPO" eval run \
+  --suite "$AHU_SOURCE/evals/batching/suites/typed-decision-batching.md" \
+  --agent @direct --agent @inline --agent @shared --runs 1 \
+  --timeout 180 --allow-widened-approvals \
+  --records "$EXPERIMENT_DIR/first.jsonl"
+ahu --repo "$CANDIDATE_REPO" eval run \
+  --suite "$AHU_SOURCE/evals/batching/suites/typed-decision-batching.md" \
+  --agent @shared --agent @inline --agent @direct --runs 1 \
+  --timeout 180 --allow-widened-approvals \
+  --records "$EXPERIMENT_DIR/second.jsonl"
 cat "$EXPERIMENT_DIR/first.jsonl" "$EXPERIMENT_DIR/second.jsonl" > "$EXPERIMENT_DIR/combined.jsonl"
 ahu eval report --records "$EXPERIMENT_DIR/combined.jsonl"
 ```

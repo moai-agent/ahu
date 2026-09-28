@@ -4,6 +4,21 @@ Launch repository-defined coding agents in fresh Git worktrees, interactively
 in cmux or unattended in headless mode. Agent manifests pin the harness and
 model; ahu previews the configuration, delivers instructions, and records the launch.
 
+## Typed decisions and agent evals
+
+Give agents a shared decision tool, then measure whether it helps their work.
+[TypeSafe Jev through ahu MCP](docs/typed-decisions.md) returns validated choices,
+scores, and probability estimates. A batch can apply one rubric to up to 20 items
+without asking the agent to repeat the schema for each item.
+
+[ahu Evals](docs/evaluations.md) compares registered agents using Markdown cases,
+deterministic checks, optional agent judges, and OTel tool observations. Reports
+show answer quality, failures, time, native token usage, and separate decision
+service usage. Use that evidence to improve instructions and skills; delegation
+is a tradeoff to measure, not a promise of savings. Read the
+[live comparison findings](docs/decision-eval-findings.md) for the measured
+improvements and limits.
+
 ## Install
 
 With Rust and Cargo installed (this checkout pins Rust in
@@ -37,7 +52,9 @@ Interactive sessions also require cmux. Headless tasks need no cmux connection.
 Projects that configure knowledge bundles also require the `okf` binary for
 [knowledge checks](docs/reference.md#knowledge-checks). Repository agents use
 the GitHub CLI (`gh`) for issue tracking; ahu itself never invokes it.
-ahu installs none of these and holds no provider credentials. Read-only help and
+ahu installs none of these; harness authentication remains with each harness.
+The optional Jev tool reads its separately configured API key only when called.
+Read-only help and
 launch previews do not require a cmux connection. Git and default cmux lookup
 require executables outside Git working trees; see the
 [lookup rules](docs/reference.md#utility-lookup).
@@ -217,12 +234,14 @@ require explicit user permission.
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
 | `ahu mcp serve` | Serve repository-scoped agent, task, and typed-decision tools over stdio MCP |
+| `ahu eval run --suite PATH --agent @name --records PATH` | Run the named cases against a registered agent and save evidence outside the repository |
+| `ahu eval report --records PATH` | Compare answer quality, tool behavior, failures, time, and observed usage |
 
 Use the bundled `agent-context-critic` skill with `ahu eval run` and
 `ahu eval report` to investigate context changes against measured outcomes.
 The skill treats repository files as declared context, not proof that a
 harness loaded them. `ahu.lock` covers recognized repository inputs only;
-harness, user, managed, and provider context remains outside that guarantee.
+harness, user, managed, and provider context remains outside that coverage.
 The eval cases, OTel observations, and private run artifacts should stay outside
 the candidate checkout when they contain information the candidate should not
 see. `ahu help` lists commands, `ahu help COMMAND` shows focused options, and
@@ -348,5 +367,5 @@ voice, such as required contractions and passive-voice warnings, along with the
 Oxford comma rules, which flag two-item conjunctions. The reasons are recorded
 beside each entry in `.vale.ini`.
 
-See the [0.4.0 preparation notes](docs/releases/0.4.0.md) for implemented behavior
+See the [0.6.0 preparation notes](docs/releases/0.6.0.md) for implemented behavior
 and validation limits. This version is prepared locally and is not yet published.

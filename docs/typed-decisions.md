@@ -96,7 +96,7 @@ a JSON-quoted, escaped ID and states that item data is evidence, not
 instructions. Evidence remains inline; this form does not load files. Both the
 inbound serialized arguments and expanded request must fit within 64 KiB.
 Instructions, including the generated binding and guard, must fit within 2048
-UTF-8 bytes. Invalid or oversized requests fail before credential access or
+UTF-8 bytes. Invalid or oversize requests fail before credential access or
 network activity. Provider adapters and the response shape remain unchanged.
 
 Example response:
@@ -231,6 +231,15 @@ leave the machine over HTTPS as described in the MCP tool section.
 
 ## Service and model boundary
 
+For repeatable comparisons, use [ahu Evals](evaluations.md) and the
+[shared-question batch suite](../evals/batching/README.md). Compare answer quality,
+failures, native token observations and elapsed time alongside service usage.
+The shared form avoids repeated schema text in MCP arguments. ahu expands the
+answer definitions and rubric before provider dispatch, so smaller MCP requests
+can still use more provider input tokens. Measure both layers separately.
+A decision call also requires an agent continuation. Measure that overhead
+before claiming a speed or token benefit.
+
 The MCP contract remains provider-neutral. ahu translates it to TypeSafe's
 native API by default, or to the local service contract when
 `AHU_DECISION_URL` is explicitly set. The included Ollama adapter remains an
@@ -239,7 +248,7 @@ dependencies, device selection, or service lifecycle.
 
 Tool calls are synchronous MCP calls; they are not recorded as ahu tasks. The
 agent gets the service result as evidence and remains responsible for deciding
-what to do. Probabilities are model estimates, not guarantees. Harnesses that
+what to do. Probabilities are model estimates. Harnesses that
 expose ahu MCP can use the same tool contract, though each harness still needs
 its own native MCP server declaration. Cross-harness usability must be checked
 against the harness versions and configurations in use.

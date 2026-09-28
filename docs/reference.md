@@ -269,12 +269,12 @@ helper lifecycle validation. Codex 0.155.1 admission covers the batch launch
 and recorded-session resume surfaces checked by compatibility probes; bounded
 native helpers remain refused.
 
-Codex 0.157.1 uses strict config validation, enables inspected hooks, disables
+Codex 0.157.1 uses strict configuration validation, enables inspected hooks, disables
 optional plugins and remote plugin loading, and clears the legacy notify command
 for this invocation. Before launch and resume, ahu asks a separate native metadata
 process for effective hooks and managed requirements without starting a model
-turn. Inspection has a 30-second deadline and bounded output; warnings, managed
-requirements, and unreviewed hooks refuse admission. Authentication remains
+turn. Inspection has a 30-second deadline and bounded output. ahu refuses
+admission for warnings, managed requirements, or hooks outside reviewed profiles. Authentication remains
 native. This inspection cannot prevent configuration changes between inspection
 and execution. A trusted project and explicit tool approvals are still required
 for unattended MCP calls.
@@ -484,7 +484,7 @@ requests must retain the policy frozen in their host grant.
 | --- | --- | --- |
 | Claude Code 2.1.269 | Admitted | Refused |
 | Claude Code 2.1.270 | Admitted | Read-only profile |
-| Claude Code 2.1.283 | Admitted with hooks disabled for the invocation | Refused: no validated bounded-helper profile |
+| Claude Code 2.1.283 | Admitted; invocation turns hooks off | Refused: no validated bounded-helper profile |
 | Codex 0.154.0/0.155.1/0.157.1 | Admitted | Refused: incomplete helper identity/join event visibility |
 | Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
 | OpenCode 1.18.29/1.18.30/1.18.31/1.18.32 | Admitted | Refused: no validated native tool switch |
@@ -1367,6 +1367,9 @@ live_untested`. Do not infer four-harness live conformance from installation,
 static inspection, PTY coverage, or cmux plumbing.
 
 ## Committed agent context and evaluation
+
+See [Evaluate agents with ahu](evaluations.md) for a complete Markdown case,
+comparison commands, and how to interpret quality, tool and usage measurements.
 
 `ahu.lock` fingerprints the recognized repository context files ahu copies into
 task worktrees. `ahu lock --update` refreshes the lock from the current checkout;
