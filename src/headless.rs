@@ -3688,6 +3688,420 @@ mod profile_and_metadata_tests {
         );
     }
 
+    #[test]
+    fn batch_resume_preserves_permission_mapping_and_literal_prompt() {
+        use crate::agent::Permissions;
+        let root = tempfile::tempdir().unwrap();
+        let spec = Spec {
+            session: Some("session-123".into()),
+            ..sample_spec()
+        };
+        for (harness, permissions, program, expected) in [
+            (
+                "claude-code",
+                Permissions::Auto,
+                "claude",
+                vec![
+                    "--print",
+                    "--model",
+                    "synthetic-model",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--permission-prompts",
+                    "none",
+                    "--disallowedTools",
+                    "Agent,Task,TeamCreate,TeamDelete",
+                    "--permission-mode",
+                    "auto",
+                    "--resume",
+                    "session-123",
+                    "--",
+                ],
+            ),
+            (
+                "claude-code",
+                Permissions::AcceptEdits,
+                "claude",
+                vec![
+                    "--print",
+                    "--model",
+                    "synthetic-model",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--permission-prompts",
+                    "none",
+                    "--disallowedTools",
+                    "Agent,Task,TeamCreate,TeamDelete",
+                    "--permission-mode",
+                    "acceptEdits",
+                    "--resume",
+                    "session-123",
+                    "--",
+                ],
+            ),
+            (
+                "antigravity",
+                Permissions::AcceptEdits,
+                "agy",
+                vec![
+                    "--model",
+                    "synthetic-model",
+                    "--output-format",
+                    "stream-json",
+                    "--print-timeout",
+                    "1800s",
+                    "--mode",
+                    "accept-edits",
+                    "--conversation",
+                    "session-123",
+                    "--print",
+                ],
+            ),
+            (
+                "antigravity",
+                Permissions::Auto,
+                "agy",
+                vec![
+                    "--model",
+                    "synthetic-model",
+                    "--output-format",
+                    "stream-json",
+                    "--print-timeout",
+                    "1800s",
+                    "--dangerously-skip-permissions",
+                    "--conversation",
+                    "session-123",
+                    "--print",
+                ],
+            ),
+        ] {
+            let request = LaunchRequest {
+                model: "synthetic-model",
+                prompt: "--literal $(prompt)\nnext line",
+                cwd: root.path(),
+                permissions,
+            };
+            let command = batch_command(harness, &request, &spec).unwrap();
+            assert_eq!(command.program, program);
+            assert_eq!(command.prompt_arg, Some(expected.len()));
+            assert_eq!(&command.args[..expected.len()], expected.as_slice());
+            assert_eq!(command.args.last().unwrap(), request.prompt);
+            assert_eq!(command.args.len(), expected.len() + 1);
+        }
+        for (harness, model, permissions, message) in [
+            ("codex", "", Permissions::Prompt, "exact model is required"),
+            (
+                "codex",
+                "--model",
+                Permissions::Prompt,
+                "exact model is required",
+            ),
+            (
+                "codex",
+                "synthetic-model",
+                Permissions::AcceptEdits,
+                "resume has no validated accept-edits mapping",
+            ),
+            (
+                "unknown",
+                "synthetic-model",
+                Permissions::Prompt,
+                "no headless adapter",
+            ),
+        ] {
+            let request = LaunchRequest {
+                model,
+                prompt: "synthetic",
+                cwd: root.path(),
+                permissions,
+            };
+            assert!(
+                batch_command(harness, &request, &spec)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message)
+            );
+        }
+    }
+
+    #[test]
+    fn event_observation_enforces_helper_count_and_metadata_bounds() {
+        let mut events = Events::default();
+        let progress = br#"{"type":"system","subtype":"task_progress","task_id":"synthetic"}"#;
+        for _ in 0..256 {
+            events.observe("claude-code", progress);
+        }
+        assert!(!events.failed);
+        assert_eq!(events.native_event_count, 256);
+        events.observe("claude-code", progress);
+        assert!(events.failed);
+        assert_eq!(events.native_event_count, 257);
+        assert_eq!(events.blockers, ["native helper evaluation limit exceeded"]);
+
+        let mut events = Events::default();
+        let oversized =
+            json!({"type": "system", "subtype": "task_progress", "task_id": "x".repeat(4097)});
+        events.observe("claude-code", &serde_json::to_vec(&oversized).unwrap());
+        assert!(events.failed);
+        assert_eq!(
+            events.blockers,
+            ["native metadata evaluation bound exceeded"]
+        );
+        assert!(events.native.helpers().is_empty());
+    }
+
+    fn saved_attempt(repo: &crate::git::Repo, id: &str, spec: &Spec) -> PathBuf {
+        let dir = store(repo).unwrap().join(id);
+        let record: task::TaskRecord = serde_json::from_value(json!({
+            "schema_version": 2, "task_id": id, "title": "Synthetic attempt",
+            "created_at": "2026-01-01T00:00:00Z", "repo_identity": repo.identity(),
+            "repo_root": repo.root, "branch": "ahu/synthetic", "worktree": repo.root,
+            "identity": {"mode": "automatic", "agent": "auto", "permissions": "prompt",
+                "harness": "codex", "model": "synthetic-model"},
+            "policy_digest": "synthetic", "catalog_version": crate::catalog::CATALOG_VERSION,
+            "config_snapshot": {"entries": [], "skipped_directories": []},
+            "config_snapshot_digest": "synthetic",
+            "materialize": {"written": [], "removed": [], "concurrently_modified": []},
+            "launch_command": {"program": "synthetic-executable", "args": []},
+            "delivery": {"nonce": "synthetic", "agent_instructions": null, "digest": "synthetic"},
+            "prompt_digest": digest_bytes(b"original prompt"),
+            "enforcement": {"harness": "codex", "harness_version": null,
+                "model_fixed_for_session": false, "gaps": [], "applied_controls": []},
+            "state": "exited"
+        }))
+        .unwrap();
+        task::save(&dir, &record, "original prompt").unwrap();
+        durable_json(&dir.join("headless.json"), spec).unwrap();
+        confined(&attempt_dir(&dir, spec), true).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resume_recovery_restores_only_attempts_without_spawn_intent() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        for spawned in [false, true] {
+            let old = sample_spec();
+            let dir = saved_attempt(&repo, if spawned { "abc" } else { "def" }, &old);
+            recover_resume(&dir).unwrap();
+            let original = task::load(&dir).unwrap();
+            let next = Spec {
+                attempt: 2,
+                session: Some("session-2".into()),
+                ..old.clone()
+            };
+            let mut changed = original.clone();
+            changed.state = task::TaskState::Starting;
+            changed.prompt_digest = digest_bytes(b"new prompt");
+            task::save(&dir, &changed, "new prompt").unwrap();
+            durable_json(&dir.join("headless.json"), &next).unwrap();
+            durable_json(
+                &dir.join("resume-journal.json"),
+                &json!({
+                    "record": original, "spec": old, "prompt": "original prompt", "next_attempt": 2
+                }),
+            )
+            .unwrap();
+            let evidence = attempt_dir(&dir, &old).join("result.json");
+            state::write_private_file(&evidence, b"preserved previous result").unwrap();
+            if spawned {
+                durable_json(
+                    &attempt_dir(&dir, &next).join("spawn-intent.json"),
+                    &json!({}),
+                )
+                .unwrap();
+            }
+            recover_resume(&dir).unwrap();
+            assert!(!dir.join("resume-journal.json").exists());
+            assert_eq!(
+                task::load(&dir).unwrap(),
+                if spawned { changed } else { original }
+            );
+            assert_eq!(
+                task::load_prompt(&dir).unwrap(),
+                if spawned {
+                    "new prompt"
+                } else {
+                    "original prompt"
+                }
+            );
+            let recovered: Spec = read_json(&dir.join("headless.json")).unwrap();
+            assert_eq!(
+                serde_json::to_value(recovered).unwrap(),
+                serde_json::to_value(if spawned { next } else { old }).unwrap()
+            );
+            assert_eq!(
+                std::fs::read(&evidence).unwrap(),
+                b"preserved previous result"
+            );
+            recover_resume(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn parent_admission_requires_live_matching_attempt_and_consumed_request() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let parent = sample_spec();
+        let dir = saved_attempt(&repo, "abc", &parent);
+        validate_parent_attempt(&repo, &sample_spec()).unwrap();
+        let mut child = Spec {
+            parent_task: Some("abc".into()),
+            parent_attempt: Some(1),
+            broker_request: Some("0123456789abcdef".into()),
+            ..sample_spec()
+        };
+        let refused = |spec: &Spec, message: &str| {
+            assert!(
+                validate_parent_attempt(&repo, spec)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message)
+            );
+        };
+        child.parent_attempt = Some(2);
+        refused(&child, "stale parent attempt");
+        child.parent_attempt = Some(1);
+        refused(&child, "no longer live");
+        let _owner = Lock::acquire(&dir.join("owner.lock")).unwrap();
+        for path in [
+            dir.join("cancel.json"),
+            attempt_dir(&dir, &parent).join("admission-closed.json"),
+            attempt_dir(&dir, &parent).join("result.json"),
+        ] {
+            durable_json(&path, &json!({})).unwrap();
+            refused(&child, "ended or closed child admission");
+            std::fs::remove_file(path).unwrap();
+        }
+        for request in [None, Some("short"), Some("0123456789abcdeg")] {
+            child.broker_request = request.map(str::to_owned);
+            refused(&child, "lacks a broker request identity");
+        }
+        child.broker_request = Some("0123456789abcdef".into());
+        let claim = attempt_dir(&dir, &parent).join("broker/0123456789abcdef.claim.json");
+        let valid =
+            json!({"state": "dispatching", "parent_attempt": 1, "request_id": "0123456789abcdef"});
+        for (key, value) in [
+            ("state", json!("consumed")),
+            ("parent_attempt", json!(2)),
+            ("request_id", json!("fedcba9876543210")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            durable_json(&claim, &invalid).unwrap();
+            refused(&child, "does not match a consumed request");
+        }
+        durable_json(&claim, &valid).unwrap();
+        validate_parent_attempt(&repo, &child).unwrap();
+    }
+
+    #[test]
+    fn cancellation_follows_current_attempt_descendants_only() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let parent = sample_spec();
+        let root = saved_attempt(&repo, "aaa", &parent);
+        let child = Spec {
+            parent_task: Some("aaa".into()),
+            parent_attempt: Some(1),
+            attempt: 2,
+            ..sample_spec()
+        };
+        let child_dir = saved_attempt(&repo, "bbb", &child);
+        let grandchild = Spec {
+            parent_task: Some("bbb".into()),
+            parent_attempt: Some(2),
+            ..sample_spec()
+        };
+        let grandchild_dir = saved_attempt(&repo, "ccc", &grandchild);
+        let stale = Spec {
+            parent_attempt: Some(0),
+            ..child.clone()
+        };
+        let stale_dir = saved_attempt(&repo, "ddd", &stale);
+        let unrelated = saved_attempt(&repo, "eee", &sample_spec());
+        let mut ids = cancel_tree(&repo, &root, "synthetic cancellation").unwrap();
+        ids.sort();
+        assert_eq!(ids, ["aaa", "bbb", "ccc"]);
+        for (dir, spec) in [
+            (&root, &parent),
+            (&child_dir, &child),
+            (&grandchild_dir, &grandchild),
+        ] {
+            let closed: Value =
+                read_json(&attempt_dir(dir, spec).join("admission-closed.json")).unwrap();
+            assert_eq!(closed["attempt"], spec.attempt);
+            assert_eq!(closed["reason"], "synthetic cancellation");
+            let cancel: Value = read_json(&dir.join("cancel.json")).unwrap();
+            assert_eq!(cancel["descendants"], true);
+            assert_eq!(cancel["reason"], "synthetic cancellation");
+            assert_eq!(task::load_prompt(dir).unwrap(), "original prompt");
+        }
+        for (dir, spec) in [(&stale_dir, &stale), (&unrelated, &parent)] {
+            assert!(!dir.join("cancel.json").exists());
+            assert!(
+                !attempt_dir(dir, spec)
+                    .join("admission-closed.json")
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_requires_terminal_result_and_preserves_coordination_evidence() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let spec = sample_spec();
+        let dir = saved_attempt(&repo, "abc", &spec);
+        let attempt = attempt_dir(&dir, &spec);
+        let capture = attempt.join("events.jsonl");
+        state::write_private_file(&capture, b"synthetic capture").unwrap();
+        assert!(
+            control(&repo, "cleanup", "abc", None, true)
+                .unwrap_err()
+                .to_string()
+                .contains("known terminal attempt")
+        );
+        assert!(capture.exists());
+        let result =
+            json!({"schema_version": 2, "task_id": "abc", "attempt": 1, "outcome": "failed"});
+        durable_json(&attempt.join("result.json"), &result).unwrap();
+        for name in ["stderr.log", "supervisor.log", "native.log", "final.txt"] {
+            state::write_private_file(&attempt.join(name), b"synthetic capture").unwrap();
+        }
+        durable_json(
+            &attempt.join("broker/request.claim.json"),
+            &json!({"retained": true}),
+        )
+        .unwrap();
+        durable_json(&dir.join("requests/request.json"), &json!({})).unwrap();
+        durable_json(&dir.join("requests/private/nested.json"), &json!({})).unwrap();
+        durable_json(&dir.join("attempt-not-a-number/events.jsonl"), &json!({})).unwrap();
+        assert_eq!(control(&repo, "cleanup", "abc", None, true).unwrap(), 0);
+        for name in [
+            "events.jsonl",
+            "stderr.log",
+            "supervisor.log",
+            "native.log",
+            "final.txt",
+        ] {
+            assert!(!attempt.join(name).exists());
+        }
+        assert!(!dir.join("requests/request.json").exists());
+        for path in [
+            "task.json",
+            "prompt.txt",
+            "headless.json",
+            "attempt-1/result.json",
+            "attempt-1/artifacts-removed.json",
+            "attempt-1/broker/request.claim.json",
+            "requests/private/nested.json",
+            "attempt-not-a-number/events.jsonl",
+        ] {
+            assert!(dir.join(path).is_file(), "{path}");
+        }
+        assert_eq!(super::result(&dir).unwrap(), result);
+        assert_eq!(control(&repo, "cleanup", "abc", None, true).unwrap(), 0);
+    }
+
     fn sample_spec() -> Spec {
         Spec {
             schema_version: 2,
