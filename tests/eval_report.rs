@@ -1165,10 +1165,51 @@ fn mean_token_amounts_are_reported_per_field_and_never_derived() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let row = summary_table(&stdout)[1];
-    assert!(
-        row.ends_with('\u{2014}'),
-        "{row} must not report 140 tokens"
-    );
+    assert!(row.ends_with("100/40 I/O"), "{row}");
+    assert!(!row.ends_with("140"), "{row} must not invent a total");
+}
+
+#[test]
+fn summary_token_fallback_preserves_missing_fields_and_separates_service_usage() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    for (tokens, expected) in [
+        (
+            r#"{"ahu.tokens.input":62521,"ahu.tokens.output":207}"#,
+            "62.5k/207 I/O",
+        ),
+        (r#"{"ahu.tokens.input":62521}"#, "62.5k/— I/O"),
+        (r#"{"ahu.tokens.output":207}"#, "—/207 I/O"),
+        (
+            r#"{"decision_service.input":100,"decision_service.output":20,"decision_service.total":120}"#,
+            "—",
+        ),
+        (
+            r#"{"ahu.tokens.input":100,"ahu.tokens.output":20,"decision_service.total":999}"#,
+            "100/20 I/O",
+        ),
+    ] {
+        let records = write_lines(outside.path(), &[v2_row(&[("reported_tokens", tokens)])]);
+        let observed = &report_json(&repo, &records)["groups"][0]["observed"];
+        assert!(observed["mean_total_tokens"].is_null(), "{observed}");
+        for width in ["80", "120"] {
+            let output = run_at(
+                &repo,
+                &["--records", records.to_str().unwrap()],
+                Some(width),
+                true,
+            );
+            assert!(output.status.success());
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let table = summary_table(&stdout);
+            assert!(table[1].ends_with(expected), "{stdout}");
+            assert!(
+                table
+                    .iter()
+                    .all(|line| columns_of(line) <= width.parse::<usize>().unwrap())
+            );
+        }
+    }
 }
 
 #[test]

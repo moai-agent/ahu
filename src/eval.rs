@@ -408,9 +408,9 @@ impl Group {
     /// estimate, and this report makes none.
     pub fn mean_total_tokens(&self) -> Option<f64> {
         self.mean_tokens
-            .iter()
-            .find(|(field, _)| *field == "total" || field.ends_with(".total"))
-            .map(|(_, mean)| *mean)
+            .get("ahu.tokens.total")
+            .or_else(|| self.mean_tokens.get("total"))
+            .copied()
     }
 }
 
@@ -1201,6 +1201,7 @@ pub fn render_at(report: &Report, width: usize) -> String {
         Role::Hint,
         "\nA dash in the table is a metric no run reported, never a measured zero;\n\
          the blocks above give each mean the coverage it was taken over.\n\
+         TOKENS shows a reported native total, or input/output marked I/O; service usage stays separate.\n\
          ANSWER shows correct answers over valid answers; reliability below includes every attempt.\n\
          Means cover only the runs that reported the measurement.\n\
          Coverage below the run count is missing observation, not a measured zero.\n\
@@ -1316,10 +1317,25 @@ fn summary_rows(groups: &[Group]) -> Vec<Vec<table::Cell>> {
                 // Over the decided runs only, as the block below reports it.
                 fraction(group.tool_pass, group.tool_pass + group.tool_fail),
                 measured(group.mean_elapsed_ms.map(human_duration)),
-                measured(group.mean_total_tokens().map(human_tokens)),
+                measured(summary_tokens(group)),
             ]
         })
         .collect()
+}
+
+fn summary_tokens(group: &Group) -> Option<String> {
+    if let Some(total) = group.mean_total_tokens() {
+        return Some(human_tokens(total));
+    }
+    let input = group.mean_tokens.get("ahu.tokens.input");
+    let output = group.mean_tokens.get("ahu.tokens.output");
+    if input.is_none() && output.is_none() {
+        return None;
+    }
+    let amount = |value: Option<&f64>| {
+        value.map_or_else(|| MISSING.to_string(), |value| human_tokens(*value))
+    };
+    Some(format!("{}/{} I/O", amount(input), amount(output)))
 }
 
 /// A pass count over the runs it was taken over, or a dash when no run was
