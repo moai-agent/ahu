@@ -2404,11 +2404,12 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    // When a harness exits, its MCP subprocess sees stdio EOF and needs a
-    // moment to emit its session summary and flush OTLP before we kill any
-    // remaining descendants. Keep this grace limited to local eval capture;
-    // cancelled and timed-out attempts still follow their termination path.
+    // A harness can exit while another descendant still holds an MCP pipe.
+    // Explicitly request shutdown before allowing a bounded export grace;
+    // waiting for EOF alone can leave the summary unflushed until SIGKILL.
+    // Cancelled and timed-out attempts already took the termination path.
     if stop.is_none() && eval_otel_capture {
+        signal_group(pid, libc::SIGTERM);
         std::thread::sleep(EVAL_OTEL_CHILD_DRAIN);
     }
     durable_json(
