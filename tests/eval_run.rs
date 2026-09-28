@@ -707,6 +707,8 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
                     Err(error) => panic!("{error}"),
                 }
             };
+            // Accepted sockets inherit O_NONBLOCK on some platforms.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
