@@ -43,7 +43,9 @@ The default TypeSafe Jev provider sends state and questions to TypeSafe AI over
 HTTPS. Do not send API keys, credentials, confidential material, or personal
 data unless the user and applicable policy explicitly permit that disclosure.
 Use synthetic or minimized inputs for evaluation. `telemetry_key` is optional;
-if used, make it a stable, non-sensitive category such as `department`.
+if used, make it a stable, non-sensitive category such as `department`. Each
+question's key must be unique within the request. Omit it for a batch of similar
+questions when separate telemetry dimensions would add no value.
 
 Use the returned typed value as one piece of evidence. Check it against the
 provided facts and task rules. A returned confidence is not calibrated

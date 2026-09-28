@@ -14,9 +14,10 @@ fn mcp_sigterm_flushes_a_complete_session_without_stdin_eof() {
         .current_dir(repo.path())
         .env("AHU_EVAL_OTEL_ENDPOINT", receiver.endpoint())
         .env(
-            "OTEL_RESOURCE_ATTRIBUTES",
+            "AHU_MCP_RESOURCE_ATTRIBUTES",
             "ahu.task.id=signal-fixture,ahu.task.attempt=1",
         )
+        .env_remove("OTEL_RESOURCE_ATTRIBUTES")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

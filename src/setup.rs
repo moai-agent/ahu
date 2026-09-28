@@ -24,6 +24,7 @@ struct Detected {
 // credentials are resolved by the server, never read or persisted by setup.
 const CODEX_MCP_ENV: &[&str] = &[
     "AHU_EVAL_OTEL_ENDPOINT",
+    "AHU_MCP_RESOURCE_ATTRIBUTES",
     "OTEL_RESOURCE_ATTRIBUTES",
     "TYPESAFE_API_KEY",
     "AHU_DECISION_URL",

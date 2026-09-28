@@ -22,7 +22,7 @@ pub(super) fn tool_definition() -> Value {
                     "additionalProperties":{
                         "type":"object","properties":{
                             "type":{"type":"string","enum":["choice","score","probability"],"description":"choice selects one option; score estimates a number between min and max; probability estimates whether the instruction is true, from 0 to 1."},
-                            "telemetry_key":{"type":"string","pattern":"^[a-z][a-z0-9_.-]{0,47}$","description":"Optional stable, non-sensitive evaluation dimension; recorded in telemetry, never used as an instruction."},
+                            "telemetry_key":{"type":"string","pattern":"^[a-z][a-z0-9_.-]{0,47}$","description":"Optional stable, non-sensitive evaluation dimension. Must be unique across questions in this request; omit it when unnecessary. Recorded in telemetry, never used as an instruction."},
                             "instructions":{"type":"string","minLength":1,"maxLength":2048},
                             "options":{"type":"object","minProperties":2,"maxProperties":32,"description":"Required for choice; map each stable answer key to a short description.","additionalProperties":{"type":"string"}},
                             "min":{"type":"number","description":"Required for score; inclusive lower bound."},"max":{"type":"number","description":"Required for score; inclusive upper bound."}

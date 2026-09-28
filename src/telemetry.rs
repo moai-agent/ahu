@@ -103,7 +103,17 @@ fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Res
     let mut resource = Resource::builder()
         .with_service_name(service_name)
         .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")));
-    for (key, value) in ahu_resource_attributes() {
+    // Some harnesses remove OTEL_* from MCP child environments. Carry only
+    // ahu's bounded identity fields through a separate, non-secret channel.
+    let attributes = if service_name == "ahu-mcp" {
+        std::env::var("AHU_MCP_RESOURCE_ATTRIBUTES")
+            .ok()
+            .map(|raw| parse_ahu_resource_attributes(&raw))
+            .unwrap_or_else(ahu_resource_attributes)
+    } else {
+        ahu_resource_attributes()
+    };
+    for (key, value) in attributes {
         resource = resource.with_attribute(KeyValue::new(key, value));
     }
     let resource = resource.build();
@@ -220,7 +230,23 @@ pub fn configure_child(
     else {
         return;
     };
+    let attributes = resource_attributes(
+        agent,
+        harness,
+        model,
+        agent_version,
+        harness_version,
+        task_id,
+        attempt,
+        std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
+    );
+    let mcp_attributes = parse_ahu_resource_attributes(&attributes)
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", escape(&value)))
+        .collect::<Vec<_>>()
+        .join(",");
     command
+        .env("AHU_MCP_RESOURCE_ATTRIBUTES", mcp_attributes)
         .env_remove("AHU_EVAL_LOCAL_METRICS")
         .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
@@ -242,19 +268,7 @@ pub fn configure_child(
         .env("OTEL_METRICS_EXPORTER", "none")
         .env("OTEL_LOGS_EXPORTER", "none")
         .env("OTEL_SERVICE_NAME", "ahu-agent")
-        .env(
-            "OTEL_RESOURCE_ATTRIBUTES",
-            resource_attributes(
-                agent,
-                harness,
-                model,
-                agent_version,
-                harness_version,
-                task_id,
-                attempt,
-                std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
-            ),
-        );
+        .env("OTEL_RESOURCE_ATTRIBUTES", attributes);
 }
 
 /// Evaluation capture is an internal, loopback-only override. It lets a
@@ -955,6 +969,8 @@ mod tests {
         assert_eq!(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://127.0.0.1:4318");
         assert!(env["OTEL_RESOURCE_ATTRIBUTES"].contains("ahu.harness=codex"));
         assert!(env["OTEL_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=2"));
+        assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=2"));
+        assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.id=task"));
     }
 
     #[test]
