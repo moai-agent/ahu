@@ -1689,10 +1689,24 @@ fn summary_distinguishes_grading_arms_and_uses_complete_evaluation_time() {
     std::fs::write(&records, row.to_string()).unwrap();
     let discovered = ahu::git::discover(repo.path()).unwrap();
     let report = ahu::eval::report(&discovered, &records).unwrap();
-    let output = ahu::eval::render_at(&report, 200);
-    assert!(output.contains("[typed grader]"));
-    assert!(output.contains("1.0s eval"));
-    assert!(!output.contains("100ms total"));
+    for width in [80, 200] {
+        let output = ahu::eval::render_at(&report, width);
+        let rows = summary_table(&output);
+        assert!(rows[1].contains("typed:"), "{output}");
+        assert!(output.contains("1.0s eval"));
+        assert!(!output.contains("100ms total"));
+    }
+
+    row["evaluator_kind"] = "agent".into();
+    row["evaluator"] = "judge".into();
+    row["evaluator_metrics"] =
+        serde_json::to_value(ahu::eval::decision::Observation::new("agent")).unwrap();
+    std::fs::write(&records, row.to_string()).unwrap();
+    let report = ahu::eval::report(&discovered, &records).unwrap();
+    for width in [80, 200] {
+        let output = ahu::eval::render_at(&report, width);
+        assert!(summary_table(&output)[1].contains("@judge:"), "{output}");
+    }
 
     row["evaluator_kind"] = "none".into();
     row["evaluator_metrics"] =

@@ -1847,7 +1847,7 @@ fn native_metadata(harness: &str, event: &Value) -> Value {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
     let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
     if harness != "claude-code" {
-        // The foreign observer only tests these two strings for this marker.
+        // Retain only known completion or collaboration markers, never payloads.
         return if kind.contains("collab")
             || event
                 .pointer("/item/type")
@@ -1855,6 +1855,8 @@ fn native_metadata(harness: &str, event: &Value) -> Value {
                 .is_some_and(|s| s.contains("collab"))
         {
             json!({"type":"collab"})
+        } else if harness == "codex" && kind == "turn.completed" {
+            json!({"type":"turn.completed"})
         } else {
             json!({})
         };
@@ -3195,6 +3197,30 @@ mod telemetry_usage_tests {
         assert_eq!(events.usage.output, Some(9));
         assert_eq!(events.usage.cached, Some(5));
         assert_eq!(events.usage.total, Some(29));
+        assert!(events.terminal);
+        let profile = crate::native::profile(&crate::native::Request {
+            harness: "codex",
+            harness_version: "0.157.1",
+            policy: crate::native::DISABLED,
+            session_model: "test-model",
+            helper_model: None,
+            helper_role: "unused",
+            max_concurrent: 1,
+            max_depth: 1,
+            budget_usd: None,
+            assignment_writes: true,
+        })
+        .unwrap();
+        assert!(events.native.completeness(&profile).complete);
+        assert_eq!(
+            super::native_metadata(
+                "codex",
+                &serde_json::json!({
+                    "type":"turn.completed", "message":"private", "usage":{"input_tokens":29}
+                })
+            ),
+            serde_json::json!({"type":"turn.completed"})
+        );
     }
 }
 

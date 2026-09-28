@@ -655,8 +655,13 @@ impl Observations {
     /// `receiver_thread_ids` and `agents_states` are empty, so a helper cannot
     /// be identified or joined. Counting those events keeps the gap visible
     /// instead of letting an unreadable stream look like an idle one.
-    fn observe_foreign(&mut self, _harness: &str, event: &Value) {
+    fn observe_foreign(&mut self, harness: &str, event: &Value) {
         let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+        // Codex reports completion with a turn event, not Claude's `result`.
+        // This does not waive unreadable helper events or prove task acceptance.
+        if harness == "codex" && kind == "turn.completed" {
+            self.terminal_seen = true;
+        }
         let item = event
             .pointer("/item/type")
             .and_then(Value::as_str)

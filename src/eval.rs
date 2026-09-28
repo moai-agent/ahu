@@ -1581,8 +1581,8 @@ fn summary_rows(groups: &[Group]) -> Vec<Vec<table::Cell>> {
                 agent.push_str(&format!(" [{}]", key.selection_mode));
             }
             match key.evaluator_kind.as_str() {
-                "typed_decision" => agent.push_str(" [typed grader]"),
-                "agent" => agent.push_str(&format!(" [grader {}]", key.evaluator)),
+                "typed_decision" => agent = format!("typed: {agent}"),
+                "agent" => agent = format!("@{}: {agent}", key.evaluator),
                 _ => {}
             }
             vec![

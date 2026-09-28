@@ -1,13 +1,10 @@
 //! What ahu is allowed to claim about native helpers.
 //!
-//! Each test here corresponds to a boundary that was checked against the
-//! installed Claude Code CLI. The point of the suite is not that the strings
-//! match; it is that a boundary ahu could not actually impose never turns into
-//! an enforced control, and that a helper whose outcome was never reported
-//! never turns into finished work.
+//! These tests cover the inspected native adapter boundaries. Claimed controls
+//! must be enforced, and helper completion requires a reported outcome.
 //!
-//! The event fixtures are the real event shapes the CLI emits in
-//! `--output-format stream-json`, reduced to the fields this module reads.
+//! Fixtures reduce Claude Code stream-json and Codex exec JSON events to
+//! the fields this module reads.
 
 use ahu::native::{self, HelperStatus, Mechanism, Observations, Profile, Request};
 use serde_json::{Value, json};
@@ -1415,4 +1412,61 @@ fn bounded_delivery_selects_contract_policy_without_rewriting_agent_or_request()
         );
     }
     assert!(deliver_headless_policy(None, body, "unknown").is_err());
+}
+
+#[test]
+fn codex_turn_completion_reconciles_native_completion_without_helpers() {
+    let profile = profile_of(&Request {
+        harness: "codex",
+        ..disabled()
+    });
+    let mut observed = Observations::default();
+    observed.observe(
+        "codex",
+        &json!({"type":"thread.started","thread_id":"owned"}),
+    );
+    observed.observe(
+        "codex",
+        &json!({"type":"item.completed","item":{"type":"agent_message","text":"done"}}),
+    );
+    assert!(!observed.completeness(&profile).complete);
+    observed.observe(
+        "codex",
+        &json!({"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":7}}),
+    );
+    let result = observed.completeness(&profile);
+    assert!(result.complete && result.terminated_cleanly && result.evidence_complete);
+    assert!(result.unknown.is_empty());
+}
+
+#[test]
+fn codex_completion_keeps_unreadable_helpers_incomplete() {
+    let profile = profile_of(&Request {
+        harness: "codex",
+        ..disabled()
+    });
+    let mut observed = Observations::default();
+    observed.observe("codex", &json!({"type":"item.completed","item":{"type":"collab_tool_call","receiver_thread_ids":[],"agents_states":{}}}));
+    observed.observe("codex", &json!({"type":"turn.completed"}));
+    let result = observed.completeness(&profile);
+    assert!(result.terminated_cleanly);
+    assert!(!result.complete && !result.evidence_complete);
+    assert_eq!(result.unknown_events, 1);
+}
+
+#[test]
+fn native_completion_does_not_generalize_codex_events_to_other_harnesses() {
+    let profile = profile_of(&Request {
+        harness: "codex",
+        ..disabled()
+    });
+    for (harness, event) in [
+        ("other", json!({"type":"turn.completed"})),
+        ("codex", json!({"type":"result"})),
+        ("codex", json!({"type":"turn.failed"})),
+    ] {
+        let mut observed = Observations::default();
+        observed.observe(harness, &event);
+        assert!(!observed.completeness(&profile).complete);
+    }
 }
