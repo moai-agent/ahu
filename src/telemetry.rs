@@ -798,6 +798,19 @@ fn mcp_result_attributes(method: &str, name: &str, response: &serde_json::Value)
                     attributes.push(KeyValue::new(key, v.min(i64::MAX as u64) as i64));
                 }
             }
+            for (field, key) in [
+                (
+                    "prompt_tokens_complete",
+                    "ahu.selection.tokens.input.complete",
+                ),
+                (
+                    "generated_tokens_complete",
+                    "ahu.selection.tokens.output.complete",
+                ),
+            ] {
+                let complete = value["service"][field].as_bool() == Some(true);
+                attributes.push(KeyValue::new(key, i64::from(complete)));
+            }
             if let Some(rows) = value.get("selected").and_then(serde_json::Value::as_array) {
                 attributes.push(KeyValue::new("ahu.selection.selected", rows.len() as i64));
             }
@@ -1365,7 +1378,14 @@ pub(crate) fn export_eval_selection(
     selection_id: &str,
     selection: &crate::skill_selection::Selection,
 ) -> bool {
-    use opentelemetry::trace::TracerProvider;
+    use opentelemetry_proto::tonic::{
+        collector::trace::v1::ExportTraceServiceRequest,
+        common::v1::{AnyValue, KeyValue as ProtoKeyValue, any_value},
+        resource::v1::Resource as ProtoResource,
+        trace::v1::{ResourceSpans, ScopeSpans, Span as ProtoSpan},
+    };
+    use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
+    use prost::Message;
     if selection.mode == crate::skill_selection::Mode::None {
         return false;
     }
@@ -1384,64 +1404,220 @@ pub(crate) fn export_eval_selection(
     {
         return false;
     }
-    let Ok(exporter) = SpanExporter::builder()
-        .with_http()
-        .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(format!("{}/v1/traces", endpoint.trim_end_matches('/')))
-        .with_timeout(Duration::from_millis(500))
-        .build()
-    else {
-        return false;
+    let attr = |key: &str, value: any_value::Value| ProtoKeyValue {
+        key: key.into(),
+        value: Some(AnyValue { value: Some(value) }),
+        ..Default::default()
     };
-    let provider = SdkTracerProvider::builder()
-        .with_resource(
-            Resource::builder()
-                .with_service_name("ahu-eval")
-                .with_attributes([
-                    KeyValue::new("ahu.eval.run_id", run_id.to_owned()),
-                    KeyValue::new("ahu.eval.stage", "skill_selection"),
-                    KeyValue::new("ahu.task.id", selection_id.to_owned()),
-                    KeyValue::new("ahu.task.attempt", "1"),
-                ])
-                .build(),
+    let string = |key: &str, value: &str| attr(key, any_value::Value::StringValue(value.into()));
+    let integer = |key: &str, value: u64| {
+        attr(
+            key,
+            any_value::Value::IntValue(value.min(i64::MAX as u64) as i64),
         )
-        .with_batch_exporter(exporter)
-        .build();
-    let mut span = provider.tracer("ahu").start("ahu.skills.selection");
-    span.set_attributes([
-        KeyValue::new("ahu.selection.purpose", "skill_relevance"),
-        KeyValue::new("ahu.selection.mode", selection.mode.as_str()),
-        KeyValue::new(
+    };
+    let mut attributes = vec![
+        string("ahu.selection.purpose", "skill_relevance"),
+        string("ahu.selection.mode", selection.mode.as_str()),
+        integer(
             "ahu.selection.policy_version",
-            selection.policy_version as i64,
+            selection.policy_version as u64,
         ),
-        KeyValue::new("ahu.selection.candidates", selection.candidate_count as i64),
-        KeyValue::new("ahu.selection.selected", selection.selected.len() as i64),
-        KeyValue::new("ahu.selection.status", selection.status.clone()),
-        KeyValue::new("ahu.selection.duration_ms", selection.elapsed_ms),
-        KeyValue::new(
-            "ahu.selection.catalog_digest",
-            selection.catalog_digest.clone(),
+        integer("ahu.selection.candidates", selection.candidate_count as u64),
+        integer("ahu.selection.selected", selection.selected.len() as u64),
+        string("ahu.selection.status", &selection.status),
+        attr(
+            "ahu.selection.duration_ms",
+            any_value::Value::DoubleValue(selection.elapsed_ms),
         ),
-    ]);
+        string("ahu.selection.catalog_digest", &selection.catalog_digest),
+    ];
     if let Some(service) = &selection.service {
         for (field, key) in [
             ("prompt_tokens", "ahu.selection.tokens.input"),
             ("generated_tokens", "ahu.selection.tokens.output"),
         ] {
             if let Some(value) = service.get(field).and_then(serde_json::Value::as_u64) {
-                span.set_attribute(KeyValue::new(key, value.min(i64::MAX as u64) as i64));
+                attributes.push(integer(key, value));
             }
+            attributes.push(integer(
+                &format!("{key}.complete"),
+                u64::from(
+                    service
+                        .get(format!("{field}_complete"))
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true),
+                ),
+            ));
         }
     }
-    span.end();
-    let ok = provider.force_flush().is_ok();
-    let _ = provider.shutdown();
-    ok
+    let ids = RandomIdGenerator::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64);
+    // Construct the wire resource explicitly: SDK Resource::builder and the
+    // default OTLP exporter both import unrelated inherited environment data.
+    let message = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(ProtoResource {
+                attributes: vec![
+                    string("service.name", "ahu-eval"),
+                    string("ahu.eval.run_id", run_id),
+                    string("ahu.eval.stage", "skill_selection"),
+                    string("ahu.task.id", selection_id),
+                    string("ahu.task.attempt", "1"),
+                ],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                spans: vec![ProtoSpan {
+                    trace_id: ids.new_trace_id().to_bytes().to_vec(),
+                    span_id: ids.new_span_id().to_bytes().to_vec(),
+                    name: "ahu.skills.selection".into(),
+                    start_time_unix_nano: now,
+                    end_time_unix_nano: now,
+                    attributes,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    // Never consult inherited proxy/OTLP headers; never follow redirects.
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_millis(500))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .post(format!("{}/v1/traces", endpoint.trim_end_matches('/')))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+        .body(message.encode_to_vec())
+        .send()
+        .is_ok_and(|response| response.status().is_success())
 }
 
 #[cfg(test)]
 mod selection_tests {
+
+    #[test]
+    fn selection_export_environment_child() {
+        let Ok(endpoint) = std::env::var("AHU_TEST_SELECTION_ENDPOINT") else {
+            return;
+        };
+        let selection = serde_json::from_value(serde_json::json!({
+            "mode":"lexical","policy_version":1,"catalog_digest":"a".repeat(64),
+            "candidate_count":1,"selected":[],"status":"abstained","elapsed_ms":1.0,
+            "service":null,"error_code":null
+        }))
+        .unwrap();
+        assert!(super::export_eval_selection(
+            &endpoint,
+            "wire-run",
+            "wire-selection",
+            &selection
+        ));
+    }
+
+    #[test]
+    fn selection_wire_excludes_inherited_headers_resources_and_proxy() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+        let collector = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", collector.local_addr().unwrap());
+        collector.set_nonblocking(true).unwrap();
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        proxy.set_nonblocking(true).unwrap();
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        let capture = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let (mut stream, _) = loop {
+                match collector.accept() {
+                    Ok(pair) => break pair,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(_) => return None,
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                headers.push_str(&line);
+            }
+            let length = headers
+                .lines()
+                .find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("content-length")
+                        .then(|| v.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            Some((headers, body))
+        });
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .env("AHU_TEST_SELECTION_ENDPOINT", endpoint)
+            .env("HTTP_PROXY", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env("http_proxy", &proxy_url)
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .env(
+                "OTEL_EXPORTER_OTLP_HEADERS",
+                "authorization=synthetic-header-secret",
+            )
+            .env(
+                "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+                "x-private=synthetic-trace-secret",
+            )
+            .env(
+                "OTEL_RESOURCE_ATTRIBUTES",
+                "private.attr=synthetic-resource-secret",
+            )
+            .args([
+                "--exact",
+                "telemetry::selection_tests::selection_export_environment_child",
+            ])
+            .output()
+            .unwrap();
+        let wire = capture.join().unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let (headers, body) = wire.expect("local collector received the request directly");
+        assert!(!headers.contains("synthetic-"));
+        for sentinel in [
+            b"synthetic-resource-secret".as_slice(),
+            b"private.attr".as_slice(),
+        ] {
+            assert!(!body.windows(sentinel.len()).any(|w| w == sentinel));
+        }
+        assert!(matches!(proxy.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
+    }
     #[test]
     fn selection_export_reaches_only_its_eval_receiver_without_payload() {
         let receiver = crate::eval_otel::Receiver::start_for(Some("selection-run"), None).unwrap();

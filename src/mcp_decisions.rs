@@ -267,6 +267,7 @@ fn validate_questions_arguments(arguments: &Value) -> Result<()> {
 pub(super) fn call(arguments: &Value, repo: &crate::git::Repo) -> Result<Value> {
     let normalized = normalize_arguments(arguments)?;
     let arguments = &normalized;
+    let _configuration = configuration()?;
     let configured_model = std::env::var_os("AHU_DECISION_MODEL");
     let model = decision_model(configured_model.as_deref())?;
     if let Ok(endpoint) = std::env::var("AHU_DECISION_URL") {
@@ -292,6 +293,21 @@ fn decision_model(value: Option<&std::ffi::OsStr>) -> Result<&str> {
                 "AHU_DECISION_MODEL must be 1 to 64 ASCII letters, digits, dots, dashes, or underscores"
             )),
     }
+}
+
+/// Non-secret configured identity, frozen independently of response outcomes.
+pub(super) fn configuration() -> Result<Value> {
+    let configured_model = std::env::var_os("AHU_DECISION_MODEL");
+    let model = decision_model(configured_model.as_deref())?;
+    if let Some(endpoint) = std::env::var_os("AHU_DECISION_URL") {
+        let endpoint = endpoint
+            .to_str()
+            .ok_or_else(|| Error::new("AHU_DECISION_URL must be UTF-8"))?;
+        let url = local_url(endpoint)?;
+        return Ok(json!({"backend":"local","requested_model":null,
+            "endpoint_digest":crate::util::digest_bytes(url.as_str().as_bytes())}));
+    }
+    Ok(json!({"backend":"typesafe","requested_model":model}))
 }
 
 /// Read only the TypeSafe credential needed by this tool. Process environment
@@ -572,7 +588,7 @@ fn typesafe_response(arguments: &Value, response: Value, model: &str) -> Result<
     Ok(json!({"answers":normalized,"service":service}))
 }
 
-fn call_endpoint(arguments: &Value, endpoint: &str) -> Result<Value> {
+fn local_url(endpoint: &str) -> Result<url::Url> {
     let url = url::Url::parse(endpoint)
         .map_err(|error| Error::new(format!("invalid AHU_DECISION_URL: {error}")))?;
     if url.scheme() != "http"
@@ -589,6 +605,11 @@ fn call_endpoint(arguments: &Value, endpoint: &str) -> Result<Value> {
             "AHU_DECISION_URL must be a credential-free http:// URL with a loopback IP literal",
         ));
     }
+    Ok(url)
+}
+
+fn call_endpoint(arguments: &Value, endpoint: &str) -> Result<Value> {
+    let url = local_url(endpoint)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())

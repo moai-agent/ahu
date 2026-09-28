@@ -134,15 +134,20 @@ Token reduction requires observed changes in what the agent reads or does.
 
 Records include policy/catalog/provider identity, suggested paths, abstention
 or fallback, selection duration and separate provider usage. The report groups
-selection policies independently. Time marked `total` includes candidate launch
-wall time plus selection duration; unmarked time in older records is harness
-elapsed. It excludes optional evaluator execution. Failed agent attempts retain
+selection policies by configured backend/model and catalog, including provider
+failures in the same arm. Returned model identities are reported separately.
+Complete provider usage and partial known subtotals have distinct coverage counts.
+Candidate calls to `ahu_skills_suggest` retain their separate provider costs even
+when the candidate later fails. Time marked `total` includes selection preparation,
+telemetry export and launch wall time; unmarked time in older records is harness
+elapsed. It excludes grading and optional evaluator execution. Failed agent attempts retain
 selection cost. Failed provider calls may have unknown billed usage.
 
 Prelaunch OTel spans use `ahu.skills.selection` with bounded purpose, policy,
 mode, counts, outcome and timing. Their synthetic observation ID is separate
 from the candidate task; the record states whether the local receiver observed
-the span. This does not count as a candidate MCP call or prove skill loading.
+the span. The loopback exporter disables proxies and redirects and does not
+inherit OTLP authorization headers or unrelated resource attributes. This does not count as a candidate MCP call or prove skill loading.
 MCP skill suggestions carry the same bounded selection metrics on their tool
 span. Task text, skill descriptions and bodies are absent from these attributes.
 

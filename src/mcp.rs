@@ -445,6 +445,10 @@ fn legacy_protocol_version(params: &Value) -> &'static str {
 }
 
 /// Shared provider-neutral dispatch for MCP and explicit prelaunch experiments.
+pub(crate) fn decision_configuration() -> Result<Value> {
+    decisions::configuration()
+}
+
 pub fn typed_decide(repo: &Repo, arguments: &Value) -> Result<Value> {
     decisions::call(arguments, repo)
 }

@@ -1555,7 +1555,7 @@ fn selection_arms_and_overhead_are_reported_separately() {
         row["skill_selection"] = serde_json::json!({
             "mode":mode,"policy_version":1,"catalog_digest":"a".repeat(64),
             "candidate_count":1,"selected":[],"status":if mode=="none" {"disabled"}else{"abstained"},
-            "elapsed_ms":elapsed,"service":if mode=="decision" {serde_json::json!({"prompt_tokens":200,"generated_tokens":2})}else{Value::Null},
+            "elapsed_ms":elapsed,"service":if mode=="decision" {serde_json::json!({"prompt_tokens":200,"generated_tokens":2,"prompt_tokens_complete":true,"generated_tokens_complete":true})}else{Value::Null},
             "error_code":null
         });
         row["total_elapsed_ms"] = (100 + elapsed).into();
@@ -1582,4 +1582,48 @@ fn selection_arms_and_overhead_are_reported_separately() {
         .find(|g| g.key.selection_mode == "lexical")
         .unwrap();
     assert_eq!(lexical.mean_selection_input_tokens, None);
+}
+
+#[test]
+fn selection_fallbacks_and_partial_usage_remain_in_the_configured_arm() {
+    let repo = TestRepo::new();
+    let external = TempDir::new().unwrap();
+    let mut rows = Vec::new();
+    for (status, service) in [
+        (
+            "suggested",
+            serde_json::json!({"model":"jev-1.13.0","prompt_tokens":200,"generated_tokens":2,"prompt_tokens_complete":true,"generated_tokens_complete":true}),
+        ),
+        (
+            "fallback",
+            serde_json::json!({"model":"jev-1.13.0","prompt_tokens":12,"generated_tokens":1,"prompt_tokens_complete":false,"generated_tokens_complete":false}),
+        ),
+        ("fallback", Value::Null),
+    ] {
+        let mut row: Value =
+            serde_json::from_str(&Row::candidate("fixture", 1.0, true).json()).unwrap();
+        row["selection_policy_digest"] = "same-configured-policy".into();
+        row["skill_selection"] = serde_json::json!({
+            "mode":"decision","policy_version":1,"catalog_digest":"a".repeat(64),
+            "candidate_count":40,"selected":[],"status":status,"elapsed_ms":30.0,
+            "service":service,"error_code":null,
+            "configuration":{"backend":"typesafe","requested_model":"jev-1.13.0"}
+        });
+        row["candidate_selection"] = serde_json::json!({"observations":1,"input_tokens_known":7,"input_complete_observations":0});
+        rows.push(row.to_string());
+    }
+    let records = external.path().join("partial.jsonl");
+    std::fs::write(&records, rows.join("\n")).unwrap();
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let report = ahu::eval::report(&discovered, &records).unwrap();
+    assert_eq!(report.groups.len(), 1);
+    let group = &report.groups[0];
+    assert_eq!(group.runs, 3);
+    assert_eq!(group.selection_fallbacks, 2);
+    assert_eq!(group.selection_input_complete_runs, 1);
+    assert_eq!(group.selection_input_partial_runs, 1);
+    assert_eq!(group.mean_selection_input_tokens, Some(200.0));
+    assert_eq!(group.mean_selection_partial_input_tokens, Some(12.0));
+    assert_eq!(group.candidate_selection_runs, 3);
+    assert_eq!(group.mean_candidate_selection["input_tokens_known"], 7.0);
 }

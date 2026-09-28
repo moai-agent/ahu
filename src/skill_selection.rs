@@ -75,6 +75,8 @@ pub struct Selection {
     pub relevance: BTreeMap<String, f64>,
     #[serde(default)]
     pub calls_attempted: usize,
+    #[serde(default)]
+    pub configuration: Option<Value>,
 }
 
 impl Selection {
@@ -149,12 +151,16 @@ fn prepare_with(
         response_digest: None,
         relevance: BTreeMap::new(),
         calls_attempted: 0,
+        configuration: None,
     };
     if mode == Mode::None {
         return Ok(selection);
     }
     if task.len() > MAX_TASK_BYTES {
         return Err(Error::new("skill selection task exceeds 16 KiB"));
+    }
+    if mode == Mode::Decision {
+        selection.configuration = Some(crate::mcp::decision_configuration()?);
     }
     let catalog = read_catalog(&repo.root)?;
     check_context(repo, &catalog)?;
@@ -513,6 +519,18 @@ fn run_decisions(
                 fallback(selection, "invalid_response");
                 break;
             }
+        }
+    }
+    if let Some(service) = selection.service.as_mut() {
+        let all_returned =
+            service["completed_batches"].as_u64() == Some(selection.calls_attempted as u64);
+        service["attempted_batches"] = json!(selection.calls_attempted);
+        for field in [
+            "prompt_tokens_complete",
+            "generated_tokens_complete",
+            "duration_ms_complete",
+        ] {
+            service[field] = json!(all_returned && service[field].as_bool() == Some(true));
         }
     }
     if !responses.is_empty() {
@@ -1299,6 +1317,11 @@ mod tests {
         assert!(selection.selected.is_empty());
         assert_eq!(selection.service.as_ref().unwrap()["prompt_tokens"], 12);
         assert_eq!(selection.service.as_ref().unwrap()["completed_batches"], 1);
+        assert_eq!(
+            selection.service.as_ref().unwrap()["prompt_tokens_complete"],
+            false
+        );
+        assert_eq!(selection.calls_attempted, 2);
         assert!(selection.response_digest.is_some());
         assert!(
             !serde_json::to_string(&selection)

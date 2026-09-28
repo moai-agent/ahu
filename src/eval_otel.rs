@@ -89,6 +89,8 @@ pub struct TaskTelemetry {
     pub selection_duration_ms: Option<f64>,
     pub selection_input_tokens: Option<u64>,
     pub selection_output_tokens: Option<u64>,
+    pub selection_input_complete_observations: u64,
+    pub selection_output_complete_observations: u64,
     /// True once an `ahu.mcp.session` summary span arrived for this task.
     ///
     /// The summary is what carries the session's own totals, so without it the
@@ -516,6 +518,7 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                     }
                     "ahu.skills.selection" => {
                         task.selection_observations = task.selection_observations.saturating_add(1);
+                        observe_selection_completeness(task, &integers);
                         add_counter(
                             &mut task.selection_candidate_count,
                             integers.get("ahu.selection.candidates").copied(),
@@ -548,6 +551,7 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                             {
                                 task.selection_observations =
                                     task.selection_observations.saturating_add(1);
+                                observe_selection_completeness(task, &integers);
                                 add_counter(
                                     &mut task.selection_candidate_count,
                                     integers.get("ahu.selection.candidates").copied(),
@@ -739,6 +743,22 @@ fn add_counter(total: &mut Option<u64>, value: Option<u64>) {
 fn add_duration(total: &mut Option<f64>, value: Option<f64>) {
     if let Some(value) = value.filter(|value| value.is_finite() && *value >= 0.0) {
         *total = Some(total.unwrap_or_default() + value);
+    }
+}
+
+fn observe_selection_completeness(task: &mut TaskTelemetry, integers: &BTreeMap<String, u64>) {
+    if integers.get("ahu.selection.tokens.input.complete") == Some(&1)
+        && integers.contains_key("ahu.selection.tokens.input")
+    {
+        task.selection_input_complete_observations =
+            task.selection_input_complete_observations.saturating_add(1);
+    }
+    if integers.get("ahu.selection.tokens.output.complete") == Some(&1)
+        && integers.contains_key("ahu.selection.tokens.output")
+    {
+        task.selection_output_complete_observations = task
+            .selection_output_complete_observations
+            .saturating_add(1);
     }
 }
 

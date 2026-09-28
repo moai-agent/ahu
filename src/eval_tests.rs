@@ -1115,6 +1115,7 @@ fn selection_policy_identity_excludes_outcomes_but_tracks_configuration() {
             "mode":"decision","policy_version":1,"catalog_digest":"a".repeat(64),
             "candidate_count":1,"selected":[],"status":"abstained","elapsed_ms":2.0,
             "service":{"backend":"typesafe","model":"jev-1.13.0","prompt_tokens":100},
+            "configuration":{"backend":"typesafe","requested_model":"jev-1.13.0"},
             "error_code":null
         }))
         .unwrap();
@@ -1127,7 +1128,37 @@ fn selection_policy_identity_excludes_outcomes_but_tracks_configuration() {
     selection.service.as_mut().unwrap()["prompt_tokens"] = 900.into();
     assert_eq!(selection_policy_digest(&selection), base);
     selection.service.as_mut().unwrap()["model"] = "different-model".into();
+    assert_eq!(selection_policy_digest(&selection), base);
+    selection.service = None;
+    selection.status = "fallback".into();
+    assert_eq!(selection_policy_digest(&selection), base);
+    selection.configuration.as_mut().unwrap()["requested_model"] = "different-model".into();
     assert_ne!(selection_policy_digest(&selection), base);
     selection.mode = crate::skill_selection::Mode::None;
     assert!(selection_policy_digest(&selection).is_none());
+}
+
+#[test]
+fn candidate_mcp_selection_cost_survives_failure_projection_and_native_tokens_stay_separate() {
+    let telemetry = crate::eval_otel::TaskTelemetry {
+        selection_observations: 2,
+        selection_duration_ms: Some(12.0),
+        selection_input_tokens: Some(55),
+        selection_output_tokens: Some(4),
+        selection_input_complete_observations: 1,
+        selection_output_complete_observations: 1,
+        ..Default::default()
+    };
+    let mut failed = outcome_fields("candidate_answer_missing", Some("candidate_answer_invalid"));
+    insert_telemetry_fields(&mut failed, Some(&telemetry)).unwrap();
+    assert_eq!(failed["candidate_selection"]["input_tokens_known"], 55);
+    assert_eq!(
+        failed["candidate_selection"]["input_complete_observations"],
+        1
+    );
+    assert_eq!(failed["candidate_selection"]["observations"], 2);
+    let usage = reported_tokens(None, Some(&telemetry)).unwrap();
+    assert_eq!(usage["skill_selection_service.input_known"], 55);
+    assert!(usage.get("ahu.tokens.input").is_none());
+    assert!(usage.get("decision_service.input").is_none());
 }

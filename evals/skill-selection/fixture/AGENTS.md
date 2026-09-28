@@ -1,0 +1,1 @@
+Harbor is a fictional service used for repository-policy planning. Its records and artifacts are synthetic. Complete the requested planning, checklist, or configuration decisions using the project conventions. No external services or accounts are needed.

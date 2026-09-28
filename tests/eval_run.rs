@@ -652,3 +652,159 @@ fn eval_run_refuses_invalid_matrix_and_checkout_combinations_before_launch() {
         assert!(diagnostic.contains(expected), "{args:?}: {diagnostic}");
     }
 }
+
+#[test]
+fn candidate_mcp_selection_usage_survives_success_and_missing_answer() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::os::unix::fs::PermissionsExt;
+    for answer in [true, false] {
+        let repo = TestRepo::new();
+        repo.init_config();
+        repo.add_agent_on("triage", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+        repo.write(".agents/skills/billing/SKILL.md", "---\nname: billing\ndescription: Resolve duplicate charge disputes\n---\nReview billing facts.\n");
+        repo.commit("selection cost fixture");
+        let external = TempDir::new().unwrap();
+        let bin = external.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let harness = bin.join("opencode");
+        std::fs::write(&harness, r#"#!/usr/bin/env python3
+import json, os, subprocess, sys
+if '--version' in sys.argv:
+    print('1.18.32')
+    raise SystemExit(0)
+rows = [
+ {'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
+ {'jsonrpc':'2.0','method':'notifications/initialized'},
+ {'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'ahu_skills_suggest','arguments':{'task':'Resolve duplicate charge','mode':'decision'}}}
+]
+p = subprocess.run([os.environ['AHU_BIN'], 'mcp', 'serve'], input=''.join(json.dumps(r)+'\n' for r in rows), text=True, capture_output=True, timeout=15)
+assert p.returncode == 0, p.stderr
+responses = [json.loads(line) for line in p.stdout.splitlines()]
+assert responses[-1]['result']['structuredContent']['status'] == 'suggested', responses
+if os.environ['FIXTURE_WRITE_ANSWER'] == 'yes':
+    with open('answer.json','w') as f:
+        json.dump({'route':'billing'}, f)
+print(json.dumps({'type':'text','sessionID':os.environ['AHU_PARENT_TASK'],'part':{'type':'text','text':'done'}}), flush=True)
+print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK'],'part':{'type':'step-finish','reason':'stop'}}), flush=True)
+"#).unwrap();
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/v1/decisions", listener.local_addr().unwrap());
+        let service = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "provider never called"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((key, value)) = line.split_once(':')
+                    && key.eq_ignore_ascii_case("content-length")
+                {
+                    length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let mut body = vec![0; length.unwrap()];
+            reader.read_exact(&mut body).unwrap();
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            let answers: serde_json::Map<String, Value> = request["questions"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|key| (key.clone(), serde_json::json!({"value":0.99})))
+                .collect();
+            let response = serde_json::json!({"answers":answers,"service":{"backend":"fixture","model":"fixture","prompt_tokens":31,"generated_tokens":2,"duration_ms":4}}).to_string();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).unwrap();
+        });
+        let case = external.path().join("case.md");
+        fixture_case(&case);
+        let records = external.path().join("runs.jsonl");
+        let home = external.path().canonicalize().unwrap().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let output = common::ahu()
+            .current_dir(repo.path())
+            .args([
+                "eval",
+                "run",
+                "--case",
+                case.to_str().unwrap(),
+                "--agent",
+                "@triage",
+                "--records",
+                records.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("HOME", home)
+            .env("AHU_DECISION_URL", endpoint)
+            .env("FIXTURE_WRITE_ANSWER", if answer { "yes" } else { "no" })
+            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        if service.join().is_err() {
+            let kept = external.keep();
+            panic!(
+                "provider missing; diagnostics {} stdout {} stderr {}",
+                kept.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let row: Value =
+            serde_json::from_str(std::fs::read_to_string(&records).unwrap().trim()).unwrap();
+        assert_eq!(row["skill_selection"]["mode"], "none");
+        assert_eq!(row["mcp_tools"]["ahu_skills_suggest"], 1);
+        assert_eq!(row["candidate_selection"]["input_tokens_known"], 31);
+        assert_eq!(row["candidate_selection"]["output_tokens_known"], 2);
+        assert_eq!(row["candidate_selection"]["input_complete_observations"], 1);
+        assert_eq!(row["candidate_selection"]["observations"], 1);
+        if row["answer_status"] != if answer { "scored" } else { "no_answer" } {
+            let kept = external.keep();
+            panic!(
+                "unexpected answer status; {} record {}",
+                kept.display(),
+                row
+            );
+        }
+        let discovered = ahu::git::discover(repo.path()).unwrap();
+        let report = ahu::eval::report(&discovered, &records).unwrap();
+        assert_eq!(
+            report.groups[0].mean_candidate_selection["input_tokens_known"],
+            31.0
+        );
+    }
+}
