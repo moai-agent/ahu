@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "beac9fcb10bf2c9f362860a166aa9dbf024cb7178b79e9af615787526f77c474"
+digest = "ab371a5aae4f7af041397bfb3606c88bf317193aabaad4bc7d92834e83150674"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -118,8 +118,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-architecture/SKILL.md"
-digest = "ea00b808882563d222b8b9709a71d1ad994c27000e3c190b47ea42d0d5fe72ed"
-bytes = 21245
+digest = "8919dd9fc3ff057dc464ac9bb0cc65e30e5e4a51803a31e568262fce92f8adff"
+bytes = 21831
 executable = false
 
 [[entries]]

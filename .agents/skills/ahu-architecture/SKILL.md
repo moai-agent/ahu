@@ -8,10 +8,11 @@ ahu is cross-harness configuration management for agent sessions. It launches
 agents that a repository defines into separate Git worktrees
 and runs interactive sessions in cmux or unattended headless attempts.
 
-ahu is not an agent harness. It does not host a model, run an agent loop, own a
-conversation, or provide tools. Claude Code, Codex, the Antigravity CLI and OpenCode do
-that. ahu decides which of them runs, with which model and instructions, in
-which worktree, and reports visible context sources and coverage gaps.
+Claude Code, Codex, the Antigravity CLI and OpenCode run the agent loop and own
+the conversation. ahu chooses the configured harness, model, instructions and
+worktree, and reports visible context sources and coverage gaps. Its MCP server
+provides agent/task inspection and typed decision tools. Its eval runner launches
+agents, checks outcomes and joins available OTel observations to each trial.
 
 An agent's harness, model, and instructions live in the repository, so changing
 how it behaves is a reviewable change like any other. A launch uses exactly that
@@ -44,9 +45,10 @@ harness or its shell tools from starting other processes.
 ahu creates the repository group and the per-task workspace through cmux, and
 interactive sessions require that connection. Headless tasks and local inspection do
 not. The harness is what actually runs the
-agent; ahu never installs, configures, or authenticates one, and it does not
-ship one. Sign-in is the harness's own, and ahu holds no API key for any of
-them.
+agent. `ahu setup` detects installed harnesses, offers available models,
+registers development agents and installs supported skills/MCP configuration.
+Harness installation and sign-in remain separate; ahu does not ship a harness
+or manage its agent-model API key.
 Git and default cmux lookup skip empty and relative PATH entries and use
 canonical executables outside Git working trees. Candidate ancestry is
 inspected without running candidate Git. Explicit AHU_CMUX_BIN retains
@@ -54,14 +56,20 @@ user-selected command semantics; these checks are not OS isolation.
 
 ahu does not use an agent-selection or system-prompt flag. A native lookup
 by name does not bind the selection to the file ahu read and digested.
-Instructions travel in the prompt on all three harnesses, attributed to
+Instructions travel in the prompt on the supported harnesses, attributed to
 their source file and delivered-text digest; delivery is not enforcement.
 
-ahu holds no credentials and speaks to no model provider. Sign-in and the
-approval boundary are the harness's own. Headless adapters pass explicit batch
-controls; manifest-requested widening remains gated. ahu cannot assert the
-effective boundary; harness settings also apply. The
-launch preview reports what ahu read in them rather than asserting a result.
+Agent-model sign-in and approval controls belong to the harness. Headless
+adapters pass explicit batch controls; manifest-requested widening remains gated.
+Harness settings also apply, so the launch preview reports observed settings
+without asserting the effective boundary.
+
+The typed decision service has a separate credential boundary: ahu can read
+`TYPESAFE_API_KEY` from its process environment or the selected repository's
+`.env` and send explicitly supplied evidence to TypeSafe. It can instead use a
+configured loopback decision service. Do not copy that key into agent prompts,
+MCP configuration, telemetry or tracked files. Read `typed-decisions` for request
+design and data handling, and `docs/typed-decisions.md` for provider configuration.
 
 ## Four rules everything else follows from
 
