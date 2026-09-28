@@ -3,7 +3,8 @@
 //! and stderr are never persisted or included in diagnostics.
 use crate::util::{Error, Result};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -33,33 +34,19 @@ pub fn inspect(executable: &Path, cwd: &Path) -> Result<Value> {
         .map_err(|_| Error::new("cannot start native Codex metadata inspection"))?;
     let stdout = child.stdout.take().expect("piped stdout");
     let mut stdin = child.stdin.take().expect("piped stdin");
-    let (tx, rx) = std::sync::mpsc::sync_channel(4);
-    let reader = std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut total = 0;
-        loop {
-            let mut line = Vec::new();
-            // Bound a single unterminated line as well as the entire stream.
-            use std::io::Read;
-            let read = reader
-                .by_ref()
-                .take((LIMIT - total + 1) as u64)
-                .read_until(b'\n', &mut line);
-            match read {
-                Ok(0) => break,
-                Ok(n) if total + n <= LIMIT => total += n,
-                _ => {
-                    let _ = tx.send(None);
-                    break;
-                }
-            }
-            if tx.send(Some(line)).is_err() {
-                break;
-            }
-        }
-    });
     let deadline = Instant::now() + Duration::from_secs(30);
     let outcome = (|| {
+        // A detached descendant can retain the write end after the owned group
+        // dies. Read on this thread with a deadline, never join an EOF reader.
+        let fd = stdout.as_raw_fd();
+        // SAFETY: stdout owns this live descriptor throughout inspection. These
+        // operations only read/set descriptor flags; no ownership is transferred.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(Error::new("cannot bound native Codex metadata reads"));
+        }
+        let mut reader = BufReader::new(stdout);
+        let mut total = 0;
         let send = |stdin: &mut std::process::ChildStdin, value: Value| -> Result<()> {
             let mut bytes = serde_json::to_vec(&value)?;
             bytes.push(b'\n');
@@ -77,14 +64,7 @@ pub fn inspect(executable: &Path, cwd: &Path) -> Result<Value> {
         let mut hooks = None;
         let mut requirements = false;
         for _ in 0..256 {
-            let line = rx
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .map_err(|_| {
-                    Error::new(
-                        "native Codex metadata inspection timed out or exited before completion",
-                    )
-                })?
-                .ok_or_else(|| Error::new("native Codex metadata exceeded the inspection bound"))?;
+            let line = read_metadata_line(&mut reader, &mut total, deadline)?;
             let event: Value = serde_json::from_slice(&line)
                 .map_err(|_| Error::new("invalid native Codex metadata response"))?;
             if !event.is_object() {
@@ -155,9 +135,60 @@ pub fn inspect(executable: &Path, cwd: &Path) -> Result<Value> {
     // an existing user session. Kill its group even after successful metadata.
     crate::headless::signal_group(child.id(), libc::SIGKILL);
     let _ = child.wait();
-    drop(rx);
-    let _ = reader.join();
     outcome
+}
+
+fn read_metadata_line<R: Read + AsRawFd>(
+    reader: &mut BufReader<R>,
+    total: &mut usize,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    let mut line = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::new("native Codex metadata inspection timed out"));
+        }
+        // read_until preserves partial data on WouldBlock. Include that data in
+        // the limit before trying again, even when no newline has arrived.
+        let result = reader
+            .by_ref()
+            .take((LIMIT - *total - line.len() + 1) as u64)
+            .read_until(b'\n', &mut line);
+        if line.len() > LIMIT - *total {
+            return Err(Error::new(
+                "native Codex metadata exceeded the inspection bound",
+            ));
+        }
+        match result {
+            Ok(0) if line.is_empty() => {
+                return Err(Error::new(
+                    "native Codex metadata inspection exited before completion",
+                ));
+            }
+            Ok(_) => {
+                *total += line.len();
+                return Ok(line);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
+            Err(_) => return Err(Error::new("cannot read native Codex metadata")),
+        }
+        let mut descriptor = libc::pollfd {
+            fd: reader.get_ref().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .clamp(1, i32::MAX as u128) as i32;
+        // SAFETY: descriptor points to one initialized pollfd for a live pipe.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, millis) };
+        if ready < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return Err(Error::new("cannot wait for native Codex metadata"));
+        }
+    }
 }
 
 fn require_no_policy(result: &Value) -> Result<()> {
@@ -172,6 +203,52 @@ fn require_no_policy(result: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn metadata_reads_are_bounded_when_a_descendant_keeps_output_open() {
+        use std::os::unix::net::UnixStream;
+        // A live peer models a detached descendant retaining the write end:
+        // killing the original process cannot deliver EOF while this is open.
+        for partial in [b"".as_slice(), b"{\"partial\":"] {
+            let (read, mut retained_writer) = UnixStream::pair().unwrap();
+            read.set_nonblocking(true).unwrap();
+            retained_writer.write_all(partial).unwrap();
+            let mut reader = BufReader::new(read);
+            let start = Instant::now();
+            let error = read_metadata_line(&mut reader, &mut 0, start + Duration::from_millis(50))
+                .unwrap_err();
+            assert!(error.to_string().contains("timed out"));
+            assert!(start.elapsed() < Duration::from_secs(1));
+            drop(retained_writer);
+        }
+    }
+
+    #[test]
+    fn metadata_reads_preserve_fragments_without_requiring_eof() {
+        use std::os::unix::net::UnixStream;
+        let (read, mut retained_writer) = UnixStream::pair().unwrap();
+        read.set_nonblocking(true).unwrap();
+        retained_writer.write_all(b"{\"result\":").unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            retained_writer.write_all(b"null}\n{}\n").unwrap();
+            retained_writer
+        });
+        let mut reader = BufReader::new(read);
+        let mut total = 0;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            read_metadata_line(&mut reader, &mut total, deadline).unwrap(),
+            b"{\"result\":null}\n"
+        );
+        // Retain the returned writer through both reads: neither requires EOF.
+        let _retained_writer = writer.join().unwrap();
+        assert_eq!(
+            read_metadata_line(&mut reader, &mut total, deadline).unwrap(),
+            b"{}\n"
+        );
+        assert_eq!(total, b"{\"result\":null}\n{}\n".len());
+    }
+
     #[test]
     fn absent_requirements_are_explicit_and_never_inferred_from_empty_objects() {
         require_no_policy(&json!({"requirements":null})).unwrap();
