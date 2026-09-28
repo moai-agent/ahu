@@ -595,7 +595,10 @@ pub fn validate_judgement(case: &EvalCase, score: &serde_json::Value) -> Result<
         let weight = case.scoring.get(criterion).copied().unwrap_or(0.0);
         weighted += score * weight;
         max += weight;
-        criterion_scores.insert(criterion.clone(), super::stats::round4(score));
+        // Preserve evidence at full precision: rounding can move a score across
+        // a calibration or acceptance boundary. Only the displayed aggregate
+        // is rounded below.
+        criterion_scores.insert(criterion.clone(), score);
     }
     let normalized = if max == 0.0 { 0.0 } else { weighted / max };
     let raw_codes = object

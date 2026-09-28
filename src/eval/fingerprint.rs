@@ -31,6 +31,8 @@ pub enum Blinding {
     /// candidate, so it could in principle observe that environment. This is
     /// prompt-level blinding and is not environmental isolation.
     PromptOnly,
+    /// Only the bounded request is supplied; no evaluator agent checkout.
+    TypedRequest,
     /// As above, and the evaluator ran from a separately prepared checkout the
     /// operator named, so the candidate's checkout is not its environment.
     Isolated,
@@ -40,6 +42,7 @@ impl Blinding {
     pub fn as_str(self) -> &'static str {
         match self {
             Blinding::PromptOnly => "prompt_only",
+            Blinding::TypedRequest => "typed_request",
             Blinding::Isolated => "isolated",
         }
     }
@@ -48,6 +51,9 @@ impl Blinding {
     /// limitation travels with the numbers rather than living only in a doc.
     pub fn caveat(self) -> &'static str {
         match self {
+            Blinding::TypedRequest => {
+                "typed_request: only rubric and untrusted case evidence/output are sent to the configured provider; no candidate identity, expected answers, weights, or traces are added. Provider behavior is outside ahu control."
+            }
             Blinding::PromptOnly => {
                 "prompt_only: candidate identity, model, harness and trace are withheld from the evaluator prompt, and the evaluator runs in its own clean ahu task. The evaluator's checkout is still the candidate's, so this is not environmental isolation."
             }
@@ -178,6 +184,8 @@ pub struct InputFingerprint {
     pub case_weight: Option<f64>,
     pub candidate: AgentFingerprint,
     pub evaluator: Option<AgentFingerprint>,
+    /// Configured typed grading policy, independent of returned provider identity.
+    pub decision_evaluator: Option<serde_json::Value>,
     pub blinding: Blinding,
     /// Digest over the skills the candidate's harness was given. Absent when the
     /// launch reported no skill catalog.
@@ -252,6 +260,7 @@ impl InputFingerprint {
             "case_weight": self.case_weight,
             "candidate": self.candidate.canonical(),
             "evaluator": self.evaluator.as_ref().map(AgentFingerprint::canonical),
+            "decision_evaluator": self.decision_evaluator,
             "blinding": self.blinding.as_str(),
             "skill_digest": self.skill_digest,
             "selection_policy_digest": self.selection_policy_digest,
@@ -385,6 +394,28 @@ impl InputFingerprint {
             evaluator_field(|a| Some(a.identity_digest.clone())),
         );
         put("blinding", self.blinding.as_str().into());
+        put(
+            "evaluator_kind",
+            if self.decision_evaluator.is_some() {
+                "typed_decision"
+            } else if self.evaluator.is_some() {
+                "agent"
+            } else {
+                "none"
+            }
+            .into(),
+        );
+        put(
+            "decision_evaluator_policy",
+            self.decision_evaluator.clone().unwrap_or_default(),
+        );
+        put(
+            "decision_evaluator_policy_digest",
+            self.decision_evaluator
+                .as_ref()
+                .map(|v| crate::util::digest_bytes(v.to_string().as_bytes()))
+                .map_or(serde_json::Value::Null, Into::into),
+        );
         put("blinding_caveat", self.blinding.caveat().into());
         put(
             "skill_digest",
@@ -471,6 +502,7 @@ mod tests {
             case_weight: None,
             candidate: agent("triage"),
             evaluator: Some(agent("judge")),
+            decision_evaluator: None,
             blinding: Blinding::PromptOnly,
             skill_digest: Some("f".repeat(64)),
             selection_policy_digest: None,
@@ -567,6 +599,11 @@ mod tests {
             Box::new(|f| f.candidate.model = "other".into()),
             Box::new(|f| f.skill_digest = Some("9".repeat(64))),
             Box::new(|f| f.selection_policy_digest = Some("8".repeat(64))),
+            Box::new(|f| {
+                f.decision_evaluator = Some(super::super::decision::policy(
+                    serde_json::json!({"backend":"mock", "requested_model":"configured"}),
+                ))
+            }),
             Box::new(|f| f.build.tool_definitions_digest = "9".repeat(64)),
             Box::new(|f| f.build.binary_digest = Some("9".repeat(64))),
             Box::new(|f| f.build.version = "9.9.9".into()),

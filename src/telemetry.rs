@@ -1509,6 +1509,23 @@ mod selection_tests {
         let Ok(endpoint) = std::env::var("AHU_TEST_SELECTION_ENDPOINT") else {
             return;
         };
+        if std::env::var("AHU_TEST_DECISION_EXPORT").as_deref() == Ok("true") {
+            let mut observation = crate::eval::decision::Observation::new("typed_decision");
+            observation.status = "scored".into();
+            observation.calls_attempted = 1;
+            observation.elapsed_ms = Some(2.0);
+            observation.service = Some(
+                serde_json::json!({"prompt_tokens":1,"model":"synthetic-private-model", "evidence":"synthetic-evidence-secret"}),
+            );
+            observation.telemetry = Some(serde_json::json!({"evidence":"synthetic-trace-secret"}));
+            assert!(super::export_eval_decision(
+                &endpoint,
+                "wire-run",
+                "wire-evaluator",
+                &observation
+            ));
+            return;
+        }
         let selection = serde_json::from_value(serde_json::json!({
             "mode":"lexical","policy_version":1,"catalog_digest":"a".repeat(64),
             "candidate_count":1,"selected":[],"status":"abstained","elapsed_ms":1.0,
@@ -1525,6 +1542,15 @@ mod selection_tests {
 
     #[test]
     fn selection_wire_excludes_inherited_headers_resources_and_proxy() {
+        check_export_wire(false);
+    }
+
+    #[test]
+    fn decision_evaluator_wire_excludes_inherited_headers_resources_evidence_and_proxy() {
+        check_export_wire(true);
+    }
+
+    fn check_export_wire(decision: bool) {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
         use std::time::{Duration, Instant};
@@ -1579,6 +1605,7 @@ mod selection_tests {
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .env_clear()
             .env("AHU_TEST_SELECTION_ENDPOINT", endpoint)
+            .env("AHU_TEST_DECISION_EXPORT", decision.to_string())
             .env("HTTP_PROXY", &proxy_url)
             .env("ALL_PROXY", &proxy_url)
             .env("http_proxy", &proxy_url)
@@ -1613,6 +1640,7 @@ mod selection_tests {
         for sentinel in [
             b"synthetic-resource-secret".as_slice(),
             b"private.attr".as_slice(),
+            b"synthetic-".as_slice(),
         ] {
             assert!(!body.windows(sentinel.len()).any(|w| w == sentinel));
         }
@@ -1664,4 +1692,119 @@ mod selection_tests {
             ));
         }
     }
+}
+
+/// Export a genuine typed grading attempt with only status, duration and usage.
+pub(crate) fn export_eval_decision(
+    endpoint: &str,
+    run_id: &str,
+    evaluator_id: &str,
+    observation: &crate::eval::decision::Observation,
+) -> bool {
+    use opentelemetry_proto::tonic::{
+        collector::trace::v1::ExportTraceServiceRequest,
+        common::v1::{AnyValue, KeyValue as ProtoKeyValue, any_value},
+        resource::v1::Resource as ProtoResource,
+        trace::v1::{ResourceSpans, ScopeSpans, Span as ProtoSpan},
+    };
+    use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
+    use prost::Message;
+    if observation.calls_attempted != 1 {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    if url.scheme() != "http"
+        || !url.host_str().is_some_and(|h| {
+            h.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        })
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    let attr = |key: &str, value: any_value::Value| ProtoKeyValue {
+        key: key.into(),
+        value: Some(AnyValue { value: Some(value) }),
+        ..Default::default()
+    };
+    let string = |key: &str, value: &str| attr(key, any_value::Value::StringValue(value.into()));
+    let integer = |key: &str, value: u64| {
+        attr(
+            key,
+            any_value::Value::IntValue(value.min(i64::MAX as u64) as i64),
+        )
+    };
+    let mut attributes = vec![
+        string("ahu.eval.decision.status", &observation.status),
+        integer("ahu.eval.decision.calls", observation.calls_attempted),
+        attr(
+            "ahu.eval.decision.duration_ms",
+            any_value::Value::DoubleValue(observation.elapsed_ms.unwrap_or_default()),
+        ),
+    ];
+    if let Some(service) = &observation.service {
+        for (field, key) in [
+            ("prompt_tokens", "ahu.eval.decision.tokens.input"),
+            ("generated_tokens", "ahu.eval.decision.tokens.output"),
+        ] {
+            if let Some(value) = service[field].as_u64() {
+                attributes.push(integer(key, value));
+            }
+        }
+    }
+    let ids = RandomIdGenerator::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64);
+    // Construct the wire resource explicitly: SDK Resource::builder and the
+    // default OTLP exporter both import unrelated inherited environment data.
+    let message = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(ProtoResource {
+                attributes: vec![
+                    string("service.name", "ahu-eval"),
+                    string("ahu.eval.run_id", run_id),
+                    string("ahu.eval.stage", "evaluator"),
+                    string("ahu.task.id", evaluator_id),
+                    string("ahu.task.attempt", "1"),
+                ],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                spans: vec![ProtoSpan {
+                    trace_id: ids.new_trace_id().to_bytes().to_vec(),
+                    span_id: ids.new_span_id().to_bytes().to_vec(),
+                    name: "ahu.eval.typed_decision".into(),
+                    start_time_unix_nano: now.saturating_sub(
+                        (observation.elapsed_ms.unwrap_or_default() * 1_000_000.0) as u64,
+                    ),
+                    end_time_unix_nano: now,
+                    attributes,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    // Never consult inherited proxy/OTLP headers; never follow redirects.
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_millis(500))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .post(format!("{}/v1/traces", endpoint.trim_end_matches('/')))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+        .body(message.encode_to_vec())
+        .send()
+        .is_ok_and(|response| response.status().is_success())
 }

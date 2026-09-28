@@ -213,6 +213,7 @@ fn eval_run_requires_named_candidate_case_and_external_records_options() {
             agents: vec!["@triage".into()],
             evaluator: Some("@judge".into()),
             evaluator_repo: None,
+            decision_evaluator: false,
             skill_selection: ahu::skill_selection::Mode::None,
             records: PathBuf::from("/outside/runs.jsonl"),
             runs: 3,
@@ -247,6 +248,7 @@ fn eval_run_requires_named_candidate_case_and_external_records_options() {
             agents: vec!["@triage".into(), "@sorter".into()],
             evaluator: Some("@judge".into()),
             evaluator_repo: Some(PathBuf::from("/outside/judge-checkout")),
+            decision_evaluator: false,
             skill_selection: ahu::skill_selection::Mode::None,
             records: PathBuf::from("/outside/runs.jsonl"),
             runs: 1,
@@ -1627,4 +1629,77 @@ fn selection_fallbacks_and_partial_usage_remain_in_the_configured_arm() {
     assert_eq!(group.mean_selection_partial_input_tokens, Some(12.0));
     assert_eq!(group.candidate_selection_runs, 3);
     assert_eq!(group.mean_candidate_selection["input_tokens_known"], 7.0);
+}
+
+#[test]
+fn decision_evaluator_flag_is_explicit_exclusive_and_documented() {
+    let base = [
+        "eval",
+        "run",
+        "--case",
+        "/outside/case.md",
+        "--agent",
+        "@candidate",
+        "--records",
+        "/outside/runs.jsonl",
+    ];
+    let mut args = base.to_vec();
+    args.push("--decision-evaluator");
+    assert!(matches!(
+        cli::parse(args.clone()).unwrap(),
+        Command::EvalRun {
+            decision_evaluator: true,
+            evaluator: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        cli::parse(base).unwrap(),
+        Command::EvalRun {
+            decision_evaluator: false,
+            ..
+        }
+    ));
+    for other in [
+        vec!["--evaluator", "@judge"],
+        vec!["--evaluator-repo", "/other"],
+        vec!["--decision-evaluator"],
+    ] {
+        let mut invalid = args.clone();
+        invalid.extend(other);
+        assert!(cli::parse(invalid).is_err());
+    }
+    let help = cli::help_for(Some("eval run")).unwrap();
+    assert!(help.contains("--decision-evaluator"));
+    assert!(help.contains("case evidence, candidate output and rubric"));
+}
+
+#[test]
+fn summary_distinguishes_grading_arms_and_uses_complete_evaluation_time() {
+    let repo = TestRepo::new();
+    let external = TempDir::new().unwrap();
+    let records = external.path().join("grading.jsonl");
+    let mut row: Value =
+        serde_json::from_str(&Row::candidate("fixture", 1.0, true).json()).unwrap();
+    row["total_elapsed_ms"] = 100.0.into();
+    row["evaluation_elapsed_ms"] = 1000.0.into();
+    row["evaluator_kind"] = "typed_decision".into();
+    row["evaluator_metrics"] =
+        serde_json::to_value(ahu::eval::decision::Observation::new("typed_decision")).unwrap();
+    std::fs::write(&records, row.to_string()).unwrap();
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let report = ahu::eval::report(&discovered, &records).unwrap();
+    let output = ahu::eval::render_at(&report, 200);
+    assert!(output.contains("[typed grader]"));
+    assert!(output.contains("1.0s eval"));
+    assert!(!output.contains("100ms total"));
+
+    row["evaluator_kind"] = "none".into();
+    row["evaluator_metrics"] =
+        serde_json::to_value(ahu::eval::decision::Observation::new("none")).unwrap();
+    std::fs::write(&records, row.to_string()).unwrap();
+    let report = ahu::eval::report(&discovered, &records).unwrap();
+    let output = ahu::eval::render_at(&report, 200);
+    assert!(output.contains("100ms total"));
+    assert!(!output.contains("  grading    "));
 }

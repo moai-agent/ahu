@@ -80,6 +80,16 @@ Use the returned typed value as one piece of evidence. If the
 result conflicts with clear evidence, explain the conflict and use your own
 judgment.
 
+## Rubric evaluation
+
+For a calibrated, bounded rubric, `ahu eval run --decision-evaluator` can replace
+the optional evaluator-agent stage with one typed request. The candidate still
+runs normally. Prefer deterministic checks for exact outcomes; use an evaluator
+agent when judging needs evidence gathering or richer reasoning. This option
+sends case evidence, candidate output and rubric to the configured provider.
+Compare `evaluation_elapsed_ms`, grading quality, failures and separate provider
+usage against `--evaluator @judge` before claiming a workflow improvement.
+
 ## Skill suggestions
 
 `ahu_skills_suggest` can suggest committed repository skills for a task.

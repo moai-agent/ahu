@@ -37,6 +37,7 @@ use crate::table;
 use crate::util::{Error, ErrorKind, Result, display_path, display_safe};
 
 pub mod case;
+pub mod decision;
 pub mod fingerprint;
 pub mod stats;
 pub mod suite;
@@ -88,6 +89,16 @@ struct Record {
     agent_version: Option<String>,
     #[serde(default)]
     evaluator: Option<String>,
+    #[serde(default)]
+    evaluator_kind: Option<String>,
+    #[serde(default)]
+    decision_evaluator_policy_digest: Option<String>,
+    #[serde(default)]
+    decision_evaluator_policy: Option<serde_json::Value>,
+    #[serde(default)]
+    evaluator_metrics: Option<decision::Observation>,
+    #[serde(default)]
+    evaluation_elapsed_ms: Option<f64>,
     #[serde(default)]
     evaluator_version: Option<String>,
     #[serde(default)]
@@ -273,6 +284,9 @@ pub struct GroupKey {
     pub agent: String,
     pub agent_version: String,
     pub evaluator: String,
+    pub evaluator_kind: String,
+    pub decision_evaluator_policy_digest: String,
+    pub decision_evaluator_policy: String,
     pub evaluator_version: String,
     pub evaluator_model: String,
     pub evaluator_harness: String,
@@ -351,6 +365,7 @@ pub struct Group {
     /// timed-out attempts included.
     pub mean_launch_elapsed_ms: Option<f64>,
     pub mean_total_elapsed_ms: Option<f64>,
+    pub evaluator_metrics: decision::Summary,
     pub mean_selection_elapsed_ms: Option<f64>,
     pub selection_fallbacks: usize,
     pub selection_telemetry_observations: usize,
@@ -650,11 +665,23 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
                 "invalid skill selection observations",
             ));
         }
+        if record
+            .evaluator_metrics
+            .as_ref()
+            .is_some_and(|m| !m.validate())
+        {
+            return Err(malformed_text(
+                path,
+                number,
+                "invalid evaluator observations",
+            ));
+        }
         if record.decision_request_bytes.is_some() != (record.decision_request_observations > 0)
             || record.score.is_some_and(|score| !score.is_finite())
             || [
                 record.elapsed_ms,
                 record.total_elapsed_ms,
+                record.evaluation_elapsed_ms,
                 record.skill_selection.as_ref().map(|s| s.elapsed_ms),
                 record.decision_service_duration_ms,
                 record.decision_call_count,
@@ -765,6 +792,15 @@ fn key_for(record: &Record) -> GroupKey {
         agent: or_unspecified(&record.agent, UNSPECIFIED),
         agent_version: or_unspecified(&record.agent_version, UNSPECIFIED),
         evaluator: or_unspecified(&record.evaluator, UNSPECIFIED),
+        evaluator_kind: or_unspecified(&record.evaluator_kind, UNSPECIFIED),
+        decision_evaluator_policy: record
+            .decision_evaluator_policy
+            .as_ref()
+            .map_or_else(|| "null".into(), |p| p.to_string()),
+        decision_evaluator_policy_digest: or_unspecified(
+            &record.decision_evaluator_policy_digest,
+            UNSPECIFIED,
+        ),
         evaluator_version: or_unspecified(&record.evaluator_version, UNSPECIFIED),
         evaluator_model: or_unspecified(&record.evaluator_model, UNSPECIFIED),
         evaluator_harness: or_unspecified(&record.evaluator_harness, UNSPECIFIED),
@@ -1065,6 +1101,11 @@ fn group(records: &[Record]) -> Vec<Group> {
                 mean_elapsed_ms: mean(&elapsed),
                 mean_launch_elapsed_ms: mean(&launch_elapsed),
                 mean_total_elapsed_ms: mean(&total_elapsed),
+                evaluator_metrics: decision::Summary::collect(
+                    items
+                        .iter()
+                        .map(|r| (r.evaluator_metrics.as_ref(), r.evaluation_elapsed_ms)),
+                ),
                 mean_selection_elapsed_ms: mean(&selection_elapsed),
                 selection_fallbacks,
                 selection_telemetry_observations,
@@ -1199,6 +1240,29 @@ pub fn render_at(report: &Report, width: usize) -> String {
             display_safe(&key.ahu_version),
             display_safe(&key.skill_digest)
         ));
+        if matches!(key.evaluator_kind.as_str(), "agent" | "typed_decision") {
+            let metrics = &group.evaluator_metrics;
+            out.push_str(&format!(
+                "  grading    {} policy {} configured {}\n             status {}; OTel {}; provider calls {}\n             provider complete input/output {}/{} of {} runs; reported services {}\n",
+                display_safe(&key.evaluator_kind),
+                display_safe(&key.decision_evaluator_policy_digest),
+                display_safe(&key.decision_evaluator_policy),
+                display_safe(&serde_json::to_string(&metrics.statuses).unwrap_or_default()),
+                display_safe(&serde_json::to_string(&metrics.telemetry_coverage).unwrap_or_default()),
+                metrics.calls_attempted,
+                metrics.provider_input_complete_runs, metrics.provider_output_complete_runs, group.runs,
+                display_safe(&serde_json::to_string(&metrics.reported_service_identities).unwrap_or_default()),
+            ));
+            for (metric, mean) in &metrics.means {
+                out.push_str(&format!(
+                    "             {} mean {:.2} ({}/{} observations)\n",
+                    display_safe(metric),
+                    mean,
+                    metrics.observations[metric],
+                    group.runs
+                ));
+            }
+        }
         if key.selection_mode != "none" {
             out.push_str(&format!(
                 "  selection  {}  {:.1} ms; total preparation + launch {:.1} ms; fallbacks {}; OTel {}/{}\n",
@@ -1516,6 +1580,11 @@ fn summary_rows(groups: &[Group]) -> Vec<Vec<table::Cell>> {
             if key.selection_mode != "none" {
                 agent.push_str(&format!(" [{}]", key.selection_mode));
             }
+            match key.evaluator_kind.as_str() {
+                "typed_decision" => agent.push_str(" [typed grader]"),
+                "agent" => agent.push_str(&format!(" [grader {}]", key.evaluator)),
+                _ => {}
+            }
             vec![
                 table::Cell::plain(display_safe(&key.case_id)),
                 table::Cell::painted(Role::Agent, display_safe(&agent)),
@@ -1532,8 +1601,18 @@ fn summary_rows(groups: &[Group]) -> Vec<Vec<table::Cell>> {
                 fraction(group.tool_pass, group.tool_pass + group.tool_fail),
                 measured(
                     group
-                        .mean_total_elapsed_ms
-                        .map(|ms| format!("{} total", human_duration(ms)))
+                        .evaluator_metrics
+                        .means
+                        .get("evaluation_elapsed_ms")
+                        .filter(|_| {
+                            matches!(key.evaluator_kind.as_str(), "agent" | "typed_decision")
+                        })
+                        .map(|ms| format!("{} eval", human_duration(*ms)))
+                        .or_else(|| {
+                            group
+                                .mean_total_elapsed_ms
+                                .map(|ms| format!("{} total", human_duration(ms)))
+                        })
                         .or_else(|| group.mean_elapsed_ms.map(human_duration)),
                 ),
                 measured(summary_tokens(group)),
@@ -1667,6 +1746,7 @@ pub struct RunRequest<'a> {
     /// evaluator's environment is not the candidate's, and the record says
     /// `isolated` rather than `prompt_only`.
     pub evaluator_repo: Option<&'a Path>,
+    pub decision_evaluator: bool,
     pub skill_selection: crate::skill_selection::Mode,
     pub records: &'a Path,
     pub runs: u32,
@@ -1689,10 +1769,23 @@ pub fn run(
     repo: &crate::git::Repo,
     request: &RunRequest<'_>,
 ) -> Result<i32> {
+    if request.decision_evaluator
+        && (request.evaluator.is_some() || request.evaluator_repo.is_some())
+    {
+        bail!(kind: ErrorKind::Usage, "--decision-evaluator conflicts with --evaluator and --evaluator-repo");
+    }
     let records = writable_records_path(repo, request.records)?;
 
     // ---- preflight: everything that can be refused is refused before a launch.
     let (suite_identity, cases) = load_cases(request)?;
+    let decision_policy = if request.decision_evaluator {
+        for entry in &cases {
+            decision::preflight(&entry.case).map_err(|e| e.with_kind(ErrorKind::Usage))?;
+        }
+        Some(decision::policy(crate::mcp::decision_configuration()?))
+    } else {
+        None
+    };
     if request.agents.is_empty() {
         bail!(kind: ErrorKind::Usage, "`ahu eval run` needs at least one --agent @name");
     }
@@ -1772,7 +1865,9 @@ pub fn run(
     {
         bail!(kind: ErrorKind::Usage, "--evaluator requires a case `rubric` object with one criterion per scored answer field; case {:?} has none", missing.case.id);
     }
-    let blinding = if evaluator_repo.is_some() {
+    let blinding = if request.decision_evaluator {
+        fingerprint::Blinding::TypedRequest
+    } else if evaluator_repo.is_some() {
         fingerprint::Blinding::Isolated
     } else {
         fingerprint::Blinding::PromptOnly
@@ -1832,6 +1927,7 @@ pub fn run(
             case_weight: entry.weight,
             candidate: fingerprint::AgentFingerprint::of(candidate),
             evaluator: evaluator.as_ref().map(fingerprint::AgentFingerprint::of),
+            decision_evaluator: decision_policy.clone(),
             blinding,
             skill_digest: None,
             selection_policy_digest: None,
@@ -1844,6 +1940,13 @@ pub fn run(
         // The selector receives only candidate-visible material, never expected
         // answers, scoring weights or the hidden evaluator rubric.
         let trial_started = std::time::Instant::now();
+        let mut evaluator_observation = decision::Observation::new(if request.decision_evaluator {
+            "typed_decision"
+        } else if evaluator.is_some() {
+            "agent"
+        } else {
+            "none"
+        });
         let visible_task = format!("{}\n{}", case.purpose, serde_json::to_string(&case.state)?);
         let selection =
             crate::skill_selection::prepare(repo, &visible_task, request.skill_selection)?;
@@ -1960,6 +2063,7 @@ pub fn run(
                     "telemetry_receiver".into(),
                     serde_json::to_value(receiver.receiver_stats().since(receiver_stats_before))?,
                 );
+                insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
                 append_jsonl(&records, &serde_json::Value::Object(record))?;
                 outputs.push(serde_json::json!({
                     "trial": trial.index,
@@ -2041,6 +2145,7 @@ pub fn run(
                     "telemetry_receiver".into(),
                     serde_json::to_value(receiver.receiver_stats().since(receiver_stats_before))?,
                 );
+                insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
                 append_jsonl(&records, &serde_json::Value::Object(record))?;
                 outputs.push(serde_json::json!({
                     "trial": trial.index, "case_id": case.id,
@@ -2060,10 +2165,40 @@ pub fn run(
         let mut judgement: Option<case::Judgement> = None;
         let mut judge_failure: Option<String> = None;
         let mut evaluator_task = None;
+        if request.decision_evaluator {
+            match decision::judge_with(case, &answer, &mut evaluator_observation, |arguments| {
+                crate::mcp::typed_decide(repo, arguments)
+            }) {
+                Ok(judged) => {
+                    judge_status = "scored";
+                    judgement = Some(judged);
+                }
+                Err(_) => {
+                    judge_status = "failed";
+                    judge_failure = Some("typed_decision_grading_failed".into());
+                }
+            }
+            let observation_id = format!("evaluator-{}-{}", run_id, trial.index);
+            evaluator_observation.observation_id = Some(observation_id.clone());
+            if evaluator_observation.calls_attempted > 0
+                && crate::telemetry::export_eval_decision(
+                    receiver.endpoint(),
+                    &run_id,
+                    &observation_id,
+                    &evaluator_observation,
+                )
+                && receiver
+                    .task(&observation_id, 1)
+                    .is_some_and(|t| t.evaluator_decision_observations == 1)
+            {
+                evaluator_observation.telemetry_coverage = "typed_decision_span".into();
+            }
+        }
         if let Some(agent) = evaluator.as_ref() {
+            let evaluator_started = std::time::Instant::now();
             let evaluator_label = request.evaluator.unwrap_or("@evaluator");
             let prompt = case.evaluator_prompt(&answer)?;
-            match launch_eval_agent(
+            let evaluator_launch = launch_eval_agent(
                 evaluator_root,
                 evaluator_label,
                 &prompt,
@@ -2074,9 +2209,27 @@ pub fn run(
                 request.timeout_seconds,
                 request.allow_widened_approvals,
                 receiver.endpoint(),
-            )
-            .result
-            .and_then(|result| {
+            );
+            let envelope = evaluator_launch
+                .result
+                .as_ref()
+                .ok()
+                .or(evaluator_launch.envelope.as_ref());
+            if let Some(envelope) = envelope {
+                write_private_file(
+                    &run_dir.join("evaluator-result.json"),
+                    &serde_json::to_vec(envelope)?,
+                )?;
+                print.evaluator = Some(
+                    fingerprint::AgentFingerprint::of(agent)
+                        .with_harness_version(harness_version(envelope)),
+                );
+                print.evaluator_skill_digest = skill_digest(envelope);
+                print.evaluator_repo_head = evaluator_root.head.clone();
+                observe_evaluator_agent(&mut evaluator_observation, envelope, &receiver)?;
+                evaluator_task = evaluator_observation.task_id.clone();
+            }
+            match evaluator_launch.result.and_then(|result| {
                 let worktree = result
                     .get("worktree")
                     .and_then(serde_json::Value::as_str)
@@ -2093,24 +2246,10 @@ pub fn run(
                 let score_json: serde_json::Value = serde_json::from_slice(&score_bytes)
                     .map_err(|_| Error::new("evaluator score.json is not valid JSON"))?;
                 let judged = case::validate_judgement(case, &score_json)?;
-                Ok((result, score_bytes, judged))
+                Ok((score_bytes, judged))
             }) {
-                Ok((result, score_bytes, judged)) => {
-                    write_private_file(
-                        &run_dir.join("evaluator-result.json"),
-                        &serde_json::to_vec(&result)?,
-                    )?;
+                Ok((score_bytes, judged)) => {
                     write_private_file(&run_dir.join("score.json"), &score_bytes)?;
-                    print.evaluator = Some(
-                        fingerprint::AgentFingerprint::of(agent)
-                            .with_harness_version(harness_version(&result)),
-                    );
-                    print.evaluator_skill_digest = skill_digest(&result);
-                    print.evaluator_repo_head = evaluator_root.head.clone();
-                    evaluator_task = result
-                        .get("task_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned);
                     judge_status = "scored";
                     judgement = Some(judged);
                 }
@@ -2119,8 +2258,13 @@ pub fn run(
                     judge_failure = Some(error.to_string());
                 }
             }
+            evaluator_observation.elapsed_ms =
+                Some(evaluator_started.elapsed().as_secs_f64() * 1000.0);
         }
 
+        if evaluator.is_some() {
+            evaluator_observation.status = judge_status.into();
+        }
         let telemetry = receiver.task(candidate_task, attempt);
         let telemetry_coverage = telemetry
             .as_ref()
@@ -2129,12 +2273,12 @@ pub fn run(
             case::score_tool_expectations(case.tool_expectations.as_ref(), telemetry.as_ref());
         let mcp_observed = telemetry.as_ref().is_some_and(|t| t.mcp_observed);
 
-        // The headline score is the judge's when one scored, and the
-        // deterministic answer score otherwise — never a judge failure turned
-        // into a zero. `score_source` says which it is.
+        // Failed judging has no headline score. Deterministic answer checks
+        // remain available separately, and cannot turn a judge failure into a pass.
         let (score, passed, score_source) = match &judgement {
-            Some(judged) => (judged.score, judged.passed, "judge"),
-            None => (answer_score, answer_passed, "deterministic"),
+            Some(judged) => (Some(judged.score), judged.passed, "judge"),
+            None if judge_status == "failed" => (None, false, "judge_failed"),
+            None => (Some(answer_score), answer_passed, "deterministic"),
         };
 
         let mut record = print.record_fields();
@@ -2167,7 +2311,7 @@ pub fn run(
                 .cloned()
                 .unwrap_or_else(|| "unknown".into()),
         );
-        put("score", number(score));
+        put("score", score.map_or(serde_json::Value::Null, number));
         put("passed", passed.into());
         put("score_source", score_source.into());
         put("answer_score", number(answer_score));
@@ -2334,6 +2478,7 @@ pub fn run(
         )?;
         insert_candidate_selection_fields(&mut record, telemetry.as_ref());
         record.retain(|_, value| !value.is_null());
+        insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
         append_jsonl(&records, &serde_json::Value::Object(record))?;
         outputs.push(serde_json::json!({
             "trial": trial.index,
@@ -2359,6 +2504,7 @@ pub fn run(
         "cases": cases.iter().map(|entry| entry.case.id.clone()).collect::<Vec<_>>(),
         "candidates": candidates.iter().map(|agent| agent.label()).collect::<Vec<_>>(),
         "evaluator": request.evaluator,
+        "decision_evaluator": decision_policy,
         "blinding": blinding.as_str(),
         "blinding_caveat": blinding.caveat(),
         "planned_trials": plan.len(),
@@ -2984,6 +3130,9 @@ fn group_json(group: &Group) -> serde_json::Value {
         "agent": key.agent,
         "agent_version": key.agent_version,
         "evaluator": key.evaluator,
+        "evaluator_kind": key.evaluator_kind,
+        "decision_evaluator_policy_digest": key.decision_evaluator_policy_digest,
+        "decision_evaluator_policy": serde_json::from_str::<serde_json::Value>(&key.decision_evaluator_policy).unwrap_or_default(),
         "evaluator_version": key.evaluator_version,
         "evaluator_model": key.evaluator_model,
         "evaluator_harness": key.evaluator_harness,
@@ -3073,6 +3222,7 @@ fn group_json(group: &Group) -> serde_json::Value {
             "mean_elapsed_ms": group.mean_elapsed_ms,
             "mean_launch_elapsed_ms": group.mean_launch_elapsed_ms,
             "mean_total_elapsed_ms": group.mean_total_elapsed_ms,
+            "evaluator_metrics": group.evaluator_metrics,
             "mean_selection_elapsed_ms": group.mean_selection_elapsed_ms,
             "mean_selection_input_tokens": group.mean_selection_input_tokens,
             "mean_selection_output_tokens": group.mean_selection_output_tokens,
@@ -3161,4 +3311,44 @@ fn insert_candidate_selection_fields(
     });
     value.as_object_mut().unwrap().retain(|_, v| !v.is_null());
     record.insert("candidate_selection".into(), value);
+}
+
+fn insert_evaluation_fields(
+    record: &mut serde_json::Map<String, serde_json::Value>,
+    evaluator: &decision::Observation,
+    started: std::time::Instant,
+) -> Result<()> {
+    record.insert(
+        "evaluation_elapsed_ms".into(),
+        number(started.elapsed().as_secs_f64() * 1000.0),
+    );
+    record.insert("evaluator_metrics".into(), serde_json::to_value(evaluator)?);
+    Ok(())
+}
+
+fn observe_evaluator_agent(
+    observation: &mut decision::Observation,
+    envelope: &serde_json::Value,
+    receiver: &crate::eval_otel::Receiver,
+) -> Result<()> {
+    observation.task_id = envelope["task_id"].as_str().map(str::to_owned);
+    observation.attempt = observation
+        .task_id
+        .as_ref()
+        .map(|_| envelope["attempt"].as_u64().unwrap_or(1) as u32);
+    let telemetry = observation
+        .task_id
+        .as_ref()
+        .and_then(|id| receiver.task(id, observation.attempt.unwrap_or(1)));
+    observation.telemetry_coverage = telemetry
+        .as_ref()
+        .map_or("none", |t| t.coverage().as_str())
+        .into();
+    observation.telemetry = telemetry.as_ref().map(serde_json::to_value).transpose()?;
+    observation.reported_tokens = reported_tokens(Some(envelope), telemetry.as_ref())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    Ok(())
 }

@@ -83,6 +83,11 @@ pub struct TaskTelemetry {
     pub decision_request_bytes: Option<u64>,
     pub decision_request_observations: u64,
     pub decision_request_formats: BTreeMap<String, u64>,
+    pub evaluator_decision_observations: u64,
+    pub evaluator_decision_errors: u64,
+    pub evaluator_decision_input_tokens: Option<u64>,
+    pub evaluator_decision_output_tokens: Option<u64>,
+    pub evaluator_decision_duration_ms: Option<f64>,
     pub selection_observations: u64,
     pub selection_candidate_count: Option<u64>,
     pub selection_selected_count: Option<u64>,
@@ -516,6 +521,29 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                             task.trace_id = Some(trace_id);
                         }
                     }
+                    "ahu.eval.typed_decision" => {
+                        task.evaluator_decision_observations =
+                            task.evaluator_decision_observations.saturating_add(1);
+                        if attrs
+                            .get("ahu.eval.decision.status")
+                            .is_some_and(|v| v == "failed")
+                        {
+                            task.evaluator_decision_errors =
+                                task.evaluator_decision_errors.saturating_add(1);
+                        }
+                        add_counter(
+                            &mut task.evaluator_decision_input_tokens,
+                            integers.get("ahu.eval.decision.tokens.input").copied(),
+                        );
+                        add_counter(
+                            &mut task.evaluator_decision_output_tokens,
+                            integers.get("ahu.eval.decision.tokens.output").copied(),
+                        );
+                        add_duration(
+                            &mut task.evaluator_decision_duration_ms,
+                            numbers.get("ahu.eval.decision.duration_ms").copied(),
+                        );
+                    }
                     "ahu.skills.selection" => {
                         task.selection_observations = task.selection_observations.saturating_add(1);
                         observe_selection_completeness(task, &integers);
@@ -671,6 +699,7 @@ fn string_attributes(
                     | "ahu.mcp.method"
                     | "ahu.mcp.tool.name"
                     | "ahu.mcp.outcome"
+                    | "ahu.eval.decision.status"
                     | "ahu.mcp.decision.request.format"
             )
             .then(|| (attribute.key.clone(), value.clone()))

@@ -570,7 +570,7 @@ fn probabilities(arguments: &Value, response: &Value) -> Option<BTreeMap<String,
         .collect()
 }
 
-fn service_metadata(value: &Value) -> Option<Value> {
+pub(crate) fn service_metadata(value: &Value) -> Option<Value> {
     let mut service = Map::new();
     for key in ["backend", "model"] {
         let text = value.get(key)?.as_str()?;

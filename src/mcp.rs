@@ -449,6 +449,10 @@ pub(crate) fn decision_configuration() -> Result<Value> {
     decisions::configuration()
 }
 
+pub(crate) fn validate_decision_request(arguments: &Value) -> Result<()> {
+    decisions::validate_arguments(arguments)
+}
+
 pub fn typed_decide(repo: &Repo, arguments: &Value) -> Result<Value> {
     decisions::call(arguments, repo)
 }

@@ -8,8 +8,8 @@ ahu is cross-harness configuration management for agent sessions. It launches
 agents that a repository defines into separate Git worktrees
 and runs interactive sessions in cmux or unattended headless attempts.
 
-Claude Code, Codex, the Antigravity CLI and OpenCode run the agent loop and own
-the conversation. ahu chooses the configured harness, model, instructions and
+ahu is not an agent harness. Claude Code, Codex, the Antigravity CLI and OpenCode
+run the agent loop and own the conversation. ahu chooses the configured harness, model, instructions and
 worktree, and reports visible context sources and coverage gaps. Its MCP server
 provides agent/task inspection and typed decision tools. Its eval runner launches
 agents, checks outcomes and joins available OTel observations to each trial.
@@ -367,7 +367,7 @@ and validates state paths before attempting cleanup. Listing never deletes them.
 - silently add, edit, or remove hooks, or reorganise native skills, settings, or histories
 - widen permissions unless a manifest asks for it, which the preview states in full before anything starts
 - claim to know the effective approval boundary: the harness's own settings decide it, and ahu only reports what it read and which flags it passed
-- install, configure, or authenticate a harness on your behalf
+- install a harness or authenticate its agent model on your behalf
 - delete a worktree, branch, or task record that may hold your work
 - treat the recognized-context lock as proof of all harness-managed context
 

@@ -159,6 +159,9 @@ eval run options:
                         and capped before any model launches
   --agent @name         Registered candidate agent (required, repeatable). The
                         order given is the order the trials run in
+  --decision-evaluator  Send case evidence, candidate output and rubric to the
+                        configured typed decision provider for grading. Opt-in;
+                        conflicts with --evaluator and --evaluator-repo
   --evaluator @name     Optional separate registered evaluator agent
   --evaluator-repo <path>
                         Run the evaluator from a separately prepared checkout,
@@ -418,6 +421,7 @@ pub enum Command {
         evaluator: Option<String>,
         /// A separately prepared checkout the evaluator runs from.
         evaluator_repo: Option<PathBuf>,
+        decision_evaluator: bool,
         skill_selection: crate::skill_selection::Mode,
         records: PathBuf,
         runs: u32,
@@ -896,6 +900,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
     let mut agents: Vec<String> = Vec::new();
     let mut evaluator = None;
     let mut evaluator_repo = None;
+    let mut decision_evaluator = false;
     let mut skill_selection = None;
     let mut records = None;
     let mut runs = 1u32;
@@ -916,6 +921,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
             // Repeatable: each occurrence adds a candidate, and the order is
             // kept because it is the order the trials run in.
             "--agent" => agents.push(value_for("--agent", rest, &mut index)?),
+            "--decision-evaluator" if !decision_evaluator => decision_evaluator = true,
             "--evaluator" if evaluator.is_none() => {
                 evaluator = Some(value_for("--evaluator", rest, &mut index)?)
             }
@@ -1006,6 +1012,9 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
     {
         bail!("--evaluator must name a registered agent as @name");
     }
+    if decision_evaluator && (evaluator.is_some() || evaluator_repo.is_some()) {
+        bail!("--decision-evaluator conflicts with --evaluator and --evaluator-repo");
+    }
     if evaluator_repo.is_some() && evaluator.is_none() {
         bail!("--evaluator-repo needs --evaluator @name: it names where that evaluator runs from.");
     }
@@ -1018,6 +1027,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
         agents,
         evaluator,
         evaluator_repo,
+        decision_evaluator,
         skill_selection: skill_selection.unwrap_or_default(),
         records,
         runs,
@@ -1774,6 +1784,7 @@ mod parser_tests {
                 agents,
                 evaluator: None,
                 evaluator_repo: None,
+                decision_evaluator: false,
                 skill_selection: crate::skill_selection::Mode::None,
                 records: "runs.jsonl".into(),
                 runs: 100,

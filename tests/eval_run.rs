@@ -810,3 +810,189 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
         );
     }
 }
+
+#[test]
+fn typed_evaluator_cli_keeps_failure_and_real_score_metadata_in_one_arm() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::os::unix::fs::PermissionsExt;
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent_on("triage", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    repo.commit("typed evaluator fixture");
+    let external = TempDir::new().unwrap();
+    let bin = external.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let harness = bin.join("opencode");
+    std::fs::write(&harness, r#"#!/usr/bin/env python3
+import json, os, subprocess, sys
+if '--version' in sys.argv:
+    print('1.18.32')
+    raise SystemExit(0)
+with open('answer.json', 'w') as f: json.dump({'route':'billing'}, f)
+rows = [{'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
+        {'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}}]
+subprocess.run([os.environ['AHU_BIN'],'mcp','serve'], input=''.join(json.dumps(r)+'\n' for r in rows), text=True, stdout=subprocess.DEVNULL, check=True)
+print(json.dumps({'type':'text','sessionID':os.environ['AHU_PARENT_TASK'],'part':{'type':'text','text':'done'}}), flush=True)
+print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK'],'part':{'type':'step-finish','reason':'stop','usage':{'input_tokens':12,'output_tokens':4,'total_tokens':16}}}), flush=True)
+"#).unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/v1/decisions", listener.local_addr().unwrap());
+    let service = std::thread::spawn(move || {
+        for success in [true, false] {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "missing grading request"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((key, value)) = line.split_once(':')
+                    && key.eq_ignore_ascii_case("content-length")
+                {
+                    length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let mut body = vec![0; length.unwrap()];
+            reader.read_exact(&mut body).unwrap();
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(request["state"]["candidate_output"]["route"], "billing");
+            assert_eq!(request["state"].as_object().unwrap().len(), 3);
+            assert!(request.get("expected").is_none());
+            assert!(request["state"].get("expected").is_none());
+            assert_eq!(
+                request["questions"]["route"]["levels"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                3
+            );
+            let response = if success {
+                serde_json::json!({"answers":{"route":{"value":0.74999,"confidence":0.8,"probabilities":{"0":0,"1":0.50002,"2":0.49998}}},"service":{"backend":"fixture","model":"fixture","model_reported":true,"prompt_tokens":31,"generated_tokens":2}}).to_string()
+            } else {
+                "{\"error\":\"synthetic-private-provider-message\"}".into()
+            };
+            let status = if success {
+                "200 OK"
+            } else {
+                "503 Service Unavailable"
+            };
+            write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).unwrap();
+        }
+    });
+    let case = external.path().join("case.md");
+    fixture_case(&case);
+    let records = external.path().join("runs.jsonl");
+    let home = external.path().canonicalize().unwrap().join("home");
+    std::fs::create_dir(&home).unwrap();
+    for _ in 0..2 {
+        let output = common::ahu()
+            .current_dir(repo.path())
+            .args([
+                "eval",
+                "run",
+                "--case",
+                case.to_str().unwrap(),
+                "--agent",
+                "@triage",
+                "--decision-evaluator",
+                "--records",
+                records.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("HOME", &home)
+            .env("AHU_DECISION_URL", &endpoint)
+            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if service.join().is_err() {
+        let record_text = std::fs::read_to_string(&records).unwrap_or_default();
+        let kept = external.keep();
+        panic!(
+            "grading fixture failed; artifacts {} records {}",
+            kept.display(),
+            record_text
+        );
+    }
+    let text = std::fs::read_to_string(&records).unwrap();
+    assert!(!text.contains("synthetic-private-provider-message"));
+    let rows: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(row["answer_passed"], true);
+        assert_eq!(row["telemetry_coverage"], "complete_session");
+        assert_eq!(row["decision_call_count"], 0);
+        assert_eq!(row["evaluator_metrics"]["calls_attempted"], 1);
+        assert_eq!(
+            row["evaluator_metrics"]["telemetry_coverage"],
+            "typed_decision_span"
+        );
+        assert!(
+            row["evaluation_elapsed_ms"].as_f64().unwrap()
+                >= row["total_elapsed_ms"].as_f64().unwrap()
+        );
+    }
+    assert_eq!(rows[0]["judge_status"], "scored");
+    assert_eq!(rows[0]["judge_criterion_scores"]["route"], 0.74999);
+    assert_eq!(
+        rows[0]["evaluator_metrics"]["provider_input_complete"],
+        true
+    );
+    assert_eq!(rows[1]["judge_status"], "failed");
+    assert_eq!(rows[1]["score"], Value::Null);
+    assert_eq!(rows[1]["passed"], false);
+    assert_eq!(rows[1]["evaluator_metrics"]["service"], Value::Null);
+    assert_eq!(
+        rows[1]["evaluator_metrics"]["provider_input_complete"],
+        false
+    );
+    let report = ahu::eval::report(&ahu::git::discover(repo.path()).unwrap(), &records).unwrap();
+    assert_eq!(report.groups.len(), 1);
+    assert_eq!(
+        report.groups[0]
+            .evaluator_metrics
+            .provider_input_complete_runs,
+        1
+    );
+    assert_eq!(report.groups[0].evaluator_metrics.statuses["failed"], 1);
+}

@@ -1653,3 +1653,11 @@ OpenCode does not **explicitly deny**, without asking. Permissions set to `deny`
 OpenCode's own configuration or agent frontmatter still apply, and ahu cannot
 widen past them. OpenCode's plugins retain their native loading behavior; ahu
 passes no `--pure` here.
+
+`ahu eval run --decision-evaluator` opts into rubric grading by the configured
+typed decision provider. It sends case evidence, candidate output, and rubric
+instructions to that provider and conflicts with `--evaluator` and
+`--evaluator-repo`. Requests are preflighted for all cases before candidates run;
+provider failures remain failed judgments with unknown usage and no fallback.
+See [Typed decision evaluator](evaluations.md#typed-decision-evaluator) for
+request bounds, fingerprints, timing, and evaluator telemetry coverage.

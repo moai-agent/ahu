@@ -132,19 +132,13 @@ fn the_overview_says_ahu_is_not_a_harness_and_names_what_it_needs() {
             text.contains("installed and signed in by you"),
             "who installs it must be explicit: {text}"
         );
-        assert!(
-            text.contains("holds no API key"),
-            "ahu must state that it holds no credentials: {text}"
-        );
-        assert!(
-            text.contains("never installs, configures, or authenticates one"),
-            "{text}"
-        );
-        assert!(text.contains("holds no credentials"), "{text}");
-        assert!(
-            text.contains("install, configure, or authenticate a harness"),
-            "the will-not list must cover this"
-        );
+        assert!(text.contains("Harness installation and sign-in remain separate"));
+        assert!(text.contains("installs supported skills/MCP configuration"));
+        assert!(text.contains("TYPESAFE_API_KEY"));
+        assert!(text.contains("typed decision service has a separate credential boundary"));
+        assert!(text.contains("install a harness or authenticate its agent model"));
+        assert!(!text.contains("speaks to no model provider"));
+        assert!(!text.contains("holds no credentials"));
     }
 }
 

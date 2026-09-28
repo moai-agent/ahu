@@ -165,3 +165,58 @@ The tool-neutral prompt template (version 3) explicitly asks for choice option
 keys and numeric score/probability values. Option descriptions explain the
 choices; they are not accepted in place of keys. Prompt version and profile are
 part of the input fingerprint, so older and newer prompt runs remain separate.
+
+## Typed decision evaluator
+
+`ahu eval run --decision-evaluator` grades case rubrics through the configured
+`ahu_typed_decide` provider boundary. It is opt-in and conflicts with `--evaluator`
+and `--evaluator-repo`; the candidate still runs normally. This option sends case
+state, questions, candidate output, and rubric instructions to the configured
+provider. It adds no expected answers, scoring weights, candidate identity, or
+traces. Evidence supplied within case data or candidate output remains untrusted.
+
+Each rubric field becomes one score question with range 0..1 and descriptive
+levels “Does not satisfy the criterion”, “Partially satisfies the criterion”, and
+“Fully satisfies the criterion”. All cases are checked before any candidate
+launch, including the 20-question limit, instruction bounds, and 64 KiB request
+capacity reserved for the largest valid answer. Grading uses the same weighted
+judgement validation as registered evaluator agents; reason codes are empty.
+Scores may be continuous between the described levels. The case's scoring
+threshold also controls the weighted judge pass, so a threshold of 1 requires
+an exactly perfect aggregate score. Choose and validate thresholds before an
+experiment; retain continuous scores when comparing graders. Prefer deterministic
+checks whenever they express the required outcome. Typed judging is an alternative
+to an optional rubric evaluator, not a prerequisite for running evals.
+There is one provider attempt, with no retry or substitute judge. Failed judging
+has no headline score or pass; deterministic answer checks remain separate.
+
+Provider and credential selection are unchanged from `ahu_typed_decide`:
+`AHU_DECISION_URL` selects a validated local endpoint, otherwise the configured
+TypeSafe backend is used (`AHU_DECISION_MODEL`, default `jev-latest`). Only that
+existing boundary accesses credentials. Configuration and grading policy version
+are fingerprinted before execution, separately from returned service identity.
+The evaluator is identified as `typed_decision`, never as a registered agent.
+Blinding is `typed_request`: ahu supplies only the bounded request, without an
+agent checkout; this does not certify provider behavior.
+
+Records include `evaluator_metrics` and `evaluation_elapsed_ms`. The latter starts
+before skill selection and ends after grading, including failed work;
+`total_elapsed_ms` retains its selection-plus-candidate-launch meaning.
+Evaluator agent tokens and projected telemetry use the evaluator's own task ID
+and attempt, including failed launches and invalid score artifacts. Typed grading
+records safe returned backend/model and optional provider tokens/duration.
+Failed service calls have unknown usage, never an invented zero. Returned usage
+and input/output completeness are reported separately from candidate usage.
+
+Reports expose evaluator status counts, timing means, per-metric observation
+counts, reported provider identities, usage completeness, and telemetry coverage
+in JSON and text. A missing observation does not contribute zero to a mean.
+The comparison table identifies the grading arm and marks complete evaluation
+time as `eval`; `total` continues to mean preparation plus candidate completion.
+Typed grading exports a genuine `ahu.eval.typed_decision` span to the run's local
+receiver under a separate evaluator observation ID. It carries only status,
+latency, and token counts, with no evidence, credentials, inherited OTel resource
+attributes, or authentication headers. Coverage `typed_decision_span` means this
+observation arrived; it does not claim MCP session coverage. Candidate MCP tool
+counts are unaffected. Agent telemetry retains `none`, `partial_spans`, or
+`complete_session` coverage.

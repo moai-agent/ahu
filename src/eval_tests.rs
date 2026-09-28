@@ -644,6 +644,7 @@ fn fixture_request<'a>(case: &'a Path, records: &'a Path) -> RunRequest<'a> {
         agents: &[],
         evaluator: None,
         evaluator_repo: None,
+        decision_evaluator: false,
         skill_selection: crate::skill_selection::Mode::None,
         records,
         runs: 1,
@@ -1161,4 +1162,134 @@ fn candidate_mcp_selection_cost_survives_failure_projection_and_native_tokens_st
     assert_eq!(usage["skill_selection_service.input_known"], 55);
     assert!(usage.get("ahu.tokens.input").is_none());
     assert!(usage.get("decision_service.input").is_none());
+}
+
+#[test]
+fn decision_evaluator_report_groups_configured_policy_and_retains_failure_costs() {
+    let mut success = decision::Observation::new("typed_decision");
+    success.status = "scored".into();
+    success.elapsed_ms = Some(10.0);
+    success.calls_attempted = 1;
+    success.telemetry_coverage = "typed_decision_span".into();
+    success.service = Some(
+        serde_json::json!({"backend":"mock","model":"reported-v2","model_reported":true,"prompt_tokens":12}),
+    );
+    success.provider_input_complete = true;
+    let mut failure = decision::Observation::new("typed_decision");
+    failure.status = "failed".into();
+    failure.elapsed_ms = Some(30.0);
+    failure.calls_attempted = 1;
+    let succeeded = serde_json::to_string(&success).unwrap();
+    let failed = serde_json::to_string(&failure).unwrap();
+    let report = report_of(&[
+        record(&[
+            ("evaluator_kind", "\"typed_decision\""),
+            ("decision_evaluator_policy_digest", "\"configured-v1\""),
+            ("evaluator_metrics", &succeeded),
+            ("evaluation_elapsed_ms", "110"),
+        ]),
+        record(&[
+            ("evaluator_kind", "\"typed_decision\""),
+            ("decision_evaluator_policy_digest", "\"configured-v1\""),
+            ("evaluator_metrics", &failed),
+            ("evaluation_elapsed_ms", "150"),
+            ("score", "null"),
+            ("passed", "false"),
+        ]),
+    ]);
+    assert_eq!(report.groups.len(), 1);
+    let summary = &report.groups[0].evaluator_metrics;
+    assert_eq!(summary.means["evaluation_elapsed_ms"], 130.0);
+    assert_eq!(summary.means["evaluator_elapsed_ms"], 20.0);
+    assert_eq!(summary.statuses["failed"], 1);
+    assert_eq!(summary.provider_input_complete_runs, 1);
+    assert_eq!(summary.provider_output_complete_runs, 0);
+    assert_eq!(summary.observations["evaluator_provider.prompt_tokens"], 1);
+    assert_eq!(summary.means["evaluator_provider.prompt_tokens"], 12.0);
+    assert_eq!(summary.telemetry_coverage["typed_decision_span"], 1);
+    assert_eq!(summary.telemetry_coverage["none"], 1);
+    assert!(report.groups[0].mean_tokens.is_empty());
+    let rendered = render(&report);
+    assert!(rendered.contains("typed_decision"));
+    assert!(rendered.contains("evaluation_elapsed_ms mean 130.00 (2/2 observations)"));
+    assert!(rendered.contains("provider complete input/output 1/0 of 2 runs"));
+    let json = group_json(&report.groups[0]);
+    assert_eq!(json["observed"]["evaluator_metrics"]["calls_attempted"], 2);
+    for field in ["evaluator_kind", "decision_evaluator_policy_digest"] {
+        let records = parse_records(
+            Path::new("runs.jsonl"),
+            &format!("{}\n{}", record(&[]), record(&[(field, "\"different\"")])),
+        )
+        .unwrap();
+        assert_eq!(group(&records).len(), 2);
+    }
+}
+
+#[test]
+fn evaluator_agent_joins_only_its_owned_task_and_attempt_including_failures() {
+    let receiver = crate::eval_otel::Receiver::start_for(Some("run"), None).unwrap();
+    let mut decision = decision::Observation::new("typed_decision");
+    decision.calls_attempted = 1;
+    decision.status = "failed".into();
+    assert!(crate::telemetry::export_eval_decision(
+        receiver.endpoint(),
+        "run",
+        "judge-task",
+        &decision
+    ));
+    let mut observation = decision::Observation::new("agent");
+    let mut envelope = serde_json::json!({"task_id":"judge-task", "attempt":2, "outcome":"failed", "metrics":{"values":{"input":{"kind":"observed", "value":42}, "output":{"kind":"unavailable"}}}});
+    observe_evaluator_agent(&mut observation, &envelope, &receiver).unwrap();
+    assert_eq!(observation.task_id.as_deref(), Some("judge-task"));
+    assert_eq!(observation.attempt, Some(2));
+    assert_eq!(observation.telemetry_coverage, "none");
+    envelope["attempt"] = serde_json::json!(1);
+    observe_evaluator_agent(&mut observation, &envelope, &receiver).unwrap();
+    assert_eq!(observation.telemetry_coverage, "partial_spans");
+    assert_eq!(
+        observation.telemetry.as_ref().unwrap()["evaluator_decision_errors"],
+        1
+    );
+    assert_eq!(observation.reported_tokens["input"]["value"], 42);
+    let summary = decision::Summary::collect([(Some(&observation), Some(100.0))].into_iter());
+    assert_eq!(summary.means["evaluator_agent.input"], 42.0);
+    assert!(!summary.means.contains_key("evaluator_agent.output"));
+    assert!(observation.validate());
+}
+
+#[test]
+fn decision_evaluator_preflights_later_suite_cases_before_agent_lookup_or_artifacts() {
+    let checkout = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let repo = fixture_repo(checkout.path());
+    let first = external.path().join("first.md");
+    let second = external.path().join("second.md");
+    fixture_case(&first, "first");
+    fixture_case(&second, "second");
+    let valid = std::fs::read_to_string(&first).unwrap().replace(
+        "scoring:\n",
+        "rubric: {route: Choose payments for invoices}\nscoring:\n",
+    );
+    std::fs::write(&first, valid).unwrap();
+    let suite = external.path().join("suite.md");
+    std::fs::write(&suite, "---\nokf_version: '0.2'\ntype: ahu:eval-suite\nschema_version: 1\nid: fixture\nsuite_version: '1'\ncases:\n  - {path: first.md, weight: 1}\n  - {path: second.md, weight: 1}\n---\nSynthetic suite.\n").unwrap();
+    let records = external.path().join("records.jsonl");
+    let mut request = fixture_request(&first, &records);
+    request.case = None;
+    request.suite = Some(&suite);
+    request.decision_evaluator = true;
+    let mut input = std::io::Cursor::new(Vec::new());
+    let mut output = Vec::new();
+    let mut console = crate::launcher::Console {
+        input: &mut input,
+        output: &mut output,
+        interactive: false,
+    };
+    let error = run(&mut console, &repo, &request).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Usage);
+    assert!(error.to_string().contains("requires a rubric"), "{error}");
+    assert!(output.is_empty());
+    assert!(!records.exists());
+    assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 3);
+    assert_eq!(std::fs::read_dir(checkout.path()).unwrap().count(), 0);
 }
