@@ -537,6 +537,48 @@ fn mcp_tool_attributes(name: &str, arguments: &serde_json::Value) -> Vec<KeyValu
     };
     let mut attributes = vec![KeyValue::new("ahu.mcp.tool.name", name.to_string())];
     if name == "ahu_typed_decide" {
+        if let Ok(bytes) = serde_json::to_vec(arguments) {
+            attributes.push(KeyValue::new(
+                "ahu.mcp.decision.arguments.bytes",
+                bytes.len() as i64,
+            ));
+        }
+        let items_form = arguments.get("items").is_some()
+            && arguments.get("question").is_some()
+            && arguments.get("state").is_none()
+            && arguments.get("questions").is_none();
+        if items_form {
+            attributes.push(KeyValue::new("ahu.mcp.decision.request.format", "items"));
+            if let Some(items) = arguments
+                .get("items")
+                .and_then(serde_json::Value::as_object)
+            {
+                attributes.push(KeyValue::new(
+                    "ahu.mcp.decision.questions.count",
+                    items.len() as i64,
+                ));
+            }
+            if let Some(kind) = arguments
+                .get("question")
+                .and_then(|question| question.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|kind| ["choice", "score", "probability"].contains(kind))
+            {
+                attributes.push(KeyValue::new(
+                    "ahu.mcp.decision.questions.types",
+                    kind.to_string(),
+                ));
+            }
+        } else if arguments.get("state").is_some()
+            && arguments.get("questions").is_some()
+            && arguments.get("items").is_none()
+            && arguments.get("question").is_none()
+        {
+            attributes.push(KeyValue::new(
+                "ahu.mcp.decision.request.format",
+                "questions",
+            ));
+        }
         let questions = arguments
             .get("questions")
             .and_then(serde_json::Value::as_object);
@@ -990,6 +1032,41 @@ mod tests {
                     .any(|(name, value)| name == key && value.is_none())
             );
         }
+    }
+
+    #[test]
+    fn mcp_batch_attributes_are_payload_free() {
+        let input = serde_json::json!({"items":{"private-id":"private-evidence","another-id":[]},"question":{"type":"choice","instructions":"private-policy","options":{"private-option":"private-description"},"telemetry_key":"unwanted_dimension"}});
+        let attributes = mcp_tool_attributes("ahu_typed_decide", &input);
+        assert_eq!(
+            string_attr(&attributes, "ahu.mcp.decision.request.format"),
+            Some("items".into())
+        );
+        assert_eq!(
+            integer_attr(&attributes, "ahu.mcp.decision.arguments.bytes"),
+            Some(serde_json::to_vec(&input).unwrap().len() as i64)
+        );
+        assert_eq!(
+            integer_attr(&attributes, "ahu.mcp.decision.questions.count"),
+            Some(2)
+        );
+        assert_eq!(
+            string_attr(&attributes, "ahu.mcp.decision.questions.types"),
+            Some("choice".into())
+        );
+        let text = format!("{attributes:?}");
+        for private in ["private-", "another-id", "unwanted_dimension"] {
+            assert!(!text.contains(private));
+        }
+        let legacy =
+            serde_json::json!({"state":{},"questions":{"private-id":{"type":"probability"}}});
+        assert_eq!(
+            string_attr(
+                &mcp_tool_attributes("ahu_typed_decide", &legacy),
+                "ahu.mcp.decision.request.format"
+            ),
+            Some("questions".into())
+        );
     }
 
     #[test]

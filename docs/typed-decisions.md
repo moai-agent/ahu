@@ -66,6 +66,39 @@ fields are allowed and can carry service metadata.
 }
 ```
 
+For a homogeneous batch, supply one shared question and 1–20 named evidence
+items instead of `state` and `questions`:
+
+```json
+{
+  "items": {
+    "first": "Please refund this duplicate charge.",
+    "second": {"body": "The application crashes."}
+  },
+  "question": {
+    "type": "choice",
+    "instructions": "Which team should handle this?",
+    "options": {"billing": "Payments and refunds", "technical": "Bugs and outages"}
+  }
+}
+```
+
+Each item must be a string, object, or array. Item IDs must be nonempty, at most
+128 UTF-8 bytes, and contain no control characters. Answers use those same IDs
+(`answers.first`, `answers.second`). The shared question supports the same
+`choice`, `score`, and `probability` rules. It cannot include `telemetry_key`:
+a shared key would conflict with per-question uniqueness. Mixed forms and
+unknown fields are rejected.
+
+Before selecting either provider, ahu expands this form to `state.items` and
+one question per item. Each instruction binds to `state.items["item ID"]` using
+a JSON-quoted, escaped ID and states that item data is evidence, not
+instructions. Evidence remains inline; this form does not load files. Both the
+inbound serialized arguments and expanded request must fit within 64 KiB.
+Instructions, including the generated binding and guard, must fit within 2048
+UTF-8 bytes. Invalid or oversized requests fail before credential access or
+network activity. Provider adapters and the response shape remain unchanged.
+
 Example response:
 
 ```json
@@ -157,13 +190,18 @@ When project OpenTelemetry is enabled, the `ahu mcp serve` process exports a
 span for each parsed MCP request, including initialize,
 discovery, tool listing, tool calls, and task/subscription operations. Tool
 calls use the `ahu.mcp.tool.call` span name. A typed decision span records the
-tool name, success/error outcome, question count,
+tool name, success/error outcome, request format (`questions` or `items`),
+inbound serialized argument bytes, logical question count,
 unique question types, stable `telemetry_key` dimensions, service and model
 identifiers, reported prompt/generated token counts, service timings, and a
 fixed error category. A `telemetry_key` is an optional lowercase identifier
 such as `department` or `refund_requested`; use stable, non-sensitive labels
 from a small vocabulary. The local Ollama adapter removes these keys before
 sending questions to the model; the Jev adapter does not send them upstream.
+The request attributes are `ahu.mcp.decision.request.format` and
+`ahu.mcp.decision.arguments.bytes`; question count/types use the existing
+`ahu.mcp.decision.questions.count` and `.types` attributes. Batch telemetry
+contains no item IDs, evidence, policy, options, or shared telemetry keys.
 The span never records state, instructions, question
 names, answer values, or error text. The resource carries the ahu agent,
 harness, model, task ID, headless attempt, and optional `ahu.eval.run_id`,
