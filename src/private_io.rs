@@ -14,6 +14,96 @@ pub(crate) fn atomic_write(path: &Path, body: &[u8], durability: Durability) -> 
     atomic_write_with(path, durability, |file| file.write_all(body))
 }
 
+/// Publish a private file only after all of its contents have been written.
+/// Returns `false` when the destination already exists and leaves it intact.
+pub(crate) fn atomic_create(path: &Path, body: &[u8], durability: Durability) -> Result<bool> {
+    use std::os::unix::{
+        ffi::OsStrExt,
+        fs::{OpenOptionsExt, PermissionsExt},
+        io::{AsRawFd, FromRawFd},
+    };
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::new("state file needs a parent"))?;
+    let name = std::ffi::CString::new(
+        path.file_name()
+            .ok_or_else(|| Error::new("state file needs a name"))?
+            .as_bytes(),
+    )
+    .map_err(|_| Error::new("state file name contains NUL"))?;
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)
+        .map_err(|e| crate::state::state_io_error("open parent directory", parent, e))?;
+    let temp = std::ffi::CString::new(format!(".create-{}", crate::orchestration::new_nonce()?))
+        .expect("nonce contains no NUL bytes");
+    // SAFETY: the parent descriptor is open and the temporary name is NUL terminated.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            temp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(crate::state::state_io_error(
+            "create temporary file",
+            path,
+            std::io::Error::last_os_error(),
+        ));
+    }
+
+    // SAFETY: openat returned a fresh descriptor whose ownership is transferred here.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let result = (|| -> std::io::Result<bool> {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(body)?;
+        file.sync_all()?;
+
+        // linkat is an atomic no-replace publication: readers see the complete
+        // file, and a concurrent creator cannot overwrite the existing entry.
+        // SAFETY: both names are NUL terminated and relative to the pinned dir.
+        if unsafe {
+            libc::linkat(
+                directory.as_raw_fd(),
+                temp.as_ptr(),
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                0,
+            )
+        } == 0
+        {
+            Ok(true)
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    })();
+
+    // SAFETY: remove only the temporary entry in the pinned parent directory.
+    let cleanup = unsafe { libc::unlinkat(directory.as_raw_fd(), temp.as_ptr(), 0) };
+    if cleanup != 0 && matches!(&result, Ok(false)) {
+        return Err(crate::state::state_io_error(
+            "remove temporary file",
+            path,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    if matches!(&result, Ok(true)) && matches!(durability, Durability::Durable) {
+        directory
+            .sync_all()
+            .map_err(|e| crate::state::state_io_error("sync parent directory", parent, e))?;
+    }
+    result.map_err(|e| crate::state::state_io_error("create file", path, e))
+}
+
 /// Pin the parent for creation, replacement, cleanup, and (when requested) fsync.
 /// Confinement above this directory remains the caller's policy.
 pub(crate) fn atomic_write_with(
@@ -161,6 +251,51 @@ mod tests {
         let bytes = std::fs::read(path).unwrap();
         assert_eq!(bytes.len(), 8192);
         assert!(bytes.iter().all(|b| *b == bytes[0]));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_create_publishes_complete_owner_only_contents_without_replacing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("binding.json");
+        assert!(atomic_create(&path, b"complete binding", Durability::Durable).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"complete binding");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        assert!(!atomic_create(&path, b"replacement", Durability::Durable).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"complete binding");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn concurrent_atomic_creates_publish_one_complete_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("binding.json");
+        let created = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|byte| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        atomic_create(path, &vec![byte; 8192], Durability::Durable).unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .filter(|created| *created)
+                .count()
+        });
+
+        assert_eq!(created, 1);
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(bytes.len(), 8192);
+        assert!(bytes.iter().all(|byte| *byte == bytes[0]));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

@@ -53,6 +53,17 @@ fn configured(repo: &Repo) {
     .unwrap();
 }
 
+fn registered(repo: &Repo) -> ResolvedAgent {
+    let manifests = repo.root.join(config::AGENTS_RELATIVE_DIR);
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("reviewer.md"),
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: reviewer\nversion: 1.0.0\nharness: claude-code\nmodel: claude-opus-5\n---\nReview carefully.\n",
+    )
+    .unwrap();
+    agent::load_all(&repo.root).unwrap().remove(0)
+}
+
 fn scripted(input: &str, f: impl FnOnce(&mut Console<'_>) -> Result<i32>) -> (Result<i32>, String) {
     let mut input = std::io::Cursor::new(input.as_bytes());
     let mut output = Vec::new();
@@ -622,4 +633,189 @@ fn launch_refuses_widened_approvals_even_during_dry_run() {
             assert!(!repo.root.join(".worktrees").exists());
         }
     }
+}
+
+#[test]
+fn agents_distinguish_drift_from_unreadable_history() {
+    let (_root, repo) = repository();
+    configured(&repo);
+    let agent = registered(&repo);
+    let (dir, mut record) = saved(&repo, "drift001");
+    record.identity.mode = task::LaunchMode::Named;
+    record.identity.agent = agent.manifest.name.clone();
+    record.identity.agent_version = Some(agent.manifest.version.clone());
+    task::save(&dir, &record, "synthetic prompt").unwrap();
+
+    let (result, text) = scripted("", |c| agents(c, &repo));
+    assert_eq!(result.unwrap(), 0);
+    assert!(text.contains("@reviewer 1.0.0 [drifted]"), "{text}");
+    let detail = agent_drift_details(&repo, &[agent]).unwrap();
+    assert_eq!(detail.len(), 1);
+    assert_eq!(detail[0].agent_name, "reviewer");
+    assert!(detail[0].previous_task.contains("drift001"));
+    assert!(!detail[0].drift.changes.is_empty());
+
+    std::fs::write(dir.join("task.json"), "{}").unwrap();
+    let (result, text) = scripted("", |c| agents(c, &repo));
+    assert_eq!(result.unwrap(), 0);
+    assert!(text.contains("drift could not be checked"));
+    assert!(text.contains("1 earlier task record(s) could not be read"));
+    assert!(text.contains("@reviewer 1.0.0"));
+    assert!(!text.contains("[drifted]"));
+}
+
+#[test]
+fn removal_reports_partial_cleanup_when_a_worktree_is_locked() {
+    let (_root, repo) = repository();
+    let (dir, mut record) = saved(&repo, "locked01");
+    record.worktree = repo.root.join(".worktrees/locked01");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &record.branch,
+            record.worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    git(
+        &repo.root,
+        &["worktree", "lock", record.worktree.to_str().unwrap()],
+    );
+    task::save(&dir, &record, "synthetic prompt").unwrap();
+
+    let (result, output) = scripted("", |c| remove_cmd(c, &repo, &record.task_id));
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("was only partly removed"), "{error}");
+    assert!(error.contains("Completed:\n  record    removed"), "{error}");
+    assert!(error.contains("Not removed:\n  worktree"), "{error}");
+    assert!(error.contains("branch"));
+    assert!(error.contains("Delete the branch yourself"));
+    assert!(output.is_empty());
+    assert!(!dir.exists());
+    assert!(record.worktree.join(".git").exists());
+    assert!(git::branch_exists(&repo, &record.branch).unwrap());
+    git(
+        &repo.root,
+        &["worktree", "unlock", record.worktree.to_str().unwrap()],
+    );
+    git(
+        &repo.root,
+        &["worktree", "remove", record.worktree.to_str().unwrap()],
+    );
+    git(&repo.root, &["branch", "-d", &record.branch]);
+}
+
+#[test]
+fn removal_refuses_foreign_repository_and_non_checkout_root() {
+    let (_root, repo) = repository();
+    let (_foreign_root, foreign) = repository();
+    let (dir, mut record) = saved(&repo, "foreign01");
+    let nested = repo.root.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    for target in [&foreign.root, &nested] {
+        record.worktree = target.clone();
+        task::save(&dir, &record, "synthetic prompt").unwrap();
+        let before = std::fs::read(dir.join("task.json")).unwrap();
+        let (result, output) = scripted("", |c| remove_cmd(c, &repo, &record.task_id));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("does not belong to this repository or is not a checkout root")
+        );
+        assert!(output.is_empty());
+        assert!(target.exists());
+        assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+    }
+    assert!(foreign.root.join(".git").exists());
+}
+
+#[test]
+fn task_without_a_launch_base_offers_a_quoted_branch_review() {
+    let (_root, repo) = repository();
+    let (dir, mut record) = saved(&repo, "nobase01");
+    record.base_commit = None;
+    record.branch = "reviewer's-branch".into();
+    task::save(&dir, &record, "synthetic prompt").unwrap();
+    let (result, text) = scripted("", |c| task_cmd(c, &repo, &record.task_id, false));
+    assert_eq!(result.unwrap(), 0);
+    assert!(text.contains("base      unknown"));
+    assert!(text.contains(" log 'reviewer'\\''s-branch'"), "{text}");
+    assert!(!text.contains(" diff "));
+}
+
+#[test]
+fn interactive_preselection_rejects_unknown_agent_before_reading_prompt() {
+    let (_root, repo) = repository();
+    configured(&repo);
+    let (result, text) = scripted("this must not become a task\n", |c| {
+        interactive(c, &repo, false, Some("absent"))
+    });
+    assert!(result.unwrap_err().to_string().contains("absent"));
+    assert!(text.contains("Preselected agent: @absent"));
+    assert!(!text.contains("Resolved for this task"));
+    assert!(task::list(&repo).unwrap().is_empty());
+    assert!(!repo.root.join(".worktrees").exists());
+}
+
+#[test]
+fn unreadable_task_prefix_resolves_to_the_diagnostic_record() {
+    let (_root, repo) = repository();
+    let (dir, _) = saved(&repo, "broken01");
+    std::fs::write(dir.join("task.json"), "{}").unwrap();
+    let (result, text) = scripted("", |c| task_cmd(c, &repo, "broken", false));
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("broken01"));
+    assert!(error.contains("unreadable"));
+    assert!(text.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("task.json")).unwrap(),
+        "{}"
+    );
+}
+
+#[test]
+fn doctor_reports_invalid_agents_and_lock_without_changing_them() {
+    let (_root, repo) = repository();
+    configured(&repo);
+    let config_before = std::fs::read(config::config_path(&repo.root)).unwrap();
+    let manifests = repo.root.join(config::AGENTS_RELATIVE_DIR);
+    std::fs::create_dir_all(&manifests).unwrap();
+    let manifest = manifests.join("broken.md");
+    std::fs::write(&manifest, "not an agent manifest").unwrap();
+    let lock = repo.root.join("ahu.lock");
+    std::fs::write(&lock, "not a context lock").unwrap();
+    let repo = Ok(repo);
+    for verbose in [false, true] {
+        let (result, text) = scripted("", |c| {
+            if verbose {
+                doctor_with_verbosity(c, &repo, true)
+            } else {
+                doctor(c, &repo)
+            }
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("doctor found blocking problems")
+        );
+        assert!(text.contains("agents       invalid:"));
+        assert!(text.contains("context lock invalid"));
+        if !verbose {
+            assert!(text.contains("context lock invalid; run `ahu lock` for details"));
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(manifest).unwrap(),
+        "not an agent manifest"
+    );
+    assert_eq!(std::fs::read_to_string(lock).unwrap(), "not a context lock");
+    assert_eq!(
+        std::fs::read(config::config_path(&repo.unwrap().root)).unwrap(),
+        config_before
+    );
 }

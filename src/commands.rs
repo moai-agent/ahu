@@ -2883,6 +2883,43 @@ mod doctor_tests {
         drop(listener);
         assert!(!local_collector_reachable(address));
     }
+
+    #[test]
+    fn enabled_telemetry_reports_invalid_remote_and_local_endpoints() {
+        let mut config = TelemetryConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        for (endpoint, expected) in [
+            ("not a URL", "enabled; endpoint is invalid"),
+            (
+                "https://collector.example.invalid",
+                "enabled; endpoint is not local",
+            ),
+        ] {
+            config.endpoint = endpoint.into();
+            assert_eq!(telemetry_collector_status(&config), (expected.into(), true));
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        for host in ["localhost", "127.0.0.1"] {
+            config.endpoint = format!("http://{host}:{}/v1/traces", address.port());
+            assert_eq!(
+                telemetry_collector_status(&config),
+                (
+                    format!("enabled; TCP listener reachable at {address} (OTLP not verified)"),
+                    false
+                )
+            );
+        }
+        // Binding port zero allocates a nonzero port, so no listening socket
+        // can claim this destination while parallel tests start subprocesses.
+        config.endpoint = "http://127.0.0.1:0/v1/traces".into();
+        assert_eq!(
+            telemetry_collector_status(&config),
+            ("enabled; no local listener at 127.0.0.1:0".into(), true)
+        );
+    }
 }
 
 #[cfg(test)]

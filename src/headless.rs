@@ -3539,6 +3539,155 @@ mod profile_and_metadata_tests {
         );
     }
 
+    #[test]
+    fn result_reading_validates_attempt_and_schema_before_returning_evidence() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let dir = store(&repo).unwrap().join("abc");
+        let spec = sample_spec();
+        let attempt = attempt_dir(&dir, &spec);
+        state::create_private_dir_all(&attempt).unwrap();
+        state::write_private_file(
+            &dir.join("headless.json"),
+            &serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        let valid = json!({"schema_version":2,"task_id":"abc","attempt":1,
+            "outcome":"failed","blockers":["synthetic failure"]});
+        let path = attempt.join("result.json");
+        state::write_private_file(&path, &serde_json::to_vec(&valid).unwrap()).unwrap();
+        assert_eq!(result(&dir).unwrap(), valid);
+        let reviewed = review_attempt(&dir, &spec, review::read).unwrap();
+        assert_eq!(reviewed["outcome"], "failed");
+        assert_eq!(reviewed["capabilities"]["attempt"], 1);
+        assert_eq!(reviewed["task_handle"], reviewed["review"]["task_handle"]);
+        for (field, value, message) in [
+            ("schema_version", json!(1), "schema does not match"),
+            ("task_id", json!("def"), "another attempt"),
+            ("attempt", json!(2), "another attempt"),
+            ("blockers", json!([false]), "blockers are malformed"),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            state::write_private_file(&path, &serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(
+                result(&dir).unwrap_err().to_string().contains(message),
+                "{field}"
+            );
+            assert!(
+                review_attempt(&dir, &spec, review::read)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message),
+                "{field}"
+            );
+        }
+        for (schema_version, attempt) in [(3, 1), (2, 0)] {
+            let unsupported = Spec {
+                schema_version,
+                attempt,
+                ..spec.clone()
+            };
+            assert!(
+                review_attempt(&dir, &unsupported, |_| panic!(
+                    "invalid spec must not read a result"
+                ))
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported headless attempt")
+            );
+        }
+    }
+
+    #[test]
+    fn result_review_normalizes_only_its_own_legacy_supervisor_error_identifier() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let dir = store(&repo).unwrap().join("abc");
+        let spec = sample_spec();
+        let path = attempt_dir(&dir, &spec).join("result.json");
+        state::create_private_dir_all(path.parent().unwrap()).unwrap();
+        let mut value = json!({"schema_version":2,"task_id":dir.file_name(),"attempt":1,
+            "outcome":"supervisor_error"});
+        state::write_private_file(&path, &serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            review_attempt(&dir, &spec, review::read).unwrap()["task_id"],
+            "abc"
+        );
+        value["task_id"] = serde_json::to_value(Path::new("def").file_name()).unwrap();
+        state::write_private_file(&path, &serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            review_attempt(&dir, &spec, review::read)
+                .unwrap_err()
+                .to_string()
+                .contains("another attempt")
+        );
+    }
+
+    #[test]
+    fn result_without_readable_ownership_reports_unknown_liveness() {
+        let root = tempfile::tempdir().unwrap();
+        let spec = sample_spec();
+        assert!(
+            result_attempt(root.path(), &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("liveness unknown")
+        );
+        assert!(
+            review_attempt(root.path(), &spec, review::read)
+                .unwrap_err()
+                .to_string()
+                .contains("liveness unknown")
+        );
+        assert!(!root.path().join("owner.lock").exists());
+    }
+
+    #[test]
+    fn batch_command_rebuilds_frozen_helper_profile_and_refuses_policy_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let request = LaunchRequest {
+            model: "claude-sonnet-4-6",
+            prompt: "--literal prompt",
+            cwd: root.path(),
+            permissions: crate::agent::Permissions::Prompt,
+        };
+        let mut spec = sample_spec();
+        spec.options.native_helpers = "bounded".into();
+        spec.harness_version = "Claude Code 2.1.270".into();
+        assert!(
+            batch_command("claude-code", &request, &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("bounded native helpers are unavailable")
+        );
+        let profile = build_native_profile("claude-code", request.model, &spec).unwrap();
+        spec.native_profile = Some(profile.clone());
+        let command = batch_command("claude-code", &request, &spec).unwrap();
+        assert_eq!(command.program, "claude");
+        assert_eq!(command.args[command.prompt_arg.unwrap()], request.prompt);
+        assert_eq!(command.args[command.args.len() - 2], "--");
+        assert!(
+            command
+                .args
+                .windows(profile.args.len())
+                .any(|args| args == profile.args)
+        );
+        spec.native_profile.as_mut().unwrap().helper_model = "different-model".into();
+        assert!(
+            batch_command("claude-code", &request, &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("differs from the frozen profile")
+        );
+        spec.native_profile = Some(profile);
+        spec.harness_version = "2.1.269".into();
+        assert!(
+            batch_command("claude-code", &request, &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("not validated")
+        );
+    }
+
     fn sample_spec() -> Spec {
         Spec {
             schema_version: 2,
@@ -3558,5 +3707,233 @@ mod profile_and_metadata_tests {
             native_controls: Vec::new(),
             gaps: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod filesystem_behavior_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    pub(super) fn repository() -> (tempfile::TempDir, crate::git::Repo) {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repo = crate::git::discover(root.path()).unwrap();
+        (root, repo)
+    }
+
+    #[test]
+    fn confinement_creates_only_private_directories_and_rejects_redirection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime");
+        let nested = root.join("task/attempt");
+        confined_at(&root, &nested, false).unwrap();
+        assert!(!root.exists());
+        confined_at(&root, &nested, true).unwrap();
+        for dir in [&root, &root.join("task"), &nested] {
+            assert_eq!(
+                std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert!(
+            confined_at(&root, temp.path(), false)
+                .unwrap_err()
+                .to_string()
+                .contains("outside its verified store")
+        );
+        assert!(
+            confined_at(&root, &root.join("../escape"), true)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid runtime component")
+        );
+        assert!(!temp.path().join("escape").exists());
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        symlink(&outside, root.join("redirect")).unwrap();
+        std::fs::write(root.join("file"), "keep").unwrap();
+        for name in ["redirect", "file"] {
+            assert!(
+                confined_at(&root, &root.join(name).join("child"), true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("redirected or not a directory")
+            );
+        }
+        assert!(!outside.join("child").exists());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            confined_at(&root, &nested, false)
+                .unwrap_err()
+                .to_string()
+                .contains("owner-only directory")
+        );
+    }
+
+    #[test]
+    fn missing_external_paths_resolve_ancestors_but_refuse_traversal_and_dangling_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&target, &alias).unwrap();
+        assert_eq!(
+            resolve_missing_path(&alias.join("new/state")).unwrap(),
+            target.canonicalize().unwrap().join("new/state")
+        );
+        assert!(!target.join("new").exists());
+        for path in [PathBuf::from("relative/state"), target.join("../state")] {
+            assert!(
+                resolve_missing_path(&path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("absolute without '..'")
+            );
+        }
+        let dangling = temp.path().join("dangling");
+        symlink(temp.path().join("absent"), &dangling).unwrap();
+        assert!(
+            resolve_missing_path(&dangling.join("state"))
+                .unwrap_err()
+                .to_string()
+                .contains("dangling symlink")
+        );
+    }
+
+    #[test]
+    fn cleanup_pins_directory_and_preserves_redirected_targets() {
+        let (_root, repo) = repository();
+        let store = store(&repo).unwrap();
+        let attempt = store.join("abc/attempt-1");
+        confined_in(&repo, &attempt, true).unwrap();
+        let pinned = ConfinedDir::open(&attempt).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("stdout"), "outside").unwrap();
+        std::fs::write(attempt.join("stdout"), "capture").unwrap();
+        let moved = store.join("abc/original-attempt");
+        std::fs::rename(&attempt, &moved).unwrap();
+        symlink(outside.path(), &attempt).unwrap();
+        assert!(pinned.remove_artifact("stdout").unwrap());
+        assert!(!moved.join("stdout").exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("stdout")).unwrap(),
+            "outside"
+        );
+        assert!(!pinned.remove_artifact("stdout").unwrap());
+        assert!(
+            !pinned
+                .unlink(&ConfinedDir::entry_name("stdout").unwrap())
+                .unwrap()
+        );
+        symlink(outside.path().join("stdout"), moved.join("link")).unwrap();
+        std::fs::create_dir(moved.join("directory")).unwrap();
+        for name in ["link", "directory"] {
+            assert!(
+                pinned
+                    .remove_artifact(name)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("expected a regular file")
+            );
+        }
+        assert!(!pinned.remove_mailbox_entry("directory".as_ref()).unwrap());
+        assert!(pinned.remove_mailbox_entry("link".as_ref()).unwrap());
+        assert!(!pinned.remove_mailbox_entry("link".as_ref()).unwrap());
+        assert!(outside.path().join("stdout").exists());
+        assert!(moved.join("directory").is_dir());
+        assert!(
+            pinned
+                .unlink(&ConfinedDir::entry_name("directory").unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("cannot remove runtime entry")
+        );
+        assert!(
+            pinned
+                .remove_artifact("bad\0name")
+                .unwrap_err()
+                .to_string()
+                .contains("interior NUL")
+        );
+        assert!(ConfinedDir::open(&attempt).is_err());
+        assert!(
+            ConfinedDir::open(&store.join("abc/missing"))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("refusing runtime directory")
+        );
+    }
+
+    #[test]
+    fn discovery_selects_task_names_with_records_and_refuses_foreign_stores() {
+        let (_root, repo) = repository();
+        let domain = store(&repo).unwrap();
+        assert!(discover_domain(&repo, &domain).unwrap().is_empty());
+        for name in [
+            "abc",
+            "01a0e53c-de9e-75a4-821f-9d197a88d800",
+            "not-a-task",
+            "def",
+        ] {
+            let dir = domain.join(name);
+            confined_in(&repo, &dir, true).unwrap();
+            if name != "def" {
+                state::write_private_file(&dir.join("task.json"), b"{}").unwrap();
+            }
+        }
+        let mut found = discover_domain(&repo, &domain).unwrap();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                domain.join("01a0e53c-de9e-75a4-821f-9d197a88d800"),
+                domain.join("abc")
+            ]
+        );
+        let (_other_root, other_repo) = repository();
+        assert!(
+            confined_in(&other_repo, &domain, false)
+                .unwrap_err()
+                .to_string()
+                .contains("another repository")
+        );
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), domain.join("bad")).unwrap();
+        assert!(
+            discover_domain(&repo, &domain)
+                .unwrap_err()
+                .to_string()
+                .contains("symlink")
+        );
+    }
+
+    #[test]
+    fn ownership_contention_refuses_second_supervisor_and_releases_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("owner.lock");
+        assert!(supervisor_owns_attempt(root.path()).is_err());
+        assert!(!path.exists());
+        let owner = Lock::acquire(&path).unwrap();
+        assert!(supervisor_owns_attempt(root.path()).unwrap());
+        assert!(Lock::try_acquire(&path).unwrap().is_none());
+        assert!(
+            Lock::acquire(&path)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("concurrent execution refused")
+        );
+        drop(owner);
+        assert!(!supervisor_owns_attempt(root.path()).unwrap());
+        assert!(Lock::try_acquire(&path).unwrap().is_some());
     }
 }
