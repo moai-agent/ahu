@@ -174,6 +174,9 @@ and `--evaluator-repo`; the candidate still runs normally. This option sends cas
 state, questions, candidate output, and rubric instructions to the configured
 provider. It adds no expected answers, scoring weights, candidate identity, or
 traces. Evidence supplied within case data or candidate output remains untrusted.
+Choice keys are also resolved locally into selected option text, supplied as
+`selected_answers`; numerical answers retain their value. This projection uses
+only candidate-visible options and the actual answer, never reference labels.
 
 Each rubric field becomes one score question with range 0..1 and descriptive
 levels “Does not satisfy the criterion”, “Partially satisfies the criterion”, and
