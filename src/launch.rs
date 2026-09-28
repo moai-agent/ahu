@@ -1366,9 +1366,15 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             // this parent or the pane it lives in.
             .process_group(0)
             .spawn()
-            .map_err(|e| {
+            .map_err(|error| {
+                let state_failure = task::set_state(task_dir, TaskState::Failed)
+                    .err()
+                    .map(|state_error| {
+                        format!(" The task state could not be recorded as failed: {state_error}.")
+                    })
+                    .unwrap_or_default();
                 Error::new(format!(
-                    "cannot start {}: {e}\nThe worktree and task record are preserved at {} and {}.",
+                    "cannot start {}: {error}.{state_failure}\nThe worktree and task record are preserved at {} and {}.",
                     executable.display(),
                     record.worktree.display(),
                     task_dir.display()
@@ -2195,6 +2201,125 @@ mod launch_contract_tests {
         assert!(error.to_string().contains("no commits yet"));
         assert!(!repo.root.join(".worktrees").exists());
         assert!(!repo.root.join(".ahu").exists());
+    }
+
+    #[test]
+    fn planning_refuses_missing_context_lock_before_creating_task_state() {
+        let (_temp, repo, _, frozen) = fixture();
+        git::run_ok(
+            &repo.root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "fixture",
+            ],
+        )
+        .unwrap();
+        let repo = git::discover(&repo.root).unwrap();
+        let error = plan(&repo, None, frozen.pair, PROMPT).unwrap_err();
+        assert_eq!(error.kind(), crate::util::ErrorKind::Prerequisite);
+        assert!(
+            error
+                .to_string()
+                .contains("agent context is not committed and locked")
+        );
+        assert!(error.to_string().contains("ahu.lock is missing"));
+        assert!(!repo.root.join(".worktrees").exists());
+        assert!(!repo.root.join(".ahu").exists());
+    }
+
+    #[test]
+    fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        const CASE: &str = "AHU_LAUNCH_RUN_FIXTURE";
+        let Ok(case) = std::env::var(CASE) else {
+            for case in ["cancel", "success", "failure", "spawn-error"] {
+                let bin = tempfile::tempdir().unwrap();
+                symlink(
+                    crate::selection::resolve_utility("git").unwrap(),
+                    bin.path().join("git"),
+                )
+                .unwrap();
+                let script = if case == "spawn-error" {
+                    "#!/nonexistent/ahu-fixture-interpreter\n".to_owned()
+                } else {
+                    format!(
+                        "#!/bin/sh\nprintf started > harness-started\nexit {}\n",
+                        if case == "success" { 0 } else { 23 }
+                    )
+                };
+                let executable = bin.path().join("codex");
+                std::fs::write(&executable, script).unwrap();
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "launch::launch_contract_tests::run_task_preserves_work_on_cancellation_exit_and_spawn_failure", "--nocapture"])
+                    .env(CASE, case)
+                    .env("PATH", bin.path())
+                    .env("AHU_CMUX_BIN", bin.path().join("absent-cmux"))
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{case}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        };
+        let (_temp, repo, loaded, plan) = fixture();
+        std::fs::create_dir_all(&plan.worktree).unwrap();
+        let sentinel = plan.worktree.join("work.txt");
+        std::fs::write(&sentinel, "keep me").unwrap();
+        let record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+        task::save(&plan.task_dir, &record, PROMPT).unwrap();
+        if case == "cancel" {
+            std::fs::write(plan.task_dir.join("cancel.json"), "{}").unwrap();
+        }
+        let result = run_task(&plan.task_dir);
+        let expected_state = match case.as_str() {
+            "cancel" => {
+                assert_eq!(result.unwrap(), HarnessOutcome::Cancelled);
+                assert!(!plan.worktree.join("harness-started").exists());
+                TaskState::Cancelled
+            }
+            "spawn-error" => {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("cannot start"), "{error}");
+                assert!(
+                    error.contains("worktree and task record are preserved"),
+                    "{error}"
+                );
+                assert!(!plan.worktree.join("harness-started").exists());
+                TaskState::Failed
+            }
+            "success" | "failure" => {
+                let HarnessOutcome::Exited(status) = result.unwrap() else {
+                    panic!("expected an observed harness exit");
+                };
+                assert_eq!(status.code(), Some(if case == "success" { 0 } else { 23 }));
+                assert_eq!(
+                    std::fs::read_to_string(plan.worktree.join("harness-started")).unwrap(),
+                    "started"
+                );
+                if case == "success" {
+                    TaskState::Exited
+                } else {
+                    TaskState::Failed
+                }
+            }
+            _ => panic!("unknown fixture case"),
+        };
+        assert_eq!(task::load(&plan.task_dir).unwrap().state, expected_state);
+        assert_eq!(task::load_prompt(&plan.task_dir).unwrap(), PROMPT);
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "keep me");
     }
 
     #[test]

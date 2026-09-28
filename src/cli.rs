@@ -1383,6 +1383,492 @@ fn parse_cmux(args: &[String]) -> Result<Command> {
 }
 
 #[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    fn assert_usage(args: &[&str], diagnostic: &str) {
+        let error = parse(args.iter().copied()).unwrap_err();
+        assert_eq!(error.kind(), crate::util::ErrorKind::Usage, "{args:?}");
+        assert!(error.to_string().contains(diagnostic), "{args:?}: {error}");
+    }
+
+    #[test]
+    fn task_listing_json_conflicts_and_limit_boundaries() {
+        assert_eq!(
+            parse(["tasks", "--output", "json"]).unwrap(),
+            Command::TasksJson
+        );
+        for limit in [1, 500] {
+            assert_eq!(
+                parse(["tasks", "--limit", &limit.to_string()]).unwrap(),
+                Command::Tasks { limit: Some(limit) }
+            );
+        }
+        for selection in [vec!["--all"], vec!["--limit", "20"]] {
+            for json_first in [false, true] {
+                let mut args = vec!["tasks"];
+                if json_first {
+                    args.extend(["--output", "json"]);
+                }
+                args.extend(selection.iter().copied());
+                if !json_first {
+                    args.extend(["--output", "json"]);
+                }
+                assert_usage(&args, "returns the complete list");
+            }
+        }
+        assert_usage(&["tasks", "--output", "yaml"], "expected json");
+        assert_usage(&["tasks", "--limit", "NaN"], "between 1 and 500");
+        for options in [
+            vec!["--all", "--all"],
+            vec!["--limit", "20", "--limit", "21"],
+            vec!["--limit", "20", "--all"],
+            vec!["--output", "json", "--output", "json"],
+        ] {
+            let mut args = vec!["tasks"];
+            args.extend(options);
+            assert_usage(&args, "unexpected option");
+        }
+    }
+
+    #[test]
+    fn help_flags_preserve_option_values_and_message_payloads() {
+        assert_usage(&["help", "eval", "run", "extra"], "usage: ahu help");
+        for flag in ["--help", "-h"] {
+            assert_usage(&[flag, "tasks"], "use `ahu help COMMAND`");
+            assert_eq!(
+                parse(["eval", "run", flag]).unwrap(),
+                Command::Help {
+                    topic: Some("eval run".into()),
+                }
+            );
+            assert_eq!(
+                parse(["message", "fixture", flag]).unwrap(),
+                Command::Message {
+                    task_id: "fixture".into(),
+                    text: flag.into(),
+                }
+            );
+            assert_eq!(
+                parse(["onboard", "--model", flag]).unwrap(),
+                Command::Onboard {
+                    register: None,
+                    remove: None,
+                    model: Some(flag.into()),
+                    version: "0.1.0".into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn knowledge_lint_refuses_missing_repeated_and_unknown_options() {
+        for output_json in [false, true] {
+            let mut args = vec!["knowledge", "lint"];
+            if output_json {
+                args.extend(["--output", "json"]);
+            }
+            assert_eq!(parse(args).unwrap(), Command::KnowledgeLint { output_json });
+        }
+        for (args, diagnostic) in [
+            (vec!["knowledge"], "needs a subcommand"),
+            (vec!["knowledge", "fetch"], "unknown subcommand"),
+            (
+                vec!["knowledge", "lint", "--output"],
+                "--output needs a value",
+            ),
+            (
+                vec!["knowledge", "lint", "--output", "text"],
+                "unsupported --output",
+            ),
+            (
+                vec!["knowledge", "lint", "--output", "json", "--output", "json"],
+                "unknown or repeated option",
+            ),
+            (
+                vec!["knowledge", "lint", "--unknown"],
+                "unknown or repeated option",
+            ),
+        ] {
+            assert_usage(&args, diagnostic);
+        }
+    }
+
+    #[test]
+    fn batch_control_requires_task_and_scopes_resume_options() {
+        for action in ["wait", "result", "cancel", "cleanup", "resume"] {
+            for json in [false, true] {
+                let mut args = vec![action, "ahu:task:fixture"];
+                if json {
+                    args.extend(["--output", "json"]);
+                }
+                let prompt = if action == "resume" {
+                    args.extend(["--prompt-file", "next task.txt"]);
+                    Some(PathBuf::from("next task.txt"))
+                } else {
+                    None
+                };
+                assert_eq!(
+                    parse(args).unwrap(),
+                    Command::BatchControl {
+                        action: action.into(),
+                        task_id: "ahu:task:fixture".into(),
+                        prompt,
+                        json,
+                    }
+                );
+            }
+            assert_usage(&[action], "task id required");
+            assert_usage(&[action, "--output", "json"], "task id required");
+            assert_usage(&[action, "fixture", "--output", "yaml"], "expected json");
+            assert_usage(&[action, "fixture", "--output"], "--output needs a value");
+            assert_usage(
+                &[action, "fixture", "--output", "json", "--output", "json"],
+                "unexpected option",
+            );
+            if action != "resume" {
+                assert_usage(
+                    &[action, "fixture", "--prompt-file", "task.txt"],
+                    "unexpected option",
+                );
+            }
+        }
+        assert_usage(&["resume", "fixture"], "resume requires --prompt-file");
+        assert_usage(
+            &["resume", "fixture", "--prompt-file"],
+            "--prompt-file needs a value",
+        );
+        assert_usage(
+            &[
+                "resume",
+                "fixture",
+                "--prompt-file",
+                "a",
+                "--prompt-file",
+                "b",
+            ],
+            "unexpected option",
+        );
+    }
+
+    #[test]
+    fn onboard_parses_registration_removal_and_preview() {
+        assert_eq!(
+            parse(["onboard"]).unwrap(),
+            Command::Onboard {
+                register: None,
+                remove: None,
+                model: None,
+                version: "0.1.0".into(),
+            }
+        );
+        assert_eq!(
+            parse([
+                "onboard",
+                "--register",
+                "fixture",
+                "--model",
+                "fixture-model",
+                "--agent-version",
+                "1.2.3",
+            ])
+            .unwrap(),
+            Command::Onboard {
+                register: Some("fixture".into()),
+                remove: None,
+                model: Some("fixture-model".into()),
+                version: "1.2.3".into(),
+            }
+        );
+        assert_eq!(
+            parse(["onboard", "--remove", "fixture"]).unwrap(),
+            Command::Onboard {
+                register: None,
+                remove: Some("fixture".into()),
+                model: None,
+                version: "0.1.0".into(),
+            }
+        );
+        for flag in ["--register", "--remove", "--model", "--agent-version"] {
+            assert_usage(&["onboard", flag], &format!("{flag} needs a value"));
+        }
+        assert_usage(&["onboard", "--unknown"], "unknown option");
+        assert_usage(
+            &["onboard", "--register", "a", "--remove", "b"],
+            "cannot be combined",
+        );
+    }
+
+    #[test]
+    fn internal_workers_require_task_directory() {
+        for command in ["run-task", "supervise"] {
+            let task_dir = PathBuf::from("task directory");
+            let expected = if command == "run-task" {
+                Command::RunTask { task_dir }
+            } else {
+                Command::BatchSupervisor { task_dir }
+            };
+            assert_eq!(
+                parse([command, "--task-dir", "task directory"]).unwrap(),
+                expected
+            );
+            assert_usage(&[command], "--task-dir");
+            assert_usage(&[command, "--task-dir"], "--task-dir");
+        }
+        assert_usage(&["run-task", "--unknown"], "unknown option");
+        for args in [
+            vec!["supervise", "directory"],
+            vec!["supervise", "--unknown", "directory"],
+            vec!["supervise", "--task-dir", "directory", "extra"],
+        ] {
+            assert_usage(&args, "supervise requires --task-dir PATH");
+        }
+    }
+
+    #[test]
+    fn cmux_install_validates_harness_and_singleton_options() {
+        for harness in ["claude-code", "codex", "opencode", "antigravity"] {
+            for dry_run in [false, true] {
+                let mut args = vec!["cmux", "install"];
+                if dry_run {
+                    args.push("--dry-run");
+                }
+                args.extend(["--harness", harness]);
+                assert_eq!(
+                    parse(args).unwrap(),
+                    Command::CmuxInstall {
+                        harness: harness.into(),
+                        dry_run,
+                    }
+                );
+            }
+        }
+        assert_usage(&["cmux", "install"], "--harness ID required");
+        assert_usage(&["cmux", "install", "--harness"], "--harness needs a value");
+        assert_usage(
+            &["cmux", "install", "--harness", "unknown"],
+            "unsupported harness",
+        );
+        for args in [
+            vec![
+                "cmux",
+                "install",
+                "--harness",
+                "codex",
+                "--harness",
+                "opencode",
+            ],
+            vec![
+                "cmux",
+                "install",
+                "--harness",
+                "codex",
+                "--dry-run",
+                "--dry-run",
+            ],
+            vec!["cmux", "install", "--unknown"],
+            vec!["cmux", "status", "--output", "yaml"],
+            vec!["cmux"],
+            vec!["cmux", "unknown"],
+        ] {
+            assert_usage(&args, "expected ahu cmux");
+        }
+    }
+
+    #[test]
+    fn eval_run_checks_numeric_limits_and_candidate_identity() {
+        let base = [
+            "eval",
+            "run",
+            "--case",
+            "case.md",
+            "--records",
+            "runs.jsonl",
+        ];
+        for (flag, values, diagnostic) in [
+            (
+                "--runs",
+                vec!["0", "101", "no", "4294967296"],
+                "--runs must be an integer",
+            ),
+            (
+                "--timeout",
+                vec!["0", "86401", "no", "18446744073709551616"],
+                "--timeout must be an integer",
+            ),
+        ] {
+            for value in values {
+                let mut args = base.to_vec();
+                args.extend(["--agent", "@fixture", flag, value]);
+                assert_usage(&args, diagnostic);
+            }
+        }
+        for (extra, diagnostic) in [
+            (vec![], "needs --agent"),
+            (vec!["--agent", "@"], "--agent must name"),
+            (
+                vec!["--agent", "@fixture", "--agent", "@fixture"],
+                "named more than once",
+            ),
+            (
+                vec!["--agent", "@fixture", "--agent", "@@fixture"],
+                "named more than once",
+            ),
+            (
+                vec!["--agent", "@fixture", "--evaluator", "judge"],
+                "--evaluator must name",
+            ),
+            (
+                vec!["--agent", "@fixture", "--evaluator", "@"],
+                "--evaluator must name",
+            ),
+            (
+                vec!["--agent", "@fixture", "--output", "yaml"],
+                "unsupported --output",
+            ),
+        ] {
+            let mut args = base.to_vec();
+            args.extend(extra);
+            assert_usage(&args, diagnostic);
+        }
+        assert_usage(
+            &["eval", "run", "--case", "case.md", "--agent", "@fixture"],
+            "needs --records",
+        );
+
+        // The maximum candidate count is accepted, with input order intact.
+        let agents: Vec<String> = (0..16).map(|n| format!("@fixture{n}")).collect();
+        let mut args: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+        for agent in &agents {
+            args.extend(["--agent".into(), agent.clone()]);
+        }
+        args.extend(
+            [
+                "--runs",
+                "100",
+                "--timeout",
+                "86400",
+                "--allow-widened-approvals",
+            ]
+            .map(str::to_string),
+        );
+        assert_eq!(
+            parse(args.clone()).unwrap(),
+            Command::EvalRun {
+                case: Some("case.md".into()),
+                suite: None,
+                agents,
+                evaluator: None,
+                evaluator_repo: None,
+                records: "runs.jsonl".into(),
+                runs: 100,
+                timeout_seconds: 86400,
+                allow_widened_approvals: true,
+                output_json: false,
+            }
+        );
+        args.extend(["--agent".into(), "@overflow".into()]);
+        assert_usage(
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            "at most 16",
+        );
+    }
+
+    #[test]
+    fn headless_launch_keeps_options_separate_from_literal_prompt_values() {
+        for policy in ["disabled", "bounded"] {
+            let Command::HeadlessLaunch { launch, options } = parse([
+                "launch",
+                "@fixture",
+                "--headless",
+                "--background",
+                "--timeout",
+                "1",
+                "--native-helpers",
+                policy,
+                "--allow-child",
+                "@reader",
+                "--allow-child",
+                "checker",
+                "--allow-child-widened",
+                "@writer",
+                "--prompt",
+                "--background",
+                "--output",
+                "json",
+            ])
+            .unwrap() else {
+                panic!("expected headless launch")
+            };
+            assert_eq!(
+                options,
+                crate::headless::Options {
+                    background: true,
+                    timeout_seconds: 1,
+                    native_helpers: policy.into(),
+                    native_helpers_explicit: true,
+                    child_agents: vec!["reader".into(), "checker".into()],
+                    child_widened: vec!["writer".into()],
+                }
+            );
+            assert_eq!(
+                *launch,
+                Command::Launch {
+                    agent: "fixture".into(),
+                    prompt: PromptSource::Inline("--background".into()),
+                    display: crate::launch::DisplayMetadata::default(),
+                    output_json: true,
+                    dry_run: false,
+                    allow_widened_approvals: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn headless_launch_rejects_invalid_and_repeated_backend_options() {
+        for (extra, diagnostic) in [
+            (vec!["--headless", "--headless"], "repeated batch option"),
+            (
+                vec!["--background", "--background"],
+                "repeated batch option",
+            ),
+            (
+                vec!["--timeout", "1", "--timeout", "2"],
+                "repeated batch option",
+            ),
+            (
+                vec![
+                    "--native-helpers",
+                    "disabled",
+                    "--native-helpers",
+                    "bounded",
+                ],
+                "repeated batch option",
+            ),
+            (vec!["--timeout", "zero"], "--timeout needs seconds"),
+            (vec!["--timeout", "0"], "timeout must be positive"),
+            (
+                vec!["--native-helpers", "unlimited"],
+                "native helpers must be disabled or bounded",
+            ),
+            (
+                vec!["--allow-child", "../reader"],
+                "invalid child agent name",
+            ),
+            (
+                vec!["--allow-child-widened", "@"],
+                "invalid child agent name",
+            ),
+        ] {
+            let mut args = vec!["launch", "@fixture", "--prompt", "task"];
+            args.extend(extra);
+            assert_usage(&args, diagnostic);
+        }
+    }
+}
+
+#[cfg(test)]
 mod color_tests {
     use super::*;
 
