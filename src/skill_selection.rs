@@ -584,6 +584,13 @@ fn service_metadata(value: &Value) -> Option<Value> {
         }
         service.insert(key.into(), json!(text));
     }
+    service.insert(
+        "model_reported".into(),
+        json!(match value.get("model_reported") {
+            Some(value) => value.as_bool()?,
+            None => true, // A local service supplied its own model field.
+        }),
+    );
     for key in ["prompt_tokens", "generated_tokens"] {
         if let Some(tokens) = value.get(key) {
             service.insert(key.into(), json!(tokens.as_u64()?));
@@ -600,7 +607,8 @@ fn service_metadata(value: &Value) -> Option<Value> {
 }
 
 fn aggregate_service(batches: &[Value]) -> Value {
-    let mut result = json!({"batches": batches, "completed_batches": batches.len()});
+    let mut result = json!({"batches": batches, "completed_batches": batches.len(),
+        "model_reported":batches.iter().all(|b| b["model_reported"].as_bool() == Some(true))});
     for key in ["backend", "model"] {
         if batches.iter().all(|b| b[key] == batches[0][key]) {
             result[key] = batches[0][key].clone();
@@ -1274,6 +1282,26 @@ mod tests {
             assert!(selection.selected.is_empty());
             assert_eq!(selection.service.unwrap()["prompt_tokens"], 12);
         }
+    }
+
+    #[test]
+    fn missing_returned_model_is_preserved_through_service_aggregation() {
+        let known = service_metadata(
+            &json!({"backend":"typesafe","model":"jev-1.13.0","model_reported":true}),
+        )
+        .unwrap();
+        let missing = service_metadata(
+            &json!({"backend":"typesafe","model":"jev-1.13.0","model_reported":false}),
+        )
+        .unwrap();
+        assert_eq!(
+            aggregate_service(std::slice::from_ref(&known))["model_reported"],
+            true
+        );
+        assert_eq!(
+            aggregate_service(&[known, missing])["model_reported"],
+            false
+        );
     }
 
     #[test]

@@ -875,8 +875,12 @@ fn group(records: &[Record]) -> Vec<Group> {
                     selection_elapsed.push(selection.elapsed_ms);
                     selection_fallbacks += usize::from(selection.status == "fallback");
                     if let Some(service) = &selection.service {
-                        if let Some(model) =
-                            service.get("model").and_then(serde_json::Value::as_str)
+                        if service
+                            .get("model_reported")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                            && let Some(model) =
+                                service.get("model").and_then(serde_json::Value::as_str)
                         {
                             *selection_reported_models
                                 .entry(model.to_owned())

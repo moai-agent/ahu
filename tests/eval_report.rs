@@ -1592,11 +1592,11 @@ fn selection_fallbacks_and_partial_usage_remain_in_the_configured_arm() {
     for (status, service) in [
         (
             "suggested",
-            serde_json::json!({"model":"jev-1.13.0","prompt_tokens":200,"generated_tokens":2,"prompt_tokens_complete":true,"generated_tokens_complete":true}),
+            serde_json::json!({"model":"jev-1.13.0","model_reported":true,"prompt_tokens":200,"generated_tokens":2,"prompt_tokens_complete":true,"generated_tokens_complete":true}),
         ),
         (
             "fallback",
-            serde_json::json!({"model":"jev-1.13.0","prompt_tokens":12,"generated_tokens":1,"prompt_tokens_complete":false,"generated_tokens_complete":false}),
+            serde_json::json!({"model":"jev-1.13.0","model_reported":false,"prompt_tokens":12,"generated_tokens":1,"prompt_tokens_complete":false,"generated_tokens_complete":false}),
         ),
         ("fallback", Value::Null),
     ] {
@@ -1620,6 +1620,7 @@ fn selection_fallbacks_and_partial_usage_remain_in_the_configured_arm() {
     let group = &report.groups[0];
     assert_eq!(group.runs, 3);
     assert_eq!(group.selection_fallbacks, 2);
+    assert_eq!(group.selection_reported_models["jev-1.13.0"], 1);
     assert_eq!(group.selection_input_complete_runs, 1);
     assert_eq!(group.selection_input_partial_runs, 1);
     assert_eq!(group.mean_selection_input_tokens, Some(200.0));

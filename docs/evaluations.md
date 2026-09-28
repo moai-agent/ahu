@@ -135,7 +135,9 @@ Token reduction requires observed changes in what the agent reads or does.
 Records include policy/catalog/provider identity, suggested paths, abstention
 or fallback, selection duration and separate provider usage. The report groups
 selection policies by configured backend/model and catalog, including provider
-failures in the same arm. Returned model identities are reported separately.
+failures in the same arm. Returned model identities are reported separately with observation counts. A
+requested-model fallback is explicitly marked and does not count as a returned
+model observation.
 Complete provider usage and partial known subtotals have distinct coverage counts.
 Candidate calls to `ahu_skills_suggest` retain their separate provider costs even
 when the candidate later fails. Time marked `total` includes selection preparation,

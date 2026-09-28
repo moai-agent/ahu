@@ -577,7 +577,9 @@ fn typesafe_response(arguments: &Value, response: Value, model: &str) -> Result<
     let usage = response.get("usage").unwrap_or(&Value::Null);
     let mut service = json!({
         "backend":"typesafe",
-        "model":response.get("model").and_then(Value::as_str).unwrap_or(model)
+        "model":response.get("model").and_then(Value::as_str).unwrap_or(model),
+        "requested_model":model,
+        "model_reported":response.get("model").and_then(Value::as_str).is_some()
     });
     if let Some(tokens) = usage.get("input_tokens") {
         service["prompt_tokens"] = tokens.clone();
@@ -1111,10 +1113,13 @@ mod tests {
         let result =
             super::typesafe_response(&typed_request(), jev_response(), "jev-pinned").unwrap();
         assert_eq!(result["service"]["model"], "jev-1.13.0");
+        assert_eq!(result["service"]["model_reported"], true);
         let mut response = jev_response();
         response.as_object_mut().unwrap().remove("model");
         let result = super::typesafe_response(&typed_request(), response, "jev-pinned").unwrap();
         assert_eq!(result["service"]["model"], "jev-pinned");
+        assert_eq!(result["service"]["requested_model"], "jev-pinned");
+        assert_eq!(result["service"]["model_reported"], false);
     }
 
     #[test]
@@ -1496,6 +1501,7 @@ mod tests {
         assert_eq!(result["answers"]["refund"]["value"], 0.8);
         assert_eq!(result["service"]["backend"], "typesafe");
         assert_eq!(result["service"]["model"], "jev-1.13.0");
+        assert_eq!(result["service"]["model_reported"], true);
         assert_eq!(result["service"]["prompt_tokens"], 123);
         assert_eq!(result["service"]["generated_tokens"], 17);
     }
