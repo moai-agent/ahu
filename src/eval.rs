@@ -1624,6 +1624,17 @@ pub fn run(
                 // with whatever the failed attempt did measure, so it is not
                 // mistaken for an attempt that cost nothing.
                 let envelope = launch.envelope.as_ref();
+                // An attempt that failed still ran on a harness and still had a
+                // skill bundle in front of it, and the envelope states both. Take
+                // them here as the success path does, so the fingerprint is not
+                // marked `partial` over fields that were actually observed.
+                if let Some(envelope) = envelope {
+                    print.candidate = print
+                        .candidate
+                        .clone()
+                        .with_harness_version(harness_version(envelope));
+                    print.skill_digest = skill_digest(envelope);
+                }
                 let harness_outcome = envelope
                     .and_then(|value| value.get("outcome"))
                     .and_then(serde_json::Value::as_str);
@@ -1662,11 +1673,8 @@ pub fn run(
                     None => None,
                 };
                 insert_telemetry_fields(&mut record, telemetry.as_ref())?;
-                if let Some(tokens) = envelope
-                    .and_then(|value| value.pointer("/metrics/values"))
-                    .filter(|tokens| tokens.as_object().is_some_and(|fields| !fields.is_empty()))
-                {
-                    record.insert("reported_tokens".into(), tokens.clone());
+                if let Some(tokens) = reported_tokens(envelope, telemetry.as_ref()) {
+                    record.insert("reported_tokens".into(), tokens);
                 }
                 if let Some(envelope) = envelope {
                     // The envelope is real evidence about this attempt, so it is
@@ -1706,12 +1714,10 @@ pub fn run(
             .get("worktree")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| Error::new("candidate task result did not contain its worktree"))?;
-        print.candidate = print.candidate.clone().with_harness_version(
-            candidate_result
-                .pointer("/native_reference/harness_version")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
-        );
+        print.candidate = print
+            .candidate
+            .clone()
+            .with_harness_version(harness_version(&candidate_result));
         print.skill_digest = skill_digest(&candidate_result);
         write_private_file(
             &run_dir.join("candidate-result.json"),
@@ -1750,8 +1756,8 @@ pub fn run(
                 record.insert("failure_reason".into(), error.to_string().into());
                 let telemetry = receiver.task(candidate_task, attempt);
                 insert_telemetry_fields(&mut record, telemetry.as_ref())?;
-                if let Some(tokens) = candidate_result.pointer("/metrics/values") {
-                    record.insert("reported_tokens".into(), tokens.clone());
+                if let Some(tokens) = reported_tokens(Some(&candidate_result), telemetry.as_ref()) {
+                    record.insert("reported_tokens".into(), tokens);
                 }
                 record.insert(
                     "telemetry_receiver".into(),
@@ -1818,12 +1824,8 @@ pub fn run(
                     )?;
                     write_private_file(&run_dir.join("score.json"), &score_bytes)?;
                     print.evaluator = Some(
-                        fingerprint::AgentFingerprint::of(agent).with_harness_version(
-                            result
-                                .pointer("/native_reference/harness_version")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_owned),
-                        ),
+                        fingerprint::AgentFingerprint::of(agent)
+                            .with_harness_version(harness_version(&result)),
                     );
                     print.evaluator_skill_digest = skill_digest(&result);
                     print.evaluator_repo_head = evaluator_root.head.clone();
@@ -2020,28 +2022,10 @@ pub fn run(
                 .map(|t| serde_json::to_value(&t.tool_errors_by_name).unwrap_or_default())
                 .unwrap_or(serde_json::Value::Null),
         );
-        let mut reported_tokens = candidate_result
-            .pointer("/metrics/values")
-            .and_then(serde_json::Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        if let Some(telemetry) = &telemetry {
-            for (name, value) in [
-                ("decision_service.input", telemetry.decision_input_tokens),
-                ("decision_service.output", telemetry.decision_output_tokens),
-            ] {
-                if let Some(value) = value {
-                    reported_tokens.insert(name.to_owned(), value.into());
-                }
-            }
-        }
         put(
             "reported_tokens",
-            if reported_tokens.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::Object(reported_tokens)
-            },
+            reported_tokens(Some(&candidate_result), telemetry.as_ref())
+                .unwrap_or(serde_json::Value::Null),
         );
         record.retain(|_, value| !value.is_null());
         append_jsonl(&records, &serde_json::Value::Object(record))?;
@@ -2579,6 +2563,55 @@ fn safe_artifact(worktree: &Path, name: &str) -> Result<PathBuf> {
         bail!("{name} resolves outside the task worktree");
     }
     Ok(actual)
+}
+
+/// The harness version the launch reported, or `None` when it reported none.
+///
+/// Read from the launch envelope, which carries it under two names for the same
+/// value. Either will do, and taking both means a launch that failed still
+/// identifies the harness it ran on: without this the fingerprint is `partial`
+/// and names `harness_version` missing although the envelope stated it.
+fn harness_version(result: &serde_json::Value) -> Option<String> {
+    [
+        "/native_reference/harness_version",
+        "/capabilities/harness_version",
+    ]
+    .into_iter()
+    .filter_map(|pointer| result.pointer(pointer))
+    .filter_map(serde_json::Value::as_str)
+    .map(str::trim)
+    .find(|version| !version.is_empty())
+    .map(str::to_owned)
+}
+
+/// Everything one attempt reported about token usage, from both of its sources.
+///
+/// The harness's own counters come from the launch envelope; the decision
+/// service's come from the telemetry the receiver collected. Both are kept for
+/// every terminal path, because an attempt can call the decision service and
+/// then fail: dropping the service usage with the failure would make the attempt
+/// look like it never spent anything there. `None` when neither source reported
+/// a field, so an absent observation stays absent.
+fn reported_tokens(
+    envelope: Option<&serde_json::Value>,
+    telemetry: Option<&crate::eval_otel::TaskTelemetry>,
+) -> Option<serde_json::Value> {
+    let mut tokens = envelope
+        .and_then(|value| value.pointer("/metrics/values"))
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(telemetry) = telemetry {
+        for (name, value) in [
+            ("decision_service.input", telemetry.decision_input_tokens),
+            ("decision_service.output", telemetry.decision_output_tokens),
+        ] {
+            if let Some(value) = value {
+                tokens.insert(name.to_owned(), value.into());
+            }
+        }
+    }
+    (!tokens.is_empty()).then_some(serde_json::Value::Object(tokens))
 }
 
 /// Digest over the skills the launch reported, or `None` when it reported none.

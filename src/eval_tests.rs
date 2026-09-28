@@ -1017,3 +1017,91 @@ fn judge_metadata_limits_reject_bad_records_at_the_original_line() {
         .is_ok()
     );
 }
+
+/// Telemetry that observed the decision service's own token usage.
+fn decision_telemetry(input: Option<u64>, output: Option<u64>) -> crate::eval_otel::TaskTelemetry {
+    crate::eval_otel::TaskTelemetry {
+        task_id: "t".into(),
+        attempt: 1,
+        decision_input_tokens: input,
+        decision_output_tokens: output,
+        ..crate::eval_otel::TaskTelemetry::default()
+    }
+}
+
+#[test]
+fn decision_service_usage_survives_a_launch_that_called_it_and_then_failed() {
+    let envelope = serde_json::json!({
+        "metrics": {"values": {"ahu.tokens.input": {"kind": "observed", "value": 10}}}
+    });
+    // Both sources, as every terminal path now collects them. An attempt can
+    // reach the decision service and fail afterwards; the service usage is a
+    // real observation and is not discarded with the failure.
+    let merged = reported_tokens(Some(&envelope), Some(&decision_telemetry(Some(7), Some(9))))
+        .expect("both sources reported");
+    assert_eq!(merged["ahu.tokens.input"]["value"], 10);
+    assert_eq!(merged["decision_service.input"], 7);
+    assert_eq!(merged["decision_service.output"], 9);
+
+    // Telemetry alone is enough: a launch whose envelope carried no harness
+    // counters still reports what the service spent.
+    let service_only = reported_tokens(None, Some(&decision_telemetry(Some(7), Some(9))))
+        .expect("the service reported");
+    assert_eq!(service_only["decision_service.input"], 7);
+    assert!(service_only.get("ahu.tokens.input").is_none());
+
+    // A field neither source measured stays absent rather than becoming zero.
+    let partial = reported_tokens(None, Some(&decision_telemetry(Some(7), None)))
+        .expect("one field reported");
+    assert_eq!(partial["decision_service.input"], 7);
+    assert!(partial.get("decision_service.output").is_none());
+
+    // Nothing reported at all is no observation, not a map of zeros.
+    assert!(reported_tokens(None, None).is_none());
+    assert!(reported_tokens(Some(&serde_json::json!({})), None).is_none());
+    assert!(
+        reported_tokens(
+            Some(&serde_json::json!({"metrics": {"values": {}}})),
+            Some(&decision_telemetry(None, None))
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn a_failed_launch_still_identifies_the_harness_the_envelope_named() {
+    // Either name for the same value will do, so a launch that reported only one
+    // of them is not recorded as a run on an unknown harness.
+    for envelope in [
+        serde_json::json!({"native_reference": {"harness_version": "2.1.283 (Claude Code)"}}),
+        serde_json::json!({"capabilities": {"harness_version": "2.1.283 (Claude Code)"}}),
+    ] {
+        assert_eq!(
+            harness_version(&envelope).as_deref(),
+            Some("2.1.283 (Claude Code)"),
+            "{envelope}"
+        );
+    }
+    // native_reference wins when both are present and they agree or differ:
+    // one source is picked rather than the two being reconciled here.
+    let both = serde_json::json!({
+        "native_reference": {"harness_version": "2.1.283"},
+        "capabilities": {"harness_version": "2.1.284"},
+    });
+    assert_eq!(harness_version(&both).as_deref(), Some("2.1.283"));
+    // A blank or absent value is not a version, and never a placeholder string.
+    for envelope in [
+        serde_json::json!({}),
+        serde_json::json!({"native_reference": {"harness_version": "   "}}),
+        serde_json::json!({"native_reference": {"harness_version": null}}),
+        serde_json::json!({"capabilities": {"harness_version": 2}}),
+    ] {
+        assert_eq!(harness_version(&envelope), None, "{envelope}");
+    }
+    // A blank in the first source falls through to the second.
+    let fallback = serde_json::json!({
+        "native_reference": {"harness_version": ""},
+        "capabilities": {"harness_version": "1.18.32"},
+    });
+    assert_eq!(harness_version(&fallback).as_deref(), Some("1.18.32"));
+}

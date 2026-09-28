@@ -477,6 +477,36 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
             assert_eq!(row["mcp_tool_call_count"], 1);
             assert_eq!(row["mcp_tools"]["ahu_agents_list"], 1);
         }
+        // A failed attempt still ran on a harness with a skill bundle in front
+        // of it, and the launch envelope states both. The fingerprint must not
+        // be marked partial over fields that were actually observed.
+        let missing: Vec<&str> = row["fingerprint_missing"]
+            .as_array()
+            .map(|names| names.iter().filter_map(|name| name.as_str()).collect())
+            .unwrap_or_default();
+        for field in ["harness_version", "skill_digest"] {
+            assert!(
+                !missing.contains(&field),
+                "{mode} reported {field} but the fingerprint calls it missing: {row}"
+            );
+            assert!(
+                row[field].is_string(),
+                "{mode} kept its observed {field}: {row}"
+            );
+        }
+        assert_eq!(row["harness_version"], "1.18.32", "{mode}");
+        assert_eq!(
+            row["skill_digest"].as_str().map(str::len),
+            Some(64),
+            "{mode}: {row}"
+        );
+        // The harness counters it did report are kept beside the failure.
+        if mode != "launch_failed" {
+            assert!(
+                row["reported_tokens"].is_object(),
+                "{mode} kept the usage it reported: {row}"
+            );
+        }
     }
 }
 
