@@ -212,7 +212,14 @@ pub fn judge_with(
             observation.provider_input_complete = service["prompt_tokens"].as_u64().is_some();
             observation.provider_output_complete = service["generated_tokens"].as_u64().is_some();
         }
-        if observation.service.is_none() {
+        // The model-neutral MCP contract permits answers without service
+        // metadata. Missing observations remain unknown; malformed supplied
+        // metadata is still rejected rather than trusted or coerced.
+        if response
+            .get("service")
+            .is_some_and(|value| !value.is_null())
+            && observation.service.is_none()
+        {
             return Err(Error::new("invalid decision service metadata"));
         }
         convert(case, &response)
@@ -502,6 +509,64 @@ Synthetic routing case.
         let judged = convert(&case, &partial).unwrap();
         assert_eq!(judged.score, 0.5);
         assert!(!judged.passed);
+    }
+
+    #[test]
+    fn optional_provider_metadata_preserves_scores_and_unknown_usage() {
+        for metadata in [None, Some(Value::Null)] {
+            let mut response = response();
+            response.as_object_mut().unwrap().remove("service");
+            if let Some(value) = metadata {
+                response["service"] = value;
+            }
+            let mut observation = Observation::new("typed_decision");
+            let judged = judge_with(
+                &case(),
+                &json!({"route":"billing"}),
+                &mut observation,
+                |_| Ok(response),
+            )
+            .unwrap();
+            assert!(judged.passed && observation.validate());
+            assert_eq!(observation.status, "scored");
+            assert_eq!(observation.calls_attempted, 1);
+            assert!(observation.service.is_none());
+            assert!(!observation.provider_input_complete && !observation.provider_output_complete);
+            let summary = Summary::collect(std::iter::once((Some(&observation), None)));
+            assert!(summary.reported_service_identities.is_empty());
+            assert!(
+                !summary
+                    .means
+                    .keys()
+                    .any(|key| key.starts_with("evaluator_provider."))
+            );
+            let receiver =
+                crate::eval_otel::Receiver::start_for(Some("unknown-provider"), None).unwrap();
+            assert!(crate::telemetry::export_eval_decision(
+                receiver.endpoint(),
+                "unknown-provider",
+                "judge",
+                &observation
+            ));
+            let telemetry = receiver.task("judge", 1).unwrap();
+            assert_eq!(telemetry.evaluator_decision_observations, 1);
+            assert_eq!(telemetry.evaluator_decision_errors, 0);
+            assert_eq!(telemetry.evaluator_decision_input_tokens, None);
+            assert_eq!(telemetry.evaluator_decision_output_tokens, None);
+        }
+        let mut malformed = response();
+        malformed["service"] = json!({"backend":"local","model":"fixture","prompt_tokens":-1});
+        let mut observation = Observation::new("typed_decision");
+        assert!(
+            judge_with(
+                &case(),
+                &json!({"route":"billing"}),
+                &mut observation,
+                |_| Ok(malformed)
+            )
+            .is_err()
+        );
+        assert_eq!(observation.status, "failed");
     }
 
     #[test]

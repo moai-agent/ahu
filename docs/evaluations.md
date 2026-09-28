@@ -208,6 +208,8 @@ before skill selection and ends after grading, including failed work;
 Evaluator agent tokens and projected telemetry use the evaluator's own task ID
 and attempt, including failed launches and invalid score artifacts. Typed grading
 records safe returned backend/model and optional provider tokens/duration.
+A provider may omit service metadata: valid scores still count, with unknown
+provider identity and usage. Malformed supplied metadata fails grading.
 Failed service calls have unknown usage, never an invented zero. Returned usage
 and input/output completeness are reported separately from candidate usage.
 
