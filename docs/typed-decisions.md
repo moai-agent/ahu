@@ -170,7 +170,10 @@ harness, model, task ID, headless attempt, and optional `ahu.eval.run_id`,
 `ahu.eval.case_id`, `ahu.eval.corpus_version`, and `ahu.eval.stage` identifiers
 when ahu launched the session. This supports grouping across harnesses and
 correlating MCP calls to the task result. MCP spans cover inbound requests;
-they do not describe harness-internal tool use that bypasses ahu MCP. Directly
+they do not describe harness-internal tool use that bypasses ahu MCP. A native
+approval denial before dispatch never reaches this server. Even a complete MCP
+session with zero calls cannot establish that the agent never tried to invoke a
+tool; inspect native approval outcomes separately. Directly
 started MCP servers have no ahu task identity unless their launcher supplies
 the corresponding allowlisted resource attributes. ahu also carries bounded
 identity fields through `AHU_MCP_RESOURCE_ATTRIBUTES` so a harness filtering

@@ -75,8 +75,11 @@ validation results identifiable. Do not tune instructions on held-out results.
    Missing service usage after an error is unknown. Do not add tokens from different
    models, equate token counts with provider bills, or subtract summed service
    durations from wall time to infer model time.
-6. Require full tool telemetry for abstention claims. Distinguish attempted calls,
-   successful calls, and errors. Preserve receiver-loss diagnostics.
+6. Require full tool telemetry for claims that no calls reached the MCP server.
+   Native approval denials before dispatch are invisible to server telemetry;
+   inspect native outcomes before claiming the agent never attempted a call.
+   Distinguish received calls, successful calls, and errors. Preserve receiver-loss
+   diagnostics.
 
 The initial small sample can establish operation and describe observed differences;
 it cannot prove broad accuracy preservation or universal savings. A release claim
