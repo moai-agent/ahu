@@ -549,7 +549,8 @@ fn a_total_is_never_derived_from_the_fields_that_were_reported() {
         .find(|line| line.starts_with("c1"))
         .expect("the row")
         .to_string();
-    assert!(row.ends_with(MISSING), "{row} must not report 140 tokens");
+    assert!(row.ends_with("100/40 I/O"), "{row}");
+    assert!(!row.ends_with("140"), "{row} must not invent a total");
 }
 
 #[test]

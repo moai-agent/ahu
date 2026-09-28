@@ -257,13 +257,14 @@ pub fn configure_child(
         .env_remove("OTEL_EXPORTER_OTLP_CLIENT_KEY")
         .env_remove("OTEL_EXPORTER_OTLP_COMPRESSION")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_COMPRESSION")
+        .env_remove("OTEL_EXPORTER_OTLP_LOGS_COMPRESSION")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
         .env("OTEL_EXPORTER_OTLP_TIMEOUT", "500")
-        .env("OTEL_EXPORTER_OTLP_COMPRESSION", "none")
         .env("OTEL_TRACES_EXPORTER", "otlp")
         .env("OTEL_METRICS_EXPORTER", "none")
         .env("OTEL_LOGS_EXPORTER", "none")
@@ -951,6 +952,15 @@ mod tests {
             ..TelemetryConfig::default()
         };
         let mut command = std::process::Command::new("true");
+        let compression_keys = [
+            "OTEL_EXPORTER_OTLP_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_LOGS_COMPRESSION",
+        ];
+        for key in compression_keys {
+            command.env(key, "gzip");
+        }
         configure_child(
             &mut command,
             &enabled,
@@ -971,6 +981,15 @@ mod tests {
         assert!(env["OTEL_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=2"));
         assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=2"));
         assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.id=task"));
+        // No compression is represented by absence. The Rust OTLP SDK rejects
+        // the string "none", preventing native exporter initialization.
+        for key in compression_keys {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(name, value)| name == key && value.is_none())
+            );
+        }
     }
 
     #[test]

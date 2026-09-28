@@ -1378,6 +1378,8 @@ pub struct Events {
     #[serde(default)]
     pub stderr_unclassified_lines: u64,
     #[serde(default)]
+    pub stderr_informational_lines: u64,
+    #[serde(default)]
     pub usage: TokenUsage,
     #[serde(default)]
     pub model: Option<String>,
@@ -1404,6 +1406,15 @@ impl Events {
         let text = String::from_utf8_lossy(line);
         let text = text.trim();
         if text.is_empty() {
+            return;
+        }
+        // Exact native stdin progress messages carry no failure or private data.
+        // Keep their count without making every noninteractive Codex run unknown.
+        if matches!(
+            text,
+            "Reading prompt from stdin..." | "Reading additional input from stdin..."
+        ) {
+            self.stderr_informational_lines += 1;
             return;
         }
         let lower = text.to_ascii_lowercase();
@@ -2461,6 +2472,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     events.failed |= stderr.failed;
     events.stderr_diagnostics = stderr.stderr_diagnostics;
     events.stderr_unclassified_lines = stderr.stderr_unclassified_lines;
+    events.stderr_informational_lines = stderr.stderr_informational_lines;
     if !events.stderr_diagnostics.is_empty() {
         events
             .blockers
@@ -3402,6 +3414,24 @@ mod write_tracking_tests {
         assert!(events.failed);
         assert_eq!(events.stderr_diagnostics, ["permission denial"]);
         assert_eq!(events.stderr_unclassified_lines, 1);
+    }
+
+    #[test]
+    fn stdin_progress_is_informational_but_nearby_diagnostics_are_not_suppressed() {
+        let mut events = Events::default();
+        events.observe_stderr(b"Reading prompt from stdin...");
+        events.observe_stderr(b"Reading additional input from stdin...\n");
+        assert_eq!(events.stderr_informational_lines, 2);
+        assert_eq!(events.stderr_unclassified_lines, 0);
+        assert!(!events.failed);
+        events.observe_stderr(b"Reading prompt from stdin... warning");
+        events.observe_stderr(
+            b"Could not create otel exporter: failed to build OTLP metrics exporter",
+        );
+        assert_eq!(events.stderr_unclassified_lines, 2);
+        events.observe_stderr(b"Reading prompt from stdin... permission denied");
+        assert!(events.failed);
+        assert_eq!(events.stderr_diagnostics, ["permission denial"]);
     }
 }
 
