@@ -7,6 +7,17 @@ use std::process::Stdio;
 #[cfg(unix)]
 #[test]
 fn mcp_sigterm_flushes_a_complete_session_without_stdin_eof() {
+    mcp_shutdown_signal_fixture(libc::SIGTERM);
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_sigint_flushes_a_complete_session_without_stdin_eof() {
+    mcp_shutdown_signal_fixture(libc::SIGINT);
+}
+
+#[cfg(unix)]
+fn mcp_shutdown_signal_fixture(signal: libc::c_int) {
     let repo = common::TestRepo::new();
     let receiver = ahu::eval_otel::Receiver::start().unwrap();
     let mut child = common::ahu()
@@ -36,7 +47,7 @@ fn mcp_sigterm_flushes_a_complete_session_without_stdin_eof() {
     drop(output);
     // This PID belongs to the unreaped child created above. Keep stdin open:
     // real harnesses can terminate MCP children before closing their pipes.
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {

@@ -19,6 +19,12 @@ repository even when its MCP server connects. Trust covers that repository's
 worktrees. Keep the same permissions in both arms; do not bypass all permissions.
 See [Claude's workspace trust rules](https://code.claude.com/docs/en/permissions#project-allow-rules-and-workspace-trust).
 
+Complete the native workspace trust step for Codex as well: its project MCP
+configuration must be active in the candidate worktrees. Validate this with a
+real tool call before freezing the comparison inputs. Keep the measured binary
+fixed throughout the matrix; install rebuilt executables by atomic replacement,
+so a running MCP process never sees its executable overwritten in place.
+
 Compare two manifest policies with the same tool and skill availability:
 
 - Baseline: answer locally within the candidate model; do not delegate judgments.

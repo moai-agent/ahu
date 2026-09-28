@@ -36,7 +36,7 @@ mod termination_signal {
         REQUESTED.store(true, Ordering::Relaxed);
     }
 
-    pub struct Guard(libc::sigaction);
+    pub struct Guard(libc::sigaction, libc::sigaction);
     impl Guard {
         pub fn install() -> std::io::Result<Self> {
             REQUESTED.store(false, Ordering::Relaxed);
@@ -45,13 +45,19 @@ mod termination_signal {
             unsafe {
                 let mut action: libc::sigaction = std::mem::zeroed();
                 let mut previous: libc::sigaction = std::mem::zeroed();
+                let mut previous_interrupt: libc::sigaction = std::mem::zeroed();
                 action.sa_sigaction = request_shutdown as *const () as usize;
                 action.sa_flags = libc::SA_RESTART;
                 libc::sigemptyset(&mut action.sa_mask);
                 if libc::sigaction(libc::SIGTERM, &action, &mut previous) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                Ok(Self(previous))
+                if libc::sigaction(libc::SIGINT, &action, &mut previous_interrupt) != 0 {
+                    let error = std::io::Error::last_os_error();
+                    libc::sigaction(libc::SIGTERM, &previous, std::ptr::null_mut());
+                    return Err(error);
+                }
+                Ok(Self(previous, previous_interrupt))
             }
         }
     }
@@ -60,6 +66,7 @@ mod termination_signal {
             // SAFETY: restore the action returned by the successful install.
             unsafe {
                 libc::sigaction(libc::SIGTERM, &self.0, std::ptr::null_mut());
+                libc::sigaction(libc::SIGINT, &self.1, std::ptr::null_mut());
             }
         }
     }
