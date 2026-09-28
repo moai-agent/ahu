@@ -464,7 +464,7 @@ mod tests {
             corpus_version: "1.0.0".into(),
             case_schema_version: 2,
             case_digest: "e".repeat(64),
-            prompt_profile: super::super::case::PromptProfile::ToolNeutralV2,
+            prompt_profile: super::super::case::PromptProfile::ToolNeutralV3,
             prompt_version: super::super::case::PROMPT_VERSION,
             scoring_version: super::super::case::SCORING_VERSION,
             suite: None,

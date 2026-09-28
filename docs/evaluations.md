@@ -158,3 +158,10 @@ Counterbalance arm order, retain failed attempts, and evaluate unnecessary
 suggestions on no-skill cases. Calibrate on development cases and evaluate on
 fresh held-out tasks. Report selection accuracy separately from completed-task
 quality, native usage, service usage and latency.
+
+### Answer encoding
+
+The tool-neutral prompt template (version 3) explicitly asks for choice option
+keys and numeric score/probability values. Option descriptions explain the
+choices; they are not accepted in place of keys. Prompt version and profile are
+part of the input fingerprint, so older and newer prompt runs remain separate.

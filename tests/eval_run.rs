@@ -195,7 +195,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     // Exact input identity, with the build identity kept apart from the HEAD of
     // the checkout under evaluation.
     assert_eq!(rows[0]["case_schema_version"], 2);
-    assert_eq!(rows[0]["prompt_profile"], "tool_neutral_v2");
+    assert_eq!(rows[0]["prompt_profile"], "tool_neutral_v3");
     for field in [
         "case_digest",
         "agent_manifest_digest",
