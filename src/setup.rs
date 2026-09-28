@@ -28,6 +28,7 @@ const CODEX_MCP_ENV: &[&str] = &[
     "OTEL_RESOURCE_ATTRIBUTES",
     "TYPESAFE_API_KEY",
     "AHU_DECISION_URL",
+    "AHU_DECISION_MODEL",
 ];
 
 fn codex_env_forwarding(existing: &str, parsed: &toml::Value) -> Result<Option<String>> {

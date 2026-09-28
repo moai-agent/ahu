@@ -531,9 +531,10 @@ pub(crate) fn mcp_request_span(request: &serde_json::Value) -> SpanGuard {
 }
 
 fn mcp_tool_attributes(name: &str, arguments: &serde_json::Value) -> Vec<KeyValue> {
-    let name = match name {
-        "ahu_agents_list" | "ahu_tasks_list" | "ahu_task_get" | "ahu_typed_decide" => name,
-        _ => "unknown",
+    let name = if crate::mcp::TOOL_NAMES.contains(&name) {
+        name
+    } else {
+        "unknown"
     };
     let mut attributes = vec![KeyValue::new("ahu.mcp.tool.name", name.to_string())];
     if name == "ahu_typed_decide" {
@@ -740,15 +741,7 @@ fn mcp_result_attributes(method: &str, name: &str, response: &serde_json::Value)
         let mut names = tools
             .iter()
             .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
-            .filter(|tool| {
-                [
-                    "ahu_agents_list",
-                    "ahu_tasks_list",
-                    "ahu_task_get",
-                    "ahu_typed_decide",
-                ]
-                .contains(tool)
-            })
+            .filter(|tool| crate::mcp::TOOL_NAMES.contains(tool))
             .collect::<Vec<_>>();
         names.sort_unstable();
         names.dedup();
@@ -773,6 +766,48 @@ fn mcp_result_attributes(method: &str, name: &str, response: &serde_json::Value)
     if response.pointer("/result/isError") == Some(&serde_json::Value::Bool(true))
         || response.get("error").is_some()
     {
+        return attributes;
+    }
+    if method == "tools/call" && name == "ahu_skills_suggest" {
+        if let Some(value) = response.pointer("/result/structuredContent") {
+            for (field, key, allowed) in [
+                (
+                    "mode",
+                    "ahu.selection.mode",
+                    &["none", "lexical", "decision"][..],
+                ),
+                (
+                    "status",
+                    "ahu.selection.status",
+                    &["disabled", "suggested", "abstained", "fallback"][..],
+                ),
+            ] {
+                if let Some(v) = value.get(field).and_then(serde_json::Value::as_str)
+                    && allowed.contains(&v)
+                {
+                    attributes.push(KeyValue::new(key, v.to_owned()));
+                }
+            }
+            for (pointer, key) in [
+                ("/candidate_count", "ahu.selection.candidates"),
+                ("/policy_version", "ahu.selection.policy_version"),
+                ("/service/prompt_tokens", "ahu.selection.tokens.input"),
+                ("/service/generated_tokens", "ahu.selection.tokens.output"),
+            ] {
+                if let Some(v) = value.pointer(pointer).and_then(serde_json::Value::as_u64) {
+                    attributes.push(KeyValue::new(key, v.min(i64::MAX as u64) as i64));
+                }
+            }
+            if let Some(rows) = value.get("selected").and_then(serde_json::Value::as_array) {
+                attributes.push(KeyValue::new("ahu.selection.selected", rows.len() as i64));
+            }
+            if let Some(v) = value.get("elapsed_ms").and_then(serde_json::Value::as_f64)
+                && v.is_finite()
+                && v >= 0.0
+            {
+                attributes.push(KeyValue::new("ahu.selection.duration_ms", v));
+            }
+        }
         return attributes;
     }
     if method != "tools/call" || name != "ahu_typed_decide" {
@@ -1319,5 +1354,138 @@ mod tests {
                 Value::F64(value) => Some(value),
                 _ => None,
             })
+    }
+}
+
+/// Export one bounded prelaunch selection observation to this eval's collector.
+/// Uses a private provider rather than changing global telemetry or process env.
+pub(crate) fn export_eval_selection(
+    endpoint: &str,
+    run_id: &str,
+    selection_id: &str,
+    selection: &crate::skill_selection::Selection,
+) -> bool {
+    use opentelemetry::trace::TracerProvider;
+    if selection.mode == crate::skill_selection::Mode::None {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    if url.scheme() != "http"
+        || !url.host_str().is_some_and(|h| {
+            h.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        })
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    let Ok(exporter) = SpanExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpBinary)
+        .with_endpoint(format!("{}/v1/traces", endpoint.trim_end_matches('/')))
+        .with_timeout(Duration::from_millis(500))
+        .build()
+    else {
+        return false;
+    };
+    let provider = SdkTracerProvider::builder()
+        .with_resource(
+            Resource::builder()
+                .with_service_name("ahu-eval")
+                .with_attributes([
+                    KeyValue::new("ahu.eval.run_id", run_id.to_owned()),
+                    KeyValue::new("ahu.eval.stage", "skill_selection"),
+                    KeyValue::new("ahu.task.id", selection_id.to_owned()),
+                    KeyValue::new("ahu.task.attempt", "1"),
+                ])
+                .build(),
+        )
+        .with_batch_exporter(exporter)
+        .build();
+    let mut span = provider.tracer("ahu").start("ahu.skills.selection");
+    span.set_attributes([
+        KeyValue::new("ahu.selection.purpose", "skill_relevance"),
+        KeyValue::new("ahu.selection.mode", selection.mode.as_str()),
+        KeyValue::new(
+            "ahu.selection.policy_version",
+            selection.policy_version as i64,
+        ),
+        KeyValue::new("ahu.selection.candidates", selection.candidate_count as i64),
+        KeyValue::new("ahu.selection.selected", selection.selected.len() as i64),
+        KeyValue::new("ahu.selection.status", selection.status.clone()),
+        KeyValue::new("ahu.selection.duration_ms", selection.elapsed_ms),
+        KeyValue::new(
+            "ahu.selection.catalog_digest",
+            selection.catalog_digest.clone(),
+        ),
+    ]);
+    if let Some(service) = &selection.service {
+        for (field, key) in [
+            ("prompt_tokens", "ahu.selection.tokens.input"),
+            ("generated_tokens", "ahu.selection.tokens.output"),
+        ] {
+            if let Some(value) = service.get(field).and_then(serde_json::Value::as_u64) {
+                span.set_attribute(KeyValue::new(key, value.min(i64::MAX as u64) as i64));
+            }
+        }
+    }
+    span.end();
+    let ok = provider.force_flush().is_ok();
+    let _ = provider.shutdown();
+    ok
+}
+
+#[cfg(test)]
+mod selection_tests {
+    #[test]
+    fn selection_export_reaches_only_its_eval_receiver_without_payload() {
+        let receiver = crate::eval_otel::Receiver::start_for(Some("selection-run"), None).unwrap();
+        let selection: crate::skill_selection::Selection =
+            serde_json::from_value(serde_json::json!({
+                "mode":"decision","policy_version":1,"catalog_digest":"a".repeat(64),
+                "candidate_count":4,"selected":[".agents/skills/private-marker/SKILL.md"],
+                "status":"suggested","elapsed_ms":12.0,
+                "service":{"prompt_tokens":100,"generated_tokens":4},
+                "error_code":null
+            }))
+            .unwrap();
+        assert!(super::export_eval_selection(
+            receiver.endpoint(),
+            "selection-run",
+            "selector-1",
+            &selection
+        ));
+        let observed = receiver.task("selector-1", 1).unwrap();
+        assert_eq!(observed.selection_observations, 1);
+        assert_eq!(observed.selection_candidate_count, Some(4));
+        assert_eq!(observed.selection_selected_count, Some(1));
+        assert_eq!(observed.selection_input_tokens, Some(100));
+        assert_eq!(observed.selection_output_tokens, Some(4));
+        assert_eq!(observed.selection_duration_ms, Some(12.0));
+        assert_eq!(observed.tool_call_spans, 0);
+        assert!(!observed.mcp_observed);
+        assert!(
+            !serde_json::to_string(&observed)
+                .unwrap()
+                .contains("private-marker")
+        );
+        for endpoint in [
+            "https://127.0.0.1:4318",
+            "http://example.invalid:4318",
+            "http://user@127.0.0.1:4318",
+            "http://127.0.0.1:4318/?secret=x",
+        ] {
+            assert!(!super::export_eval_selection(
+                endpoint,
+                "selection-run",
+                "selector-1",
+                &selection
+            ));
+        }
     }
 }

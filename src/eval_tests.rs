@@ -644,6 +644,7 @@ fn fixture_request<'a>(case: &'a Path, records: &'a Path) -> RunRequest<'a> {
         agents: &[],
         evaluator: None,
         evaluator_repo: None,
+        skill_selection: crate::skill_selection::Mode::None,
         records,
         runs: 1,
         timeout_seconds: 1,
@@ -1105,4 +1106,28 @@ fn a_failed_launch_still_identifies_the_harness_the_envelope_named() {
         "capabilities": {"harness_version": "1.18.32"},
     });
     assert_eq!(harness_version(&fallback).as_deref(), Some("1.18.32"));
+}
+
+#[test]
+fn selection_policy_identity_excludes_outcomes_but_tracks_configuration() {
+    let mut selection: crate::skill_selection::Selection =
+        serde_json::from_value(serde_json::json!({
+            "mode":"decision","policy_version":1,"catalog_digest":"a".repeat(64),
+            "candidate_count":1,"selected":[],"status":"abstained","elapsed_ms":2.0,
+            "service":{"backend":"typesafe","model":"jev-1.13.0","prompt_tokens":100},
+            "error_code":null
+        }))
+        .unwrap();
+    let base = selection_policy_digest(&selection);
+    selection
+        .selected
+        .push(".agents/skills/fixture/SKILL.md".into());
+    selection.elapsed_ms = 999.0;
+    selection.status = "suggested".into();
+    selection.service.as_mut().unwrap()["prompt_tokens"] = 900.into();
+    assert_eq!(selection_policy_digest(&selection), base);
+    selection.service.as_mut().unwrap()["model"] = "different-model".into();
+    assert_ne!(selection_policy_digest(&selection), base);
+    selection.mode = crate::skill_selection::Mode::None;
+    assert!(selection_policy_digest(&selection).is_none());
 }

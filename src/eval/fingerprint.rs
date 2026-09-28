@@ -182,6 +182,8 @@ pub struct InputFingerprint {
     /// Digest over the skills the candidate's harness was given. Absent when the
     /// launch reported no skill catalog.
     pub skill_digest: Option<String>,
+    /// Policy/catalog/provider identity for optional prelaunch advice.
+    pub selection_policy_digest: Option<String>,
     /// Digest over the skills provided to the evaluator.
     pub evaluator_skill_digest: Option<String>,
     pub build: BuildIdentity,
@@ -252,6 +254,7 @@ impl InputFingerprint {
             "evaluator": self.evaluator.as_ref().map(AgentFingerprint::canonical),
             "blinding": self.blinding.as_str(),
             "skill_digest": self.skill_digest,
+            "selection_policy_digest": self.selection_policy_digest,
             "evaluator_skill_digest": self.evaluator_skill_digest,
             "ahu_version": self.build.version,
             "ahu_build_digest": self.build.binary_digest,
@@ -275,6 +278,12 @@ impl InputFingerprint {
         let mut put = |key: &str, value: serde_json::Value| {
             fields.insert(key.to_owned(), value);
         };
+        put(
+            "selection_policy_digest",
+            self.selection_policy_digest
+                .clone()
+                .map_or(serde_json::Value::Null, Into::into),
+        );
         put("case_id", self.case_id.clone().into());
         put("corpus_version", self.corpus_version.clone().into());
         put("case_schema_version", self.case_schema_version.into());
@@ -464,6 +473,7 @@ mod tests {
             evaluator: Some(agent("judge")),
             blinding: Blinding::PromptOnly,
             skill_digest: Some("f".repeat(64)),
+            selection_policy_digest: None,
             evaluator_skill_digest: Some("9".repeat(64)),
             build: BuildIdentity {
                 version: "0.5.0".into(),
@@ -556,6 +566,7 @@ mod tests {
             Box::new(|f| f.candidate.source_digest = "9".repeat(64)),
             Box::new(|f| f.candidate.model = "other".into()),
             Box::new(|f| f.skill_digest = Some("9".repeat(64))),
+            Box::new(|f| f.selection_policy_digest = Some("8".repeat(64))),
             Box::new(|f| f.build.tool_definitions_digest = "9".repeat(64)),
             Box::new(|f| f.build.binary_digest = Some("9".repeat(64))),
             Box::new(|f| f.build.version = "9.9.9".into()),

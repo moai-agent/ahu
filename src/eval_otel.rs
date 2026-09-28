@@ -83,6 +83,12 @@ pub struct TaskTelemetry {
     pub decision_request_bytes: Option<u64>,
     pub decision_request_observations: u64,
     pub decision_request_formats: BTreeMap<String, u64>,
+    pub selection_observations: u64,
+    pub selection_candidate_count: Option<u64>,
+    pub selection_selected_count: Option<u64>,
+    pub selection_duration_ms: Option<f64>,
+    pub selection_input_tokens: Option<u64>,
+    pub selection_output_tokens: Option<u64>,
     /// True once an `ahu.mcp.session` summary span arrived for this task.
     ///
     /// The summary is what carries the session's own totals, so without it the
@@ -508,12 +514,61 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                             task.trace_id = Some(trace_id);
                         }
                     }
+                    "ahu.skills.selection" => {
+                        task.selection_observations = task.selection_observations.saturating_add(1);
+                        add_counter(
+                            &mut task.selection_candidate_count,
+                            integers.get("ahu.selection.candidates").copied(),
+                        );
+                        add_counter(
+                            &mut task.selection_selected_count,
+                            integers.get("ahu.selection.selected").copied(),
+                        );
+                        add_duration(
+                            &mut task.selection_duration_ms,
+                            numbers.get("ahu.selection.duration_ms").copied(),
+                        );
+                        add_counter(
+                            &mut task.selection_input_tokens,
+                            integers.get("ahu.selection.tokens.input").copied(),
+                        );
+                        add_counter(
+                            &mut task.selection_output_tokens,
+                            integers.get("ahu.selection.tokens.output").copied(),
+                        );
+                    }
                     "ahu.mcp.tools.list" => (),
                     "ahu.mcp.tool.call" => {
                         task.tool_call_spans = task.tool_call_spans.saturating_add(1);
                         if let Some(name) = attrs.get("ahu.mcp.tool.name") {
                             let count = task.tool_calls_by_name.entry(name.clone()).or_default();
                             *count = count.saturating_add(1);
+                            if name == "ahu_skills_suggest"
+                                && attrs.get("ahu.mcp.outcome").is_some_and(|v| v == "success")
+                            {
+                                task.selection_observations =
+                                    task.selection_observations.saturating_add(1);
+                                add_counter(
+                                    &mut task.selection_candidate_count,
+                                    integers.get("ahu.selection.candidates").copied(),
+                                );
+                                add_counter(
+                                    &mut task.selection_selected_count,
+                                    integers.get("ahu.selection.selected").copied(),
+                                );
+                                add_duration(
+                                    &mut task.selection_duration_ms,
+                                    numbers.get("ahu.selection.duration_ms").copied(),
+                                );
+                                add_counter(
+                                    &mut task.selection_input_tokens,
+                                    integers.get("ahu.selection.tokens.input").copied(),
+                                );
+                                add_counter(
+                                    &mut task.selection_output_tokens,
+                                    integers.get("ahu.selection.tokens.output").copied(),
+                                );
+                            }
                             if name == "ahu_typed_decide" {
                                 if let Some(bytes) =
                                     integers.get("ahu.mcp.decision.arguments.bytes")
@@ -620,7 +675,11 @@ fn string_attributes(
             key.as_str() != "ahu.mcp.tool.name"
                 || matches!(
                     value.as_str(),
-                    "ahu_agents_list" | "ahu_tasks_list" | "ahu_task_get" | "ahu_typed_decide"
+                    "ahu_agents_list"
+                        | "ahu_tasks_list"
+                        | "ahu_task_get"
+                        | "ahu_typed_decide"
+                        | "ahu_skills_suggest"
                 )
         })
         .collect()

@@ -58,6 +58,7 @@ fn eval_run_launches_candidate_captures_local_otel_and_appends_external_record()
     repo.init_config();
     repo.add_agent_on("triage", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
     repo.add_agent_on("judge", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    repo.write(".agents/skills/billing/SKILL.md", "---\nname: billing\ndescription: Resolve duplicate charge disputes\n---\nReview billing facts.\n");
     repo.commit("evaluation agents");
 
     let external = TempDir::new().unwrap();
@@ -118,6 +119,8 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
             case.to_str().unwrap(),
             "--agent",
             "@triage",
+            "--skill-selection",
+            "lexical",
             "--evaluator",
             "@judge",
             "--records",
@@ -213,6 +216,17 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
             "{field} must be recorded as a digest"
         );
     }
+    assert_eq!(rows[0]["skill_selection"]["mode"], "lexical");
+    assert_eq!(rows[0]["skill_selection"]["status"], "suggested");
+    assert_eq!(rows[0]["selection_telemetry_observed"], true);
+    assert_eq!(
+        rows[0]["selection_policy_digest"].as_str().map(str::len),
+        Some(64)
+    );
+    assert!(
+        rows[0]["total_elapsed_ms"].as_f64().unwrap()
+            >= rows[0]["launch_elapsed_ms"].as_f64().unwrap()
+    );
     assert_eq!(rows[0]["ahu_version"], env!("CARGO_PKG_VERSION"));
     assert!(
         rows[0].get("ahu_revision").is_none(),

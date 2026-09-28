@@ -145,6 +145,10 @@ eval report options:
                         evaluator
 
 eval run options:
+  --skill-selection <none|lexical|decision>
+                        Optional prelaunch skill advice (default none). Decision
+                        sends candidate-visible task and committed skill descriptions
+                        to the configured decision provider. Does not remove skills.
   --case <path>         OKF Markdown case with YAML front matter; expected
                         answer values, rubric, and tool expectations stay hidden
                         from the candidate. Schema 2 prompts tool-neutrally;
@@ -414,6 +418,7 @@ pub enum Command {
         evaluator: Option<String>,
         /// A separately prepared checkout the evaluator runs from.
         evaluator_repo: Option<PathBuf>,
+        skill_selection: crate::skill_selection::Mode,
         records: PathBuf,
         runs: u32,
         timeout_seconds: u64,
@@ -891,6 +896,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
     let mut agents: Vec<String> = Vec::new();
     let mut evaluator = None;
     let mut evaluator_repo = None;
+    let mut skill_selection = None;
     let mut records = None;
     let mut runs = 1u32;
     let mut timeout_seconds = 1800u64;
@@ -919,6 +925,13 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
                     rest,
                     &mut index,
                 )?))
+            }
+            "--skill-selection" if skill_selection.is_none() => {
+                skill_selection = Some(crate::skill_selection::Mode::parse(&value_for(
+                    "--skill-selection",
+                    rest,
+                    &mut index,
+                )?)?);
             }
             "--records" if records.is_none() => {
                 records = Some(PathBuf::from(value_for("--records", rest, &mut index)?))
@@ -1005,6 +1018,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
         agents,
         evaluator,
         evaluator_repo,
+        skill_selection: skill_selection.unwrap_or_default(),
         records,
         runs,
         timeout_seconds,
@@ -1760,6 +1774,7 @@ mod parser_tests {
                 agents,
                 evaluator: None,
                 evaluator_repo: None,
+                skill_selection: crate::skill_selection::Mode::None,
                 records: "runs.jsonl".into(),
                 runs: 100,
                 timeout_seconds: 86400,
@@ -1771,6 +1786,68 @@ mod parser_tests {
         assert_usage(
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
             "at most 16",
+        );
+    }
+
+    #[test]
+    fn eval_skill_selection_is_explicit_bounded_and_documented() {
+        for mode in ["none", "lexical", "decision"] {
+            let parsed = parse(
+                [
+                    "eval",
+                    "run",
+                    "--case",
+                    "case.md",
+                    "--agent",
+                    "@fixture",
+                    "--records",
+                    "/tmp/records.jsonl",
+                    "--skill-selection",
+                    mode,
+                ]
+                .map(str::to_owned),
+            )
+            .unwrap();
+            assert!(
+                matches!(parsed, Command::EvalRun { skill_selection, .. } if skill_selection.as_str() == mode)
+            );
+        }
+        assert_usage(
+            &[
+                "eval",
+                "run",
+                "--case",
+                "case.md",
+                "--agent",
+                "@fixture",
+                "--records",
+                "/tmp/records.jsonl",
+                "--skill-selection",
+                "automatic",
+            ],
+            "skill selection mode",
+        );
+        assert_usage(
+            &[
+                "eval",
+                "run",
+                "--case",
+                "case.md",
+                "--agent",
+                "@fixture",
+                "--records",
+                "/tmp/records.jsonl",
+                "--skill-selection",
+                "none",
+                "--skill-selection",
+                "decision",
+            ],
+            "unknown or repeated",
+        );
+        assert!(
+            help_for(Some("eval run"))
+                .unwrap()
+                .contains("--skill-selection")
         );
     }
 

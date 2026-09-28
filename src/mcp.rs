@@ -444,6 +444,11 @@ fn legacy_protocol_version(params: &Value) -> &'static str {
     }
 }
 
+/// Shared provider-neutral dispatch for MCP and explicit prelaunch experiments.
+pub fn typed_decide(repo: &Repo, arguments: &Value) -> Result<Value> {
+    decisions::call(arguments, repo)
+}
+
 fn tools() -> Vec<Value> {
     vec![
         json!({
@@ -462,6 +467,14 @@ fn tools() -> Vec<Value> {
             "inputSchema":{"type":"object","properties":{"task":{"type":"string"}},"required":["task"],"additionalProperties":false}
         }),
         decisions::tool_definition(),
+        json!({
+            "name":"ahu_skills_suggest",
+            "description":"Suggest up to three committed repository skills for a task, or abstain. Advisory only; does not load skills or change agent identity. Decision mode sends the task and skill names/descriptions to the configured typed decision provider (TypeSafe HTTPS by default). Use lexical mode for local token matching.",
+            "inputSchema":{"type":"object","properties":{
+                "task":{"type":"string","minLength":1,"maxLength":16384},
+                "mode":{"type":"string","enum":["lexical","decision"],"default":"decision"}
+            },"required":["task"],"additionalProperties":false}
+        }),
     ]
 }
 
@@ -469,11 +482,12 @@ fn tools() -> Vec<Value> {
 ///
 /// Evaluation case tool expectations and evaluation record validation are both
 /// bounded by this list, so neither can name a tool that does not exist.
-pub const TOOL_NAMES: [&str; 4] = [
+pub const TOOL_NAMES: [&str; 5] = [
     "ahu_agents_list",
     "ahu_tasks_list",
     "ahu_task_get",
     "ahu_typed_decide",
+    "ahu_skills_suggest",
 ];
 
 /// SHA-256 over the served tool definitions, descriptions and schemas included.
@@ -490,7 +504,7 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
         .as_str()
         .ok_or_else(|| Error::new("tools/call requires a string params.name"))?;
     let selector = match name {
-        "ahu_agents_list" | "ahu_tasks_list" | "ahu_typed_decide" => false,
+        "ahu_agents_list" | "ahu_tasks_list" | "ahu_typed_decide" | "ahu_skills_suggest" => false,
         "ahu_task_get" => true,
         "ahu_task_inspect" if inspection_adapter => true,
         _ => return Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
@@ -500,6 +514,24 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
     if name == "ahu_typed_decide" {
         return decisions::validate_arguments(arguments);
     }
+    if name == "ahu_skills_suggest" {
+        let object = arguments
+            .as_object()
+            .ok_or_else(|| Error::new("skill suggestion arguments must be an object"))?;
+        if object.keys().any(|key| key != "task" && key != "mode")
+            || !object
+                .get("task")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty() && s.len() <= 16384)
+            || object
+                .get("mode")
+                .is_some_and(|v| !matches!(v.as_str(), Some("lexical" | "decision")))
+        {
+            return Err(Error::new("invalid skill suggestion arguments"));
+        }
+        return Ok(());
+    }
+
     let object = arguments
         .as_object()
         .ok_or_else(|| Error::new("arguments must be an object"))?;
@@ -540,6 +572,17 @@ fn call_response(repo: &Repo, id: &Value, params: &Value, modern: bool) -> Value
         "ahu_tasks_list" => tasks(repo),
         "ahu_task_get" => task_get(repo, &arguments),
         "ahu_typed_decide" => decisions::call(&arguments, repo),
+        "ahu_skills_suggest" => {
+            crate::skill_selection::Mode::parse(arguments["mode"].as_str().unwrap_or("decision"))
+                .and_then(|mode| {
+                    crate::skill_selection::prepare(
+                        repo,
+                        arguments["task"].as_str().unwrap_or_default(),
+                        mode,
+                    )
+                })
+                .and_then(|selection| serde_json::to_value(selection).map_err(Into::into))
+        }
         _ => Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
     };
     match result {
@@ -727,7 +770,8 @@ mod tests {
                 "ahu_agents_list",
                 "ahu_tasks_list",
                 "ahu_task_get",
-                "ahu_typed_decide"
+                "ahu_typed_decide",
+                "ahu_skills_suggest"
             ]
         );
         // The exported name list is what bounds evaluation tool expectations,

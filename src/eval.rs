@@ -100,6 +100,14 @@ struct Record {
     harness_version: Option<String>,
     #[serde(default)]
     skill_digest: Option<String>,
+    #[serde(default)]
+    selection_policy_digest: Option<String>,
+    #[serde(default)]
+    skill_selection: Option<crate::skill_selection::Selection>,
+    #[serde(default)]
+    total_elapsed_ms: Option<f64>,
+    #[serde(default)]
+    selection_telemetry_observed: Option<bool>,
     /// Observed token metrics, keyed by the recorder's metric names. An empty
     /// or absent map is no observation; a map of zeros is an observation of
     /// zero.
@@ -271,6 +279,8 @@ pub struct GroupKey {
     pub harness: String,
     pub harness_version: String,
     pub skill_digest: String,
+    pub selection_policy_digest: String,
+    pub selection_mode: String,
     pub case_schema_version: String,
     pub case_digest: String,
     pub prompt_profile: String,
@@ -338,6 +348,12 @@ pub struct Group {
     /// Mean launch wall-clock time over the runs that reported one, failed and
     /// timed-out attempts included.
     pub mean_launch_elapsed_ms: Option<f64>,
+    pub mean_total_elapsed_ms: Option<f64>,
+    pub mean_selection_elapsed_ms: Option<f64>,
+    pub selection_fallbacks: usize,
+    pub selection_telemetry_observations: usize,
+    pub mean_selection_input_tokens: Option<f64>,
+    pub mean_selection_output_tokens: Option<f64>,
     /// Mean over the runs that reported a count; `None` when none did.
     pub mean_decision_calls: Option<f64>,
     /// Mean sum of successful typed-decision service durations per run.
@@ -586,10 +602,30 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
                 ),
             ));
         }
+        if record.skill_selection.as_ref().is_some_and(|s| {
+            !["disabled", "suggested", "abstained", "fallback"].contains(&s.status.as_str())
+                || s.candidate_count > 40
+                || s.selected.len() > 3
+                || s.service.as_ref().is_some_and(|service| {
+                    ["prompt_tokens", "generated_tokens"].iter().any(|key| {
+                        service
+                            .get(key)
+                            .is_some_and(|v| !v.is_null() && v.as_u64().is_none())
+                    })
+                })
+        }) {
+            return Err(malformed_text(
+                path,
+                number,
+                "invalid skill selection observations",
+            ));
+        }
         if record.decision_request_bytes.is_some() != (record.decision_request_observations > 0)
             || record.score.is_some_and(|score| !score.is_finite())
             || [
                 record.elapsed_ms,
+                record.total_elapsed_ms,
+                record.skill_selection.as_ref().map(|s| s.elapsed_ms),
                 record.decision_service_duration_ms,
                 record.decision_call_count,
                 record.mcp_request_count,
@@ -707,6 +743,12 @@ fn key_for(record: &Record) -> GroupKey {
         harness: record.harness.clone(),
         harness_version: or_unspecified(&record.harness_version, UNSPECIFIED),
         skill_digest: or_unspecified(&record.skill_digest, UNSPECIFIED),
+        selection_policy_digest: or_unspecified(&record.selection_policy_digest, "none"),
+        selection_mode: record
+            .skill_selection
+            .as_ref()
+            .map_or("none", |s| s.mode.as_str())
+            .into(),
         case_schema_version: number(record.case_schema_version),
         case_digest: or_unspecified(&record.case_digest, UNSPECIFIED),
         prompt_profile: or_unspecified(&record.prompt_profile, UNSPECIFIED),
@@ -760,6 +802,12 @@ fn group(records: &[Record]) -> Vec<Group> {
             let mut answer_quality_passes = 0usize;
             let mut answer_scores = Vec::new();
             let mut launch_elapsed = Vec::new();
+            let mut total_elapsed = Vec::new();
+            let mut selection_elapsed = Vec::new();
+            let mut selection_inputs = Vec::new();
+            let mut selection_outputs = Vec::new();
+            let mut selection_fallbacks = 0;
+            let mut selection_telemetry_observations = 0;
             let mut judge_scores = Vec::new();
             let mut judge_passes = 0usize;
             let mut judge_failed = 0usize;
@@ -773,6 +821,31 @@ fn group(records: &[Record]) -> Vec<Group> {
             let mut terminal_statuses: BTreeMap<String, usize> = BTreeMap::new();
             let mut telemetry_receiver = crate::eval_otel::ReceiverStats::default();
             for item in &items {
+                if let Some(value) = item.total_elapsed_ms {
+                    total_elapsed.push(value);
+                }
+                if item.selection_telemetry_observed == Some(true) {
+                    selection_telemetry_observations += 1;
+                }
+                if let Some(selection) = &item.skill_selection {
+                    selection_elapsed.push(selection.elapsed_ms);
+                    selection_fallbacks += usize::from(selection.status == "fallback");
+                    if let Some(service) = &selection.service {
+                        if let Some(v) = service
+                            .get("prompt_tokens")
+                            .and_then(serde_json::Value::as_f64)
+                        {
+                            selection_inputs.push(v);
+                        }
+                        if let Some(v) = service
+                            .get("generated_tokens")
+                            .and_then(serde_json::Value::as_f64)
+                        {
+                            selection_outputs.push(v);
+                        }
+                    }
+                }
+
                 let status = item.terminal_status.as_deref().unwrap_or(UNSPECIFIED);
                 *terminal_statuses.entry(status.to_owned()).or_default() += 1;
                 let scored = item.answer_scored();
@@ -927,6 +1000,12 @@ fn group(records: &[Record]) -> Vec<Group> {
                 telemetry_receiver: (coverage.telemetry_receiver > 0).then_some(telemetry_receiver),
                 mean_elapsed_ms: mean(&elapsed),
                 mean_launch_elapsed_ms: mean(&launch_elapsed),
+                mean_total_elapsed_ms: mean(&total_elapsed),
+                mean_selection_elapsed_ms: mean(&selection_elapsed),
+                selection_fallbacks,
+                selection_telemetry_observations,
+                mean_selection_input_tokens: mean(&selection_inputs),
+                mean_selection_output_tokens: mean(&selection_outputs),
                 mean_decision_calls: mean(&calls),
                 mean_decision_service_duration_ms: mean(&decision_service_durations),
                 mean_decision_request_bytes: mean(&decision_request_bytes),
@@ -1044,6 +1123,19 @@ pub fn render_at(report: &Report, width: usize) -> String {
             display_safe(&key.ahu_version),
             display_safe(&key.skill_digest)
         ));
+        if key.selection_mode != "none" {
+            out.push_str(&format!(
+                "  selection  {}  {:.1} ms; total launch + selection {:.1} ms; fallbacks {}; OTel {}/{}\n",
+                display_safe(&key.selection_mode),
+                group.mean_selection_elapsed_ms.unwrap_or_default(),
+                group.mean_total_elapsed_ms.unwrap_or_default(),
+                group.selection_fallbacks, group.selection_telemetry_observations, group.runs
+            ));
+            out.push_str(&format!(
+                "             service input/output tokens {:?}/{:?} mean/run (separate from agent usage)\n",
+                group.mean_selection_input_tokens, group.mean_selection_output_tokens
+            ));
+        }
         out.push_str(&format!(
             "  inputs     case {}  prompt {} v{}  scoring v{}  suite {} {}\n                          agent id {}  evaluator id {}  blinding {}\n                          tools {}  ahu {} build {}  target HEAD {}  fingerprint {} ({})\n",
             display_safe(&key.case_digest),
@@ -1229,6 +1321,7 @@ pub fn render_at(report: &Report, width: usize) -> String {
         Role::Hint,
         "\nA dash in the table is a metric no run reported, never a measured zero;\n\
          the blocks above give each mean the coverage it was taken over.\n\
+         TIME marked total includes launch plus prelaunch selection; unmarked time is harness elapsed.\n\
          TOKENS shows a reported native total, or input/output marked I/O; service usage stays separate.\n\
          ANSWER shows correct answers over valid answers; reliability below includes every attempt.\n\
          Means cover only the runs that reported the measurement.\n\
@@ -1325,11 +1418,14 @@ fn summary_rows(groups: &[Group]) -> Vec<Vec<table::Cell>> {
             let key = &group.key;
             // The version is what distinguishes two rows for the same agent, so
             // it travels with the name rather than in a column of its own.
-            let agent = if key.agent_version == UNSPECIFIED {
+            let mut agent = if key.agent_version == UNSPECIFIED {
                 key.agent.clone()
             } else {
                 format!("{}@{}", key.agent, key.agent_version)
             };
+            if key.selection_mode != "none" {
+                agent.push_str(&format!(" [{}]", key.selection_mode));
+            }
             vec![
                 table::Cell::plain(display_safe(&key.case_id)),
                 table::Cell::painted(Role::Agent, display_safe(&agent)),
@@ -1344,7 +1440,12 @@ fn summary_rows(groups: &[Group]) -> Vec<Vec<table::Cell>> {
                 },
                 // Over the decided runs only, as the block below reports it.
                 fraction(group.tool_pass, group.tool_pass + group.tool_fail),
-                measured(group.mean_elapsed_ms.map(human_duration)),
+                measured(
+                    group
+                        .mean_total_elapsed_ms
+                        .map(|ms| format!("{} total", human_duration(ms)))
+                        .or_else(|| group.mean_elapsed_ms.map(human_duration)),
+                ),
                 measured(summary_tokens(group)),
             ]
         })
@@ -1476,6 +1577,7 @@ pub struct RunRequest<'a> {
     /// evaluator's environment is not the candidate's, and the record says
     /// `isolated` rather than `prompt_only`.
     pub evaluator_repo: Option<&'a Path>,
+    pub skill_selection: crate::skill_selection::Mode,
     pub records: &'a Path,
     pub runs: u32,
     pub timeout_seconds: u64,
@@ -1642,16 +1744,44 @@ pub fn run(
             evaluator: evaluator.as_ref().map(fingerprint::AgentFingerprint::of),
             blinding,
             skill_digest: None,
+            selection_policy_digest: None,
             evaluator_skill_digest: None,
             build: build.clone(),
             target_repo_head: repo.head.clone(),
             evaluator_repo_head: None,
         };
 
+        // The selector receives only candidate-visible material, never expected
+        // answers, scoring weights or the hidden evaluator rubric.
+        let visible_task = format!("{}\n{}", case.purpose, serde_json::to_string(&case.state)?);
+        let selection =
+            crate::skill_selection::prepare(repo, &visible_task, request.skill_selection)?;
+        print.selection_policy_digest = selection_policy_digest(&selection);
+        write_private_file(
+            &run_dir.join("skill-selection.json"),
+            &serde_json::to_vec(&selection)?,
+        )?;
+        let selection_id = format!("selection-{}-{}", run_id, trial.index);
+        let selection_exported = crate::telemetry::export_eval_selection(
+            receiver.endpoint(),
+            &run_id,
+            &selection_id,
+            &selection,
+        );
+        let selection_observed = selection_exported
+            && receiver
+                .task(&selection_id, 1)
+                .is_some_and(|t| t.selection_observations == 1);
+        let mut candidate_prompt = case.candidate_prompt();
+        let advice = selection.prompt_block();
+        if !advice.is_empty() {
+            candidate_prompt.push_str("\n\n");
+            candidate_prompt.push_str(&advice);
+        }
         let launch = launch_eval_agent(
             repo,
             label,
-            &case.candidate_prompt(),
+            &candidate_prompt,
             &run_dir.join("candidate"),
             &run_id,
             case,
@@ -1691,6 +1821,12 @@ pub fn run(
                 record.extend(base_fields(&run_id, trial, "candidate"));
                 record.extend(outcome_fields(status, Some("candidate_run_failed")));
                 record.insert("launch_elapsed_ms".into(), launch.elapsed_ms.into());
+                insert_selection_fields(
+                    &mut record,
+                    &selection,
+                    selection_observed,
+                    launch.elapsed_ms,
+                )?;
                 record.insert("failure_reason".into(), error.to_string().into());
                 if let Some(harness_outcome) = harness_outcome {
                     record.insert("outcome".into(), harness_outcome.into());
@@ -1797,6 +1933,12 @@ pub fn run(
                 record.insert("attempt".into(), attempt.into());
                 record.insert("attempts".into(), attempt.into());
                 record.insert("launch_elapsed_ms".into(), launch_elapsed_ms.into());
+                insert_selection_fields(
+                    &mut record,
+                    &selection,
+                    selection_observed,
+                    launch_elapsed_ms,
+                )?;
                 record.insert("failure_reason".into(), error.to_string().into());
                 let telemetry = receiver.task(candidate_task, attempt);
                 insert_telemetry_fields(&mut record, telemetry.as_ref())?;
@@ -2092,6 +2234,12 @@ pub fn run(
             reported_tokens(Some(&candidate_result), telemetry.as_ref())
                 .unwrap_or(serde_json::Value::Null),
         );
+        insert_selection_fields(
+            &mut record,
+            &selection,
+            selection_observed,
+            launch_elapsed_ms,
+        )?;
         record.retain(|_, value| !value.is_null());
         append_jsonl(&records, &serde_json::Value::Object(record))?;
         outputs.push(serde_json::json!({
@@ -2744,6 +2892,8 @@ fn group_json(group: &Group) -> serde_json::Value {
     }));
     merge(serde_json::json!({
         "skill_digest": key.skill_digest,
+        "selection_policy_digest": key.selection_policy_digest,
+        "selection_mode": key.selection_mode,
         "case_schema_version": key.case_schema_version,
         "case_digest": key.case_digest,
         "prompt_profile": key.prompt_profile,
@@ -2820,6 +2970,12 @@ fn group_json(group: &Group) -> serde_json::Value {
         "observed": {
             "mean_elapsed_ms": group.mean_elapsed_ms,
             "mean_launch_elapsed_ms": group.mean_launch_elapsed_ms,
+            "mean_total_elapsed_ms": group.mean_total_elapsed_ms,
+            "mean_selection_elapsed_ms": group.mean_selection_elapsed_ms,
+            "mean_selection_input_tokens": group.mean_selection_input_tokens,
+            "mean_selection_output_tokens": group.mean_selection_output_tokens,
+            "selection_fallbacks": group.selection_fallbacks,
+            "selection_telemetry_observations": group.selection_telemetry_observations,
             "mean_decision_calls": group.mean_decision_calls,
             "mean_decision_service_duration_ms": group.mean_decision_service_duration_ms,
             "mean_decision_request_bytes": group.mean_decision_request_bytes,
@@ -2848,3 +3004,35 @@ fn group_json(group: &Group) -> serde_json::Value {
 #[cfg(test)]
 #[path = "eval_tests.rs"]
 mod tests;
+
+/// Selection output is evidence, not part of the policy identity: repetitions
+/// with different suggestions must remain comparable.
+fn selection_policy_digest(selection: &crate::skill_selection::Selection) -> Option<String> {
+    if selection.mode == crate::skill_selection::Mode::None {
+        return None;
+    }
+    Some(crate::util::digest_bytes(
+        &serde_json::to_vec(&serde_json::json!({
+            "mode":selection.mode, "version":selection.policy_version,
+            "catalog":selection.catalog_digest,
+            "backend":selection.service.as_ref().and_then(|s|s.get("backend")),
+            "model":selection.service.as_ref().and_then(|s|s.get("model")),
+        }))
+        .expect("selection identity serializes"),
+    ))
+}
+
+fn insert_selection_fields(
+    record: &mut serde_json::Map<String, serde_json::Value>,
+    selection: &crate::skill_selection::Selection,
+    observed: bool,
+    launch_ms: u64,
+) -> Result<()> {
+    record.insert("skill_selection".into(), serde_json::to_value(selection)?);
+    record.insert("selection_telemetry_observed".into(), observed.into());
+    record.insert(
+        "total_elapsed_ms".into(),
+        (launch_ms as f64 + selection.elapsed_ms).into(),
+    );
+    Ok(())
+}

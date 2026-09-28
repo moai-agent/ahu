@@ -242,7 +242,7 @@ fn stdio_server_negotiates_and_lists_repository_agents_and_tasks() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(rows[0]["result"]["serverInfo"]["name"], "ahu");
-    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 5);
     assert_eq!(
         rows[2]["result"]["structuredContent"]["agents"][0]["name"],
         "@reviewer"
@@ -933,7 +933,7 @@ fn conformance_notifications_are_silent_and_do_not_select_modes_or_queue_work() 
 fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
     let repo = common::TestRepo::new();
     let mut client = Client::new(&repo, "alice");
-    for (params, count) in [(modern_without_tasks(json!({})), 4), (modern(json!({})), 5)] {
+    for (params, count) in [(modern_without_tasks(json!({})), 5), (modern(json!({})), 6)] {
         let result = client.call("tools/list", params)["result"].clone();
         assert_eq!(result["resultType"], "complete");
         assert_eq!(result["tools"].as_array().unwrap().len(), count);
@@ -966,7 +966,7 @@ fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
         assert!(result.get("resultType").is_none(), "{result}");
         assert!(result.get("taskId").is_none());
         if method == "tools/list" {
-            assert_eq!(result["tools"].as_array().unwrap().len(), 4);
+            assert_eq!(result["tools"].as_array().unwrap().len(), 5);
         }
     }
     assert_eq!(
@@ -1099,9 +1099,74 @@ fn conformance_failed_probes_allow_legacy_and_adapter_requires_both_opt_ins() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["id"], 0);
     assert_eq!(rows[0]["result"]["resultType"], "complete");
-    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 5);
     assert_eq!(rows[1]["id"], -1);
     assert_eq!(rows[1]["error"]["code"], -32602);
     assert_eq!(rows[2]["id"], "");
     assert_eq!(rows[2]["result"]["resultType"], "complete");
+}
+
+#[test]
+fn skill_suggestions_are_local_when_lexical_and_export_only_bounded_metadata() {
+    let repo = common::TestRepo::new();
+    repo.write(".agents/skills/billing/SKILL.md",
+        "---\nname: billing\ndescription: Resolve duplicate charge disputes\n---\nUse the refund checklist.\n");
+    repo.commit("synthetic skill");
+    let receiver = ahu::eval_otel::Receiver::start().unwrap();
+    let mut child = common::ahu()
+        .current_dir(repo.path())
+        .args(["mcp", "serve"])
+        .env("AHU_EVAL_OTEL_ENDPOINT", receiver.endpoint())
+        .env(
+            "AHU_MCP_RESOURCE_ATTRIBUTES",
+            "ahu.task.id=skill-fixture,ahu.task.attempt=1",
+        )
+        .env_remove("OTEL_RESOURCE_ATTRIBUTES")
+        .env_remove("TYPESAFE_API_KEY")
+        .env("AHU_DECISION_URL", "http://127.0.0.1:1/never-called")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"ahu_skills_suggest","arguments":{"task":"Resolve a duplicate charge","mode":"lexical"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"ahu_skills_suggest","arguments":{"task":"private-marker","mode":"bogus"}}}),
+    ];
+    let mut input = child.stdin.take().unwrap();
+    for request in requests {
+        writeln!(input, "{request}").unwrap();
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let value = &rows.iter().find(|r| r["id"] == 2).unwrap()["result"]["structuredContent"];
+    assert_eq!(value["status"], "suggested");
+    assert_eq!(
+        value["selected"],
+        serde_json::json!([".agents/skills/billing/SKILL.md"])
+    );
+    assert!(rows.iter().find(|r| r["id"] == 3).unwrap()["error"].is_object());
+    let observed = receiver.task("skill-fixture", 1).unwrap();
+    assert_eq!(observed.coverage().as_str(), "complete_session");
+    assert_eq!(observed.selection_observations, 1);
+    assert_eq!(observed.selection_candidate_count, Some(1));
+    assert_eq!(observed.selection_selected_count, Some(1));
+    assert_eq!(observed.tool_calls_by_name["ahu_skills_suggest"], 2);
+    let recorded = serde_json::to_string(&observed).unwrap();
+    assert!(!recorded.contains("private-marker"));
+    assert!(!recorded.contains("duplicate charge"));
 }

@@ -13,6 +13,8 @@ use std::process::Stdio;
 
 use ahu::cli::{self, Command};
 use common::TestRepo;
+use serde_json::Value;
+use tempfile::TempDir;
 
 /// One synthetic record with the fields the report groups and scores by.
 struct Row {
@@ -211,6 +213,7 @@ fn eval_run_requires_named_candidate_case_and_external_records_options() {
             agents: vec!["@triage".into()],
             evaluator: Some("@judge".into()),
             evaluator_repo: None,
+            skill_selection: ahu::skill_selection::Mode::None,
             records: PathBuf::from("/outside/runs.jsonl"),
             runs: 3,
             timeout_seconds: 120,
@@ -244,6 +247,7 @@ fn eval_run_requires_named_candidate_case_and_external_records_options() {
             agents: vec!["@triage".into(), "@sorter".into()],
             evaluator: Some("@judge".into()),
             evaluator_repo: Some(PathBuf::from("/outside/judge-checkout")),
+            skill_selection: ahu::skill_selection::Mode::None,
             records: PathBuf::from("/outside/runs.jsonl"),
             runs: 1,
             timeout_seconds: 1800,
@@ -1535,4 +1539,47 @@ fn decision_request_measurements_require_a_matching_observation_count() {
         let output = run(&repo, &["--records", records.to_str().unwrap()]);
         assert!(!output.status.success());
     }
+}
+
+#[test]
+fn selection_arms_and_overhead_are_reported_separately() {
+    let repo = TestRepo::new();
+    let external = TempDir::new().unwrap();
+    let mut base: Value =
+        serde_json::from_str(&Row::candidate("fixture", 1.0, true).json()).unwrap();
+    base["launch_elapsed_ms"] = 100.into();
+    let mut rows = Vec::new();
+    for (mode, elapsed) in [("none", 0), ("lexical", 4), ("decision", 250)] {
+        let mut row = base.clone();
+        row["selection_policy_digest"] = format!("policy-{mode}").into();
+        row["skill_selection"] = serde_json::json!({
+            "mode":mode,"policy_version":1,"catalog_digest":"a".repeat(64),
+            "candidate_count":1,"selected":[],"status":if mode=="none" {"disabled"}else{"abstained"},
+            "elapsed_ms":elapsed,"service":if mode=="decision" {serde_json::json!({"prompt_tokens":200,"generated_tokens":2})}else{Value::Null},
+            "error_code":null
+        });
+        row["total_elapsed_ms"] = (100 + elapsed).into();
+        row["selection_telemetry_observed"] = (mode != "none").into();
+        rows.push(row.to_string());
+    }
+    let records = external.path().join("selection.jsonl");
+    std::fs::write(&records, rows.join("\n")).unwrap();
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let report = ahu::eval::report(&discovered, &records).unwrap();
+    assert_eq!(report.groups.len(), 3);
+    let decision = report
+        .groups
+        .iter()
+        .find(|g| g.key.selection_mode == "decision")
+        .unwrap();
+    assert_eq!(decision.mean_total_elapsed_ms, Some(350.0));
+    assert_eq!(decision.mean_selection_input_tokens, Some(200.0));
+    assert_eq!(decision.selection_telemetry_observations, 1);
+    assert!(decision.mean_tokens.is_empty());
+    let lexical = report
+        .groups
+        .iter()
+        .find(|g| g.key.selection_mode == "lexical")
+        .unwrap();
+    assert_eq!(lexical.mean_selection_input_tokens, None);
 }

@@ -121,6 +121,12 @@ canonical task IDs and verified `@name` handles while using ahu's existing
 repository ownership and task-resolution rules. Protocol handles describe
 inspection operations and do not replace ahu launch records or identities.
 
+The advisory `ahu_skills_suggest` MCP tool accepts a task and a lexical or
+decision policy. It suggests committed skills without loading them. Decision
+mode sends task text and skill names/descriptions to the configured provider.
+`ahu eval run --skill-selection none|lexical|decision` compares the same policies
+before candidate launch; see [the evaluation guide](evaluations.md).
+
 The optional `ahu_typed_decide` tool uses TypeSafe Jev over HTTPS by default,
 reading `TYPESAFE_API_KEY` from the MCP process
 environment or the primary checkout's ignored `.env`. Setting

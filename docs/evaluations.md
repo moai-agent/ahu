@@ -114,3 +114,40 @@ uncalibrated: review sample judgments and disagreements against human decisions.
 Report observed improvements with the cases, model, harness, repetition count,
 coverage and regressions. Small pilots can demonstrate a working integration
 and expose overhead; they do not establish universal accuracy or efficiency.
+
+## Compare skill-selection policies
+
+An explicit `--skill-selection` option adds advisory skill paths before the
+candidate starts. Use the same agent, committed skill catalog and cases across
+`none`, `lexical` and `decision` arms. The default `none` leaves the prompt
+unchanged. Decision mode discloses candidate-visible task purpose/state and
+skill names/descriptions to the configured provider; it never receives hidden
+answers or grading rubrics.
+
+```sh
+AHU_DECISION_MODEL=jev-1.13.0 ahu --repo "$CANDIDATE_REPO" eval run   --case "$CASE_FILE" --agent @candidate --skill-selection decision   --records "$EXPERIMENT_DIR/decision.jsonl"
+```
+
+This does not remove skills, rewrite their bodies, or choose a different
+harness/model. The first experiment measures selection and task quality.
+Token reduction requires observed changes in what the agent reads or does.
+
+Records include policy/catalog/provider identity, suggested paths, abstention
+or fallback, selection duration and separate provider usage. The report groups
+selection policies independently. Time marked `total` includes candidate launch
+wall time plus selection duration; unmarked time in older records is harness
+elapsed. It excludes optional evaluator execution. Failed agent attempts retain
+selection cost. Failed provider calls may have unknown billed usage.
+
+Prelaunch OTel spans use `ahu.skills.selection` with bounded purpose, policy,
+mode, counts, outcome and timing. Their synthetic observation ID is separate
+from the candidate task; the record states whether the local receiver observed
+the span. This does not count as a candidate MCP call or prove skill loading.
+MCP skill suggestions carry the same bounded selection metrics on their tool
+span. Task text, skill descriptions and bodies are absent from these attributes.
+
+Freeze labels, policies, model versions and the analysis plan before comparing.
+Counterbalance arm order, retain failed attempts, and evaluate unnecessary
+suggestions on no-skill cases. Calibrate on development cases and evaluate on
+fresh held-out tasks. Report selection accuracy separately from completed-task
+quality, native usage, service usage and latency.

@@ -39,6 +39,7 @@ pub mod orchestration;
 mod private_io;
 pub mod selection;
 pub mod setup;
+pub mod skill_selection;
 pub mod snapshot;
 pub mod state;
 pub mod storage;

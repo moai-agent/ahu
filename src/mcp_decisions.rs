@@ -25,6 +25,7 @@ pub(super) fn tool_definition() -> Value {
                             "telemetry_key":{"type":"string","pattern":"^[a-z][a-z0-9_.-]{0,47}$","description":"Optional stable, non-sensitive evaluation dimension. Must be unique across questions in this request; omit it when unnecessary. Recorded in telemetry, never used as an instruction."},
                             "instructions":{"type":"string","minLength":1,"maxLength":2048},
                             "options":{"type":"object","minProperties":2,"maxProperties":32,"description":"Required for choice; map each stable answer key to a short description.","additionalProperties":{"type":"string"}},
+                            "levels":{"type":"array","minItems":2,"maxItems":10,"items":{"type":"string","minLength":1,"maxLength":512},"description":"Optional for score only: ordered descriptive levels from lowest to highest, each nonblank and at most 512 UTF-8 bytes. Output remains scaled to min..max."},
                             "min":{"type":"number","description":"Required for score; inclusive lower bound."},"max":{"type":"number","description":"Required for score; inclusive upper bound."}
                         },"required":["type","instructions"],"additionalProperties":false
                     }
@@ -158,6 +159,7 @@ fn validate_questions_arguments(arguments: &Value) -> Result<()> {
                 "instructions",
                 "telemetry_key",
                 "options",
+                "levels",
                 "min",
                 "max",
             ]
@@ -193,6 +195,21 @@ fn validate_questions_arguments(arguments: &Value) -> Result<()> {
             .ok_or_else(|| Error::new(format!("question {name:?} requires a type")))?;
         if !["choice", "score", "probability"].contains(&kind) {
             return Err(Error::new(format!("unsupported question type {kind:?}")));
+        }
+        if let Some(levels) = q.get("levels")
+            && (kind != "score"
+                || !levels.as_array().is_some_and(|levels| {
+                    (2..=10).contains(&levels.len())
+                        && levels.iter().all(|level| {
+                            level
+                                .as_str()
+                                .is_some_and(|s| !s.trim().is_empty() && s.len() <= 512)
+                        })
+                }))
+        {
+            return Err(Error::new(format!(
+                "question {name:?} levels require a score with 2 to 10 nonblank descriptions of at most 512 UTF-8 bytes each"
+            )));
         }
         if !question["instructions"]
             .as_str()
@@ -250,11 +267,31 @@ fn validate_questions_arguments(arguments: &Value) -> Result<()> {
 pub(super) fn call(arguments: &Value, repo: &crate::git::Repo) -> Result<Value> {
     let normalized = normalize_arguments(arguments)?;
     let arguments = &normalized;
+    let configured_model = std::env::var_os("AHU_DECISION_MODEL");
+    let model = decision_model(configured_model.as_deref())?;
     if let Ok(endpoint) = std::env::var("AHU_DECISION_URL") {
         return call_endpoint(arguments, &endpoint);
     }
     let api_key = typesafe_api_key(repo)?;
-    call_typesafe(arguments, &api_key)
+    call_typesafe(arguments, &api_key, model)
+}
+
+/// Only the process environment can select a model; never consult dotenv.
+fn decision_model(value: Option<&std::ffi::OsStr>) -> Result<&str> {
+    match value {
+        None => Ok("jev-latest"),
+        Some(value) => value
+            .to_str()
+            .filter(|value| {
+                (1..=64).contains(&value.len())
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
+                    })
+            })
+            .ok_or_else(|| Error::new(
+                "AHU_DECISION_MODEL must be 1 to 64 ASCII letters, digits, dots, dashes, or underscores"
+            )),
+    }
 }
 
 /// Read only the TypeSafe credential needed by this tool. Process environment
@@ -339,14 +376,19 @@ fn checked_api_key(value: String) -> Result<String> {
 
 const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 
-fn call_typesafe(arguments: &Value, api_key: &str) -> Result<Value> {
-    call_typesafe_at(arguments, api_key, TYPESAFE_ENDPOINT)
+fn call_typesafe(arguments: &Value, api_key: &str, model: &str) -> Result<Value> {
+    call_typesafe_at(arguments, api_key, TYPESAFE_ENDPOINT, model)
 }
 
 /// `endpoint` is injectable for local HTTP tests; production always uses the
 /// fixed HTTPS endpoint above and never accepts a user-provided remote URL.
-fn call_typesafe_at(arguments: &Value, api_key: &str, endpoint: &str) -> Result<Value> {
-    let body = typesafe_request(arguments)?;
+fn call_typesafe_at(
+    arguments: &Value,
+    api_key: &str,
+    endpoint: &str,
+    model: &str,
+) -> Result<Value> {
+    let body = typesafe_request(arguments, model)?;
     let started = std::time::Instant::now();
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -382,12 +424,12 @@ fn call_typesafe_at(arguments: &Value, api_key: &str, endpoint: &str) -> Result<
     }
     let response: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Error::new("TypeSafe decision response is invalid JSON"))?;
-    let mut result = typesafe_response(arguments, response)?;
+    let mut result = typesafe_response(arguments, response, model)?;
     result["service"]["duration_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
     Ok(result)
 }
 
-fn typesafe_request(arguments: &Value) -> Result<Value> {
+fn typesafe_request(arguments: &Value, model: &str) -> Result<Value> {
     let questions = arguments["questions"]
         .as_object()
         .ok_or_else(|| Error::new("questions must be an object"))?;
@@ -404,10 +446,10 @@ fn typesafe_request(arguments: &Value) -> Result<Value> {
             "score" => json!({
                 "type":"score",
                 "instructions":instructions,
-                "criteria":[
+                "criteria":question.get("levels").cloned().unwrap_or_else(|| json!([
                     format!("Minimum score ({})", question["min"]),
                     format!("Maximum score ({})", question["max"])
-                ]
+                ]))
             }),
             "probability" => json!({
                 "type":"noul",
@@ -418,13 +460,13 @@ fn typesafe_request(arguments: &Value) -> Result<Value> {
         translated.insert(name.clone(), upstream);
     }
     Ok(json!({
-        "model":"jev-latest",
+        "model":model,
         "state":arguments["state"],
         "questions":translated
     }))
 }
 
-fn typesafe_response(arguments: &Value, response: Value) -> Result<Value> {
+fn typesafe_response(arguments: &Value, response: Value, model: &str) -> Result<Value> {
     let answers = response
         .get("answers")
         .and_then(Value::as_object)
@@ -466,14 +508,28 @@ fn typesafe_response(arguments: &Value, response: Value) -> Result<Value> {
                 let raw = answer.get("score").and_then(Value::as_f64).ok_or_else(|| {
                     Error::new(format!("TypeSafe score answer {name:?} is missing"))
                 })?;
-                if !raw.is_finite() || !(0.0..=1.0).contains(&raw) {
+                let last_level = (score_level_count(question) - 1) as f64;
+                if !raw.is_finite() || !(0.0..=last_level).contains(&raw) {
                     return Err(Error::new(format!(
-                        "TypeSafe score answer {name:?} is outside its two-point rubric"
+                        "TypeSafe score answer {name:?} is outside its rubric"
                     )));
                 }
                 let minimum = question["min"].as_f64().unwrap();
                 let maximum = question["max"].as_f64().unwrap();
-                json!(minimum + raw * (maximum - minimum))
+                let fraction = raw / last_level;
+                let width = maximum - minimum;
+                // Preserve legacy interpolation, but avoid overflowing the
+                // subtraction when finite bounds straddle a very wide range.
+                let scaled = if fraction == 0.0 {
+                    minimum
+                } else if fraction == 1.0 {
+                    maximum
+                } else if width.is_finite() {
+                    minimum + fraction * width
+                } else {
+                    (1.0 - fraction) * minimum + fraction * maximum
+                };
+                json!(scaled.clamp(minimum, maximum))
             }
             "probability" if response_kind == "noul" => {
                 let probability = answer.get("noul").and_then(Value::as_f64).ok_or_else(|| {
@@ -494,23 +550,18 @@ fn typesafe_response(arguments: &Value, response: Value) -> Result<Value> {
         };
         let mut item = Map::new();
         item.insert("value".into(), value.take());
-        if let Some(confidence) = answer.get("confidence") {
-            if !confidence
-                .as_f64()
-                .is_some_and(|n| (0.0..=1.0).contains(&n))
-            {
-                return Err(Error::new(format!(
-                    "TypeSafe confidence for {name:?} must be between 0 and 1"
-                )));
+        validate_answer_metadata(question, answer, name)?;
+        for key in ["confidence", "probabilities"] {
+            if let Some(metadata) = answer.get(key) {
+                item.insert(key.into(), metadata.clone());
             }
-            item.insert("confidence".into(), confidence.clone());
         }
         normalized.insert(name.clone(), Value::Object(item));
     }
     let usage = response.get("usage").unwrap_or(&Value::Null);
     let mut service = json!({
         "backend":"typesafe",
-        "model":response.get("model").and_then(Value::as_str).unwrap_or("jev-latest")
+        "model":response.get("model").and_then(Value::as_str).unwrap_or(model)
     });
     if let Some(tokens) = usage.get("input_tokens") {
         service["prompt_tokens"] = tokens.clone();
@@ -575,6 +626,63 @@ fn call_endpoint(arguments: &Value, endpoint: &str) -> Result<Value> {
     validate_response(arguments, result)
 }
 
+fn score_level_count(question: &Value) -> usize {
+    question["levels"].as_array().map_or(2, Vec::len)
+}
+
+/// Confidence is provider metadata; do not assume it measures correctness.
+/// Validate its range independently of the distribution over options/levels.
+fn validate_answer_metadata(
+    question: &Value,
+    answer: &Map<String, Value>,
+    name: &str,
+) -> Result<()> {
+    let unit_interval = |value: &Value| {
+        value
+            .as_f64()
+            .is_some_and(|n| n.is_finite() && (0.0..=1.0).contains(&n))
+    };
+    if let Some(confidence) = answer.get("confidence")
+        && !unit_interval(confidence)
+    {
+        return Err(Error::new(format!(
+            "answer {name:?} confidence must be finite and between 0 and 1"
+        )));
+    }
+    if let Some(probabilities) = answer.get("probabilities") {
+        let probabilities = probabilities.as_object().ok_or_else(|| {
+            Error::new(format!("answer {name:?} probabilities must be an object"))
+        })?;
+        let keys_match = match question["type"].as_str() {
+            Some("choice") => question["options"].as_object().is_some_and(|options| {
+                options.len() == probabilities.len()
+                    && options.keys().all(|key| probabilities.contains_key(key))
+            }),
+            Some("score") => {
+                let count = score_level_count(question);
+                probabilities.len() == count
+                    && (0..count).all(|index| probabilities.contains_key(&index.to_string()))
+            }
+            _ => false,
+        };
+        if !keys_match || !probabilities.values().all(unit_interval) {
+            return Err(Error::new(format!(
+                "answer {name:?} probabilities require exact option or score level keys and finite values between 0 and 1"
+            )));
+        }
+        let sum: f64 = probabilities
+            .values()
+            .map(|value| value.as_f64().unwrap())
+            .sum();
+        if (sum - 1.0).abs() > 1e-6 {
+            return Err(Error::new(format!(
+                "answer {name:?} probabilities must sum to 1 within 1e-6"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_response(arguments: &Value, result: Value) -> Result<Value> {
     let answers = result
         .get("answers")
@@ -593,15 +701,7 @@ fn validate_response(arguments: &Value, result: Value) -> Result<Value> {
         let value = answer
             .get("value")
             .ok_or_else(|| Error::new(format!("answer {name:?} requires value")))?;
-        if let Some(confidence) = answer.get("confidence")
-            && !confidence
-                .as_f64()
-                .is_some_and(|n| (0.0..=1.0).contains(&n))
-        {
-            return Err(Error::new(format!(
-                "answer {name:?} confidence must be between 0 and 1"
-            )));
-        }
+        validate_answer_metadata(question, answer, name)?;
         let valid = match question["type"].as_str().unwrap() {
             "choice" => value
                 .as_str()
@@ -628,16 +728,442 @@ fn validate_response(arguments: &Value, result: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        call_typesafe_at, checked_api_key, dotenv_api_key, process_api_key, typesafe_request,
-        typesafe_response, validate_arguments, validate_response,
+        call_typesafe_at, checked_api_key, dotenv_api_key, process_api_key, validate_arguments,
+        validate_response,
     };
     use serde_json::{Value, json};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::Path;
 
+    fn typesafe_request(arguments: &Value) -> crate::util::Result<Value> {
+        super::typesafe_request(arguments, "jev-latest")
+    }
+
+    fn typesafe_response(arguments: &Value, response: Value) -> crate::util::Result<Value> {
+        super::typesafe_response(arguments, response, "jev-latest")
+    }
+
     fn batch(question: Value) -> Value {
         json!({"items":{"alpha":"evidence", "beta":{"text":"other"}, "gamma":["third"]}, "question":question})
+    }
+
+    #[test]
+    fn explicit_levels_translate_and_scale_fractional_scores() {
+        let mut request = typed_request();
+        request["questions"]["urgency"]["levels"] = json!(["Low", "Medium", "High"]);
+        request["questions"]["urgency"]["min"] = json!(-10);
+        request["questions"]["urgency"]["max"] = json!(30);
+        validate_arguments(&request).unwrap();
+        assert_eq!(
+            typesafe_request(&request).unwrap()["questions"]["urgency"]["criteria"],
+            json!(["Low", "Medium", "High"])
+        );
+        for (raw, expected) in [(0.0, -10.0), (0.5, 0.0), (1.0, 10.0), (2.0, 30.0)] {
+            let mut response = jev_response();
+            response["answers"]["urgency"]["score"] = json!(raw);
+            assert_eq!(
+                typesafe_response(&request, response).unwrap()["answers"]["urgency"]["value"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_optional_distributions_without_conflating_confidence() {
+        let mut upstream = jev_response();
+        upstream["answers"]["route"]["confidence"] = json!(0.3);
+        upstream["answers"]["urgency"]["probabilities"] = json!({"0":0.25,"1":0.75});
+        let result = typesafe_response(&typed_request(), upstream.clone()).unwrap();
+        for name in ["route", "urgency"] {
+            assert_eq!(
+                result["answers"][name]["probabilities"],
+                upstream["answers"][name]["probabilities"]
+            );
+        }
+        assert_eq!(result["answers"]["route"]["confidence"], 0.3);
+        assert_eq!(
+            validate_response(&typed_request(), result.clone()).unwrap(),
+            result
+        );
+    }
+
+    #[test]
+    fn both_backends_reject_invalid_distributions() {
+        for probabilities in [
+            json!(null),
+            json!([]),
+            json!({}),
+            json!({"billing":1}),
+            json!({"billing":0.5,"wrong":0.5}),
+            json!({"billing":0.5,"other":0.5,"extra":0}),
+            json!({"billing":-0.1,"other":1.1}),
+            json!({"billing":"0.5","other":0.5}),
+            json!({"billing":null,"other":1}),
+            json!({"billing":0.4,"other":0.4}),
+        ] {
+            let mut upstream = jev_response();
+            upstream["answers"]["route"]["probabilities"] = probabilities.clone();
+            assert!(typesafe_response(&typed_request(), upstream).is_err());
+            let mut local = valid_response();
+            local["answers"]["route"]["probabilities"] = probabilities;
+            assert!(validate_response(&typed_request(), local).is_err());
+        }
+    }
+
+    #[test]
+    fn levels_validate_counts_descriptions_and_utf8_byte_limits_in_both_forms() {
+        let score = typed_request()["questions"]["urgency"].clone();
+        for levels in [
+            json!(null),
+            json!(false),
+            json!("low, high"),
+            json!({"0":"Low","1":"High"}),
+            json!([]),
+            json!(["Only"]),
+            json!(vec!["Level"; 11]),
+            json!(["", "High"]),
+            json!([" \n\t", "High"]),
+            json!(["\u{2003}", "High"]),
+            json!([0, "High"]),
+            json!([null, "High"]),
+            json!([{}, "High"]),
+            json!(["x".repeat(513), "High"]),
+            json!(["é".repeat(257), "High"]),
+        ] {
+            let mut question = score.clone();
+            question["levels"] = levels;
+            assert!(validate_arguments(&batch(question.clone())).is_err());
+            assert!(validate_arguments(&json!({"state":{},"questions":{"q":question}})).is_err());
+        }
+        for levels in [
+            json!(["x".repeat(512), "é".repeat(256)]),
+            json!(vec!["Level"; 10]),
+        ] {
+            let mut question = score.clone();
+            question["levels"] = levels;
+            assert!(validate_arguments(&batch(question.clone())).is_ok());
+            assert!(validate_arguments(&json!({"state":{},"questions":{"q":question}})).is_ok());
+        }
+        for name in ["route", "refund"] {
+            for levels in [json!(["Low", "High"]), json!(null)] {
+                let mut question = typed_request()["questions"][name].clone();
+                question["levels"] = levels;
+                assert!(validate_arguments(&batch(question.clone())).is_err());
+                assert!(
+                    validate_arguments(&json!({"state":{},"questions":{"q":question}})).is_err()
+                );
+            }
+        }
+        let schema = super::tool_definition()["inputSchema"].clone();
+        let named = &schema["oneOf"][0]["properties"]["questions"]["additionalProperties"]["properties"]
+            ["levels"];
+        let shared = &schema["oneOf"][1]["properties"]["question"]["properties"]["levels"];
+        assert_eq!(named, shared);
+        assert_eq!(named["minItems"], 2);
+        assert_eq!(named["maxItems"], 10);
+        assert_eq!(named["items"]["maxLength"], 512);
+    }
+
+    #[test]
+    fn batch_levels_and_distributions_cover_every_supported_rubric_size() {
+        for count in 2..=10 {
+            let levels: Vec<_> = (0..count).map(|index| format!("Level {index}")).collect();
+            let probabilities: serde_json::Map<_, _> = (0..count)
+                .map(|index| (index.to_string(), json!(1.0 / count as f64)))
+                .collect();
+            let normalized = super::normalize_arguments(&batch(json!({
+                "type":"score","instructions":"Score.","min":-10,"max":30,"levels":levels
+            })))
+            .unwrap();
+            let provider = typesafe_request(&normalized).unwrap();
+            let mut upstream = json!({"answers":{}});
+            for (id, raw) in [
+                ("alpha", 0.0),
+                ("beta", (count - 1) as f64 / 2.0),
+                ("gamma", (count - 1) as f64),
+            ] {
+                assert_eq!(provider["questions"][id]["criteria"], json!(levels));
+                upstream["answers"][id] =
+                    json!({"type":"score","score":raw,"probabilities":probabilities});
+            }
+            let result = typesafe_response(&normalized, upstream).unwrap();
+            for (id, expected) in [("alpha", -10.0), ("beta", 10.0), ("gamma", 30.0)] {
+                assert_eq!(result["answers"][id]["value"], expected);
+                assert_eq!(result["answers"][id]["probabilities"], json!(probabilities));
+                assert!(result["answers"][id].get("confidence").is_none());
+            }
+            assert_eq!(
+                validate_response(&normalized, result.clone()).unwrap(),
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn score_scaling_rejects_invalid_raw_values_and_keeps_extreme_bounds_finite() {
+        let mut request = typed_request();
+        request["questions"]["urgency"]["levels"] = json!(["Low", "Medium", "High"]);
+        for raw in [
+            json!(-0.01),
+            json!(2.01),
+            json!(null),
+            json!("1"),
+            json!(true),
+        ] {
+            let mut response = jev_response();
+            response["answers"]["urgency"]["score"] = raw;
+            assert!(typesafe_response(&request, response).is_err());
+        }
+        request["questions"]["urgency"]["min"] = json!(-f64::MAX);
+        request["questions"]["urgency"]["max"] = json!(f64::MAX);
+        validate_arguments(&request).unwrap();
+        for (raw, expected) in [(0.0, -f64::MAX), (1.0, 0.0), (2.0, f64::MAX)] {
+            let mut response = jev_response();
+            response["answers"]["urgency"]["score"] = json!(raw);
+            let result = typesafe_response(&request, response).unwrap();
+            assert_eq!(result["answers"]["urgency"]["value"], expected);
+            validate_response(&request, result).unwrap();
+        }
+        // Subtraction can lose the small bound even without overflowing.
+        for (minimum, maximum) in [(-1e16, 1.0), (-1.0, 1e16)] {
+            request["questions"]["urgency"]["min"] = json!(minimum);
+            request["questions"]["urgency"]["max"] = json!(maximum);
+            for (raw, expected) in [(0.0, minimum), (2.0, maximum)] {
+                let mut response = jev_response();
+                response["answers"]["urgency"]["score"] = json!(raw);
+                assert_eq!(
+                    typesafe_response(&request, response).unwrap()["answers"]["urgency"]["value"],
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn score_distributions_use_exact_level_indices_including_legacy_scores() {
+        for levels in [None, Some(json!(["Low", "Medium", "High"]))] {
+            let mut request = typed_request();
+            if let Some(levels) = &levels {
+                request["questions"]["urgency"]["levels"] = levels.clone();
+            }
+            let valid = if levels.is_some() {
+                json!({"0":0.2,"1":0.3,"2":0.5})
+            } else {
+                json!({"0":0.25,"1":0.75})
+            };
+            let mut upstream = jev_response();
+            upstream["answers"]["urgency"]["probabilities"] = valid.clone();
+            let normalized = typesafe_response(&request, upstream).unwrap();
+            assert_eq!(normalized["answers"]["urgency"]["probabilities"], valid);
+            validate_response(&request, normalized.clone()).unwrap();
+            for invalid in [
+                json!({"0":1}),
+                json!({"00":0.5,"1":0.5}),
+                json!({"0.0":0.5,"1":0.5}),
+                json!({"Low":0.5,"High":0.5}),
+                json!({"0":0.5,"1":0.5,"9":0}),
+                json!({"0":0.5,"-1":0.5}),
+                json!({"0":0.4,"1":0.4}),
+                json!({"0":true,"1":0}),
+                json!({"0":0,"1":null}),
+                json!({"0":0,"1":2}),
+            ] {
+                let mut upstream = jev_response();
+                upstream["answers"]["urgency"]["probabilities"] = invalid.clone();
+                assert!(typesafe_response(&request, upstream).is_err());
+                let mut local = normalized.clone();
+                local["answers"]["urgency"]["probabilities"] = invalid;
+                assert!(validate_response(&request, local).is_err());
+            }
+            // The other rubric's exact index set is not interchangeable.
+            let mut local = normalized;
+            local["answers"]["urgency"]["probabilities"] = if levels.is_some() {
+                json!({"0":0.25,"1":0.75})
+            } else {
+                json!({"0":0.2,"1":0.3,"2":0.5})
+            };
+            assert!(validate_response(&request, local).is_err());
+        }
+    }
+
+    #[test]
+    fn optional_metadata_is_never_invented_and_has_consistent_validation() {
+        let request = typed_request();
+        let mut upstream = jev_response();
+        for answer in upstream["answers"].as_object_mut().unwrap().values_mut() {
+            answer.as_object_mut().unwrap().remove("probabilities");
+            answer.as_object_mut().unwrap().remove("confidence");
+        }
+        let normalized = typesafe_response(&request, upstream.clone()).unwrap();
+        for answer in normalized["answers"].as_object().unwrap().values() {
+            assert!(answer.get("probabilities").is_none());
+            assert!(answer.get("confidence").is_none());
+        }
+        for name in ["route", "urgency", "refund"] {
+            for confidence in [
+                json!(null),
+                json!(true),
+                json!("0.5"),
+                json!(-0.1),
+                json!(1.1),
+            ] {
+                let mut bad = upstream.clone();
+                bad["answers"][name]["confidence"] = confidence.clone();
+                assert!(typesafe_response(&request, bad).is_err());
+                let mut bad = normalized.clone();
+                bad["answers"][name]["confidence"] = confidence;
+                assert!(validate_response(&request, bad).is_err());
+            }
+            for confidence in [0.0, 1.0] {
+                let mut valid = upstream.clone();
+                valid["answers"][name]["confidence"] = json!(confidence);
+                validate_response(&request, typesafe_response(&request, valid).unwrap()).unwrap();
+            }
+        }
+        // Scalar probability questions do not define option or level keys.
+        for probabilities in [json!({"0":0.2,"1":0.8}), json!({}), json!(null)] {
+            let mut bad = upstream.clone();
+            bad["answers"]["refund"]["probabilities"] = probabilities.clone();
+            assert!(typesafe_response(&request, bad).is_err());
+            let mut bad = normalized.clone();
+            bad["answers"]["refund"]["probabilities"] = probabilities;
+            assert!(validate_response(&request, bad).is_err());
+        }
+        for (other, valid) in [
+            (0.5000005, true),
+            (0.500002, false),
+            (0.4999995, true),
+            (0.499998, false),
+        ] {
+            let mut response = upstream.clone();
+            response["answers"]["route"]["probabilities"] = json!({"billing":0.5,"other":other});
+            assert_eq!(typesafe_response(&request, response).is_ok(), valid);
+            let mut local = normalized.clone();
+            local["answers"]["route"]["probabilities"] = json!({"billing":0.5,"other":other});
+            assert_eq!(validate_response(&request, local).is_ok(), valid);
+        }
+    }
+
+    #[test]
+    fn model_identifiers_are_bounded_and_provider_versions_are_preserved() {
+        use std::ffi::OsStr;
+        assert_eq!(super::decision_model(None).unwrap(), "jev-latest");
+        for model in [
+            "a".to_string(),
+            "Jev-2.0_preview".to_string(),
+            "x".repeat(64),
+        ] {
+            assert_eq!(
+                super::decision_model(Some(OsStr::new(&model))).unwrap(),
+                model
+            );
+            assert_eq!(
+                super::typesafe_request(&typed_request(), &model).unwrap()["model"],
+                model
+            );
+        }
+        for model in [
+            "",
+            " ",
+            " jev",
+            "jev ",
+            "jev\n",
+            "jev\0",
+            "jev\t",
+            "jev/2",
+            "https://example.test",
+            "jev:2",
+            "jév",
+            "jev?x",
+            "jev#x",
+            "jev\\2",
+            &"x".repeat(65),
+        ] {
+            assert!(super::decision_model(Some(OsStr::new(model))).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(super::decision_model(Some(OsStr::from_bytes(b"jev-\xff"))).is_err());
+        }
+        let result =
+            super::typesafe_response(&typed_request(), jev_response(), "jev-pinned").unwrap();
+        assert_eq!(result["service"]["model"], "jev-1.13.0");
+        let mut response = jev_response();
+        response.as_object_mut().unwrap().remove("model");
+        let result = super::typesafe_response(&typed_request(), response, "jev-pinned").unwrap();
+        assert_eq!(result["service"]["model"], "jev-pinned");
+    }
+
+    #[test]
+    fn model_environment_child() {
+        let Ok(case) = std::env::var("AHU_DECISION_MODEL_TEST_CASE") else {
+            return;
+        };
+        if case == "default" || case == "override" {
+            let model = std::env::var_os("AHU_DECISION_MODEL");
+            assert_eq!(
+                super::decision_model(model.as_deref()).unwrap(),
+                if case == "default" {
+                    "jev-latest"
+                } else {
+                    "jev-pinned_2.0"
+                }
+            );
+        } else {
+            let root = tempfile::tempdir().unwrap();
+            let repo = crate::git::Repo {
+                root: root.path().into(),
+                common_dir: root.path().join(".git"),
+                head: None,
+            };
+            let error = super::call(&typed_request(), &repo)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("AHU_DECISION_MODEL"), "{error}");
+        }
+    }
+
+    #[test]
+    fn process_model_selection_validates_before_credentials_and_local_dispatch() {
+        for case in [
+            "default",
+            "override",
+            "invalid-before-key",
+            "invalid-before-local",
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .env_clear()
+                .args([
+                    "--exact",
+                    "mcp::decisions::tests::model_environment_child",
+                    "--nocapture",
+                ])
+                .env("AHU_DECISION_MODEL_TEST_CASE", case)
+                .env("TYPESAFE_API_KEY", "invalid\nsynthetic");
+            if case != "default" {
+                child.env(
+                    "AHU_DECISION_MODEL",
+                    if case == "override" {
+                        "jev-pinned_2.0"
+                    } else {
+                        "https://invalid.example"
+                    },
+                );
+            }
+            if case == "invalid-before-local" {
+                child.env("AHU_DECISION_URL", "invalid-local-endpoint");
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
@@ -1037,7 +1563,7 @@ mod tests {
             stream.read_exact(&mut body).unwrap();
             assert!(headers.contains("authorization: bearer test-secret"));
             let payload: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(payload["model"], "jev-latest");
+            assert_eq!(payload["model"], "jev-pinned_2.0");
             assert!(payload.to_string().find("telemetry_key").is_none());
             let response = serde_json::to_vec(&jev_response()).unwrap();
             write!(
@@ -1050,7 +1576,8 @@ mod tests {
         });
         let mut request = typed_request();
         request["questions"]["route"]["telemetry_key"] = json!("department");
-        let result = call_typesafe_at(&request, "test-secret", &endpoint).unwrap();
+        let result =
+            call_typesafe_at(&request, "test-secret", &endpoint, "jev-pinned_2.0").unwrap();
         server.join().unwrap();
         assert_eq!(result["service"]["backend"], "typesafe");
         assert!(result["service"]["duration_ms"].as_f64().is_some());

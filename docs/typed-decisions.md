@@ -123,7 +123,20 @@ included in the MCP result or telemetry.
 
 Jev's `choice`, `score`, and `noul` responses are translated back to ahu's
 stable `choice`, `score`, and `probability` result values. ahu maps a score
-between Jev's two-point min/max rubric back to the requested numeric range.
+from Jev's ordered rubric position back to the requested numeric range.
+Supply optional `levels` (2–10 nonblank descriptions, each at most 512 UTF-8
+bytes) for meaningful score anchors. Without levels, the existing two-point
+min/max rubric remains available. Choice and score responses preserve optional
+`probabilities`: choice keys match the options; score keys are zero-based level
+indices. Values must be finite, between zero and one, and sum to one within
+0.000001. A scalar probability answer has no distribution map.
+
+Set `AHU_DECISION_MODEL=jev-1.13.0` in the MCP process environment to pin Jev for
+a reproducible experiment. The default remains `jev-latest`. Only the process
+environment selects the model; the credential-only dotenv reader does not load
+it. The model identifier is bounded to 64 ASCII letters, digits, dots, underscores
+or dashes. Setup forwards the variable name to Codex MCP children without
+reading its value. The response retains the provider's reported model version.
 Telemetry reports TypeSafe's returned input/output token counts and the
 round-trip duration; it does not include request or answer contents.
 
@@ -268,3 +281,27 @@ process running as the same OS user. An agent or tool that can read the primary
 checkout can also read this file. Keep task agents in their worktrees, use the
 harness's filesystem restrictions, and use a user-level secret manager or a
 server-scoped environment injection when stronger isolation is required.
+
+## Advisory skill selection
+
+`ahu_skills_suggest` accepts a `task` string and optional `mode`:
+`decision` (default) or `lexical`. It returns up to three relative skill paths,
+or abstains. Existing instructions and explicit skill requests retain precedence;
+a suggestion does not load a skill or change the agent's identity.
+
+Both modes inspect the committed `.agents/skills/*/SKILL.md` catalog and require
+a current committed context lock. The catalog is limited to 40 skills; files
+must be regular files, without symlink traversal. Decision mode sends only
+the task and skill names/descriptions to the configured decision provider.
+It does not send skill bodies. Lexical mode performs local distinct-token
+matching. Missing credentials or a provider failure produce a recorded fallback
+with no suggestions. Invalid context or input is an error.
+
+The initial decision policy selects at most three relevance probabilities at
+or above 0.8. Lexical matching requires two distinct shared words after fixed
+stopword removal. These are versioned experimental policies, not calibrated
+guarantees. Both support abstention and multiple applicable skills.
+
+For prelaunch comparisons, use
+`ahu eval run --skill-selection none|lexical|decision`.
+The default is `none`. See [the evaluation guide](evaluations.md).
