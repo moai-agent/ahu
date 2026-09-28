@@ -4,6 +4,59 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::process::Stdio;
 
+#[cfg(unix)]
+#[test]
+fn mcp_sigterm_flushes_a_complete_session_without_stdin_eof() {
+    let repo = common::TestRepo::new();
+    let receiver = ahu::eval_otel::Receiver::start().unwrap();
+    let mut child = common::ahu()
+        .args(["mcp", "serve"])
+        .current_dir(repo.path())
+        .env("AHU_EVAL_OTEL_ENDPOINT", receiver.endpoint())
+        .env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "ahu.task.id=signal-fixture,ahu.task.attempt=1",
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    writeln!(input, "{}", serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}})).unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"],
+        1
+    );
+    // The harness may close its read end before terminating the server.
+    drop(output);
+    // This PID belongs to the unreaped child created above. Keep stdin open:
+    // real harnesses can terminate MCP children before closing their pipes.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("MCP shutdown timed out");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(status.success(), "{status}");
+    let observed = receiver
+        .task("signal-fixture", 1)
+        .expect("missing session summary");
+    assert_eq!(observed.coverage().as_str(), "complete_session");
+    assert_eq!(observed.session_summaries, 1);
+    assert_eq!(observed.tool_calls, 0);
+}
+
 #[test]
 fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
     let repo = common::TestRepo::new();

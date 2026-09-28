@@ -1201,6 +1201,7 @@ pub fn render_at(report: &Report, width: usize) -> String {
         Role::Hint,
         "\nA dash in the table is a metric no run reported, never a measured zero;\n\
          the blocks above give each mean the coverage it was taken over.\n\
+         ANSWER shows correct answers over valid answers; reliability below includes every attempt.\n\
          Means cover only the runs that reported the measurement.\n\
          Coverage below the run count is missing observation, not a measured zero.\n\
          Answer reliability covers every attempt, so a failed launch counts\n\
@@ -1307,7 +1308,11 @@ fn summary_rows(groups: &[Group]) -> Vec<Vec<table::Cell>> {
                     Role::Runtime,
                     display_safe(&format!("{} / {}", key.harness, key.model)),
                 ),
-                fraction(group.answer_passes, group.runs),
+                if group.answer_observations == 0 {
+                    table::Cell::painted(Role::Gap, format!("no answer ({})", group.runs))
+                } else {
+                    fraction(group.answer_quality_passes, group.answer_observations)
+                },
                 // Over the decided runs only, as the block below reports it.
                 fraction(group.tool_pass, group.tool_pass + group.tool_fail),
                 measured(group.mean_elapsed_ms.map(human_duration)),

@@ -1277,6 +1277,8 @@ fn a_failed_attempt_is_not_a_wrong_answer_and_quality_covers_only_real_answers()
     assert!(stdout.contains("candidate_launch_failed 1"), "{stdout}");
     assert!(stdout.contains("candidate_timed_out 1"), "{stdout}");
     assert!(stdout.contains("failed attempts 2/5"), "{stdout}");
+    assert!(summary_table(&stdout)[1].contains("2/3"), "{stdout}");
+    assert!(!summary_table(&stdout)[1].contains("2/5"), "{stdout}");
 }
 
 #[test]
@@ -1308,6 +1310,11 @@ fn a_configuration_that_never_answered_has_no_quality_rate_or_interval() {
         "{stdout}"
     );
     assert!(stdout.contains("failed attempts 2/2"), "{stdout}");
+    assert!(!summary_table(&stdout)[1].contains("0/2"), "{stdout}");
+    assert!(
+        summary_table(&stdout)[1].contains("no answer (2)"),
+        "{stdout}"
+    );
 }
 
 #[test]

@@ -26,6 +26,48 @@ const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
 const SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
+#[cfg(unix)]
+mod termination_signal {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REQUESTED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn request_shutdown(_: libc::c_int) {
+        // Signal context: no allocation, locks, I/O, or telemetry calls.
+        REQUESTED.store(true, Ordering::Relaxed);
+    }
+
+    pub struct Guard(libc::sigaction);
+    impl Guard {
+        pub fn install() -> std::io::Result<Self> {
+            REQUESTED.store(false, Ordering::Relaxed);
+            // SAFETY: both structures are initialized before use; the handler
+            // only stores an atomic flag. Each MCP process serves one session.
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                let mut previous: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = request_shutdown as *const () as usize;
+                action.sa_flags = libc::SA_RESTART;
+                libc::sigemptyset(&mut action.sa_mask);
+                if libc::sigaction(libc::SIGTERM, &action, &mut previous) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(Self(previous))
+            }
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            // SAFETY: restore the action returned by the successful install.
+            unsafe {
+                libc::sigaction(libc::SIGTERM, &self.0, std::ptr::null_mut());
+            }
+        }
+    }
+    pub fn requested() -> bool {
+        REQUESTED.load(Ordering::Relaxed)
+    }
+}
+
 pub const AGENT_CONTEXT_CRITIC_SKILL: &str = "agent-context-critic";
 
 /// Skills `ahu setup` installs in a user's repository, and the set doctor
@@ -90,6 +132,8 @@ pub fn verify_bundled_skills(repo_root: &std::path::Path) -> Result<(usize, usiz
 
 /// Serve newline-delimited JSON-RPC messages on stdin/stdout.
 pub fn serve(repo: &Repo) -> Result<i32> {
+    #[cfg(unix)]
+    let _termination = termination_signal::Guard::install()?;
     let telemetry = crate::config::load(&repo.root)?
         .map(|loaded| loaded.config.telemetry)
         .unwrap_or_default();
@@ -117,6 +161,10 @@ pub fn serve(repo: &Repo) -> Result<i32> {
     let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
     let mut session = task_protocol::Session::new()?;
     loop {
+        #[cfg(unix)]
+        if termination_signal::requested() {
+            break;
+        }
         match receive.recv_timeout(std::time::Duration::from_millis(50)) {
             Ok(Ok(line)) => {
                 if line.trim().is_empty() {
@@ -152,6 +200,10 @@ pub fn serve(repo: &Repo) -> Result<i32> {
                 }
             }
             Ok(Err(error)) => {
+                #[cfg(unix)]
+                if termination_signal::requested() {
+                    break;
+                }
                 crate::telemetry::mcp_transport_error();
                 let failure = rpc_error(&Value::Null, -32600, error.to_string());
                 write_response(&mut stdout, &failure)?;
@@ -170,7 +222,10 @@ pub fn serve(repo: &Repo) -> Result<i32> {
 fn read_frame(reader: &mut impl BufRead) -> io::Result<Option<String>> {
     let mut frame = Vec::new();
     loop {
-        let buffer = reader.fill_buf()?;
+        let buffer = match reader.fill_buf() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
         if buffer.is_empty() {
             return if frame.is_empty() {
                 Ok(None)

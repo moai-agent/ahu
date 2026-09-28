@@ -12,6 +12,13 @@ Keep records, prompts, reports, and native logs outside the source checkout. Kee
 one binary, repository revision, skill bundle, MCP configuration, permission mode,
 and exact model fixed within each harness comparison.
 
+For Claude Code, approve the specific MCP tool in project permissions and trust
+the disposable repository once in an interactive session before running headless
+trials. Current Claude versions ignore project allow rules in an untrusted
+repository even when its MCP server connects. Trust covers that repository's
+worktrees. Keep the same permissions in both arms; do not bypass all permissions.
+See [Claude's workspace trust rules](https://code.claude.com/docs/en/permissions#project-allow-rules-and-workspace-trust).
+
 Compare two manifest policies with the same tool and skill availability:
 
 - Baseline: answer locally within the candidate model; do not delegate judgments.
