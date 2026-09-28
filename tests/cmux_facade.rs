@@ -931,7 +931,19 @@ fn isolation_profile_matrix_preserves_refusals_and_representation_parity() {
         let entry = ahu::catalog::harness(harness).unwrap();
         for reviewed in entry.headless_verified_versions {
             let clean = f.inspect(harness).with_version(Some(reviewed));
-            assert!(clean.headless.allowed, "{clean:?}");
+            if harness == "codex" && *reviewed == "0.157.1" {
+                // Exact catalog admission does not replace fresh native inspection.
+                assert!(!clean.headless.allowed, "{clean:?}");
+                assert!(
+                    clean
+                        .headless
+                        .reasons
+                        .iter()
+                        .any(|r| r.contains("fresh native"))
+                );
+            } else {
+                assert!(clean.headless.allowed, "{clean:?}");
+            }
         }
         assert!(!f.inspect(harness).with_version(None).headless.allowed);
         if !source.is_empty() {
@@ -1012,4 +1024,92 @@ fn claude_invocation_isolation_covers_only_parsed_nonmanaged_hooks() {
                 .allowed
         );
     }
+}
+
+#[test]
+fn codex_effective_metadata_covers_opaque_state_but_keeps_other_boundaries() {
+    let f = Fixture::new();
+    f.write(
+        f.home.join(".codex/auth.json"),
+        "synthetic opaque content must not be read",
+    );
+    std::fs::create_dir(f.home.join(".codex/plugins")).unwrap();
+    let metadata = json!({"data":[{"cwd":f.root,"hooks":[],"warnings":[],"errors":[]}]});
+    assert!(!f.inspect("codex").headless.allowed);
+    let status =
+        integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata).unwrap();
+    let status = status.with_version(Some("0.157.1"));
+    assert!(status.headless.allowed);
+    assert!(
+        !serde_json::to_string(&status)
+            .unwrap()
+            .contains("synthetic opaque content")
+    );
+    // A version observation alone is never a substitute for native inspection.
+    assert!(
+        !integration::headless_status(f.inspect("codex"), "0.157.1")
+            .headless
+            .allowed
+    );
+    f.write(
+        f.root.join(".codex/config.toml"),
+        "include = 'unknown.toml'",
+    );
+    assert!(integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata).is_err());
+    std::fs::remove_file(f.root.join(".codex/config.toml")).unwrap();
+    let system = f.root.join("system");
+    f.write(system.join("requirements.toml"), "synthetic requirement");
+    let locations = Locations {
+        system_codex: Some(system),
+        ..f.locations()
+    };
+    let status = integration::inspect_in(&f.root, "codex", &locations);
+    assert!(integration::codex_effective_status(status, &f.root, &metadata).is_err());
+}
+
+#[test]
+fn codex_effective_metadata_refuses_unknown_hooks_even_if_disabled_or_untrusted() {
+    let f = Fixture::new();
+    for enabled in [true, false] {
+        for trust in ["trusted", "untrusted", "modified"] {
+            let hook = json!({"eventName":"stop","handlerType":"command","command":"touch synthetic-marker","isManaged":false,"enabled":enabled,"trustStatus":trust,"source":"user"});
+            let metadata =
+                json!({"data":[{"cwd":f.root,"hooks":[hook],"warnings":[],"errors":[]}]});
+            let error = integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata)
+                .unwrap_err();
+            assert!(error.to_string().contains("guarded allowlist"));
+        }
+    }
+    for hook in [
+        json!({"eventName":"stop","handlerType":"mcpTool","isManaged":false,"enabled":true,"source":"plugin"}),
+        json!({"eventName":"stop","handlerType":"command","isManaged":true,"enabled":true,"source":"cloudRequirements"}),
+        json!({"eventName":"unknown","handlerType":"command","isManaged":false,"enabled":true,"source":"user"}),
+    ] {
+        let metadata = json!({"data":[{"cwd":f.root,"hooks":[hook],"warnings":[],"errors":[]}]});
+        assert!(
+            integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata).is_err()
+        );
+    }
+}
+
+#[test]
+fn codex_effective_metadata_rejects_incomplete_scopes_and_unresolved_paths() {
+    let f = Fixture::new();
+    for metadata in [
+        json!({}),
+        json!({"data":[]}),
+        json!({"data":[{"cwd":"/unrelated","hooks":[],"warnings":[],"errors":[]}]}),
+        json!({"data":[{"cwd":f.root,"hooks":[],"warnings":["unresolved"],"errors":[]}]}),
+        json!({"data":[{"cwd":f.root,"hooks":[],"warnings":[],"errors":[{}]}]}),
+        json!({"data":[{"cwd":f.root,"hooks":[],"warnings":[]}]}),
+        json!({"data":[{"cwd":f.root,"hooks":vec![json!({});257],"warnings":[],"errors":[]}]}),
+    ] {
+        assert!(
+            integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata).is_err()
+        );
+    }
+    std::fs::create_dir(f.home.join(".codex")).unwrap();
+    std::os::unix::fs::symlink(f.root.join("missing"), f.home.join(".codex/auth.json")).unwrap();
+    let metadata = json!({"data":[{"cwd":f.root,"hooks":[],"warnings":[],"errors":[]}]});
+    assert!(integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata).is_err());
 }

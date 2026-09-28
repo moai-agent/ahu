@@ -18,8 +18,23 @@ pub fn profile(harness: &str, version: &str) -> Option<Profile> {
             id: "claude-2.1.283-nonmanaged-hooks-disabled-v1",
             args: &["--settings", "{\"disableAllHooks\":true}"],
         }),
-        // Codex 0.157.1's hooks=false also suppresses managed hooks. Do not
-        // authorize it while remote managed policy cannot be established.
+        ("codex", "0.157.1") => Some(Profile {
+            id: "codex-0.157.1-effective-guarded-hooks-v1",
+            // Never disable hooks or bypass trust. Native strict configuration
+            // refuses conflicts with mandatory feature requirements. Admission
+            // additionally requires an explicit null requirements response.
+            args: &[
+                "--strict-config",
+                "-c",
+                "features.hooks=true",
+                "-c",
+                "features.plugins=false",
+                "-c",
+                "features.remote_plugin=false",
+                "-c",
+                "notify=[]",
+            ],
+        }),
         _ => None,
     }
 }

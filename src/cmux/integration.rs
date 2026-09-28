@@ -135,6 +135,16 @@ impl Status {
     pub fn with_version(mut self, version: Option<&str>) -> Self {
         self.version_checked = true;
         self.cli_version = version.map(str::to_owned);
+        if self.harness == "codex"
+            && crate::harness::isolation::profile("codex", version.unwrap_or("")).is_some()
+            && !self
+                .components
+                .iter()
+                .any(|c| c.name == "native invocation profile")
+        {
+            self.headless.allowed = false;
+            self.headless.reasons.push("Codex 0.157.1 requires fresh native effective hook and requirements inspection using the frozen invocation profile".into());
+        }
         if let Err(error) =
             crate::catalog::check_headless_version(&self.harness, version.unwrap_or(""))
         {
@@ -1195,7 +1205,9 @@ fn scan_plugin_config(path: &Path, scope: &str, out: &mut Vec<Component>) {
 /// Apply only controls that batch_command also freezes and emits. Inspection
 /// without this explicit headless profile retains its interactive evidence.
 pub fn headless_status(mut status: Status, version: &str) -> Status {
-    if let Some(profile) = crate::harness::isolation::profile(&status.harness, version) {
+    if status.harness == "claude-code"
+        && let Some(profile) = crate::harness::isolation::profile(&status.harness, version)
+    {
         for component in &mut status.components {
             let evidence = &component.evidence[0];
             if status.harness == "claude-code"
@@ -1219,6 +1231,159 @@ pub fn headless_status(mut status: Status, version: &str) -> Status {
         status.gaps.push(format!("Headless invocation profile: {}. Managed hooks and unresolved plugins remain admission blockers.", profile.id));
     }
     status.with_version(Some(version))
+}
+
+/// Production headless execution supplies its already verified executable.
+/// An on-disk metadata report is never accepted as an admission credential.
+pub fn enforce_headless_executable(
+    repo: &Path,
+    harness: &str,
+    version: &str,
+    executable: &Path,
+) -> Result<Status> {
+    if harness != "codex" || crate::harness::isolation::profile(harness, version).is_none() {
+        return enforce_headless(repo, harness, version);
+    }
+    let status = inspect_codex_effective(repo, executable)?.with_version(Some(version));
+    if !status.headless.allowed {
+        return Err(Error::new(format!(
+            "headless cmux isolation is unverified for codex:\n{}",
+            status.headless.reasons.join("\n")
+        )));
+    }
+    Ok(status)
+}
+
+/// Compatibility probes can exercise the real metadata and component validator
+/// before catalog admission; normal launches also require the exact version gate.
+pub fn inspect_codex_effective(repo: &Path, executable: &Path) -> Result<Status> {
+    let status = inspect(repo, "codex");
+    let metadata = crate::harness::codex_metadata::inspect(executable, repo)?;
+    codex_effective_status(status, repo, &metadata)
+}
+
+pub fn codex_effective_status(status: Status, repo: &Path, metadata: &Value) -> Result<Status> {
+    if status.harness != "codex" {
+        return Err(Error::new(
+            "native Codex metadata cannot authorize another harness",
+        ));
+    }
+    let data = metadata
+        .get("data")
+        .and_then(Value::as_array)
+        .filter(|data| data.len() == 1)
+        .ok_or_else(|| Error::new("native Codex hook inventory has an invalid scope"))?;
+    let entry = &data[0];
+    if entry.get("cwd").and_then(Value::as_str) != repo.to_str()
+        || !["warnings", "errors"].iter().all(|key| {
+            entry
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        })
+    {
+        return Err(Error::new(
+            "native Codex hook inventory has unresolved scope, warnings or errors",
+        ));
+    }
+    let hooks = entry
+        .get("hooks")
+        .and_then(Value::as_array)
+        .filter(|hooks| hooks.len() <= MAX_ENTRIES)
+        .ok_or_else(|| Error::new("native Codex hook inventory is missing or exceeds the bound"))?;
+    let mut components = status.components;
+    for (index, hook) in hooks.iter().enumerate() {
+        let event = match hook.get("eventName").and_then(Value::as_str) {
+            Some("preToolUse") => "PreToolUse",
+            Some("postToolUse") => "PostToolUse",
+            Some("permissionRequest") => "PermissionRequest",
+            Some("preCompact") => "PreCompact",
+            Some("postCompact") => "PostCompact",
+            Some("sessionStart") => "SessionStart",
+            Some("userPromptSubmit") => "UserPromptSubmit",
+            Some("subagentStart") => "SubagentStart",
+            Some("subagentStop") => "SubagentStop",
+            Some("stop") => "Stop",
+            _ => return Err(Error::new("native Codex hook event is not reviewed")),
+        };
+        // Disabled or untrusted unknown hooks are not treated as safe: native
+        // trust/activation can change independently of their command identity.
+        if hook.get("handlerType").and_then(Value::as_str) != Some("command")
+            || hook.get("isManaged") != Some(&Value::Bool(false))
+            || hook.get("enabled").and_then(Value::as_bool).is_none()
+            || !matches!(
+                hook.get("source").and_then(Value::as_str),
+                Some("user" | "project" | "sessionFlags")
+            )
+        {
+            return Err(Error::new(
+                "native Codex hook has an unresolved handler or managed source",
+            ));
+        }
+        let command = hook
+            .get("command")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::new("native Codex hook command is missing"))?;
+        let mut item = component(
+            &format!("effective {event} registration {index}"),
+            repo,
+            "native effective metadata",
+        );
+        item.evidence[0].method =
+            "bounded hooks/list command SHA-256; no raw native response retained".into();
+        item.evidence[0].digest = Some(digest_bytes(command.as_bytes()));
+        verify_codex(command, event, &mut item);
+        if item.isolation != Isolation::VerifiedDisable {
+            return Err(Error::new(
+                "native Codex hook command or artifact is outside the reviewed guarded allowlist",
+            ));
+        }
+        components.push(item);
+    }
+    for item in &mut components {
+        if [
+            "plugin hook sources",
+            "cloud authentication",
+            "cloud configuration",
+        ]
+        .contains(&item.name.as_str())
+            && item.isolation == Isolation::Unknown
+            && item.evidence[0].scope == "user native state"
+            && item.detail.starts_with("native ")
+        {
+            item.isolation = Isolation::VerifiedDisable;
+            item.detail = "executable consequences covered by the exact Codex invocation profile and fresh native hook metadata; credentials remain native and unread".into();
+        }
+    }
+    let profile = crate::harness::isolation::profile("codex", "0.157.1").expect("reviewed profile");
+    let mut invocation = component(
+        "native invocation profile",
+        repo,
+        "native effective metadata",
+    );
+    invocation.isolation = Isolation::VerifiedDisable;
+    invocation.evidence[0].method =
+        "exact invocation controls and explicit absent mandatory requirements".into();
+    invocation.evidence[0].digest = Some(digest_bytes(&serde_json::to_vec(&(
+        profile.id,
+        profile.args,
+        "requirements:null",
+    ))?));
+    invocation.detail = format!(
+        "{}; fresh native hooks/list and configRequirements/read checked",
+        profile.id
+    );
+    components.push(invocation);
+    let mut gaps = status.gaps;
+    gaps.push("Codex effective metadata was inspected before this launch with hooks enabled, optional plugins disabled and notify empty. Mandatory requirements must be absent; native strict configuration still rejects newly conflicting requirements. Remote changes between inspection and execution and same-user concurrent changes are not isolated.".into());
+    let status = finish("codex", components, gaps);
+    if !status.headless.allowed {
+        return Err(Error::new(format!(
+            "headless cmux isolation is unverified for codex:\n{}",
+            status.headless.reasons.join("\n")
+        )));
+    }
+    Ok(status)
 }
 
 pub fn enforce_headless(repo: &Path, harness: &str, version: &str) -> Result<Status> {

@@ -161,6 +161,9 @@ pub fn batch_command(
             if spec.session.is_none() {
                 add(&["--color", "never"]);
             }
+            if let Some(profile) = isolation {
+                add(profile.args);
+            }
             if let Some(dir) = &spec.broker_dir {
                 let paths = toml::Value::Array(vec![toml::Value::String(
                     dir.to_string_lossy().into_owned(),
@@ -803,8 +806,13 @@ pub fn launch(
         spec.gaps.push("The ENTIRE assignment has a read-only MODEL TOOL ceiling: parent and helpers have no model tools for editing, building, shell commands or shell-launching registered children. Settings-defined hooks are outside that tool ceiling and their side effects are not proven read-only. MCP tools and slash commands are disabled; repository settings remain discoverable. Roles are requested/observed, not an allowlist; total helper count is not capped. Budget is 5 USD per attempt, concurrency 1, depth 1, helper model equals manifest model.".into());
     }
     spec.native_profile = Some(profile);
-    let cmux_integration =
-        validate_environment(repo, &repo.root, &plan.pair.harness, &spec.harness_version)?;
+    let cmux_integration = validate_environment(
+        repo,
+        &repo.root,
+        &plan.pair.harness,
+        &spec.harness_version,
+        &plan.harness_executable,
+    )?;
     plan.cmux_integration = cmux_integration.clone();
     spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", cmux_integration.headless.evidence_digest));
     let (delivered, delivery) = crate::orchestration::deliver_composed(
@@ -1005,6 +1013,7 @@ fn validate_environment(
     config_root: &Path,
     harness: &str,
     version: &str,
+    executable: &Path,
 ) -> Result<crate::cmux::integration::Status> {
     for variable in [
         "HOME",
@@ -1034,7 +1043,7 @@ fn validate_environment(
         }
     }
     crate::catalog::check_headless_version(harness, version)?;
-    crate::cmux::integration::enforce_headless(config_root, harness, version)
+    crate::cmux::integration::enforce_headless_executable(config_root, harness, version, executable)
 }
 
 pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
@@ -2218,6 +2227,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         &record.worktree,
         &record.identity.harness,
         &spec.harness_version,
+        &real,
     )?;
     let eval_otel_capture = crate::telemetry::eval_endpoint_override().is_some();
     if let Some(parent) = &spec.parent_task {
@@ -3002,6 +3012,7 @@ pub fn control(
                 &record.worktree,
                 &record.identity.harness,
                 &spec.harness_version,
+                &real,
             )?;
             let original_spec = spec.clone();
             let original_record = record.clone();
@@ -4175,8 +4186,41 @@ mod profile_and_metadata_tests {
             }
             assert_eq!(command.args[command.prompt_arg.unwrap()], "literal prompt");
         }
-        assert!(crate::harness::isolation::profile("codex", "0.157.1").is_none());
+        assert!(crate::harness::isolation::profile("codex", "0.157.2").is_none());
         assert!(crate::harness::isolation::profile("claude-code", "2.1.284").is_none());
+    }
+
+    #[test]
+    fn codex_effective_profile_is_frozen_on_launch_and_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let request = LaunchRequest {
+            model: "synthetic-model",
+            prompt: "literal prompt",
+            cwd: root.path(),
+            permissions: crate::agent::Permissions::Prompt,
+        };
+        let mut spec = sample_spec();
+        spec.harness_version = "codex-cli 0.157.1".into();
+        assert!(batch_command("codex", &request, &spec).is_err());
+        let profile = crate::harness::isolation::profile("codex", &spec.harness_version).unwrap();
+        spec.native_controls.push(profile.id.into());
+        for session in [None, Some("synthetic-session".into())] {
+            spec.session = session;
+            let command = batch_command("codex", &request, &spec).unwrap();
+            assert!(
+                command
+                    .args
+                    .windows(profile.args.len())
+                    .any(|args| args == profile.args)
+            );
+            assert!(
+                !command
+                    .args
+                    .iter()
+                    .any(|v| v == "features.hooks=false" || v == "--dangerously-bypass-hook-trust")
+            );
+            assert_eq!(command.args[command.prompt_arg.unwrap()], "literal prompt");
+        }
     }
 
     fn sample_spec() -> Spec {

@@ -154,7 +154,7 @@ pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
     let entry = harness(id)?;
     let evidence = match id {
         "codex" => {
-            "Absent native sources or exact reviewed hook commands with disable guards; plugins, cloud/authentication and managed sources must be resolved."
+            "Absent native sources or exact reviewed guarded hook commands. Codex 0.157.1 requires fresh native hook and requirements inspection with its frozen invocation profile; credentials remain native and unread, optional plugins and notify are disabled, and mandatory policy must be absent."
         }
         "opencode" => {
             "Absent native sources or the exact reviewed guarded Session plugin; Feed is unsafe, and authentication/account stores, substitutions and declared modules are unresolved."
@@ -255,7 +255,10 @@ pub const HARNESSES: &[HarnessEntry] = &[
         verified_versions: "0.154.0, 0.157.1",
         // 0.155.1 retains the batch argv surface; a live JSON launch and
         // native-session resume both emitted the expected identity and terminal events.
-        headless_verified_versions: &["0.154.0", "0.155.1"],
+        // 0.157.1: fresh native admission and authenticated prompt receipt,
+        // completion, exit and usage parsing verified on 2026-09-28 through
+        // ahu batch argv and event parsing with the frozen inspection profile.
+        headless_verified_versions: &["0.154.0", "0.155.1", "0.157.1"],
         enforces_model_for_session: false,
         features: &[
             Feature::InteractiveLaunch,
@@ -503,6 +506,8 @@ mod tests {
             assert!(check_headless_version(harness, "").is_err());
             assert!(check_headless_version(harness, "999.0.0").is_err());
         }
+        check_headless_version("codex", "codex-cli 0.157.1").unwrap();
+        assert!(check_headless_version("codex", "0.157.2").is_err());
         assert!(isolation_profile("unknown").is_none());
         assert!(require_version(CATALOG_VERSION).is_ok());
         assert!(require_version("unreleased-catalog").is_err());
