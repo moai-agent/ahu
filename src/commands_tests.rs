@@ -819,3 +819,175 @@ fn doctor_reports_invalid_agents_and_lock_without_changing_them() {
         config_before
     );
 }
+
+#[test]
+fn task_listing_reports_an_unreadable_question_without_hiding_the_task() {
+    let (_root, repo) = repository();
+    let (dir, record) = saved(&repo, "question01");
+    std::fs::create_dir(dir.join("question.md")).unwrap();
+    let (result, text) = scripted("", |c| tasks_at(c, &repo, 200));
+    assert_eq!(result.unwrap(), 0);
+    assert!(text.contains("question01"));
+    assert!(text.contains("question  present, unreadable"), "{text}");
+    assert_eq!(task::load(&dir).unwrap().task_id, record.task_id);
+    assert!(dir.join("question.md").is_dir());
+}
+
+#[test]
+fn indexed_headless_task_refuses_a_different_repository_before_lookup() {
+    let (_root, repo) = repository();
+    let entry = crate::task_index::Entry {
+        schema_version: crate::task_index::INDEX_SCHEMA_VERSION,
+        task_id: "headless01".into(),
+        repo_identity: "not-this-repository".into(),
+        checkout: repo.root.clone(),
+        store: crate::task_index::StoreKind::Headless,
+    };
+    let error = load_indexed_task(&entry).unwrap_err().to_string();
+    assert!(
+        error.contains("task index repository identity mismatch"),
+        "{error}"
+    );
+    assert!(!repo.root.join(".ahu").exists());
+}
+
+#[test]
+fn removal_keeps_the_record_when_its_worktree_cannot_be_inspected() {
+    let (_root, repo) = repository();
+    let outside = tempfile::tempdir().unwrap();
+    let (dir, mut record) = saved(&repo, "uninspectable01");
+    record.worktree = outside.path().to_path_buf();
+    task::save(&dir, &record, "synthetic prompt").unwrap();
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    let (result, text) = scripted("", |c| remove_cmd(c, &repo, &record.task_id));
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("cannot be inspected"), "{error}");
+    assert!(error.contains("Nothing was removed"));
+    assert!(text.is_empty());
+    assert!(outside.path().is_dir());
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+}
+
+#[test]
+fn cancellation_keeps_terminal_tasks_without_writing_a_request() {
+    let (_root, repo) = repository();
+    let (dir, record) = saved(&repo, "terminal01");
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    assert_eq!(cancel_cmd(&repo, &record.task_id, true).unwrap(), 0);
+    assert!(!dir.join("cancel.json").exists());
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+    assert!(record.worktree.is_dir());
+}
+
+#[test]
+fn cancellation_preserves_work_when_the_supervisor_finishes_or_record_becomes_unreadable() {
+    for unreadable in [false, true] {
+        let (_root, repo) = repository();
+        let (dir, mut record) = saved(&repo, "cancel01");
+        record.state = task::TaskState::Running;
+        // Neither outcome confirms cancellation, so this workspace must never
+        // be contacted or closed by the command.
+        record.cmux_workspace_id = Some("synthetic-workspace-never-contact".into());
+        task::save(&dir, &record, "synthetic prompt").unwrap();
+        let marker = repo.root.join("keep-work.txt");
+        std::fs::write(&marker, "reviewable work").unwrap();
+        let result = std::thread::scope(|scope| {
+            let observer = scope.spawn(|| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !dir.join("cancel.json").exists() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "cancellation request was not written"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if unreadable {
+                    crate::state::write_private_file(&dir.join("task.json"), b"{}").unwrap();
+                } else {
+                    let mut finished = record.clone();
+                    finished.state = task::TaskState::Exited;
+                    task::save(&dir, &finished, "synthetic prompt").unwrap();
+                }
+            });
+            let result = cancel_cmd(&repo, &record.task_id, true);
+            observer.join().unwrap();
+            result
+        });
+        assert_eq!(result.unwrap(), 0);
+        let request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("cancel.json")).unwrap()).unwrap();
+        assert_eq!(request["reason"], "cancelled");
+        assert!(
+            request["requested_at"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        );
+        if unreadable {
+            assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), b"{}");
+        } else {
+            assert_eq!(task::load(&dir).unwrap().state, task::TaskState::Exited);
+        }
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "reviewable work");
+        assert!(dir.is_dir());
+    }
+}
+
+#[test]
+fn run_task_refuses_invalid_project_configuration_before_starting_a_harness() {
+    let (_root, repo) = repository();
+    configured(&repo);
+    let (dir, _) = saved(&repo, "runinvalid01");
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    std::fs::write(config::config_path(&repo.root), "invalid = [").unwrap();
+    let error = run_task(&dir).unwrap_err().to_string();
+    assert!(error.contains("TOML"), "{error}");
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+}
+
+#[test]
+fn listing_omits_redundant_titles_and_preserves_short_task_branches() {
+    let (_root, repo) = repository();
+    let (dir, mut record) = saved(&repo, "short");
+    record.title = "Short".into();
+    record.branch = "ahu/auto/short".into();
+    task::save(&dir, &record, "synthetic prompt").unwrap();
+    let (result, text) = scripted("", |c| tasks_at(c, &repo, 200));
+    assert_eq!(result.unwrap(), 0);
+    assert!(!text.contains("TITLE"), "{text}");
+    assert!(!text.contains("Short"), "{text}");
+    assert!(text.contains("ahu/auto/short"), "{text}");
+    assert!(text.contains("exited"), "{text}");
+
+    record.title = "Additional review context".into();
+    task::save(&dir, &record, "synthetic prompt").unwrap();
+    let (result, text) = scripted("", |c| tasks_at(c, &repo, 200));
+    assert_eq!(result.unwrap(), 0);
+    assert!(text.contains("TITLE"), "{text}");
+    assert!(text.contains("Additional review context"), "{text}");
+    assert!(text.contains("ahu/auto/short"), "{text}");
+}
+
+#[test]
+fn inbox_refuses_empty_numeric_names_and_sequence_overflow_without_writes() {
+    for name in ["0.md", "00.md", "0x.md", "018446744073709551615.md"] {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path().join("inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        let existing = inbox.join(name);
+        std::fs::write(&existing, "preserve this message").unwrap();
+        let error = deliver_inbox_message(root.path(), "new message")
+            .unwrap_err()
+            .to_string();
+        let expected = if name == "018446744073709551615.md" {
+            "the task inbox is full."
+        } else {
+            "unrecognized entry"
+        };
+        assert!(error.contains(expected), "{name}: {error}");
+        assert_eq!(std::fs::read_dir(&inbox).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(existing).unwrap(),
+            "preserve this message"
+        );
+    }
+}
