@@ -20,6 +20,93 @@ struct Detected {
     version: Option<String>,
 }
 
+// Codex filters the environment of stdio MCP children. Forward names only;
+// credentials are resolved by the server, never read or persisted by setup.
+const CODEX_MCP_ENV: &[&str] = &[
+    "AHU_EVAL_OTEL_ENDPOINT",
+    "OTEL_RESOURCE_ATTRIBUTES",
+    "TYPESAFE_API_KEY",
+    "AHU_DECISION_URL",
+];
+
+fn codex_env_forwarding(existing: &str, parsed: &toml::Value) -> Result<Option<String>> {
+    let server = &parsed["mcp_servers"]["ahu"];
+    let mut values = match server.get("env_vars") {
+        Some(toml::Value::Array(values)) => values.clone(),
+        None => Vec::new(),
+        _ => {
+            return Err(Error::new(
+                "ahu MCP env_vars must be an array of variable names",
+            ));
+        }
+    };
+    for name in CODEX_MCP_ENV {
+        if !values.iter().any(|v| {
+            v.as_str() == Some(name)
+                || (v.get("name").and_then(toml::Value::as_str) == Some(name)
+                    && v.get("source")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or("local")
+                        == "local")
+        }) {
+            values.push(toml::Value::String((*name).into()));
+        }
+    }
+    let wanted = toml::Value::Array(values);
+    if server.get("env_vars") == Some(&wanted) {
+        return Ok(None);
+    }
+    #[derive(serde::Deserialize)]
+    struct Location {
+        args: toml::Spanned<toml::Value>,
+        env_vars: Option<toml::Spanned<toml::Value>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Locations {
+        mcp_servers: std::collections::BTreeMap<String, Location>,
+    }
+    let locations: Locations = toml::from_str(existing).map_err(|_| {
+        Error::new("cannot locate ahu MCP configuration for environment forwarding")
+    })?;
+    let location = &locations.mcp_servers["ahu"];
+    let encoded = wanted.to_string();
+    let mut expected = parsed.clone();
+    expected["mcp_servers"]["ahu"]
+        .as_table_mut()
+        .unwrap()
+        .insert("env_vars".into(), wanted);
+    let mut candidates = Vec::new();
+    if let Some(value) = &location.env_vars {
+        let mut candidate = existing.to_owned();
+        candidate.replace_range(value.span(), &encoded);
+        candidates.push(candidate);
+    } else {
+        let end = location.args.span().end;
+        let line_end = existing[end..]
+            .find('\n')
+            .map_or(existing.len(), |offset| end + offset + 1);
+        let mut candidate = existing.to_owned();
+        let separator = if line_end == existing.len() && !existing.ends_with('\n') {
+            "\n"
+        } else {
+            ""
+        };
+        candidate.insert_str(line_end, &format!("{separator}env_vars = {encoded}\n"));
+        candidates.push(candidate);
+        // Inline tables need a comma rather than a new assignment line.
+        let mut candidate = existing.to_owned();
+        candidate.insert_str(end, &format!(", env_vars = {encoded}"));
+        candidates.push(candidate);
+    }
+    candidates
+        .into_iter()
+        .find(|text| toml::from_str::<toml::Value>(text).ok().as_ref() == Some(&expected))
+        .map(Some)
+        .ok_or_else(|| {
+            Error::new("cannot safely update ahu MCP env_vars without changing other configuration")
+        })
+}
+
 /// Configure all project-local inputs needed before future ahu launches.
 pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
     if !console.interactive {
@@ -417,6 +504,9 @@ fn add_codex_server(root: &Path, writes: &mut Vec<(PathBuf, Vec<u8>)>) -> Result
                 ]
             });
         if command_matches && args_match {
+            if let Some(updated) = codex_env_forwarding(&existing, &parsed)? {
+                writes.push((path, updated.into_bytes()));
+            }
             return Ok(());
         }
         return Err(Error::new(
@@ -428,6 +518,15 @@ fn add_codex_server(root: &Path, writes: &mut Vec<(PathBuf, Vec<u8>)>) -> Result
         output.push('\n');
     }
     output.push_str("\n[mcp_servers.ahu]\ncommand = \"ahu\"\nargs = [\"mcp\", \"serve\"]\n");
+    output.push_str(&format!(
+        "env_vars = {}\n",
+        toml::Value::Array(
+            CODEX_MCP_ENV
+                .iter()
+                .map(|v| toml::Value::String((*v).into()))
+                .collect()
+        )
+    ));
     writes.push((path, output.into_bytes()));
     Ok(())
 }
@@ -455,6 +554,7 @@ fn verify_client_configurations(root: &Path, detected: &[Detected]) -> Result<()
                     .and_then(toml::Value::as_str)
                     != Some("ahu")
                     || !args_match
+                    || codex_env_forwarding(&text, &value)?.is_some()
                 {
                     return Err(Error::new(
                         "Codex MCP project configuration did not read back as expected",
@@ -570,8 +670,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        Detected, add_client_configurations, add_codex_server, add_json_server, apply_plan,
-        dev_agent, run, run_detected, safe_new_path, verify_client_configurations,
+        CODEX_MCP_ENV, Detected, add_client_configurations, add_codex_server, add_json_server,
+        apply_plan, codex_env_forwarding, dev_agent, run, run_detected, safe_new_path,
+        verify_client_configurations,
     };
 
     fn detected(id: &'static str) -> Detected {
@@ -744,6 +845,41 @@ mod tests {
                 .to_string()
                 .contains("invalid TOML")
         );
+    }
+
+    #[test]
+    fn codex_mcp_upgrade_forwards_names_and_preserves_unrelated_config() {
+        for text in [
+            "# keep this\nmodel = 'x'\n[mcp_servers.ahu]\ncommand = 'ahu'\nargs = ['mcp','serve'] # keep this too\n[features]\nhooks = true\n",
+            "[mcp_servers.ahu]\ncommand = 'ahu'\nargs = ['mcp','serve']",
+            "mcp_servers.ahu = {command = 'ahu', args = ['mcp','serve']}\n",
+            "[mcp_servers.ahu]\ncommand = 'ahu'\nargs = ['mcp','serve']\nenv_vars = ['CUSTOM_NAME'] # retained comment\n",
+        ] {
+            let parsed: toml::Value = toml::from_str(text).unwrap();
+            let updated = codex_env_forwarding(text, &parsed).unwrap().unwrap();
+            let value: toml::Value = toml::from_str(&updated).unwrap();
+            for name in CODEX_MCP_ENV {
+                assert!(
+                    value["mcp_servers"]["ahu"]["env_vars"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&toml::Value::String((*name).into()))
+                );
+            }
+            for comment in ["# keep this", "# keep this too", "# retained comment"] {
+                if text.contains(comment) {
+                    assert!(updated.contains(comment));
+                }
+            }
+            if text.contains("CUSTOM_NAME") {
+                assert!(updated.contains("CUSTOM_NAME"));
+            }
+            assert!(codex_env_forwarding(&updated, &value).unwrap().is_none());
+        }
+        let invalid: toml::Value =
+            toml::from_str("[mcp_servers.ahu]\nargs = ['mcp','serve']\nenv_vars = 'bad'\n")
+                .unwrap();
+        assert!(codex_env_forwarding("", &invalid).is_err());
     }
 
     #[test]
