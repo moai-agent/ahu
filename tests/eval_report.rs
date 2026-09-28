@@ -1186,3 +1186,254 @@ fn a_negative_token_amount_is_refused_by_line() {
         assert!(stderr.contains("runs.jsonl:1:"), "{stderr}");
     }
 }
+
+/// A row for an attempt that never produced a valid answer, as the runner writes
+/// one: no score, `answer_passed: false` so the all-attempt reliability rate
+/// counts it, and `answer_status` so the quality rate does not.
+fn no_answer_row(terminal_status: &str, extra: &[(&str, &str)]) -> String {
+    let mut fields: Vec<(&str, String)> = vec![
+        ("score", "null".to_string()),
+        ("passed", "false".to_string()),
+        ("answer_score", "null".to_string()),
+        ("answer_passed", "false".to_string()),
+        ("answer_status", "\"no_answer\"".to_string()),
+        ("judge_status", "\"not_reached\"".to_string()),
+        ("tool_expectation_status", "\"unknown\"".to_string()),
+        ("telemetry_coverage", "\"none\"".to_string()),
+        ("terminal_status", format!("\"{terminal_status}\"")),
+    ];
+    fields.extend(
+        extra
+            .iter()
+            .map(|(name, value)| (*name, (*value).to_string())),
+    );
+    let owned: Vec<(&str, &str)> = fields
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    v2_row(&owned)
+}
+
+#[test]
+fn a_failed_attempt_is_not_a_wrong_answer_and_quality_covers_only_real_answers() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    // Five attempts of one configuration: two right answers, one wrong answer,
+    // one launch that never started, one that ran out of time.
+    let wrong = v2_row(&[
+        ("score", "0.0"),
+        ("passed", "false"),
+        ("answer_score", "0.0"),
+        ("answer_passed", "false"),
+    ]);
+    let records = write_lines(
+        outside.path(),
+        &[
+            v2_row(&[]),
+            v2_row(&[]),
+            wrong,
+            no_answer_row("candidate_launch_failed", &[]),
+            no_answer_row("candidate_timed_out", &[]),
+        ],
+    );
+    let group = &report_json(&repo, &records)["groups"][0];
+    assert_eq!(group["runs"], 5);
+
+    // Reliability keeps every attempt in the denominator: a configuration that
+    // cannot produce an answer is not a reliable one.
+    assert_eq!(group["answer"]["passed"], 2);
+    assert_eq!(group["answer"]["pass_rate"], 0.4);
+    assert_eq!(group["answer"]["pass_interval"]["samples"], 5);
+
+    // Quality covers only the attempts that answered at all, so the two
+    // failures are not counted as two wrong answers.
+    assert_eq!(group["answer"]["observations"], 3);
+    assert_eq!(group["answer"]["quality_passed"], 2);
+    assert_eq!(group["answer"]["quality_rate"], 0.6667);
+    assert_eq!(group["answer"]["quality_interval"]["samples"], 3);
+    assert_eq!(group["answer"]["no_answer"], 2);
+    assert_eq!(group["attempts_without_answer"], 2);
+
+    // The scored mean still covers only the trials that produced a score.
+    assert_eq!(group["score_observations"], 3);
+    assert_eq!(group["mean_score"], 0.6667);
+
+    // Each kind of ending is named and counted rather than averaged away.
+    assert_eq!(group["terminal_statuses"]["candidate_scored"], 3);
+    assert_eq!(group["terminal_statuses"]["candidate_launch_failed"], 1);
+    assert_eq!(group["terminal_statuses"]["candidate_timed_out"], 1);
+
+    let output = run(&repo, &["--records", records.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("reliability 0.4000 (2/5 attempts)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("quality 0.6667 (2/3 valid answers)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("no answer 2"), "{stdout}");
+    assert!(stdout.contains("candidate_launch_failed 1"), "{stdout}");
+    assert!(stdout.contains("candidate_timed_out 1"), "{stdout}");
+    assert!(stdout.contains("failed attempts 2/5"), "{stdout}");
+}
+
+#[test]
+fn a_configuration_that_never_answered_has_no_quality_rate_or_interval() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let records = write_lines(
+        outside.path(),
+        &[
+            no_answer_row("candidate_launch_failed", &[]),
+            no_answer_row("candidate_answer_missing", &[]),
+        ],
+    );
+    let group = &report_json(&repo, &records)["groups"][0];
+    assert_eq!(group["answer"]["observations"], 0);
+    // No answer is not a quality of zero, so there is no rate and no interval.
+    assert!(group["answer"]["quality_rate"].is_null(), "{group}");
+    assert!(group["answer"]["quality_interval"].is_null(), "{group}");
+    // Reliability is still measured over the attempts, which all failed.
+    assert_eq!(group["answer"]["pass_rate"], 0.0);
+    assert_eq!(group["answer"]["pass_interval"]["samples"], 2);
+    assert!(group["mean_score"].is_null(), "{group}");
+    assert_eq!(group["score_observations"], 0);
+
+    let output = run(&repo, &["--records", records.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("quality no answer (0/0 valid answers)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("failed attempts 2/2"), "{stdout}");
+}
+
+#[test]
+fn an_older_record_without_an_answer_status_is_read_from_its_terminal_status() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    // The same two failures, recorded before `answer_status` existed.
+    let records = write_lines(
+        outside.path(),
+        &[
+            v2_row(&[]),
+            v2_row(&[
+                ("score", "null"),
+                ("passed", "false"),
+                ("answer_passed", "false"),
+                ("terminal_status", "\"candidate_answer_invalid_json\""),
+            ]),
+            v2_row(&[
+                ("score", "null"),
+                ("passed", "false"),
+                ("answer_passed", "false"),
+                ("terminal_status", "\"candidate_timed_out\""),
+            ]),
+        ],
+    );
+    let group = &report_json(&repo, &records)["groups"][0];
+    assert_eq!(group["runs"], 3);
+    assert_eq!(group["answer"]["observations"], 1);
+    assert_eq!(group["answer"]["quality_rate"], 1.0);
+    assert_eq!(group["attempts_without_answer"], 2);
+}
+
+#[test]
+fn a_failed_attempt_keeps_the_launch_timing_and_usage_it_did_report() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let records = write_lines(
+        outside.path(),
+        &[
+            v2_row(&[("elapsed_ms", "4000"), ("launch_elapsed_ms", "4200")]),
+            // Timed out after its bound, with the usage it had already reported.
+            no_answer_row(
+                "candidate_timed_out",
+                &[
+                    ("launch_elapsed_ms", "60000"),
+                    (
+                        "reported_tokens",
+                        "{\"total\":{\"kind\":\"observed\",\"value\":900}}",
+                    ),
+                ],
+            ),
+        ],
+    );
+    let group = &report_json(&repo, &records)["groups"][0];
+    // Launch timing covers both attempts; harness elapsed time covers only the
+    // one that exported spans, and the two are not confused for each other.
+    assert_eq!(group["coverage"]["launch_timing_observations"], 2);
+    assert_eq!(group["coverage"]["timing_observations"], 1);
+    assert_eq!(group["observed"]["mean_launch_elapsed_ms"], 32_100.0);
+    assert_eq!(group["observed"]["mean_elapsed_ms"], 4000.0);
+    // The failed attempt's own token observation is kept, not discarded with it.
+    assert_eq!(group["coverage"]["token_observations"], 1);
+    assert_eq!(group["observed"]["mean_total_tokens"], 900.0);
+    assert_eq!(group["attempts_without_answer"], 1);
+
+    let output = run(&repo, &["--records", records.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The survivor-only mean is printed with the sample and the failures beside
+    // it, so it cannot be read as the cost of the whole matrix.
+    assert!(
+        stdout.contains("elapsed ms 4000 (1/2 runs, 1 unanswered)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("launch ms 32100 (2/2)"), "{stdout}");
+    assert!(
+        stdout.contains("against the coverage and failed-attempt counts beside them"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_tool_that_only_ever_errored_is_a_failed_expectation_with_its_errors_named() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    // Every call to the decision tool errored: the run reached for it and
+    // delegated nothing, which is a failed expectation, not a pass.
+    let records = write_lines(
+        outside.path(),
+        &[v2_row(&[
+            ("tool_expectation_status", "\"fail\""),
+            ("mcp_observed", "true"),
+            ("mcp_tool_call_count", "2"),
+            ("mcp_tool_error_count", "2"),
+            ("mcp_tools", "{\"ahu_typed_decide\":2}"),
+            ("mcp_tool_errors_by_name", "{\"ahu_typed_decide\":2}"),
+            ("typed_decision_error_count", "2"),
+            ("decision_call_count", "2"),
+        ])],
+    );
+    let group = &report_json(&repo, &records)["groups"][0];
+    assert_eq!(group["tool_expectations"]["fail"], 1);
+    assert_eq!(group["tool_expectations"]["pass"], 0);
+    assert_eq!(group["tool_expectations"]["pass_rate"], 0.0);
+    // The errors stay attributed by name and separate from the call counts, so
+    // two calls that both failed never read as two successful decisions.
+    assert_eq!(group["observed"]["mcp_tools"]["ahu_typed_decide"], 2.0);
+    assert_eq!(
+        group["observed"]["mcp_tool_errors"]["ahu_typed_decide"],
+        2.0
+    );
+    assert_eq!(group["observed"]["mean_typed_decision_errors"], 2.0);
+    assert_eq!(group["observed"]["mean_decision_calls"], 2.0);
+}
+
+#[test]
+fn a_record_with_an_unknown_answer_status_is_refused_by_line() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let records = write_lines(outside.path(), &[v2_row(&[("answer_status", "\"maybe\"")])]);
+    let output = run(&repo, &["--records", records.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("runs.jsonl:1"), "{stderr}");
+
+    // A negative launch time is not a duration either.
+    let records = write_lines(outside.path(), &[v2_row(&[("launch_elapsed_ms", "-1")])]);
+    let output = run(&repo, &["--records", records.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(2));
+}

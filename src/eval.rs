@@ -191,12 +191,50 @@ struct Record {
     terminal_status: Option<String>,
     #[serde(default)]
     attempts: Option<f64>,
+    /// Whether a valid answer existed to score at all. `scored` or `no_answer`.
+    ///
+    /// Absent in a record written before this field existed, so the reader falls
+    /// back to the terminal status, which has always said the same thing.
+    #[serde(default)]
+    answer_status: Option<String>,
+    /// Wall-clock milliseconds the runner spent on the candidate launch.
+    ///
+    /// Collected by the runner rather than the harness, so it survives a launch
+    /// that failed or timed out and never reached the telemetry receiver.
+    #[serde(default)]
+    launch_elapsed_ms: Option<f64>,
+}
+
+/// Terminal statuses that mean no valid answer existed to score.
+///
+/// Shared by the runner that writes a record and the report that reads one, so
+/// the two cannot drift on what counts as a failed attempt.
+pub fn is_no_answer_status(status: &str) -> bool {
+    matches!(
+        status,
+        "candidate_launch_failed" | "candidate_timed_out" | "candidate_cancelled"
+    ) || status.starts_with("candidate_answer_")
 }
 
 impl Record {
     /// Whether this run's answer passed, as a binary outcome.
     fn answer_pass(&self) -> bool {
         self.answer_passed.unwrap_or(self.passed)
+    }
+
+    /// Whether this run produced a valid answer for the scorer to judge.
+    ///
+    /// A launch that failed, timed out, or produced no usable `answer.json` did
+    /// not answer wrongly; it did not answer. The two have to stay apart, so the
+    /// quality rate below is taken only over the runs this returns true for.
+    fn answer_scored(&self) -> bool {
+        match self.answer_status.as_deref() {
+            Some("scored") => true,
+            Some("no_answer") => false,
+            // Older records, and manually recorded rows, say the same thing
+            // through the terminal status.
+            _ => !is_no_answer_status(self.terminal_status.as_deref().unwrap_or(UNSPECIFIED)),
+        }
     }
 
     fn tool_status(&self) -> ToolExpectationStatus {
@@ -263,6 +301,9 @@ pub struct GroupKey {
 pub struct Coverage {
     pub tokens: usize,
     pub timing: usize,
+    /// Runs that carried the runner's own launch wall-clock time. Collected
+    /// outside the harness, so a failed or timed-out attempt still has one.
+    pub launch_timing: usize,
     pub decision_calls: usize,
     pub mcp: usize,
     /// Runs whose telemetry carried the MCP session summary.
@@ -290,6 +331,9 @@ pub struct Group {
     pub telemetry_receiver: Option<crate::eval_otel::ReceiverStats>,
     /// Mean over the runs that reported a time; `None` when none did.
     pub mean_elapsed_ms: Option<f64>,
+    /// Mean launch wall-clock time over the runs that reported one, failed and
+    /// timed-out attempts included.
+    pub mean_launch_elapsed_ms: Option<f64>,
     /// Mean over the runs that reported a count; `None` when none did.
     pub mean_decision_calls: Option<f64>,
     /// Mean sum of successful typed-decision service durations per run.
@@ -310,12 +354,28 @@ pub struct Group {
     pub mean_typed_decision_errors: Option<f64>,
     pub mcp_tools: BTreeMap<String, f64>,
     pub mcp_tool_errors: BTreeMap<String, f64>,
-    /// Answer quality as a binary outcome, with a 95% Wilson interval.
+    /// Answer reliability: passes over *every* attempt in the group, with a 95%
+    /// Wilson interval. A failed launch counts against this, because a
+    /// configuration that cannot produce an answer is not a reliable one.
     ///
     /// This is the deterministic answer check, not a judge's opinion of it.
     pub answer_passes: usize,
     pub answer_pass_rate: f64,
     pub answer_pass_interval: Option<stats::Interval>,
+    /// Attempts that produced a valid answer at all, and the passes among them.
+    ///
+    /// Answer *quality* is this pair: how often a real answer was right. It is
+    /// kept apart from reliability above so a failed launch is never reported as
+    /// a wrong answer, and there is no interval when nothing was answered --
+    /// an unanswered sample is not a quality of zero.
+    pub answer_observations: usize,
+    pub answer_quality_passes: usize,
+    pub answer_quality_rate: Option<f64>,
+    pub answer_quality_interval: Option<stats::Interval>,
+    /// Attempts that produced no valid answer. The complement of
+    /// `answer_observations`, named because it is what a reader of the
+    /// conditional latency and token means has to see beside them.
+    pub attempts_without_answer: usize,
     /// Tool-expectation outcomes. The rate and interval are taken over the
     /// decided runs only, so `unknown` never counts as either a pass or a fail.
     pub tool_pass: usize,
@@ -566,9 +626,14 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
                                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
                     })
             })
+            || [record.attempts, record.launch_elapsed_ms]
+                .into_iter()
+                .flatten()
+                .any(|value| !value.is_finite() || value < 0.0)
             || record
-                .attempts
-                .is_some_and(|value| !value.is_finite() || value < 0.0)
+                .answer_status
+                .as_deref()
+                .is_some_and(|status| !["scored", "no_answer"].contains(&status))
             // A reported token amount is a count. A non-numeric value stays
             // tolerated -- it is simply not an amount -- but a number that is
             // not a count is bad input rather than a metric to average.
@@ -680,7 +745,10 @@ fn group(records: &[Record]) -> Vec<Group> {
             let mut mcp_tools: BTreeMap<String, Vec<f64>> = BTreeMap::new();
             let mut mcp_tool_errors_by_name: BTreeMap<String, Vec<f64>> = BTreeMap::new();
             let mut answer_passes = 0usize;
+            let mut answer_observations = 0usize;
+            let mut answer_quality_passes = 0usize;
             let mut answer_scores = Vec::new();
+            let mut launch_elapsed = Vec::new();
             let mut judge_scores = Vec::new();
             let mut judge_passes = 0usize;
             let mut judge_failed = 0usize;
@@ -696,8 +764,15 @@ fn group(records: &[Record]) -> Vec<Group> {
             for item in &items {
                 let status = item.terminal_status.as_deref().unwrap_or(UNSPECIFIED);
                 *terminal_statuses.entry(status.to_owned()).or_default() += 1;
+                let scored = item.answer_scored();
+                if scored {
+                    answer_observations += 1;
+                }
                 if item.answer_pass() {
                     answer_passes += 1;
+                    if scored {
+                        answer_quality_passes += 1;
+                    }
                 }
                 if let Some(score) = item.answer_score {
                     answer_scores.push(score);
@@ -773,6 +848,10 @@ fn group(records: &[Record]) -> Vec<Group> {
                     coverage.timing += 1;
                     elapsed.push(value);
                 }
+                if let Some(value) = item.launch_elapsed_ms {
+                    coverage.launch_timing += 1;
+                    launch_elapsed.push(value);
+                }
                 if let Some(value) = item.decision_call_count {
                     coverage.decision_calls += 1;
                     calls.push(value);
@@ -831,6 +910,7 @@ fn group(records: &[Record]) -> Vec<Group> {
                 coverage,
                 telemetry_receiver: (coverage.telemetry_receiver > 0).then_some(telemetry_receiver),
                 mean_elapsed_ms: mean(&elapsed),
+                mean_launch_elapsed_ms: mean(&launch_elapsed),
                 mean_decision_calls: mean(&calls),
                 mean_decision_service_duration_ms: mean(&decision_service_durations),
                 token_fields,
@@ -855,6 +935,17 @@ fn group(records: &[Record]) -> Vec<Group> {
                 answer_passes,
                 answer_pass_rate: round4(answer_passes as f64 / runs as f64),
                 answer_pass_interval: stats::Interval::wilson(answer_passes, runs),
+                answer_observations,
+                answer_quality_passes,
+                // Over the answered attempts only, and absent when nothing was
+                // answered: no answer is not a wrong answer.
+                answer_quality_rate: (answer_observations > 0)
+                    .then(|| round4(answer_quality_passes as f64 / answer_observations as f64)),
+                answer_quality_interval: stats::Interval::wilson(
+                    answer_quality_passes,
+                    answer_observations,
+                ),
+                attempts_without_answer: runs - answer_observations,
                 tool_pass,
                 tool_fail,
                 tool_unknown,
@@ -966,12 +1057,45 @@ pub fn render_at(report: &Report, width: usize) -> String {
             group.passes,
             group.runs
         ));
+        // Two different questions, printed as two lines rather than one rate:
+        // how often this configuration produced a correct answer at all, and how
+        // often the answers it did produce were correct. Collapsing them would
+        // report a failed launch as a wrong answer.
         out.push_str(&format!(
-            "  answer     pass rate {:.4} ({}/{})  95% CI {}\n",
+            "  answer     reliability {:.4} ({}/{} attempts)  95% CI {}\n",
             group.answer_pass_rate,
             group.answer_passes,
             group.runs,
             interval(group.answer_pass_interval)
+        ));
+        out.push_str(&format!(
+            "             quality {} ({}/{} valid answers)  95% CI {}  no answer {}\n",
+            group.answer_quality_rate.map_or_else(
+                || style.paint(Role::Gap, "no answer"),
+                |rate| format!("{rate:.4}")
+            ),
+            group.answer_quality_passes,
+            group.answer_observations,
+            interval(group.answer_quality_interval),
+            group.attempts_without_answer
+        ));
+        // How the attempts ended, by name. A group with failures is visibly a
+        // group with failures rather than a lower mean.
+        out.push_str(&format!(
+            "  terminal   {}\n",
+            group
+                .terminal_statuses
+                .iter()
+                .map(|(status, count)| {
+                    let text = format!("{} {count}", display_safe(status));
+                    if is_no_answer_status(status) {
+                        style.paint(Role::Gap, &text)
+                    } else {
+                        text
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("  ")
         ));
         out.push_str(&format!(
             "  tools      pass {}  fail {}  unknown {}  n/a {}  pass rate {}  95% CI {}\n",
@@ -1007,20 +1131,33 @@ pub fn render_at(report: &Report, width: usize) -> String {
         } else {
             out.push_str("  OTLP recv  none observed\n");
         }
+        // The coverage the means below were taken over, and the attempts that
+        // produced no answer at all, on the same line as the means they qualify:
+        // a mean over the survivors is not a mean over the attempts.
         out.push_str(&format!(
-            "  coverage   tokens {}/{}  timing {}/{}  decision calls {}/{}  MCP {}/{}\n",
+            "  coverage   tokens {}/{}  timing {}/{}  launch timing {}/{}  decision calls {}/{}  MCP {}/{}  failed attempts {}/{}\n",
             group.coverage.tokens,
             group.runs,
             group.coverage.timing,
             group.runs,
+            group.coverage.launch_timing,
+            group.runs,
             group.coverage.decision_calls,
             group.runs,
             group.coverage.mcp,
+            group.runs,
+            group.attempts_without_answer,
             group.runs
         ));
         out.push_str(&format!(
-            "  observed   elapsed ms {}  decision calls {}  decision service ms {}  MCP requests {}  tool calls {} (errors {})  typed-decision errors {}\n",
+            "  observed   elapsed ms {} ({}/{} runs, {} unanswered)  launch ms {} ({}/{})  decision calls {}  decision service ms {}  MCP requests {}  tool calls {} (errors {})  typed-decision errors {}\n",
             measurement(group.mean_elapsed_ms),
+            group.coverage.timing,
+            group.runs,
+            group.attempts_without_answer,
+            measurement(group.mean_launch_elapsed_ms),
+            group.coverage.launch_timing,
+            group.runs,
             measurement(group.mean_decision_calls),
             measurement(group.mean_decision_service_duration_ms),
             measurement(group.mean_mcp_requests),
@@ -1066,6 +1203,13 @@ pub fn render_at(report: &Report, width: usize) -> String {
          the blocks above give each mean the coverage it was taken over.\n\
          Means cover only the runs that reported the measurement.\n\
          Coverage below the run count is missing observation, not a measured zero.\n\
+         Answer reliability covers every attempt, so a failed launch counts\n\
+         against it; answer quality covers only the attempts that produced a\n\
+         valid answer, and has no interval when none did. A failed attempt is\n\
+         never a wrong answer, and the terminal line names how each one ended.\n\
+         Latency and token means cover the runs that reported them, so read them\n\
+         against the coverage and failed-attempt counts beside them rather than\n\
+         as the cost of the whole matrix.\n\
          Intervals are 95% Wilson over the runs shown; the tool rate covers only\n\
          the runs telemetry could decide, and `unknown` is neither a pass nor a fail.\n\
          A judge score is one uncalibrated observation; no interval is claimed for\n\
@@ -1250,6 +1394,7 @@ pub fn render_json(report: &Report) -> Result<String> {
         "caveats": {
             "judge_calibration": "single_judge_uncalibrated",
             "judge_repeats": "not_implemented",
+            "conditional_efficiency": "latency and token means cover only the attempts that reported them; read them against coverage and attempts_without_answer rather than as the cost of the whole matrix",
             "mean_score_interval": "not_reported: a weighted continuous mean is not a binomial proportion, so no inferential interval is claimed for it in this report version",
         },
         "groups": report.groups.iter().map(group_json).collect::<Vec<_>>(),
@@ -1454,7 +1599,7 @@ pub fn run(
             evaluator_repo_head: None,
         };
 
-        let candidate_result = match launch_eval_agent(
+        let launch = launch_eval_agent(
             repo,
             label,
             &case.candidate_prompt(),
@@ -1465,17 +1610,67 @@ pub fn run(
             request.timeout_seconds,
             request.allow_widened_approvals,
             receiver.endpoint(),
-        ) {
+        );
+        let candidate_result = match launch.result {
             Ok(result) => result,
             Err(error) => {
                 // The candidate never produced an answer. The row says so, with
-                // the inputs that were known, rather than scoring a zero.
+                // the inputs that were known, rather than scoring a zero — and
+                // with whatever the failed attempt did measure, so it is not
+                // mistaken for an attempt that cost nothing.
+                let envelope = launch.envelope.as_ref();
+                let harness_outcome = envelope
+                    .and_then(|value| value.get("outcome"))
+                    .and_then(serde_json::Value::as_str);
+                let status = match harness_outcome {
+                    Some("timed_out") => "candidate_timed_out",
+                    Some("cancelled") => "candidate_cancelled",
+                    _ => "candidate_launch_failed",
+                };
                 let mut record = print.record_fields();
                 record.extend(base_fields(&run_id, trial, "candidate"));
-                record.extend(outcome_fields(
-                    "candidate_launch_failed",
-                    Some("candidate_run_failed"),
-                ));
+                record.extend(outcome_fields(status, Some("candidate_run_failed")));
+                record.insert("launch_elapsed_ms".into(), launch.elapsed_ms.into());
+                record.insert("failure_reason".into(), error.to_string().into());
+                if let Some(harness_outcome) = harness_outcome {
+                    record.insert("outcome".into(), harness_outcome.into());
+                }
+                // A launch that reached a task still has a task id, an attempt,
+                // and possibly exported telemetry. Collected only from what the
+                // envelope actually reported: nothing here invents a zero.
+                let task = envelope.and_then(|value| {
+                    let task_id = value.get("task_id").and_then(serde_json::Value::as_str)?;
+                    let attempt = value
+                        .get("attempt")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(1) as u32;
+                    Some((task_id.to_owned(), attempt))
+                });
+                let telemetry = match &task {
+                    Some((task_id, attempt)) => {
+                        record.insert("task_id".into(), task_id.clone().into());
+                        record.insert("candidate_task_id".into(), task_id.clone().into());
+                        record.insert("attempt".into(), (*attempt).into());
+                        record.insert("attempts".into(), (*attempt).into());
+                        receiver.task(task_id, *attempt)
+                    }
+                    None => None,
+                };
+                insert_telemetry_fields(&mut record, telemetry.as_ref())?;
+                if let Some(tokens) = envelope
+                    .and_then(|value| value.pointer("/metrics/values"))
+                    .filter(|tokens| tokens.as_object().is_some_and(|fields| !fields.is_empty()))
+                {
+                    record.insert("reported_tokens".into(), tokens.clone());
+                }
+                if let Some(envelope) = envelope {
+                    // The envelope is real evidence about this attempt, so it is
+                    // kept beside the ones that succeeded.
+                    write_private_file(
+                        &run_dir.join("candidate-result.json"),
+                        &serde_json::to_vec(envelope)?,
+                    )?;
+                }
                 record.insert(
                     "telemetry_receiver".into(),
                     serde_json::to_value(receiver.receiver_stats().since(receiver_stats_before))?,
@@ -1486,12 +1681,14 @@ pub fn run(
                     "case_id": case.id,
                     "agent": candidate.manifest.name,
                     "run_index": trial.run_index,
-                    "terminal_status": "candidate_launch_failed",
+                    "terminal_status": status,
+                    "launch_elapsed_ms": launch.elapsed_ms,
                     "failure": error.to_string(),
                 }));
                 continue;
             }
         };
+        let launch_elapsed_ms = launch.elapsed_ms;
         let candidate_task = candidate_result
             .get("task_id")
             .and_then(serde_json::Value::as_str)
@@ -1543,53 +1740,11 @@ pub fn run(
                 record.extend(outcome_fields(status, Some("candidate_answer_invalid")));
                 record.insert("task_id".into(), candidate_task.into());
                 record.insert("attempt".into(), attempt.into());
+                record.insert("attempts".into(), attempt.into());
+                record.insert("launch_elapsed_ms".into(), launch_elapsed_ms.into());
+                record.insert("failure_reason".into(), error.to_string().into());
                 let telemetry = receiver.task(candidate_task, attempt);
-                let coverage = telemetry
-                    .as_ref()
-                    .map_or(crate::eval_otel::Coverage::None, |item| item.coverage());
-                record.insert("telemetry_coverage".into(), coverage.as_str().into());
-                record.insert(
-                    "mcp_observed".into(),
-                    telemetry
-                        .as_ref()
-                        .is_some_and(|item| item.mcp_observed)
-                        .into(),
-                );
-                for (name, pick) in [
-                    ("mcp_request_count", 0),
-                    ("mcp_tool_list_count", 1),
-                    ("mcp_tool_call_count", 2),
-                    ("mcp_tool_error_count", 3),
-                ] {
-                    let count = telemetry
-                        .as_ref()
-                        .filter(|item| item.mcp_observed)
-                        .map(|item| match pick {
-                            0 => item.mcp_requests,
-                            1 => item.tool_list_calls,
-                            2 => item.tool_calls,
-                            _ => item.tool_errors,
-                        });
-                    if let Some(count) = count {
-                        record.insert(name.into(), count.into());
-                    }
-                }
-                if let Some(item) = telemetry.as_ref().filter(|item| item.mcp_observed) {
-                    record.insert(
-                        "mcp_tools".into(),
-                        serde_json::to_value(&item.tool_calls_by_name)?,
-                    );
-                    record.insert(
-                        "mcp_tool_errors_by_name".into(),
-                        serde_json::to_value(&item.tool_errors_by_name)?,
-                    );
-                    if item.tool_errors_fully_named() {
-                        record.insert(
-                            "typed_decision_error_count".into(),
-                            item.typed_decision_errors.into(),
-                        );
-                    }
-                }
+                insert_telemetry_fields(&mut record, telemetry.as_ref())?;
                 if let Some(tokens) = candidate_result.pointer("/metrics/values") {
                     record.insert("reported_tokens".into(), tokens.clone());
                 }
@@ -1631,6 +1786,7 @@ pub fn run(
                 request.allow_widened_approvals,
                 receiver.endpoint(),
             )
+            .result
             .and_then(|result| {
                 let worktree = result
                     .get("worktree")
@@ -1717,6 +1873,8 @@ pub fn run(
         );
         put("attempt", attempt.into());
         put("attempts", attempt.into());
+        put("launch_elapsed_ms", launch_elapsed_ms.into());
+        put("answer_status", "scored".into());
         put(
             "outcome",
             candidate_result
@@ -1765,6 +1923,15 @@ pub fn run(
                 case.tool_expectations
                     .as_ref()
                     .map(|expect| &expect.required),
+            )
+            .unwrap_or(serde_json::Value::Null),
+        );
+        put(
+            "tool_expectation_required_successful",
+            serde_json::to_value(
+                case.tool_expectations
+                    .as_ref()
+                    .map(|expect| &expect.required_successful),
             )
             .unwrap_or(serde_json::Value::Null),
         );
@@ -1970,11 +2137,13 @@ fn outcome_fields(
     if let Some(category) = failure_category {
         fields.insert("failure_category".into(), category.into());
     }
-    if terminal_status == "candidate_launch_failed"
-        || terminal_status.starts_with("candidate_answer_")
-    {
+    if is_no_answer_status(terminal_status) {
         // No valid answer means no answer score. Recording 0 here would be a
         // claim the candidate answered wrongly, which is not what happened.
+        // `answer_passed: false` stays, because the all-attempt reliability rate
+        // is meant to count this attempt against the configuration; the
+        // `answer_status` below is what keeps it out of the quality rate.
+        fields.insert("answer_status".into(), "no_answer".into());
         fields.insert("outcome".into(), "failed".into());
         fields.insert("judge_status".into(), "not_reached".into());
         fields.insert(
@@ -1990,6 +2159,68 @@ fn outcome_fields(
         fields.insert("answer_passed".into(), false.into());
     }
     fields
+}
+
+/// Project whatever telemetry arrived for one attempt onto its record fields.
+///
+/// Shared by every terminal path so a failed or timed-out attempt reports the
+/// same observations a scored one would. Every field is written only from a
+/// count the session actually reported: an absent observation stays absent, and
+/// the coverage field says so rather than a zero standing in for it.
+fn insert_telemetry_fields(
+    record: &mut serde_json::Map<String, serde_json::Value>,
+    telemetry: Option<&crate::eval_otel::TaskTelemetry>,
+) -> Result<()> {
+    let coverage = telemetry.map_or(crate::eval_otel::Coverage::None, |item| item.coverage());
+    record.insert("telemetry_coverage".into(), coverage.as_str().into());
+    record.insert(
+        "mcp_observed".into(),
+        telemetry.is_some_and(|item| item.mcp_observed).into(),
+    );
+    if let Some(item) = telemetry {
+        if let Some(trace_id) = &item.trace_id {
+            record.insert("trace_id".into(), trace_id.clone().into());
+        }
+        // Timing and duration arrive with the spans, so they survive an attempt
+        // that failed after exporting them.
+        if let Some(elapsed) = item.elapsed_ms {
+            record.insert("elapsed_ms".into(), elapsed.into());
+        }
+        if let Some(duration) = item.decision_duration_ms {
+            record.insert("decision_service_duration_ms".into(), duration.into());
+        }
+        record.insert(
+            "telemetry_duplicate_spans".into(),
+            item.duplicate_spans.into(),
+        );
+    }
+    if let Some(item) = telemetry.filter(|item| item.mcp_observed) {
+        for (name, count) in [
+            ("decision_call_count", item.typed_decision_calls),
+            ("mcp_request_count", item.mcp_requests),
+            ("mcp_tool_list_count", item.tool_list_calls),
+            ("mcp_tool_call_count", item.tool_calls),
+            ("mcp_tool_error_count", item.tool_errors),
+        ] {
+            record.insert(name.into(), count.into());
+        }
+        record.insert(
+            "mcp_tools".into(),
+            serde_json::to_value(&item.tool_calls_by_name)?,
+        );
+        record.insert(
+            "mcp_tool_errors_by_name".into(),
+            serde_json::to_value(&item.tool_errors_by_name)?,
+        );
+        // Only meaningful once every error has a name to belong to.
+        if item.tool_errors_fully_named() {
+            record.insert(
+                "typed_decision_error_count".into(),
+                item.typed_decision_errors.into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// One case of the matrix, with the weight the suite gave it.
@@ -2160,6 +2391,23 @@ fn append_jsonl(path: &Path, value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// What one eval launch produced, whether or not it can be used.
+///
+/// The envelope is kept even for a launch that failed: a timed-out attempt still
+/// reports its task id, its outcome, and whatever token metrics the harness
+/// measured, and those are real observations. Discarding them with the error
+/// would leave the row looking like a run that cost nothing.
+struct LaunchOutcome {
+    /// Wall-clock milliseconds the runner spent on the launch. Measured here
+    /// rather than in the harness, so it exists even when nothing was exported.
+    elapsed_ms: u64,
+    /// The harness result envelope, whenever the launch emitted valid JSON.
+    envelope: Option<serde_json::Value>,
+    /// The usable result, or why there is none.
+    result: Result<serde_json::Value>,
+}
+
+/// Launch one eval agent, timing it and keeping whatever evidence it produced.
 #[allow(clippy::too_many_arguments)]
 fn launch_eval_agent(
     repo: &crate::git::Repo,
@@ -2172,6 +2420,42 @@ fn launch_eval_agent(
     timeout_seconds: u64,
     allow_widened: bool,
     otel_endpoint: &str,
+) -> LaunchOutcome {
+    let started = std::time::Instant::now();
+    let mut envelope = None;
+    let result = launch_eval_agent_inner(
+        repo,
+        agent,
+        prompt,
+        output_dir,
+        run_id,
+        case,
+        stage,
+        timeout_seconds,
+        allow_widened,
+        otel_endpoint,
+        &mut envelope,
+    );
+    LaunchOutcome {
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        envelope,
+        result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_eval_agent_inner(
+    repo: &crate::git::Repo,
+    agent: &str,
+    prompt: &str,
+    output_dir: &Path,
+    run_id: &str,
+    case: &case::EvalCase,
+    stage: &str,
+    timeout_seconds: u64,
+    allow_widened: bool,
+    otel_endpoint: &str,
+    envelope: &mut Option<serde_json::Value>,
 ) -> Result<serde_json::Value> {
     create_private_dir(output_dir)?;
     let prompt_path = output_dir.join("prompt.txt");
@@ -2240,11 +2524,20 @@ fn launch_eval_agent(
             display_path(output_dir)
         ))
     })?;
+    // Kept before the success check: the caller records what this launch
+    // observed even when the launch is unusable.
+    *envelope = Some(result.clone());
     if !status.success()
         || result.get("outcome").and_then(serde_json::Value::as_str) != Some("succeeded")
     {
         bail!(
-            "eval agent {agent} did not complete successfully; inspect the external run result for its task outcome"
+            "eval agent {agent} did not complete successfully ({}); inspect the external run result for its task outcome",
+            display_safe(
+                result
+                    .get("outcome")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("no outcome reported")
+            )
         );
     }
     Ok(result)
@@ -2364,10 +2657,18 @@ fn group_json(group: &Group) -> serde_json::Value {
         "score_observations": group.score_observations,
         "pass_rate": group.pass_rate,
         "answer": {
+            // Reliability: over every attempt, failed launches included.
             "passed": group.answer_passes,
             "pass_rate": group.answer_pass_rate,
             "pass_interval": stats::interval_json(group.answer_pass_interval),
             "mean_score": group.mean_answer_score,
+            // Quality: over the attempts that produced a valid answer. Null
+            // rather than zero when nothing was answered.
+            "observations": group.answer_observations,
+            "quality_passed": group.answer_quality_passes,
+            "quality_rate": group.answer_quality_rate,
+            "quality_interval": stats::interval_json(group.answer_quality_interval),
+            "no_answer": group.attempts_without_answer,
         },
         "tool_expectations": {
             "pass": group.tool_pass,
@@ -2387,11 +2688,13 @@ fn group_json(group: &Group) -> serde_json::Value {
             "calibration": "single_judge_uncalibrated",
         },
         "terminal_statuses": group.terminal_statuses,
+        "attempts_without_answer": group.attempts_without_answer,
     }));
     merge(serde_json::json!({
         "coverage": {
             "token_observations": group.coverage.tokens,
             "timing_observations": group.coverage.timing,
+            "launch_timing_observations": group.coverage.launch_timing,
             "decision_call_observations": group.coverage.decision_calls,
             "mcp_observations": group.coverage.mcp,
             "telemetry_complete_session": group.coverage.telemetry_complete,
@@ -2402,6 +2705,7 @@ fn group_json(group: &Group) -> serde_json::Value {
         "telemetry_receiver": group.telemetry_receiver,
         "observed": {
             "mean_elapsed_ms": group.mean_elapsed_ms,
+            "mean_launch_elapsed_ms": group.mean_launch_elapsed_ms,
             "mean_decision_calls": group.mean_decision_calls,
             "mean_decision_service_duration_ms": group.mean_decision_service_duration_ms,
             "mean_mcp_requests": group.mean_mcp_requests,

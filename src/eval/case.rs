@@ -44,9 +44,22 @@ impl PromptProfile {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolExpectations {
-    /// Tools the candidate is expected to have called at least once.
+    /// Tools the candidate is expected to have *attempted* at least once.
+    ///
+    /// Attempted, not completed: a call that returned an error satisfies this,
+    /// because the expectation is about tool selection. Use
+    /// `required_successful` to expect the call to have worked.
     #[serde(default)]
     pub required: Vec<String>,
+    /// Tools the candidate is expected to have called *successfully* at least
+    /// once: at least one call the session did not count as an error.
+    ///
+    /// Separate from `required` rather than a stricter reading of it. A run that
+    /// only ever got errors out of a tool reached for it, which is what
+    /// `required` asks about, but it delegated nothing, which is what this asks
+    /// about.
+    #[serde(default)]
+    pub required_successful: Vec<String>,
     /// Tools the candidate is expected not to have called at all.
     #[serde(default)]
     pub forbidden: Vec<String>,
@@ -60,10 +73,13 @@ impl ToolExpectations {
     /// scored `not_applicable` rather than silently pass.
     fn validate(&self) -> Result<()> {
         let known: BTreeSet<&str> = crate::mcp::TOOL_NAMES.into_iter().collect();
-        if self.required.is_empty() && self.forbidden.is_empty() {
-            bail!(kind: ErrorKind::Usage, "evaluation case tool_expectations must list at least one required or forbidden tool; omit the field to express no expectation");
+        if self.required.is_empty()
+            && self.required_successful.is_empty()
+            && self.forbidden.is_empty()
+        {
+            bail!(kind: ErrorKind::Usage, "evaluation case tool_expectations must list at least one required, required_successful, or forbidden tool; omit the field to express no expectation");
         }
-        for list in [&self.required, &self.forbidden] {
+        for list in [&self.required, &self.required_successful, &self.forbidden] {
             if list.len() > known.len() {
                 bail!(kind: ErrorKind::Usage, "evaluation case tool_expectations name more tools than ahu serves");
             }
@@ -78,6 +94,7 @@ impl ToolExpectations {
         if self
             .required
             .iter()
+            .chain(&self.required_successful)
             .any(|name| self.forbidden.contains(name))
         {
             bail!(kind: ErrorKind::Usage, "evaluation case tool_expectations must not both require and forbid the same tool");
@@ -123,6 +140,11 @@ impl ToolExpectationStatus {
 /// call it counted has to be attributable to a named tool. Without the summary
 /// the per-call spans are a floor, and a floor cannot prove a forbidden tool was
 /// never reached for — so the answer is `Unknown`, never a pass by absence.
+///
+/// A `required_successful` expectation needs one thing more: the errors have to
+/// be attributable by name too. Otherwise a session that errored on every call
+/// is indistinguishable from one that delegated cleanly, and an unattributable
+/// error count would let an error-only session read as successful delegation.
 pub fn score_tool_expectations(
     expectations: Option<&ToolExpectations>,
     telemetry: Option<&crate::eval_otel::TaskTelemetry>,
@@ -138,13 +160,25 @@ pub fn score_tool_expectations(
     {
         return ToolExpectationStatus::Unknown;
     }
-    let called = |name: &String| {
+    if !expectations.required_successful.is_empty() && !telemetry.tool_errors_fully_named() {
+        return ToolExpectationStatus::Unknown;
+    }
+    let calls = |name: &String| telemetry.tool_calls_by_name.get(name).copied().unwrap_or(0);
+    let errors = |name: &String| {
         telemetry
-            .tool_calls_by_name
+            .tool_errors_by_name
             .get(name)
-            .is_some_and(|count| *count > 0)
+            .copied()
+            .unwrap_or(0)
     };
-    if expectations.required.iter().all(called) && !expectations.forbidden.iter().any(called) {
+    let called = |name: &String| calls(name) > 0;
+    // At least one call the session did not count as an error. Errors are a
+    // subset of calls, so this is a call that returned something.
+    let succeeded = |name: &String| calls(name) > errors(name);
+    if expectations.required.iter().all(called)
+        && expectations.required_successful.iter().all(succeeded)
+        && !expectations.forbidden.iter().any(called)
+    {
         ToolExpectationStatus::Pass
     } else {
         ToolExpectationStatus::Fail
@@ -722,11 +756,11 @@ mod tests {
     fn required_and_forbidden_expectations_are_balanced_against_the_same_evidence() {
         let required = ToolExpectations {
             required: vec!["ahu_typed_decide".into()],
-            forbidden: Vec::new(),
+            ..ToolExpectations::default()
         };
         let forbidden = ToolExpectations {
-            required: Vec::new(),
             forbidden: vec!["ahu_typed_decide".into()],
+            ..ToolExpectations::default()
         };
         let used = telemetry(1, 1, &[("ahu_typed_decide", 1)]);
         let unused = telemetry(1, 0, &[]);
@@ -757,11 +791,124 @@ mod tests {
         );
     }
 
+    /// A session that called `named` tools and failed `errored` of those calls.
+    fn errored_telemetry(named: &[(&str, u64)], errored: &[(&str, u64)]) -> TaskTelemetry {
+        TaskTelemetry {
+            task_id: "t".into(),
+            attempt: 1,
+            mcp_observed: true,
+            session_summaries: 1,
+            spans_recorded: 1 + named.len() as u64,
+            tool_calls: named.iter().map(|(_, count)| *count).sum(),
+            tool_errors: errored.iter().map(|(_, count)| *count).sum(),
+            tool_calls_by_name: named
+                .iter()
+                .map(|(name, count)| ((*name).to_owned(), *count))
+                .collect(),
+            tool_errors_by_name: errored
+                .iter()
+                .map(|(name, count)| ((*name).to_owned(), *count))
+                .collect(),
+            ..TaskTelemetry::default()
+        }
+    }
+
+    #[test]
+    fn a_required_successful_expectation_is_not_satisfied_by_error_only_calls() {
+        let attempted = ToolExpectations {
+            required: vec!["ahu_typed_decide".into()],
+            ..ToolExpectations::default()
+        };
+        let delegated = ToolExpectations {
+            required_successful: vec!["ahu_typed_decide".into()],
+            ..ToolExpectations::default()
+        };
+        // Two calls, both errors: the tool was reached for and nothing was
+        // decided by it.
+        let error_only = errored_telemetry(&[("ahu_typed_decide", 2)], &[("ahu_typed_decide", 2)]);
+        assert_eq!(
+            score_tool_expectations(Some(&attempted), Some(&error_only)),
+            ToolExpectationStatus::Pass,
+            "attempted use is what `required` asks about"
+        );
+        assert_eq!(
+            score_tool_expectations(Some(&delegated), Some(&error_only)),
+            ToolExpectationStatus::Fail,
+            "an error-only session delegated nothing"
+        );
+
+        // One of two calls errored: something was still decided.
+        let partly = errored_telemetry(&[("ahu_typed_decide", 2)], &[("ahu_typed_decide", 1)]);
+        assert_eq!(
+            score_tool_expectations(Some(&delegated), Some(&partly)),
+            ToolExpectationStatus::Pass
+        );
+
+        // Never called at all fails both readings.
+        let never = errored_telemetry(&[("ahu_agents_list", 1)], &[]);
+        for expectations in [&attempted, &delegated] {
+            assert_eq!(
+                score_tool_expectations(Some(expectations), Some(&never)),
+                ToolExpectationStatus::Fail
+            );
+        }
+
+        // Errors the projection could not attribute leave the stricter
+        // expectation undecided rather than letting it pass by absence.
+        let mut unattributed = errored_telemetry(&[("ahu_typed_decide", 2)], &[]);
+        unattributed.tool_errors = 2;
+        assert!(!unattributed.tool_errors_fully_named());
+        assert_eq!(
+            score_tool_expectations(Some(&delegated), Some(&unattributed)),
+            ToolExpectationStatus::Unknown
+        );
+        // The attempted-use expectation is still decidable from the call counts.
+        assert_eq!(
+            score_tool_expectations(Some(&attempted), Some(&unattributed)),
+            ToolExpectationStatus::Pass
+        );
+    }
+
+    #[test]
+    fn required_successful_is_accepted_in_front_matter_and_validated_like_the_others() {
+        let case = parse(&document(
+            2,
+            "tool_expectations:\n  required_successful: [ahu_typed_decide]\n",
+        ))
+        .expect("valid expectations");
+        let expectations = case.tool_expectations.as_ref().expect("present");
+        assert_eq!(expectations.required_successful, ["ahu_typed_decide"]);
+        assert!(expectations.required.is_empty());
+
+        for (front, needle) in [
+            (
+                "tool_expectations: {required_successful: [ahu_not_a_tool]}\n",
+                "not an ahu tool",
+            ),
+            (
+                "tool_expectations: {required_successful: [ahu_task_get, ahu_task_get]}\n",
+                "repeat a tool name",
+            ),
+            (
+                "tool_expectations: {required_successful: [ahu_task_get], forbidden: [ahu_task_get]}\n",
+                "require and forbid",
+            ),
+            (
+                "tool_expectations: {required: [], required_successful: [], forbidden: []}\n",
+                "at least one",
+            ),
+        ] {
+            let error = parse(&document(2, front)).expect_err("refused: {front}");
+            assert_eq!(error.kind(), ErrorKind::Usage, "{front}");
+            assert!(error.to_string().contains(needle), "{front}: {error}");
+        }
+    }
+
     #[test]
     fn missing_or_partial_telemetry_leaves_a_tool_expectation_unknown() {
         let forbidden = ToolExpectations {
-            required: Vec::new(),
             forbidden: vec!["ahu_typed_decide".into()],
+            ..ToolExpectations::default()
         };
         // No telemetry at all.
         assert_eq!(

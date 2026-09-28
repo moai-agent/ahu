@@ -317,7 +317,7 @@ fn eval_run_records_invalid_candidate_answers_without_scoring_them_as_zero() {
     std::fs::write(
         &harness,
         r##"#!/usr/bin/env python3
-import json, os, subprocess, sys
+import json, os, subprocess, sys, time
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
@@ -333,6 +333,11 @@ elif mode == 'too_large':
 elif mode == 'invalid_value':
     with open('answer.json', 'w', encoding='utf-8') as answer:
         json.dump({'route':'unknown'}, answer)
+elif mode == 'timed_out':
+    session = os.environ['AHU_PARENT_TASK']
+    print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':{'type':'step-finish','reason':'stop','usage':{'input_tokens':3,'output_tokens':4,'total_tokens':7},'model':'fixture'}}), flush=True)
+    time.sleep(60)
+    raise SystemExit(0)
 requests = [
     {'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
     {'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}},
@@ -365,6 +370,7 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
             "candidate_launch_failed",
             "candidate_run_failed",
         ),
+        ("timed_out", "candidate_timed_out", "candidate_run_failed"),
         (
             "invalid_json",
             "candidate_answer_invalid_json",
@@ -400,6 +406,8 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
                 records.to_str().unwrap(),
                 "--runs",
                 "1",
+                "--timeout",
+                if mode == "timed_out" { "1" } else { "120" },
                 "--output",
                 "json",
             ])
@@ -426,12 +434,45 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
             .unwrap();
         assert_eq!(row["terminal_status"], status);
         assert_eq!(row["failure_category"], category);
-        assert_eq!(row["outcome"], "failed");
+        // The harness's own outcome survives when it reported one, so a run that
+        // ran out of time is not filed as a generic failure.
+        assert_eq!(
+            row["outcome"],
+            if mode == "timed_out" {
+                "timed_out"
+            } else {
+                "failed"
+            }
+        );
         assert_eq!(row["judge_status"], "not_reached");
         assert_eq!(row["score"], Value::Null);
         assert_eq!(row["passed"], false);
         assert_eq!(row["answer_passed"], false);
-        if mode != "launch_failed" {
+        // An attempt with no valid answer is marked as such, so the report can
+        // keep it out of the answer-quality rate without turning it into a
+        // wrong answer. The all-attempt reliability rate still counts it.
+        assert_eq!(row["answer_status"], "no_answer", "{mode}");
+        // Launch timing is the runner's own measurement, so a failed or
+        // timed-out attempt is never an attempt that appears to cost nothing.
+        let launch_ms = row["launch_elapsed_ms"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{mode} kept its launch timing: {row}"));
+        assert!(launch_ms >= 0.0, "{mode}: {row}");
+        // Whatever the launch did reach is kept beside the failure.
+        assert!(
+            row["telemetry_coverage"].is_string(),
+            "{mode} states its telemetry coverage: {row}"
+        );
+        if mode == "timed_out" {
+            // The harness reported the timeout, and the row says so rather than
+            // calling it a generic launch failure.
+            assert_eq!(row["outcome"], "timed_out");
+            assert!(row["task_id"].is_string(), "{row}");
+            // The attempt ran to its one-second bound: the timing is the real
+            // elapsed launch, not a placeholder.
+            assert!(launch_ms >= 1000.0, "{mode}: {launch_ms} ms");
+        }
+        if mode != "launch_failed" && mode != "timed_out" {
             assert_eq!(row["mcp_observed"], true);
             assert_eq!(row["mcp_tool_call_count"], 1);
             assert_eq!(row["mcp_tools"]["ahu_agents_list"], 1);

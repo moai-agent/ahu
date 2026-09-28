@@ -87,11 +87,26 @@ scoring:
 | `expected` | Deterministic reference answer, one key per question. |
 | `scoring` | Per-question weight plus `exact_match_pass_threshold`. |
 | `rubric` | One criterion per scored field; required by `--evaluator`. |
-| `tool_expectations` | Optional `required` and `forbidden` tool name lists. |
+| `tool_expectations` | Optional `required`, `required_successful`, and `forbidden` tool name lists. |
 
 `tool_expectations` names only tools ahu exposes over MCP: `ahu_agents_list`,
-`ahu_tasks_list`, `ahu_task_get`, and `ahu_typed_decide`. Both lists are
-optional; a case with neither makes no claim about tool use.
+`ahu_tasks_list`, `ahu_task_get`, and `ahu_typed_decide`. Every list is
+optional; a case with none makes no claim about tool use.
+
+The three lists ask three different questions:
+
+- `required` — the tool was *attempted* at least once. A call that returned an
+  error satisfies it, because the expectation is about tool selection.
+- `required_successful` — the tool was called at least once *without* an error.
+  A run that only ever got errors out of a tool selected it but delegated
+  nothing, so it fails this and passes `required`. Use this when the case is
+  about work actually being delegated rather than about which tool was chosen.
+- `forbidden` — the tool was not called at all.
+
+`required_successful` needs the session summary to attribute every error to a
+named tool, not just every call. Without that the status is **unknown**: an
+error count nothing can attribute would let an error-only session read as
+successful delegation.
 
 The Markdown body is shown to the candidate, so it states the request and its
 data and nothing else. `expected`, `rubric`, and `tool_expectations` stay in
@@ -164,9 +179,11 @@ declaring `okf_version: "0.2"`, `type: ahu:eval-suite`, `schema_version: 1`, an
 resolve relative to the suite file. They may move up one directory, but cannot
 escape that parent or traverse a symlink.
 
-`suites/agent-tool-selection.md` pairs the two authored cases at equal weight,
-so an agent that always calls the typed-decision tool and an agent that never
-calls it each fail half the suite. The report keeps one row per case and records
+`suites/agent-tool-selection.md` collects the three authored cases at equal
+weight. Two require the typed-decision tool and one forbids it, so an agent that
+always calls it fails one case of three on tool behaviour and an agent that never
+calls it fails two of three. That balance is about tool selection only: a
+tool-expectation outcome is never folded into an answer score. The report keeps one row per case and records
 each weight; it does not currently calculate a weighted suite-wide score.
 
 ## Running
@@ -247,7 +264,17 @@ either is a separate row.
 
 Each row reports the answer outcome and the tool-behaviour outcome separately,
 retains the judge's per-criterion scores and its reason codes, and gives a 95%
-Wilson score interval for binary pass rates. Reason codes are short identifiers,
+Wilson score interval for binary pass rates.
+
+The answer outcome is two figures, not one. **Reliability** is passes over every
+attempt in the row, failed launches and timeouts included, because a
+configuration that cannot produce an answer is not a reliable one. **Quality**
+is passes over the attempts that produced a valid answer, as `scored/total`,
+with its own Wilson interval — and no interval at all when nothing was answered,
+because no answer is not a quality of zero. A failed attempt is never reported
+as a wrong answer. The readable report also prints a `terminal` line counting
+how each attempt ended by name, and a `failed attempts` count beside the
+coverage figures. Reason codes are short identifiers,
 which is what makes them safe to keep in a record that holds no prose.
 
 The terminal report starts with a comparison table containing case, agent,
@@ -269,8 +296,8 @@ leave a wide interval; the interval narrows as runs accumulate.
 It is not evidence that one configuration caused an improvement in another.
 Non-overlapping intervals on two rows are a reason to look closer, not a result.
 Sequential local runs share machine state, model loading, and time of day; a
-case corpus of two is a small sample of behaviour; and an LLM judge has its own
-bias and variance. Spot-check individual answers and judge scores by hand, and
+case corpus of three is a small sample of behaviour; and an LLM judge has its
+own bias and variance. Spot-check individual answers and judge scores by hand, and
 calibrate the judge against answers you have scored yourself, before reporting
 that a change helped.
 
@@ -283,6 +310,19 @@ decision-call, and MCP figures are not: each is reported as a coverage count
 (`timing 1/2`) alongside a mean over only the runs that carried the
 measurement, so a configuration that reported nothing is visibly uncovered
 rather than silently cheap and fast.
+
+Latency and token means are conditional on a run having reported the
+measurement, so they are printed with the sample they were taken over and with
+the number of attempts that produced no answer at all (`elapsed ms 4000 (1/2
+runs, 1 unanswered)`). A mean over the attempts that survived is not the cost of
+the matrix, and the counts beside it are what stop it being read as one. The
+JSON contract carries the same figures as `coverage.timing_observations`,
+`coverage.launch_timing_observations`, and `attempts_without_answer`.
+
+`launch_elapsed_ms` is the runner's own wall-clock measurement of a launch,
+separate from the harness `elapsed_ms` that arrives with the spans. It is
+recorded for every terminal attempt, including one that failed or timed out
+before exporting anything, so a failed attempt never looks free.
 
 A reported zero is an observation; an absent field is not. Two runs where one
 reports `elapsed_ms: 0` and the other reports no timing give `timing 1/2` with a
@@ -348,9 +388,18 @@ never reads as a zero.
 
 A candidate that launches but omits an answer, writes malformed JSON, or
 produces an answer outside the declared question type is recorded as a failed,
-unscored trial. The remaining trials in the matrix still run. A scored mean
-therefore does not disguise these failures; inspect both `score_observations`
+unscored trial, and so is one that never launched or ran out of time. Such a row
+carries `answer_status: "no_answer"`, which is what keeps it out of the
+answer-quality rate while still counting against all-attempt reliability. The
+remaining trials in the matrix still run. A scored mean therefore does not
+disguise these failures; inspect `score_observations`, `attempts_without_answer`,
 and the terminal-status counts.
+
+A failed or timed-out attempt keeps whatever it did report: its launch wall-clock
+time, its task ID and attempt, the harness outcome that ended it, any token
+metrics the harness measured, and any telemetry that reached the receiver before
+the attempt was stopped. None of that is invented — an observation the attempt
+never made stays absent rather than becoming a zero.
 
 Cases and JSONL run records use schema version 2. Earlier experimental schema
 versions were never released and are not accepted by the runner or report.
