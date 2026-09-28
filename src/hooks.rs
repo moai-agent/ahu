@@ -1052,6 +1052,228 @@ fn parse_hooks(value: &serde_json::Value, scope: Scope, source: &str) -> Option<
     Some(found)
 }
 
+/// The warning shown when hooks outside project policy are in effect.
+pub const NON_PROJECT_HOOK_WARNING: &str =
+    "Hooks configured outside this project are not project policy.";
+
+/// The explanation printed under [`NON_PROJECT_HOOK_WARNING`], already wrapped.
+///
+/// Scope-neutral on purpose: why a hook falls outside project policy differs by
+/// scope, so the specific reason is printed per hook.
+pub const NON_PROJECT_HOOK_DETAIL: &[&str] = &[
+    "They can block tool calls and put text into the model's context, and they are",
+    "not part of the configuration every ahu user in this project shares.",
+];
+
+/// Render the launch preview's hook section.
+pub fn render_for_preview(inventory: &HookInventory, executable_config_files: usize) -> String {
+    let mut out = String::new();
+    out.push_str("\nHooks\n");
+    if let Some(harness) = &inventory.unscanned_harness {
+        // "none found" would be the result of looking in Claude Code's settings
+        // files for a launch of a harness that does not read them. Unknown is
+        // not absent, and this heading's whole job is to tell the reader whether
+        // repository-supplied code will run in the session.
+        out.push_str(&format!(
+            "  !! ahu does not read {}'s hook or lifecycle configuration.\n     \
+             Hooks for this launch are unknown, not absent. The harness's own configuration\n     \
+             directories are carried into the task worktree by the checkout and by ahu's\n     \
+             configuration snapshot, and whatever they declare will apply there.\n",
+            display_safe(harness)
+        ));
+    } else if inventory.is_empty() && !inventory.wrapper_injected {
+        out.push_str("  none found in the settings files ahu can read\n");
+    }
+
+    let travelling = inventory.travelling();
+    if !travelling.is_empty() {
+        out.push_str(&format!(
+            "  + {} hook(s) declared in this repository travel into the task worktree and run there\n",
+            travelling.len()
+        ));
+        for hook in &travelling {
+            out.push_str(&format!(
+                "     {} [{}] {}\n",
+                hook.label(),
+                hook.scope.as_str(),
+                hook.source_label()
+            ));
+        }
+    }
+    if executable_config_files > 0 {
+        out.push_str(&format!(
+            "  + {executable_config_files} inherited configuration file(s) are executable and will be \
+             copied into the task worktree with that bit set\n"
+        ));
+    }
+
+    let outside = inventory.outside_project_policy();
+    if !outside.is_empty() {
+        out.push_str(&format!("\n  !! {NON_PROJECT_HOOK_WARNING}\n"));
+        for line in NON_PROJECT_HOOK_DETAIL {
+            out.push_str(&format!("     {line}\n"));
+        }
+        for hook in &outside {
+            out.push_str(&format!(
+                "     - {} [{}] {}\n",
+                hook.label(),
+                hook.scope.as_str(),
+                hook.source_label()
+            ));
+            out.push_str(&format!("       {}\n", hook.scope.why_not_project_policy()));
+        }
+        out.push_str(
+            "     ahu does not add, edit, or remove hooks, and it will not disable one for you.\n\
+             \x20    Move a hook into this repository's settings to make it project policy.\n",
+        );
+    }
+    if inventory.wrapper_injected {
+        out.push_str(
+            "\n  !! cmux injects its own Claude Code hooks through its Claude wrapper.\n\
+             \x20    ahu cannot enumerate them, so this inventory is incomplete by construction.\n",
+        );
+    }
+    for unreadable in &inventory.unreadable {
+        out.push_str(&format!(
+            "\n  !! {} exists but ahu could not read its hooks; treat them as unknown.\n",
+            display_safe(unreadable)
+        ));
+    }
+    out
+}
+
+/// Render what the settings files and `.mcp.json` say about the approval
+/// boundary, for the launch preview's Approvals section.
+///
+/// Report native declarations alongside manifest-requested permission flags;
+/// neither alone establishes the effective approval boundary.
+pub fn render_settings_for_preview(inventory: &HookInventory) -> String {
+    let mut out = String::new();
+    let facts: Vec<&SettingsFacts> = inventory
+        .settings
+        .iter()
+        .filter(|f| !f.is_empty())
+        .collect();
+    // What ahu did not read is not retracted by finding something it did read.
+    // `.mcp.json` and `opencode.json` are repository configuration ahu parses
+    // for every harness, while the harness's own settings can still be a surface
+    // it has no implementation for. Emitting this independently stops "unknown"
+    // becoming "none" the moment one of those files happens to be present.
+    if let Some(harness) = &inventory.unscanned_harness {
+        out.push_str(&format!(
+            "  ahu did not read {}'s settings; what it allows, denies, or\n  \
+             pre-approves is unknown to ahu, not known to be empty.\n",
+            display_safe(harness)
+        ));
+    }
+    if facts.is_empty() && inventory.mcp_servers.is_empty() && inventory.declared_plugins.is_empty()
+    {
+        if inventory.unscanned_harness.is_none() {
+            out.push_str(
+                "  the settings files ahu read declare no permission, plugin, MCP, or env keys\n",
+            );
+        }
+        return out;
+    }
+
+    for fact in facts {
+        let marker = if fact.widens_approvals() { "!!" } else { "  " };
+        out.push_str(&format!(
+            "  {marker} {} [{}]\n",
+            display_safe(&fact.source),
+            fact.scope.as_str()
+        ));
+        if let Some(mode) = &fact.default_mode {
+            out.push_str(&format!(
+                "       permissions.defaultMode {}\n",
+                display_safe(mode)
+            ));
+        }
+        for (label, values) in [
+            ("permissions.allow", &fact.allow),
+            ("permissions.deny", &fact.deny),
+            ("permissions.ask", &fact.ask),
+            (
+                "permissions.additionalDirectories",
+                &fact.additional_directories,
+            ),
+            ("enabledPlugins", &fact.enabled_plugins),
+            ("enabledMcpjsonServers", &fact.enabled_mcpjson_servers),
+        ] {
+            if !values.is_empty() {
+                out.push_str(&format!(
+                    "       {label} {}\n",
+                    display_safe(&values.join(", "))
+                ));
+            }
+        }
+        if let Some(enabled) = fact.enable_all_project_mcp_servers {
+            out.push_str(&format!("       enableAllProjectMcpServers {enabled}\n"));
+        }
+        if !fact.env_names.is_empty() {
+            out.push_str(&format!(
+                "       env sets {} variable(s): {} (values not shown)\n",
+                fact.env_names.len(),
+                display_safe(&fact.env_names.join(", "))
+            ));
+        }
+        if !fact.uninterpreted_keys.is_empty() {
+            out.push_str(&format!(
+                "       keys ahu does not interpret, so their effect is unknown: {}\n",
+                display_safe(&fact.uninterpreted_keys.join(", "))
+            ));
+        }
+        if fact.scope.travels_into_worktree() {
+            out.push_str("       this file travels into the task worktree and applies there\n");
+        }
+    }
+
+    if !inventory.mcp_servers.is_empty() {
+        out.push_str(&format!(
+            "  !! {} MCP server(s) declared by this repository. Each is a process the harness\n     \
+             starts, with this session's privileges:\n",
+            inventory.mcp_servers.len()
+        ));
+        for server in &inventory.mcp_servers {
+            out.push_str(&format!(
+                "       {} → {}\n",
+                display_safe(&server.name),
+                display_safe(&server.command)
+            ));
+        }
+    }
+    if !inventory.declared_plugins.is_empty() {
+        out.push_str(&format!(
+            "  !! {} plugin module(s) declared by this repository. OpenCode installs and runs\n     \
+             these at startup when it is the launched harness; another harness does not read\n     \
+             this file. ahu does not resolve, pin, or sandbox what they fetch:\n",
+            inventory.declared_plugins.len()
+        ));
+        for plugin in &inventory.declared_plugins {
+            out.push_str(&format!(
+                "       {} → {}\n",
+                display_safe(&plugin.source),
+                display_safe(&plugin.module)
+            ));
+        }
+    }
+    // Qualified rather than fixed: on a harness whose settings ahu has no
+    // implementation for, "ahu reads these files" would describe the repository
+    // files it parsed as though they were the harness's approval configuration.
+    if inventory.unscanned_harness.is_some() {
+        out.push_str(
+            "  the files above are the repository configuration ahu parses; it did not read\n  \
+             this harness's own settings, and it does not set, override, or remove any of them.\n",
+        );
+    } else {
+        out.push_str(
+            "  ahu reads these files; it does not set, override, or remove any of them, and it\n  \
+             cannot tell you which keys the installed harness honours from a project settings file.\n",
+        );
+    }
+    out
+}
+
 #[cfg(test)]
 mod parser_tests {
     use super::*;
@@ -1442,226 +1664,4 @@ mod parser_tests {
         assert!(truncate("é".repeat(60).as_str(), 48).chars().count() <= 48);
         assert_eq!(string_list(Some(&json!("not-array"))), Vec::<String>::new());
     }
-}
-
-/// The warning shown when hooks outside project policy are in effect.
-pub const NON_PROJECT_HOOK_WARNING: &str =
-    "Hooks configured outside this project are not project policy.";
-
-/// The explanation printed under [`NON_PROJECT_HOOK_WARNING`], already wrapped.
-///
-/// Scope-neutral on purpose: why a hook falls outside project policy differs by
-/// scope, so the specific reason is printed per hook.
-pub const NON_PROJECT_HOOK_DETAIL: &[&str] = &[
-    "They can block tool calls and put text into the model's context, and they are",
-    "not part of the configuration every ahu user in this project shares.",
-];
-
-/// Render the launch preview's hook section.
-pub fn render_for_preview(inventory: &HookInventory, executable_config_files: usize) -> String {
-    let mut out = String::new();
-    out.push_str("\nHooks\n");
-    if let Some(harness) = &inventory.unscanned_harness {
-        // "none found" would be the result of looking in Claude Code's settings
-        // files for a launch of a harness that does not read them. Unknown is
-        // not absent, and this heading's whole job is to tell the reader whether
-        // repository-supplied code will run in the session.
-        out.push_str(&format!(
-            "  !! ahu does not read {}'s hook or lifecycle configuration.\n     \
-             Hooks for this launch are unknown, not absent. The harness's own configuration\n     \
-             directories are carried into the task worktree by the checkout and by ahu's\n     \
-             configuration snapshot, and whatever they declare will apply there.\n",
-            display_safe(harness)
-        ));
-    } else if inventory.is_empty() && !inventory.wrapper_injected {
-        out.push_str("  none found in the settings files ahu can read\n");
-    }
-
-    let travelling = inventory.travelling();
-    if !travelling.is_empty() {
-        out.push_str(&format!(
-            "  + {} hook(s) declared in this repository travel into the task worktree and run there\n",
-            travelling.len()
-        ));
-        for hook in &travelling {
-            out.push_str(&format!(
-                "     {} [{}] {}\n",
-                hook.label(),
-                hook.scope.as_str(),
-                hook.source_label()
-            ));
-        }
-    }
-    if executable_config_files > 0 {
-        out.push_str(&format!(
-            "  + {executable_config_files} inherited configuration file(s) are executable and will be \
-             copied into the task worktree with that bit set\n"
-        ));
-    }
-
-    let outside = inventory.outside_project_policy();
-    if !outside.is_empty() {
-        out.push_str(&format!("\n  !! {NON_PROJECT_HOOK_WARNING}\n"));
-        for line in NON_PROJECT_HOOK_DETAIL {
-            out.push_str(&format!("     {line}\n"));
-        }
-        for hook in &outside {
-            out.push_str(&format!(
-                "     - {} [{}] {}\n",
-                hook.label(),
-                hook.scope.as_str(),
-                hook.source_label()
-            ));
-            out.push_str(&format!("       {}\n", hook.scope.why_not_project_policy()));
-        }
-        out.push_str(
-            "     ahu does not add, edit, or remove hooks, and it will not disable one for you.\n\
-             \x20    Move a hook into this repository's settings to make it project policy.\n",
-        );
-    }
-    if inventory.wrapper_injected {
-        out.push_str(
-            "\n  !! cmux injects its own Claude Code hooks through its Claude wrapper.\n\
-             \x20    ahu cannot enumerate them, so this inventory is incomplete by construction.\n",
-        );
-    }
-    for unreadable in &inventory.unreadable {
-        out.push_str(&format!(
-            "\n  !! {} exists but ahu could not read its hooks; treat them as unknown.\n",
-            display_safe(unreadable)
-        ));
-    }
-    out
-}
-
-/// Render what the settings files and `.mcp.json` say about the approval
-/// boundary, for the launch preview's Approvals section.
-///
-/// Report native declarations alongside manifest-requested permission flags;
-/// neither alone establishes the effective approval boundary.
-pub fn render_settings_for_preview(inventory: &HookInventory) -> String {
-    let mut out = String::new();
-    let facts: Vec<&SettingsFacts> = inventory
-        .settings
-        .iter()
-        .filter(|f| !f.is_empty())
-        .collect();
-    // What ahu did not read is not retracted by finding something it did read.
-    // `.mcp.json` and `opencode.json` are repository configuration ahu parses
-    // for every harness, while the harness's own settings can still be a surface
-    // it has no implementation for. Emitting this independently stops "unknown"
-    // becoming "none" the moment one of those files happens to be present.
-    if let Some(harness) = &inventory.unscanned_harness {
-        out.push_str(&format!(
-            "  ahu did not read {}'s settings; what it allows, denies, or\n  \
-             pre-approves is unknown to ahu, not known to be empty.\n",
-            display_safe(harness)
-        ));
-    }
-    if facts.is_empty() && inventory.mcp_servers.is_empty() && inventory.declared_plugins.is_empty()
-    {
-        if inventory.unscanned_harness.is_none() {
-            out.push_str(
-                "  the settings files ahu read declare no permission, plugin, MCP, or env keys\n",
-            );
-        }
-        return out;
-    }
-
-    for fact in facts {
-        let marker = if fact.widens_approvals() { "!!" } else { "  " };
-        out.push_str(&format!(
-            "  {marker} {} [{}]\n",
-            display_safe(&fact.source),
-            fact.scope.as_str()
-        ));
-        if let Some(mode) = &fact.default_mode {
-            out.push_str(&format!(
-                "       permissions.defaultMode {}\n",
-                display_safe(mode)
-            ));
-        }
-        for (label, values) in [
-            ("permissions.allow", &fact.allow),
-            ("permissions.deny", &fact.deny),
-            ("permissions.ask", &fact.ask),
-            (
-                "permissions.additionalDirectories",
-                &fact.additional_directories,
-            ),
-            ("enabledPlugins", &fact.enabled_plugins),
-            ("enabledMcpjsonServers", &fact.enabled_mcpjson_servers),
-        ] {
-            if !values.is_empty() {
-                out.push_str(&format!(
-                    "       {label} {}\n",
-                    display_safe(&values.join(", "))
-                ));
-            }
-        }
-        if let Some(enabled) = fact.enable_all_project_mcp_servers {
-            out.push_str(&format!("       enableAllProjectMcpServers {enabled}\n"));
-        }
-        if !fact.env_names.is_empty() {
-            out.push_str(&format!(
-                "       env sets {} variable(s): {} (values not shown)\n",
-                fact.env_names.len(),
-                display_safe(&fact.env_names.join(", "))
-            ));
-        }
-        if !fact.uninterpreted_keys.is_empty() {
-            out.push_str(&format!(
-                "       keys ahu does not interpret, so their effect is unknown: {}\n",
-                display_safe(&fact.uninterpreted_keys.join(", "))
-            ));
-        }
-        if fact.scope.travels_into_worktree() {
-            out.push_str("       this file travels into the task worktree and applies there\n");
-        }
-    }
-
-    if !inventory.mcp_servers.is_empty() {
-        out.push_str(&format!(
-            "  !! {} MCP server(s) declared by this repository. Each is a process the harness\n     \
-             starts, with this session's privileges:\n",
-            inventory.mcp_servers.len()
-        ));
-        for server in &inventory.mcp_servers {
-            out.push_str(&format!(
-                "       {} → {}\n",
-                display_safe(&server.name),
-                display_safe(&server.command)
-            ));
-        }
-    }
-    if !inventory.declared_plugins.is_empty() {
-        out.push_str(&format!(
-            "  !! {} plugin module(s) declared by this repository. OpenCode installs and runs\n     \
-             these at startup when it is the launched harness; another harness does not read\n     \
-             this file. ahu does not resolve, pin, or sandbox what they fetch:\n",
-            inventory.declared_plugins.len()
-        ));
-        for plugin in &inventory.declared_plugins {
-            out.push_str(&format!(
-                "       {} → {}\n",
-                display_safe(&plugin.source),
-                display_safe(&plugin.module)
-            ));
-        }
-    }
-    // Qualified rather than fixed: on a harness whose settings ahu has no
-    // implementation for, "ahu reads these files" would describe the repository
-    // files it parsed as though they were the harness's approval configuration.
-    if inventory.unscanned_harness.is_some() {
-        out.push_str(
-            "  the files above are the repository configuration ahu parses; it did not read\n  \
-             this harness's own settings, and it does not set, override, or remove any of them.\n",
-        );
-    } else {
-        out.push_str(
-            "  ahu reads these files; it does not set, override, or remove any of them, and it\n  \
-             cannot tell you which keys the installed harness honours from a project settings file.\n",
-        );
-    }
-    out
 }

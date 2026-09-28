@@ -206,7 +206,7 @@ fn run_detected(
         crate::agent::parse_manifest(&agent, &path)?;
         writes.push((path, agent.into_bytes()));
     }
-    add_client_configurations(&repo.root, &detected, &mut writes)?;
+    add_client_configurations(&repo.root, detected, &mut writes)?;
 
     let existing_agents = crate::agent::load_all(&repo.root)?;
     for (harness, _) in &chosen_models {
@@ -247,7 +247,7 @@ fn run_detected(
     // user to commit these project files and the lock.
     crate::agent::load_all(&repo.root)?;
     config::load(&repo.root)?;
-    verify_client_configurations(&repo.root, &detected)?;
+    verify_client_configurations(&repo.root, detected)?;
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let lock = crate::context_lock::refresh(repo, &snapshot)?;
     console.say(&format!(

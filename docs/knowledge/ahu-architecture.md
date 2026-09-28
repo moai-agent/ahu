@@ -88,7 +88,7 @@ harness prompts, or context the bounded scan cannot identify.[^lock][^launch]
 The CLI launches provider harnesses and hosts ahu's MCP server as separate
 interfaces. A harness can call MCP tools while it works. The typed decision
 interface validates structured requests and can route them to a configured
-backend; it is independent of the candidate agent's harness model.[^mcp][^decisions]
+service; it is independent of the candidate agent's harness model.[^mcp][^decisions]
 
 OTel records bounded process and tool-call evidence when telemetry is enabled.
 Task records capture ahu-known lifecycle and outcome details. The eval runner
@@ -100,7 +100,7 @@ or tools.[^telemetry][^eval][^eval-run][^state]
 [^main]: CLI routing in src/main.rs.
 [^launch]: Launch admission and task planning in src/launch.rs.
 [^lock]: Lock generation and checks in src/context_lock.rs.
-[^mcp]: MCP registration and protocol handling in src/mcp.rs.
+[^mcp]: MCP registration and protocol handling in `src/mcp.rs`.
 [^decisions]: Typed decision validation in src/mcp_decisions.rs.
 [^telemetry]: Instrumentation in src/telemetry.rs.
 [^eval]: Evaluation CLI in src/eval.rs.

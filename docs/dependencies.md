@@ -8,12 +8,33 @@ filter, including build and development dependencies.
 
 | Area | Rule |
 | --- | --- |
-| Licenses | ahu is licensed under MIT. Accept MIT, Apache-2.0 and Unicode-3.0 dependency license expressions; reject other or unidentified licenses. For an `OR` expression, an allowed alternative suffices. Unicode-3.0 covers the Unicode data license required by `unicode-ident`. Only unpublished workspace packages are exempt from dependency license checks. |
+| Licenses | ahu is licensed under MIT. Accept MIT, Apache-2.0 and Unicode-3.0 dependency license expressions; reject other or unidentified licenses except the exact versions approved below. For an `OR` expression, an allowed alternative suffices. Unicode-3.0 covers the Unicode data license required by `unicode-ident`. Only unpublished workspace packages are exempt from dependency license checks. |
 | Sources | Accept crates.io only; reject Git dependencies and other registries. Review local path dependencies and Cargo source replacement configuration manually. |
 | Advisories | Fail for known vulnerabilities regardless of severity or missing CVSS, unsoundness, unmaintained crates and yanked releases, including transitive dependencies. No advisory exceptions are configured. |
-| Duplicates | Warn, keeping dependency paths visible. Review compatibility, maintenance and size costs; duplicate versions alone are not evidence of a vulnerability. Do not force arbitrary downgrades to remove warnings. Wildcard dependency requirements fail. |
+| Duplicates | Reject duplicate versions except the five exact versions documented in `deny.toml` for incompatible transitive requirements. Review exceptions on lockfile updates; do not force arbitrary downgrades. Wildcard dependency requirements fail. |
 | Review | A repository maintainer reviews every manifest, lockfile, source override and policy change before merging, including upstream provenance, new build scripts/proc macros, licenses, advisories, and duplicate warnings. The author supplies the scan result and rationale. CI does not enforce reviewer identity or branch protection. |
 | Exceptions | Require maintainer approval, exact crate/version or advisory scope, a named accountable maintainer, rationale, compensating measures and a calendar expiry or explicit upstream review condition. Record these alongside a narrowly scoped configuration entry; keep confidential evidence in private review records. Revisit on each affected lockfile update and before release, and remove resolved exceptions. |
+
+## Approved dependency license exceptions
+
+The maintainer approved these exact versions on 2026-09-27 for the `rustls` transport layer security (TLS)
+stack used by HTTPS decisions and OpenTelemetry export. The general license
+allowlist stays unchanged; these entries do not permit unrelated dependencies.
+
+| Crate | Version | Additional allowed licenses |
+| --- | --- | --- |
+| `aws-lc-rs` | 1.18.1 | `ISC` |
+| `aws-lc-sys` | 0.45.0 | `ISC`, `BSD-3-Clause` |
+| `rustls-webpki` | 0.103.15 | `ISC` |
+| `subtle` | 2.6.1 | `BSD-3-Clause` |
+| `untrusted` | 0.9.0 | `ISC` |
+| `webpki-root-certs` | 1.0.9 | `CDLA-Permissive-2.0` |
+
+The accountable maintainer is `Orie Steele`. Review each exception on any affected lockfile update and
+before every release. Retain the applicable upstream license and notice texts
+in distributed artifacts, including the certificate data license. Exact version
+constraints and rejection of unused exceptions keep policy changes visible.
+No vulnerability or source exception accompanies these license approvals.
 
 Run the same scan locally from the repository root:
 

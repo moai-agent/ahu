@@ -378,7 +378,7 @@ mod tests {
         assert!(branch_merged_into_primary_head(&repo, "ahu/test-task").unwrap());
         remove_task_worktree(&repo, &worktree).unwrap();
         assert!(branch_exists(&repo, "ahu/test-task").unwrap());
-        delete_task_branch(&root.path(), "ahu/test-task").unwrap();
+        delete_task_branch(root.path(), "ahu/test-task").unwrap();
         assert!(!branch_exists(&repo, "ahu/test-task").unwrap());
         assert!(branches_matching(&repo, "ahu/*task").unwrap().is_empty());
     }

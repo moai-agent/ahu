@@ -10,11 +10,11 @@ agents on when to use the tool and how to handle its output and data boundary.
 ## MCP tool
 
 `ahu mcp serve` advertises `ahu_typed_decide`. With no `AHU_DECISION_URL`, it
-uses TypeSafe Jev. A local-only service URL set through `AHU_DECISION_URL`
+uses TypeSafe Jev. A local-only service address set through `AHU_DECISION_URL`
 explicitly selects the existing provider-neutral HTTP adapter path instead.
 
 For Jev, ahu checks the MCP process environment for `TYPESAFE_API_KEY`, then
-the `.env` file in the repository's primary checkout. Environment values take precedence. Ahu reads
+the `.env` file in the repository's primary checkout. Environment values take precedence. ahu reads
 only those key names from `.env`; it does not source the file, evaluate shell
 code, or put other `.env` values into the process environment. Keep `.env`
 untracked, restrict it to your account (`chmod 600 .env` on macOS/Linux), and
@@ -89,7 +89,7 @@ proxy. The API key is sent only in the Authorization header and is never
 included in the MCP result or telemetry.
 
 Jev's `choice`, `score`, and `noul` responses are translated back to ahu's
-stable `choice`, `score`, and `probability` result values. Ahu maps a score
+stable `choice`, `score`, and `probability` result values. ahu maps a score
 between Jev's two-point min/max rubric back to the requested numeric range.
 Telemetry reports TypeSafe's returned input/output token counts and the
 round-trip duration; it does not include request or answer contents.
@@ -182,11 +182,11 @@ of zero activity.
 For the local Ollama provider, the request stays on the machine: the adapter
 accepts only loopback Ollama URLs, disables environment-configured HTTP proxies,
 and binds its listener to loopback. For TypeSafe Jev, the state and questions
-leave the machine over HTTPS as described above.
+leave the machine over HTTPS as described in the MCP tool section.
 
 ## Service and model boundary
 
-The MCP contract remains provider-neutral. Ahu translates it to TypeSafe's
+The MCP contract remains provider-neutral. ahu translates it to TypeSafe's
 native API by default, or to the local service contract when
 `AHU_DECISION_URL` is explicitly set. The included Ollama adapter remains an
 optional local process; ahu itself does not manage model downloads, runtime
@@ -202,11 +202,11 @@ against the harness versions and configurations in use.
 ## Secret boundary
 
 MCP stdio servers run as local subprocesses with the privileges and inherited
-environment their host gives them. Ahu does not load the full `.env` or add
+environment their host gives them. ahu does not load the full `.env` or add
 its contents to the process environment. For Jev it reads only the API key when
 the decision tool is called, preferring the process environment and then the
 primary checkout's `.env`; it sends that key only to the fixed TypeSafe HTTPS
-endpoint. The key is not included in MCP responses, OTEL attributes, task
+endpoint. The key is not included in MCP responses, OTel attributes, task
 records, or agent prompts.
 
 The ignored `.env` is a convenience, not a security boundary against another

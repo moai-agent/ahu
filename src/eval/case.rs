@@ -344,9 +344,8 @@ impl EvalCase {
         // Tool expectations describe behaviour under a tool-neutral prompt. A
         // version 1 case forced the tool, so an expectation there would score
         // ahu's own instruction rather than the agent.
-        match &self.tool_expectations {
-            Some(expectations) => expectations.validate()?,
-            None => {}
+        if let Some(expectations) = &self.tool_expectations {
+            expectations.validate()?;
         }
         Ok(())
     }

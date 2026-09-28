@@ -16,7 +16,7 @@ import sys
 FRONTMATTER_LINE = re.compile(r"(?P<key>[A-Za-z0-9_-]+): (?P<value>.*)")
 NAME_GRAMMAR = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 # Skills for ahu's own agents; `ahu setup` only distributes the bundled subset.
-REPOSITORY_ONLY_SKILLS = {"ahu-architecture", "release"}
+REPOSITORY_ONLY_SKILLS = {"ahu-architecture", "ahu-harness-upgrade", "release"}
 BUNDLE_ENTRY = re.compile(
     r'\(\s*(?:"(?P<literal>[^"]+)"|(?P<const>[A-Z][A-Z0-9_]*))'
     r'\s*,\s*include_str!\("(?P<path>[^"]+)"\)\s*,?\s*\)\s*,?'

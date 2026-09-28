@@ -48,7 +48,7 @@ argument; quote multi-word prompts in the shell. `ahu lock` checks that the
 recognized repository context matches committed `ahu.lock`; `ahu lock --update`
 refreshes it for review. Every changed context input and the lock must be
 tracked, clean, and committed before an agent can run. The bundled
-`agent-context-critic` skill uses evals to test context hypotheses rather than
+`agent-context-critic` skill uses evaluations to test context hypotheses rather than
 claiming that ahu can enumerate everything a harness loaded.
 
 ## Installing and updating ahu safely
@@ -174,7 +174,7 @@ tool validation, task delivery, and transport details.
 
 Follow the repository's tracking policy for long-running or failure-prone work.
 It may require an issue, task, milestone item, or another provider record; it
-may choose to use ahu's task record alone. Ahu records execution state, not
+may choose to use ahu's task record alone. ahu records execution state, not
 acceptance criteria or roadmap status, and it has no built-in issue-tracker
 integration. The bundled `direct-agents` skill describes how to keep tracker
 work optional or link a provider-side work item to an ahu task ID without
@@ -1369,7 +1369,7 @@ Use the bundled `agent-context-critic` skill to examine a concrete behavior,
 form one context-change hypothesis, run the same OKF suite before and after the
 committed change, and compare results with `ahu eval report`. Prefer deterministic
 answer and OTel-backed tool checks; use agent evaluators for subjective rubric
-dimensions, and review a sample of their judgments. Eval files accessible from a
+dimensions, and review a sample of their judgments. Evaluation files accessible from a
 candidate checkout are not secret merely because the prompt omits their answers.
 
 ## State and compatibility

@@ -781,7 +781,8 @@ fn unreadable_task_prefix_resolves_to_the_diagnostic_record() {
 fn doctor_reports_invalid_agents_and_lock_without_changing_them() {
     let (_root, repo) = repository();
     configured(&repo);
-    let config_before = std::fs::read(config::config_path(&repo.root)).unwrap();
+    let config_path = config::config_path(&repo.root);
+    let config_before = std::fs::read(&config_path).unwrap();
     let manifests = repo.root.join(config::AGENTS_RELATIVE_DIR);
     std::fs::create_dir_all(&manifests).unwrap();
     let manifest = manifests.join("broken.md");
@@ -814,10 +815,7 @@ fn doctor_reports_invalid_agents_and_lock_without_changing_them() {
         "not an agent manifest"
     );
     assert_eq!(std::fs::read_to_string(lock).unwrap(), "not a context lock");
-    assert_eq!(
-        std::fs::read(config::config_path(&repo.unwrap().root)).unwrap(),
-        config_before
-    );
+    assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
 }
 
 #[test]

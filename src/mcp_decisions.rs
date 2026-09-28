@@ -191,7 +191,7 @@ fn process_api_key(value: Option<String>) -> Result<Option<String>> {
 
 fn dotenv_api_key(root: &Path) -> Result<String> {
     const KEY_NAMES: [&str; 1] = ["TYPESAFE_API_KEY"];
-    let path = match crate::util::resolve_existing_within(&root, ".env") {
+    let path = match crate::util::resolve_existing_within(root, ".env") {
         Ok(Some(path)) => path,
         Ok(None) => {
             return Err(Error::new(

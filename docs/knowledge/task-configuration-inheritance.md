@@ -32,11 +32,11 @@ The snapshot recognizes `.agents`, `.claude`, `.codex`, `.agent`, `.opencode`, a
 directories, along with supported instruction and configuration filenames,
 including `GEMINI.md`, `opencode.json` and `opencode.jsonc`. It records content
 digests and executable bits. Collection has a depth limit and skips directories
-such as `.git`, `.worktrees`, and build output; the scan is not an exhaustive
-complete scan of every possible configuration location. The lock records known
-unscanned configuration and symlinks and refuses those cases, but cannot discover
-all nested or harness-managed context. Committed files in skipped directories can
-still arrive through the base checkout.[^snapshot][^lock]
+such as `.git`, `.worktrees`, and build output; it does not cover every possible
+configuration location. The lock records recognized configuration it could not
+scan, along with symlinks, and refuses those cases. It cannot discover all nested
+or harness-managed context. Committed files in skipped directories can still
+arrive through the base checkout.[^snapshot][^lock]
 
 Configuration symlinks are recorded separately and are not followed as snapshot
 entries. Materialization reconciles symlinks in the destination so configuration

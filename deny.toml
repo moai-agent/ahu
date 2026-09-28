@@ -14,6 +14,17 @@ ignore = []
 
 [licenses]
 allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+# Exact versions from the TLS graph. Owner: Orie Steele.
+# Re-review on any affected lockfile update and before each release.
+# Retain upstream license/notice texts in distributed artifacts.
+exceptions = [
+    { crate = "aws-lc-rs@=1.18.1", allow = ["ISC"] },
+    { crate = "aws-lc-sys@=0.45.0", allow = ["ISC", "BSD-3-Clause"] },
+    { crate = "rustls-webpki@=0.103.15", allow = ["ISC"] },
+    { crate = "subtle@=2.6.1", allow = ["BSD-3-Clause"] },
+    { crate = "untrusted@=0.9.0", allow = ["ISC"] },
+    { crate = "webpki-root-certs@=1.0.9", allow = ["CDLA-Permissive-2.0"] },
+]
 confidence-threshold = 0.95
 include-dev = true
 include-build = true

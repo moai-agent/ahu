@@ -52,7 +52,7 @@ ahu
 ```
 
 Run `ahu setup` once in each project. It detects installed harnesses, asks you
-to choose models for their ahu dev agents, installs the bundled skills, adds
+to choose models for their ahu development agents, installs the bundled skills, adds
 project MCP entries, and writes `.agents/ahu/config.toml` and `ahu.lock`.
 Review and commit the generated files so future ahu commands can use the same
 project setup. ahu does not stage, commit, or push them.
@@ -197,7 +197,7 @@ require explicit user permission.
 
 | Command | Purpose |
 | --- | --- |
-| `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness dev agents, and refresh `ahu.lock` |
+| `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness development agents, and refresh `ahu.lock` |
 | `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
 | `ahu launch @agent [options]` | Backward-compatible launch alias with `--prompt` and `--prompt-file` support |
 | `ahu doctor` | Concise readiness summary; add `--verbose` for component diagnostics |
@@ -260,7 +260,7 @@ configures a project MCP entry for each detected harness, installs bundled
 skills in harness-supported paths, creates a `dev-<harness>` ahu agent using a
 model you choose, and refreshes `ahu.lock`. Review and commit the generated
 project files before launching. Claude Code asks before using project MCP
-servers, and Codex must trust the repository before loading project config. See the
+servers, and Codex must trust the repository before loading project configuration. See the
 [typed-decision experiment](docs/typed-decisions.md) for its model-neutral
 service contract and limitations.
 
