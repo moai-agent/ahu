@@ -219,6 +219,8 @@ in JSON and text. A missing observation does not contribute zero to a mean.
 The comparison table prefixes candidates with `typed:` or `@judge-name:` so the
 grading arm stays visible in narrow terminals. It marks complete evaluation time
 as `eval`; `total` continues to mean preparation plus candidate completion.
+The table's `TOKENS` column shows candidate native usage; grader and provider
+usage remain separate in the detailed observations below it.
 Typed grading exports a genuine `ahu.eval.typed_decision` span to the run's local
 receiver under a separate evaluator observation ID. It carries only status,
 latency, and token counts, with no evidence, credentials, inherited OTel resource

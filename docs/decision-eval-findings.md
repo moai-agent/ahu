@@ -1,8 +1,13 @@
 # What the decision evals show
 
-The latest [skill-selection comparison](#skill-selection-advice) improved advice
-precision, but did **not** demonstrate faster agents or reliable token savings.
-The agent-efficiency release gate remains unmet. Earlier batching results follow.
+The latest [typed rubric comparison](#typed-rubric-evaluation) found **46.3% less
+complete evaluation time and 50.6% fewer native-model input tokens** when Jev
+replaced the configured evaluator agent in four synthetic cases on an optimized
+build. A separate 12-case calibration matched all 72 reference grading bands.
+This demonstrates lower observed evaluation time for this configured rubric
+workflow. Earlier skill-advice and batching
+experiments did not establish candidate-task efficiency gains; their results
+remain below.
 
 The earlier batching experiment on September 28, 2026 exercised Codex 0.157.1 with
 `gpt-6-astra` and TypeSafe Jev. Requests selected the mutable `jev-latest` alias;
@@ -230,7 +235,182 @@ ahu reviewer reproduced the ratios and bootstrap endpoints, verified the preserv
 Keep skill advice opt-in. A defensible bounded claim is: **Jev produced more
 precise skill advice than the lexical baseline on this synthetic corpus, while
 preserving the observed task accuracy.** Do not market proven agent speed or
-token savings from these results. The requested positive agent-efficiency release
-confirmation has not been obtained. A next experiment should remove a measured
-source of work—such as unnecessary catalog context or a separate classification
-turn—and use fresh tasks before making an efficiency claim.
+token savings from these skill-advice results. This experiment did not meet its
+positive agent-efficiency gate. The subsequent typed-rubric study below tests
+removing a separate grading-agent invocation using a fresh corpus.
+
+## Typed rubric evaluation
+
+A third experiment on September 28, 2026 tested replacing the optional evaluator
+agent with `ahu eval run --decision-evaluator`. ahu sends one bounded rubric
+request directly to the configured typed-decision provider. The candidate still
+runs normally. This measures the evaluation workflow with a configured Codex
+judge; it does not establish faster coding or better candidate answers.
+
+### Calibrating the grading stage
+
+The [grading corpus](../evals/decision-grading/README.md) contains 12 synthetic
+cases across six domains and two separate pilot cases. A registered ahu agent
+authored the references and another reviewed them before provider runs; these
+are model-reviewed references, not independent human annotations. Rubrics grade
+selected option meanings against supplied evidence. They do not assess arbitrary
+code changes or replace expert review.
+
+The initial pilot returned four of six grading bands correctly from Jev. One
+generic revision resolved choice keys into their exact selected option text
+locally, keeping that text as untrusted data. The revised pilot returned six of
+six correctly. Both pilots remain separate from the confirmatory dataset. No
+reference labels, held-out cases, score cutpoints, or acceptance gates changed.
+The native prompt retained its original structure, so the experiment compares
+two grading workflows, rather than isolating a model-only effect.
+
+The frozen comparison used a debug executable and ran **48 attempts: 12 cases, two graders, two repetitions**.
+Each pair graded the same saved candidate answer. Runs were sequential, with arm
+order reversed and case order rotated for the second repetition. Native grading
+used registered Codex agents with `codex-cli 0.157.1`, `gpt-6-astra`, and observed
+high reasoning effort. Typed grading pinned `jev-1.13.0`; every service response
+reported that version. All attempts were retained, with no retries or substitutes.
+
+| Grading-stage measure | Codex evaluator agent | Jev typed evaluator |
+| --- | ---: | ---: |
+| Correct reference bands | 72/72 | 72/72 |
+| Continuous mean absolute error | 0 | 0.0240 |
+| Critical false accepts | 0/18 | 0/18 |
+| Mean complete grading time | 37.185 s | 0.301 s |
+| Complete MCP session observations | 24/24 | 24/24 |
+| Native input / output per attempt | 31,110 / 213.9 | No native grader invoked |
+| Native cached input per attempt | 23,291 | No native grader invoked |
+| Jev input / output per attempt | No Jev call | 1,689.6 / 43 |
+
+Jev used **99.19% less grading time**. The paired case-cluster bootstrap 95%
+interval for the reduction was **99.12%–99.24%** (10,000 resamples, retaining both
+repetitions within each case). Timing includes prompt/request formation, launch
+or provider transport, result parsing, artifact capture, and schema validation;
+common case loading and collector setup are outside this stage timer. Debug-build
+and harness-startup overhead is included. These are measured workflow latencies,
+not a comparison of pure model inference or optimized release latency.
+
+All predefined gates passed: band agreement at least 95% and no worse than the
+native judge; continuous error at most 0.10 and at most 0.05 above native; no
+critical false accepts or unknown tagged outcomes; mean time ratio at most 0.8
+with an upper 95% bound at most 0.9; and complete attempt, telemetry, and usage
+accounting. Bands use fixed cutpoints 0.25 and 0.75 on raw scores. The 72 judgments
+are repeated criteria across 12 cases, not 72 independent tasks. Perfect observed
+agreement does not establish a population-wide accuracy guarantee.
+
+Native input includes cached input. Native and Jev token units remain separate;
+these figures are neither a combined token total nor a subscription-bill estimate.
+No provider failure occurred in the formal run, so this is not a reliability
+estimate for outage conditions. Local tests cover failure accounting separately.
+
+### Full CLI workflow
+
+The initial CLI matrix used the same debug executable: four fixed cases, three
+configurations, one fresh candidate run per cell. All 12 passed. It observed a
+50.64% reduction in complete evaluation time and 50.60% fewer native input tokens
+with Jev. Those debug timings are retained separately.
+
+Before seeing optimized results, the same 12-trial schedule and acceptance checks
+were frozen for a separate `cargo build --release` run. Native completion
+reporting and narrow-table labels were corrected; grading requests, references,
+models, and metric definitions were unchanged. Both CLI matrices used a temporary
+loopback transport to the source-scoped MCP credential reader; its overhead is
+included, and credentials were not copied into candidate checkouts.
+
+**Optimized-build means per evaluation:**
+
+| Configuration | Correct answers | Complete evaluation | Full command | Native input / output | Jev input / output |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Candidate + Codex grader | 4/4 | 29.23 s | 29.36 s | 60,118 / 310.5 | No call |
+| Candidate + Jev grader | 4/4 | 15.69 s | 15.80 s | 29,706 / 133.3 | 1,695 / 43 |
+| Candidate + deterministic checks | 4/4 | 13.73 s | 13.84 s | 29,747 / 138.3 | No call |
+
+Jev reduced observed complete evaluation time by **46.33%**, full command time by
+**46.19%**, and native-model input by **50.59%** against the configured Codex
+evaluator workflow. Native output fell 57.09%. Native input includes cached input;
+mean cached counts were 50,528, 23,808, and 20,960 respectively. Native candidate
+and grader counters share the same configured model and units here, so their
+input/output counts can be combined; Jev units remain separate.
+
+Candidate answers were identical across all three arms for each case, and all
+headlines passed. The two graders agreed on all returned criterion bands. Every
+candidate had a complete MCP session; all four native graders had complete
+sessions; all four typed graders exported their distinct grading observation.
+Provider usage matched the four saved service responses. Native model, usage,
+terminal completion, and unique task/session identities were checked against
+native records.
+No attempt was retried, replaced, or excluded; no receiver drops were observed.
+The actual `ahu eval report` displayed all 12 configurations with separate
+candidate and grader accounting.
+
+The optimized run met its predefined observational checks: identical correct
+answers and grade bands, at least 20% less complete evaluation time and native
+input, and complete attempt/telemetry/usage accounting. This is an exploratory
+four-case integration comparison, with one trial per cell. The calibration's
+confidence interval does **not** apply to this full-workflow result. These cases
+have exact references: deterministic checks avoid the optional model grader and
+were the fastest observed control. Use a model grader when a validated rubric
+requires it; this does not justify adding Jev to every evaluation.
+
+The optimized measured revision was
+`d59717741b82b4bdf05bf40a563c0f89813a02f5`; executable SHA-256
+`59629a6164a3e39a802aea6a1a723b2fd1dd09873a87fcb62906b3db0d69961f`.
+
+
+### What Evals and OTel established
+
+The calibration exercised the real `ahu_typed_decide` MCP boundary. Every typed
+call joined to exactly one complete session, with service identity and usage
+matching the returned response. Native judges had complete MCP sessions with
+zero typed calls; owned native session logs independently matched the configured
+model, terminal completion, and input/output/cache counters. Saved requests and
+prompts were checked against the frozen evidence, answers and rubrics. No
+reference labels or expected answers were added to them.
+
+Candidates and native graders made no ahu MCP tool calls in these matrices;
+their native tools wrote answer and score artifacts. Typed grading was invoked
+by ahu orchestration. This experiment did not measure agents choosing when to
+call Jev. `complete_session` confirms an MCP session summary was received;
+`typed_decision_span` confirms the separate local grading observation arrived.
+Neither label claims a provider-side trace or complete capture of every native
+tool action. The coordinator separately checked the exact owned native sessions.
+
+A separate metadata defect made successful Codex tasks report that their native
+terminal event was missing. Source and owned-session review traced it to dropped
+`turn.completed` metadata. The measurement retained this warning and used direct
+native completion evidence. The fix passed focused tests and all 16 native sessions in the optimized
+comparison reported complete native evidence. Later compatibility work accepts
+valid provider scores with absent service metadata, recording identity and usage
+as unknown; malformed supplied metadata still fails. That absence-only change
+does not change any measured Jev request or response.
+
+The debug calibration and debug CLI measured revision was
+`bb4d995872c048627a43f6674f899195ca542321`; executable
+SHA-256 `0f8471b36f95c8bf08180e6c42fac7ec42cf005e3ec93c69bb9cb05672c7394d`.
+Plans, raw requests, outputs, and native evidence remain outside the repository.
+The candidate/judge checkout omitted the corpus and references; same-user OS
+access was not isolated. Results support calibrated, bounded rubric evaluation
+with this configuration. Broader tasks, other judges/harnesses, and richer
+explanations need their own comparisons. Earlier batching and skill-advice
+results remain unchanged.
+
+### Validation and review
+
+An independent registered ahu reviewer reproduced the aggregates, bootstrap
+endpoints, schedule identities, frozen-input hashes, and saved-data joins. It
+found no additional substantive production or security blocker in the inspected
+paths. This was a bounded review; the reviewer checked saved native audits and
+result envelopes without independently repeating the raw native-history audit.
+
+Final validation passed **1,133 tests across 43 suites**, formatting, clippy with
+warnings denied, repository skill checks, and corpus schema/hash/boundary checks.
+The earlier full-suite failure was a stale mock expecting three request-state
+fields after selected-answer projection added a fourth. Its correction asserts
+the exact four-field boundary and resolved value; the final full suite passed.
+The report now keeps grader labels visible in narrow terminals and explicitly
+labels candidate token scope. Its JSON metrics remained unchanged.
+
+Measurements belong to the revisions named above. Later changes cover optional
+metadata absence, test expectations, and reporting clarity; final-head optimized
+latency was not remeasured. Passing tests and this review do not authorize release
+or publication.

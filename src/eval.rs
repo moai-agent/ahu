@@ -1209,6 +1209,14 @@ pub fn render_at(report: &Report, width: usize) -> String {
         ));
         return out;
     }
+    if report.groups.iter().any(|group| {
+        matches!(
+            group.key.evaluator_kind.as_str(),
+            "agent" | "typed_decision"
+        )
+    }) {
+        out.push_str("  TOKENS: candidate native usage; grading usage below.\n");
+    }
     out.push('\n');
     out.push_str(&table::render(
         style,

@@ -878,7 +878,24 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
             reader.read_exact(&mut body).unwrap();
             let request: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(request["state"]["candidate_output"]["route"], "billing");
-            assert_eq!(request["state"].as_object().unwrap().len(), 3);
+            assert_eq!(
+                request["state"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                [
+                    "candidate_output",
+                    "case_state",
+                    "questions",
+                    "selected_answers"
+                ]
+            );
+            assert_eq!(
+                request["state"]["selected_answers"]["route"],
+                request["state"]["questions"]["route"]["options"]["billing"]
+            );
             assert!(request.get("expected").is_none());
             assert!(request["state"].get("expected").is_none());
             assert_eq!(

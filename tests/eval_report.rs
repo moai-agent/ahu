@@ -1692,6 +1692,7 @@ fn summary_distinguishes_grading_arms_and_uses_complete_evaluation_time() {
     for width in [80, 200] {
         let output = ahu::eval::render_at(&report, width);
         let rows = summary_table(&output);
+        assert!(output.contains("TOKENS: candidate native usage; grading usage below."));
         assert!(rows[1].contains("typed:"), "{output}");
         assert!(output.contains("1.0s eval"));
         assert!(!output.contains("100ms total"));
@@ -1716,4 +1717,5 @@ fn summary_distinguishes_grading_arms_and_uses_complete_evaluation_time() {
     let output = ahu::eval::render_at(&report, 200);
     assert!(output.contains("100ms total"));
     assert!(!output.contains("  grading    "));
+    assert!(!output.contains("TOKENS: candidate native usage"));
 }
