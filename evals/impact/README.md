@@ -81,6 +81,12 @@ validation results identifiable. Do not tune instructions on held-out results.
    Distinguish received calls, successful calls, and errors. Preserve receiver-loss
    diagnostics.
 
+For fresh Codex 0.157.1 threads, terminal input and output counters accumulate
+across model responses. Cached input is part of input, and reasoning is part of
+output; do not add either detail again. Resumed threads may carry earlier usage,
+so verify a unique fresh native session for every trial. The exec JSON stream
+omits total tokens; leave that observation unavailable.
+
 The initial small sample can establish operation and describe observed differences;
 it cannot prove broad accuracy preservation or universal savings. A release claim
 must name the tested tasks, harnesses, models, repetitions, observed tradeoffs, and
