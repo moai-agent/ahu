@@ -257,7 +257,7 @@ A dry run performs preflight checks and prints the redacted command, frozen
 identity, capabilities, gaps, timeout, and coordination path without launching.
 Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
-The admitted CLI profiles are Codex 0.154.0/0.155.1, Claude Code 2.1.269/2.1.270,
+The admitted CLI profiles are Codex 0.154.0/0.155.1/0.157.1, Claude Code 2.1.269/2.1.270/2.1.283,
 Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.30/1.18.31/1.18.32. Other versions fail before
 worktree creation, with no fallback harness or model. OpenCode's batch form is
 `opencode run --format json`; its permission mapping is the interactive one, so
@@ -269,6 +269,16 @@ helper lifecycle validation. Codex 0.155.1 admission covers the batch launch
 and recorded-session resume surfaces checked by compatibility probes; bounded
 native helpers remain refused.
 
+Codex 0.157.1 uses strict config validation, enables inspected hooks, disables
+optional plugins and remote plugin loading, and clears the legacy notify command
+for this invocation. Before launch and resume, ahu asks a separate native metadata
+process for effective hooks and managed requirements without starting a model
+turn. Inspection has a 30-second deadline and bounded output; warnings, managed
+requirements, and unreviewed hooks refuse admission. Authentication remains
+native. This inspection cannot prevent configuration changes between inspection
+and execution. A trusted project and explicit tool approvals are still required
+for unattended MCP calls.
+
 `ahu cmux status` (also `--output json`) checks installed CLI versions and
 reports the same isolation profile used by launch previews. Inspection alone
 without a version observation reports component compatibility only. An admitted
@@ -277,7 +287,7 @@ other launch checks.
 
 | Harness | Required native isolation evidence |
 | --- | --- |
-| Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Plugin state, cloud authentication/configuration, and managed sources remain unresolved. |
+| Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Version 0.157.1 additionally requires native effective metadata inspection with no warnings or managed requirements, and disables optional plugins for the invocation. Older profiles retain unresolved plugin, cloud, and managed-source checks. |
 | OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; authentication/account stores, declared modules, and substitutions remain unresolved. |
 | Claude Code | Direct executable avoids the cmux wrapper. Independent hooks, enabled plugins, and managed settings require separate evidence. |
 | Antigravity | Absent inspected hooks and an exact reviewed CLI version. Custom hooks, extensions, and overrides remain unverified. |
@@ -474,7 +484,8 @@ requests must retain the policy frozen in their host grant.
 | --- | --- | --- |
 | Claude Code 2.1.269 | Admitted | Refused |
 | Claude Code 2.1.270 | Admitted | Read-only profile |
-| Codex 0.154.0/0.155.1 | Admitted | Refused: incomplete helper identity/join event visibility |
+| Claude Code 2.1.283 | Admitted with hooks disabled for the invocation | Refused: no validated bounded-helper profile |
+| Codex 0.154.0/0.155.1/0.157.1 | Admitted | Refused: incomplete helper identity/join event visibility |
 | Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
 | OpenCode 1.18.29/1.18.30/1.18.31/1.18.32 | Admitted | Refused: no validated native tool switch |
 
@@ -678,7 +689,11 @@ harness event stream actually reports (`input`, `output`, `cached`,
 `cache_write`, `reasoning`, and `total`). Missing usage remains absent; ahu never
 estimates it. ahu does not add prompts, transcripts, credentials, or private
 issue content to its span attributes. Inherited `OTEL_RESOURCE_ATTRIBUTES` are retained for
-children, and the exporter SDK can read ambient OpenTelemetry configuration.
+children. MCP correlation also uses `AHU_MCP_RESOURCE_ATTRIBUTES`, containing only
+bounded, allowlisted ahu identity fields, because a harness may strip `OTEL_*`
+variables from its MCP children. Codex setup forwards that variable and the eval
+receiver endpoint by name, alongside decision-provider configuration; it does not
+copy secret values. The exporter SDK can read ambient OpenTelemetry configuration.
 Keep sensitive data out of that configuration; these settings are not a
 redaction boundary.
 
@@ -691,7 +706,8 @@ the `ahu.mcp.tool.call` name and record bounded tool name and success/error
 outcome. Typed-decision spans additionally report question count and types,
 stable `telemetry_key` dimensions, decision service/model identifiers,
 reported input/output tokens, adapter timing, and fixed error categories. The
-MCP process also emits an `ahu.mcp.session` summary on normal shutdown with
+MCP process also emits an `ahu.mcp.session` summary on EOF or handled SIGINT/SIGTERM
+shutdown with
 request, tool-call, and transport-error counts plus SDK exporter initialization
 status (not collector receipt). It omits request state,
 instructions, question names, answer values, and error text. ahu-launched

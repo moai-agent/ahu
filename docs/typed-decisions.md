@@ -172,7 +172,11 @@ when ahu launched the session. This supports grouping across harnesses and
 correlating MCP calls to the task result. MCP spans cover inbound requests;
 they do not describe harness-internal tool use that bypasses ahu MCP. Directly
 started MCP servers have no ahu task identity unless their launcher supplies
-the corresponding allowlisted resource attributes. On normal server shutdown,
+the corresponding allowlisted resource attributes. ahu also carries bounded
+identity fields through `AHU_MCP_RESOURCE_ATTRIBUTES` so a harness filtering
+`OTEL_*` variables does not break task correlation. Codex MCP setup forwards
+this variable and the local eval receiver endpoint explicitly. On EOF or handled
+SIGINT/SIGTERM shutdown,
 an `ahu.mcp.session` span summarizes request, tool-call, decision-call, error,
 tool-list and transport-error counts and whether the SDK exporter provider was
 initialized. This does not establish that a collector received the spans. A

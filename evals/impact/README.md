@@ -21,7 +21,22 @@ See [Claude's workspace trust rules](https://code.claude.com/docs/en/permissions
 
 Complete the native workspace trust step for Codex as well: its project MCP
 configuration must be active in the candidate worktrees. Validate this with a
-real tool call before freezing the comparison inputs. Keep the measured binary
+real tool call before freezing the comparison inputs. With Codex 0.157.1, an
+operator who authorizes synthetic TypeSafe calls can set the following in the
+disposable repository's `.codex/config.toml`, identically for both arms:
+
+```toml
+[mcp_servers.ahu.tools.ahu_typed_decide]
+approval_mode = "approve"
+```
+
+This approval covers that tool's data transfer and service usage. Do not install
+it silently through setup or apply it to unrelated tools or user projects.
+A connected MCP server and a correct fallback answer do not prove that a call
+was allowed. Check successful decision-call telemetry before starting the matrix.
+See the [Codex configuration reference](https://developers.openai.com/codex/config-reference).
+
+Keep the measured binary
 fixed throughout the matrix; install rebuilt executables by atomic replacement,
 so a running MCP process never sees its executable overwritten in place.
 
