@@ -89,6 +89,12 @@ agent when judging needs evidence gathering or richer reasoning. This option
 sends case evidence, candidate output and rubric to the configured provider.
 Compare `evaluation_elapsed_ms`, grading quality, failures and separate provider
 usage against `--evaluator @judge` before claiming a workflow improvement.
+A four-case optimized-build comparison found lower evaluation time and native
+input usage with Jev, while deterministic checks were faster still. Treat that
+as evidence for this rubric-grading workflow only, not as proof of faster
+candidate work or a general Jev advantage. See
+[`docs/decision-eval-findings.md`](../../../docs/decision-eval-findings.md#typed-rubric-evaluation)
+for the measurements and limitations.
 
 ## Skill suggestions
 

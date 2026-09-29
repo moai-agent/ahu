@@ -244,6 +244,31 @@ leave the machine over HTTPS as described in the MCP tool section.
 
 ## Service and model boundary
 
+### Typed decisions in evaluation workflows
+
+For a bounded case rubric, `ahu eval run --decision-evaluator` can send one
+structured grading request through the typed-decision provider instead of
+starting a separate evaluator agent for that stage. The candidate still runs
+normally, and ahu reports grader time and provider usage separately from
+candidate usage. This can reduce evaluation overhead; it does not make the
+candidate itself faster or prove better agent task performance.
+
+In an optimized-build comparison across four synthetic cases, candidate answers
+and grader bands matched between the Codex-agent and Jev-grader configurations.
+The Jev configuration used **46.3% less observed complete evaluation time** and
+**50.6% fewer native-model input tokens** on average. Jev usage was reported
+separately (1,695 input and 43 output tokens per evaluation on average). These
+are exploratory results from one run per configuration and case, not a broad
+accuracy or speed guarantee. A separate frozen calibration matched all 72
+reference grading bands, but those repeated criteria came from 12 cases with
+model-reviewed synthetic references. Deterministic checks were faster in the
+four-case workflow comparison, so use them when they express the outcome you
+need; use typed grading when a validated rubric requires model judgment.
+
+See [evaluation findings](decision-eval-findings.md#typed-rubric-evaluation) for
+the setup, measurements, accounting details, and limitations, and
+[evaluation docs](evaluations.md#typed-decision-evaluator) for case configuration.
+
 For repeatable comparisons, use [ahu Evals](evaluations.md) and the
 [shared-question batch suite](../evals/batching/README.md). Compare answer quality,
 failures, native token observations and elapsed time alongside service usage.

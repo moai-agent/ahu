@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "c4b7c7cdc02631bffd5bebdde419f4d0a86aeffdf4dd855a80bd46d1384503ad"
+digest = "1473d62884f78bf1523a7fa96e503e6fbdc15c6d6d4d4e40594a3953fe36edbb"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -111,6 +111,12 @@ bytes = 414
 executable = false
 
 [[entries]]
+path = ".agents/mcp_config.json"
+digest = "40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06"
+bytes = 117
+executable = false
+
+[[entries]]
 path = ".agents/skills/agent-context-critic/SKILL.md"
 digest = "9c6b46a4c13789912fd6b07e1600ba37401d29c15e69ef6e39a9f38010ac5cf9"
 bytes = 5477
@@ -148,8 +154,20 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/typed-decisions/SKILL.md"
-digest = "1f33849376cffd18114ae3cdd1bcc773c190d71fb93ce9e367c9ba57b8d182c6"
-bytes = 5571
+digest = "630a694fa2927097eed4a0bb1d1e1ae0dbaf71fb935b795c0d8ae228200e01e0"
+bytes = 5987
+executable = false
+
+[[entries]]
+path = ".codex/config.toml"
+digest = "375dd7fa25b370d223946f5daf2f0c33165bd022f6a13d23fbe02975ef79d82c"
+bytes = 217
+executable = false
+
+[[entries]]
+path = ".mcp.json"
+digest = "40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06"
+bytes = 117
 executable = false
 
 [[entries]]
@@ -238,6 +256,6 @@ executable = false
 
 [[entries]]
 path = "opencode.json"
-digest = "5eaf946b41c1f89ca2d0722e16b35fa24dccc1d79c9e9c1a72b866503986e2f9"
-bytes = 468
+digest = "4ecc55dabff9aa1d56ed3bb9bd4b2f2ee2dc4fd66a97956c81b8d5f83ce80e57"
+bytes = 590
 executable = false

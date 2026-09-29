@@ -9,6 +9,13 @@ workflow. Earlier skill-advice and batching
 experiments did not establish candidate-task efficiency gains; their results
 remain below.
 
+This result is specifically about ahu using Jev as the optional rubric grader.
+The candidate agents in those comparisons made no ahu MCP calls, so those
+measurements do not establish that agents discovered or chose Jev themselves.
+The evaluation framework can score candidate tool behavior when a harness
+connects, permits the call, and exports complete MCP telemetry; see the
+[tool setup and coverage requirements](../evals/README.md#tool-status-can-be-unknown).
+
 The earlier batching experiment on September 28, 2026 exercised Codex 0.157.1 with
 `gpt-6-astra` and TypeSafe Jev. Requests selected the mutable `jev-latest` alias;
 all eight pilot decision calls reported `jev-1.13.0`.

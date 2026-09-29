@@ -1,0 +1,4 @@
+[mcp_servers.ahu]
+command = "ahu"
+args = ["mcp", "serve"]
+env_vars = ["AHU_EVAL_OTEL_ENDPOINT", "AHU_MCP_RESOURCE_ATTRIBUTES", "OTEL_RESOURCE_ATTRIBUTES", "TYPESAFE_API_KEY", "AHU_DECISION_URL", "AHU_DECISION_MODEL"]

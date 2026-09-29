@@ -46,6 +46,18 @@ are never turned into zeroes, and an unknown tool status is not a pass on a
 process group, so an MCP subprocess may not flush its final summary; those runs
 retain partial or absent telemetry and an unknown tool status.
 
+An ahu server entry and a successful tool call are separate checks. `ahu setup`
+validates ahu's own stdio handshake; it cannot confirm that a harness loaded the
+project entry, trusted the workspace, or allowed a tool call. Before a tool-use
+comparison, inspect the selected harness's MCP status and make one real call
+from the candidate workspace. For headless trials, configure any required
+per-tool approval only in the disposable evaluation project and only for the
+tool the case needs. In particular, do not make `ahu_typed_decide` a default
+auto-approved tool in a normal project: it sends supplied evidence to the
+configured decision provider. A missing server call can also mean the harness
+denied the call before MCP dispatch; inspect native approval outcomes before
+concluding the candidate chose not to use the tool.
+
 ### Telemetry, without a collector
 
 ahu's headless and MCP spans are the observability stream. `ahu eval run`
