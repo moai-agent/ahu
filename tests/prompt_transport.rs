@@ -800,6 +800,15 @@ fn approval_widening_is_opt_in_and_harness_native() {
                 "{harness_id} must pass no permission flag by default, found {flag}"
             );
         }
+        if harness_id == "codex" {
+            assert!(
+                !command
+                    .args
+                    .iter()
+                    .any(|a| a.starts_with("mcp_servers.ahu.tools.")),
+                "Codex MCP tools must not be auto-approved for prompt permissions"
+            );
+        }
     }
 
     // Opt-in maps to the flag each harness actually documents.
@@ -891,6 +900,40 @@ fn approval_widening_is_opt_in_and_harness_native() {
     assert!(Permissions::AcceptEdits.widens_defaults());
     assert!(Permissions::Auto.widens_defaults());
     assert!(Permissions::Auto.disclosure().contains("unattended"));
+}
+
+#[test]
+fn codex_auto_approves_only_local_read_only_ahu_mcp_tools() {
+    use ahu::agent::Permissions;
+
+    let command = harness::adapter_for("codex")
+        .unwrap()
+        .launch_command(&LaunchRequest {
+            model: "gpt-6-astra",
+            prompt: "p",
+            cwd: Path::new("/tmp"),
+            permissions: Permissions::Auto,
+        })
+        .unwrap();
+    for tool in ["ahu_agents_list", "ahu_tasks_list", "ahu_task_get"] {
+        let config = format!("mcp_servers.ahu.tools.{tool}.approval_mode=\"approve\"");
+        assert!(command.args.contains(&config), "missing {config:?}");
+    }
+    for tool in ["ahu_typed_decide", "ahu_skills_suggest"] {
+        assert!(
+            !command.args.iter().any(|arg| arg.contains(tool)),
+            "provider-backed tool {tool} must retain its approval gate"
+        );
+    }
+
+    let disclosure = harness::adapter_for("codex")
+        .unwrap()
+        .enforcement("gpt-6-astra", Permissions::Auto)
+        .unwrap()
+        .applied_controls
+        .join(" ");
+    assert!(disclosure.contains("ahu_agents_list, ahu_tasks_list, ahu_task_get"));
+    assert!(disclosure.contains("remain approval-gated"));
 }
 
 /// The Enforcement block must never deny passing a flag the launch passes.

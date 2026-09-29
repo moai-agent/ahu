@@ -159,6 +159,15 @@ needed to establish that the client connected and exposed its tools. Skill
 presence does not prove that a particular run loaded the skill. See
 [skill verification](skill-verification.md) for per-harness discovery evidence.
 
+For Codex agents declaring `permissions = auto`, ahu approves only its local
+read-only `ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get` tools for
+that launch. Provider-backed `ahu_typed_decide` and `ahu_skills_suggest` calls
+stay gated because their inputs may leave the machine. Before release, verify
+each supported harness in both interactive and headless mode with a real ahu
+tool call, and confirm an `ahu.mcp.tool.call` span reached the configured local
+OTLP receiver. An initialize/tools-list handshake alone is not proof of use;
+approval denials can happen before ahu receives a call.
+
 The canonical tree follows a strict contract: one directory per skill directly
 under `.agents/skills/`, named after the skill, holding exactly one `SKILL.md`.
 The frontmatter carries `name` (equal to the directory name) and `description`

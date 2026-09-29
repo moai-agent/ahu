@@ -58,6 +58,14 @@ configured decision provider. A missing server call can also mean the harness
 denied the call before MCP dispatch; inspect native approval outcomes before
 concluding the candidate chose not to use the tool.
 
+For Codex agents whose manifest explicitly declares `permissions = auto`, ahu
+approves only `ahu_agents_list`, `ahu_tasks_list` and `ahu_task_get` for that
+launch. Codex otherwise refuses MCP calls under ahu's noninteractive
+`approval_policy = "never"`, even though it has loaded and listed the server's
+tools. Provider-backed `ahu_typed_decide` and `ahu_skills_suggest` remain
+approval-gated; evals that need them must opt in for that tool in the disposable
+candidate project.
+
 ### Telemetry, without a collector
 
 ahu's headless and MCP spans are the observability stream. `ahu eval run`
