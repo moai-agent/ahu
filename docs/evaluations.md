@@ -134,7 +134,7 @@ Token reduction requires observed changes in what the agent reads or does.
 
 Records include policy/catalog/provider identity, suggested paths, abstention
 or fallback, selection duration and separate provider usage. The report groups
-selection policies by configured backend/model and catalog, including provider
+selection policies by configured provider/model and catalog, including provider
 failures in the same arm. Returned model identities are reported separately with observation counts. A
 requested-model fallback is explicitly marked and does not count as a returned
 model observation.
@@ -175,12 +175,12 @@ state, questions, candidate output, and rubric instructions to the configured
 provider. It adds no expected answers, scoring weights, candidate identity, or
 traces. Evidence supplied within case data or candidate output remains untrusted.
 Choice keys are also resolved locally into selected option text, supplied as
-`selected_answers`; numerical answers retain their value. This projection uses
+`selected_answers`; numeric answers retain their value. This projection uses
 only candidate-visible options and the actual answer, never reference labels.
 
 Each rubric field becomes one score question with range 0..1 and descriptive
-levels “Does not satisfy the criterion”, “Partially satisfies the criterion”, and
-“Fully satisfies the criterion”. All cases are checked before any candidate
+levels **Does not satisfy the criterion**, **Partially satisfies the criterion**,
+and **Fully satisfies the criterion**. All cases are checked before any candidate
 launch, including the 20-question limit, instruction bounds, and 64 KiB request
 capacity reserved for the largest valid answer. Grading uses the same weighted
 judgement validation as registered evaluator agents; reason codes are empty.
@@ -190,12 +190,12 @@ an exactly perfect aggregate score. Choose and validate thresholds before an
 experiment; retain continuous scores when comparing graders. Prefer deterministic
 checks whenever they express the required outcome. Typed judging is an alternative
 to an optional rubric evaluator, not a prerequisite for running evals.
-There is one provider attempt, with no retry or substitute judge. Failed judging
-has no headline score or pass; deterministic answer checks remain separate.
+Each candidate gets one provider attempt, with no retry or substitute judge.
+Failed judging has no headline score or pass; deterministic answer checks remain separate.
 
 Provider and credential selection are unchanged from `ahu_typed_decide`:
 `AHU_DECISION_URL` selects a validated local endpoint, otherwise the configured
-TypeSafe backend is used (`AHU_DECISION_MODEL`, default `jev-latest`). Only that
+TypeSafe provider is used (`AHU_DECISION_MODEL`, default `jev-latest`). Only that
 existing boundary accesses credentials. Configuration and grading policy version
 are fingerprinted before execution, separately from returned service identity.
 The evaluator is identified as `typed_decision`, never as a registered agent.
@@ -205,9 +205,9 @@ agent checkout; this does not certify provider behavior.
 Records include `evaluator_metrics` and `evaluation_elapsed_ms`. The latter starts
 before skill selection and ends after grading, including failed work;
 `total_elapsed_ms` retains its selection-plus-candidate-launch meaning.
-Evaluator agent tokens and projected telemetry use the evaluator's own task ID
-and attempt, including failed launches and invalid score artifacts. Typed grading
-records safe returned backend/model and optional provider tokens/duration.
+Evaluator-agent tokens and projected telemetry use the ID and attempt of that
+evaluator task, including failed launches and invalid score artifacts. Typed grading
+records safe returned provider/model and optional provider tokens/duration.
 A provider may omit service metadata: valid scores still count, with unknown
 provider identity and usage. Malformed supplied metadata fails grading.
 Failed service calls have unknown usage, never an invented zero. Returned usage

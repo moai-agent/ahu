@@ -1666,7 +1666,7 @@ passes no `--pure` here.
 `ahu eval run --decision-evaluator` opts into rubric grading by the configured
 typed decision provider. It sends case evidence, candidate output, and rubric
 instructions to that provider and conflicts with `--evaluator` and
-`--evaluator-repo`. Requests are preflighted for all cases before candidates run;
+`--evaluator-repo`. Requests are checked for every case before candidates run;
 provider failures remain failed judgments with unknown usage and no fallback.
 See [Typed decision evaluator](evaluations.md#typed-decision-evaluator) for
 request bounds, fingerprints, timing, and evaluator telemetry coverage.

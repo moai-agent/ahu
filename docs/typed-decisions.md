@@ -124,7 +124,7 @@ included in the MCP result or telemetry.
 Jev's `choice`, `score`, and `noul` responses are translated back to ahu's
 stable `choice`, `score`, and `probability` result values. ahu maps a score
 from Jev's ordered rubric position back to the requested numeric range.
-Supply optional `levels` (2–10 nonblank descriptions, each at most 512 UTF-8
+Supply optional `levels` (2–10 descriptions that are not blank, each at most 512 UTF-8
 bytes) for meaningful score anchors. Without levels, the existing two-point
 min/max rubric remains available. Choice and score responses preserve optional
 `probabilities`: choice keys match the options; score keys are zero-based level
@@ -133,7 +133,7 @@ indices. Values must be finite, between zero and one, and sum to one within
 
 Set `AHU_DECISION_MODEL=jev-1.13.0` in the MCP process environment to pin Jev for
 a reproducible experiment. The default remains `jev-latest`. Only the process
-environment selects the model; the credential-only dotenv reader does not load
+environment selects the model; the credential-only `.env` reader does not load
 it. The model identifier is bounded to 64 ASCII letters, digits, dots, underscores
 or dashes. Setup forwards the variable name to Codex MCP children without
 reading its value. The response retains the provider's reported model version.
@@ -323,9 +323,9 @@ matching. Missing credentials or a provider failure produce a recorded fallback
 with no suggestions. Invalid context or input is an error.
 
 The initial decision policy selects at most three relevance probabilities at
-or above 0.8. Lexical matching requires two distinct shared words after fixed
+least 0.8. Lexical matching requires two distinct shared words after fixed
 stopword removal. These are versioned experimental policies, not calibrated
-guarantees. Both support abstention and multiple applicable skills.
+measurements. Both support abstention and multiple applicable skills.
 
 For prelaunch comparisons, use
 `ahu eval run --skill-selection none|lexical|decision`.
