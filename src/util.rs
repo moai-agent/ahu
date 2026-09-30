@@ -110,15 +110,31 @@ pub fn digest_bytes(bytes: &[u8]) -> String {
 /// Bounds hashing work for repository-controlled configuration files.
 pub const MAX_CONFIG_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Largest executable ahu will read when recording its build identity.
+///
+/// Coverage-instrumented test binaries can be larger than configuration files.
+/// Hashing remains streamed and bounded so executable identity does not inherit
+/// the much smaller configuration-file limit or allow unbounded reads.
+const MAX_BUILD_IDENTITY_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Lowercase hex SHA-256 of a file's contents.
 ///
 /// Streamed and capped because snapshot collection and materialization hash
 /// repository-controlled files repeatedly; file size must not imply unbounded
 /// memory use or read time.
 pub fn digest_file(path: &Path) -> Result<String> {
+    digest_file_with_limit(path, MAX_CONFIG_BYTES, "64 MiB")
+}
+
+/// Digest the running executable for the evaluation build identity.
+pub fn digest_executable(path: &Path) -> Result<String> {
+    digest_file_with_limit(path, MAX_BUILD_IDENTITY_BYTES, "512 MiB")
+}
+
+fn digest_file_with_limit(path: &Path, limit: u64, limit_label: &str) -> Result<String> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
-    digest_reader(&mut file, path)
+    digest_reader_with_limit(&mut file, path, limit, limit_label)
 }
 
 /// Digest whatever an already-open handle yields, with the same size cap.
@@ -127,6 +143,15 @@ pub fn digest_file(path: &Path) -> Result<String> {
 /// hashed are the bytes it copied can do both from one descriptor, rather than
 /// opening the path twice and hoping it still names the same file.
 pub fn digest_reader(reader: &mut impl std::io::Read, shown: &Path) -> Result<String> {
+    digest_reader_with_limit(reader, shown, MAX_CONFIG_BYTES, "64 MiB")
+}
+
+fn digest_reader_with_limit(
+    reader: &mut impl std::io::Read,
+    shown: &Path,
+    limit: u64,
+    limit_label: &str,
+) -> Result<String> {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
@@ -140,13 +165,10 @@ pub fn digest_reader(reader: &mut impl std::io::Read, shown: &Path) -> Result<St
             break;
         }
         total += read as u64;
-        if total > MAX_CONFIG_BYTES {
+        if total > limit {
             return Err(Error::new(format!(
-                "{} is larger than the {} MiB ahu will read for a configuration file.\n\
-                 ahu digests every agent-configuration file it inventories, so it will not read \
-                 an unbounded one. Move this file out of an agent-configuration path.",
+                "{} is larger than the {limit_label} digest limit.",
                 shown.display(),
-                MAX_CONFIG_BYTES / (1024 * 1024)
             )));
         }
         hasher.update(&buffer[..read]);

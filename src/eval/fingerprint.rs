@@ -136,7 +136,7 @@ impl BuildIdentity {
     pub fn detect() -> Self {
         let binary_digest = std::env::current_exe()
             .ok()
-            .and_then(|path| crate::util::digest_file(&path).ok());
+            .and_then(|path| crate::util::digest_executable(&path).ok());
         Self {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             binary_digest,

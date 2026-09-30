@@ -215,15 +215,22 @@ fn is_tracked(root: &Path, path: &str) -> Result<bool> {
 fn is_clean_at_head(root: &Path, path: &str) -> Result<bool> {
     let output = git::run(
         root,
-        &["--literal-pathspecs", "diff", "--quiet", "HEAD", "--", path],
+        &[
+            "--literal-pathspecs",
+            "diff",
+            "--name-only",
+            "HEAD",
+            "--",
+            path,
+        ],
     )?;
-    match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => bail!(
+    if output.status.success() {
+        Ok(output.stdout.is_empty())
+    } else {
+        bail!(
             "cannot compare {path} with committed HEAD: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        ),
+        )
     }
 }
 
