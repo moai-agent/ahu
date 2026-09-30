@@ -99,13 +99,7 @@ fn a_relative_path_entry_never_runs_a_repository_binary_even_for_a_version_probe
     let output = run(
         &fixture,
         &path,
-        &[
-            "launch",
-            "@sable",
-            "--prompt-file",
-            "assignment.txt",
-            "--dry-run",
-        ],
+        &["@sable", "--prompt-file", "assignment.txt", "--dry-run"],
     );
 
     assert!(
@@ -148,13 +142,7 @@ fn an_absolute_path_entry_inside_the_repository_is_refused() {
     let output = run(
         &fixture,
         &path,
-        &[
-            "launch",
-            "@sable",
-            "--prompt-file",
-            "assignment.txt",
-            "--dry-run",
-        ],
+        &["@sable", "--prompt-file", "assignment.txt", "--dry-run"],
     );
 
     assert!(
@@ -212,13 +200,7 @@ fn a_repository_binary_alone_is_reported_as_no_harness_at_all() {
     let output = run(
         &fixture,
         &path,
-        &[
-            "launch",
-            "@sable",
-            "--prompt-file",
-            "assignment.txt",
-            "--dry-run",
-        ],
+        &["@sable", "--prompt-file", "assignment.txt", "--dry-run"],
     );
 
     assert!(!fixture.marker.exists());

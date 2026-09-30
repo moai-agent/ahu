@@ -83,13 +83,7 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
         (
             "unknown agent",
             repo.path(),
-            &[
-                "launch",
-                "@absent",
-                "--prompt-file",
-                "assignment.txt",
-                "--dry-run",
-            ],
+            &["@absent", "--prompt-file", "assignment.txt", "--dry-run"],
             "",
             3,
         ),
@@ -97,14 +91,14 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
         (
             "missing cmux",
             repo.path(),
-            &["launch", "@reviewer", "--prompt-file", "assignment.txt"],
+            &["@reviewer", "--prompt-file", "assignment.txt"],
             "",
             4,
         ),
         (
             "invalid configuration",
             malformed.path(),
-            &["launch", "@reviewer", "--prompt", "Review", "--dry-run"],
+            &["@reviewer", "--prompt", "Review", "--dry-run"],
             "",
             5,
         ),

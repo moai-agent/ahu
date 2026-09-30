@@ -75,7 +75,7 @@ mod termination_signal {
     }
 }
 
-pub const AGENT_CONTEXT_CRITIC_SKILL: &str = "agent-context-critic";
+pub const AGENT_CONTEXT_CRITIC_SKILL: &str = "ahu-agent-context-critic";
 
 /// Skills `ahu setup` installs in a user's repository, and the set doctor
 /// verifies. `.agents/skills/` in this repository also holds skills about
@@ -87,16 +87,16 @@ pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
         include_str!("../.agents/skills/discover-requirements/SKILL.md"),
     ),
     (
-        "direct-agents",
-        include_str!("../.agents/skills/direct-agents/SKILL.md"),
+        "ahu-direct-agents",
+        include_str!("../.agents/skills/ahu-direct-agents/SKILL.md"),
     ),
     (
         AGENT_CONTEXT_CRITIC_SKILL,
-        include_str!("../.agents/skills/agent-context-critic/SKILL.md"),
+        include_str!("../.agents/skills/ahu-agent-context-critic/SKILL.md"),
     ),
     (
-        "typed-decisions",
-        include_str!("../.agents/skills/typed-decisions/SKILL.md"),
+        "ahu-typed-decisions",
+        include_str!("../.agents/skills/ahu-typed-decisions/SKILL.md"),
     ),
 ];
 
@@ -865,12 +865,28 @@ mod tests {
             bundled,
             vec![
                 "discover-requirements",
-                "direct-agents",
+                "ahu-direct-agents",
                 AGENT_CONTEXT_CRITIC_SKILL,
-                "typed-decisions"
+                "ahu-typed-decisions"
             ]
         );
         assert!(!bundled.contains(&"ahu-harness-upgrade"));
+    }
+
+    #[test]
+    fn ahu_specific_skill_directories_use_the_ahu_namespace() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".agents/skills");
+        for entry in std::fs::read_dir(root).unwrap() {
+            let entry = entry.unwrap();
+            if !entry.file_type().unwrap().is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                name == "discover-requirements" || name.starts_with("ahu-"),
+                "skill directory {name:?} must be ahu-namespaced unless it is generic"
+            );
+        }
     }
 
     #[test]

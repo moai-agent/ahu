@@ -259,7 +259,7 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
 }
 
 /// The `ahu agents` table. The agent cell is what a reader types into
-/// `ahu launch`, and a truncated handle selects nothing, so it is fixed. The
+/// `ahu @agent`, and a truncated handle selects nothing, so it is fixed. The
 /// harness and model are the identity a manifest pins -- the reason the listing
 /// exists -- and neither says anything in part, so they are fixed too.
 ///
@@ -1817,11 +1817,11 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
             );
         }
     };
-    let Some(workspace) = record.cmux_workspace_id.as_deref() else {
+    if record.cmux_workspace_id.is_none() {
         bail!("task {} has no recorded cmux session.", record.task_id);
-    };
+    }
     let client = Cmux::discover()?;
-    client.select_workspace(workspace)?;
+    cmux::repository::RepositoryManager::new(&client, repo).select_task_workspace(&record)?;
     console.say(&format!(
         "Focused {} — {}\n  worktree {}\n",
         style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
@@ -1931,6 +1931,21 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     } else {
         None
     };
+    let cmux_status = if record.cmux_workspace_id.is_some() {
+        let client = Cmux::discover().map_err(|error| {
+            Error::new(format!(
+                "cannot safely remove task {} while its recorded cmux workspace cannot be checked: {error}",
+                display_safe(task_id)
+            ))
+        })?;
+        if cmux::repository::RepositoryManager::new(&client, gate).close_task_workspace(&record)? {
+            "closed"
+        } else {
+            "already absent"
+        }
+    } else {
+        "not used"
+    };
     let mut completed: Vec<(&str, String)> = Vec::new();
     let mut not_removed: Vec<(&str, String)> = Vec::new();
     let mut worktree_removed = false;
@@ -1998,8 +2013,8 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     }
     let mut said = format!("removed task {}\n", display_safe(task_id));
     said.push_str(&format!(
-        "  worktree  {}\n  branch    {}\n  record    {}\n",
-        completed[0].1, completed[2].1, completed[1].1
+        "  worktree  {}\n  branch    {}\n  record    {}\n  cmux      {cmux_status}\n",
+        completed[0].1, completed[2].1, completed[1].1,
     ));
     console.say(&said)?;
     Ok(0)
@@ -2124,9 +2139,13 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
     // read failure preserves the pane; closing it is not process supervision.
     let workspace = match record.cmux_workspace_id.as_deref() {
         None => "absent",
-        Some(workspace_id) if cancellation == "confirmed" => {
+        Some(_workspace_id) if cancellation == "confirmed" => {
             Cmux::discover()
-                .and_then(|client| client.close_workspace(workspace_id))
+                .and_then(|client| {
+                    cmux::repository::RepositoryManager::new(&client, repo)
+                        .close_task_workspace(&record)
+                        .map(|_| ())
+                })
                 .map_err(|error| {
                     crate::util::Error::new(format!(
                         "cancellation confirmed, but cmux workspace close failed: {error}"
@@ -2312,7 +2331,7 @@ pub fn launch_cmd(
         bail!(kind: crate::util::ErrorKind::Usage,
             "@{} runs with permissions = {}, which widens the harness's own approval boundary:\n  \
              {}\n\
-             `ahu launch` starts a session with no interactive confirmation, so it will not widen \
+             `ahu @agent` starts a session with no interactive confirmation, so it will not widen \
              approvals on your behalf.\n\
              Re-run with --allow-widened-approvals if that is what you intend. Passing it puts \
              the widening in the command line your own harness shows you before it runs, and \

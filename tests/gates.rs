@@ -16,7 +16,7 @@ fn launch(repo: &TestRepo, extra: &[&str]) -> std::process::Output {
     let bin = common::fake_harness(temp, &temp.join("argv"));
     let mut cmd = common::ahu();
     cmd.current_dir(repo.path())
-        .args(["launch", "@deploy", "--prompt-file"])
+        .args(["@deploy", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .args(extra)
         // cmux is deliberately absent, so a launch that gets past the gate
@@ -107,7 +107,7 @@ fn launch_still_needs_no_opt_in_for_an_agent_that_widens_nothing() {
     let bin = common::fake_harness(temp, &temp.join("argv"));
     let output = common::ahu()
         .current_dir(repo.path())
-        .args(["launch", "@sable", "--prompt-file"])
+        .args(["@sable", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .arg("--dry-run")
         .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
@@ -147,21 +147,14 @@ fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
 
     // It is a real option, parsed and rejected when repeated or unknown.
     assert!(matches!(
-        ahu::cli::parse([
-            "launch",
-            "@deploy",
-            "--prompt-file",
-            "p",
-            "--allow-widened-approvals",
-        ])
-        .unwrap(),
+        ahu::cli::parse(["@deploy", "--prompt-file", "p", "--allow-widened-approvals",]).unwrap(),
         ahu::cli::Command::Launch {
             allow_widened_approvals: true,
             ..
         }
     ));
     assert!(matches!(
-        ahu::cli::parse(["launch", "@deploy", "--prompt-file", "p"]).unwrap(),
+        ahu::cli::parse(["@deploy", "--prompt-file", "p"]).unwrap(),
         ahu::cli::Command::Launch {
             allow_widened_approvals: false,
             ..
@@ -169,7 +162,6 @@ fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
     ));
     assert!(
         ahu::cli::parse([
-            "launch",
             "@deploy",
             "--prompt-file",
             "p",

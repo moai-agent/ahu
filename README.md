@@ -106,7 +106,8 @@ ahu @dev-astra --prompt-file assignment.txt \
 ```
 
 Direct `ahu @agent` submissions do not ask for interactive confirmation and keep
-focus on the caller. The older `ahu launch @agent` form remains supported,
+focus on the caller. Use the direct `ahu @agent` form for all registered-agent
+launches; the removed `ahu launch @agent` form is rejected with a migration hint.
 including `--prompt` and `--prompt-file`.
 Each task receives a short handle derived from its displayed title, such as
 `@configuration-review`. Use `--name review` to choose one. Task commands accept
@@ -216,7 +217,6 @@ require explicit user permission.
 | --- | --- |
 | `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness development agents, and refresh `ahu.lock` |
 | `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
-| `ahu launch @agent [options]` | Backward-compatible launch alias with `--prompt` and `--prompt-file` support |
 | `ahu doctor` | Concise readiness summary; add `--verbose` for component diagnostics |
 | `ahu lock` | Check that recognized agent context and `ahu.lock` are committed and current |
 | `ahu lock --update` | Fingerprint current recognized context into `ahu.lock` for review and commit |

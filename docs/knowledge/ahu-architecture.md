@@ -51,7 +51,7 @@ flowchart LR
     LockCmd --> LockFile["ahu.lock"]
     Git["Committed recognized context"] --> Admission["Launch admission"]
     LockFile --> Admission
-    CLI --> Launch["ahu launch / headless"]
+    CLI --> Launch["ahu @agent / headless"]
     Launch --> Admission
     Admission -->|"tracked, clean, lock matches"| Plan["Resolve agent, harness, model"]
     Admission -->|"missing, stale, dirty, unsafe"| Refuse["Refuse before launch"]

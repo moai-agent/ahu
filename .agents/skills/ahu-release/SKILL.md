@@ -1,5 +1,5 @@
 ---
-name: release
+name: ahu-release
 description: Prepare, verify, merge, and tag a repository release candidate with hermetic CI and explicit publication gates; use with Codex or OpenCode, never Claude Code.
 ---
 
@@ -17,7 +17,7 @@ one work item maps to exactly one pull request. Follow repository policy for
 whether release work items are required and how they link to ahu task IDs. If no
 tracker is configured, keep coordination in the release workflow and ahu task
 records; do not create an assumed GitHub or private-roadmap workflow.
-Use the bundled `direct-agents` skill for task IDs, provider-side links, and
+Use the bundled `ahu-direct-agents` skill for task IDs, provider-side links, and
 tracker lifecycle rules; this release skill adds release-specific local task
 cleanup without changing the provider's records.
 

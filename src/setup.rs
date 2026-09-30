@@ -1043,7 +1043,7 @@ mod tests {
         assert!(root.path().join(".codex/config.toml").is_file());
         assert!(
             root.path()
-                .join(".agents/skills/direct-agents/SKILL.md")
+                .join(".agents/skills/ahu-direct-agents/SKILL.md")
                 .is_file()
         );
         assert!(root.path().join(crate::context_lock::LOCK_PATH).is_file());
@@ -1327,7 +1327,9 @@ mod tests {
     fn setup_conflicts_are_detected_before_any_planned_write() {
         for directory in [false, true] {
             let (root, repo) = setup_repo();
-            let path = root.path().join(".agents/skills/direct-agents/SKILL.md");
+            let path = root
+                .path()
+                .join(".agents/skills/ahu-direct-agents/SKILL.md");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             if directory {
                 std::fs::create_dir(&path).unwrap();

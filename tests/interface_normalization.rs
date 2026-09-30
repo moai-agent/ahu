@@ -7,8 +7,8 @@ use common::TestRepo;
 fn repository_selection_does_not_consume_command_payloads() {
     for args in [
         vec!["message", "abc123", "--repo=elsewhere"],
-        vec!["launch", "@worker", "--prompt", "--repo"],
-        vec!["launch", "@worker", "--prompt-file", "--repo=elsewhere"],
+        vec!["@worker", "--prompt", "--repo"],
+        vec!["@worker", "--prompt-file", "--repo=elsewhere"],
     ] {
         let original: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let (remaining, repository) = extract_repository(original.clone()).unwrap();

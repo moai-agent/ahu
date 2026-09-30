@@ -7,7 +7,7 @@ fn launch(repo: &TestRepo, name: &str, dry_run: bool) -> std::process::Output {
     let bin = common::fake_harness(temp, &temp.join("argv"));
     let mut cmd = common::ahu();
     cmd.current_dir(repo.path())
-        .args(["launch", name, "--prompt-file"])
+        .args([name, "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
         .env(
@@ -63,17 +63,25 @@ fn actual_launch_uses_a_short_preview_while_dry_run_keeps_audit_details() {
 fn launch_parser_requires_an_explicit_registered_identity_and_prompt_file() {
     for args in [
         vec!["launch"],
-        vec!["launch", "@"],
+        vec!["@"],
         vec!["launch", "../agent", "--prompt-file", "p"],
-        vec!["launch", "@sable"],
-        vec!["launch", "@sable", "--prompt-file", "p", "--model", "other"],
+        vec!["@sable", "--prompt-file", "p", "--model", "other"],
     ] {
-        assert!(ahu::cli::parse(args).is_err());
+        assert!(ahu::cli::parse(args.clone()).is_err(), "accepted {args:?}");
     }
     assert!(
-        matches!(ahu::cli::parse(["launch", "@sable", "--prompt-file", "task.txt", "--dry-run"]).unwrap(),
+        matches!(ahu::cli::parse(["@sable", "--prompt-file", "task.txt", "--dry-run"]).unwrap(),
         ahu::cli::Command::Launch { agent, dry_run: true, .. } if agent == "sable")
     );
+}
+
+#[test]
+fn removed_launch_command_suggests_canonical_direct_agent_form() {
+    let error = ahu::cli::parse(["launch", "@sable", "--prompt", "task"])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("was removed"), "{error}");
+    assert!(error.contains("ahu @agent [prompt]"), "{error}");
 }
 
 #[test]
@@ -360,14 +368,7 @@ fn inline_and_piped_prompts_produce_clean_json_without_cmux() {
         let mut command = common::ahu();
         command
             .current_dir(repo.path())
-            .args([
-                "--color=always",
-                "launch",
-                "@sable",
-                "--dry-run",
-                "--output",
-                "json",
-            ])
+            .args(["--color=always", "@sable", "--dry-run", "--output", "json"])
             .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .env(
                 "PATH",
@@ -448,22 +449,8 @@ fn inline_and_piped_prompts_produce_clean_json_without_cmux() {
 fn launch_prompt_conflicts_and_terminal_stdin_are_usage_errors() {
     use ahu::cli::PromptSource;
     for args in [
-        vec![
-            "launch",
-            "@sable",
-            "--prompt",
-            "hello",
-            "--prompt-file",
-            "file",
-        ],
-        vec![
-            "launch",
-            "@sable",
-            "--prompt-file",
-            "file",
-            "--prompt",
-            "hello",
-        ],
+        vec!["@sable", "--prompt", "hello", "--prompt-file", "file"],
+        vec!["@sable", "--prompt-file", "file", "--prompt", "hello"],
     ] {
         let output = common::ahu().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2));
@@ -475,9 +462,7 @@ fn launch_prompt_conflicts_and_terminal_stdin_are_usage_errors() {
         .unwrap_err();
     assert_eq!(error.kind(), ahu::util::ErrorKind::Usage);
     assert!(error.to_string().contains("terminal"));
-    assert!(
-        ahu::cli::parse(["launch", "@sable", "--prompt", "hello", "--output", "json"]).is_err()
-    );
+    assert!(ahu::cli::parse(["@sable", "--prompt", "hello", "--output", "json"]).is_err());
 }
 
 #[test]

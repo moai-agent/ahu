@@ -18,9 +18,7 @@ use crate::selection::ResolvedPair;
 use crate::snapshot::{self, ConfigSnapshot};
 use crate::state::{self, LaunchLock};
 use crate::task::{self, LaunchIdentity, LaunchMode, TaskRecord, TaskState};
-use crate::util::{Error, Result, shell_single_quote};
-
-use serde::{Deserialize, Serialize};
+use crate::util::{Error, Result};
 
 /// The launch preview discloses prompt delivery as an enforcement gap.
 /// Instructions are delivered uniformly, without system-prompt or agent-selection
@@ -30,18 +28,8 @@ pub const DELIVERY_IS_NOT_ENFORCEMENT: &str = "ahu delivers the agent's instruct
      it, and the model may follow the task prompt instead. ahu does not use harness \
      agent-selection or system-prompt flags, so no harness enforces this agent's identity.";
 
-/// Where a repository's cmux group lives. Stored by object id, not by title, so
-/// renaming the group in cmux does not orphan the mapping.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GroupMapping {
-    pub group_id: Option<String>,
-    pub window_id: Option<String>,
-    pub anchor_workspace_id: Option<String>,
-}
-
-fn mapping_path(repo: &Repo) -> Result<PathBuf> {
-    Ok(state::coordination_dir(repo)?.join("cmux.json"))
-}
+pub use crate::cmux::repository::{CoordinatorPlacement, group_coordinator};
+pub use crate::cmux::repository::{GroupMapping, mapping_path};
 
 /// Optional sidebar text, independent of the assignment delivered to the harness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -582,32 +570,26 @@ pub fn execute(
         return Err(rollback_worktree(repo, plan, e));
     }
 
-    let group = match ensure_group(&cmux_client, repo, &mut notes) {
-        Ok(group) => group,
-        Err(e) => return Err(rollback_worktree(repo, plan, e)),
-    };
-    record.cmux_group_id = Some(group.id.clone());
-
     let executable = std::env::current_exe()
         .map_err(|e| Error::new(format!("cannot locate the ahu executable: {e}")))?;
     let startup = cmux::startup_command(&executable, &plan.task_dir);
     let title = cmux::workspace_title(&plan.agent_label(), &plan.title);
-
-    let window = state::read_json::<GroupMapping>(&mapping_path(repo)?)?.window_id;
-    let created = match cmux_client.create_task_workspace(
-        &group.id,
-        window.as_deref(),
+    let manager = cmux::repository::RepositoryManager::new(&cmux_client, repo);
+    let placement = match manager.create_task_workspace(
         &title,
         &plan.summary,
         &plan.worktree,
         &startup,
         focus,
+        &mut notes,
     ) {
-        Ok(created) => created,
-        // No session exists, so nothing in the worktree came from a task.
+        Ok(placement) => placement,
+        // A rejected or uncreated workspace leaves no session behind.
         Err(e) => return Err(rollback_worktree(repo, plan, e)),
     };
-
+    let group = placement.group;
+    let created = placement.workspace;
+    record.cmux_group_id = Some(group.id.clone());
     record.cmux_workspace_id = Some(created.workspace_id.clone());
     record.cmux_window_id = Some(created.window_id.clone());
     // Past this point the workspace exists and its shell may already be running
@@ -617,13 +599,13 @@ pub fn execute(
             "the cmux session started but its task record could not be updated: {e}"
         ));
     }
-    if let Err(e) = cmux_client.set_status(
-        &created.workspace_id,
+    if let Err(e) = manager.set_task_status(
+        &record,
         &cmux::workspace_identity(&record.identity.agent, &record.identity.model),
     ) {
         notes.push(format!("could not set the sidebar status: {e}"));
     }
-    if let Err(e) = cmux_client.expand_group(&group.id) {
+    if let Err(e) = manager.expand_task_group(&record) {
         notes.push(format!("could not expand the repository group: {e}"));
     }
 
@@ -634,223 +616,10 @@ pub fn execute(
     })
 }
 
-/// Find the repository's cmux group, creating it when it is absent.
-///
-/// The mapping is stored by object id. A stored group that no longer exists is
-/// replaced; a group whose anchor was closed (cmux promotes a child, which then
-/// loses its own sidebar row) gets a fresh dedicated anchor so every task keeps
-/// a visible row.
+/// Compatibility wrapper for launch-local tests; policy lives in the shared manager.
+#[cfg(test)]
 fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<cmux::Group> {
-    let path = mapping_path(repo)?;
-    let mut mapping: GroupMapping = state::read_json(&path)?;
-    let current_window = client.current_window().ok().flatten();
-
-    // A user may already be working in a repository group before ahu has any
-    // saved mapping. Prefer that group to creating a duplicate, even when an
-    // earlier ahu invocation saved a different group after losing its state.
-    let groups = client.list_groups(current_window.as_deref())?;
-    let current_workspace = client.current_workspace()?;
-    let workspaces = client.workspaces_in_window(current_window.as_deref())?;
-    let candidates = repository_group_candidates(&groups, &repo.display_name(), |id| {
-        workspaces.get(id).is_some_and(|workspace| {
-            git::discover(Path::new(&workspace.directory))
-                .is_ok_and(|found| found.identity() == repo.identity())
-        })
-    });
-    let current_group = if candidates.iter().any(|group| {
-        current_workspace
-            .as_ref()
-            .is_some_and(|id| group.member_workspace_ids.contains(id))
-    }) {
-        recover_group(&candidates, current_workspace.as_deref())?
-    } else {
-        None
-    };
-    if let Some(group) = current_group
-        && mapping.group_id.as_deref() != Some(group.id.as_str())
-    {
-        mapping = GroupMapping {
-            group_id: Some(group.id.clone()),
-            window_id: current_window.clone(),
-            anchor_workspace_id: Some(group.anchor_workspace_id.clone()),
-        };
-        state::write_json(&path, &mapping)?;
-        return Ok(group.clone());
-    }
-
-    if let Some(group_id) = mapping.group_id.clone() {
-        let window: Option<String> = mapping.window_id.clone().or_else(|| current_window.clone());
-        if let Some(group) = client.find_group(&group_id, window.as_deref())? {
-            if mapping.anchor_workspace_id.as_deref() != Some(group.anchor_workspace_id.as_str()) {
-                match restore_anchor(client, repo, &group) {
-                    Ok(anchor) => {
-                        notes.push(
-                            "the repository group's anchor workspace had been closed, so cmux had \
-                             promoted a task into the header row. ahu created a new anchor so that \
-                             task is visible again."
-                                .to_string(),
-                        );
-                        mapping.anchor_workspace_id = Some(anchor);
-                    }
-                    Err(e) => notes.push(format!(
-                        "the repository group's anchor changed and ahu could not restore a \
-                         dedicated one ({e}); one task may be hidden under the group header."
-                    )),
-                }
-                mapping.window_id = window.clone();
-                state::write_json(&path, &mapping)?;
-                if let Some(refreshed) = client.find_group(&group_id, window.as_deref())? {
-                    return Ok(refreshed);
-                }
-            }
-            return Ok(group);
-        }
-        notes.push(format!(
-            "the cmux group recorded for this repository ({group_id}) no longer exists; \
-             ahu will find an existing group or create one."
-        ));
-    }
-
-    let group = match recover_group(&candidates, None)? {
-        Some(group) => group.clone(),
-        None => client.create_group(&repo.display_name(), &repo.root)?,
-    };
-    mapping = GroupMapping {
-        group_id: Some(group.id.clone()),
-        window_id: current_window,
-        anchor_workspace_id: Some(group.anchor_workspace_id.clone()),
-    };
-    state::write_json(&path, &mapping)?;
-    Ok(group)
-}
-
-pub struct CoordinatorPlacement {
-    pub notes: Vec<String>,
-    pub opened_workspace: bool,
-}
-
-/// Coordinator shortcuts reuse their terminal and join the same primary-owned
-/// group as task launches. If the terminal already anchors another group, open
-/// a fresh coordinator workspace under the repository group instead of trying
-/// to move a cmux anchor between groups.
-pub fn group_coordinator(
-    repo: &Repo,
-    executable: &str,
-    label: &str,
-    harness: &str,
-    model: &str,
-    args: &[String],
-) -> Result<CoordinatorPlacement> {
-    let Some(workspace) = std::env::var("CMUX_WORKSPACE_ID")
-        .ok()
-        .filter(|id| !id.is_empty())
-    else {
-        return Ok(CoordinatorPlacement {
-            notes: Vec::new(),
-            opened_workspace: false,
-        });
-    };
-    let client = Cmux::discover()?;
-    client.check_capabilities()?;
-    // Validate the explicit caller before creating a group or changing state.
-    client.window_for_workspace(&workspace)?;
-    let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
-    let mut notes = Vec::new();
-    let group = ensure_group(&client, repo, &mut notes)?;
-    let mapping: GroupMapping = state::read_json(&mapping_path(repo)?)?;
-    let window = mapping
-        .window_id
-        .ok_or_else(|| Error::new("cmux repository group has no known window"))?;
-    if !group.member_workspace_ids.contains(&workspace) {
-        let belongs_to_other_group =
-            client
-                .list_groups(Some(&window))?
-                .into_iter()
-                .any(|candidate| {
-                    candidate.id != group.id
-                        && candidate
-                            .member_workspace_ids
-                            .iter()
-                            .any(|member| member == &workspace)
-                });
-        if belongs_to_other_group {
-            let startup = std::iter::once(shell_single_quote(executable))
-                .chain(args.iter().map(|arg| shell_single_quote(arg)))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let created = client.create_coordinator_workspace(
-                &group.id,
-                Some(&window),
-                &format!("{label} coordinator"),
-                &format!("{label} coordinator for {}", repo.display_name()),
-                &repo.root,
-                &startup,
-            )?;
-            if let Err(error) =
-                client.set_agent_metadata(&created.workspace_id, "director", harness, model)
-            {
-                notes.push(format!(
-                    "could not set coordinator metadata in cmux: {error}"
-                ));
-            }
-            notes.push(format!(
-                "the invoking workspace already belongs to another cmux group; ahu opened a new {label} coordinator workspace under the {} group.",
-                repo.display_name()
-            ));
-            return Ok(CoordinatorPlacement {
-                notes,
-                opened_workspace: true,
-            });
-        }
-        client.add_workspace_to_group(&group.id, &workspace, &window)?;
-    }
-    if let Err(error) = client.set_agent_metadata(&workspace, "director", harness, model) {
-        notes.push(format!(
-            "could not set coordinator metadata in cmux: {error}"
-        ));
-    }
-    client.expand_group(&group.id)?;
-    Ok(CoordinatorPlacement {
-        notes,
-        opened_workspace: false,
-    })
-}
-
-fn repository_group_candidates<'a>(
-    groups: &'a [cmux::Group],
-    name: &str,
-    belongs: impl Fn(&str) -> bool,
-) -> Vec<&'a cmux::Group> {
-    groups
-        .iter()
-        .filter(|group| {
-            group.name == name && group.member_workspace_ids.iter().any(|id| belongs(id))
-        })
-        .collect()
-}
-
-fn recover_group<'a>(
-    groups: &[&'a cmux::Group],
-    current: Option<&str>,
-) -> Result<Option<&'a cmux::Group>> {
-    if let Some(group) = groups.iter().find(|group| {
-        current.is_some_and(|id| group.member_workspace_ids.iter().any(|member| member == id))
-    }) {
-        return Ok(Some(group));
-    }
-    match groups {
-        [group] => Ok(Some(group)),
-        [] => Ok(None),
-        _ => bail!(
-            "Multiple cmux groups match this repository. Run ahu from the group you want to use."
-        ),
-    }
-}
-
-fn restore_anchor(client: &Cmux, repo: &Repo, group: &cmux::Group) -> Result<String> {
-    let anchor = client.create_anchor_workspace(&group.id, &repo.display_name(), &repo.root)?;
-    client.set_anchor(&group.id, &anchor)?;
-    Ok(anchor)
+    cmux::repository::RepositoryManager::new(client, repo).ensure_group(notes)
 }
 
 /// Reconcile recorded tasks against cmux, so sessions closed outside ahu do not
@@ -1319,9 +1088,9 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     // Nested commands discover the checkout the session edits.
     state::ensure_checkout_state(&record.worktree)?;
     let _ = task::set_state(task_dir, TaskState::Running);
-    if let (Ok(client), Some(workspace)) = (Cmux::discover(), record.cmux_workspace_id.as_deref()) {
-        let _ = client.set_status(
-            workspace,
+    if let (Ok(client), Ok(repo)) = (Cmux::discover(), git::discover(&record.worktree)) {
+        let _ = cmux::repository::RepositoryManager::new(&client, &repo).set_task_status(
+            &record,
             &cmux::workspace_identity(&record.identity.agent, &record.identity.model),
         );
     }
@@ -1469,22 +1238,33 @@ mod group_recovery_tests {
             group("original", "coordinator"),
             group("unrelated", "other-repo"),
         ];
-        let matches = repository_group_candidates(&groups, "ahu", |id| id != "other-repo");
+        let matches =
+            cmux::repository::repository_group_candidates(&groups, "ahu", |id| id != "other-repo");
         assert_eq!(matches.len(), 2);
         assert_eq!(
-            recover_group(&matches, Some("coordinator"))
+            cmux::repository::recover_group(&matches, Some("coordinator"))
                 .unwrap()
                 .unwrap()
                 .id,
             "original"
         );
-        assert!(recover_group(&matches, None).is_err());
+        assert!(cmux::repository::recover_group(&matches, None).is_err());
         assert_eq!(
-            recover_group(&matches[..1], None).unwrap().unwrap().id,
+            cmux::repository::recover_group(&matches[..1], None)
+                .unwrap()
+                .unwrap()
+                .id,
             "new"
         );
-        assert!(recover_group(&[], None).unwrap().is_none());
-        assert!(repository_group_candidates(&groups, "different", |_| true).is_empty());
+        assert!(
+            cmux::repository::recover_group(&[], None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cmux::repository::repository_group_candidates(&groups, "different", |_| true)
+                .is_empty()
+        );
     }
 
     fn spawn_sleep(seconds: &str) -> std::process::Child {

@@ -98,7 +98,7 @@ reasoning; preserve each harness's semantics and keep provider tokens separate.
 
 ## Improve instructions, skills and tools
 
-Use the bundled `agent-context-critic` skill to turn one observed problem into a
+Use the bundled `ahu-agent-context-critic` skill to turn one observed problem into a
 testable change. Commit each variant with its refreshed context lock. Freeze
 cases and expected answers before running the comparison, retain failures, and
 compare matched cases with the same model, tools and permissions. Include tasks

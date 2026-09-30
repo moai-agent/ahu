@@ -26,7 +26,7 @@ agents, each using its configured harness and model in a separate worktree.
 Headless children inherit that backend; interactive children use cmux.
 Use `ahu @name 'assignment text'` for a direct launch, or
 `ahu @name --prompt-file /path/to/task.txt` for a file-backed assignment.
-`ahu launch @name` remains a supported alias and accepts the older
+`ahu @name` remains a supported alias and accepts the older
 `--prompt` form.
 Headless native helpers follow the frozen policy described below. Every
 launch supplies its backend delegation contract as prompt text on every
@@ -68,7 +68,7 @@ The typed decision service has a separate credential boundary: ahu can read
 `TYPESAFE_API_KEY` from its process environment or the selected repository's
 `.env` and send explicitly supplied evidence to TypeSafe. It can instead use a
 configured loopback decision service. Do not copy that key into agent prompts,
-MCP configuration, telemetry or tracked files. Read `typed-decisions` for request
+MCP configuration, telemetry or tracked files. Read `ahu-typed-decisions` for request
 design and data handling, and `docs/typed-decisions.md` for provider configuration.
 
 ## Four rules everything else follows from

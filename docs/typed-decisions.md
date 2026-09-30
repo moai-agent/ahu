@@ -4,7 +4,7 @@ This is an exploratory, model-neutral MCP interface for letting an ahu agent
 ask a configured decision provider for bounded typed answers. The default
 provider is TypeSafe Jev; an explicit local provider can still be selected for
 offline experiments. ahu does not run an agent loop. The bundled
-[`typed-decisions` skill](../.agents/skills/typed-decisions/SKILL.md) guides
+[`ahu-typed-decisions` skill](../.agents/skills/ahu-typed-decisions/SKILL.md) guides
 agents on when to use the tool and how to handle its output and data boundary.
 
 ## MCP tool

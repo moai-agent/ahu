@@ -443,9 +443,10 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
     repo.write("CLAUDE.md", "committed guidance\n");
-    repo.commit("fixture");
-    // An uncommitted, ignored configuration file must still be inherited.
+    // This ignored native configuration is still part of the committed
+    // context snapshot and is inherited by the task worktree.
     repo.write(".claude/settings.local.json", "{\"local\":true}\n");
+    repo.commit("fixture");
 
     let discovered = ahu::git::discover(repo.path()).unwrap();
     let loaded = ahu::config::load(repo.path()).unwrap().unwrap();

@@ -13,6 +13,7 @@
 //! that task would have no visible row of its own.
 
 pub mod integration;
+pub mod repository;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

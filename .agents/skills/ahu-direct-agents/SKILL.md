@@ -1,5 +1,5 @@
 ---
-name: direct-agents
+name: ahu-direct-agents
 description: Coordinate repository work through registered ahu agents and task records.
 ---
 # Direct agents
@@ -17,7 +17,7 @@ Discover identities with `ahu agents`. Put the complete assignment in a UTF-8
 file outside every repository, then launch it with:
 
 ```sh
-ahu launch @agent-name --prompt-file /absolute/path/to/task.txt
+ahu @agent-name --prompt-file /absolute/path/to/task.txt
 ```
 
 Use `--headless --background --output json` for unattended work. Approval
@@ -118,7 +118,7 @@ it does not grant authority or change those checks. Report unavailable agents,
 denied launches, missing credentials, incomplete reports, and unjoined children
 as blockers. Never replace a configured harness or model after failure.
 
-Maintain this file at `.agents/skills/direct-agents/SKILL.md`. Run `ahu setup`
+Maintain this file at `.agents/skills/ahu-direct-agents/SKILL.md`. Run `ahu setup`
 to install the user-facing skills in the paths supported by detected harnesses.
 Codex, OpenCode, and Antigravity use `.agents/skills/`; Claude Code uses
 `.claude/skills/`. A skill file being present does not prove that a harness

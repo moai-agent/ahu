@@ -35,11 +35,6 @@ Commands:
   setup                 Configure ahu, harness MCP access, skills, and dev agents
   @agent [prompt]       Assign work to an agent; quote multi-word prompts.
                         Also accepts --prompt or --prompt-file.
-  launch @name [options]
-                        Backward-compatible alias. Reads no confirmation, so
-                        approval widening needs an explicit flag.
-                        --title <text> and --summary <text> set plain sidebar text.
-                        With --title alone, the description also uses that title.
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
   lock [--update]       Check committed agent context, or refresh ahu.lock before committing it
@@ -97,7 +92,7 @@ Commands:
 Task references:
   Use ahu:task:<id> to identify a task explicitly. Bare IDs and unique ID
   prefixes remain accepted. Exact @name handles select tasks in this repository.
-  In `launch @name`, @name selects a registered agent instead.
+  In `ahu @name`, @name selects a registered agent instead.
 
 Options:
   help [COMMAND]        Print focused help for a command; use `help all` for this reference
@@ -185,10 +180,10 @@ tasks options:
 doctor options:
   --verbose             Show component-level cmux, hook, drift, and context-lock details
 
-launcher options:
+agent assignment options:
   --no-focus            Do not switch to the new session after launching
 
-launch options:
+agent assignment options:
   --name <name>        Reserve an immutable @name for this task in the repository.
                         By default, generate a short name from the displayed title.
   --prompt <text>       Use an inline prompt (conflicts with --prompt-file)
@@ -216,7 +211,7 @@ launch options:
   --dry-run             Show the preview and create nothing
   --allow-widened-approvals
                         Required to launch an agent whose manifest declares
-                        permissions = auto or accept-edits. `ahu launch` reads no
+                        permissions = auto or accept-edits. `ahu @agent` reads no
                         confirmation, so widening is opt-in on the command line
 
 Exit codes:
@@ -251,7 +246,6 @@ Commands:
   mcp serve             Serve repository tools over stdio MCP
   explain               Show the architecture overview
   @agent [PROMPT]       Assign work to a registered agent
-  launch @agent         Backward-compatible launch alias
   agy|claude|codex|opencode
                         Open a coordinating harness session
 
@@ -277,9 +271,9 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
     let help = match topic {
         "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh ahu.lock. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
-        "eval run" => help_section("eval run options:", "launcher options:"),
+        "eval run" => help_section("eval run options:", "agent assignment options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
-        "launch" | "@agent" => help_section("launch options:", "Exit codes:"),
+        "@agent" => help_section("agent assignment options:", "Exit codes:"),
         "explain" => help_section("explain options:", "onboard options:"),
         "onboard" => help_section("onboard options:", "knowledge lint options:"),
         "knowledge lint" => help_section("knowledge lint options:", "eval report options:"),
@@ -335,7 +329,7 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "claude" => "ahu claude — open Claude Code",
         "codex" => "ahu codex — open Codex",
         "opencode" => "ahu opencode — open OpenCode",
-        "launch" => "ahu launch @agent — backward-compatible launch alias",
+        "@agent" => "ahu @agent — assign work to a registered agent",
         "help" => "ahu help — show command help",
         "run-task" => "ahu run-task — internal task worker",
         "supervise" => "ahu supervise — internal task supervisor",
@@ -487,7 +481,7 @@ impl PromptSource {
             Self::Stdin => {
                 if stdin_is_terminal {
                     return Err(crate::util::Error::new(
-                        "ahu launch needs --prompt or --prompt-file when stdin is a terminal.",
+                        "ahu @agent needs --prompt or --prompt-file when stdin is a terminal.",
                     )
                     .with_kind(crate::util::ErrorKind::Usage));
                 }
@@ -726,7 +720,6 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         },
         "knowledge" => parse_knowledge(&args[1..]),
         "eval" => parse_eval(&args[1..]),
-        "launch" => parse_launch_backend(&args[1..], stdin_available),
         direct if direct.starts_with('@') => {
             if args.len() == 1 && !stdin_available {
                 let agent = direct.strip_prefix('@').unwrap_or_default();
@@ -748,6 +741,9 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 agent: None,
             })
         }
+        "launch" => bail!(
+            "`ahu launch` was removed. Use `ahu @agent [prompt]`; see `ahu help @agent` for options."
+        ),
         other => bail!("unknown command {other:?}.\n\nRun 'ahu help' for usage."),
     }
 }
@@ -1183,7 +1179,7 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
 fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     let name = rest
         .first()
-        .ok_or_else(|| crate::util::Error::new("ahu launch needs @agent --prompt-file <path>."))?;
+        .ok_or_else(|| crate::util::Error::new("ahu @agent needs --prompt-file <path>."))?;
     let agent = name.strip_prefix('@').unwrap_or(name);
     validate_agent_name(agent)?;
     let mut display = crate::launch::DisplayMetadata::default();
@@ -1225,7 +1221,7 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
                 allow_widened_approvals = true;
             }
             value if !value.starts_with('-') => positional_prompt.push(value.to_string()),
-            other => bail!("unknown or repeated option {other:?} for ahu launch."),
+            other => bail!("unknown or repeated option {other:?} for ahu @agent."),
         }
         index += 1;
     }
@@ -1241,7 +1237,7 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
         (Some(path), None) => PromptSource::File(path),
         (None, Some(text)) => PromptSource::Inline(text),
         (None, None) if stdin_available => PromptSource::Stdin,
-        (None, None) => bail!("ahu launch needs --prompt, --prompt-file, or piped stdin."),
+        (None, None) => bail!("ahu @agent needs --prompt, --prompt-file, or piped stdin."),
     };
     if output_json && !dry_run {
         bail!("--output json requires --dry-run.");
@@ -1866,7 +1862,6 @@ mod parser_tests {
     fn headless_launch_keeps_options_separate_from_literal_prompt_values() {
         for policy in ["disabled", "bounded"] {
             let Command::HeadlessLaunch { launch, options } = parse([
-                "launch",
                 "@fixture",
                 "--headless",
                 "--background",
@@ -1949,7 +1944,7 @@ mod parser_tests {
                 "invalid child agent name",
             ),
         ] {
-            let mut args = vec!["launch", "@fixture", "--prompt", "task"];
+            let mut args = vec!["@fixture", "--prompt", "task"];
             args.extend(extra);
             assert_usage(&args, diagnostic);
         }
@@ -1970,14 +1965,13 @@ mod color_tests {
         let (args, choice) = extract_color(vec![
             "--color".into(),
             "never".into(),
-            "launch".into(),
             "@fixture".into(),
             "--prompt".into(),
             "--color=always".into(),
         ])
         .unwrap();
         assert_eq!(choice, Some(crate::style::ColorChoice::Never));
-        assert_eq!(args, ["launch", "@fixture", "--prompt", "--color=always"]);
+        assert_eq!(args, ["@fixture", "--prompt", "--color=always"]);
         for args in [
             vec!["--color"],
             vec!["--color="],
@@ -1992,7 +1986,6 @@ mod color_tests {
         for option in ["--prompt", "--prompt-file"] {
             for value in ["--color", "--color=always"] {
                 let (args, choice) = extract_color(vec![
-                    "launch".into(),
                     "@fixture".into(),
                     option.into(),
                     value.into(),
@@ -2000,7 +1993,7 @@ mod color_tests {
                 ])
                 .unwrap();
                 assert_eq!(choice, Some(crate::style::ColorChoice::Never));
-                assert_eq!(args, ["launch", "@fixture", option, value]);
+                assert_eq!(args, ["@fixture", option, value]);
             }
         }
     }
@@ -2086,7 +2079,7 @@ mod focused_help_tests {
         for (topic, starts_with) in [
             ("eval run", "eval run options:"),
             ("eval report", "eval report options:"),
-            ("launch", "launch options:"),
+            ("@agent", "agent assignment options:"),
             ("explain", "explain options:"),
             ("onboard", "onboard options:"),
             ("knowledge lint", "knowledge lint options:"),
@@ -2097,6 +2090,12 @@ mod focused_help_tests {
             );
         }
         assert!(help_for(Some("agents")).unwrap().contains("ahu agents"));
+        assert!(
+            help_for(Some("@agent"))
+                .unwrap()
+                .contains("--allow-widened-approvals")
+        );
+        assert!(help_for(Some("launch")).is_err());
         assert!(help_for(Some("unknown")).is_err());
         assert!(help_section("absent:", "also absent:").is_empty());
         assert!(help_line_for("unlisted").is_none());
@@ -2108,10 +2107,10 @@ mod direct_agent_tests {
     use super::*;
 
     #[test]
-    fn direct_agent_syntax_accepts_positional_prompt_and_launch_alias_remains() {
+    fn direct_agent_syntax_accepts_positional_prompt() {
         for args in [
             vec!["@dev-glm", "fix", "the", "parser"],
-            vec!["launch", "@dev-glm", "fix", "the", "parser"],
+            vec!["@dev-glm", "--prompt", "fix the parser"],
         ] {
             let Command::Launch {
                 agent,

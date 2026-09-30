@@ -155,7 +155,7 @@ pub fn add_worktree(repo: &Repo, path: &Path, branch: &str, base: &str) -> Resul
         {
             "\nCreating a task needs write access to the repository's Git metadata. \
              If this command is running in a restricted agent session, request approval \
-             to run ahu launch outside its sandbox, or run it in your terminal. \
+             to run ahu @agent outside its sandbox, or run it in your terminal. \
              --allow-widened-approvals only controls the child agent; it cannot grant \
              permissions to the session launching ahu."
         } else {

@@ -41,14 +41,14 @@ ahu @reviewer --headless --prompt-file assignment.txt --output json
 ahu @reviewer
 ```
 
-The `ahu launch @name` form remains a backward-compatible alias. Both forms
-accept `--prompt`, `--prompt-file`, or piped stdin. Do not combine a positional
+The canonical `ahu @name` form accepts `--prompt`, `--prompt-file`, or piped stdin.
+The removed `ahu launch @name` form is rejected with a migration hint. Do not combine a positional
 prompt with either prompt flag. Direct prompts are passed as one literal
 argument; quote multi-word prompts in the shell. `ahu lock` checks that the
 recognized repository context matches committed `ahu.lock`; `ahu lock --update`
 refreshes it for review. Every changed context input and the lock must be
 tracked, clean, and committed before an agent can run. The bundled
-`agent-context-critic` skill uses evaluations to test context hypotheses rather than
+`ahu-agent-context-critic` skill uses evaluations to test context hypotheses rather than
 claiming that ahu can enumerate everything a harness loaded.
 
 ## Installing and updating ahu safely
@@ -71,7 +71,7 @@ replaced using one of the procedures described earlier before investigating anot
 
 Task commands accept exact `@name` handles, `ahu:task:<id>`, bare IDs, uppercase,
 and unambiguous ID prefixes. References to other resource kinds are refused.
-`ahu launch @name` selects a registered agent; `ahu task @name` selects a task.
+`ahu @name` selects a registered agent; `ahu task @name` selects a task.
 
 ### Task handles
 
@@ -106,7 +106,7 @@ Registered agent names and task handles may share text; the command supplies
 their distinct meaning. Names locate tasks and do not grant authority.
 
 The `@` sigil is interpreted by command context: agent-selection positions such
-as `ahu launch @dev-astra` select a registered agent, while task-reference
+as `ahu @dev-astra` select a registered agent, while task-reference
 positions such as `ahu task @storage-cleanup` select an immutable task handle.
 The canonical task reference is `ahu:task:<uuid>`. Provider-owned native session
 IDs remain labeled locators in inspection output; they do not become ahu task
@@ -119,7 +119,7 @@ stdout. Its repository inspection tools are read-only and scoped to the current 
 `ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get`. The server reports
 canonical task IDs and verified `@name` handles while using ahu's existing
 repository ownership and task-resolution rules. Protocol handles describe
-inspection operations and do not replace ahu launch records or identities.
+inspection operations and do not replace ahu task records or identities.
 
 The advisory `ahu_skills_suggest` MCP tool accepts a task and a lexical or
 decision policy. It suggests committed skills without loading them. Decision
@@ -191,7 +191,7 @@ Follow the repository's tracking policy for long-running or failure-prone work.
 It may require an issue, task, milestone item, or another provider record; it
 may choose to use ahu's task record alone. ahu records execution state, not
 acceptance criteria or roadmap status, and it has no built-in issue-tracker
-integration. The bundled `direct-agents` skill describes how to keep tracker
+integration. The bundled `ahu-direct-agents` skill describes how to keep tracker
 work optional or link a provider-side work item to an ahu task ID without
 assuming GitHub or a private roadmap.
 
@@ -464,7 +464,7 @@ If either manifest requests wider approvals, supply the corresponding parent
 Inside the owning task, request the child through the launching executable:
 
 ```sh
-"$AHU_BIN" launch @reviewer --headless --background \
+"$AHU_BIN" @reviewer --headless --background \
   --prompt 'Read the assigned source and report findings.' --output json
 ```
 
@@ -1399,7 +1399,7 @@ repository file. A clean lock does not prove those sources are absent or that a
 harness loaded any particular skill. The lock's coverage limitations are part
 of the launch disclosure.
 
-Use the bundled `agent-context-critic` skill to examine a concrete behavior,
+Use the bundled `ahu-agent-context-critic` skill to examine a concrete behavior,
 form one context-change hypothesis, run the same OKF suite before and after the
 committed change, and compare results with `ahu eval report`. Prefer deterministic
 answer and OTel-backed tool checks; use agent evaluators for subjective rubric
@@ -1411,6 +1411,25 @@ candidate checkout are not secret merely because the prompt omits their answers.
 Headless tasks use primary-owned coordination; interactive tasks use their own
 worktree-local records. `tasks` and `task` include compatible legacy records as
 well. `focus` is for interactive cmux sessions.
+
+### Interactive CMUX ownership
+
+All interactive harnesses enter `cmux::repository::RepositoryManager` after
+harness and model resolution. That manager owns repository-group selection and
+recovery, anchor restoration, task-workspace creation, and the recorded
+task-to-group/window/workspace association. `ahu focus`, confirmed cancellation,
+task status updates, and `ahu remove` cleanup resolve that association through
+the same manager. Ambiguous or mismatched ownership fails closed rather than
+selecting or closing a similarly named workspace. Headless tasks do not require
+CMUX and do not enter this lifecycle.
+
+ahu stores CMUX's group, window, and workspace identifiers in the task record.
+The workspace is the addressable task terminal surface in the CMUX API used by
+ahu; CMUX does not provide ahu a stable separate pane/surface identifier for
+that shell. The `surface_id` returned by `markdown.open` is for the separate
+explanation viewer and is not a task-session identifier. These limits mean ahu
+can confirm and manage the task workspace, but does not claim to inspect the
+harness process or terminal internals from CMUX alone.
 
 Each interactive task stores `task.json` and `prompt.txt` under
 `<task-worktree>/.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Session status
@@ -1548,8 +1567,8 @@ inside ahu use registered ahu agents running their configured
 harnesses and models in separate worktrees. Interactive tasks use cmux workspaces;
 headless descendants inherit the execution mode and primary-owned coordination scope.
 Headless child grants and bounded native helpers follow the preceding policies.
-The supplied delegation contract still uses the backward-compatible
-`ahu launch @name --prompt-file assignment.txt` form so saved deliveries can
+The supplied delegation contract uses the canonical
+`ahu @name --prompt-file assignment.txt` form so saved deliveries can
 be replayed. `AHU_BIN` points to the launching ahu executable.
 
 Specify the absolute source checkout and revision or diff scope when assigning
@@ -1588,7 +1607,7 @@ drift. The two source digests and configuration inputs remain distinct.
 ### Registered agent permissions
 
 For interactive launches, `permissions = "prompt"` passes no approval flag. `accept-edits` and `auto`
-request adapter-specific flags; `ahu launch` requires
+request adapter-specific flags; `ahu @agent` requires
 `--allow-widened-approvals` for either, including dry runs. Existing harness
 settings still affect approvals. The flag grants no additional access to the
 calling session.

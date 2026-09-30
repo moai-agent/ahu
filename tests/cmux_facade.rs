@@ -506,7 +506,6 @@ fn headless_dry_run_uses_the_same_status_and_refuses_unknown_registration() {
             )
             .env("AHU_RUNTIME_DIR", f.root.join("runtime"))
             .args([
-                "launch",
                 "@worker",
                 "--headless",
                 "--dry-run",

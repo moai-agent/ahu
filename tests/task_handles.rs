@@ -111,9 +111,8 @@ fn names_are_bounded_and_cannot_be_paths_or_options() {
         assert!(handles::name(&handles::generated_name(title)).is_ok());
     }
     for args in [
-        vec!["launch", "@worker", "--name", "@short", "--prompt", "work"],
+        vec!["@worker", "--name", "@short", "--prompt", "work"],
         vec![
-            "launch",
             "@worker",
             "--headless",
             "--name",
@@ -125,10 +124,7 @@ fn names_are_bounded_and_cannot_be_paths_or_options() {
         assert!(ahu::cli::parse(args).is_ok());
     }
     assert!(
-        ahu::cli::parse([
-            "launch", "@worker", "--name", "a", "--name", "b", "--prompt", "work"
-        ])
-        .is_err()
+        ahu::cli::parse(["@worker", "--name", "a", "--name", "b", "--prompt", "work"]).is_err()
     );
 }
 

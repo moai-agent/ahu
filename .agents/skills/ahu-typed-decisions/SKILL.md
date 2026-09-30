@@ -1,5 +1,5 @@
 ---
-name: typed-decisions
+name: ahu-typed-decisions
 description: Use ahu's typed decision MCP tool for bounded, non-sensitive judgments when model-backed classification or scoring is useful.
 ---
 

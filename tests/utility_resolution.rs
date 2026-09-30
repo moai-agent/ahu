@@ -117,14 +117,8 @@ fn repository_utilities_are_excluded_before_discovery_and_launch() {
         for args in [
             vec!["agents"],
             vec!["doctor"],
-            vec![
-                "launch",
-                "@sable",
-                "--prompt-file",
-                "assignment.txt",
-                "--dry-run",
-            ],
-            vec!["launch", "@sable", "--prompt-file", "assignment.txt"],
+            vec!["@sable", "--prompt-file", "assignment.txt", "--dry-run"],
+            vec!["@sable", "--prompt-file", "assignment.txt"],
         ] {
             let result = fixture
                 .command(fixture.repo.path(), &path)

@@ -53,7 +53,7 @@ if scenario in ('child','mailbox'):
  child=os.environ['CHILD_PROMPT']
  env=dict(os.environ,SCENARIO='success')
  extra=['--name',os.environ['CHILD_TASK_NAME']] if 'CHILD_TASK_NAME' in os.environ else []
- r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--headless','--background','--output','json','--prompt-file',child]+extra,env=env,capture_output=True,text=True)
+ r=subprocess.run([os.environ['AHU_BIN'],'@worker','--headless','--background','--output','json','--prompt-file',child]+extra,env=env,capture_output=True,text=True)
  assert r.returncode==0, r.stderr
  child_id=json.loads(r.stdout)['task_id']
  r=subprocess.run([os.environ['AHU_BIN'],'wait',child_id,'--output','json'],env=env,capture_output=True,text=True)
@@ -127,7 +127,6 @@ if scenario=='nonzero': sys.exit(7)
         self.command()
             .env("SCENARIO", scenario)
             .args([
-                "launch",
                 "@worker",
                 "--headless",
                 "--output",
@@ -241,7 +240,6 @@ fn exporter_setup_failure_does_not_block_headless_execution() {
         .command()
         .env("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "gzip")
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--output",
@@ -533,7 +531,6 @@ fn recursive_registered_child_inherits_headless_and_is_discoverable() {
         .env("CHILD_TASK_NAME", "@nested-worker")
         .env("CHILD_PROMPT", prompt)
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--output",
@@ -599,7 +596,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "codex",
             vec![
                 json!({"type":"thread.started","thread_id":"thr-codex"}),
-                json!({"type":"item.completed","item":{"type":"function_call","name":"skill","input":{"skill":"direct-agents"}}}),
+                json!({"type":"item.completed","item":{"type":"function_call","name":"skill","input":{"skill":"ahu-direct-agents"}}}),
                 json!({"type":"item.completed","item":{"type":"agent_message","text":"done"}}),
                 json!({"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18},"model":"gpt-test"}),
             ],
@@ -608,7 +605,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "claude-code",
             vec![
                 json!({"type":"system","session_id":"ses-claude","subtype":"init"}),
-                json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"direct-agents"}}]}}),
+                json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"ahu-direct-agents"}}]}}),
                 json!({"type":"assistant","message":{"content":[]}}),
                 json!({"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18},"model":"claude-test"}),
             ],
@@ -617,7 +614,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "antigravity",
             vec![
                 json!({"type":"init","session_id":"ses-agy"}),
-                json!({"type":"tool_use","name":"Skill","input":{"skill":"direct-agents"}}),
+                json!({"type":"tool_use","name":"Skill","input":{"skill":"ahu-direct-agents"}}),
                 json!({"type":"result","status":"success","response":"done","usage":{"prompt_tokens":17,"completion_tokens":4,"total_tokens":21},"model_name":"gemini-test"}),
             ],
         ),
@@ -625,7 +622,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "opencode",
             vec![
                 json!({"type":"step_start","sessionID":"ses-opencode","part":{"type":"step-start"}}),
-                json!({"type":"tool_use","sessionID":"ses-opencode","part":{"type":"tool","tool":"skill","state":{"input":{"skill":"direct-agents"}}}}),
+                json!({"type":"tool_use","sessionID":"ses-opencode","part":{"type":"tool","tool":"skill","state":{"input":{"skill":"ahu-direct-agents"}}}}),
                 json!({"type":"text","sessionID":"ses-opencode","part":{"type":"text","text":"done"}}),
                 json!({"type":"step_finish","sessionID":"ses-opencode","part":{"type":"step-finish","reason":"stop","usage":{"input_tokens":19,"output_tokens":6,"total_tokens":25},"model":"glm-test"}}),
             ],
@@ -667,7 +664,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             1,
             "{harness} skill invocation was not captured"
         );
-        assert_eq!(events.skills[0].name, "direct-agents");
+        assert_eq!(events.skills[0].name, "ahu-direct-agents");
     }
 }
 
@@ -749,7 +746,7 @@ fn skill_probe_antigravity_nested_tool_event_records_only_invocation_metadata() 
 #[test]
 fn cli_values_never_become_batch_options_and_duplicates_are_refused() {
     for field in ["--prompt", "--title", "--summary"] {
-        let mut args = vec!["launch", "@worker", "--headless", field, "--dry-run"];
+        let mut args = vec!["@worker", "--headless", field, "--dry-run"];
         if field != "--prompt" {
             args.extend(["--prompt", "task"]);
         }
@@ -767,7 +764,7 @@ fn cli_values_never_become_batch_options_and_duplicates_are_refused() {
         vec!["--headless", "--background", "--background"],
         vec!["--headless", "--timeout", "1", "--timeout", "1"],
     ] {
-        let mut args = vec!["launch", "@worker", "--prompt", "task"];
+        let mut args = vec!["@worker", "--prompt", "task"];
         args.extend(extra);
         assert!(ahu::cli::parse(args).is_err());
     }
@@ -794,7 +791,7 @@ fn missing_native_home_beneath_checkout_alias_is_refused() {
     let out = f
         .command()
         .env("CODEX_HOME", alias.join("missing/home"))
-        .args(["launch", "@worker", "--headless", "--prompt", "task"])
+        .args(["@worker", "--headless", "--prompt", "task"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -984,7 +981,6 @@ fn cancelled_parent_refuses_later_child_admission() {
         .env("AHU_PARENT_TASK", id)
         .env("AHU_EXECUTION_BACKEND", "headless")
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--prompt",
@@ -1014,7 +1010,6 @@ fn batch_options_without_headless_refuse_ambient_execution_backend() {
         .command()
         .env("AHU_EXECUTION_BACKEND", "headless")
         .args([
-            "launch",
             "@worker",
             "--background",
             "--prompt",
@@ -1038,7 +1033,6 @@ fn ambient_broker_dispatch_admits_batch_options() {
         .command()
         .env("AHU_BROKER_DISPATCH", "1111111111111111")
         .args([
-            "launch",
             "@missing",
             "--background",
             "--prompt",
@@ -1064,7 +1058,6 @@ fn malformed_mailbox_requests_are_isolated_and_consumed_ids_do_not_replay() {
         .env("SCENARIO", "mailbox")
         .env("CHILD_PROMPT", prompt)
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--prompt",
@@ -1135,7 +1128,6 @@ fn a_dispatch_from_an_old_parent_attempt_is_refused_before_child_creation() {
         .env("AHU_PARENT_ATTEMPT", "2")
         .env("AHU_BROKER_DISPATCH", "1111111111111111")
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--prompt",
@@ -1313,7 +1305,7 @@ if '--version' in sys.argv: print('2.1.270');sys.exit(0)
 print(json.dumps({'type':'system','subtype':'init','session_id':os.environ['AHU_PARENT_TASK']}),flush=True)
 if '\nparent-shutdown</ahu-request-' in sys.argv[-1]:
  time.sleep(1)
- r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--headless','--background','--timeout','30','--prompt','slow-child','--output','json'],capture_output=True,text=True)
+ r=subprocess.run([os.environ['AHU_BIN'],'@worker','--headless','--background','--timeout','30','--prompt','slow-child','--output','json'],capture_output=True,text=True)
  assert r.returncode==0,r.stderr
  open(os.environ['CHILD_ID_FILE'],'w').write(json.loads(r.stdout)['task_id'])
  if os.environ['STOP_MODE']=='capture_failed': print('x'*(1024*1024+1),flush=True)
@@ -1331,7 +1323,6 @@ else:
             .env("LATE_FILE", &late_file)
             .env("STOP_MODE", mode)
             .args([
-                "launch",
                 "@worker",
                 "--headless",
                 "--timeout",
@@ -1382,7 +1373,6 @@ fn child_and_worker_resume_refuse_before_mutating_attempts() {
         .env("SCENARIO", "child")
         .env("CHILD_PROMPT", &prompt)
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--prompt",
@@ -1441,7 +1431,7 @@ if os.environ['MAILBOX_MODE']=='noise':
 else:
  # The host dispatch inherits the supervisor environment; the parent version
  # probe must complete first, so delay only probes in a task worktree.
- subprocess.Popen([os.environ['AHU_BIN'],'launch','@worker','--background','--prompt','child','--output','json'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+ subprocess.Popen([os.environ['AHU_BIN'],'@worker','--background','--prompt','child','--output','json'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 time.sleep(30)
 "#;
         let script = script.replace(
@@ -1454,7 +1444,6 @@ time.sleep(30)
             .command()
             .env("MAILBOX_MODE", mode)
             .args([
-                "launch",
                 "@worker",
                 "--headless",
                 "--timeout",
@@ -1501,7 +1490,6 @@ print(json.dumps({'type':'result','status':'SUCCESS','response':'plausible succe
     let out = f
         .command()
         .args([
-            "launch",
             "@agy-worker",
             "--headless",
             "--prompt",
@@ -1884,13 +1872,7 @@ fn an_unvalidated_opencode_version_is_refused_by_the_headless_path() {
 
     let out = f
         .command()
-        .args([
-            "launch",
-            "@oc",
-            "--headless",
-            "--prompt",
-            "perform synthetic task",
-        ])
+        .args(["@oc", "--headless", "--prompt", "perform synthetic task"])
         .output()
         .unwrap();
     assert!(
@@ -1957,7 +1939,6 @@ emit('step_finish',{'type':'step-finish','reason':'stop'})
     let out = f
         .command()
         .args([
-            "launch",
             "@oc",
             "--headless",
             "--output",
@@ -2022,7 +2003,7 @@ print(json.dumps({'type':'result','subtype':'success','result':'validated synthe
 
     let out = f
         .command()
-        .args(["launch", "@stubbed", "--headless", "--prompt", "ok"])
+        .args(["@stubbed", "--headless", "--prompt", "ok"])
         .output()
         .unwrap();
     assert!(
@@ -2055,7 +2036,7 @@ fn a_parenthetical_version_token_is_refused_by_the_headless_path() {
 
     let out = f
         .command()
-        .args(["launch", "@stubbed", "--headless", "--prompt", "ok"])
+        .args(["@stubbed", "--headless", "--prompt", "ok"])
         .output()
         .unwrap();
     assert!(
@@ -2120,7 +2101,6 @@ print(json.dumps({'type':'turn.completed'}),flush=True)
     let out = f
         .command()
         .args([
-            "launch",
             "@cx",
             "--headless",
             "--output",
@@ -2273,7 +2253,6 @@ fn a_planned_write_outside_the_worktree_is_disclosed_without_the_file() {
         .env("SCENARIO", "outside_event")
         .env("OUTSIDE_PATH", &planned)
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--output",
@@ -2627,7 +2606,6 @@ fn primary_records_remain_readable_after_submitting_sibling_is_removed() {
         .command()
         .current_dir(&sibling)
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--prompt",
@@ -2917,7 +2895,6 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
         let interactive = f
             .command()
             .args([
-                "launch",
                 "@matrix",
                 "--dry-run",
                 "--output",
@@ -2944,7 +2921,6 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             let refused = f
                 .command()
                 .args([
-                    "launch",
                     "@matrix",
                     "--headless",
                     "--output",
@@ -3063,12 +3039,7 @@ else: raise AssertionError(method)
     let launched = f
         .command()
         .env("AHU_CMUX_BIN", &cmux)
-        .args([
-            "launch",
-            "@worker",
-            "--prompt",
-            "synthetic interactive task",
-        ])
+        .args(["@worker", "--prompt", "synthetic interactive task"])
         .output()
         .unwrap();
     assert!(
