@@ -4,6 +4,21 @@ Launch repository-defined coding agents in fresh Git worktrees, interactively
 in cmux or unattended in headless mode. Agent manifests pin the harness and
 model; ahu previews the configuration, delivers instructions, and records the launch.
 
+## Typed decisions and agent evals
+
+Give agents a shared decision tool, then measure whether it helps their work.
+[TypeSafe Jev through ahu MCP](docs/typed-decisions.md) returns validated choices,
+scores, and probability estimates. A batch can apply one rubric to up to 20 items
+without asking the agent to repeat the schema for each item.
+
+[ahu Evals](docs/evaluations.md) compares registered agents using Markdown cases,
+deterministic checks, optional agent judges, and OTel tool observations. Reports
+show answer quality, failures, time, native token usage, and separate decision
+service usage. Use that evidence to improve instructions and skills; delegation
+is a tradeoff to measure, not a promise of savings. Read the
+[live comparison findings](docs/decision-eval-findings.md) for the measured
+improvements and limits.
+
 ## Install
 
 With Rust and Cargo installed (this checkout pins Rust in
@@ -37,7 +52,9 @@ Interactive sessions also require cmux. Headless tasks need no cmux connection.
 Projects that configure knowledge bundles also require the `okf` binary for
 [knowledge checks](docs/reference.md#knowledge-checks). Repository agents use
 the GitHub CLI (`gh`) for issue tracking; ahu itself never invokes it.
-ahu installs none of these and holds no provider credentials. Read-only help and
+ahu installs none of these; harness authentication remains with each harness.
+The optional Jev tool reads its separately configured API key only when called.
+Read-only help and
 launch previews do not require a cmux connection. Git and default cmux lookup
 require executables outside Git working trees; see the
 [lookup rules](docs/reference.md#utility-lookup).
@@ -51,9 +68,11 @@ ahu doctor
 ahu
 ```
 
-On first use, setup writes the project's harness order, model rankings, and
-catalog pin to `.agents/ahu/config.toml`. Share that policy through Git; ahu
-does not stage, commit, or push it.
+Run `ahu setup` once in each project. It detects installed harnesses, asks you
+to choose models for their ahu development agents, installs the bundled skills, adds
+project MCP entries, and writes `.agents/ahu/config.toml` and `ahu.lock`.
+Review and commit the generated files so future ahu commands can use the same
+project setup. ahu does not stage, commit, or push them.
 
 In the launcher, select an agent by number, `@name`, or bare name. Leave the
 selection blank for the project's automatic harness/model choice. The resolved
@@ -126,8 +145,15 @@ ahu tasks
 task_id=abc123  # replace with a full task ID from ahu tasks
 ahu task "$task_id"
 ahu result "$task_id"  # headless tasks
-ahu diff "$task_id"
 ahu focus "$task_id"  # interactive cmux tasks
+```
+
+Reviewing the changes is plain Git. `ahu task` prints the task's branch,
+worktree, and launch base; run Git against those directly:
+
+```sh
+git -C .worktrees/"$task_id" diff "$base_commit"   # base commit from ahu task
+git -C .worktrees/"$task_id" status
 ```
 
 Headless inspection shows the attempt outcome, observed ownership, blockers,
@@ -178,8 +204,8 @@ ahu delivers its contract, available execution facts, agent instructions, and
 assignment in nonce-bearing sections with raw bodies. This is prompt text,
 not an enforced system prompt. The harness controls the running session,
 including model changes, approvals, and context loading. ahu reports visible
-settings and gaps and never claims its inventory is complete. Ordinary launches
-do not alter native hooks or settings. Explicit `ahu cmux install` delegates a
+settings and gaps without claiming to know everything the harness loads.
+Ordinary launches do not alter native hooks or settings. Explicit `ahu cmux install` delegates a
 reviewable native installation to cmux.
 Private tracker material stays out of public files and reports; remote pushes
 require explicit user permission.
@@ -188,14 +214,17 @@ require explicit user permission.
 
 | Command | Purpose |
 | --- | --- |
+| `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness development agents, and refresh `ahu.lock` |
 | `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
 | `ahu launch @agent [options]` | Backward-compatible launch alias with `--prompt` and `--prompt-file` support |
-| `ahu doctor` | Check repository, configuration, harness, cmux, hygiene cadence, telemetry, skills, and drift |
+| `ahu doctor` | Concise readiness summary; add `--verbose` for component diagnostics |
+| `ahu lock` | Check that recognized agent context and `ahu.lock` are committed and current |
+| `ahu lock --update` | Fingerprint current recognized context into `ahu.lock` for review and commit |
 | `ahu agents` | List registered agents and detected drift |
-| `ahu tasks` | List tasks in a compact table |
+| `ahu tasks` | List the 20 most recent tasks; use `--limit N` or `--all` to change the range |
 | `ahu cmux status` | Inspect native integration evidence and headless isolation |
 | `ahu cmux install --harness codex --dry-run` | Preview an explicit native installation |
-| `ahu help` | Options, prompt sources, and exit codes |
+| `ahu help [COMMAND]` | Compact command list or focused help; use `ahu help all` for the full option reference |
 | `ahu onboard` | Read-only preview of native definitions available for registration |
 | `ahu knowledge lint` | Validate and lint configured OKF bundles with installed `okf` |
 | `ahu explain` | Built-in architecture overview |
@@ -204,26 +233,61 @@ require explicit user permission.
 | `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
-| `ahu mcp serve` | Serve repository-scoped agent and task inspection over stdio MCP |
-| `ahu mcp setup` | Materialize ahu's bundled skills into the project for review and commit |
+| `ahu mcp serve` | Serve repository-scoped agent, task, and typed-decision tools over stdio MCP |
+| `ahu eval run --suite PATH --agent @name --records PATH` | Run the named cases against a registered agent and save evidence outside the repository |
+| `ahu eval report --records PATH` | Compare answer quality, tool behavior, failures, time, and observed usage |
 
-Advanced inspection commands such as `ahu inventory`, `ahu hygiene`, and
-`ahu diff` remain available; run `ahu <command> --help` for their options.
+Use the bundled `agent-context-critic` skill with `ahu eval run` and
+`ahu eval report` to investigate context changes against measured outcomes.
+The skill treats repository files as declared context, not proof that a
+harness loaded them. `ahu.lock` covers recognized repository inputs only;
+harness, user, managed, and provider context remains outside that coverage.
+The eval cases, OTel observations, and private run artifacts should stay outside
+the candidate checkout when they contain information the candidate should not
+see. `ahu help` lists commands, `ahu help COMMAND` shows focused options, and
+`ahu help all` prints the full reference.
 
-`ahu codex` passes `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
-and `ahu agy` pass `--dangerously-skip-permissions`, the Antigravity CLI's
-unattended mode. Each shortcut names the installed executable (`codex`,
-`claude`, `agy`, `opencode`), accepts no additional arguments, discloses the
-flag it passes, and retains the harness's configured model. Registered child
-agents keep their own manifest permissions and launch requirements. Inside
-cmux, coordinator shortcuts place their workspace in the repository's group
-before starting. See
+All four shortcuts open the same way: approvals bypassed, on this project's
+top-ranked model for that harness, both passed explicitly on the command line.
+
+| Shortcut | Arguments ahu passes |
+| --- | --- |
+| `ahu agy` | `--model <m> --dangerously-skip-permissions` |
+| `ahu claude` | `--model <m> --dangerously-skip-permissions` |
+| `ahu codex` | `-m <m> --dangerously-bypass-approvals-and-sandbox` |
+| `ahu opencode` | `--model <provider>/<model> --auto` |
+
+`<m>` is the first model listed for that harness in `[model_rankings]`, and each
+shortcut prints its whole argument list before starting, so the disclosed line is
+exactly what was launched. When a harness has no ranked model, ahu passes no
+model option, says so on stderr, and the harness opens on whichever model it is
+configured with; ahu does not invent an identifier. OpenCode's `--auto` approves
+every permission OpenCode does not *explicitly deny*, without asking. Permissions
+set to `deny` in OpenCode's own configuration or agent frontmatter still apply,
+and ahu passes no `--pure`, so the user's plugins still load.
+
+Each shortcut names the installed executable (`codex`, `claude`, `agy`,
+`opencode`) and accepts no additional arguments. Registered child agents keep
+their own manifest permissions and launch requirements. Inside cmux, coordinator
+shortcuts place their workspace in the repository's group before starting. See
 [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
-The initial MCP integration is local and repository-scoped. `ahu mcp serve`
-provides read-only agent and task inspection over stdio; `ahu mcp setup` copies
-the bundled skills into `.agents/skills/` as ordinary files that the project can
-review and commit. The skill bundle ships with ahu for now.
+The MCP integration is local and repository-scoped. `ahu mcp serve` provides
+agent and task inspection over stdio, and can expose the optional
+`ahu_typed_decide` tool for TypeSafe Jev over HTTPS or a configured local
+decision service. `ahu setup`
+configures a project MCP entry for each detected harness, installs bundled
+skills in harness-supported paths, creates a `dev-<harness>` ahu agent using a
+model you choose, and refreshes `ahu.lock`. Review and commit the generated
+project files before launching. Claude Code asks before using project MCP
+servers, and Codex must trust the repository before loading project configuration. See the
+[typed-decision experiment](docs/typed-decisions.md) for its model-neutral
+service contract and limitations.
+
+External issue tracking is optional and remains policy in skills and tracker
+tools, not in ahu's task CLI. The bundled `direct-agents` skill lets a project
+choose whether to use tracker records and, when configured, link those records
+to ahu task IDs on the provider side.
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON
 contracts, prompt transport, hooks, state, and delegation boundaries.
@@ -303,5 +367,5 @@ voice, such as required contractions and passive-voice warnings, along with the
 Oxford comma rules, which flag two-item conjunctions. The reasons are recorded
 beside each entry in `.vale.ini`.
 
-See the [0.4.0 preparation notes](docs/releases/0.4.0.md) for implemented behavior
+See the [0.6.0 preparation notes](docs/releases/0.6.0.md) for implemented behavior
 and validation limits. This version is prepared locally and is not yet published.

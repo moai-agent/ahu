@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "corpus_version": "1.0.0",
+  "label_provenance": "Independently authored from synthetic evidence before any provider experiments; not provider consensus or human-reviewed ground truth. Coordinator label review is required before experiments.",
+  "domains": {
+    "software-cache": [
+      "dg-cache-a",
+      "dg-cache-b"
+    ],
+    "support-exports": [
+      "dg-export-a",
+      "dg-export-b"
+    ],
+    "documentation-versions": [
+      "dg-docs-a",
+      "dg-docs-b"
+    ],
+    "test-evidence": [
+      "dg-ci-a",
+      "dg-ci-b"
+    ],
+    "content-trust": [
+      "dg-import-a",
+      "dg-import-b"
+    ],
+    "search-rollout": [
+      "dg-search-a",
+      "dg-search-b"
+    ]
+  },
+  "pilots": [
+    "dg-pilot-mail",
+    "dg-pilot-links"
+  ]
+}

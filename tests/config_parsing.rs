@@ -46,7 +46,6 @@ fn valid_config_loads_with_a_digest_over_its_exact_bytes() {
     repo.init_config();
     let loaded = config::load(repo.path()).unwrap().unwrap();
     assert_eq!(loaded.config.harness_preferences, vec!["claude-code"]);
-    assert_eq!(loaded.config.context_hygiene.review_interval_days, 7);
     assert_eq!(loaded.digest.len(), 64);
 
     // A byte change is a different policy snapshot, committed or not.
@@ -54,7 +53,10 @@ fn valid_config_loads_with_a_digest_over_its_exact_bytes() {
     let text = repo.read(".agents/ahu/config.toml");
     repo.write(
         ".agents/ahu/config.toml",
-        &text.replace("review_interval_days = 7", "review_interval_days = 14"),
+        &text.replace(
+            "catalog_version =",
+            "# byte-level policy change\ncatalog_version =",
+        ),
     );
     let after = config::load(repo.path()).unwrap().unwrap();
     assert_ne!(before, after.digest);
@@ -140,7 +142,6 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
         model_rankings: [("claude-code".to_string(), vec!["claude-opus-5".to_string()])]
             .into_iter()
             .collect(),
-        context_hygiene: config::ContextHygiene::default(),
         knowledge: config::Knowledge::default(),
         telemetry: config::TelemetryConfig::default(),
     };
@@ -170,10 +171,6 @@ fn rendered_config_round_trips() {
         )]
         .into_iter()
         .collect(),
-        context_hygiene: config::ContextHygiene {
-            review_on_first_load: true,
-            review_interval_days: 3,
-        },
         // A non-default knowledge section so the round trip proves it is
         // rendered, not silently dropped back to the default. The non-ASCII
         // paths are the reason the bundles are rendered as TOML rather than
@@ -410,9 +407,8 @@ fn a_project_order_naming_only_unsupported_harnesses_reports_a_policy_problem() 
              harness_preferences = [\"codex\"]\n\
              model_selection = \"project-ranked\"\n\
              catalog_version = \"{}\"\n\
-             \n[context_hygiene]\n\
-             review_on_first_load = true\n\
-             review_interval_days = 7\n",
+             \n[knowledge]\n\
+             bundles = []\n",
             catalog::CATALOG_VERSION
         ),
     );
@@ -649,22 +645,21 @@ fn a_proposed_manifest_round_trips_through_the_loader() {
     }
 }
 
-/// Adding a harness to the catalog moves its version, and a project pinned to
-/// the previous one stops rather than being upgraded for free.
+/// Updating a verified harness version moves the catalog revision, and a
+/// project pinned to the previous one stops rather than being upgraded for free.
 ///
-/// That is the point of the pin: catalog `2026-09-13` offers a harness and a
-/// model that `2026-09-12` did not, so what an automatic launch resolves to can
-/// differ between them. Changing which catalog a project uses is a project
-/// decision, made by editing `catalog_version`, not a side effect of installing
-/// a newer ahu.
+/// That is the point of the pin: catalog `2026-09-27` records the Codex 0.157.1
+/// interactive compatibility check. Changing which catalog a project uses is a
+/// project decision, made by editing `catalog_version`, not a side effect of
+/// installing a newer ahu.
 #[test]
 fn a_project_pinned_to_the_previous_catalog_is_stopped_not_upgraded() {
-    assert_eq!(catalog::CATALOG_VERSION, "2026-09-13");
+    assert_eq!(catalog::CATALOG_VERSION, "2026-09-27");
 
-    let error = catalog::require_version("2026-09-12")
+    let error = catalog::require_version("2026-09-13")
         .expect_err("a superseded pin must not be silently accepted")
         .to_string();
-    assert!(error.contains("2026-09-12"), "{error}");
+    assert!(error.contains("2026-09-13"), "{error}");
     assert!(error.contains(catalog::CATALOG_VERSION), "{error}");
     assert!(error.contains("will not substitute"), "{error}");
     assert!(

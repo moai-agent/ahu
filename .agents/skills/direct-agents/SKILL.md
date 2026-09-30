@@ -44,27 +44,50 @@ parent work, and do not push unless explicitly authorized.
 
 ## Long-running work and tracker records
 
-For work that can run for a long time or fail after submission, create or link a
-private durable tracker record before launching the task. An issue, task,
-milestone item, or equivalent provider object may represent that record; the
-provider mapping is project policy, not an ahu requirement. The tracker record
-is the durable work ledger, while ahu's task state is execution evidence and may
-be removed with task cleanup. Keep the record limited to acceptance criteria,
-validation evidence, failure details, and disposition needed by the maintainer.
+Follow this repository's work-tracking policy when one exists. A project may
+require a tracker record for certain work, use records only for releases or
+long-running assignments, or choose not to use an external tracker. Do not
+assume GitHub, a private roadmap, or any tracker is available. When no provider
+or tracking policy is configured, use the ahu task record for execution and
+report that no external work item is linked; do not invent a tracker workflow.
+
+When policy requires a durable work item, create or resolve it before launch.
+After ahu returns a task ID, link that execution from the provider-side work
+item using its native relation, reference field, or private activity record.
+Keep ahu task IDs, handles, attempts, and branches as execution identifiers;
+the provider-side work item remains the record for acceptance criteria,
+validation evidence, failures, and disposition. Update the link as the task is
+resumed or its commit/review is delivered, and close the work item only under
+the repository's policy after acceptance and required delivery checks pass.
+Use the provider's native representation; this does not require a particular
+issue-to-task cardinality.
+
+Do not put private tracker identifiers, URLs, titles, or contents into ahu
+prompts, task records, result reports, public files, or commits. Tracker tools
+and skills manage the link on the provider side.
+
+`ahu cleanup` removes recognized temporary captures and bounded requests after
+termination is known; it retains the task record, results, native sessions,
+branch, and worktree. `ahu remove` can remove the task record, worktree, and
+branch after the task is terminal and its changes are safely integrated. Keep
+the provider-side work item and its delivery evidence according to repository
+policy when removing local ahu execution state.
 
 Use a provider adapter or MCP server for tracker operations. When the provider
 is GitHub, issues, labels, projects, and milestones are one possible mapping;
 do not bake repository names, issue-number formats, label names, project field
 IDs, or milestone semantics into task prompts or public skill prose.
 
-The tracker provider contract is intentionally small. It must be able to
-resolve the private work area and visibility boundary, find or create a durable
-work record, read and update lifecycle plus current-agent state, append
-validation evidence, link parent/child or release context, and close the record
-only after delivery checks. Provider identifiers stay in the private tracker;
-ahu task IDs, worktrees, and attempts remain separate execution identifiers.
-If a provider cannot implement one of these operations, report that capability
-gap rather than approximating it with a public comment or a local file.
+When tracker integration is part of repository policy, its provider contract is
+intentionally small. It should resolve the work area and visibility boundary,
+find or create a durable work record, read and update lifecycle plus current-
+agent state, append validation evidence, link the ahu task and any parent,
+child, or release context, and close the record only after delivery checks. A
+project may implement this with a tracker MCP, a provider adapter, or another
+approved skill/tool workflow. Provider identifiers stay in the provider; ahu
+task IDs, worktrees, and attempts remain separate execution identifiers. If a
+required provider operation is unavailable, report the capability gap rather
+than approximating it with a public comment or local repository file.
 
 Use the provider's coordination fields, labels, tags, or status values instead
 of personal assignees when the project is maintained by one maintainer. Preserve
@@ -95,5 +118,10 @@ it does not grant authority or change those checks. Report unavailable agents,
 denied launches, missing credentials, incomplete reports, and unjoined children
 as blockers. Never replace a configured harness or model after failure.
 
-Maintain this file at `.agents/skills/direct-agents/SKILL.md`; all supported
-harnesses load the canonical `.agents/skills/` tree directly.
+Maintain this file at `.agents/skills/direct-agents/SKILL.md`. Run `ahu setup`
+to install the user-facing skills in the paths supported by detected harnesses.
+Codex, OpenCode, and Antigravity use `.agents/skills/`; Claude Code uses
+`.claude/skills/`. A skill file being present does not prove that a harness
+loaded it. When the ahu MCP server is connected, its inspection tools are
+available alongside the ahu CLI; use `ahu_agents_list`, `ahu_tasks_list`, and
+`ahu_task_get` when they fit the task.

@@ -39,7 +39,11 @@ jobs:
           rustup --version
       - name: Install pinned Rust and components
         # Reads rust-toolchain.toml; fresh runners may fetch tools/dependencies.
-        run: rustup toolchain install --no-self-update
+        run: |
+          rustup toolchain install --no-self-update
+          rustup component add llvm-tools-preview
+      - name: Install pinned coverage tool
+        run: cargo install cargo-llvm-cov --version 0.9.1 --locked
       - name: Check canonical repository skills
         run: |
           python3 scripts/check-skills.py
@@ -69,10 +73,11 @@ jobs:
             chmod +x "$stub_dir/$harness"
           done
           echo "$stub_dir" >> "$GITHUB_PATH"
-      - name: Test with synthetic fixtures
+      - name: Test and report code coverage
         run: |
           unset AHU_TEST_CMUX XDG_CONFIG_HOME OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT
-          cargo test --locked -- --test-threads="$TEST_THREADS"
+          cargo llvm-cov --all-targets --locked --summary-only -- --test-threads="$TEST_THREADS"
+          cargo llvm-cov report --json --summary-only | python3 -B scripts/check-eval-mcp-coverage.py
       # Configured knowledge validation remains a separate maintainer check:
       # install OKF 0.5.0 outside the checkout, then run
       # cargo run --locked -- knowledge lint. CI tests its fixture integration.

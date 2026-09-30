@@ -8,6 +8,8 @@
 pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
+pub mod codex_metadata;
+pub mod isolation;
 pub mod opencode;
 
 use serde::{Deserialize, Serialize};
@@ -70,6 +72,55 @@ impl LaunchCommand {
         }
         copy
     }
+}
+
+/// The exact-model option a harness CLI takes, with the checks that option needs.
+///
+/// One mapping serves the headless adapters and the coordinator shortcuts in
+/// `crate::commands`, so a coordinating session cannot pass a flag an adapter
+/// does not use, and a model an adapter would refuse is refused there too.
+///
+/// Verified against the installed CLIs' own help: Claude Code, the Antigravity
+/// CLI and OpenCode take `--model`; Codex takes `-m` (its `--model` alias is
+/// equivalent, and `-m` is what the catalog's enforcement gap names).
+pub fn model_args(harness_id: &str, model: &str) -> Result<Vec<String>> {
+    let entry = crate::catalog::harness(harness_id).ok_or_else(|| {
+        crate::util::Error::new(format!(
+            "the compatibility catalog has no entry for harness {harness_id:?}, so ahu cannot \
+             name the option that CLI takes for a model. This is an ahu build problem, not a \
+             repository one."
+        ))
+    })?;
+    let name = entry.display_name;
+    let flag = match harness_id {
+        "claude-code" | "antigravity" | "opencode" => "--model",
+        "codex" => "-m",
+        other => {
+            bail!("ahu has no validated model option for harness {other:?}. It will not guess one.")
+        }
+    };
+    if model.is_empty() {
+        bail!("the {name} adapter requires an exact model identifier.");
+    }
+    if model.starts_with('-') {
+        bail!("model identifier {model:?} would be read as an option by the {name} CLI.");
+    }
+    // OpenCode documents `--model` as `provider/model`. An unqualified
+    // identifier is a silent-misroute risk: which provider it would reach
+    // depends on the user's configuration, and ahu will not guess one.
+    if entry.supports(crate::catalog::Feature::ProviderQualifiedModels)
+        && !model.split_once('/').is_some_and(|(provider, rest)| {
+            !provider.is_empty() && !rest.is_empty() && !rest.contains('/')
+        })
+    {
+        bail!(
+            "model identifier {model:?} is not provider-qualified. {name}'s --model takes \
+             <provider>/<model>, where the provider half names one of the providers \
+             {name}'s own configuration defines. ahu will not guess which provider an \
+             unqualified identifier means; name it in the manifest."
+        );
+    }
+    Ok(vec![flag.to_string(), model.to_string()])
 }
 
 /// Detect whether the harness binary ahu resolved is really a wrapper.
@@ -149,5 +200,67 @@ pub fn adapter_for(harness_id: &str) -> Result<Box<dyn Adapter>> {
             "ahu has no validated adapter for harness {other:?}. \
              It will not substitute another harness."
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_lookup_fails_closed_for_unregistered_harnesses() {
+        assert!(adapter_for("codex").is_ok());
+        assert!(
+            adapter_for("unknown")
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("no validated adapter")
+        );
+    }
+
+    #[test]
+    fn model_arguments_require_an_exact_safe_catalog_model() {
+        assert_eq!(model_args("codex", "gpt-5.5").unwrap(), ["-m", "gpt-5.5"]);
+        assert_eq!(
+            model_args("claude-code", "claude-sonnet").unwrap(),
+            ["--model", "claude-sonnet"]
+        );
+        assert!(
+            model_args("missing", "model")
+                .unwrap_err()
+                .to_string()
+                .contains("no entry for harness")
+        );
+        assert!(
+            model_args("codex", "")
+                .unwrap_err()
+                .to_string()
+                .contains("exact model")
+        );
+        assert!(
+            model_args("codex", "--help")
+                .unwrap_err()
+                .to_string()
+                .contains("option")
+        );
+        assert!(
+            model_args("opencode", "model-without-provider")
+                .unwrap_err()
+                .to_string()
+                .contains("provider-qualified")
+        );
+        assert!(
+            model_args("opencode", "/model")
+                .unwrap_err()
+                .to_string()
+                .contains("provider-qualified")
+        );
+        assert!(
+            model_args("opencode", "provider/")
+                .unwrap_err()
+                .to_string()
+                .contains("provider-qualified")
+        );
     }
 }

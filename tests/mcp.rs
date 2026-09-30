@@ -1,7 +1,217 @@
 mod common;
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::process::Stdio;
+
+#[cfg(unix)]
+#[test]
+fn mcp_sigterm_flushes_a_complete_session_without_stdin_eof() {
+    mcp_shutdown_signal_fixture(libc::SIGTERM);
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_sigint_flushes_a_complete_session_without_stdin_eof() {
+    mcp_shutdown_signal_fixture(libc::SIGINT);
+}
+
+#[cfg(unix)]
+fn mcp_shutdown_signal_fixture(signal: libc::c_int) {
+    let repo = common::TestRepo::new();
+    let receiver = ahu::eval_otel::Receiver::start().unwrap();
+    let mut child = common::ahu()
+        .args(["mcp", "serve"])
+        .current_dir(repo.path())
+        .env("AHU_EVAL_OTEL_ENDPOINT", receiver.endpoint())
+        .env(
+            "AHU_MCP_RESOURCE_ATTRIBUTES",
+            "ahu.task.id=signal-fixture,ahu.task.attempt=1",
+        )
+        .env_remove("OTEL_RESOURCE_ATTRIBUTES")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    writeln!(input, "{}", serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}})).unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"],
+        1
+    );
+    // The harness may close its read end before terminating the server.
+    drop(output);
+    // This PID belongs to the unreaped child created above. Keep stdin open:
+    // real harnesses can terminate MCP children before closing their pipes.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("MCP shutdown timed out");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(status.success(), "{status}");
+    let observed = receiver
+        .task("signal-fixture", 1)
+        .expect("missing session summary");
+    assert_eq!(observed.coverage().as_str(), "complete_session");
+    assert_eq!(observed.session_summaries, 1);
+    assert_eq!(observed.tool_calls, 0);
+}
+
+#[test]
+fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
+    let repo = common::TestRepo::new();
+    let receiver = ahu::eval_otel::Receiver::start().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1/decisions", listener.local_addr().unwrap());
+    let service = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut headers = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            headers.push_str(&line);
+        }
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap();
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(request["questions"]["route"]["type"], "choice");
+        let response = serde_json::json!({
+            "answers":{"route":{"value":"billing","confidence":0.91}},
+            "service":{
+                "backend":"ollama",
+                "model":"fixture-model",
+                "prompt_tokens":12,
+                "generated_tokens":3,
+                "duration_ms":25
+            }
+        })
+        .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response.len(),
+            response
+        )
+        .unwrap();
+        request
+    });
+
+    let mut child = common::ahu()
+        .args(["mcp", "serve"])
+        .current_dir(repo.path())
+        .env("AHU_DECISION_URL", endpoint)
+        .env("AHU_EVAL_OTEL_ENDPOINT", receiver.endpoint())
+        .env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "ahu.task.id=decision-fixture,ahu.task.attempt=1",
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let meta = serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{
+            "extensions":{"io.modelcontextprotocol/tasks":{}}
+        }
+    });
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":meta}
+        })
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"ahu_typed_decide",
+                "arguments":{
+                    "state":{"body":"Please refund the duplicate charge."},
+                    "questions":{"route":{
+                        "type":"choice","instructions":"Which team handles this?",
+                        "telemetry_key":"routing",
+                        "options":{"billing":"Invoices and refunds","other":"Everything else"}
+                    }}
+                },
+                "_meta":{
+                    "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities":{
+                        "extensions":{"io.modelcontextprotocol/tasks":{}}
+                    }
+                }
+            }
+        })
+    )
+    .unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[1]["result"]["resultType"], "complete");
+    assert_eq!(
+        rows[1]["result"]["structuredContent"]["answers"]["route"]["value"],
+        "billing"
+    );
+    let request = service.join().unwrap();
+    assert_eq!(
+        request["state"]["body"],
+        "Please refund the duplicate charge."
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let telemetry = loop {
+        if let Some(telemetry) = receiver.task("decision-fixture", 1)
+            && telemetry.session_summaries == 1
+        {
+            break telemetry;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "MCP OTel spans were not exported"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(
+        telemetry.coverage(),
+        ahu::eval_otel::Coverage::CompleteSession
+    );
+    assert!(telemetry.mcp_observed);
+    assert_eq!(telemetry.tool_calls, 1);
+    assert_eq!(telemetry.typed_decision_calls, 1);
+    assert_eq!(telemetry.tool_calls_by_name["ahu_typed_decide"], 1);
+}
 
 #[test]
 fn stdio_server_negotiates_and_lists_repository_agents_and_tasks() {
@@ -32,7 +242,7 @@ fn stdio_server_negotiates_and_lists_repository_agents_and_tasks() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(rows[0]["result"]["serverInfo"]["name"], "ahu");
-    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 5);
     assert_eq!(
         rows[2]["result"]["structuredContent"]["agents"][0]["name"],
         "@reviewer"
@@ -146,83 +356,33 @@ fn legacy_initialize_echoes_a_supported_handshake_version() {
 }
 
 #[test]
-fn setup_refuses_to_write_through_a_skills_symlink() {
+fn legacy_initialize_echoes_each_protocol_version_still_supported_by_ahu() {
     let repo = common::TestRepo::new();
-    let external = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir_all(repo.path().join(".agents")).unwrap();
-    std::os::unix::fs::symlink(external.path(), repo.path().join(".agents/skills")).unwrap();
+    let versions = ["2025-06-18", "2025-03-26", "2024-11-05"];
+    let requests = versions
+        .iter()
+        .enumerate()
+        .map(|(index, version)| {
+            json!({"jsonrpc":"2.0","id":index + 1,"method":"initialize","params":{"protocolVersion":version}}).to_string()
+        })
+        .collect::<Vec<_>>();
+    let rows = exchange(&repo, &requests);
+    for (row, version) in rows.iter().zip(versions) {
+        assert_eq!(row["result"]["protocolVersion"], version);
+    }
+}
+
+#[test]
+fn mcp_setup_subcommand_is_replaced_by_the_single_setup_command() {
+    let repo = common::TestRepo::new();
     let output = common::ahu()
         .args(["mcp", "setup"])
         .current_dir(repo.path())
         .output()
         .unwrap();
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("refusing to act through a symlink"),
-        "{}",
-        stderr
-    );
-    assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
-}
-
-#[test]
-fn setup_preserves_existing_non_utf8_skill_bytes() {
-    let repo = common::TestRepo::new();
-    let path = repo
-        .path()
-        .join(".agents/skills/discover-requirements/SKILL.md");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let original = b"local skill\n\xff\xfe";
-    std::fs::write(&path, original).unwrap();
-    let output = common::ahu()
-        .args(["mcp", "setup"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), original);
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("refusing to overwrite changed skill")
-    );
-}
-
-#[test]
-fn setup_materializes_the_bundled_skill_trees_without_overwriting_changes() {
-    let repo = common::TestRepo::new();
-    let output = common::ahu()
-        .args(["mcp", "setup"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let agents = repo.read(".agents/skills/discover-requirements/SKILL.md");
-    assert!(!repo.path().join(".claude/skills").exists());
-    assert!(agents.contains("# Discover requirements"));
-    let hygiene = repo.read(".agents/skills/context-hygiene/SKILL.md");
-    assert!(hygiene.contains("# Context hygiene"), "{hygiene}");
-
-    let repeated = common::ahu()
-        .args(["mcp", "setup"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    assert!(repeated.status.success());
-    assert!(repeated.stdout.is_empty());
-
-    repo.write(
-        ".agents/skills/discover-requirements/SKILL.md",
-        "local change\n",
-    );
-    let refused = common::ahu()
-        .args(["mcp", "setup"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    assert!(!refused.status.success());
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("refusing to overwrite changed skill")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("expected ahu mcp serve"));
+    assert!(!repo.path().join(".agents/skills").exists());
 }
 
 #[test]
@@ -308,7 +468,6 @@ fn tasks_extension_returns_a_durable_handle_and_rejects_legacy_calls() {
 }
 
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader};
 use std::time::{Duration, Instant};
 
 const EXT: &str = "io.modelcontextprotocol/tasks";
@@ -412,13 +571,21 @@ impl Client {
         }
     }
     fn stop(&mut self) {
+        // EOF lets the server persist its normal shutdown summary and flush
+        // LLVM coverage counters. Tests that specifically model a crash call
+        // `crash` instead.
+        self.input.take();
+        let status = self.child.wait().unwrap();
+        assert!(status.success(), "MCP server exited with {status}");
+    }
+    fn crash(&mut self) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
     }
 }
 impl Drop for Client {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        self.input.take();
         let _ = self.child.wait();
     }
 }
@@ -429,7 +596,7 @@ fn asynchronous_handles_resume_after_process_loss_and_keep_results() {
     let mut first = Client::new(&repo, "alice");
     let id = first.create("ahu_agents_list", json!({}));
     let initial = first.task("tasks/get", &id)["result"].clone();
-    first.stop();
+    first.crash();
     let mut second = Client::new(&repo, "alice");
     let restored = second.task("tasks/get", &id)["result"].clone();
     assert_eq!(restored["createdAt"], initial["createdAt"]);
@@ -648,6 +815,25 @@ fn subscribed_stdio_clients_receive_authorized_durable_transitions() {
     assert_eq!(cancelled["params"], other.task("tasks/get", &id)["result"]);
 }
 
+#[test]
+fn subscriptions_reject_missing_oversized_and_unowned_task_id_lists() {
+    let repo = common::TestRepo::new();
+    let mut client = Client::new(&repo, "alice");
+    for notifications in [
+        json!({}),
+        json!({"taskIds":vec!["00000000-0000-4000-8000-000000000000"; 65]}),
+        json!({"taskIds":[17]}),
+        json!({"taskIds":["00000000-0000-4000-8000-000000000000"]}),
+    ] {
+        let response = client.call(
+            "subscriptions/listen",
+            modern(json!({"notifications":notifications})),
+        );
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+    }
+    client.stop();
+}
+
 // EOF bounds the exchange: unexpected notification replies cannot hide behind
 // a timeout, and every stdout line must be a JSON-RPC response.
 fn exchange(repo: &common::TestRepo, lines: &[String]) -> Vec<Value> {
@@ -747,7 +933,7 @@ fn conformance_notifications_are_silent_and_do_not_select_modes_or_queue_work() 
 fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
     let repo = common::TestRepo::new();
     let mut client = Client::new(&repo, "alice");
-    for (params, count) in [(modern_without_tasks(json!({})), 3), (modern(json!({})), 4)] {
+    for (params, count) in [(modern_without_tasks(json!({})), 5), (modern(json!({})), 6)] {
         let result = client.call("tools/list", params)["result"].clone();
         assert_eq!(result["resultType"], "complete");
         assert_eq!(result["tools"].as_array().unwrap().len(), count);
@@ -780,7 +966,7 @@ fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
         assert!(result.get("resultType").is_none(), "{result}");
         assert!(result.get("taskId").is_none());
         if method == "tools/list" {
-            assert_eq!(result["tools"].as_array().unwrap().len(), 3);
+            assert_eq!(result["tools"].as_array().unwrap().len(), 5);
         }
     }
     assert_eq!(
@@ -913,9 +1099,74 @@ fn conformance_failed_probes_allow_legacy_and_adapter_requires_both_opt_ins() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["id"], 0);
     assert_eq!(rows[0]["result"]["resultType"], "complete");
-    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 5);
     assert_eq!(rows[1]["id"], -1);
     assert_eq!(rows[1]["error"]["code"], -32602);
     assert_eq!(rows[2]["id"], "");
     assert_eq!(rows[2]["result"]["resultType"], "complete");
+}
+
+#[test]
+fn skill_suggestions_are_local_when_lexical_and_export_only_bounded_metadata() {
+    let repo = common::TestRepo::new();
+    repo.write(".agents/skills/billing/SKILL.md",
+        "---\nname: billing\ndescription: Resolve duplicate charge disputes\n---\nUse the refund checklist.\n");
+    repo.commit("synthetic skill");
+    let receiver = ahu::eval_otel::Receiver::start().unwrap();
+    let mut child = common::ahu()
+        .current_dir(repo.path())
+        .args(["mcp", "serve"])
+        .env("AHU_EVAL_OTEL_ENDPOINT", receiver.endpoint())
+        .env(
+            "AHU_MCP_RESOURCE_ATTRIBUTES",
+            "ahu.task.id=skill-fixture,ahu.task.attempt=1",
+        )
+        .env_remove("OTEL_RESOURCE_ATTRIBUTES")
+        .env_remove("TYPESAFE_API_KEY")
+        .env("AHU_DECISION_URL", "http://127.0.0.1:1/never-called")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"ahu_skills_suggest","arguments":{"task":"Resolve a duplicate charge","mode":"lexical"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"ahu_skills_suggest","arguments":{"task":"private-marker","mode":"bogus"}}}),
+    ];
+    let mut input = child.stdin.take().unwrap();
+    for request in requests {
+        writeln!(input, "{request}").unwrap();
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let value = &rows.iter().find(|r| r["id"] == 2).unwrap()["result"]["structuredContent"];
+    assert_eq!(value["status"], "suggested");
+    assert_eq!(
+        value["selected"],
+        serde_json::json!([".agents/skills/billing/SKILL.md"])
+    );
+    assert!(rows.iter().find(|r| r["id"] == 3).unwrap()["error"].is_object());
+    let observed = receiver.task("skill-fixture", 1).unwrap();
+    assert_eq!(observed.coverage().as_str(), "complete_session");
+    assert_eq!(observed.selection_observations, 1);
+    assert_eq!(observed.selection_candidate_count, Some(1));
+    assert_eq!(observed.selection_selected_count, Some(1));
+    assert_eq!(observed.tool_calls_by_name["ahu_skills_suggest"], 2);
+    let recorded = serde_json::to_string(&observed).unwrap();
+    assert!(!recorded.contains("private-marker"));
+    assert!(!recorded.contains("duplicate charge"));
 }

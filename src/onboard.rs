@@ -416,3 +416,140 @@ pub fn render(candidates: &[Candidate], repo_root: &Path) -> String {
     );
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(name: &str) -> Candidate {
+        Candidate {
+            name: name.to_string(),
+            path: format!(".claude/agents/{name}.md"),
+            format: SourceFormat::ClaudeAgent,
+            native_model: Some("claude-opus-5".into()),
+            already_registered: false,
+            blockers: Vec::new(),
+            preserved_fields: vec!["model".into(), "description".into()],
+            description: "review code".into(),
+        }
+    }
+
+    #[test]
+    fn preview_finds_supported_and_blocked_native_definitions_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let claude = root.path().join(".claude/agents");
+        let opencode = root.path().join(".opencode/agent");
+        let codex = root.path().join(".codex/agents");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::create_dir_all(&opencode).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(
+            claude.join("reviewer.md"),
+            "---\nmodel: claude-opus-5\ndescription: Review safely\ncolor: blue\n---\nReview instructions\n",
+        )
+        .unwrap();
+        std::fs::write(
+            opencode.join("unknown-model.md"),
+            "---\nmodel: unavailable-model\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            codex.join("native.toml"),
+            "description = 'leave in place'\n",
+        )
+        .unwrap();
+
+        let candidates = preview(root.path()).unwrap();
+        assert_eq!(candidates.len(), 3);
+        let reviewer = candidates
+            .iter()
+            .find(|item| item.name == "reviewer")
+            .unwrap();
+        assert!(reviewer.registrable());
+        assert_eq!(reviewer.description, "Review safely");
+        assert_eq!(reviewer.preserved_fields, ["model", "description", "color"]);
+        let unsupported = candidates
+            .iter()
+            .find(|item| item.name == "unknown-model")
+            .unwrap();
+        assert!(!unsupported.registrable());
+        assert!(unsupported.blockers[0].contains("not a opencode model"));
+        let native_only = candidates
+            .iter()
+            .find(|item| item.name == "native")
+            .unwrap();
+        assert!(!native_only.registrable());
+        assert!(!root.path().join(AGENTS_RELATIVE_DIR).exists());
+    }
+
+    #[test]
+    fn registrations_are_exclusive_validated_and_removal_is_limited_to_ahu_manifests() {
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = candidate("reviewer");
+        let native = root.path().join(&reviewer.path);
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, "---\nmodel: claude-opus-5\n---\nInstructions\n").unwrap();
+        let path = register(root.path(), &reviewer, "claude-opus-5", "1.0.0").unwrap();
+        assert!(
+            crate::agent::parse_manifest(&std::fs::read_to_string(&path).unwrap(), &path).is_ok()
+        );
+        assert!(register(root.path(), &reviewer, "claude-opus-5", "1.0.0").is_err());
+        assert!(
+            preview(root.path())
+                .unwrap()
+                .iter()
+                .any(|item| item.name == "reviewer" && item.already_registered)
+        );
+        assert!(unregister(root.path(), "../outside").is_err());
+        unregister(root.path(), "reviewer").unwrap();
+        assert!(!path.exists());
+
+        let unrelated = root.path().join(AGENTS_RELATIVE_DIR).join("unrelated.md");
+        std::fs::write(&unrelated, "not a manifest").unwrap();
+        assert!(unregister(root.path(), "unrelated").is_err());
+        assert!(unrelated.exists());
+
+        let mut blocked = candidate("blocked");
+        blocked.blockers.push("unsupported model".into());
+        assert!(register(root.path(), &blocked, "bad", "1.0.0").is_err());
+    }
+
+    #[test]
+    fn frontmatter_summary_and_preview_render_handle_empty_and_populated_cases() {
+        assert_eq!(
+            frontmatter_summary("not frontmatter"),
+            (None, Vec::new(), String::new())
+        );
+        assert_eq!(
+            frontmatter_summary("---\r\nmodel: 'model-x'\ndescription: \"safe text\"\n---\r\n"),
+            (
+                Some("model-x".into()),
+                vec!["model".into(), "description".into()],
+                "safe text".into()
+            )
+        );
+        let root = tempfile::tempdir().unwrap();
+        assert!(render(&[], root.path()).contains("No native agent definitions were found"));
+        let blocked = Candidate {
+            blockers: vec!["cannot safely register".into()],
+            ..candidate("blocked")
+        };
+        let rendered = render(&[blocked], root.path());
+        assert!(rendered.contains("cannot be registered"));
+        assert!(rendered.contains("blocked: cannot safely register"));
+        assert!(render(&[candidate("ready")], root.path()).contains("can be registered"));
+    }
+
+    #[test]
+    fn manifest_quoting_preserves_control_and_display_sensitive_text() {
+        let mut reviewer = candidate("reviewer");
+        reviewer.description = "quote \" slash \\ line\nbidi \u{202e} bell\u{0007}".into();
+        let manifest = proposed_manifest(&reviewer, "claude-opus-5", "1.0.0");
+        let (parsed, _) =
+            crate::agent::parse_manifest(&manifest, Path::new("reviewer.md")).unwrap();
+        assert!(parsed.description.contains("\\u202E"));
+        assert!(parsed.description.contains("\\u0007"));
+        assert!(manifest.contains("\\u202E"));
+        assert!(manifest.contains("\\u0007"));
+    }
+}

@@ -39,7 +39,7 @@ fn setup_and_registration_classify_actionable_errors() {
             3,
             "no native definition",
         ),
-        (&["init"], 4, "no ahu configuration"),
+        (&["setup"], 4, "needs a terminal"),
         (&["onboard", "--register", "fixture"], 2, "--model"),
     ];
     let mut failures = Vec::new();

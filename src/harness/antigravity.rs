@@ -26,7 +26,6 @@
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::agent::Permissions;
-use crate::bail;
 use crate::util::Result;
 
 pub struct Antigravity;
@@ -37,16 +36,7 @@ impl Adapter for Antigravity {
     }
 
     fn launch_command(&self, request: &LaunchRequest<'_>) -> Result<LaunchCommand> {
-        if request.model.is_empty() {
-            bail!("the Antigravity adapter requires an exact model identifier.");
-        }
-        if request.model.starts_with('-') {
-            bail!(
-                "model identifier {:?} would be read as an option by the Antigravity CLI.",
-                request.model
-            );
-        }
-        let mut args = vec!["--model".to_string(), request.model.to_string()];
+        let mut args = super::model_args(self.id(), request.model)?;
         // Verified against `agy --help`: --mode takes accept-edits | plan, and
         // --dangerously-skip-permissions auto-approves every tool request.
         match request.permissions {

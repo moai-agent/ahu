@@ -10,6 +10,7 @@ command reference documentation lives outside the bundle in README.md and
 docs/reference.md at the repository root. Source paths in concept provenance are
 relative to this bundle root and refer to the accompanying checkout.
 
+- [ahu system architecture](ahu-architecture.md) - The CLI, committed-context gate, harness, MCP, telemetry, and eval paths.
 - [Named agent identity](named-agent-identity.md) - How manifests select an agent's identity and instruction source.
 - [Task configuration inheritance](task-configuration-inheritance.md) - How task worktrees inherit recognized agent configuration.
 - [Task state](task-state.md) - Where records live and how discovery and integrity checks work.

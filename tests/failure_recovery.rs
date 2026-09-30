@@ -33,6 +33,16 @@ fn scripted(
     }
 }
 
+fn policy_wizard(console: &mut Console<'_>, repo: &std::path::Path) -> ahu::util::Result<i32> {
+    match ahu::launcher::run_setup(console)? {
+        Some(config) => {
+            config::write_new(repo, &config)?;
+            Ok(0)
+        }
+        None => Ok(1),
+    }
+}
+
 /// The exact child-test fixture provides private state and an unavailable cmux.
 /// Keep each group of assertions together without mutating process globals.
 fn with_state<T>(_repo: &TestRepo, f: impl FnOnce() -> T) -> T {
@@ -380,35 +390,8 @@ fn the_resolved_harness_and_model_are_shown_before_the_prompt_is_entered() {
 }
 
 #[test]
-fn a_first_load_hygiene_review_runs_before_submission_and_deletes_nothing() {
-    if !common::in_harness_fixture(
-        "a_first_load_hygiene_review_runs_before_submission_and_deletes_nothing",
-    ) {
-        return;
-    }
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    repo.write(".claude/skills/review/SKILL.md", "a skill that may load\n");
-    repo.commit("fixture");
-    let discovered = git::discover(repo.path()).unwrap();
-
-    let (_, text) = with_state(&repo, || {
-        scripted("@chris\ndo the thing\n.\nn\n", |console| {
-            commands::interactive(console, &discovered, false, None)
-        })
-    });
-    assert!(text.contains("Context hygiene review"), "{text}");
-    assert!(text.contains("first load"), "{text}");
-    assert!(text.contains(".claude/skills/review/SKILL.md"), "{text}");
-    assert!(text.contains("Nothing has been changed"), "{text}");
-    // The skill is still there.
-    assert!(repo.path().join(".claude/skills/review/SKILL.md").exists());
-}
-
-#[test]
-fn a_noninteractive_first_run_asks_for_setup_and_writes_nothing() {
-    if !common::in_harness_fixture("a_noninteractive_first_run_asks_for_setup_and_writes_nothing") {
+fn a_noninteractive_first_run_requires_the_single_setup_command() {
+    if !common::in_harness_fixture("a_noninteractive_first_run_requires_the_single_setup_command") {
         return;
     }
     let repo = TestRepo::new();
@@ -426,8 +409,7 @@ fn a_noninteractive_first_run_asks_for_setup_and_writes_nothing() {
         })
     };
     let error = result.unwrap_err().to_string();
-    assert!(error.contains("not run interactively"), "{error}");
-    assert!(error.contains("Nothing was changed"), "{error}");
+    assert!(error.contains("run `ahu setup` first"), "{error}");
     assert!(!repo.path().join(".agents/ahu/config.toml").exists());
 }
 
@@ -437,10 +419,9 @@ fn cancelled_setup_writes_nothing() {
         return;
     }
     let repo = TestRepo::new();
-    let discovered = git::discover(repo.path()).unwrap();
-    // Choose Claude Code, accept catalog model order, default interval, then say no.
+    // Choose Claude Code, accept its catalog model order, then cancel.
     let (code, text) = with_state(&repo, || {
-        scripted("1\n\n\nn\n", |console| commands::init(console, &discovered))
+        scripted("1\n\n\nn\n", |console| policy_wizard(console, repo.path()))
     });
     assert_eq!(code, 1, "{text}");
     assert!(text.contains("Nothing was written"), "{text}");
@@ -453,9 +434,8 @@ fn setup_saves_only_the_config_file() {
         return;
     }
     let repo = TestRepo::new();
-    let discovered = git::discover(repo.path()).unwrap();
     let (code, text) = with_state(&repo, || {
-        scripted("1\n\n\ny\n", |console| commands::init(console, &discovered))
+        scripted("1\n\ny\n", |console| policy_wizard(console, repo.path()))
     });
     assert_eq!(code, 0, "{text}");
     let written = repo.read(".agents/ahu/config.toml");
@@ -474,14 +454,6 @@ fn setup_saves_only_the_config_file() {
     // It is usable immediately, uncommitted.
     let loaded = config::load(repo.path()).unwrap().unwrap();
     assert_eq!(loaded.config.harness_preferences, vec!["claude-code"]);
-
-    // Re-running reports the existing configuration rather than replacing it.
-    let (code, text) = with_state(&repo, || {
-        scripted("", |console| commands::init(console, &discovered))
-    });
-    assert_eq!(code, 0, "{text}");
-    assert!(text.contains("already initialized"), "{text}");
-    assert_eq!(repo.read(".agents/ahu/config.toml"), written);
 }
 
 #[test]
@@ -543,38 +515,6 @@ fn onboarding_is_additive_idempotent_and_reversible() {
     assert_eq!(code, 0);
     assert!(!repo.path().join(".agents/ahu/agents/sam.md").exists());
     assert_eq!(repo.read(".claude/agents/sam.md"), native_before);
-}
-
-#[test]
-fn the_inventory_separates_available_from_loaded_and_admits_its_gaps() {
-    if !common::in_harness_fixture(
-        "the_inventory_separates_available_from_loaded_and_admits_its_gaps",
-    ) {
-        return;
-    }
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    repo.write("CLAUDE.md", "repository guidance\n");
-    repo.write(".claude/skills/review/SKILL.md", "skill\n");
-    repo.commit("fixture");
-    let discovered = git::discover(repo.path()).unwrap();
-
-    let (code, text) = with_state(&repo, || {
-        scripted("", |console| {
-            commands::inventory_cmd(console, &discovered, Some("chris"))
-        })
-    });
-    assert_eq!(code, 0, "{text}");
-    assert!(text.contains("[loaded] chris@1.0.0"), "{text}");
-    assert!(text.contains("[available] CLAUDE.md"), "{text}");
-    assert!(
-        text.contains("[available] .claude/skills/review/SKILL.md"),
-        "{text}"
-    );
-    assert!(text.contains("[opaque]"), "{text}");
-    assert!(text.contains("What ahu cannot see"), "{text}");
-    assert!(text.contains("is not complete"), "{text}");
 }
 
 #[test]
@@ -651,10 +591,15 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
 
     let found = drift::detect(
         "chris@1.0.0",
-        Some(ahu::drift::AgentDigests {
-            identity: &agent.identity_digest(),
-            source: &agent.source_digest,
-            instructions: &agent.instructions_digest,
+        Some(ahu::drift::AgentIdentity {
+            version: &agent.manifest.version,
+            harness: &agent.manifest.harness,
+            model: &agent.manifest.model,
+            permissions: agent.manifest.permissions,
+            instructions_source: Some(&agent.relative_source(&discovered.root)),
+            identity_digest: &agent.identity_digest(),
+            source_digest: &agent.source_digest,
+            instructions_digest: &agent.instructions_digest,
         }),
         &plan.snapshot.digest(),
         &loaded.digest,
@@ -663,24 +608,18 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
     )
     .expect("drift detected");
     let rendered = drift::render(&found);
-    // Drift names which digest moved, and what that digest covers. "the agent's
-    // instructions or manifest changed" could not distinguish an edit to the
-    // delivered text from an edit to frontmatter, and a reader comparing a
-    // digest against a file has to know which bytes it covers.
+    // Drift names the file and which of its bytes moved. A digest pair alone
+    // could not distinguish an edit to the delivered text from an edit to
+    // frontmatter, and neither one tells a reader which file to open.
     assert!(
-        rendered.contains("the instruction text ahu delivers changed"),
+        rendered.contains("- instructions: .claude/agents/chris.md changed, text ahu delivers"),
         "{rendered}"
     );
+    // A digest pair for the agent's own files is now redundant with the line
+    // above, so the report does not carry one.
+    assert!(!rendered.contains("frontmatter included"), "{rendered}");
     assert!(
-        rendered.contains("after any frontmatter is stripped"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("the agent's source file changed"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("the whole file, frontmatter included"),
+        rendered.contains("the repository agent configuration changed:"),
         "{rendered}"
     );
     assert!(rendered.contains("bump the agent's version"), "{rendered}");
@@ -765,10 +704,15 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
 
     let found = drift::detect(
         "chris@1.0.0",
-        Some(ahu::drift::AgentDigests {
-            identity: &agent.identity_digest(),
-            source: &agent.source_digest,
-            instructions: &agent.instructions_digest,
+        Some(ahu::drift::AgentIdentity {
+            version: &agent.manifest.version,
+            harness: &agent.manifest.harness,
+            model: &agent.manifest.model,
+            permissions: agent.manifest.permissions,
+            instructions_source: Some(&agent.relative_source(&discovered.root)),
+            identity_digest: &agent.identity_digest(),
+            source_digest: &agent.source_digest,
+            instructions_digest: &agent.instructions_digest,
         }),
         &plan.snapshot.digest(),
         &loaded.digest,
@@ -780,6 +724,10 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
     assert!(rendered.contains("configuration changed"), "{rendered}");
     assert!(rendered.contains("hooks in effect changed"), "{rendered}");
     assert!(rendered.contains("project policy changed"), "{rendered}");
+    // The record carries no agent digests to compare, so nothing is claimed
+    // about the agent's own files -- and the version note still lands.
+    assert!(!rendered.contains("instructions:"), "{rendered}");
+    assert!(rendered.contains("(version still 1.0.0)"), "{rendered}");
 }
 
 /// A catalog lookup that a refactor could break must surface as an error the

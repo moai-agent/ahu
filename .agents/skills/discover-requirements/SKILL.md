@@ -80,8 +80,10 @@ counterpart on the same harness. Preserve existing delegation and approval
 boundaries.
 
 Maintain `.agents/skills/discover-requirements/SKILL.md` as the canonical
-repository skill file. Claude loads the same `.agents/skills/` tree directly;
-do not create a duplicate `.claude/skills/` copy, symlink, global sync, or install.
+repository skill file. `ahu setup` installs harness-facing copies where needed:
+Codex, OpenCode, and Antigravity discover `.agents/skills/`, while Claude Code
+discovers `.claude/skills/`. Do not create symlinks or global copies manually.
+Skill-file presence is not evidence that a harness loaded the skill.
 
 After skill edits, run `python3 scripts/check-skills.py` to validate the
 canonical repository skill tree.

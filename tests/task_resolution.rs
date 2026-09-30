@@ -436,10 +436,10 @@ fn focus_resolves_through_the_task_index() {
     assert!(text.contains("has no recorded cmux session"), "{text}");
 }
 
-/// `ahu diff` resolves a registered task from a sibling checkout and
-/// writes the bare patch to stdout.
+/// `ahu task` resolves a registered task from a sibling checkout and hands
+/// back the checkout and launch base that reviewing it with Git needs.
 #[test]
-fn diff_resolves_through_the_task_index() {
+fn task_resolves_through_the_task_index() {
     let _lock = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = Scenario::new();
     let a = fixture();
@@ -447,10 +447,15 @@ fn diff_resolves_through_the_task_index() {
     let id = "006aa5a0-1234-7e5f-8a9b-0c1d2e3f4a52";
     prepare_registered_task(&a, id);
 
-    let out = ahu_at(&scenario, c.path(), &["diff", id]);
+    let out = ahu_at(&scenario, c.path(), &["task", id, "--output", "json"]);
     let text = text_of(&out);
     assert_eq!(out.status.code(), Some(0), "{text}");
-    assert!(out.stdout.is_empty(), "{text}");
+    let value: serde_json::Value = serde_json::from_str(text.trim()).expect("json");
+    assert_eq!(value["task_id"], id);
+    assert_eq!(
+        value["worktree"].as_str().unwrap(),
+        worktree_of(&a, id).to_string_lossy()
+    );
 }
 
 /// `ahu remove` resolves a registered task from a sibling checkout and

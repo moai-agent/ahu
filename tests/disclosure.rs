@@ -55,9 +55,7 @@ fn repo_on(harness: &str, model: &str) -> TestRepo {
              catalog_version = {:?}\n\
              \n[model_rankings]\n\
              {harness:?} = [{model:?}]\n\
-             \n[context_hygiene]\n\
-             review_on_first_load = false\n\
-             review_interval_days = 7\n",
+",
             ahu::catalog::CATALOG_VERSION
         ),
     );
@@ -698,12 +696,21 @@ fn a_frontmatter_only_edit_is_drift_and_is_named_as_a_file_change() {
     );
 
     let previous = record_for(&repo, &before);
+    // The same root the launch path hands drift, so the path is the
+    // repository-relative one a reviewer would type.
+    let root = git::discover(repo.path()).unwrap().root;
+    let source = after.relative_source(&root);
     let found = ahu::drift::detect(
         "sable@1.0.0",
-        Some(ahu::drift::AgentDigests {
-            identity: &after.identity_digest(),
-            source: &after.source_digest,
-            instructions: &after.instructions_digest,
+        Some(ahu::drift::AgentIdentity {
+            version: &after.manifest.version,
+            harness: &after.manifest.harness,
+            model: &after.manifest.model,
+            permissions: after.manifest.permissions,
+            instructions_source: Some(&source),
+            identity_digest: &after.identity_digest(),
+            source_digest: &after.source_digest,
+            instructions_digest: &after.instructions_digest,
         }),
         &previous.config_snapshot_digest.clone(),
         &previous.policy_digest.clone(),
@@ -713,18 +720,20 @@ fn a_frontmatter_only_edit_is_drift_and_is_named_as_a_file_change() {
     .expect("a frontmatter edit is still drift");
     let rendered = ahu::drift::render(&found);
 
+    // The file is named, not only digested: a reader can open it.
     assert!(
-        rendered.contains("the agent's source file changed"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("the text ahu delivers is unchanged"),
+        rendered.contains(
+            "- instructions: .claude/agents/sable.md changed, frontmatter or \
+             metadata only -- the text ahu delivers is unchanged"
+        ),
         "the distinction is the whole point: {rendered}"
     );
     assert!(
-        !rendered.contains("the instruction text ahu delivers changed"),
+        !rendered.contains("changed, text ahu delivers"),
         "{rendered}"
     );
+    // The label is what drift exists to contradict, so it is said outright.
+    assert!(rendered.contains("(version still 1.0.0)"), "{rendered}");
 }
 
 /// A minimal previous-launch record for `drift::detect`.
@@ -789,68 +798,6 @@ fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::
 
 /// The inventory names both digests too — it is the other place a reader is
 /// handed one and has to know what it covers.
-#[test]
-fn the_inventory_labels_both_digests() {
-    let repo = repo_on("claude-code", "claude-opus-5");
-    repo.write(
-        ".claude/agents/sable.md",
-        "---\nname: sable\nmodel: claude-opus-5\n---\n\nYou are sable.\n",
-    );
-    // Overwrite the body-mode fixture with a source-mode manifest pointing at
-    // the claude-agent definition.
-    repo.write(
-        ".agents/ahu/agents/sable.md",
-        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: sable\ndescription: fixture agent\n\
-         status: stable\ntags: [agents]\nharness: claude-code\nmodel: claude-opus-5\n\
-         permissions: prompt\nversion: 1.0.0\nsource_format: claude-agent\n\
-         source_path: .claude/agents/sable.md\n\n---\n\nInstructions live in the native \
-         definition at `.claude/agents/sable.md`, referenced in place and never edited.\n",
-    );
-    repo.commit("fixture");
-
-    let loaded = config::load(repo.path()).unwrap().unwrap();
-    let found = agent::find(repo.path(), "sable").unwrap();
-    let taken = ahu::snapshot::collect(repo.path()).unwrap();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let enforcement = adapter
-        .enforcement("claude-opus-5", Default::default())
-        .unwrap();
-    let home = tempfile::TempDir::new().unwrap();
-    let hooks = hooks::collect_for(repo.path(), "claude-code", &locations(home.path())).unwrap();
-    let built = ahu::inventory::build(&ahu::inventory::Subject {
-        repo_root: repo.path(),
-        loaded_config: &loaded,
-        snapshot: &taken,
-        agent: Some(&found),
-        harness: "claude-code",
-        model: "claude-opus-5",
-        enforcement: &enforcement,
-        hooks: &hooks,
-        prompt: None,
-    })
-    .unwrap();
-    let rendered = ahu::inventory::render(&built);
-
-    assert!(
-        rendered.contains(&format!(
-            "file digest {} covers the whole file",
-            &found.source_digest[..12]
-        )),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains(&format!(
-            "instructions digest {} covers exactly the text ahu delivers",
-            &found.instructions_digest[..12]
-        )),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("with its YAML frontmatter stripped"),
-        "{rendered}"
-    );
-}
-
 /// A plugin module an `opencode.json` declares is named on the launch preview.
 ///
 /// The configuration snapshot carries the file and digests it, but that digest
@@ -1136,37 +1083,6 @@ fn the_catalog_records_the_validated_feature_surface_of_each_harness() {
 /// it. The glosses are the part that keeps a mark from reading as a stronger
 /// claim than the adapter validation made.
 #[test]
-fn the_feature_matrix_is_rendered_with_every_feature_and_gloss() {
-    use ahu::catalog::FEATURES;
-
-    let rendered = ahu::inventory::render_feature_matrix();
-    assert!(rendered.contains("Harness feature matrix"), "{rendered}");
-    for feature in FEATURES {
-        assert!(
-            rendered.contains(feature.as_str()),
-            "{:?} must be a row in the matrix:\n{rendered}",
-            feature
-        );
-        assert!(
-            rendered.contains(feature.gloss()),
-            "{:?} must carry its gloss so a mark cannot read as a stronger claim:\n{rendered}",
-            feature
-        );
-    }
-    for harness in ahu::catalog::HARNESSES {
-        assert!(
-            rendered.contains(harness.display_name),
-            "{} must be a column:\n{rendered}",
-            harness.display_name
-        );
-    }
-    assert!(
-        rendered.contains("live-validated adapter surface"),
-        "the matrix must say what a mark is:\n{rendered}"
-    );
-}
-
-#[test]
 fn delivery_layout_and_nonce_changes_are_not_agent_version_drift() {
     let repo = repo_on("claude-code", "claude-opus-5");
     let agent = agent::find(repo.path(), "sable").unwrap();
@@ -1183,10 +1099,17 @@ fn delivery_layout_and_nonce_changes_are_not_agent_version_drift() {
         assert!(
             ahu::drift::detect(
                 &record.agent_label(),
-                Some(ahu::drift::AgentDigests {
-                    identity: &agent.identity_digest(),
-                    source: &agent.source_digest,
-                    instructions: &agent.instructions_digest
+                Some(ahu::drift::AgentIdentity {
+                    version: &agent.manifest.version,
+                    harness: &agent.manifest.harness,
+                    model: &agent.manifest.model,
+                    permissions: agent.manifest.permissions,
+                    instructions_source: Some(
+                        &agent.relative_source(&git::discover(repo.path()).unwrap().root)
+                    ),
+                    identity_digest: &agent.identity_digest(),
+                    source_digest: &agent.source_digest,
+                    instructions_digest: &agent.instructions_digest
                 }),
                 &record.config_snapshot_digest,
                 &record.policy_digest,
@@ -1196,4 +1119,54 @@ fn delivery_layout_and_nonce_changes_are_not_agent_version_drift() {
             .is_none()
         );
     }
+}
+
+#[test]
+fn launch_display_validation_and_json_warnings_are_reviewable() {
+    if !common::in_harness_fixture("launch_display_validation_and_json_warnings_are_reviewable") {
+        return;
+    }
+    let repo = repo_on("claude-code", "claude-opus-5");
+    repo.commit("fixture");
+    let (_, mut plan) = plan_for(&repo, "claude-code", "claude-opus-5");
+    assert!(
+        plan.apply_display(&launch::DisplayMetadata {
+            title: Some("   ".into()),
+            ..Default::default()
+        })
+        .is_err()
+    );
+    plan.apply_display(&launch::DisplayMetadata {
+        name: Some("clear-name".into()),
+        title: Some("A concise title".into()),
+        summary: Some("A useful summary".into()),
+    })
+    .unwrap();
+    assert_eq!(plan.task_name.as_deref(), Some("clear-name"));
+    assert_eq!(plan.title, "A concise title");
+    assert_eq!(plan.summary, "A useful summary");
+
+    plan.parent_dirty = true;
+    plan.hooks.unreadable.push("settings.json".into());
+    plan.snapshot.skipped_directories.push(".private".into());
+    plan.snapshot.unscanned_config.push("mystery.json".into());
+    plan.snapshot.symlinks.push(".agents/external".into());
+    let value: serde_json::Value =
+        serde_json::from_str(&launch::render_json(&plan, "work on it").unwrap()).unwrap();
+    let warnings = value["warnings"].as_array().unwrap();
+    for phrase in [
+        "uncommitted changes",
+        "Hook configuration could not be read",
+        "Directories not scanned",
+        "Configuration carried by the checkout",
+        "Configuration symlinks",
+    ] {
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.as_str().unwrap().contains(phrase)),
+            "missing warning {phrase}: {warnings:?}"
+        );
+    }
+    assert_eq!(value["executed"], false);
 }

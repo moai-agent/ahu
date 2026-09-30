@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ahu": {
+      "command": "ahu",
+      "args": ["mcp", "serve"],
+      "env": {}
+    }
+  }
+}

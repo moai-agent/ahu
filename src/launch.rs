@@ -208,13 +208,6 @@ pub fn plan(
     if prompt.trim().is_empty() {
         bail!(kind: crate::util::ErrorKind::Usage, "the task prompt is empty; nothing was launched.");
     }
-    let adapter = harness::adapter_for(&pair.harness)?;
-    let snapshot = snapshot::collect(&repo.root)?;
-    // Scanning for hooks is harness-specific: `hooks::collect` knows Claude
-    // Code's settings files and nothing else, so it is told which harness this
-    // launch is for and reports a coverage gap rather than "none found" when it
-    // has no implementation for it.
-    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
     let base_commit = repo.head.clone();
     if base_commit.is_none() {
         bail!(kind: crate::util::ErrorKind::Prerequisite,
@@ -222,6 +215,20 @@ pub fn plan(
              Make an initial commit first."
         );
     }
+    let adapter = harness::adapter_for(&pair.harness)?;
+    let snapshot = snapshot::collect(&repo.root)?;
+    let context_lock = crate::context_lock::check(repo, &snapshot)?;
+    if !context_lock.current {
+        bail!(kind: crate::util::ErrorKind::Prerequisite,
+            "agent context is not committed and locked: {}",
+            context_lock.detail
+        );
+    }
+    // Scanning for hooks is harness-specific: `hooks::collect` knows Claude
+    // Code's settings files and nothing else, so it is told which harness this
+    // launch is for and reports a coverage gap rather than "none found" when it
+    // has no implementation for it.
+    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
     let parent_dirty = git::is_dirty(repo)?;
     // Refuse early if `.worktrees` is a symlink, before anything is created.
     state::ensure_worktrees_root(&repo.root)?;
@@ -417,13 +424,7 @@ pub(crate) fn prepared_record(
             permissions: plan.permissions,
             harness: plan.pair.harness.clone(),
             model: plan.pair.model.clone(),
-            instructions_source: plan.agent.as_ref().map(|a| {
-                a.source_path
-                    .strip_prefix(&repo.root)
-                    .unwrap_or(&a.source_path)
-                    .to_string_lossy()
-                    .to_string()
-            }),
+            instructions_source: plan.agent.as_ref().map(|a| a.relative_source(&repo.root)),
             source_digest: plan.agent.as_ref().map(|a| a.source_digest.clone()),
             instructions_digest: plan.agent.as_ref().map(|a| a.instructions_digest.clone()),
             identity_digest: plan.agent.as_ref().map(|a| a.identity_digest()),
@@ -738,7 +739,7 @@ pub fn group_coordinator(
     label: &str,
     harness: &str,
     model: &str,
-    args: &[&str],
+    args: &[String],
 ) -> Result<CoordinatorPlacement> {
     let Some(workspace) = std::env::var("CMUX_WORKSPACE_ID")
         .ok()
@@ -1357,6 +1358,7 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             record.identity.agent_version.as_deref(),
             record.enforcement.harness_version.as_deref(),
             Some(&record.task_id),
+            None,
         );
         command
             // The run-task parent owns the harness's fresh process group, so
@@ -1364,9 +1366,15 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
             // this parent or the pane it lives in.
             .process_group(0)
             .spawn()
-            .map_err(|e| {
+            .map_err(|error| {
+                let state_failure = task::set_state(task_dir, TaskState::Failed)
+                    .err()
+                    .map(|state_error| {
+                        format!(" The task state could not be recorded as failed: {state_error}.")
+                    })
+                    .unwrap_or_default();
                 Error::new(format!(
-                    "cannot start {}: {e}\nThe worktree and task record are preserved at {} and {}.",
+                    "cannot start {}: {error}.{state_failure}\nThe worktree and task record are preserved at {} and {}.",
                     executable.display(),
                     record.worktree.display(),
                     task_dir.display()
@@ -1879,3 +1887,7 @@ mod pty_tests {
         assert_eq!(unsafe { libc::tcgetpgrp(0) }, parent);
     }
 }
+
+#[cfg(test)]
+#[path = "launch_tests.rs"]
+mod launch_contract_tests;

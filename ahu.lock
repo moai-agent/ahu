@@ -1,0 +1,261 @@
+schema_version = 1
+digest = "1473d62884f78bf1523a7fa96e503e6fbdc15c6d6d4d4e40594a3953fe36edbb"
+skipped_directories = [
+    ".ahu",
+    ".worktrees",
+    "target",
+]
+unscanned_config = []
+symlinks = []
+
+[[entries]]
+path = ".agents/ahu/agents/arch-astra.md"
+digest = "532506e2e98cc16f56b1243755eea710c956f759be77c0d353f9d5bf10c59f30"
+bytes = 5996
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/arch-glm.md"
+digest = "e844fe30098bdaa164b83b713e992f89c1f7c92b8f6b706b3b76dfc96099ea53"
+bytes = 6004
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/arch-opus.md"
+digest = "2af529a874b9914952c05d9e291fa1b5301472042b0a72668e5dec5dce2d6e39"
+bytes = 6000
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/defsec-astra.md"
+digest = "c6a95d5e12425bd5e7cd8fdf4fecf69d822b411ad9567796350b4f6482718792"
+bytes = 7024
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/defsec-glm.md"
+digest = "99d017a45cf965a98fb335d72c1c1f2c80f9be8a943ae46bef21f1656ef2b13b"
+bytes = 7030
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/defsec-opus.md"
+digest = "dc62ef13b55a2c5c93c8578dd2356c6e81ec5b78f0ecdfd9edaf60fb2b57a37c"
+bytes = 7028
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/dev-agy.md"
+digest = "b1c2122f6ebcdd2a76f76aa617c94ad7524647a9a31761d24a10c450bc297afa"
+bytes = 5888
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/dev-astra.md"
+digest = "0ec4452f9345311ffb3af931a6f2ced8bab533d52b3bb114c42fe4ac8ba161e6"
+bytes = 6935
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/dev-glm.md"
+digest = "c55a1269dd90e09fb3fe7ec56754bcf7270c6dcdcfe4634bf4a5b7b1c6b60a4a"
+bytes = 6939
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/dev-opus.md"
+digest = "5184d4969f07160a9bfca4fb2925e818646a3f5f0e2a673528f6f0cc9fd18196"
+bytes = 3523
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/docs-astra.md"
+digest = "478daba8265c047e8ca327a09f499d9033c6283782f2ccc6677ef378fb44ef68"
+bytes = 6749
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/docs-glm.md"
+digest = "8b41fe5e44d0436c1b1073e306704a5b318baa2d5ead5fccd538769a79d9ea97"
+bytes = 6755
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/docs-opus.md"
+digest = "1b007f276718783e5e49856e29fca52182ad057e1589c3be4219e02c48240a83"
+bytes = 6754
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/offsec-astra.md"
+digest = "3a8e94d464720c4d4e7a294670f45dd1e0abb10dcf02e9e790cb42323a5cb596"
+bytes = 6497
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/roadmap-architect.md"
+digest = "7e4dae7fc50295d2acb81dc6138873b061eaedc1dfd10b204a738fa0386c17ea"
+bytes = 3944
+executable = false
+
+[[entries]]
+path = ".agents/ahu/agents/roadmap-product-manager.md"
+digest = "548739627d999122c16b75edc2b859fa2ef4b331d354dced9d6cae7098d5d4fc"
+bytes = 4053
+executable = false
+
+[[entries]]
+path = ".agents/ahu/config.toml"
+digest = "6775f4ad648bb79513316b0c34d4015e0caed350527c2fa1f49b3770d61dc2a6"
+bytes = 414
+executable = false
+
+[[entries]]
+path = ".agents/mcp_config.json"
+digest = "40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06"
+bytes = 117
+executable = false
+
+[[entries]]
+path = ".agents/skills/agent-context-critic/SKILL.md"
+digest = "9c6b46a4c13789912fd6b07e1600ba37401d29c15e69ef6e39a9f38010ac5cf9"
+bytes = 5477
+executable = false
+
+[[entries]]
+path = ".agents/skills/ahu-architecture/SKILL.md"
+digest = "c0c848f549bbf21f3a96a3920a8be9a75c8062b254658015ff03e99416d2fe2d"
+bytes = 21864
+executable = false
+
+[[entries]]
+path = ".agents/skills/ahu-harness-upgrade/SKILL.md"
+digest = "de5bef8a1e3289427f48e6cff36f34fb94fc54fc9e55bfd15d1c82149bd5390f"
+bytes = 4660
+executable = false
+
+[[entries]]
+path = ".agents/skills/direct-agents/SKILL.md"
+digest = "7fd34a2aced838f0a9bf20eb0b6b18e8b6d323a04bc93ab5b11f1b9b1ef865b9"
+bytes = 7187
+executable = false
+
+[[entries]]
+path = ".agents/skills/discover-requirements/SKILL.md"
+digest = "129931849a0b6dc263b21b2e52f56f19e96d412088cd4c4f3a94aae39ed1f609"
+bytes = 5176
+executable = false
+
+[[entries]]
+path = ".agents/skills/release/SKILL.md"
+digest = "764267d6f570754123f790de6d04ad805f91d9d71440749e03d6fe2f4b9cba24"
+bytes = 6636
+executable = false
+
+[[entries]]
+path = ".agents/skills/typed-decisions/SKILL.md"
+digest = "630a694fa2927097eed4a0bb1d1e1ae0dbaf71fb935b795c0d8ae228200e01e0"
+bytes = 5987
+executable = false
+
+[[entries]]
+path = ".codex/config.toml"
+digest = "375dd7fa25b370d223946f5daf2f0c33165bd022f6a13d23fbe02975ef79d82c"
+bytes = 217
+executable = false
+
+[[entries]]
+path = ".mcp.json"
+digest = "40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06"
+bytes = 117
+executable = false
+
+[[entries]]
+path = "AGENTS.md"
+digest = "1a94fad2a7eb0162dfcc562eaebd5f51dda8571e40191a012516fe21ec524678"
+bytes = 4110
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/api-compatibility/SKILL.md"
+digest = "dbf2a9bc7af45c3d36b33d99b0f3d229d0f1dca44bf5e3ed123b135194c19c5a"
+bytes = 646
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/cache-invalidation/SKILL.md"
+digest = "1e0224bb9f1f8496c6a6b923d01ef96bcdda77d346d69de19be1d5f6ae028ba3"
+bytes = 664
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/data-redaction/SKILL.md"
+digest = "5c7c9876e87b97f43848bceffeef448127430dc42f29e9cc38b2d3d7a771d4d4"
+bytes = 714
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/dependency-upgrade/SKILL.md"
+digest = "0c548952f2a37223fcb522896ebf4a6d4896819da7b0cb6c49847c9e32ea2521"
+bytes = 616
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/deployment-rollback/SKILL.md"
+digest = "9a47401537fc0b1b82f46a5dfd90ab9b4cf089e0c6706d62eb0352d258cc4003"
+bytes = 670
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/documentation-contract/SKILL.md"
+digest = "ecf93444beeefa5d5f381eb6fc313ab62aa45c08aae0ac56adcb3cc6da8295d5"
+bytes = 618
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/evaluation-analysis/SKILL.md"
+digest = "76bb500dfaee19d12bb56029103fbbd58bb778622dc6d17ba83559e4a9b98df7"
+bytes = 651
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/event-logging/SKILL.md"
+digest = "725a3e1a75f1e133dd598b007659453ac249d8b795e38da3a78fc751b0abe05f"
+bytes = 636
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/mcp-diagnostics/SKILL.md"
+digest = "5147d245af64dd801bf2ef1adcccbfebec66e050a399eb08b696e9ada7e1d796"
+bytes = 686
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/queue-recovery/SKILL.md"
+digest = "1444725b6a9ca3acf98f3edf34a0f75e58bde4e8ee54fe7cf6f3b6d4191caaee"
+bytes = 598
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/release-readiness/SKILL.md"
+digest = "76e85d2787a83e2a7befb457906c009cff5d13d958ff8531420ebefc681236a0"
+bytes = 681
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/.agents/skills/schema-migration/SKILL.md"
+digest = "4d73a8057719848a029e4eda97ca80a2231fc3d94a9288386a3baae0b75203f4"
+bytes = 708
+executable = false
+
+[[entries]]
+path = "evals/skill-selection/fixture/AGENTS.md"
+digest = "9b4ffa45cde83ffb186408f2b50e96832dd06ce8eaa5f8a14658f0e8aa1b12f5"
+bytes = 255
+executable = false
+
+[[entries]]
+path = "opencode.json"
+digest = "4ecc55dabff9aa1d56ed3bb9bd4b2f2ee2dc4fd66a97956c81b8d5f83ce80e57"
+bytes = 590
+executable = false

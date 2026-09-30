@@ -11,7 +11,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use crate::agent::ResolvedAgent;
 use crate::bail;
 use crate::catalog;
-use crate::config::{ContextHygiene, ProjectConfig};
+use crate::config::ProjectConfig;
 use crate::selection;
 use crate::style::{self, Role};
 use crate::util::{Result, display_safe};
@@ -278,11 +278,25 @@ pub fn confirm_submit(console: &mut Console<'_>, code: &str) -> Result<bool> {
 /// The initializing user is establishing project policy for everyone, not a
 /// personal profile. Cancellation writes nothing.
 pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
+    run_setup_using(console, |harness| crate::models::Options {
+        models: catalog::models_for(harness),
+        source: crate::models::Source::Catalog,
+    })
+}
+
+pub fn run_setup_with_available_models(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
+    run_setup_using(console, crate::models::for_harness)
+}
+
+fn run_setup_using(
+    console: &mut Console<'_>,
+    models_for: impl Fn(&str) -> crate::models::Options,
+) -> Result<Option<ProjectConfig>> {
     if !console.interactive {
         bail!(kind: crate::util::ErrorKind::Prerequisite,
             "this repository has no ahu configuration yet, and ahu was not run interactively.\n\
              Initialization records the project-agreed harness and model order, so ahu will not \
-             invent one. Run `ahu init` from a terminal.\n\
+             invent one. Run `ahu setup` from a terminal.\n\
              Nothing was changed."
         );
     }
@@ -356,23 +370,27 @@ pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
 
     let mut model_rankings = std::collections::BTreeMap::new();
     for harness_id in &harness_preferences {
-        let models = catalog::models_for(harness_id);
+        let options = models_for(harness_id);
+        let models = options.models;
         if models.is_empty() {
             console.say(&format!(
-                "\nCatalog {} lists no models for {harness_id}; no ranking is recorded for it.\n",
-                catalog::CATALOG_VERSION
+                "\nNo model in ahu's compatibility catalog is available for {harness_id}; no ranking is recorded for it.\n"
             ))?;
             continue;
         }
-        console.say(&format!("\nModels available for {harness_id}:\n"))?;
+        let source = match options.source {
+            crate::models::Source::Harness => "listed by the harness and supported by ahu",
+            crate::models::Source::Catalog => {
+                "listed in ahu's catalog; account access is not checked"
+            }
+        };
+        console.say(&format!("\nModels for {harness_id} ({source}):\n"))?;
         for (index, model) in models.iter().enumerate() {
             console.say(&format!(
-                "  {}. {:<22} {}\n      basis: {} (reviewed {})\n",
+                "  {}. {:<28} {}\n",
                 index + 1,
                 model.model,
-                model.display_name,
-                model.evaluation_basis,
-                model.reviewed_on
+                model.display_name
             ))?;
         }
         console
@@ -414,31 +432,12 @@ pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
         model_rankings.insert(harness_id.clone(), chosen);
     }
 
-    let interval = loop {
-        let answer = console.ask("\nContext hygiene review interval in days [7]: ")?;
-        let Some(answer) = answer else {
-            return Ok(None);
-        };
-        let trimmed = answer.trim();
-        if trimmed.is_empty() {
-            break 7;
-        }
-        match trimmed.parse::<u32>() {
-            Ok(value) if value >= 1 => break value,
-            _ => console.say("Enter a whole number of days, at least 1.\n")?,
-        }
-    };
-
     let config = ProjectConfig {
         schema_version: crate::config::SUPPORTED_SCHEMA_VERSION,
         harness_preferences,
         model_selection: "project-ranked".to_string(),
         catalog_version: catalog::CATALOG_VERSION.to_string(),
         model_rankings,
-        context_hygiene: ContextHygiene {
-            review_on_first_load: true,
-            review_interval_days: interval,
-        },
         // Setup asks nothing about knowledge bundles: a new project has none to
         // name yet, and an empty list makes `ahu knowledge lint` say so.
         knowledge: crate::config::Knowledge::default(),

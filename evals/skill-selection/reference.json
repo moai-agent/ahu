@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "corpus_version": "1.0.0",
+  "cases": {
+    "01-column-transition": {
+      "required": [
+        ".agents/skills/schema-migration/SKILL.md"
+      ],
+      "useful": [],
+      "rationale": "Storage sequencing and the two-run retirement gate are defined only in the migration body; no wire change is requested."
+    },
+    "02-response-rename": {
+      "required": [
+        ".agents/skills/api-compatibility/SKILL.md"
+      ],
+      "useful": [],
+      "rationale": "The body supplies the wire-format rule and notice count; stored columns are explicitly unchanged."
+    },
+    "03-support-export": {
+      "required": [
+        ".agents/skills/data-redaction/SKILL.md"
+      ],
+      "useful": [],
+      "rationale": "Only the export body supplies first-seen batch aliases and the permitted opaque correlation field."
+    },
+    "04-recovered-worker": {
+      "required": [
+        ".agents/skills/event-logging/SKILL.md"
+      ],
+      "useful": [],
+      "rationale": "Severity, once-per-operation success logging, and correlation fields come from the event body; no support export is requested."
+    },
+    "05-tag-checklist": {
+      "required": [
+        ".agents/skills/release-readiness/SKILL.md"
+      ],
+      "useful": [],
+      "rationale": "The release body defines exact-digest platform evidence and how to handle an infrastructure timeout."
+    },
+    "06-trial-report": {
+      "required": [
+        ".agents/skills/evaluation-analysis/SKILL.md"
+      ],
+      "useful": [],
+      "rationale": "The analysis body specifies reliability, conditional answer quality, and missing-observation handling."
+    },
+    "07-version-recovery": {
+      "required": [
+        ".agents/skills/deployment-rollback/SKILL.md",
+        ".agents/skills/cache-invalidation/SKILL.md"
+      ],
+      "useful": [],
+      "rationale": "Target and health verification use rollback policy; fresh namespaces and TTL use cache policy. Prior release approval is outside the requested recovery."
+    },
+    "08-discovery-and-jobs": {
+      "required": [
+        ".agents/skills/mcp-diagnostics/SKILL.md",
+        ".agents/skills/queue-recovery/SKILL.md"
+      ],
+      "useful": [],
+      "rationale": "Handshake evidence classification is in MCP diagnostics; receipt/key-based disposition is in queue recovery. No run-score comparison is requested."
+    },
+    "09-client-package": {
+      "required": [
+        ".agents/skills/dependency-upgrade/SKILL.md",
+        ".agents/skills/api-compatibility/SKILL.md",
+        ".agents/skills/documentation-contract/SKILL.md"
+      ],
+      "useful": [],
+      "rationale": "Upgrade-specific checks, wire compatibility, and redirect/anchor lifetime each require a distinct policy body."
+    },
+    "10-status-copy": {
+      "required": [],
+      "useful": [],
+      "rationale": "Every answer is supplied verbatim; workflow nouns do not make a policy consultation necessary."
+    },
+    "11-list-count": {
+      "required": [],
+      "useful": [],
+      "rationale": "Counting suffixes and sorting the provided ASCII names are mechanical; documentation editing is not requested."
+    },
+    "12-config-copy": {
+      "required": [],
+      "useful": [],
+      "rationale": "The complete transformation is specified in state; no workflow policy fact is missing."
+    }
+  }
+}

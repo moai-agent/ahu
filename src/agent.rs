@@ -407,7 +407,7 @@ pub struct ResolvedAgent {
     /// Separate digests let readers compare the source file and the delivered
     /// body without treating frontmatter as instruction text.
     pub instructions_digest: String,
-    /// Instructions the harness receives, for the context inventory.
+    /// Instructions the harness receives, for the committed-context snapshot.
     pub instructions: String,
     /// Model the native file declares, when it declares one.
     pub native_model: Option<String>,
@@ -419,6 +419,20 @@ impl ResolvedAgent {
     /// `chris@1.2.0`, the form used to refer to a launch.
     pub fn label(&self) -> String {
         format!("{}@{}", self.manifest.name, self.manifest.version)
+    }
+
+    /// The instruction source as a reviewer refers to it: repository-relative
+    /// when the file is inside the checkout, absolute when it somehow is not.
+    ///
+    /// Task records store this form, and drift names the file that changed, so
+    /// both go through one conversion rather than each spelling a path its own
+    /// way.
+    pub fn relative_source(&self, repo_root: &Path) -> String {
+        self.source_path
+            .strip_prefix(repo_root)
+            .unwrap_or(&self.source_path)
+            .to_string_lossy()
+            .to_string()
     }
 
     /// Digest binding the manifest and the native definition together.
@@ -811,4 +825,794 @@ fn find_frontmatter_end(rest: &str) -> Option<(usize, usize)> {
         offset += line.len();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A manifest whose frontmatter is valid and whose body is its instructions.
+    fn manifest_text(extra: &str, body: &str) -> String {
+        format!(
+            "---\nokf_version: {OKF_VERSION}\ntype: ahu:agent\ntitle: builder\nversion: \
+             1.0.0\ndescription: builds\nharness: claude-code\nmodel: \
+             claude-sonnet-5\n{extra}---\n\n{body}"
+        )
+    }
+
+    fn parse(text: &str) -> Result<(AgentManifest, String)> {
+        parse_manifest(text, Path::new("/repo/.agents/ahu/agents/builder.md"))
+    }
+
+    fn parse_err(text: &str) -> String {
+        parse(text).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn source_formats_round_trip_their_manifest_spelling_and_own_harness() {
+        let cases = [
+            (
+                SourceFormat::ClaudeAgent,
+                "claude-agent",
+                "claude-code",
+                true,
+            ),
+            (SourceFormat::CodexAgent, "codex-agent", "codex", false),
+            (
+                SourceFormat::AntigravityAgent,
+                "antigravity-agent",
+                "antigravity",
+                true,
+            ),
+            (
+                SourceFormat::OpenCodeAgent,
+                "opencode-agent",
+                "opencode",
+                true,
+            ),
+        ];
+        for (format, spelling, harness, has_frontmatter) in cases {
+            assert_eq!(format.as_str(), spelling);
+            assert_eq!(SourceFormat::parse(spelling), Some(format));
+            assert_eq!(format.native_harness(), Some(harness));
+            assert_eq!(format.has_frontmatter(), has_frontmatter);
+        }
+        for unknown in ["", "claude", "cursor-agent", "CLAUDE-AGENT"] {
+            assert_eq!(SourceFormat::parse(unknown), None);
+        }
+    }
+
+    #[test]
+    fn status_and_permissions_spell_themselves_for_the_registry_and_the_preview() {
+        assert_eq!(Status::default(), Status::Stable);
+        for (status, spelling) in [
+            (Status::Draft, "draft"),
+            (Status::Stable, "stable"),
+            (Status::Deprecated, "deprecated"),
+        ] {
+            assert_eq!(status.as_str(), spelling);
+        }
+
+        assert_eq!(Permissions::default(), Permissions::Prompt);
+        for (permissions, spelling, widens) in [
+            (Permissions::Prompt, "prompt", false),
+            (Permissions::AcceptEdits, "accept-edits", true),
+            (Permissions::Auto, "auto", true),
+        ] {
+            assert_eq!(permissions.as_str(), spelling);
+            assert_eq!(permissions.widens_defaults(), widens);
+            assert!(!permissions.disclosure().is_empty());
+        }
+        // The prompt disclosure must not claim a boundary ahu did not set.
+        assert!(
+            Permissions::Prompt
+                .disclosure()
+                .contains("ahu passes no permission flag")
+        );
+        assert!(
+            Permissions::AcceptEdits
+                .disclosure()
+                .contains("other tools still prompt")
+        );
+        assert!(Permissions::Auto.disclosure().contains("unattended"));
+    }
+
+    #[test]
+    fn a_manifest_needs_frontmatter_that_opens_and_closes() {
+        let missing = parse_err("title: builder\n\nInstructions.\n");
+        assert!(missing.contains("not an ahu agent manifest"), "{missing}");
+
+        let unclosed = parse_err("---\nokf_version: 0.2\ntype: ahu:agent\n\nInstructions.\n");
+        assert!(unclosed.contains("never closed"), "{unclosed}");
+
+        // CRLF frontmatter delimiters open and close the same document.
+        let crlf = format!(
+            "---\r\nokf_version: {OKF_VERSION}\r\ntype: ahu:agent\r\ntitle: builder\r\nversion: \
+             1.0.0\r\nharness: claude-code\r\nmodel: claude-sonnet-5\r\n---\r\n\r\nInstructions.\r\n"
+        );
+        let (manifest, body) = parse(&crlf).unwrap();
+        assert_eq!(manifest.name, "builder");
+        assert!(body.contains("Instructions."));
+    }
+
+    #[test]
+    fn frontmatter_lines_must_be_key_value_pairs_and_comments_are_skipped() {
+        let broken = parse_err(&manifest_text("just-a-bare-line\n", "Instructions.\n"));
+        assert!(broken.contains("is not a `key: value` pair"), "{broken}");
+
+        // Comments, blank lines, and unknown keys leave a manifest valid: it is
+        // an OKF document first, so ahu reads the fields it owns and no others.
+        let (manifest, _) = parse(&manifest_text(
+            "# a comment\n\nauthor: someone\nquoted: \"value\"\n",
+            "Instructions.\n",
+        ))
+        .unwrap();
+        assert_eq!(manifest.name, "builder");
+        assert_eq!(manifest.description, "builds");
+    }
+
+    #[test]
+    fn the_okf_envelope_and_the_required_identity_fields_are_all_enforced() {
+        let wrong_version = parse_err(
+            &manifest_text("", "Instructions.\n").replace("okf_version: 0.2", "okf_version: 0.1"),
+        );
+        assert!(
+            wrong_version.contains("is not supported by this ahu build"),
+            "{wrong_version}"
+        );
+
+        let wrong_kind = parse_err(
+            &manifest_text("", "Instructions.\n").replace("type: ahu:agent", "type: ahu:skill"),
+        );
+        assert!(
+            wrong_kind.contains("is not an ahu agent manifest"),
+            "{wrong_kind}"
+        );
+
+        // Each of the four identity fields is individually required.
+        for removed in [
+            "title: builder\n",
+            "version: 1.0.0\n",
+            "harness: claude-code\n",
+            "model: claude-sonnet-5\n",
+        ] {
+            let text = manifest_text("", "Instructions.\n").replace(removed, "");
+            let error = parse_err(&text);
+            assert!(
+                error.contains("title, version, harness, and model are all required"),
+                "{removed:?} -> {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_permissions_and_native_helpers_accept_only_their_declared_values() {
+        for (declared, expected) in [
+            ("", Status::Stable),
+            ("status: stable\n", Status::Stable),
+            ("status: draft\n", Status::Draft),
+            ("status: deprecated\n", Status::Deprecated),
+        ] {
+            let (manifest, _) = parse(&manifest_text(declared, "Instructions.\n")).unwrap();
+            assert_eq!(manifest.status, expected);
+        }
+        let bad_status = parse_err(&manifest_text("status: retired\n", "Instructions.\n"));
+        assert!(
+            bad_status.contains("is not one of: stable, draft, deprecated"),
+            "{bad_status}"
+        );
+
+        for (declared, expected) in [
+            ("", Permissions::Prompt),
+            ("permissions: prompt\n", Permissions::Prompt),
+            ("permissions: accept-edits\n", Permissions::AcceptEdits),
+            ("permissions: auto\n", Permissions::Auto),
+        ] {
+            let (manifest, _) = parse(&manifest_text(declared, "Instructions.\n")).unwrap();
+            assert_eq!(manifest.permissions, expected);
+        }
+        let bad_permissions = parse_err(&manifest_text("permissions: yolo\n", "Instructions.\n"));
+        assert!(
+            bad_permissions.contains("is not one of: prompt, accept-edits, auto"),
+            "{bad_permissions}"
+        );
+
+        for (declared, expected) in [
+            ("", None),
+            ("native_helpers: disabled\n", Some("disabled")),
+            ("native_helpers: bounded\n", Some("bounded")),
+        ] {
+            let (manifest, _) = parse(&manifest_text(declared, "Instructions.\n")).unwrap();
+            assert_eq!(manifest.native_helpers.as_deref(), expected);
+        }
+        let bad_helpers = parse_err(&manifest_text("native_helpers: all\n", "Instructions.\n"));
+        assert!(
+            bad_helpers.contains("is not one of: disabled, bounded"),
+            "{bad_helpers}"
+        );
+    }
+
+    #[test]
+    fn a_source_reference_needs_both_halves_and_a_known_format() {
+        let (manifest, _) = parse(&manifest_text(
+            "source_format: claude-agent\nsource_path: .claude/agents/builder.md\n",
+            "See the native definition.\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            manifest.source,
+            Some(AgentSource {
+                format: SourceFormat::ClaudeAgent,
+                path: ".claude/agents/builder.md".to_string(),
+            })
+        );
+
+        // No source pair at all means the body is the instructions.
+        let (plain, _) = parse(&manifest_text("", "Instructions.\n")).unwrap();
+        assert_eq!(plain.source, None);
+
+        let unknown_format = parse_err(&manifest_text(
+            "source_format: cursor-agent\nsource_path: .cursor/agents/builder.md\n",
+            "See the native definition.\n",
+        ));
+        assert!(
+            unknown_format.contains("source_format \"cursor-agent\" is not one of"),
+            "{unknown_format}"
+        );
+
+        // Half a reference is never a reference: neither half implies the other.
+        for half in [
+            "source_format: claude-agent\n",
+            "source_path: .claude/agents/builder.md\n",
+        ] {
+            let error = parse_err(&manifest_text(half, "See the native definition.\n"));
+            assert!(
+                error.contains("source_format and source_path must appear together"),
+                "{half:?} -> {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_body_is_refused_and_the_reason_depends_on_the_source_reference() {
+        let own_instructions = parse_err(&manifest_text("", "   \n\n"));
+        assert!(
+            own_instructions.contains("The body is this agent's instructions"),
+            "{own_instructions}"
+        );
+
+        let referenced = parse_err(&manifest_text(
+            "source_format: claude-agent\nsource_path: .claude/agents/builder.md\n",
+            "\n",
+        ));
+        assert!(
+            referenced.contains("must still tell a human reader where the instructions live"),
+            "{referenced}"
+        );
+    }
+
+    /// A repository root carrying one registry manifest per `write_manifest`
+    /// call. Nothing is committed: `load_all` reads the working tree.
+    fn registry() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(AGENTS_RELATIVE_DIR)).unwrap();
+        root
+    }
+
+    fn write(root: &Path, relative: &str, contents: &str) -> PathBuf {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    /// A manifest whose body is its own instructions, written into the registry.
+    fn write_manifest(root: &Path, name: &str, extra: &str, body: &str) -> PathBuf {
+        write(
+            root,
+            &format!("{AGENTS_RELATIVE_DIR}/{name}.md"),
+            &format!(
+                "---\nokf_version: {OKF_VERSION}\ntype: ahu:agent\ntitle: {name}\nversion: \
+                 1.0.0\ndescription: builds\nharness: claude-code\nmodel: \
+                 claude-sonnet-5\n{extra}---\n\n{body}"
+            ),
+        )
+    }
+
+    fn load_err(root: &Path) -> String {
+        load_all(root).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn an_unregistered_repository_has_no_agents_and_says_so_when_one_is_named() {
+        let root = tempfile::tempdir().unwrap();
+        // No `.agents/ahu/agents` at all: an empty registry, not an error.
+        assert!(load_all(root.path()).unwrap().is_empty());
+        let error = find(root.path(), "builder").unwrap_err();
+        assert_eq!(error.kind(), crate::util::ErrorKind::UnknownAgent);
+        assert!(
+            error.to_string().contains("has no ahu agents yet"),
+            "{error}"
+        );
+
+        // An empty registry directory is equally not an error.
+        let root = registry();
+        assert!(load_all(root.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_named_agent_is_never_substituted_and_the_alternatives_are_listed() {
+        let root = registry();
+        write_manifest(root.path(), "builder", "", "Instructions.\n");
+        write_manifest(root.path(), "reviewer", "", "Instructions.\n");
+
+        let found = find(root.path(), "builder").unwrap();
+        assert_eq!(found.manifest.name, "builder");
+        assert_eq!(found.label(), "builder@1.0.0");
+
+        let error = find(root.path(), "missing").unwrap_err();
+        assert_eq!(error.kind(), crate::util::ErrorKind::UnknownAgent);
+        let text = error.to_string();
+        assert!(text.contains("@builder"), "{text}");
+        assert!(text.contains("@reviewer"), "{text}");
+        assert!(text.contains("never substitutes"), "{text}");
+    }
+
+    #[test]
+    fn the_registry_reads_manifests_in_order_and_skips_what_is_not_one() {
+        let root = registry();
+        write_manifest(root.path(), "reviewer", "", "Instructions.\n");
+        write_manifest(root.path(), "builder", "", "Instructions.\n");
+        // Reserved knowledge-bundle documents and non-Markdown files are never
+        // manifests, so malformed ones must not fail the load.
+        write(
+            root.path(),
+            &format!("{AGENTS_RELATIVE_DIR}/index.md"),
+            "not a manifest\n",
+        );
+        write(
+            root.path(),
+            &format!("{AGENTS_RELATIVE_DIR}/log.md"),
+            "not a manifest\n",
+        );
+        write(
+            root.path(),
+            &format!("{AGENTS_RELATIVE_DIR}/notes.txt"),
+            "not a manifest\n",
+        );
+
+        let agents = load_all(root.path()).unwrap();
+        let names: Vec<&str> = agents.iter().map(|a| a.manifest.name.as_str()).collect();
+        assert_eq!(names, ["builder", "reviewer"]);
+    }
+
+    #[test]
+    fn one_malformed_manifest_fails_the_whole_registry_load() {
+        let root = registry();
+        write_manifest(root.path(), "builder", "", "Instructions.\n");
+        write(
+            root.path(),
+            &format!("{AGENTS_RELATIVE_DIR}/broken.md"),
+            "not a manifest at all\n",
+        );
+        // A partial list must never be presented as the project's registry.
+        assert!(load_err(root.path()).contains("not an ahu agent manifest"));
+        assert!(find(root.path(), "builder").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_registry_refuses_to_read_through_a_symlinked_manifest_or_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = registry();
+        let outside = tempfile::tempdir().unwrap();
+        let target = write(
+            outside.path(),
+            "elsewhere.md",
+            "---\nokf_version: 0.2\n---\n",
+        );
+        symlink(
+            &target,
+            root.path()
+                .join(format!("{AGENTS_RELATIVE_DIR}/builder.md")),
+        )
+        .unwrap();
+        let error = load_err(root.path());
+        assert!(
+            error.contains("refusing to act through a symlink"),
+            "{error}"
+        );
+        // The refusal names the path inside the repository, not the target.
+        assert!(error.contains("builder.md"), "{error}");
+
+        // A symlinked registry directory is refused before any manifest is read.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".agents/ahu")).unwrap();
+        symlink(outside.path(), root.path().join(AGENTS_RELATIVE_DIR)).unwrap();
+        assert!(load_err(root.path()).contains("refusing to act through a symlink"));
+    }
+
+    #[test]
+    fn agent_names_are_unique_because_each_manifest_must_match_its_file_name() {
+        let root = registry();
+        write_manifest(root.path(), "builder", "", "Instructions.\n");
+        write_manifest(root.path(), "reviewer", "", "Instructions.\n");
+        // The registry is one flat directory, so no two manifests share a file
+        // stem, and a manifest whose title differs from its stem is refused.
+        // Together those make duplicate agent names unreachable; the duplicate
+        // check in `load_all` is a guard on that invariant, not a reachable
+        // branch. The invariant itself is what a test can assert.
+        let path = root
+            .path()
+            .join(format!("{AGENTS_RELATIVE_DIR}/reviewer.md"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("title: reviewer", "title: builder");
+        std::fs::write(&path, text).unwrap();
+        let error = load_err(root.path());
+        assert!(error.contains("does not match the file stem"), "{error}");
+        assert!(error.contains("reviewer"), "{error}");
+    }
+
+    #[test]
+    fn a_manifest_must_match_its_file_name_and_carry_a_usable_name_and_version() {
+        let root = registry();
+        write_manifest(root.path(), "builder", "", "Instructions.\n");
+        let path = root
+            .path()
+            .join(format!("{AGENTS_RELATIVE_DIR}/builder.md"));
+        let original = std::fs::read_to_string(&path).unwrap();
+
+        let stem_mismatch = original.replace("title: builder", "title: other");
+        std::fs::write(&path, &stem_mismatch).unwrap();
+        assert!(load_err(root.path()).contains("does not match the file stem"));
+
+        // A name that cannot be a selector, branch segment, or session title.
+        // The file is named to match so the stem check passes first.
+        let unsafe_path = root
+            .path()
+            .join(format!("{AGENTS_RELATIVE_DIR}/Builder.md"));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(
+            &unsafe_path,
+            original.replace("title: builder", "title: Builder"),
+        )
+        .unwrap();
+        let error = load_err(root.path());
+        assert!(error.contains("is not usable as a selector"), "{error}");
+        std::fs::remove_file(&unsafe_path).unwrap();
+
+        std::fs::write(&path, original.replace("version: 1.0.0", "version: 1.0")).unwrap();
+        let error = load_err(root.path());
+        assert!(error.contains("is not a semantic version"), "{error}");
+
+        // A valid pre-release and build version is accepted.
+        std::fs::write(
+            &path,
+            original.replace("version: 1.0.0", "version: 2.1.0-rc.1+build.5"),
+        )
+        .unwrap();
+        assert_eq!(
+            load_all(root.path()).unwrap()[0].manifest.version,
+            "2.1.0-rc.1+build.5"
+        );
+    }
+
+    #[test]
+    fn the_harness_and_model_must_both_be_in_the_compatibility_catalog() {
+        let root = registry();
+        write_manifest(root.path(), "builder", "", "Instructions.\n");
+        let path = root
+            .path()
+            .join(format!("{AGENTS_RELATIVE_DIR}/builder.md"));
+        let original = std::fs::read_to_string(&path).unwrap();
+
+        std::fs::write(
+            &path,
+            original.replace("harness: claude-code", "harness: cursor"),
+        )
+        .unwrap();
+        let error = load_err(root.path());
+        assert!(error.contains("is not in compatibility catalog"), "{error}");
+        assert!(error.contains(catalog::CATALOG_VERSION), "{error}");
+
+        // A catalog harness with a model that belongs to another harness.
+        std::fs::write(
+            &path,
+            original.replace("model: claude-sonnet-5", "model: gpt-5.5"),
+        )
+        .unwrap();
+        let error = load_err(root.path());
+        assert!(
+            error.contains("is not a catalog model for harness"),
+            "{error}"
+        );
+        // The refusal lists what the catalog does offer instead of substituting.
+        assert!(error.contains("claude-sonnet-5"), "{error}");
+        assert!(
+            error.contains("will not substitute a different model"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_carrying_its_own_instructions_digests_the_manifest_file() {
+        let root = registry();
+        let path = write_manifest(root.path(), "builder", "", "Do the work.\n");
+        let agent = find(root.path(), "builder").unwrap();
+
+        assert_eq!(agent.manifest_path, path);
+        assert_eq!(agent.source_path, path);
+        // The source is the manifest, so the file digests are the same file's.
+        assert_eq!(agent.source_digest, agent.manifest_digest);
+        // The delivered text is the body alone, so its digest differs from the
+        // file's: frontmatter is metadata, never instruction text.
+        assert_eq!(agent.instructions, "Do the work.\n");
+        assert_eq!(agent.instructions_digest, digest_bytes(b"Do the work.\n"));
+        assert_ne!(agent.instructions_digest, agent.source_digest);
+        assert_eq!(agent.native_model, None);
+        assert!(agent.native_settings.is_empty());
+        assert_eq!(
+            agent.relative_source(root.path()),
+            format!("{AGENTS_RELATIVE_DIR}/builder.md")
+        );
+        // A root the file is not under leaves the absolute path in place.
+        assert_eq!(
+            agent.relative_source(Path::new("/nowhere")),
+            path.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn a_referenced_claude_definition_supplies_the_instructions_and_its_settings() {
+        let root = registry();
+        write_manifest(
+            root.path(),
+            "builder",
+            "source_format: claude-agent\nsource_path: .claude/agents/builder.md\n",
+            "Instructions live in the native definition.\n",
+        );
+        let native = write(
+            root.path(),
+            ".claude/agents/builder.md",
+            "---\nname: builder\nmodel: claude-sonnet-5\ntools: Read\n---\n\nNative instructions.\n",
+        );
+
+        let agent = find(root.path(), "builder").unwrap();
+        assert_eq!(agent.source_path, native.canonicalize().unwrap());
+        assert_eq!(agent.instructions, "Native instructions.\n");
+        assert_eq!(agent.native_model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(
+            agent.native_settings.get("tools").map(String::as_str),
+            Some("Read")
+        );
+        // The manifest file and the instruction source are different files.
+        assert_ne!(agent.source_digest, agent.manifest_digest);
+        assert_ne!(agent.instructions_digest, agent.source_digest);
+        // Identity covers both file digests, so changing either is drift.
+        let before = agent.identity_digest();
+        std::fs::write(
+            &native,
+            "---\nname: builder\nmodel: claude-sonnet-5\ntools: Read\n---\n\nChanged.\n",
+        )
+        .unwrap();
+        assert_ne!(
+            find(root.path(), "builder").unwrap().identity_digest(),
+            before
+        );
+    }
+
+    #[test]
+    fn a_codex_source_is_delivered_verbatim_because_it_has_no_frontmatter() {
+        let root = registry();
+        let path = root
+            .path()
+            .join(format!("{AGENTS_RELATIVE_DIR}/builder.md"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "---\nokf_version: {OKF_VERSION}\ntype: ahu:agent\ntitle: builder\nversion: \
+                 1.0.0\nharness: codex\nmodel: gpt-5.5\nsource_format: \
+                 codex-agent\nsource_path: .codex/agents/builder.toml\n---\n\nSee the TOML.\n"
+            ),
+        )
+        .unwrap();
+        let native_text = "model = \"gpt-5.5\"\ninstructions = \"Do the work.\"\n";
+        write(root.path(), ".codex/agents/builder.toml", native_text);
+
+        let agent = find(root.path(), "builder").unwrap();
+        // TOML fields are not interpreted as instruction metadata, so the whole
+        // file is the delivered text and the two digests cover identical bytes.
+        assert_eq!(agent.instructions, native_text);
+        assert_eq!(agent.instructions_digest, agent.source_digest);
+        assert_eq!(agent.native_model, None);
+        assert!(agent.native_settings.is_empty());
+    }
+
+    #[test]
+    fn ahu_never_translates_an_agent_between_harnesses_or_guesses_a_model() {
+        let root = registry();
+        // A Claude-format source under a manifest that selects Codex.
+        let path = root
+            .path()
+            .join(format!("{AGENTS_RELATIVE_DIR}/builder.md"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mismatched = format!(
+            "---\nokf_version: {OKF_VERSION}\ntype: ahu:agent\ntitle: builder\nversion: \
+             1.0.0\nharness: codex\nmodel: gpt-5.5\nsource_format: \
+             claude-agent\nsource_path: .claude/agents/builder.md\n---\n\nSee it.\n"
+        );
+        std::fs::write(&path, &mismatched).unwrap();
+        write(
+            root.path(),
+            ".claude/agents/builder.md",
+            "---\nname: builder\n---\n\nNative.\n",
+        );
+        let error = load_err(root.path());
+        assert!(
+            error.contains("does not translate an agent from one harness to another"),
+            "{error}"
+        );
+
+        // A native definition that declares a different model than the manifest.
+        write_manifest(
+            root.path(),
+            "builder",
+            "source_format: claude-agent\nsource_path: .claude/agents/builder.md\n",
+            "See it.\n",
+        );
+        write(
+            root.path(),
+            ".claude/agents/builder.md",
+            "---\nname: builder\nmodel: claude-opus-5\n---\n\nNative.\n",
+        );
+        let error = load_err(root.path());
+        assert!(error.contains("but"), "{error}");
+        assert!(error.contains("declares"), "{error}");
+        assert!(error.contains("Make them agree"), "{error}");
+
+        // `inherit` and an empty declaration defer to the manifest rather than
+        // conflicting with it.
+        for declared in ["model: inherit", "model:"] {
+            write(
+                root.path(),
+                ".claude/agents/builder.md",
+                &format!("---\nname: builder\n{declared}\n---\n\nNative.\n"),
+            );
+            let agent = find(root.path(), "builder").unwrap();
+            assert_eq!(agent.manifest.model, "claude-sonnet-5");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_or_non_utf8_source_is_reported_against_the_manifest() {
+        let root = registry();
+        write_manifest(
+            root.path(),
+            "builder",
+            "source_format: claude-agent\nsource_path: .claude/agents/builder.md\n",
+            "See it.\n",
+        );
+        // A source_path that resolves to nothing at all.
+        let error = load_err(root.path());
+        assert!(error.contains("cannot resolve source_path"), "{error}");
+
+        // A source file whose bytes are not valid UTF-8 cannot be instructions.
+        let native = root.path().join(".claude/agents/builder.md");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, [0x2d, 0x2d, 0x2d, 0x0a, 0xff, 0xfe]).unwrap();
+        let error = load_err(root.path());
+        assert!(error.contains("is not valid UTF-8"), "{error}");
+        assert!(error.contains("agent source"), "{error}");
+    }
+
+    #[test]
+    fn a_non_utf8_manifest_is_refused_before_it_is_parsed() {
+        let root = registry();
+        std::fs::write(
+            root.path()
+                .join(format!("{AGENTS_RELATIVE_DIR}/builder.md")),
+            [0x2d, 0x2d, 0x2d, 0x0a, 0xff, 0xfe],
+        )
+        .unwrap();
+        let error = load_err(root.path());
+        assert!(error.contains("is not valid UTF-8"), "{error}");
+    }
+
+    #[test]
+    fn a_source_path_must_be_a_plain_relative_file_inside_the_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join(".agents/ahu/agents/builder.md");
+        let target = write(root.path(), ".claude/agents/builder.md", "Native.\n");
+
+        let resolved =
+            resolve_source_path(root.path(), ".claude/agents/builder.md", &manifest).unwrap();
+        // The validated path is returned, so the read cannot re-resolve a link.
+        assert_eq!(resolved, target.canonicalize().unwrap());
+        assert!(resolved.is_absolute());
+        // A `./` prefix is a plain path, not traversal.
+        assert_eq!(
+            resolve_source_path(root.path(), "./.claude/agents/builder.md", &manifest).unwrap(),
+            resolved
+        );
+
+        let cases = [
+            ("", "source_path is empty"),
+            ("/etc/passwd", "is absolute"),
+            ("../outside.md", "escapes the repository root"),
+            (".claude/../../outside.md", "escapes the repository root"),
+            (".claude/agents/missing.md", "cannot resolve source_path"),
+            (".claude/agents", "is not a file"),
+        ];
+        for (relative, expected) in cases {
+            let error = resolve_source_path(root.path(), relative, &manifest)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{relative:?} -> {error}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_source_path_cannot_reach_outside_the_repository_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join(".agents/ahu/agents/builder.md");
+        let outside = tempfile::tempdir().unwrap();
+        let external = write(outside.path(), "external.md", "Native.\n");
+        std::fs::create_dir_all(root.path().join(".claude/agents")).unwrap();
+        symlink(&external, root.path().join(".claude/agents/builder.md")).unwrap();
+
+        let error = resolve_source_path(root.path(), ".claude/agents/builder.md", &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("resolves outside the repository"), "{error}");
+        assert!(
+            error.contains("cannot carry an external file into a task worktree"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn find_frontmatter_end_reports_the_closing_delimiter_or_nothing() {
+        assert_eq!(find_frontmatter_end("a: 1\n---\nbody"), Some((5, 4)));
+        // A CRLF delimiter line is recognised, and its length includes the \r.
+        assert_eq!(find_frontmatter_end("a: 1\r\n---\r\nbody"), Some((6, 5)));
+        assert_eq!(find_frontmatter_end("a: 1\nno delimiter\n"), None);
+    }
+
+    #[test]
+    fn parse_frontmatter_splits_metadata_from_delivered_text() {
+        // No frontmatter: the whole file is the instructions and nothing is read
+        // as metadata.
+        let (body, model, settings) = parse_frontmatter("Just instructions.\n");
+        assert_eq!(body, "Just instructions.\n");
+        assert_eq!(model, None);
+        assert!(settings.is_empty());
+
+        // Opened but never closed is not frontmatter either, so the text is
+        // delivered whole rather than half-stripped.
+        let (body, model, settings) = parse_frontmatter("---\nmodel: x\nno close\n");
+        assert_eq!(body, "---\nmodel: x\nno close\n");
+        assert_eq!(model, None);
+        assert!(settings.is_empty());
+
+        let (body, model, settings) = parse_frontmatter(
+            "---\n# comment\n\na bare line with no colon\nname: builder\nmodel: \
+             'claude-sonnet-5'\ntools: Read, Write\n---\n\nInstructions.\n",
+        );
+        assert_eq!(body, "Instructions.\n");
+        assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(settings.get("name").map(String::as_str), Some("builder"));
+        assert_eq!(
+            settings.get("tools").map(String::as_str),
+            Some("Read, Write")
+        );
+        // Comments and non-pair lines are not settings.
+        assert!(!settings.contains_key("# comment"));
+        assert_eq!(settings.len(), 3);
+    }
 }

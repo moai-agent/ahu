@@ -14,6 +14,17 @@ ignore = []
 
 [licenses]
 allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+# Exact versions from the TLS graph. Owner: Orie Steele.
+# Re-review on any affected lockfile update and before each release.
+# Retain upstream license/notice texts in distributed artifacts.
+exceptions = [
+    { crate = "aws-lc-rs@=1.18.1", allow = ["ISC"] },
+    { crate = "aws-lc-sys@=0.45.0", allow = ["ISC", "BSD-3-Clause"] },
+    { crate = "rustls-webpki@=0.103.15", allow = ["ISC"] },
+    { crate = "subtle@=2.6.1", allow = ["BSD-3-Clause"] },
+    { crate = "untrusted@=0.9.0", allow = ["ISC"] },
+    { crate = "webpki-root-certs@=1.0.9", allow = ["CDLA-Permissive-2.0"] },
+]
 confidence-threshold = 0.95
 include-dev = true
 include-build = true
@@ -24,10 +35,17 @@ unused-license-exception = "deny"
 ignore = true
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 multiple-versions-include-dev = true
 wildcards = "deny"
 highlight = "all"
+skip = [
+    { crate = "base64@0.22.1", reason = "hyper-util and reqwest 0.13 require incompatible base64 minor versions" },
+    { crate = "getrandom@0.4.3", reason = "tempfile's test-only dependency uses 0.4 while OpenTelemetry uses 0.3" },
+    { crate = "r-efi@6.0.0", reason = "the two getrandom minor lines require incompatible EFI support versions" },
+    { crate = "syn@3.0.5", reason = "current proc-macro dependencies require both incompatible syn major versions" },
+    { crate = "winnow@0.7.15", reason = "toml's parser dependencies require incompatible winnow major versions" },
+]
 
 [sources]
 unknown-registry = "deny"

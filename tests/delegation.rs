@@ -116,11 +116,6 @@ fn dry_run_resolves_the_named_agent_without_reading_confirmation_or_launching() 
     );
     assert!(text.contains("delegation contract"), "{text}");
     assert!(text.contains("fenced with the tag nonce"), "{text}");
-    // Routine harness capabilities belong in explicit inspection output.
-    assert!(
-        text.contains("Detailed runtime capabilities: ahu inventory"),
-        "{text}"
-    );
     assert!(text.contains("Dry run"));
     assert!(!text.contains(HOSTILE_PROMPT));
     assert_eq!(common::git(repo.path(), &["branch", "--list", "ahu/*"]), "");
@@ -444,7 +439,7 @@ fn inline_and_piped_prompts_produce_clean_json_without_cmux() {
         let diagnostics = String::from_utf8_lossy(&output.stderr);
         assert!(diagnostics.contains("About to submit"));
         assert!(diagnostics.contains("Enforcement"));
-        assert!(diagnostics.contains("hygiene"));
+        assert!(diagnostics.contains("ahu.lock"));
     }
     assert_eq!(common::git(repo.path(), &["branch", "--list", "ahu/*"]), "");
 }

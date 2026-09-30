@@ -1273,3 +1273,395 @@ pub fn render_settings_for_preview(inventory: &HookInventory) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn write_fixture(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn collected_hooks_preserve_all_scopes_and_commandless_labels() {
+        let repo = tempfile::tempdir().unwrap();
+        let machine = tempfile::tempdir().unwrap();
+        let document = r#"{"hooks":{"SessionStart":[{"type":"prompt"}]}}"#;
+        write_fixture(repo.path(), ".claude/settings.json", document);
+        write_fixture(repo.path(), ".claude/settings.local.json", document);
+        write_fixture(machine.path(), ".claude/settings.json", document);
+        write_fixture(machine.path(), "managed.json", document);
+        let inventory = collect_in(
+            repo.path(),
+            &Locations {
+                home: Some(machine.path().to_path_buf()),
+                managed: Some(machine.path().join("managed.json")),
+                cmux_wrapper: false,
+            },
+        )
+        .unwrap();
+        assert!(inventory.unreadable.is_empty());
+        assert_eq!(inventory.checked.len(), 4);
+        assert_eq!(
+            inventory.hooks.iter().map(|h| h.scope).collect::<Vec<_>>(),
+            [
+                Scope::Project,
+                Scope::ProjectLocal,
+                Scope::User,
+                Scope::Managed
+            ]
+        );
+        assert_eq!(
+            inventory
+                .travelling()
+                .iter()
+                .map(|h| h.scope)
+                .collect::<Vec<_>>(),
+            [Scope::Project, Scope::ProjectLocal]
+        );
+        assert_eq!(
+            inventory
+                .outside_project_policy()
+                .iter()
+                .map(|h| h.scope)
+                .collect::<Vec<_>>(),
+            [Scope::ProjectLocal, Scope::User, Scope::Managed]
+        );
+        for hook in &inventory.hooks {
+            assert_eq!(hook.label(), "SessionStart → <prompt hook>");
+            assert_eq!(hook.command, None);
+            assert_eq!(hook.command_digest, digest_bytes(b""));
+        }
+        assert_eq!(inventory.hooks[0].source, ".claude/settings.json");
+        assert_eq!(
+            inventory.hooks[3].source,
+            machine.path().join("managed.json").to_string_lossy()
+        );
+        assert!(render_for_preview(&inventory, 0).contains("[managed]"));
+        assert_eq!(
+            Scope::Project.why_not_project_policy(),
+            "it is project policy"
+        );
+    }
+
+    #[test]
+    fn unreadable_and_malformed_files_report_gaps_without_losing_valid_hooks() {
+        for (source, harness) in [
+            (".claude/settings.local.json", "claude-code"),
+            (".mcp.json", "claude-code"),
+            ("opencode.json", "opencode"),
+        ] {
+            for contents in [None, Some("{invalid-json")] {
+                let repo = tempfile::tempdir().unwrap();
+                write_fixture(
+                    repo.path(),
+                    ".claude/settings.json",
+                    r#"{"hooks":{"Stop":[{"type":"command","command":"fixture-check"}]}}"#,
+                );
+                if let Some(contents) = contents {
+                    write_fixture(repo.path(), source, contents);
+                } else {
+                    // A directory in place of a file fails reads even under root.
+                    std::fs::create_dir_all(repo.path().join(source)).unwrap();
+                }
+                let inventory = collect_for(repo.path(), harness, &Locations::default()).unwrap();
+                assert_eq!(inventory.unreadable.len(), 1, "{source}");
+                assert!(inventory.unreadable[0].starts_with(source));
+                assert!(inventory.mcp_servers.is_empty());
+                assert!(inventory.declared_plugins.is_empty());
+                if harness == "claude-code" {
+                    assert_eq!(inventory.hooks.len(), 1);
+                    assert_eq!(inventory.hooks[0].label(), "Stop → fixture-check");
+                }
+                assert!(render_for_preview(&inventory, 0).contains("treat them as unknown"));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_declaration_shapes_are_unknown_not_absent() {
+        for (source, contents) in [
+            (".mcp.json", r#"{"mcpServers":[]}"#),
+            (".mcp.json", r#"{"mcp":false}"#),
+            ("opencode.json", r#"{"plugins":"fixture-plugin"}"#),
+            (".claude/settings.json", r#"{"hooks":{"Stop":{}}}"#),
+        ] {
+            let repo = tempfile::tempdir().unwrap();
+            write_fixture(repo.path(), source, contents);
+            let inventory = collect_in(repo.path(), &Locations::default()).unwrap();
+            assert_eq!(inventory.unreadable.len(), 1);
+            assert!(inventory.unreadable[0].starts_with(source));
+            assert!(inventory.hooks.is_empty());
+            assert!(inventory.mcp_servers.is_empty());
+            assert!(inventory.declared_plugins.is_empty());
+        }
+    }
+
+    #[test]
+    fn repository_plugins_inventory_files_and_skip_subdirectories() {
+        let repo = tempfile::tempdir().unwrap();
+        for source in [
+            ".opencode/plugin/z.ts",
+            ".opencode/plugin/a.js",
+            ".opencode/plugins",
+            ".opencode/plugin.ts",
+            ".opencode/plugins.js",
+        ] {
+            write_fixture(repo.path(), source, "export default {};");
+        }
+        std::fs::create_dir_all(repo.path().join(".opencode/plugin/nested")).unwrap();
+        std::fs::create_dir_all(repo.path().join(".opencode/plugin.js")).unwrap();
+        write_fixture(
+            repo.path(),
+            "opencode.json",
+            r#"{"plugins":["fixture-plugin", "fixture-plugin"],"mcp":{"fixture":{"command":"fixture-server"}}}"#,
+        );
+        let inventory = collect_for(repo.path(), "opencode", &Locations::default()).unwrap();
+        assert!(inventory.unreadable.is_empty());
+        let modules: Vec<_> = inventory
+            .declared_plugins
+            .iter()
+            .map(|p| p.module.as_str())
+            .collect();
+        assert_eq!(
+            modules,
+            [
+                ".opencode/plugin.ts",
+                ".opencode/plugin/a.js",
+                ".opencode/plugin/z.ts",
+                ".opencode/plugins",
+                ".opencode/plugins.js",
+                "fixture-plugin"
+            ]
+        );
+        assert_eq!(inventory.mcp_servers.len(), 1);
+        assert_eq!(inventory.mcp_servers[0].command, "fixture-server");
+        assert!(
+            !inventory
+                .checked
+                .iter()
+                .any(|p| p.ends_with("nested") || p == ".opencode/plugin.js")
+        );
+    }
+
+    #[test]
+    fn opencode_user_settings_keep_scope_and_report_read_and_shape_errors() {
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write_fixture(
+            home.path(),
+            ".config/opencode/opencode.json",
+            r#"{"permission":{"read":"allow"},"plugins":false}"#,
+        );
+        write_fixture(
+            home.path(),
+            ".config/opencode/opencode.jsonc",
+            "// unsupported JSONC",
+        );
+        std::fs::create_dir_all(home.path().join(".opencode/opencode.json")).unwrap();
+        write_fixture(home.path(), ".opencode/opencode.jsonc", "[]");
+        let inventory = collect_for(
+            repo.path(),
+            "opencode",
+            &Locations {
+                home: Some(home.path().to_path_buf()),
+                ..Locations::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(inventory.settings.len(), 1);
+        assert_eq!(inventory.settings[0].scope, Scope::User);
+        assert_eq!(inventory.settings[0].allow, ["read"]);
+        assert_eq!(inventory.checked.len(), 2);
+        assert_eq!(inventory.unreadable.len(), 3);
+        for (source, reason) in [
+            (
+                ".config/opencode/opencode.json",
+                "not a shape ahu understands",
+            ),
+            (".config/opencode/opencode.jsonc", "not valid JSON"),
+            (".opencode/opencode.json", ""),
+        ] {
+            let path = home.path().join(source).to_string_lossy().to_string();
+            assert!(
+                inventory
+                    .unreadable
+                    .iter()
+                    .any(|s| s.starts_with(&path) && s.contains(reason))
+            );
+        }
+        assert!(inventory.declared_plugins.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_symlinks_refuse_external_declarations() {
+        let repo = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        write_fixture(
+            external.path(),
+            "settings.json",
+            r#"{"plugins":["external-plugin"],"mcpServers":{"external":{"command":"external-server"}}}"#,
+        );
+        std::fs::create_dir_all(repo.path().join(".opencode")).unwrap();
+        for source in ["opencode.json", ".mcp.json", ".opencode/plugin"] {
+            std::os::unix::fs::symlink(
+                external.path().join("settings.json"),
+                repo.path().join(source),
+            )
+            .unwrap();
+        }
+        std::os::unix::fs::symlink(external.path(), repo.path().join(".claude")).unwrap();
+        let inventory = collect_in(repo.path(), &Locations::default()).unwrap();
+        assert_eq!(inventory.unreadable.len(), 5);
+        assert!(
+            inventory
+                .unreadable
+                .iter()
+                .all(|gap| gap.contains("symlink"))
+        );
+        assert!(inventory.checked.is_empty());
+        assert!(inventory.hooks.is_empty());
+        assert!(inventory.settings.is_empty());
+        assert!(inventory.declared_plugins.is_empty());
+        assert!(inventory.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn scope_policy_and_worktree_properties_are_distinct() {
+        assert!(Scope::Project.is_project_policy());
+        assert!(Scope::Project.travels_into_worktree());
+        assert!(!Scope::ProjectLocal.is_project_policy());
+        assert!(Scope::ProjectLocal.travels_into_worktree());
+        assert!(!Scope::User.travels_into_worktree());
+        assert!(!Scope::Managed.travels_into_worktree());
+        assert!(
+            Scope::User
+                .why_not_project_policy()
+                .contains("home directory")
+        );
+        assert!(
+            Scope::Managed
+                .why_not_project_policy()
+                .contains("machine policy")
+        );
+        assert_eq!(Scope::ProjectLocal.as_str(), "project-local");
+    }
+
+    #[test]
+    fn claude_settings_capture_policy_and_only_environment_names() {
+        let facts = parse_claude_settings(
+            &json!({
+                "permissions": {
+                    "defaultMode": "acceptEdits",
+                    "allow": ["Read", 7],
+                    "deny": ["Bash(rm *)"],
+                    "ask": ["Write"],
+                    "additionalDirectories": ["../shared"]
+                },
+                "enabledPlugins": ["lint"],
+                "enableAllProjectMcpServers": true,
+                "enabledMcpjsonServers": ["docs"],
+                "env": {"API_TOKEN": "super-secret"},
+                "futureSetting": true
+            }),
+            Scope::Project,
+            "settings.json",
+        );
+        assert_eq!(facts.default_mode.as_deref(), Some("acceptEdits"));
+        assert_eq!(facts.allow, ["Read", "7"]);
+        assert_eq!(facts.deny, ["Bash(rm *)"]);
+        assert_eq!(facts.ask, ["Write"]);
+        assert_eq!(facts.additional_directories, ["../shared"]);
+        assert_eq!(facts.enabled_plugins, ["lint"]);
+        assert_eq!(facts.enable_all_project_mcp_servers, Some(true));
+        assert_eq!(facts.enabled_mcpjson_servers, ["docs"]);
+        assert_eq!(facts.env_names, ["API_TOKEN"]);
+        assert_eq!(facts.uninterpreted_keys, ["futureSetting"]);
+        assert!(facts.widens_approvals());
+        assert!(!format!("{facts:?}").contains("super-secret"));
+    }
+
+    #[test]
+    fn opencode_permission_alias_and_action_map_are_interpreted() {
+        let facts = parse_opencode_settings(
+            &json!({
+                "permission": {
+                    "read": "allow",
+                    "write": "ask",
+                    "shell": "deny",
+                    "unknown": "prompt",
+                    "additionalDirectories": ["/tmp/work"]
+                },
+                "plugins": ["plugin-a"],
+                "env": {"SECRET": "private"},
+                "newKey": 1
+            }),
+            Scope::User,
+            "opencode.json",
+        );
+        assert!(facts.allow.contains(&"read".to_string()));
+        assert!(facts.ask.contains(&"write".to_string()));
+        assert!(facts.deny.contains(&"shell".to_string()));
+        assert_eq!(facts.enabled_plugins, Vec::<String>::new());
+        assert_eq!(facts.env_names, ["SECRET"]);
+        assert_eq!(facts.uninterpreted_keys, ["newKey"]);
+        assert!(facts.widens_approvals());
+        assert!(!facts.is_empty());
+    }
+
+    #[test]
+    fn approval_fact_detection_is_conservative_but_ignores_deny_and_ask() {
+        for mode in ["bypassPermissions", "acceptEdits", "auto", "dontAsk"] {
+            let mut facts = SettingsFacts::new("settings", Scope::Project);
+            facts.default_mode = Some(mode.to_string());
+            assert!(facts.widens_approvals(), "mode {mode}");
+        }
+        let mut narrow = SettingsFacts::new("settings", Scope::Project);
+        narrow.deny.push("Bash".into());
+        narrow.ask.push("Write".into());
+        assert!(!narrow.widens_approvals());
+    }
+
+    #[test]
+    fn hook_parser_handles_nested_and_bare_shapes_and_rejects_malformed_events() {
+        let hooks = parse_hooks(
+            &json!({"hooks": {
+                "PreToolUse": [{"matcher": "Bash", "hooks": [
+                    {"type": "command", "command": "checker --token secret"},
+                    {"command": "second"}
+                ]}],
+                "SessionStart": [{"type": "prompt", "command": "hello"}]
+            }}),
+            Scope::Project,
+            "settings.json",
+        )
+        .unwrap();
+        assert_eq!(hooks.len(), 3);
+        assert_eq!(hooks[0].event, "PreToolUse");
+        assert_eq!(hooks[0].matcher.as_deref(), Some("Bash"));
+        assert!(hooks[0].label().contains("checker …"));
+        assert!(!hooks[0].label().contains("secret"));
+        assert_eq!(hooks[1].kind, "unknown");
+        assert_eq!(hooks[2].kind, "prompt");
+        assert!(parse_hooks(&json!({"hooks": []}), Scope::Project, "x").is_none());
+        assert!(parse_hooks(&json!({"hooks": {"event": {}}}), Scope::Project, "x").is_none());
+        assert!(
+            parse_hooks(&json!({}), Scope::Project, "x")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn command_labels_hide_assignments_and_truncate_by_characters() {
+        assert_eq!(program_label("  "), "<empty command>");
+        assert!(program_label("TOKEN='two words' checker").contains("digest only"));
+        assert_eq!(truncate("alpha\n beta", 20), "alpha beta");
+        assert!(truncate("é".repeat(60).as_str(), 48).chars().count() <= 48);
+        assert_eq!(string_list(Some(&json!("not-array"))), Vec::<String>::new());
+    }
+}

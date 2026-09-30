@@ -110,15 +110,31 @@ pub fn digest_bytes(bytes: &[u8]) -> String {
 /// Bounds hashing work for repository-controlled configuration files.
 pub const MAX_CONFIG_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Largest executable ahu will read when recording its build identity.
+///
+/// Coverage-instrumented test binaries can be larger than configuration files.
+/// Hashing remains streamed and bounded so executable identity does not inherit
+/// the much smaller configuration-file limit or allow unbounded reads.
+const MAX_BUILD_IDENTITY_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Lowercase hex SHA-256 of a file's contents.
 ///
 /// Streamed and capped because snapshot collection and materialization hash
 /// repository-controlled files repeatedly; file size must not imply unbounded
 /// memory use or read time.
 pub fn digest_file(path: &Path) -> Result<String> {
+    digest_file_with_limit(path, MAX_CONFIG_BYTES, "64 MiB")
+}
+
+/// Digest the running executable for the evaluation build identity.
+pub fn digest_executable(path: &Path) -> Result<String> {
+    digest_file_with_limit(path, MAX_BUILD_IDENTITY_BYTES, "512 MiB")
+}
+
+fn digest_file_with_limit(path: &Path, limit: u64, limit_label: &str) -> Result<String> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
-    digest_reader(&mut file, path)
+    digest_reader_with_limit(&mut file, path, limit, limit_label)
 }
 
 /// Digest whatever an already-open handle yields, with the same size cap.
@@ -127,6 +143,15 @@ pub fn digest_file(path: &Path) -> Result<String> {
 /// hashed are the bytes it copied can do both from one descriptor, rather than
 /// opening the path twice and hoping it still names the same file.
 pub fn digest_reader(reader: &mut impl std::io::Read, shown: &Path) -> Result<String> {
+    digest_reader_with_limit(reader, shown, MAX_CONFIG_BYTES, "64 MiB")
+}
+
+fn digest_reader_with_limit(
+    reader: &mut impl std::io::Read,
+    shown: &Path,
+    limit: u64,
+    limit_label: &str,
+) -> Result<String> {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
@@ -140,13 +165,10 @@ pub fn digest_reader(reader: &mut impl std::io::Read, shown: &Path) -> Result<St
             break;
         }
         total += read as u64;
-        if total > MAX_CONFIG_BYTES {
+        if total > limit {
             return Err(Error::new(format!(
-                "{} is larger than the {} MiB ahu will read for a configuration file.\n\
-                 ahu digests every agent-configuration file it inventories, so it will not read \
-                 an unbounded one. Move this file out of an agent-configuration path.",
+                "{} is larger than the {limit_label} digest limit.",
                 shown.display(),
-                MAX_CONFIG_BYTES / (1024 * 1024)
             )));
         }
         hasher.update(&buffer[..read]);
@@ -591,5 +613,147 @@ mod sidebar_tests {
         assert_eq!(plain_inline(&nested, 8), nested);
         let label = sidebar_text(&nested, 60);
         assert!(label.chars().count() <= 60);
+    }
+}
+
+#[cfg(test)]
+mod behavior_tests {
+    use super::*;
+
+    #[test]
+    fn safe_names_semver_and_display_escaping_reject_hostile_values() {
+        for value in ["agent-1", "a_b", "0123456789"] {
+            assert!(is_safe_name(value));
+        }
+        for value in [
+            "",
+            "-agent",
+            "_agent",
+            "Agent",
+            "agent.name",
+            "a/b",
+            &"x".repeat(65),
+        ] {
+            assert!(!is_safe_name(value), "{value:?}");
+        }
+        for value in ["0.1.0", "1.2.3-rc.1+build.5", "1.2.3-alpha-beta"] {
+            assert!(is_semver(value), "{value}");
+        }
+        for value in [
+            "",
+            "01.2.3",
+            "1.2",
+            "1.2.3.4",
+            "1.2.3-",
+            "1.2.3+",
+            "1.2.3-a..b",
+            "1.2.3-\u{001b}",
+        ] {
+            assert!(!is_semver(value), "{value:?}");
+        }
+        assert_eq!(display_safe("a\u{001b}[2J\u{202e}b"), "a\\x1b[2J\\u{202e}b");
+        assert_eq!(
+            display_safe_block("one\ntwo\r\u{2028}"),
+            "one\ntwo\\x0d\\u{2028}"
+        );
+        assert_eq!(display_path(Path::new("a\u{001b}b")), "a\\x1bb");
+    }
+
+    #[test]
+    fn task_titles_and_sidebar_text_strip_markdown_and_bound_output() {
+        assert_eq!(
+            sidebar_text(
+                "# Heading\n- [x] **done** and [label](https://example.invalid/a(b))\n~~~ignored~~~",
+                160
+            ),
+            "Heading done and label"
+        );
+        assert_eq!(sidebar_text("   \n", 20), "");
+        assert_eq!(sidebar_text("long value", 0), "");
+        assert_eq!(sidebar_text("first line\nsecond", 7), "first…");
+        assert_eq!(
+            task_title_from_prompt("\n\u{202e}\nUseful title\nrest"),
+            "Useful title"
+        );
+        assert_eq!(task_title_from_prompt("\u{202e}\n"), "untitled task");
+    }
+
+    #[test]
+    fn repository_path_resolution_handles_missing_non_directory_and_escape_paths() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(resolve_within(root.path(), "", false).is_err());
+        assert!(resolve_within(root.path(), "../outside", false).is_err());
+        assert!(resolve_existing_within(root.path(), "./file").is_err());
+        assert!(
+            resolve_existing_within(root.path(), "missing/file")
+                .unwrap()
+                .is_none()
+        );
+
+        let file = root.path().join("not-a-directory");
+        std::fs::write(&file, "file").unwrap();
+        assert!(resolve_within(root.path(), "not-a-directory/child", true).is_err());
+        assert!(resolve_existing_within(root.path(), "not-a-directory/child").is_err());
+
+        let created = resolve_within(root.path(), "new/nested/file", true).unwrap();
+        assert_eq!(created, root.path().join("new/nested/file"));
+        assert!(created.parent().unwrap().is_dir());
+        std::fs::write(&created, "content").unwrap();
+        assert_eq!(
+            resolve_existing_within(root.path(), "new/nested/file").unwrap(),
+            Some(created)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn repository_path_resolution_refuses_symlinks_at_parent_and_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("parent-link")).unwrap();
+        symlink(outside.path().join("target"), root.path().join("leaf-link")).unwrap();
+        assert!(resolve_within(root.path(), "parent-link/file", true).is_err());
+        assert!(resolve_existing_within(root.path(), "parent-link/file").is_err());
+        assert!(resolve_within(root.path(), "leaf-link", true).is_err());
+        assert!(resolve_existing_within(root.path(), "leaf-link").is_err());
+    }
+
+    #[test]
+    fn digest_reader_hashes_streams_and_enforces_read_errors_and_size_limit() {
+        assert_eq!(
+            digest_bytes(b"ahu"),
+            digest_reader(&mut &b"ahu"[..], Path::new("fixture")).unwrap()
+        );
+        struct FailingReader;
+        impl std::io::Read for FailingReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("read failed"))
+            }
+        }
+        let error = digest_reader(&mut FailingReader, Path::new("broken"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("broken"));
+        assert!(error.contains("read failed"));
+
+        struct LargeReader(u64);
+        impl std::io::Read for LargeReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.0.min(buffer.len() as u64) as usize;
+                buffer[..count].fill(0);
+                self.0 -= count as u64;
+                Ok(count)
+            }
+        }
+        let mut large = LargeReader(MAX_CONFIG_BYTES + 1);
+        assert!(
+            digest_reader(&mut large, Path::new("large-config"))
+                .unwrap_err()
+                .to_string()
+                .contains("64 MiB")
+        );
+        assert!(digest_file(Path::new("missing-config")).is_err());
     }
 }

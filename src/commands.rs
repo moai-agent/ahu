@@ -10,18 +10,18 @@ use crate::bail;
 use crate::catalog;
 use crate::cmux::{self, Cmux};
 use crate::config::{self, LoadedConfig};
+use crate::context_lock;
 use crate::drift;
 use crate::git::{self, Repo};
 use crate::harness;
 use crate::hooks;
-use crate::hygiene;
-use crate::inventory;
 use crate::knowledge;
 use crate::launch;
 use crate::launcher::{self, Console};
 use crate::onboard;
 use crate::selection::{self, ResolvedPair};
 use crate::style::{self, Role};
+use crate::table;
 use crate::task;
 use crate::util::{Error, Result, display_path, display_safe, display_safe_block};
 
@@ -35,8 +35,10 @@ pub fn repo_from_cwd() -> Result<Repo> {
     git::discover(&cwd).map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))
 }
 
-/// Open a coordinating session in the invoking terminal. Repository discovery
-/// registers executable exclusions before resolving the harness, just as for agents.
+/// Open a coordinating Codex session in the invoking terminal, on the project's
+/// top-ranked Codex model, with approval prompts and the sandbox bypassed.
+/// Repository discovery registers executable exclusions before resolving the
+/// harness, just as for agents.
 pub fn codex(repo: &Repo) -> Result<i32> {
     coordinating_session(
         repo,
@@ -46,7 +48,8 @@ pub fn codex(repo: &Repo) -> Result<i32> {
     )
 }
 
-/// Open Claude using its configured model with permission checks bypassed.
+/// Open Claude Code on the project's top-ranked Claude Code model with
+/// permission checks bypassed.
 pub fn claude(repo: &Repo) -> Result<i32> {
     coordinating_session(
         repo,
@@ -56,14 +59,18 @@ pub fn claude(repo: &Repo) -> Result<i32> {
     )
 }
 
-/// Open OpenCode using its configured model and permission behavior.
+/// Open OpenCode on the project's top-ranked OpenCode model with `--auto`, which
+/// auto-approves every permission OpenCode does not explicitly deny.
 ///
-/// This shortcut retains native permission settings and plugin loading.
+/// `--auto` is OpenCode's only permission-widening flag, so it is how this
+/// shortcut matches the other three. Permissions set to `deny` in OpenCode's own
+/// configuration still apply; ahu passes no `--pure`, so the user's plugins load.
 pub fn opencode(repo: &Repo) -> Result<i32> {
-    coordinating_session(repo, "opencode", "OpenCode", &[])
+    coordinating_session(repo, "opencode", "OpenCode", &["--auto"])
 }
 
-/// Open the Antigravity CLI in its unattended (YOLO) permission mode.
+/// Open the Antigravity CLI on the project's top-ranked Antigravity model, in
+/// its unattended (YOLO) permission mode.
 pub fn antigravity(repo: &Repo) -> Result<i32> {
     coordinating_session(
         repo,
@@ -73,17 +80,38 @@ pub fn antigravity(repo: &Repo) -> Result<i32> {
     )
 }
 
-fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) -> Result<i32> {
+/// Open a coordinating session: the project's top-ranked model for the harness,
+/// plus the shortcut's own approval-bypass flags, in the invoking terminal.
+///
+/// `bypass` is the approval widening the shortcut owns. The model comes from the
+/// project's `model_rankings`, through the same mapping the headless adapters use
+/// for the model option, so a coordinator and an agent on one harness cannot end
+/// up passing different flags for the same thing. A harness with no ranked model
+/// launches without a model option rather than on one ahu invented.
+fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]) -> Result<i32> {
     let harness = match program {
         "claude" => "claude-code",
         "agy" => "antigravity",
         other => other,
     };
     let loaded = config::load(&repo.root)?;
-    let model = loaded
+    let ranked = loaded
         .as_ref()
-        .and_then(|loaded| selection::ranked_models(loaded, harness).into_iter().next())
-        .unwrap_or_else(|| "unconfigured".to_string());
+        .and_then(|loaded| selection::ranked_models(loaded, harness).into_iter().next());
+    // Telemetry and cmux metadata still need a value for a harness with no
+    // ranked model; the argument list gets no model option in that case.
+    let model = ranked.clone().unwrap_or_else(|| "unconfigured".to_string());
+    let mut args: Vec<String> = match &ranked {
+        Some(ranked) => harness::model_args(harness, ranked)?,
+        None => Vec::new(),
+    };
+    args.extend(bypass.iter().map(|flag| flag.to_string()));
+    let model_note = ranked.is_none().then(|| {
+        format!(
+            "no model is ranked for {harness} in this project's configuration, so ahu passes no \
+             model option and {label} opens on whichever model it is configured with."
+        )
+    });
     if let Some(loaded) = &loaded {
         crate::telemetry::initialize(&loaded.config.telemetry)?;
     }
@@ -94,18 +122,21 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
     crate::state::ensure_checkout_state(&repo.root)?;
-    let placement = launch::group_coordinator(repo, &executable, label, harness, &model, args)?;
+    let placement = launch::group_coordinator(repo, &executable, label, harness, &model, &args)?;
     for note in placement.notes {
         eprintln!("ahu: {}", display_safe(&note));
+    }
+    if let Some(note) = &model_note {
+        eprintln!("ahu: {}", display_safe(note));
     }
     if placement.opened_workspace {
         return Ok(0);
     }
-    if !args.is_empty() {
-        eprintln!("{label} coordinator: {}", args.join(" "));
-    }
+    // The whole argument list, model included, so the line names exactly what
+    // was launched rather than only the approval flags.
+    eprintln!("{label} coordinator: {}", display_safe(&args.join(" ")));
     let mut command = std::process::Command::new(executable);
-    command.args(args).env("AHU_BIN", std::env::current_exe()?);
+    command.args(&args).env("AHU_BIN", std::env::current_exe()?);
     if let Some(loaded) = &loaded {
         crate::telemetry::configure_child(
             &mut command,
@@ -115,6 +146,7 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
             &model,
             None,
             selection::installed_version(program).as_deref(),
+            None,
             None,
         );
     }
@@ -137,44 +169,33 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, args: &[&str]) 
     }
 }
 
-/// Load configuration, or run first-run setup, or explain why it cannot.
-fn config_or_setup(repo: &Repo, console: &mut Console<'_>) -> Result<Option<LoadedConfig>> {
-    if let Some(loaded) = config::load(&repo.root)? {
-        return Ok(Some(loaded));
-    }
-    let Some(new_config) = launcher::run_setup(console)? else {
-        console.say("Cancelled. Nothing was written.\n")?;
-        return Ok(None);
-    };
-    let path = config::write_new(&repo.root, &new_config)?;
-    console.say(&format!("\nWrote {}\n", path.display()))?;
-    console.say(
-        "The configuration is in effect now; it does not need to be committed to be used.\n\
-         Run `ahu onboard` to see native agent definitions you could register.\n\n",
-    )?;
-    config::load(&repo.root)?.map(Some).ok_or_else(|| {
-        crate::util::Error::new("configuration disappeared immediately after it was written")
-    })
+/// Load the project policy written by the one supported setup command.
+fn config_or_setup(repo: &Repo, _console: &mut Console<'_>) -> Result<Option<LoadedConfig>> {
+    config::load(&repo.root)?
+        .map(Some)
+        .ok_or_else(|| Error::new("this repository is not set up for ahu; run `ahu setup` first"))
 }
 
-/// `ahu init`
-pub fn init(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
-    if let Some(loaded) = config::load(&repo.root)? {
+/// Check or refresh `ahu.lock`. Refreshing never stages or commits.
+pub fn lock_cmd(console: &mut Console<'_>, repo: &Repo, update: bool) -> Result<i32> {
+    let snapshot = crate::snapshot::collect(&repo.root)?;
+    if update {
+        let path = context_lock::refresh(repo, &snapshot)?;
         console.say(&format!(
-            "ahu is already initialized in this repository.\n  {}\n  policy digest {}\n\
-             \nPreferences are edited in that file, not through ahu.\n",
-            loaded.path.display(),
-            loaded.short_digest()
+            "Wrote {} from the current recognized context. Review and commit it with every context change before launching an agent; ahu did not stage or commit.\n",
+            display_path(&path)
         ))?;
         return Ok(0);
     }
-    let Some(new_config) = launcher::run_setup(console)? else {
-        return Ok(1);
-    };
-    let path = config::write_new(&repo.root, &new_config)?;
-    console.say(&format!("\nWrote {}\n", path.display()))?;
-    console.say("Nothing else was created, registered, installed, staged, or committed.\n")?;
-    Ok(0)
+    let status = context_lock::check(repo, &snapshot)?;
+    if status.current {
+        console.say(&format!("{}\n", status.detail))?;
+        Ok(0)
+    } else {
+        console.say(&format!("Context is not launchable: {}\n", status.detail))?;
+        Err(Error::new("committed context lock is not current")
+            .with_kind(crate::util::ErrorKind::Prerequisite))
+    }
 }
 
 /// `ahu agents`
@@ -203,39 +224,97 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
             std::collections::BTreeSet::new()
         }
     };
-    console.say("AGENT                 HARNESS       MODEL                         STATUS\n")?;
-    for agent in &agents {
-        let label = if drifted.contains(&agent.manifest.name) {
-            format!(
-                "@{} {} [drifted]",
-                agent.manifest.name, agent.manifest.version
-            )
-        } else {
-            format!("@{} {}", agent.manifest.name, agent.manifest.version)
-        };
-        console.say(&format!(
-            "{:<22} {:<13} {:<29} {}\n",
-            style.paint(Role::Agent, &display_safe(&label)),
-            style.paint(Role::Runtime, &display_safe(&agent.manifest.harness)),
-            style.paint(Role::Runtime, &display_safe(&agent.manifest.model)),
-            display_safe(
-                &agent
-                    .source_path
-                    .strip_prefix(&repo.root)
-                    .unwrap_or(&agent.source_path)
-                    .to_string_lossy()
-            ),
-        ))?;
-    }
+    let rows: Vec<Vec<table::Cell>> = agents
+        .iter()
+        .map(|agent| {
+            let label = if drifted.contains(&agent.manifest.name) {
+                format!(
+                    "@{} {} [drifted]",
+                    agent.manifest.name, agent.manifest.version
+                )
+            } else {
+                format!("@{} {}", agent.manifest.name, agent.manifest.version)
+            };
+            vec![
+                table::Cell::painted(Role::Agent, display_safe(&label)),
+                table::Cell::painted(Role::Runtime, display_safe(&agent.manifest.harness)),
+                table::Cell::painted(Role::Runtime, display_safe(&agent.manifest.model)),
+                table::Cell::plain(display_safe(
+                    &agent
+                        .source_path
+                        .strip_prefix(&repo.root)
+                        .unwrap_or(&agent.source_path)
+                        .to_string_lossy(),
+                )),
+            ]
+        })
+        .collect();
+    console.say(&table::render(
+        style,
+        table::columns(),
+        AGENT_COLUMNS,
+        &rows,
+    ))?;
     Ok(0)
 }
+
+/// The `ahu agents` table. The agent cell is what a reader types into
+/// `ahu launch`, and a truncated handle selects nothing, so it is fixed. The
+/// harness and model are the identity a manifest pins -- the reason the listing
+/// exists -- and neither says anything in part, so they are fixed too.
+///
+/// The source path gives up width first and leaves the table first. It is the
+/// one column that survives being cut: the file name only repeats the agent's
+/// own name, while the leading directory is what the column is really saying --
+/// whether the instructions live in a native definition or in the manifest
+/// itself -- and that is the part a cut keeps. Then the model goes, and the
+/// harness outlasts it: it is the shorter column and it names the CLI that has
+/// to run the assignment.
+const AGENT_COLUMNS: &[table::Column] = &[
+    table::Column {
+        header: "AGENT",
+        min: 0,
+        shrink: None,
+        drop: None,
+    },
+    table::Column {
+        header: "HARNESS",
+        min: 0,
+        shrink: None,
+        drop: Some(2),
+    },
+    table::Column {
+        header: "MODEL",
+        min: 0,
+        shrink: None,
+        drop: Some(1),
+    },
+    table::Column {
+        header: "STATUS",
+        min: 12,
+        shrink: Some(0),
+        drop: Some(0),
+    },
+];
 
 fn agent_drift(
     repo: &Repo,
     agents: &[ResolvedAgent],
 ) -> Result<std::collections::BTreeSet<String>> {
+    Ok(agent_drift_details(repo, agents)?
+        .into_iter()
+        .map(|drifted| drifted.agent_name)
+        .collect())
+}
+
+/// Every drifted agent with the detail the launch path reports.
+///
+/// `ahu agents` only needs the names; `ahu doctor` shows what changed, so the
+/// same comparison produces both rather than doctor repeating the walk with a
+/// different definition of drift.
+fn agent_drift_details(repo: &Repo, agents: &[ResolvedAgent]) -> Result<Vec<drift::Drifted>> {
     let Some(loaded) = config::load(&repo.root)? else {
-        return Ok(std::collections::BTreeSet::new());
+        return Ok(Vec::new());
     };
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let previous = task::list(repo)?;
@@ -245,25 +324,34 @@ fn agent_drift(
             previous.unreadable.len()
         )));
     }
-    let mut drifted = std::collections::BTreeSet::new();
+    let mut drifted = Vec::new();
     for agent in agents {
         let found_hooks = hooks::collect(&repo.root, &agent.manifest.harness)?;
         let identity = agent.identity_digest();
-        if drift::detect(
+        let source = agent.relative_source(&repo.root);
+        if let Some(found) = drift::detect(
             &agent.label(),
-            Some(drift::AgentDigests {
-                identity: &identity,
-                source: &agent.source_digest,
-                instructions: &agent.instructions_digest,
+            Some(drift::AgentIdentity {
+                version: &agent.manifest.version,
+                harness: &agent.manifest.harness,
+                model: &agent.manifest.model,
+                permissions: agent.manifest.permissions,
+                instructions_source: Some(&source),
+                identity_digest: &identity,
+                source_digest: &agent.source_digest,
+                instructions_digest: &agent.instructions_digest,
             }),
             &snapshot.digest(),
             &loaded.digest,
             &found_hooks.digest(),
             &previous.records,
-        )
-        .is_some()
-        {
-            drifted.insert(agent.manifest.name.clone());
+        ) {
+            drifted.push(drift::Drifted {
+                agent_name: agent.manifest.name.clone(),
+                agent_version: agent.manifest.version.clone(),
+                previous_task: crate::task_handles::reference(repo, &found.previous_task_id),
+                drift: found,
+            });
         }
     }
     Ok(drifted)
@@ -346,6 +434,14 @@ pub fn onboard_cmd(
 
 /// `ahu doctor`
 pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
+    doctor_with_verbosity(console, repo, false)
+}
+
+pub fn doctor_with_verbosity(
+    console: &mut Console<'_>,
+    repo: &Result<Repo>,
+    verbose: bool,
+) -> Result<i32> {
     let mut problems = 0;
     let mut warnings = 0;
     let mut project_harnesses = std::collections::BTreeSet::new();
@@ -353,14 +449,17 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
     let mut registered_agents = Vec::new();
     match repo {
         Ok(repo) => {
-            console.say(&format!(
-                "repository   {}\n  identity   {}\n  group name {}\n  HEAD       {}\n",
-                display_path(&repo.root),
-                repo.identity(),
-                // Derived from a directory name, which ahu does not choose.
-                display_safe(&repo.display_name()),
-                display_safe(repo.head.as_deref().unwrap_or("(no commits)"))
-            ))?;
+            if verbose {
+                console.say(&format!(
+                    "repository   {}\n  identity   {}\n  group name {}\n  HEAD       {}\n",
+                    display_path(&repo.root),
+                    repo.identity(),
+                    display_safe(&repo.display_name()),
+                    display_safe(repo.head.as_deref().unwrap_or("(no commits)"))
+                ))?;
+            } else {
+                console.say(&format!("repository   {}\n", display_path(&repo.root)))?;
+            }
         }
         Err(e) => {
             problems += 1;
@@ -376,15 +475,19 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             Ok(Some(loaded)) => {
                 project_harnesses.extend(loaded.config.harness_preferences.iter().cloned());
                 loaded_config = Some(loaded.clone());
-                console.say(&format!(
-                    "config       {} ({})\n  catalog    {}\n  harnesses  {}\n",
-                    display_path(&loaded.path),
-                    loaded.short_digest(),
-                    display_safe(&loaded.config.catalog_version),
-                    display_safe(&loaded.config.harness_preferences.join(", "))
-                ))?;
+                if verbose {
+                    console.say(&format!(
+                        "config       {} ({})\n  catalog    {}\n  harnesses  {}\n",
+                        display_path(&loaded.path),
+                        loaded.short_digest(),
+                        display_safe(&loaded.config.catalog_version),
+                        display_safe(&loaded.config.harness_preferences.join(", "))
+                    ))?;
+                } else {
+                    console.say(&format!("config       {}\n", display_path(&loaded.path)))?;
+                }
             }
-            Ok(None) => console.say("config       not initialized; run `ahu init`\n")?,
+            Ok(None) => console.say("config       not initialized; run `ahu setup`\n")?,
             Err(e) => {
                 problems += 1;
                 console.say(&format!(
@@ -423,26 +526,28 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                         console.say(&format!(
                             "hooks        {display_name}: {count} configured\n",
                         ))?;
-                        for hook in &found.hooks {
-                            console.say(&format!(
-                                "  {:<12} {}\n",
-                                hook.scope.as_str(),
-                                hook.label()
-                            ))?;
-                        }
-                        for plugin in &found.declared_plugins {
-                            let scope = if plugin.source.starts_with('/')
-                                || plugin.source.starts_with('~')
-                            {
-                                "user"
-                            } else {
-                                "project"
-                            };
-                            console.say(&format!(
-                                "  {:<12} plugin → {}\n",
-                                scope,
-                                display_safe(&plugin.module)
-                            ))?;
+                        if verbose {
+                            for hook in &found.hooks {
+                                console.say(&format!(
+                                    "  {:<12} {}\n",
+                                    hook.scope.as_str(),
+                                    hook.label()
+                                ))?;
+                            }
+                            for plugin in &found.declared_plugins {
+                                let scope = if plugin.source.starts_with('/')
+                                    || plugin.source.starts_with('~')
+                                {
+                                    "user"
+                                } else {
+                                    "project"
+                                };
+                                console.say(&format!(
+                                    "  {:<12} plugin → {}\n",
+                                    scope,
+                                    display_safe(&plugin.module)
+                                ))?;
+                            }
                         }
                         for unreadable in &found.unreadable {
                             warnings += 1;
@@ -494,46 +599,36 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         }
         console.say(&format!("telemetry    {label}\n"))?;
 
-        let review_state = match hygiene::load_state(repo) {
-            Ok(state) => state,
-            Err(error) => {
-                warnings += 1;
-                console.say(&format!(
-                    "hygiene      review cadence unavailable: {}\n",
-                    display_safe_block(&error.to_string())
-                ))?;
-                hygiene::ReviewState::default()
+        match crate::context_lock::check(repo, &crate::snapshot::collect(&repo.root)?) {
+            Ok(status) if status.current => {
+                if verbose {
+                    console.say(&format!("context lock {}\n", status.detail))?;
+                } else {
+                    console.say("context lock current\n")?;
+                }
             }
-        };
-        let mut cadence_due = 0;
-        let cadence_agents: Vec<_> = if registered_agents.is_empty() {
-            vec![None]
-        } else {
-            registered_agents.iter().map(Some).collect()
-        };
-        for agent in cadence_agents {
-            let key = agent
-                .map(ResolvedAgent::label)
-                .unwrap_or_else(|| "auto".into());
-            let state = hygiene::due(loaded, &review_state, &key);
-            let status = match state {
-                hygiene::Trigger::FirstLoad => {
-                    cadence_due += 1;
-                    "due (first load)"
+            Ok(status) => {
+                problems += 1;
+                if verbose {
+                    console.say(&format!(
+                        "context lock stale: {}\n",
+                        display_safe_block(&status.detail)
+                    ))?;
+                } else {
+                    console.say("context lock stale; run `ahu lock` for details\n")?;
                 }
-                hygiene::Trigger::Overdue => {
-                    cadence_due += 1;
-                    "due (interval elapsed)"
+            }
+            Err(error) => {
+                problems += 1;
+                if verbose {
+                    console.say(&format!(
+                        "context lock invalid: {}\n",
+                        display_safe_block(&error.to_string())
+                    ))?;
+                } else {
+                    console.say("context lock invalid; run `ahu lock` for details\n")?;
                 }
-                hygiene::Trigger::NotDue => "current",
-                hygiene::Trigger::Requested => "current",
-            };
-            console.say(&format!("hygiene      {key}: {status}\n"))?;
-        }
-        if cadence_due > 0 {
-            warnings += 1;
-            console
-                .say("  Run `ahu hygiene` or launch the affected agent to review its context.\n")?;
+            }
         }
 
         match crate::mcp::verify_bundled_skills(&repo.root) {
@@ -544,9 +639,8 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
                     ))?;
                 if missing + changed > 0 {
                     warnings += 1;
-                    console.say(
-                        "  Review with `ahu mcp setup`; changed skills are left untouched.\n",
-                    )?;
+                    console
+                        .say("  Review with `ahu setup`; changed skills are left untouched.\n")?;
                 }
             }
             Err(error) => {
@@ -558,22 +652,20 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             }
         }
 
-        match agent_drift(repo, &registered_agents) {
-            Ok(names) if names.is_empty() => {
+        match agent_drift_details(repo, &registered_agents) {
+            Ok(drifted) if drifted.is_empty() => {
                 console.say("drift        no registered agents are drifted\n")?;
             }
-            Ok(names) => {
+            Ok(drifted) => {
                 warnings += 1;
-                console.say(&format!(
-                    "drift        {}\n",
-                    display_safe(
-                        &names
-                            .into_iter()
-                            .map(|name| format!("@{name}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                ))?;
+                if verbose {
+                    console.say(&drift::render_doctor(&drifted))?;
+                } else {
+                    console.say(&format!(
+                        "drift        {} registered agent(s) drifted; run `ahu agents` for details\n",
+                        drifted.len()
+                    ))?;
+                }
             }
             Err(error) => {
                 warnings += 1;
@@ -608,9 +700,29 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
         {
             warnings += 1;
         }
-        console.say(&format!("cmux integration {}:\n", display_safe(harness)))?;
-        console.say(&cmux::integration::render_summary(&status))?;
-        if let Some(reason) = status.headless.reasons.first() {
+        if verbose {
+            console.say(&format!("cmux integration {}:\n", display_safe(harness)))?;
+            console.say(&cmux::integration::render_summary(&status))?;
+        } else {
+            let verified = status
+                .components
+                .iter()
+                .filter(|component| {
+                    component.registration == cmux::integration::Registration::Installed
+                })
+                .count();
+            let unknown = status.components.len().saturating_sub(verified);
+            console.say(&format!(
+                "cmux         {}: {verified} verified, {unknown} unknown; headless {}\n",
+                display_safe(harness),
+                if status.headless.allowed {
+                    "ready"
+                } else {
+                    "needs review"
+                }
+            ))?;
+        }
+        if verbose && let Some(reason) = status.headless.reasons.first() {
             let safe = display_safe(reason);
             let mut shown: String = safe.chars().take(240).collect();
             if safe.chars().count() > 240 {
@@ -618,16 +730,18 @@ pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
             }
             console.say(&format!("  headless   {shown}\n"))?;
         }
-        let installer = cmux::integration::installation_plan(harness, &native_cli)?;
-        console.say(&format!(
-            "  installer  {}; inspect: ahu cmux install --harness {} --dry-run\n",
-            if installer.available {
-                "available"
-            } else {
-                "unavailable/unknown"
-            },
-            display_safe(harness)
-        ))?;
+        if verbose {
+            let installer = cmux::integration::installation_plan(harness, &native_cli)?;
+            console.say(&format!(
+                "  installer  {}; inspect: ahu cmux install --harness {} --dry-run\n",
+                if installer.available {
+                    "available"
+                } else {
+                    "unavailable/unknown"
+                },
+                display_safe(harness)
+            ))?;
+        }
     }
 
     match Cmux::discover() {
@@ -781,6 +895,28 @@ fn session_owner(
 
 /// `ahu tasks`
 pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
+    tasks_with_limit(console, repo, Some(20))
+}
+
+pub fn tasks_with_limit(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    limit: Option<usize>,
+) -> Result<i32> {
+    tasks_limited_at(console, repo, table::columns(), limit)
+}
+
+/// `ahu tasks`, laid out for an explicit width and without a row limit.
+pub fn tasks_at(console: &mut Console<'_>, repo: &Repo, width: usize) -> Result<i32> {
+    tasks_limited_at(console, repo, width, None)
+}
+
+fn tasks_limited_at(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    width: usize,
+    limit: Option<usize>,
+) -> Result<i32> {
     let listing = if std::env::var("AHU_EXECUTION_BACKEND").ok().as_deref() == Some("headless")
         || !crate::headless::discover(repo)?.is_empty()
     {
@@ -801,63 +937,187 @@ pub fn tasks(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         return Ok(0);
     }
     let workspaces = liveness_workspaces(&listing.records);
-    console.say(
-        "TASK HANDLE             TITLE                        STATE     AGENT                  MODE     LIVE    RUNTIME                         WORKTREE\n",
-    )?;
-    for (dir, record) in &listing.records {
+    let style = style::stdout();
+    let mut reviews = Vec::with_capacity(listing.records.len());
+    let mut rows = Vec::with_capacity(listing.records.len());
+    let shown = limit
+        .unwrap_or(listing.records.len())
+        .min(listing.records.len());
+    for (dir, record) in listing.records.iter().take(shown) {
         let review = if crate::headless::review::is_headless(dir) {
             Some(crate::headless::inspection(dir)?)
         } else {
             None
         };
         let mode = if review.is_some() { "headless" } else { "cmux" };
+        let live = task::observed_liveness(session_owner(dir, record, workspaces.as_ref()));
         // Every field here comes out of task.json, which was built from the
         // prompt and from repository configuration. `tasks` is as much a
         // disclosure surface as the launch preview, so it escapes the same way.
-        let live = task::observed_liveness(session_owner(dir, record, workspaces.as_ref()));
-        let runtime = format!("{} / {}", record.identity.harness, record.identity.model);
-        let worktree = repo_relative_path(repo, &record.worktree);
-        console.say(&format!(
-            "{} {} {} {} {} {} {} {}\n",
-            table_cell(
-                &display_safe(&crate::task_handles::label(repo, &record.task_id)),
-                22
+        let handle = crate::task_handles::column_reference(repo, &record.task_id);
+        // A title the handle already carries word for word would spend the
+        // widest column in the table saying what the first column said.
+        let title = if crate::task_handles::title_adds_to_handle(&handle, &record.title) {
+            display_safe(&record.title)
+        } else {
+            String::new()
+        };
+        rows.push(vec![
+            table::Cell::painted(Role::Agent, display_safe(&handle)),
+            table::Cell::plain(title),
+            table::Cell::painted(state_role(record.state.as_str()), record.state.as_str()),
+            table::Cell::painted(Role::Agent, display_safe(&record.agent_label())),
+            table::Cell::plain(mode),
+            match live {
+                task::ObservedLiveness::Live => table::Cell::plain(live.as_str()),
+                // Not a verdict on the task: it is what ahu could see, and
+                // dimming says so without inventing a state.
+                _ => table::Cell::painted(Role::Hint, live.as_str()),
+            },
+            table::Cell::painted(
+                Role::Runtime,
+                display_safe(&format!(
+                    "{} / {}",
+                    record.identity.harness, record.identity.model
+                )),
             ),
-            table_cell(&display_safe(&record.title), 28),
-            table_cell(record.state.as_str(), 9),
-            table_cell(&display_safe(&record.agent_label()), 22),
-            table_cell(mode, 8),
-            table_cell(live.as_str(), 7),
-            table_cell(&display_safe(&runtime), 30),
-            display_safe(&worktree),
-        ))?;
-        if let Some(review) = &review {
+            table::Cell::painted(Role::Hint, display_safe(&short_branch(record))),
+        ]);
+        reviews.push(review);
+    }
+    // A column of empty cells is a header and two blank columns of gap, so the
+    // title leaves the table entirely when no row had anything to put in it.
+    let mut columns = TASK_COLUMNS.to_vec();
+    if rows.iter().all(|row| row[TITLE_COLUMN].text.is_empty()) {
+        columns.remove(TITLE_COLUMN);
+        for row in &mut rows {
+            row.remove(TITLE_COLUMN);
+        }
+    }
+    let mut lines = table::lines(style, width, &columns, &rows).into_iter();
+    if let Some(header) = lines.next() {
+        console.say(&format!("{header}\n"))?;
+    }
+    for (((dir, _), review), line) in listing.records.iter().take(shown).zip(&reviews).zip(lines) {
+        console.say(&format!("{line}\n"))?;
+        if let Some(review) = review {
             console.say(&crate::headless::review::render(review, true))?;
         }
         if let Some(question) = question_excerpt(dir) {
             console.say(&format!("  question  {question}\n"))?;
         }
     }
-    console.say(&style::stdout().paint(
+    console.say(&style.paint(
         Role::Warning,
         &render_unreadable_tasks(repo, &listing.unreadable),
     ))?;
-    console.say("Run `ahu task <handle>` for task details.\n")?;
+    console.say("Run `ahu task <handle>` for a task's full branch, worktree and launch base.\n")?;
+    if shown < listing.records.len() {
+        console.say(&style.paint(
+            Role::Hint,
+            &format!(
+                "Showing {shown} of {} tasks. Use `ahu tasks --all` to show the full list.\n",
+                listing.records.len()
+            ),
+        ))?;
+    }
     Ok(0)
 }
 
-fn table_cell(value: &str, width: usize) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
-    let cell = if chars.len() <= width {
-        value.to_string()
-    } else {
-        chars
-            .into_iter()
-            .take(width.saturating_sub(1))
-            .collect::<String>()
-            + "…"
+/// The `ahu tasks` table. The handle is fixed: a truncated one does not
+/// resolve, and resolving it is the only reason the column is there. What the
+/// reader cannot get anywhere else in the row keeps its width next: the state,
+/// the agent, and the runtime, which is the one column that shows a task ran on
+/// its own harness and model. The branch comes next, whole or not at all, and
+/// the title gives way before it, because the handle was generated from it.
+/// Mode and liveness are the first to go: both are one short word a reader can
+/// infer from the rest of the row.
+const TASK_COLUMNS: &[table::Column] = &[
+    table::Column {
+        header: "HANDLE",
+        min: 0,
+        shrink: None,
+        drop: None,
+    },
+    table::Column {
+        header: "TITLE",
+        min: 16,
+        shrink: Some(1),
+        drop: Some(2),
+    },
+    table::Column {
+        header: "STATE",
+        min: 0,
+        shrink: None,
+        drop: None,
+    },
+    table::Column {
+        header: "AGENT",
+        min: 0,
+        shrink: None,
+        drop: Some(4),
+    },
+    table::Column {
+        header: "MODE",
+        min: 0,
+        shrink: None,
+        drop: Some(0),
+    },
+    table::Column {
+        header: "LIVE",
+        min: 0,
+        shrink: None,
+        drop: Some(1),
+    },
+    table::Column {
+        header: "RUNTIME",
+        min: 0,
+        shrink: None,
+        drop: Some(5),
+    },
+    table::Column {
+        // The cell is already the shortest branch worth printing: the prefix and
+        // the leading digits of the id, which is what a reader scanning
+        // `git branch` matches against. Cutting into that leaves a name that
+        // matches nothing, so this column does not shrink -- spare width goes to
+        // the whole branch before mode, liveness or the title see any of it, and
+        // a table too narrow for it loses the column rather than its meaning.
+        header: "BRANCH",
+        min: 0,
+        shrink: None,
+        drop: Some(3),
+    },
+];
+
+/// The title's position in [`TASK_COLUMNS`].
+const TITLE_COLUMN: usize = 1;
+
+/// The branch, shortened to its prefix and the first eight characters of the
+/// task id.
+///
+/// The rest of the id is a UUID nobody reads across, and `ahu task <handle>`
+/// prints the whole branch name for anyone who wants to paste it.
+fn short_branch(record: &task::TaskRecord) -> String {
+    let Some(prefix) = record.branch.strip_suffix(&record.task_id) else {
+        return record.branch.clone();
     };
-    format!("{cell:<width$}")
+    match record.task_id.get(..8) {
+        Some(short) => format!("{prefix}{short}"),
+        None => record.branch.clone(),
+    }
+}
+
+/// A recorded session state, coloured by what it means for the reader: work
+/// that may still be running, work that stopped on its own, work that stopped
+/// because something went wrong, and work whose supervisor went away.
+fn state_role(state: &str) -> Role {
+    match state {
+        "starting" | "running" => Role::Success,
+        "failed" | "cancelled" => Role::Error,
+        "interrupted" => Role::Warning,
+        // `exited` and anything a later schema adds: stopped, nothing claimed.
+        _ => Role::Hint,
+    }
 }
 
 fn repo_relative_path(repo: &Repo, path: &Path) -> String {
@@ -1242,6 +1502,8 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
                 display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none"))
             ))?;
         }
+        console.say(&format!("  review    {}\n", review_command(&record)))?;
+        console.say(&outside_writes_notice(repo, &dir, &record))?;
         if let Some(body) = read_artifact(&dir, "result.md") {
             match body {
                 ArtifactBody::Content(body) => {
@@ -1296,6 +1558,51 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
         }
     }
     Ok(0)
+}
+
+/// The plain Git command that shows what a task changed.
+///
+/// ahu has no diff of its own: the task's own checkout and its recorded launch
+/// base are everything Git needs, and a reader who can see the command can
+/// also vary it. Quoted because a checkout path is repository-controlled.
+fn review_command(record: &task::TaskRecord) -> String {
+    let worktree = crate::util::shell_single_quote(&record.worktree.to_string_lossy());
+    match record.base_commit.as_deref() {
+        Some(base) => display_safe(&format!("git -C {worktree} diff {base}")),
+        // Without a base there is nothing to diff against; the branch is still
+        // where the work is.
+        None => display_safe(&format!(
+            "git -C {worktree} log {}",
+            crate::util::shell_single_quote(&record.branch)
+        )),
+    }
+}
+
+/// What the attempt's own event stream said it wrote outside the worktree.
+///
+/// A reader who looks at the branch and sees nothing has not established that
+/// nothing happened: an unsandboxed harness can name any absolute path, and
+/// the recorded targets are the only place that shows up. This is post-run
+/// disclosure, not a boundary, and reported targets are not proof of writes.
+fn outside_writes_notice(repo: &Repo, dir: &Path, record: &task::TaskRecord) -> String {
+    let Some(outside) = crate::headless::recorded_writes_outside_worktree(dir) else {
+        return String::new();
+    };
+    let mut out = String::from(
+        "\n!! write tool calls in the recorded event stream targeted paths outside the task\n\
+         \x20  worktree, so the branch alone does not show everything the session touched:\n",
+    );
+    for path in outside.iter().take(3) {
+        out.push_str(&format!("     {}\n", display_safe(path)));
+    }
+    if outside.len() > 3 {
+        out.push_str(&format!("     ... and {} more\n", outside.len() - 3));
+    }
+    out.push_str(&format!(
+        "   Run `ahu result {}` for the full recorded list.\n",
+        display_safe(&crate::task_handles::reference(repo, &record.task_id))
+    ));
+    style::stdout().paint(Role::Warning, &out)
 }
 
 /// The most inbox entries a task directory accepts.
@@ -1479,89 +1786,6 @@ fn read_artifact(dir: &Path, file: &str) -> Option<ArtifactBody> {
     Some(ArtifactBody::Content(display_safe_block(
         &String::from_utf8_lossy(&body),
     )))
-}
-
-/// Compare the task checkout to its launch base without staging or running diff helpers.
-pub fn diff_cmd(console: &mut Console<'_>, repo: &Repo, id: &str) -> Result<i32> {
-    use std::io::IsTerminal;
-    let (dir, record, owner_identity, via_index) = match resolve_task(repo, id)? {
-        Located::Listing(dir, record) => (dir, record, repo.identity(), false),
-        Located::Pointer(entry, dir, record) => (dir, record, entry.repo_identity.clone(), true),
-        Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
-        Located::NoMatch { .. } => {
-            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {id:?}.")
-        }
-    };
-    let task_repo = git::discover(&record.worktree)?;
-    if task_repo.identity() != owner_identity
-        || task_repo.root.canonicalize()? != record.worktree.canonicalize()?
-    {
-        if via_index {
-            bail!(
-                "task worktree does not belong to the repository that launched it or is not a checkout root."
-            );
-        }
-        bail!("task worktree does not belong to this repository or is not a checkout root.");
-    }
-    let base = record
-        .base_commit
-        .as_deref()
-        .filter(|base| matches!(base.len(), 40 | 64) && base.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| crate::util::Error::new("task has no valid launch base commit."))?;
-    let run = |args: &[&str]| -> Result<Vec<u8>> {
-        let output = git::run(&record.worktree, args)?;
-        if !output.status.success() {
-            bail!(
-                "cannot inspect task diff: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Ok(output.stdout)
-    };
-    let patch = run(&[
-        "--no-pager",
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-color",
-        "--binary",
-        base,
-        "--",
-    ])?;
-    let untracked = run(&["ls-files", "--others", "--exclude-standard", "-z"])?;
-    let untracked: Vec<String> = untracked
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| display_safe(&String::from_utf8_lossy(p)))
-        .collect();
-    for path in &untracked {
-        eprintln!("Untracked (not included in diff): {path}");
-    }
-    if patch.is_empty()
-        && untracked.is_empty()
-        && let Some(outside) = crate::headless::recorded_writes_outside_worktree(&dir)
-    {
-        eprintln!(
-            "No changes in the task worktree, but write tool calls in the recorded event stream targeted paths outside it:"
-        );
-        for path in outside.iter().take(3) {
-            eprintln!("  {}", display_safe(path));
-        }
-        if outside.len() > 3 {
-            eprintln!("... and {} more", outside.len() - 3);
-        }
-        eprintln!(
-            "Run `ahu result {}` for the full recorded list.",
-            display_safe(&crate::task_handles::reference(repo, &record.task_id))
-        );
-    }
-    if std::io::stdout().is_terminal() {
-        console.say(&display_safe_block(&String::from_utf8_lossy(&patch)))?;
-    } else {
-        // Redirected output stays a byte-exact patch, including non-UTF-8 data.
-        console.output.write_all(&patch)?;
-    }
-    Ok(0)
 }
 
 /// `ahu focus <task-id>`
@@ -1781,87 +2005,6 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     Ok(0)
 }
 
-/// `ahu inventory [@agent]`
-pub fn inventory_cmd(
-    console: &mut Console<'_>,
-    repo: &Repo,
-    agent_name: Option<&str>,
-) -> Result<i32> {
-    let Some(loaded) = config::load(&repo.root)? else {
-        bail!(kind: crate::util::ErrorKind::Prerequisite, "this repository is not initialized. Run `ahu init` first.");
-    };
-    let snapshot = crate::snapshot::collect(&repo.root)?;
-    let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
-    let adapter = harness::adapter_for(&pair.harness)?;
-    // Same permissions the launch would use, so this report describes the same
-    // flags a launch of this identity would actually pass.
-    let permissions = resolved
-        .as_ref()
-        .map(|a| a.manifest.permissions)
-        .unwrap_or_default();
-    let enforcement = adapter.enforcement(&pair.model, permissions)?;
-    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
-    let built = inventory::build(&inventory::Subject {
-        repo_root: &repo.root,
-        loaded_config: &loaded,
-        snapshot: &snapshot,
-        agent: resolved.as_ref(),
-        harness: &pair.harness,
-        model: &pair.model,
-        enforcement: &enforcement,
-        hooks: &found_hooks,
-        prompt: None,
-    })?;
-    console.say(&inventory::render(&built))?;
-    Ok(0)
-}
-
-/// `ahu hygiene [@agent]`
-pub fn hygiene_cmd(
-    console: &mut Console<'_>,
-    repo: &Repo,
-    agent_name: Option<&str>,
-) -> Result<i32> {
-    let Some(loaded) = config::load(&repo.root)? else {
-        bail!(kind: crate::util::ErrorKind::Prerequisite, "this repository is not initialized. Run `ahu init` first.");
-    };
-    let snapshot = crate::snapshot::collect(&repo.root)?;
-    let (resolved, pair) = resolve_identity(repo, &loaded, agent_name)?;
-    let adapter = harness::adapter_for(&pair.harness)?;
-    // Same permissions the launch would use, so this report describes the same
-    // flags a launch of this identity would actually pass.
-    let permissions = resolved
-        .as_ref()
-        .map(|a| a.manifest.permissions)
-        .unwrap_or_default();
-    let enforcement = adapter.enforcement(&pair.model, permissions)?;
-    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
-    let built = inventory::build(&inventory::Subject {
-        repo_root: &repo.root,
-        loaded_config: &loaded,
-        snapshot: &snapshot,
-        agent: resolved.as_ref(),
-        harness: &pair.harness,
-        model: &pair.model,
-        enforcement: &enforcement,
-        hooks: &found_hooks,
-        prompt: None,
-    })?;
-    let key = resolved
-        .as_ref()
-        .map(|a| a.label())
-        .unwrap_or_else(|| "auto".to_string());
-    let review_state = hygiene::load_state(repo)?;
-    let review = hygiene::review(&key, &built, &enforcement, &loaded, &review_state);
-    console.say(&hygiene::render(
-        &review,
-        hygiene::Trigger::Requested,
-        &loaded,
-    ))?;
-    hygiene::record_review(repo, &key)?;
-    Ok(0)
-}
-
 /// `ahu knowledge lint [--output json]`
 ///
 /// A check, so its exit status is the result: 0 when the bundles pass under the
@@ -1870,7 +2013,7 @@ pub fn hygiene_cmd(
 pub fn knowledge_lint(console: &mut Console<'_>, repo: &Repo, json: bool) -> Result<i32> {
     let loaded = config::load(&repo.root)?.ok_or_else(|| {
         crate::util::Error::new(
-            "project configuration is missing; run `ahu init` before checking knowledge bundles.",
+            "project configuration is missing; run `ahu setup` before checking knowledge bundles.",
         )
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
@@ -1885,6 +2028,26 @@ pub fn knowledge_lint(console: &mut Console<'_>, repo: &Repo, json: bool) -> Res
     Err(crate::util::Error::new(
         "knowledge lint found problems; see the findings above.",
     ))
+}
+
+/// `ahu eval report --records <path>` — compare local evaluation runs.
+///
+/// Read-only, and only outside the checkout: the records are run evidence, and
+/// `evals/README.md` keeps that in a user-owned directory. Like every other
+/// `--output json` command, the machine contract owns stdout and the readable
+/// report goes to stderr when JSON was asked for.
+pub fn eval_report(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    records: &std::path::Path,
+    json: bool,
+) -> Result<i32> {
+    let report = crate::eval::report(repo, records)?;
+    if json {
+        println!("{}", crate::eval::render_json(&report)?);
+    }
+    console.say(&crate::eval::render(&report))?;
+    Ok(0)
 }
 
 /// `ahu cancel <task-id>` — request cancellation of a running task.
@@ -2135,7 +2298,7 @@ pub fn launch_cmd(
 ) -> Result<i32> {
     let loaded = config::load(&repo.root)?.ok_or_else(|| {
         crate::util::Error::new(
-            "project configuration is missing; run ahu init before assigning work.",
+            "project configuration is missing; run ahu setup before assigning work.",
         )
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
@@ -2216,7 +2379,7 @@ fn submit(
     }
     plan.apply_display(display)?;
 
-    preflight(console, repo, loaded, &plan, prompt, dry_run)?;
+    preflight(console, repo, loaded, &plan)?;
 
     // Generated here, after the prompt has been read and after the plan is
     // built, so nothing in the prompt can have contained it.
@@ -2269,33 +2432,8 @@ pub(crate) fn preflight(
     repo: &Repo,
     loaded: &LoadedConfig,
     plan: &launch::LaunchPlan,
-    prompt: &str,
-    dry_run: bool,
 ) -> Result<()> {
-    // First-load and overdue context hygiene review, before submission.
     let key = plan.agent_label();
-    let review_state = hygiene::load_state(repo)?;
-    let trigger = hygiene::due(loaded, &review_state, &key);
-    if trigger != hygiene::Trigger::NotDue {
-        let built = inventory::build(&inventory::Subject {
-            repo_root: &repo.root,
-            loaded_config: loaded,
-            snapshot: &plan.snapshot,
-            agent: plan.agent.as_ref(),
-            harness: &plan.pair.harness,
-            model: &plan.pair.model,
-            enforcement: &plan.enforcement,
-            hooks: &plan.hooks,
-            prompt: Some(prompt),
-        })?;
-        let review = hygiene::review(&key, &built, &plan.enforcement, loaded, &review_state);
-        console.say("\n")?;
-        console.say(&hygiene::render(&review, trigger, loaded))?;
-        if !dry_run {
-            hygiene::record_review(repo, &key)?;
-        }
-    }
-
     // Drift against the last launch of this same agent at this same version.
     let previous = task::list(repo)?;
     // Drift can only compare against records it can read. Saying nothing when
@@ -2310,15 +2448,21 @@ pub(crate) fn preflight(
         ))?;
     }
     let agent_identity = plan.agent.as_ref().map(|a| a.identity_digest());
+    let agent_source = plan.agent.as_ref().map(|a| a.relative_source(&repo.root));
     if let Some(found) = drift::detect(
         &key,
         plan.agent
             .as_ref()
             .zip(agent_identity.as_deref())
-            .map(|(a, identity)| drift::AgentDigests {
-                identity,
-                source: &a.source_digest,
-                instructions: &a.instructions_digest,
+            .map(|(a, identity)| drift::AgentIdentity {
+                version: &a.manifest.version,
+                harness: &a.manifest.harness,
+                model: &a.manifest.model,
+                permissions: a.manifest.permissions,
+                instructions_source: agent_source.as_deref(),
+                identity_digest: identity,
+                source_digest: &a.source_digest,
+                instructions_digest: &a.instructions_digest,
             }),
         &plan.snapshot.digest(),
         &loaded.digest,
@@ -2337,7 +2481,7 @@ pub(crate) fn preflight(
 }
 
 /// The normal launch view contains decisions and next actions. Full audit
-/// details remain available through dry-run previews, JSON, and inventory.
+/// details remain available through dry-run previews and JSON.
 pub fn render_launch_preview(
     repo: &Repo,
     plan: &launch::LaunchPlan,
@@ -2393,7 +2537,7 @@ pub fn render_launch_preview(
     }
     if !plan.hooks.hooks.is_empty() {
         out.push_str(&format!(
-            "  hooks      {} configured; details: ahu inventory\n",
+            "  hooks      {} configured; review the launch JSON for details\n",
             plan.hooks.hooks.len()
         ));
     }
@@ -2401,7 +2545,7 @@ pub fn render_launch_preview(
         out.push_str(&style.paint(
             Role::Gap,
             &format!(
-                "  gaps       {} capability limit(s); details: ahu inventory\n",
+                "  gaps       {} capability limit(s); review the launch JSON for details\n",
                 plan.enforcement.gaps.len()
             ),
         ));
@@ -2434,7 +2578,7 @@ fn render_enforcement_gaps(plan: &launch::LaunchPlan) -> String {
         out.push_str(&style.paint(
             Role::Gap,
             &format!(
-                "  ! {} capability limit(s); details: ahu inventory\n",
+                "  ! {} capability limit(s); review the launch JSON for details\n",
                 plan.enforcement.gaps.len()
             ),
         ));
@@ -2571,9 +2715,9 @@ pub fn render_preview(
         plan.hooks.short_digest()
     ));
     out.push_str(
-        "\nThe task worktree starts at the base commit above and then receives this checkout's\n\
-         complete agent configuration as it stands right now, including uncommitted and ignored\n\
-         files, at their native paths.\n",
+        "\nThe task worktree starts at the base commit above. ahu.lock and every recognized\n\
+         repository context input must match committed HEAD before launch. Harness-level and\n\
+         provider-managed context remains outside this repository lock.\n",
     );
     if plan.parent_dirty {
         out.push_str(&style.paint(Role::Drift, "\nCheckout changes\n"));
@@ -2583,12 +2727,10 @@ pub fn render_preview(
         );
     }
     if !plan.snapshot.skipped_directories.is_empty() {
-        // Not "not inherited": the worktree is a checkout of the base commit,
-        // so committed files under these paths are in it either way. What the
-        // scan skipped is the inventory, not the inheritance.
+        // These paths exceed the bounded context scan; name them without
+        // suggesting the repository lock covers files the scanner did not read.
         out.push_str(&format!(
-            "Not scanned, so not inventoried; committed files under these paths are still present\n\
-             in the task worktree: {}\n",
+            "Context scan is bounded and does not lock nested inputs in these paths: {}\n",
             display_safe(&plan.snapshot.skipped_directories.join(", "))
         ));
     }
@@ -2648,7 +2790,6 @@ pub fn render_preview(
         ));
     }
     out.push_str(&render_enforcement_gaps(plan));
-    out.push_str("  Detailed runtime capabilities: ahu inventory\n");
     out.push_str(&format!(
         "\nCommand to be run in the worktree (the prompt is one argument, never shell input):\n  {} {}\n",
         display_path(&plan.harness_executable),
@@ -2742,4 +2883,202 @@ mod doctor_tests {
         drop(listener);
         assert!(!local_collector_reachable(address));
     }
+
+    #[test]
+    fn enabled_telemetry_reports_invalid_remote_and_local_endpoints() {
+        let mut config = TelemetryConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        for (endpoint, expected) in [
+            ("not a URL", "enabled; endpoint is invalid"),
+            (
+                "https://collector.example.invalid",
+                "enabled; endpoint is not local",
+            ),
+        ] {
+            config.endpoint = endpoint.into();
+            assert_eq!(telemetry_collector_status(&config), (expected.into(), true));
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        for host in ["localhost", "127.0.0.1"] {
+            config.endpoint = format!("http://{host}:{}/v1/traces", address.port());
+            assert_eq!(
+                telemetry_collector_status(&config),
+                (
+                    format!("enabled; TCP listener reachable at {address} (OTLP not verified)"),
+                    false
+                )
+            );
+        }
+        // Binding port zero allocates a nonzero port, so no listening socket
+        // can claim this destination while parallel tests start subprocesses.
+        config.endpoint = "http://127.0.0.1:0/v1/traces".into();
+        assert_eq!(
+            telemetry_collector_status(&config),
+            ("enabled; no local listener at 127.0.0.1:0".into(), true)
+        );
+    }
 }
+
+#[cfg(test)]
+mod artifact_and_inbox_tests {
+    use super::*;
+
+    #[test]
+    fn inbox_names_accept_only_ahu_numbered_markdown_entries() {
+        assert_eq!(parse_inbox_entry("0001.md"), Some(1));
+        assert_eq!(parse_inbox_entry("0100.md"), Some(100));
+        for name in ["1.md", "000.md", "0001.txt", "readme.md", "0001.md.bak"] {
+            assert_eq!(parse_inbox_entry(name), None, "{name}");
+        }
+        assert_eq!(parse_inbox_entry("000999999999999999999999.md"), None);
+    }
+
+    #[test]
+    fn inbox_delivery_appends_safely_and_refuses_unrecognized_or_nonfiles() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(deliver_inbox_message(root.path(), "first").unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("inbox/0001.md")).unwrap(),
+            "first"
+        );
+        assert_eq!(deliver_inbox_message(root.path(), "second").unwrap(), 2);
+
+        let unknown = tempfile::tempdir().unwrap();
+        std::fs::create_dir(unknown.path().join("inbox")).unwrap();
+        std::fs::write(
+            unknown.path().join("inbox/notes.md"),
+            "do not overwrite beside",
+        )
+        .unwrap();
+        assert!(deliver_inbox_message(unknown.path(), "message").is_err());
+
+        let nonfile = tempfile::tempdir().unwrap();
+        std::fs::create_dir(nonfile.path().join("inbox")).unwrap();
+        std::fs::create_dir(nonfile.path().join("inbox/0001.md")).unwrap();
+        assert!(deliver_inbox_message(nonfile.path(), "message").is_err());
+    }
+
+    #[test]
+    fn inbox_delivery_enforces_entry_and_total_byte_budgets() {
+        let full = tempfile::tempdir().unwrap();
+        let inbox = full.path().join("inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        for number in 1..=INBOX_MAX_ENTRIES {
+            std::fs::write(inbox.join(format!("{number:04}.md")), "x").unwrap();
+        }
+        assert!(
+            deliver_inbox_message(full.path(), "next")
+                .unwrap_err()
+                .to_string()
+                .contains("full")
+        );
+
+        let oversized = tempfile::tempdir().unwrap();
+        let inbox = oversized.path().join("inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        std::fs::write(
+            inbox.join("0001.md"),
+            vec![b'x'; INBOX_MAX_TOTAL_BYTES as usize],
+        )
+        .unwrap();
+        assert!(
+            deliver_inbox_message(oversized.path(), "x")
+                .unwrap_err()
+                .to_string()
+                .contains("bytes")
+        );
+    }
+
+    #[test]
+    fn question_and_result_artifacts_are_bounded_and_display_safe() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(question_excerpt(root.path()).is_none());
+        assert!(read_artifact(root.path(), "result.md").is_none());
+
+        std::fs::write(root.path().join("question.md"), "  first line\nsecond\n").unwrap();
+        assert_eq!(question_excerpt(root.path()).as_deref(), Some("first line"));
+        std::fs::write(root.path().join("question.md"), "\n  \n").unwrap();
+        assert_eq!(
+            question_excerpt(root.path()).as_deref(),
+            Some("present, empty")
+        );
+        std::fs::write(
+            root.path().join("question.md"),
+            vec![b'x'; TASK_ARTIFACT_LIMIT as usize + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            question_excerpt(root.path()).as_deref(),
+            Some("present, larger than the display bound")
+        );
+
+        std::fs::write(root.path().join("result.md"), "result\u{202e}").unwrap();
+        match read_artifact(root.path(), "result.md").unwrap() {
+            ArtifactBody::Content(body) => assert!(body.contains("\\u{202e}")),
+            _ => panic!("expected bounded result content"),
+        }
+        std::fs::write(
+            root.path().join("result.md"),
+            vec![b'x'; TASK_ARTIFACT_LIMIT as usize + 1],
+        )
+        .unwrap();
+        assert!(matches!(
+            read_artifact(root.path(), "result.md"),
+            Some(ArtifactBody::Oversized)
+        ));
+    }
+
+    #[test]
+    fn unreadable_task_report_groups_reasons_and_recovers_worktree_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(root.path()).unwrap();
+        let unreadable = ["task-one", "task-two"].map(|task_id| {
+            let dir = root
+                .path()
+                .join(".ahu/state/repos/identity/tasks")
+                .join(task_id);
+            let worktree = crate::state::worktree_dir(root.path(), task_id).unwrap();
+            std::fs::create_dir_all(&worktree).unwrap();
+            task::UnreadableTask {
+                dir: dir.clone(),
+                task_id: task_id.into(),
+                reason: format!("{}: unsupported record", dir.join("task.json").display()),
+            }
+        });
+        assert!(render_unreadable_tasks(&repo, &[]).is_empty());
+        let rendered = render_unreadable_tasks(&repo, &unreadable);
+        assert!(rendered.contains("2 task(s)"));
+        assert_eq!(rendered.matches("unsupported record").count(), 1);
+        assert!(rendered.contains("task-one [unreadable]"));
+        assert!(rendered.contains(".worktrees/task-two"));
+        assert!(rendered.contains("branch    none found"));
+        assert!(rendered.contains("authoritative listing"));
+    }
+
+    #[test]
+    fn task_state_roles_and_record_path_prefixes_are_stable() {
+        assert!(matches!(state_role("running"), Role::Success));
+        assert!(matches!(state_role("failed"), Role::Error));
+        assert!(matches!(state_role("interrupted"), Role::Warning));
+        assert!(matches!(state_role("new-future-state"), Role::Hint));
+        let dir = Path::new("/tmp/task");
+        assert_eq!(
+            strip_record_path("/tmp/task/task.json: invalid schema", dir),
+            "invalid schema"
+        );
+        assert_eq!(strip_record_path("different path", dir), "different path");
+    }
+}
+
+#[cfg(test)]
+#[path = "commands_tests.rs"]
+mod command_tests;

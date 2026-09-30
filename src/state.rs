@@ -1,7 +1,7 @@
 //! ahu's local state directory.
 //!
 //! This module locates operational state: task records, task worktrees, the
-//! repository-to-cmux-group mapping, and hygiene review timestamps. None of it
+//! repository-to-cmux-group mapping. None of it
 //! is policy. Policy lives in the repository, the same for every user.
 
 use std::ffi::OsStr;
@@ -768,6 +768,440 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launch_lock_reclaims_stale_files_and_releases_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("coordination/launch.lock");
+        let lock = LaunchLock::acquire_at(path.clone()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            std::process::id().to_string()
+        );
+        drop(lock);
+        assert!(!path.exists());
+
+        let stale = std::fs::File::create(&path).unwrap();
+        stale
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::now() - STALE_AFTER - std::time::Duration::from_secs(5),
+            ))
+            .unwrap();
+        drop(stale);
+        let lock = LaunchLock::acquire_at(path.clone()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            std::process::id().to_string()
+        );
+        drop(lock);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn launch_lock_times_out_without_removing_an_active_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("launch.lock");
+        let lock = LaunchLock::acquire_at(path.clone()).unwrap();
+        let error = LaunchLock::acquire_at(path.clone())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("another ahu launch is in progress"),
+            "{error}"
+        );
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            std::process::id().to_string()
+        );
+        drop(lock);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn invalid_json_and_serialization_failure_preserve_the_record() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("record.json");
+        std::fs::write(&path, b"not json").unwrap();
+        let error = read_json::<Vec<String>>(&path).unwrap_err().to_string();
+        assert!(error.contains("is not valid ahu state"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+
+        // JSON cannot represent a map whose keys are sequences.
+        let invalid = std::collections::BTreeMap::from([(vec![1, 2], "value")]);
+        let error = write_json(&path, &invalid).unwrap_err().to_string();
+        assert!(error.contains("cannot serialize state"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"not json");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn checkout_ignore_rejects_directories_and_invalid_utf8() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join(".ahu");
+        std::fs::create_dir(&local).unwrap();
+        let ignore = local.join(".gitignore");
+        std::fs::create_dir(&ignore).unwrap();
+        let error = ensure_checkout_state(root.path()).unwrap_err().to_string();
+        assert!(error.contains("expected a regular file"), "{error}");
+        std::fs::remove_dir(&ignore).unwrap();
+        std::fs::write(&ignore, [0xff]).unwrap();
+        let error = ensure_checkout_state(root.path()).unwrap_err().to_string();
+        assert!(error.contains("read ignore file"), "{error}");
+        assert_eq!(std::fs::read(&ignore).unwrap(), [0xff]);
+    }
+
+    #[test]
+    fn directory_confinement_rejects_files_traversal_and_unrelated_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let base = ensure_checkout_state(root.path()).unwrap();
+        let file = base.join("repos");
+        std::fs::write(&file, "preserve").unwrap();
+        for create in [false, true] {
+            let error = confine_dir(&base, &file.join("task"), create)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("expected a directory, found a file"),
+                "{error}"
+            );
+            let error = confine_dir(&base, &base.join("../escape"), create)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("traversal component"), "{error}");
+            let error = confine_dir(&base, root.path(), create)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("is not inside the ahu state directory"),
+                "{error}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "preserve");
+        assert!(!root.path().join(".ahu/escape").exists());
+        assert!(checkout_for_state(root.path()).is_err());
+        assert_eq!(checkout_for_state(&base).unwrap(), root.path());
+    }
+
+    #[test]
+    fn directory_creation_reports_obstructions_without_changing_them() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, "preserve").unwrap();
+        let error = create_one_dir(&file).unwrap_err().to_string();
+        assert!(
+            error.contains("expected a directory, found a file"),
+            "{error}"
+        );
+        let missing = root.path().join("missing/child");
+        let error = create_one_dir(&missing).unwrap_err().to_string();
+        assert!(error.contains("create directory"), "{error}");
+        let error = create_private_dir_all(&file.join("child"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("create directory"), "{error}");
+        let error = create_new_private_file(&missing).unwrap_err().to_string();
+        assert!(error.contains("write temporary file"), "{error}");
+        let error = confine_file(&file.join("child")).unwrap_err().to_string();
+        assert!(error.contains("cannot inspect ahu state"), "{error}");
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "preserve");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn nested_state_names_do_not_bypass_a_redirected_ancestor() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let base = ensure_checkout_state(root.path()).unwrap();
+        let link = base.join("repos");
+        symlink(outside.path(), &link).unwrap();
+        let nested = link.join(".ahu/state/task");
+        assert_eq!(confinement_base(&nested), Some(base));
+        let original_mode = std::fs::metadata(outside.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        for result in [
+            confine_existing_dir(&nested),
+            create_private_dir_all(&nested),
+            write_private_file(&nested.join("record"), b"must not escape"),
+            create_one_dir(&link),
+            set_private_mode(&link),
+        ] {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("symlink pointing at"), "{error}");
+        }
+        assert!(read_private_file(&nested.join("record")).is_err());
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::metadata(outside.path())
+                .unwrap()
+                .permissions()
+                .mode(),
+            original_mode
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_modes_are_applied_to_existing_files_and_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("external");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        create_private_dir_all(&dir).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let file = dir.join("record");
+        std::fs::write(&file, "preserve").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        set_private_mode(&file).unwrap();
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "preserve");
+        let error = set_private_mode(&dir.join("missing"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("inspect directory"), "{error}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn state_reads_refuse_sockets_before_opening_them() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("socket");
+        let _socket = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let error = read_private_file(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("expected a regular file, found a socket"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn worktrees_reject_invalid_ignore_entries_and_missing_worktrees() {
+        let root = git_repo();
+        let worktrees = root.path().join(WORKTREES_DIR);
+        std::fs::write(&worktrees, "preserve").unwrap();
+        let error = ensure_worktrees_root(root.path()).unwrap_err().to_string();
+        assert!(error.contains("exists and is not a directory"), "{error}");
+        assert_eq!(std::fs::read_to_string(&worktrees).unwrap(), "preserve");
+        std::fs::remove_file(&worktrees).unwrap();
+        std::fs::create_dir(&worktrees).unwrap();
+        let ignore = worktrees.join(".gitignore");
+        std::fs::create_dir(&ignore).unwrap();
+        let error = ensure_worktrees_root(root.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("is a directory, so ahu cannot make"),
+            "{error}"
+        );
+        std::fs::remove_dir(&ignore).unwrap();
+        std::fs::write(&ignore, [0xff]).unwrap();
+        let error = ensure_worktrees_root(root.path()).unwrap_err().to_string();
+        assert!(error.contains("cannot read"), "{error}");
+        assert!(error.contains(&ignore.display().to_string()), "{error}");
+        let error = verify_worktree_inside_repo(root.path(), &worktrees.join("missing"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("cannot resolve the task worktree"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn worktree_verification_and_ignore_creation_refuse_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = git_repo();
+        let outside = tempfile::tempdir().unwrap();
+        let worktrees = root.path().join(WORKTREES_DIR);
+        symlink(outside.path(), &worktrees).unwrap();
+        let error = verify_worktree_inside_repo(root.path(), outside.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is a symlink"), "{error}");
+        std::fs::remove_file(&worktrees).unwrap();
+        std::fs::create_dir(&worktrees).unwrap();
+        let target = outside.path().join("ignore");
+        std::fs::write(&target, "preserve").unwrap();
+        symlink(&target, worktrees.join(".gitignore")).unwrap();
+        let error = ensure_worktrees_root(root.path()).unwrap_err().to_string();
+        assert!(error.contains("because it is a symlink"), "{error}");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "preserve");
+    }
+
+    fn git_repo() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        root
+    }
+
+    #[test]
+    fn checkout_state_is_created_private_and_requires_a_bare_ignore_all() {
+        let root = tempfile::tempdir().unwrap();
+        let state = ensure_checkout_state(root.path()).unwrap();
+        assert!(state.is_dir());
+        assert!(ignores_everything(
+            &std::fs::read_to_string(root.path().join(".ahu/.gitignore")).unwrap()
+        ));
+
+        std::fs::write(root.path().join(".ahu/.gitignore"), "*\n!keep\n").unwrap();
+        assert!(
+            ensure_checkout_state(root.path())
+                .unwrap_err()
+                .to_string()
+                .contains("no negations")
+        );
+
+        std::fs::remove_dir_all(root.path().join(".ahu")).unwrap();
+        std::fs::write(root.path().join(".ahu"), "not a directory").unwrap();
+        assert!(checkout_root(root.path()).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn checkout_state_refuses_redirecting_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join(".ahu")).unwrap();
+        assert!(ensure_checkout_state(root.path()).is_err());
+
+        std::fs::remove_file(root.path().join(".ahu")).unwrap();
+        std::fs::create_dir(root.path().join(".ahu")).unwrap();
+        symlink(outside.path(), root.path().join(".ahu/state")).unwrap();
+        assert!(checkout_root(root.path()).is_err());
+
+        std::fs::remove_file(root.path().join(".ahu/state")).unwrap();
+        std::fs::create_dir(root.path().join(".ahu/state")).unwrap();
+        symlink(outside.path(), root.path().join(".ahu/.gitignore")).unwrap();
+        assert!(ensure_checkout_state(root.path()).is_err());
+    }
+
+    #[test]
+    fn private_state_files_round_trip_and_missing_json_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let state_root = ensure_checkout_state(root.path()).unwrap();
+        let dir = state_root.join("repos/example/tasks");
+        create_private_dir_all(&dir).unwrap();
+        confine_existing_dir(&dir).unwrap();
+        let path = dir.join("record.json");
+        assert_eq!(
+            read_json::<Vec<String>>(&path).unwrap(),
+            Vec::<String>::new()
+        );
+        write_json(&path, &vec!["one".to_string()]).unwrap();
+        assert_eq!(read_json::<Vec<String>>(&path).unwrap(), vec!["one"]);
+        write_private_file(&dir.join("prompt.md"), b"task prompt").unwrap();
+        assert_eq!(
+            read_private_file(&dir.join("prompt.md")).unwrap(),
+            b"task prompt"
+        );
+        assert!(read_private_file(&dir.join("missing.md")).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn state_file_reads_refuse_symlinks_and_non_regular_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let state_root = ensure_checkout_state(root.path()).unwrap();
+        let dir = state_root.join("repos");
+        create_private_dir_all(&dir).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = dir.join("redirect.json");
+        symlink(outside.path().join("secret"), &link).unwrap();
+        assert!(read_json::<Vec<String>>(&link).is_err());
+        std::fs::remove_file(&link).unwrap();
+        std::fs::create_dir(&link).unwrap();
+        assert!(
+            confine_file(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_temporary_file_replaces_stale_file_but_refuses_links_and_directories() {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("record.tmp");
+        std::fs::write(&stale, "stale").unwrap();
+        create_new_private_file(&stale)
+            .unwrap()
+            .write_all(b"fresh")
+            .unwrap();
+        assert_eq!(std::fs::read(&stale).unwrap(), b"fresh");
+
+        let target = root.path().join("target");
+        std::fs::write(&target, "safe").unwrap();
+        let link = root.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert!(create_new_private_file(&link).is_err());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "safe");
+
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(create_new_private_file(&directory).is_err());
+    }
+
+    #[test]
+    fn worktrees_directory_is_self_ignored_and_worktrees_are_confined() {
+        let root = git_repo();
+        let worktrees = ensure_worktrees_root(root.path()).unwrap();
+        assert!(ignores_everything(
+            &std::fs::read_to_string(worktrees.join(".gitignore")).unwrap()
+        ));
+        let inside = worktrees.join("task");
+        std::fs::create_dir(&inside).unwrap();
+        verify_worktree_inside_repo(root.path(), &inside).unwrap();
+
+        let outside_root = tempfile::tempdir().unwrap();
+        let outside = outside_root.path().join("task");
+        std::fs::create_dir(&outside).unwrap();
+        assert!(verify_worktree_inside_repo(root.path(), &outside).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn worktrees_refuse_a_symlink_or_incomplete_ignore_policy() {
+        use std::os::unix::fs::symlink;
+
+        let root = git_repo();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join(WORKTREES_DIR)).unwrap();
+        assert!(ensure_worktrees_root(root.path()).is_err());
+        std::fs::remove_file(root.path().join(WORKTREES_DIR)).unwrap();
+        std::fs::create_dir(root.path().join(WORKTREES_DIR)).unwrap();
+        std::fs::write(
+            root.path().join(WORKTREES_DIR).join(".gitignore"),
+            "# no ignore\n",
+        )
+        .unwrap();
+        assert!(ensure_worktrees_root(root.path()).is_err());
+    }
+
+    #[test]
     #[cfg(unix)]
     fn permission_errors_explain_state_location_and_sandbox_recovery() {
         // EPERM (sandbox denial) and EACCES (filesystem permissions) must both
@@ -789,7 +1223,7 @@ mod tests {
     #[test]
     fn failed_state_write_names_the_operation_and_preserves_previous_record() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hygiene.json");
+        let path = dir.path().join("task.json");
         std::fs::write(&path, "{}").unwrap();
         let error = crate::private_io::atomic_write_with(
             &path,

@@ -256,9 +256,14 @@ fn live_tasks_are_discovered_from_the_primary_checkout_and_from_a_sibling() {
         second_dir.join("task.json").to_string_lossy()
     );
 
-    // And a diff against the launch base runs in the task's own checkout.
-    let diff = ahu_in(repo.path(), &["diff", first]);
-    assert!(diff.status.success(), "{}", text_of(&diff));
+    // And the task's own record names the checkout and base that plain Git
+    // needs; ahu no longer wraps that in a command of its own.
+    let inspected = ahu_in(repo.path(), &["task", first, "--output", "json"]);
+    let value: serde_json::Value = serde_json::from_str(text_of(&inspected).trim()).expect("json");
+    let worktree = value["worktree"].as_str().unwrap();
+    let base = value["base_commit"].as_str().unwrap();
+    let diff = common::git(std::path::Path::new(worktree), &["diff", "--stat", base]);
+    assert!(diff.is_empty() || diff.contains('|'), "{diff}");
 }
 
 /// Removing the worktree removes the task's state, and the listing stops
@@ -784,182 +789,12 @@ fn an_inherited_override_cannot_hide_worktree_or_legacy_tasks() {
 
 /// A cmux stand-in that answers only what `execute` asks before it creates the
 /// worktree: a ping and a capability list. Anything after that is not reached
-/// by these tests, which fail the launch in between.
-fn stub_cmux(dir: &Path) -> PathBuf {
-    let script = dir.join("stub-cmux");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\n\
-         case \"$1\" in\n\
-         ping) exit 0 ;;\n\
-         capabilities) printf '%s' '{\"capabilities\":[\"workspace.groups.v1\",\
-\"workspace.group_create.v1\",\"workspace.create_in_group.v1\"]}' ; exit 0 ;;\n\
-         *) echo 'the stub does not answer that' >&2 ; exit 1 ;;\n\
-         esac\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    script
-}
-
-/// Plan and execute in this process, which the fixture has already configured.
-fn execute_here(repo_root: &Path, plan: &ahu::launch::LaunchPlan) -> ahu::util::Result<()> {
-    let discovered = git::discover(repo_root).unwrap();
-    let loaded = ahu::config::load(&discovered.root).unwrap().unwrap();
-    ahu::launch::execute(&discovered, &loaded, plan, "do the thing", false).map(|_| ())
-}
-
 /// A launch that fails after the worktree exists, on a worktree Git will not
-/// remove, says so and leaves the checkout discoverable.
-#[cfg(unix)]
-#[test]
-fn a_failure_after_materialization_reports_the_worktree_it_could_not_remove() {
-    // Built before the fixture check so the parent can hand the child a cmux
-    // that answers, and kept alive by the parent for as long as the child runs.
-    let scratch = tempfile::TempDir::new().unwrap();
-    let stub = stub_cmux(scratch.path());
-    if !common::in_child_fixture(
-        "a_failure_after_materialization_reports_the_worktree_it_could_not_remove",
-        |command| {
-            command
-                .env_remove("AHU_STATE_DIR")
-                .env("AHU_CMUX_BIN", &stub);
-        },
-    ) {
-        return;
-    }
-
-    let repo = fixture();
-    // Committed so the new worktree gets it from HEAD: a state ignore file that
-    // ignores nothing, which state preparation refuses.
-    repo.write(".ahu/.gitignore", "# ignores nothing\n");
-    repo.commit("state ignore that ignores nothing");
-    // Repaired only in the invoking checkout, so its own store still works.
-    std::fs::write(
-        repo.path().join(".ahu/.gitignore"),
-        "# Local ahu session state. Never commit.\n*\n",
-    )
-    .unwrap();
-    // Uncommitted agent configuration, copied into the worktree by
-    // materialization, which is what makes the new checkout dirty.
-    repo.write("CLAUDE.md", "uncommitted guidance\n");
-
-    let plan = plan_from(repo.path());
-    let error = execute_here(repo.path(), &plan)
-        .expect_err("state preparation must fail on the committed ignore file")
-        .to_string();
-
-    assert!(error.contains("must ignore all state files"), "{error}");
-    assert!(
-        error.contains("could not be removed"),
-        "the refusal to clean up must be reported: {error}"
-    );
-    assert!(error.contains(&plan.branch), "{error}");
-    assert!(
-        error.contains(&plan.worktree.to_string_lossy().to_string()),
-        "{error}"
-    );
-    assert!(plan.worktree.is_dir(), "dirty work must be preserved");
-
-    // The retained checkout is not omitted from the listing.
-    let listed = ahu_in(repo.path(), &["tasks"]);
-    let text = text_of(&listed);
-    assert!(listed.status.success(), "{text}");
-    assert!(text.contains(&plan.task_id), "{text}");
-    assert!(text.contains("no record anywhere"), "{text}");
-    assert!(text.contains(&plan.branch), "{text}");
-}
-
 /// The cleanup that follows a failed launch is not a way out of the checkout.
 ///
 /// The failure being cleaned up here is a committed link at the worktree's
 /// `.ahu`. Removing the task directory by name would follow that same link, so
 /// this plants a file at the exact path an unguarded `remove_dir_all` would
-/// delete and checks it is still there afterwards.
-#[cfg(unix)]
-#[test]
-fn a_failed_rollback_does_not_delete_through_a_redirected_state_path() {
-    use std::os::unix::fs::PermissionsExt;
-    let scratch = tempfile::TempDir::new().unwrap();
-    let stub = stub_cmux(scratch.path());
-    if !common::in_child_fixture(
-        "a_failed_rollback_does_not_delete_through_a_redirected_state_path",
-        |command| {
-            command
-                .env_remove("AHU_STATE_DIR")
-                .env("AHU_CMUX_BIN", &stub);
-        },
-    ) {
-        return;
-    }
-
-    let repo = fixture();
-    let external = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir_all(external.path().join("state/repos")).unwrap();
-
-    // Committed link at `.ahu`, plus uncommitted configuration so the new
-    // checkout is dirty and Git refuses to remove it.
-    std::os::unix::fs::symlink(external.path(), repo.path().join(".ahu")).unwrap();
-    repo.commit("state directory that is a link");
-    std::fs::remove_file(repo.path().join(".ahu")).unwrap();
-    repo.write("CLAUDE.md", "uncommitted guidance\n");
-
-    let plan = plan_from(repo.path());
-    // Exactly where an unguarded `remove_dir_all(plan.task_dir)` would land,
-    // because `<worktree>/.ahu` is the committed link to this directory.
-    let identity = git::discover(repo.path()).unwrap().identity();
-    let target = external
-        .path()
-        .join("state/repos")
-        .join(&identity)
-        .join("tasks")
-        .join(&plan.task_id);
-    std::fs::create_dir_all(&target).unwrap();
-    let sentinel = target.join("sentinel.txt");
-    std::fs::write(&sentinel, "untouched\n").unwrap();
-    std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o640)).unwrap();
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
-
-    let error = execute_here(repo.path(), &plan)
-        .expect_err("a linked state directory must fail the launch")
-        .to_string();
-    assert!(error.contains("refusing ahu state path"), "{error}");
-
-    // The directory the deletion would have taken is exactly as it was.
-    assert!(target.is_dir(), "the redirected task directory was removed");
-    assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "untouched\n");
-    assert_eq!(
-        std::fs::symlink_metadata(&sentinel)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o640
-    );
-    assert_eq!(
-        std::fs::symlink_metadata(&target)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o750
-    );
-    let mut entries: Vec<String> = std::fs::read_dir(external.path())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-        .collect();
-    entries.sort();
-    assert_eq!(
-        entries,
-        vec!["state".to_string()],
-        "external directory changed"
-    );
-}
-
 /// A stray record in a worktree's store does not stand in for the record that
 /// worktree never got, and the note survives an otherwise empty listing.
 #[test]

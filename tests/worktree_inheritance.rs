@@ -230,6 +230,23 @@ fn a_repository_with_no_agent_configuration_produces_an_empty_snapshot() {
     assert_eq!(taken.digest().len(), 64);
 }
 
+#[test]
+fn dotenv_secrets_are_not_agent_configuration_or_task_inheritance() {
+    let repo = TestRepo::new();
+    repo.write(".env", "TYPESAFE_API_KEY=synthetic-secret\n");
+    repo.write(".env.local", "OTHER_SECRET=synthetic-secret\n");
+    repo.write(".env.example", "TYPESAFE_API_KEY=replace-me\n");
+
+    let snapshot = snapshot::collect(repo.path()).unwrap();
+    assert!(
+        snapshot
+            .entries
+            .iter()
+            .all(|entry| !entry.path.starts_with(".env"))
+    );
+    assert!(!snapshot.digest().contains("synthetic-secret"));
+}
+
 /// A repository must never be able to direct ahu's writes outside the worktree.
 ///
 /// The full chain, using only real Git operations: an attacker commits a symlink
@@ -580,46 +597,19 @@ fn a_directory_past_the_depth_cap_is_disclosed_rather_than_dropped() {
     );
 }
 
-/// Committed content under a skipped path *is* inherited — it arrives with the
-/// checkout rather than with the configuration copy. Saying "not inherited"
-/// tells the reader the opposite of the truth.
+/// Context that the bounded scanner cannot lock must block candidate launches.
 #[test]
-fn the_disclosure_does_not_claim_skipped_configuration_is_absent() {
+fn committed_configuration_inside_skipped_paths_is_not_launchable() {
     let repo = TestRepo::new();
     repo.init_config();
     repo.write("vendor/CLAUDE.md", "planted guidance\n");
     repo.commit("fixture");
 
-    let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
     let taken = snapshot::collect(repo.path()).unwrap();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let enforcement = adapter
-        .enforcement("claude-opus-5", Default::default())
-        .unwrap();
-    let found = ahu::hooks::collect(repo.path(), "claude-code").unwrap();
-    let built = ahu::inventory::build(&ahu::inventory::Subject {
-        repo_root: repo.path(),
-        loaded_config: &loaded,
-        snapshot: &taken,
-        agent: None,
-        harness: "claude-code",
-        model: "claude-opus-5",
-        enforcement: &enforcement,
-        hooks: &found,
-        prompt: None,
-    })
-    .unwrap();
-
-    let gaps = built.coverage_gaps.join("\n");
-    assert!(gaps.contains("vendor"), "{gaps}");
-    assert!(
-        !gaps.contains("nor inherited"),
-        "the inventory claims skipped configuration is not inherited: {gaps}"
-    );
-    assert!(
-        gaps.contains("still present in the task worktree"),
-        "the inventory must say committed files under a skipped path are present: {gaps}"
-    );
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let status = ahu::context_lock::check(&discovered, &taken).unwrap();
+    assert!(!status.current, "{status:?}");
+    assert!(status.detail.contains("vendor/CLAUDE.md"), "{status:?}");
 }
 
 // --- `.worktrees` must really ignore itself ----------------------------------

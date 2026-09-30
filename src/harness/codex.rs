@@ -22,10 +22,21 @@
 
 use super::{Adapter, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::agent::Permissions;
-use crate::bail;
 use crate::util::Result;
 
 pub struct Codex;
+
+/// MCP's approval gate is separate from Codex's shell approval policy. When
+/// an agent explicitly declares `permissions = auto`, let it use ahu's local,
+/// read-only repository tools in headless runs. Provider-backed decision and
+/// skill-suggestion calls stay approval-gated because their arguments can be
+/// sent outside the machine.
+pub(crate) const AUTO_LOCAL_MCP_TOOLS: &[&str] =
+    &["ahu_agents_list", "ahu_tasks_list", "ahu_task_get"];
+
+pub(crate) fn auto_local_mcp_config(tool: &str) -> String {
+    format!("mcp_servers.ahu.tools.{tool}.approval_mode=\"approve\"")
+}
 
 impl Adapter for Codex {
     fn id(&self) -> &'static str {
@@ -33,18 +44,9 @@ impl Adapter for Codex {
     }
 
     fn launch_command(&self, request: &LaunchRequest<'_>) -> Result<LaunchCommand> {
-        if request.model.is_empty() {
-            bail!("the Codex adapter requires an exact model identifier.");
-        }
-        if request.model.starts_with('-') {
-            bail!(
-                "model identifier {:?} would be read as an option by the Codex CLI.",
-                request.model
-            );
-        }
         // `--` closes the option list so a prompt starting with `-` is still a
         // prompt, and the prompt itself stays a single argv element.
-        let mut args = vec!["-m".to_string(), request.model.to_string()];
+        let mut args = super::model_args(self.id(), request.model)?;
         // Verified against `codex --help`: --approve-for-me routes approvals
         // through automatic review in the workspace-write sandbox, and
         // `--ask-for-approval never` stops Codex asking at all.
@@ -58,6 +60,10 @@ impl Adapter for Codex {
                 args.push("never".to_string());
                 args.push("--sandbox".to_string());
                 args.push("workspace-write".to_string());
+                for tool in AUTO_LOCAL_MCP_TOOLS {
+                    args.push("-c".to_string());
+                    args.push(auto_local_mcp_config(tool));
+                }
             }
         }
         args.push("--".to_string());
@@ -113,7 +119,10 @@ fn permission_control(permissions: Permissions) -> String {
         ),
         Permissions::Auto => format!(
             "ahu passes --ask-for-approval never and --sandbox workspace-write because this \
-             agent's manifest declares permissions = auto; it passes no --approve-for-me, \
+             agent's manifest declares permissions = auto, and approves only ahu's local \
+             read-only MCP tools (ahu_agents_list, ahu_tasks_list, ahu_task_get); \
+             provider-backed ahu_typed_decide and ahu_skills_suggest remain approval-gated; \
+             it passes no --approve-for-me, \
              --dangerously-bypass-approvals-and-sandbox, or --dangerously-bypass-hook-trust; \
              {tail}"
         ),

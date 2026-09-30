@@ -280,7 +280,7 @@ fn prerequisites_are_reported_as_prerequisites_not_as_findings() {
     );
     assert_eq!(missing_config.code, Some(4), "{}", missing_config.stderr);
     assert!(
-        missing_config.stderr.contains("ahu init"),
+        missing_config.stderr.contains("ahu setup"),
         "{}",
         missing_config.stderr
     );

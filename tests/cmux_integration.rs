@@ -774,9 +774,7 @@ fn two_agents_keep_their_own_harness_model_and_workspace_in_one_group() {
              \n[model_rankings]\n\
              \"claude-code\" = [\"claude-opus-5\"]\n\
              \"codex\" = [\"gpt-6-astra\"]\n\
-             \n[context_hygiene]\n\
-             review_on_first_load = false\n\
-             review_interval_days = 7\n",
+",
             ahu::catalog::CATALOG_VERSION
         ),
     );

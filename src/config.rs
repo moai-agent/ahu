@@ -2,7 +2,7 @@
 //!
 //! One policy per project. The file holds the project-agreed harness order, the
 //! project-agreed model order within each harness, the required compatibility
-//! catalog revision, and the context-hygiene cadence. There are deliberately no personal
+//! catalog revision. There are deliberately no personal
 //! profiles, environment overrides, or command-line switches that change any of
 //! these for one user.
 
@@ -19,21 +19,6 @@ pub const CONFIG_RELATIVE_PATH: &str = ".agents/ahu/config.toml";
 pub const AGENTS_RELATIVE_DIR: &str = ".agents/ahu/agents";
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ContextHygiene {
-    pub review_on_first_load: bool,
-    pub review_interval_days: u32,
-}
-
-impl Default for ContextHygiene {
-    fn default() -> Self {
-        Self {
-            review_on_first_load: true,
-            review_interval_days: 7,
-        }
-    }
-}
 
 /// Project-agreed knowledge bundles and the policy `ahu knowledge lint` applies
 /// to them.
@@ -77,6 +62,7 @@ impl Default for TelemetryConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     pub schema_version: u32,
     /// Project-agreed harness order for launches without a named agent.
@@ -88,8 +74,6 @@ pub struct ProjectConfig {
     /// Project-agreed model order per harness, best first.
     #[serde(default)]
     pub model_rankings: std::collections::BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    pub context_hygiene: ContextHygiene,
     #[serde(default)]
     pub knowledge: Knowledge,
     #[serde(default)]
@@ -175,7 +159,7 @@ pub fn load(repo_root: &Path) -> Result<Option<LoadedConfig>> {
     let config: ProjectConfig = toml::from_str(&text).map_err(|e| {
         Error::new(format!(
             "{} is not valid ahu configuration: {e}\n\
-             ahu will not rewrite or reset it. Fix the file, or move it aside and run `ahu init`.",
+             ahu will not rewrite or reset it. Fix the file, or move it aside and run `ahu setup`.",
             path.display()
         ))
     })?;
@@ -272,12 +256,6 @@ fn validate(config: &ProjectConfig, path: &Path) -> Result<()> {
             );
         }
     }
-    if config.context_hygiene.review_interval_days == 0 {
-        bail!(
-            "{}: context_hygiene.review_interval_days must be at least 1.",
-            path.display()
-        );
-    }
     catalog::require_version(&config.catalog_version)?;
     crate::telemetry::validate_config(&config.telemetry, path)?;
     Ok(())
@@ -364,15 +342,6 @@ pub fn render(config: &ProjectConfig) -> String {
                 .join(", ")
         ));
     }
-    out.push_str("\n[context_hygiene]\n");
-    out.push_str(&format!(
-        "review_on_first_load = {}\n",
-        config.context_hygiene.review_on_first_load
-    ));
-    out.push_str(&format!(
-        "review_interval_days = {}\n",
-        config.context_hygiene.review_interval_days
-    ));
     out.push_str("\n[knowledge]\n");
     out.push_str("# Repository-relative OKF bundle directories for `ahu knowledge lint`.\n");
     out.push_str(&format!(
@@ -404,7 +373,7 @@ pub fn render(config: &ProjectConfig) -> String {
 
 /// Write a new configuration, creating only the missing ahu directories.
 ///
-/// The file is created exclusively: a concurrent `ahu init` that got there first
+/// The file is created exclusively: a concurrent `ahu setup` that got there first
 /// keeps its result and this call reports the collision instead of overwriting.
 pub fn write_new(repo_root: &Path, config: &ProjectConfig) -> Result<PathBuf> {
     // Component-by-component, so a symlinked `.agents` or `.agents/ahu` cannot
@@ -419,7 +388,7 @@ pub fn write_new(repo_root: &Path, config: &ProjectConfig) -> Result<PathBuf> {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             bail!(
-                "{} already exists. Another ahu initialization finished first; \
+                "{} already exists. Another ahu setup finished first; \
                  nothing was overwritten.",
                 path.display()
             );

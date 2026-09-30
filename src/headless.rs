@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+const EVAL_OTEL_CHILD_DRAIN: Duration = Duration::from_millis(750);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Options {
     pub background: bool,
@@ -125,6 +127,12 @@ pub fn batch_command(
     } else {
         None
     };
+    let isolation = crate::harness::isolation::profile(harness, &spec.harness_version);
+    if let Some(profile) = isolation
+        && !spec.native_controls.iter().any(|id| id == profile.id)
+    {
+        bail!("headless isolation profile is missing or differs from the frozen controls");
+    }
     let mut args: Vec<String> = Vec::new();
     let mut add = |values: &[&str]| args.extend(values.iter().map(|v| v.to_string()));
     let program = match harness {
@@ -144,7 +152,18 @@ pub fn batch_command(
             ]);
             match request.permissions {
                 Permissions::Prompt => add(&["-c", "sandbox_mode=\"read-only\""]),
-                Permissions::Auto => add(&["-c", "sandbox_mode=\"workspace-write\""]),
+                Permissions::Auto => {
+                    add(&["-c", "sandbox_mode=\"workspace-write\""]);
+                    // `approval_policy="never"` prevents interactive prompts;
+                    // Codex separately denies MCP tools that still require
+                    // approval. Auto agents may use only ahu's local,
+                    // read-only tools unattended. Provider-backed tools remain
+                    // approval-gated and require an eval-specific opt-in.
+                    for tool in crate::harness::codex::AUTO_LOCAL_MCP_TOOLS {
+                        let config = crate::harness::codex::auto_local_mcp_config(tool);
+                        add(&["-c", config.as_str()]);
+                    }
+                }
                 Permissions::AcceptEdits if spec.session.is_none() => add(&["--approve-for-me"]),
                 Permissions::AcceptEdits => bail!(
                     "Codex exec resume has no validated accept-edits mapping; submit a new assignment instead"
@@ -152,6 +171,9 @@ pub fn batch_command(
             }
             if spec.session.is_none() {
                 add(&["--color", "never"]);
+            }
+            if let Some(profile) = isolation {
+                add(profile.args);
             }
             if let Some(dir) = &spec.broker_dir {
                 let paths = toml::Value::Array(vec![toml::Value::String(
@@ -179,6 +201,9 @@ pub fn batch_command(
                 "--permission-prompts",
                 "none",
             ]);
+            if let Some(profile) = isolation {
+                add(profile.args);
+            }
             if let Some(profile) = &native_profile {
                 add(&profile.args.iter().map(String::as_str).collect::<Vec<_>>());
             } else {
@@ -630,7 +655,7 @@ pub fn launch(
         return crate::broker::request(repo, agent, prompt, display, &options, allow, json_output);
     }
     let loaded = crate::config::load(&repo.root)?
-        .ok_or_else(|| Error::new("project configuration is missing; run ahu init"))?;
+        .ok_or_else(|| Error::new("project configuration is missing; run ahu setup"))?;
     let (agent, pair) = crate::commands::resolve_identity(repo, &loaded, Some(agent))?;
     if !options.native_helpers_explicit {
         match agent
@@ -777,6 +802,11 @@ pub fn launch(
     ]);
     let profile = build_native_profile(&plan.pair.harness, &plan.pair.model, &spec)?;
     spec.native_controls = profile.control_ids();
+    if let Some(isolation) =
+        crate::harness::isolation::profile(&plan.pair.harness, &spec.harness_version)
+    {
+        spec.native_controls.push(isolation.id.into());
+    }
     spec.gaps.extend(profile.gaps.clone());
     spec.gaps.push("Native integration evidence is bounded; unsupported configuration and hooks are refused. ahu itself never invokes cmux in this backend; arbitrary shell commands remain outside integration inspection. Same-UID code is not isolated from supervisor state.".into());
     if !spec.child_grants.is_empty() {
@@ -787,8 +817,13 @@ pub fn launch(
         spec.gaps.push("The ENTIRE assignment has a read-only MODEL TOOL ceiling: parent and helpers have no model tools for editing, building, shell commands or shell-launching registered children. Settings-defined hooks are outside that tool ceiling and their side effects are not proven read-only. MCP tools and slash commands are disabled; repository settings remain discoverable. Roles are requested/observed, not an allowlist; total helper count is not capped. Budget is 5 USD per attempt, concurrency 1, depth 1, helper model equals manifest model.".into());
     }
     spec.native_profile = Some(profile);
-    let cmux_integration =
-        validate_environment(repo, &repo.root, &plan.pair.harness, &spec.harness_version)?;
+    let cmux_integration = validate_environment(
+        repo,
+        &repo.root,
+        &plan.pair.harness,
+        &spec.harness_version,
+        &plan.harness_executable,
+    )?;
     plan.cmux_integration = cmux_integration.clone();
     spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", cmux_integration.headless.evidence_digest));
     let (delivered, delivery) = crate::orchestration::deliver_composed(
@@ -823,7 +858,7 @@ pub fn launch(
     if !dry_run {
         confined(plan.task_dir.parent().expect("store"), true)?;
     }
-    crate::commands::preflight(console, repo, &loaded, &plan, prompt, dry_run)?;
+    crate::commands::preflight(console, repo, &loaded, &plan)?;
     let mut preview = json!({"schema_version":1,"backend":"headless","task_id":plan.task_id,"worktree":plan.worktree,
         "task_handle_candidate":format!("@{}",plan.task_name.clone().unwrap_or_else(||crate::task_handles::generated_name(&plan.title))), "task_handle_reserved":false,
         "branch":plan.branch,"command":plan.command.redacted(),"executable":plan.harness_executable,"capabilities":spec,
@@ -989,6 +1024,7 @@ fn validate_environment(
     config_root: &Path,
     harness: &str,
     version: &str,
+    executable: &Path,
 ) -> Result<crate::cmux::integration::Status> {
     for variable in [
         "HOME",
@@ -1018,7 +1054,7 @@ fn validate_environment(
         }
     }
     crate::catalog::check_headless_version(harness, version)?;
-    Ok(crate::cmux::integration::enforce(config_root, harness)?.with_version(Some(version)))
+    crate::cmux::integration::enforce_headless_executable(config_root, harness, version, executable)
 }
 
 pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
@@ -1353,6 +1389,8 @@ pub struct Events {
     #[serde(default)]
     pub stderr_unclassified_lines: u64,
     #[serde(default)]
+    pub stderr_informational_lines: u64,
+    #[serde(default)]
     pub usage: TokenUsage,
     #[serde(default)]
     pub model: Option<String>,
@@ -1379,6 +1417,15 @@ impl Events {
         let text = String::from_utf8_lossy(line);
         let text = text.trim();
         if text.is_empty() {
+            return;
+        }
+        // Exact native stdin progress messages carry no failure or private data.
+        // Keep their count without making every noninteractive Codex run unknown.
+        if matches!(
+            text,
+            "Reading prompt from stdin..." | "Reading additional input from stdin..."
+        ) {
+            self.stderr_informational_lines += 1;
             return;
         }
         let lower = text.to_ascii_lowercase();
@@ -1811,7 +1858,7 @@ fn native_metadata(harness: &str, event: &Value) -> Value {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
     let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
     if harness != "claude-code" {
-        // The foreign observer only tests these two strings for this marker.
+        // Retain only known completion or collaboration markers, never payloads.
         return if kind.contains("collab")
             || event
                 .pointer("/item/type")
@@ -1819,6 +1866,8 @@ fn native_metadata(harness: &str, event: &Value) -> Value {
                 .is_some_and(|s| s.contains("collab"))
         {
             json!({"type":"collab"})
+        } else if harness == "codex" && kind == "turn.completed" {
+            json!({"type":"turn.completed"})
         } else {
             json!({})
         };
@@ -1944,7 +1993,7 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
 
 /// Recorded `writes_outside_worktree` from a finished attempt's result
 /// envelope, if it exists and is non-empty. Never fails the caller.
-pub(crate) fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>> {
+pub fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>> {
     let spec: Spec = read_json(&dir.join("headless.json")).ok()?;
     let result_path = attempt_dir(dir, &spec).join("result.json");
     let result: Value = read_json(&result_path).ok()?;
@@ -2202,7 +2251,9 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         &record.worktree,
         &record.identity.harness,
         &spec.harness_version,
+        &real,
     )?;
+    let eval_otel_capture = crate::telemetry::eval_endpoint_override().is_some();
     if let Some(parent) = &spec.parent_task {
         let parent_dir = lookup(&repo, parent)?;
         if parent_dir.join("cancel.json").exists() {
@@ -2232,6 +2283,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             ("ahu.task.id", record.task_id.clone()),
         ],
     );
+    telemetry_span.set_u64("ahu.task.attempt", u64::from(spec.attempt));
     if let Some(version) = record.identity.agent_version.as_deref() {
         telemetry_span.set_string("ahu.agent.version", version);
     }
@@ -2245,6 +2297,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         record.identity.agent_version.as_deref(),
         Some(&spec.harness_version),
         Some(&record.task_id),
+        Some(spec.attempt),
     );
     command
         .env("AHU_BIN", std::env::current_exe()?)
@@ -2385,6 +2438,13 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    // When a harness exits, its MCP subprocess sees stdio EOF and needs a
+    // moment to emit its session summary and flush OTLP before we kill any
+    // remaining descendants. Keep this grace limited to local eval capture;
+    // cancelled and timed-out attempts still follow their termination path.
+    if stop.is_none() && eval_otel_capture {
+        std::thread::sleep(EVAL_OTEL_CHILD_DRAIN);
+    }
     durable_json(
         &attempt.join("admission-closed.json"),
         &json!({"at":task::now_rfc3339(),"attempt":spec.attempt}),
@@ -2425,6 +2485,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     events.failed |= stderr.failed;
     events.stderr_diagnostics = stderr.stderr_diagnostics;
     events.stderr_unclassified_lines = stderr.stderr_unclassified_lines;
+    events.stderr_informational_lines = stderr.stderr_informational_lines;
     if !events.stderr_diagnostics.is_empty() {
         events
             .blockers
@@ -2976,6 +3037,7 @@ pub fn control(
                 &record.worktree,
                 &record.identity.harness,
                 &spec.harness_version,
+                &real,
             )?;
             let original_spec = spec.clone();
             let original_record = record.clone();
@@ -3146,6 +3208,30 @@ mod telemetry_usage_tests {
         assert_eq!(events.usage.output, Some(9));
         assert_eq!(events.usage.cached, Some(5));
         assert_eq!(events.usage.total, Some(29));
+        assert!(events.terminal);
+        let profile = crate::native::profile(&crate::native::Request {
+            harness: "codex",
+            harness_version: "0.157.1",
+            policy: crate::native::DISABLED,
+            session_model: "test-model",
+            helper_model: None,
+            helper_role: "unused",
+            max_concurrent: 1,
+            max_depth: 1,
+            budget_usd: None,
+            assignment_writes: true,
+        })
+        .unwrap();
+        assert!(events.native.completeness(&profile).complete);
+        assert_eq!(
+            super::native_metadata(
+                "codex",
+                &serde_json::json!({
+                    "type":"turn.completed", "message":"private", "usage":{"input_tokens":29}
+                })
+            ),
+            serde_json::json!({"type":"turn.completed"})
+        );
     }
 }
 
@@ -3177,5 +3263,1311 @@ mod ownership_tests {
         }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
         assert!(!Lock::is_owned(&path).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod write_tracking_tests {
+    use super::*;
+
+    #[test]
+    fn write_path_discovery_handles_normalized_keys_nested_tools_and_embedded_json() {
+        let event = serde_json::json!({
+            "outer": [{
+                "tool_name": "WriteFile",
+                "arguments": r#"{"file_path":"/tmp/project/../outside/new.txt"}"#
+            }],
+            "tool": "Read",
+            "path": "/tmp/not-a-write.txt"
+        });
+        let paths = collect_write_paths(&event);
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == "/tmp/project/../outside/new.txt")
+        );
+        assert!(!paths.iter().any(|path| path == "/tmp/not-a-write.txt"));
+        assert_eq!(
+            resolve_write_path("/tmp/project/../outside/new.txt").unwrap(),
+            PathBuf::from("/tmp/outside/new.txt")
+        );
+        assert!(resolve_write_path("").is_none());
+        assert!(resolve_write_path("relative/file.txt").is_none());
+    }
+
+    #[test]
+    fn observed_write_events_record_only_unique_paths_outside_the_worktree() {
+        let worktree = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let inside_path = worktree.path().join("edited.txt");
+        let outside_path = outside.path().join("edited.txt");
+        let event = serde_json::json!({
+            "tool": "Write",
+            "input": {"filePath": inside_path, "targetFile": outside_path}
+        });
+        let encoded = serde_json::to_vec(&event).unwrap();
+        let mut events = Events::default();
+        observe_writes(&mut events, &encoded, worktree.path());
+        observe_writes(&mut events, &encoded, worktree.path());
+        assert_eq!(events.writes_outside_worktree.len(), 1);
+        assert!(events.writes_outside_worktree[0].ends_with("edited.txt"));
+
+        observe_writes(&mut events, b"not json", worktree.path());
+        assert_eq!(events.writes_outside_worktree.len(), 1);
+    }
+
+    #[test]
+    fn native_metadata_is_projected_to_only_supported_helper_fields() {
+        let progress = native_metadata(
+            "claude-code",
+            &serde_json::json!({
+                "type":"system", "subtype":"task_progress", "task_id":"child",
+                "usage":{"total_tokens":12}, "secret":"ignore"
+            }),
+        );
+        assert_eq!(progress["task_id"], "child");
+        assert_eq!(progress["usage"]["total_tokens"], 12);
+        assert!(progress.get("secret").is_none());
+
+        let result = native_metadata(
+            "claude-code",
+            &serde_json::json!({
+                "type":"result", "subagent_stats":{
+                    "spawned":2, "completed":1, "max_depth":3,
+                    "refused":{"budget":4, "secret":9},
+                    "by_type":{"worker":1, "invalid":"x"}
+                }, "huge_payload":"ignored"
+            }),
+        );
+        assert_eq!(result["subagent_stats"]["spawned"], 2);
+        assert_eq!(result["subagent_stats"]["refused"]["budget"], 4);
+        assert!(result["subagent_stats"]["refused"].get("secret").is_none());
+        assert!(result.get("huge_payload").is_none());
+
+        assert_eq!(
+            native_metadata("codex", &serde_json::json!({"type":"item.started"})),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            native_metadata("codex", &serde_json::json!({"type":"collab.started"})),
+            serde_json::json!({"type":"collab"})
+        );
+    }
+
+    #[test]
+    fn native_metadata_bounds_and_session_validation_fail_closed() {
+        assert!(bounded_native_metadata(
+            &serde_json::json!({"a": [1, true, null]})
+        ));
+        assert!(!bounded_native_metadata(&serde_json::json!(
+            "x".repeat(4097)
+        )));
+        assert!(!bounded_native_metadata(&serde_json::json!(vec![0; 257])));
+        assert!(!bounded_native_metadata(&serde_json::json!(u64::MAX)));
+        assert!(valid_session("session-1"));
+        assert!(!valid_session(" \n"));
+        assert!(!valid_session("bad\nlocator"));
+        assert!(!valid_session(&"x".repeat(4097)));
+    }
+
+    #[test]
+    fn stream_capture_checkpoints_sessions_and_classifies_incomplete_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(dir.path()).unwrap();
+        let store = crate::storage::HeadlessStore::for_repo(&repo).unwrap();
+        let checkpoint = store.directory.join("task-1/attempt-2/session.json");
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        capture(
+            std::io::Cursor::new(
+                b"{\"type\":\"step_start\",\"sessionID\":\"opencode-session\"}\n".to_vec(),
+            ),
+            checkpoint.clone(),
+            dir.path().to_path_buf(),
+            Some(SessionOwner {
+                task_id: "task-1".into(),
+                attempt: 2,
+                harness: "opencode".into(),
+            }),
+            shared.clone(),
+            tx,
+        );
+        rx.recv().unwrap().unwrap();
+        assert_eq!(
+            shared.lock().unwrap().session.as_deref(),
+            Some("opencode-session")
+        );
+        let saved: SessionCheckpoint =
+            serde_json::from_slice(&std::fs::read(checkpoint).unwrap()).unwrap();
+        assert_eq!(saved.task_id, "task-1");
+        assert_eq!(saved.attempt, 2);
+
+        let incomplete = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        capture(
+            std::io::Cursor::new(b"{\"type\":\"turn.started\"}".to_vec()),
+            dir.path().join("unused.json"),
+            dir.path().to_path_buf(),
+            Some(SessionOwner {
+                task_id: "task-1".into(),
+                attempt: 2,
+                harness: "codex".into(),
+            }),
+            incomplete.clone(),
+            tx,
+        );
+        rx.recv().unwrap().unwrap();
+        assert!(incomplete.lock().unwrap().failed);
+        assert!(
+            incomplete
+                .lock()
+                .unwrap()
+                .blockers
+                .contains(&"unterminated event stream".into())
+        );
+    }
+
+    #[test]
+    fn stderr_capture_keeps_only_categories_or_a_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        capture(
+            std::io::Cursor::new(b"permission denied\nordinary diagnostic\n\n".to_vec()),
+            dir.path().join("unused.json"),
+            dir.path().to_path_buf(),
+            None,
+            events.clone(),
+            tx,
+        );
+        rx.recv().unwrap().unwrap();
+        let events = events.lock().unwrap();
+        assert!(events.failed);
+        assert_eq!(events.stderr_diagnostics, ["permission denial"]);
+        assert_eq!(events.stderr_unclassified_lines, 1);
+    }
+
+    #[test]
+    fn stdin_progress_is_informational_but_nearby_diagnostics_are_not_suppressed() {
+        let mut events = Events::default();
+        events.observe_stderr(b"Reading prompt from stdin...");
+        events.observe_stderr(b"Reading additional input from stdin...\n");
+        assert_eq!(events.stderr_informational_lines, 2);
+        assert_eq!(events.stderr_unclassified_lines, 0);
+        assert!(!events.failed);
+        events.observe_stderr(b"Reading prompt from stdin... warning");
+        events.observe_stderr(
+            b"Could not create otel exporter: failed to build OTLP metrics exporter",
+        );
+        assert_eq!(events.stderr_unclassified_lines, 2);
+        events.observe_stderr(b"Reading prompt from stdin... permission denied");
+        assert!(events.failed);
+        assert_eq!(events.stderr_diagnostics, ["permission denial"]);
+    }
+}
+
+#[cfg(test)]
+mod profile_and_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn schema_reader_accepts_only_supported_headless_spec_versions() {
+        #[derive(Deserialize)]
+        struct Version {
+            #[serde(deserialize_with = "read_spec_version")]
+            schema_version: u32,
+        }
+        for version in [1, 2] {
+            let parsed: Version =
+                serde_json::from_value(json!({"schema_version":version})).unwrap();
+            assert_eq!(parsed.schema_version, version);
+        }
+        for version in [0, 3, 99] {
+            assert!(serde_json::from_value::<Version>(json!({"schema_version":version})).is_err());
+        }
+    }
+
+    #[test]
+    fn skill_catalog_is_sorted_and_excludes_hidden_or_incomplete_entries() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [
+            ".agents/skills/zeta",
+            ".agents/skills/alpha",
+            ".claude/skills/native",
+        ] {
+            std::fs::create_dir_all(root.path().join(path)).unwrap();
+        }
+        std::fs::create_dir_all(root.path().join(".agents/skills/.hidden")).unwrap();
+        std::fs::write(root.path().join(".agents/skills/zeta/SKILL.md"), "zeta").unwrap();
+        std::fs::write(root.path().join(".agents/skills/alpha/SKILL.md"), "alpha").unwrap();
+        std::fs::write(root.path().join(".claude/skills/native/SKILL.md"), "native").unwrap();
+        let catalog = skill_catalog(root.path());
+        assert_eq!(catalog.len(), 3);
+        assert!(
+            catalog
+                .windows(2)
+                .all(|pair| pair[0].source <= pair[1].source)
+        );
+        assert!(catalog.iter().all(|entry| !entry.name.starts_with('.')));
+        assert_eq!(
+            catalog
+                .iter()
+                .find(|entry| entry.name == "zeta")
+                .unwrap()
+                .digest,
+            digest_bytes(b"zeta")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_validation_rejects_repository_binaries_and_cmux_wrappers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo_root = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo_root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(repo_root.path()).unwrap();
+        let inside = repo_root.path().join("agent");
+        std::fs::write(&inside, "#!/bin/sh\necho ok\n").unwrap();
+        let mut permissions = std::fs::metadata(&inside).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&inside, permissions.clone()).unwrap();
+        assert!(
+            validate_executable(&inside, &repo)
+                .unwrap_err()
+                .to_string()
+                .contains("outside the repository")
+        );
+
+        let outside_root = tempfile::tempdir().unwrap();
+        let wrapper = outside_root.path().join("wrapper");
+        std::fs::write(&wrapper, "#!/bin/sh\n# cmux wrapper\n").unwrap();
+        std::fs::set_permissions(&wrapper, permissions.clone()).unwrap();
+        assert!(
+            validate_executable(&wrapper, &repo)
+                .unwrap_err()
+                .to_string()
+                .contains("script wrapper")
+        );
+
+        let valid = outside_root.path().join("agent");
+        std::fs::write(&valid, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::set_permissions(&valid, permissions).unwrap();
+        assert_eq!(
+            validate_executable(&valid, &repo).unwrap(),
+            valid.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_result_reports_supervisor_liveness_without_claiming_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let task_dir = root.path().join("task-1");
+        let spec = sample_spec();
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let owner = Lock::acquire(&task_dir.join("owner.lock")).unwrap();
+        let running = result_attempt(&task_dir, &spec).unwrap();
+        assert_eq!(running["outcome"], "running");
+        assert_eq!(running["acceptance"], "not assessed");
+        assert_eq!(running["completion_verified"], false);
+        drop(owner);
+        let interrupted = result_attempt(&task_dir, &spec).unwrap();
+        assert_eq!(interrupted["outcome"], "interrupted");
+        assert!(
+            interrupted["blockers"][0]
+                .as_str()
+                .unwrap()
+                .contains("no live supervisor")
+        );
+    }
+
+    #[test]
+    fn recorded_write_paths_ignore_missing_malformed_and_empty_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = crate::git::discover(root.path()).unwrap();
+        let store = crate::storage::HeadlessStore::for_repo(&repo).unwrap();
+        let task_dir = store.directory.join("task-1");
+        state::create_private_dir_all(&task_dir).unwrap();
+        assert!(recorded_writes_outside_worktree(&task_dir).is_none());
+        state::write_private_file(&task_dir.join("headless.json"), b"bad json").unwrap();
+        assert!(recorded_writes_outside_worktree(&task_dir).is_none());
+
+        let spec = sample_spec();
+        state::write_private_file(
+            &task_dir.join("headless.json"),
+            &serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        let result_file = attempt_dir(&task_dir, &spec).join("result.json");
+        state::create_private_dir_all(result_file.parent().unwrap()).unwrap();
+        state::write_private_file(&result_file, br#"{"writes_outside_worktree":[]}"#).unwrap();
+        assert!(recorded_writes_outside_worktree(root.path()).is_none());
+        state::write_private_file(
+            &result_file,
+            br#"{"writes_outside_worktree":["/outside/a",4,"/outside/b"]}"#,
+        )
+        .unwrap();
+        let _: Value = read_json(&result_file).unwrap();
+        assert_eq!(
+            recorded_writes_outside_worktree(&task_dir).unwrap(),
+            ["/outside/a", "/outside/b"]
+        );
+    }
+
+    #[test]
+    fn result_reading_validates_attempt_and_schema_before_returning_evidence() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let dir = store(&repo).unwrap().join("abc");
+        let spec = sample_spec();
+        let attempt = attempt_dir(&dir, &spec);
+        state::create_private_dir_all(&attempt).unwrap();
+        state::write_private_file(
+            &dir.join("headless.json"),
+            &serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        let valid = json!({"schema_version":2,"task_id":"abc","attempt":1,
+            "outcome":"failed","blockers":["synthetic failure"]});
+        let path = attempt.join("result.json");
+        state::write_private_file(&path, &serde_json::to_vec(&valid).unwrap()).unwrap();
+        assert_eq!(result(&dir).unwrap(), valid);
+        let reviewed = review_attempt(&dir, &spec, review::read).unwrap();
+        assert_eq!(reviewed["outcome"], "failed");
+        assert_eq!(reviewed["capabilities"]["attempt"], 1);
+        assert_eq!(reviewed["task_handle"], reviewed["review"]["task_handle"]);
+        for (field, value, message) in [
+            ("schema_version", json!(1), "schema does not match"),
+            ("task_id", json!("def"), "another attempt"),
+            ("attempt", json!(2), "another attempt"),
+            ("blockers", json!([false]), "blockers are malformed"),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            state::write_private_file(&path, &serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(
+                result(&dir).unwrap_err().to_string().contains(message),
+                "{field}"
+            );
+            assert!(
+                review_attempt(&dir, &spec, review::read)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message),
+                "{field}"
+            );
+        }
+        for (schema_version, attempt) in [(3, 1), (2, 0)] {
+            let unsupported = Spec {
+                schema_version,
+                attempt,
+                ..spec.clone()
+            };
+            assert!(
+                review_attempt(&dir, &unsupported, |_| panic!(
+                    "invalid spec must not read a result"
+                ))
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported headless attempt")
+            );
+        }
+    }
+
+    #[test]
+    fn result_review_normalizes_only_its_own_legacy_supervisor_error_identifier() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let dir = store(&repo).unwrap().join("abc");
+        let spec = sample_spec();
+        let path = attempt_dir(&dir, &spec).join("result.json");
+        state::create_private_dir_all(path.parent().unwrap()).unwrap();
+        let mut value = json!({"schema_version":2,"task_id":dir.file_name(),"attempt":1,
+            "outcome":"supervisor_error"});
+        state::write_private_file(&path, &serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            review_attempt(&dir, &spec, review::read).unwrap()["task_id"],
+            "abc"
+        );
+        value["task_id"] = serde_json::to_value(Path::new("def").file_name()).unwrap();
+        state::write_private_file(&path, &serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            review_attempt(&dir, &spec, review::read)
+                .unwrap_err()
+                .to_string()
+                .contains("another attempt")
+        );
+    }
+
+    #[test]
+    fn result_without_readable_ownership_reports_unknown_liveness() {
+        let root = tempfile::tempdir().unwrap();
+        let spec = sample_spec();
+        assert!(
+            result_attempt(root.path(), &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("liveness unknown")
+        );
+        assert!(
+            review_attempt(root.path(), &spec, review::read)
+                .unwrap_err()
+                .to_string()
+                .contains("liveness unknown")
+        );
+        assert!(!root.path().join("owner.lock").exists());
+    }
+
+    #[test]
+    fn batch_command_rebuilds_frozen_helper_profile_and_refuses_policy_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let request = LaunchRequest {
+            model: "claude-sonnet-4-6",
+            prompt: "--literal prompt",
+            cwd: root.path(),
+            permissions: crate::agent::Permissions::Prompt,
+        };
+        let mut spec = sample_spec();
+        spec.options.native_helpers = "bounded".into();
+        spec.harness_version = "Claude Code 2.1.270".into();
+        assert!(
+            batch_command("claude-code", &request, &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("bounded native helpers are unavailable")
+        );
+        let profile = build_native_profile("claude-code", request.model, &spec).unwrap();
+        spec.native_profile = Some(profile.clone());
+        let command = batch_command("claude-code", &request, &spec).unwrap();
+        assert_eq!(command.program, "claude");
+        assert_eq!(command.args[command.prompt_arg.unwrap()], request.prompt);
+        assert_eq!(command.args[command.args.len() - 2], "--");
+        assert!(
+            command
+                .args
+                .windows(profile.args.len())
+                .any(|args| args == profile.args)
+        );
+        spec.native_profile.as_mut().unwrap().helper_model = "different-model".into();
+        assert!(
+            batch_command("claude-code", &request, &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("differs from the frozen profile")
+        );
+        spec.native_profile = Some(profile);
+        spec.harness_version = "2.1.269".into();
+        assert!(
+            batch_command("claude-code", &request, &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("not validated")
+        );
+    }
+
+    #[test]
+    fn batch_resume_preserves_permission_mapping_and_literal_prompt() {
+        use crate::agent::Permissions;
+        let root = tempfile::tempdir().unwrap();
+        let spec = Spec {
+            session: Some("session-123".into()),
+            ..sample_spec()
+        };
+        for (harness, permissions, program, expected) in [
+            (
+                "claude-code",
+                Permissions::Auto,
+                "claude",
+                vec![
+                    "--print",
+                    "--model",
+                    "synthetic-model",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--permission-prompts",
+                    "none",
+                    "--disallowedTools",
+                    "Agent,Task,TeamCreate,TeamDelete",
+                    "--permission-mode",
+                    "auto",
+                    "--resume",
+                    "session-123",
+                    "--",
+                ],
+            ),
+            (
+                "claude-code",
+                Permissions::AcceptEdits,
+                "claude",
+                vec![
+                    "--print",
+                    "--model",
+                    "synthetic-model",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--permission-prompts",
+                    "none",
+                    "--disallowedTools",
+                    "Agent,Task,TeamCreate,TeamDelete",
+                    "--permission-mode",
+                    "acceptEdits",
+                    "--resume",
+                    "session-123",
+                    "--",
+                ],
+            ),
+            (
+                "antigravity",
+                Permissions::AcceptEdits,
+                "agy",
+                vec![
+                    "--model",
+                    "synthetic-model",
+                    "--output-format",
+                    "stream-json",
+                    "--print-timeout",
+                    "1800s",
+                    "--mode",
+                    "accept-edits",
+                    "--conversation",
+                    "session-123",
+                    "--print",
+                ],
+            ),
+            (
+                "antigravity",
+                Permissions::Auto,
+                "agy",
+                vec![
+                    "--model",
+                    "synthetic-model",
+                    "--output-format",
+                    "stream-json",
+                    "--print-timeout",
+                    "1800s",
+                    "--dangerously-skip-permissions",
+                    "--conversation",
+                    "session-123",
+                    "--print",
+                ],
+            ),
+        ] {
+            let request = LaunchRequest {
+                model: "synthetic-model",
+                prompt: "--literal $(prompt)\nnext line",
+                cwd: root.path(),
+                permissions,
+            };
+            let command = batch_command(harness, &request, &spec).unwrap();
+            assert_eq!(command.program, program);
+            assert_eq!(command.prompt_arg, Some(expected.len()));
+            assert_eq!(&command.args[..expected.len()], expected.as_slice());
+            assert_eq!(command.args.last().unwrap(), request.prompt);
+            assert_eq!(command.args.len(), expected.len() + 1);
+        }
+        for (harness, model, permissions, message) in [
+            ("codex", "", Permissions::Prompt, "exact model is required"),
+            (
+                "codex",
+                "--model",
+                Permissions::Prompt,
+                "exact model is required",
+            ),
+            (
+                "codex",
+                "synthetic-model",
+                Permissions::AcceptEdits,
+                "resume has no validated accept-edits mapping",
+            ),
+            (
+                "unknown",
+                "synthetic-model",
+                Permissions::Prompt,
+                "no headless adapter",
+            ),
+        ] {
+            let request = LaunchRequest {
+                model,
+                prompt: "synthetic",
+                cwd: root.path(),
+                permissions,
+            };
+            assert!(
+                batch_command(harness, &request, &spec)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message)
+            );
+        }
+    }
+
+    #[test]
+    fn event_observation_enforces_helper_count_and_metadata_bounds() {
+        let mut events = Events::default();
+        let progress = br#"{"type":"system","subtype":"task_progress","task_id":"synthetic"}"#;
+        for _ in 0..256 {
+            events.observe("claude-code", progress);
+        }
+        assert!(!events.failed);
+        assert_eq!(events.native_event_count, 256);
+        events.observe("claude-code", progress);
+        assert!(events.failed);
+        assert_eq!(events.native_event_count, 257);
+        assert_eq!(events.blockers, ["native helper evaluation limit exceeded"]);
+
+        let mut events = Events::default();
+        let oversized =
+            json!({"type": "system", "subtype": "task_progress", "task_id": "x".repeat(4097)});
+        events.observe("claude-code", &serde_json::to_vec(&oversized).unwrap());
+        assert!(events.failed);
+        assert_eq!(
+            events.blockers,
+            ["native metadata evaluation bound exceeded"]
+        );
+        assert!(events.native.helpers().is_empty());
+    }
+
+    fn saved_attempt(repo: &crate::git::Repo, id: &str, spec: &Spec) -> PathBuf {
+        let dir = store(repo).unwrap().join(id);
+        let record: task::TaskRecord = serde_json::from_value(json!({
+            "schema_version": 2, "task_id": id, "title": "Synthetic attempt",
+            "created_at": "2026-01-01T00:00:00Z", "repo_identity": repo.identity(),
+            "repo_root": repo.root, "branch": "ahu/synthetic", "worktree": repo.root,
+            "identity": {"mode": "automatic", "agent": "auto", "permissions": "prompt",
+                "harness": "codex", "model": "synthetic-model"},
+            "policy_digest": "synthetic", "catalog_version": crate::catalog::CATALOG_VERSION,
+            "config_snapshot": {"entries": [], "skipped_directories": []},
+            "config_snapshot_digest": "synthetic",
+            "materialize": {"written": [], "removed": [], "concurrently_modified": []},
+            "launch_command": {"program": "synthetic-executable", "args": []},
+            "delivery": {"nonce": "synthetic", "agent_instructions": null, "digest": "synthetic"},
+            "prompt_digest": digest_bytes(b"original prompt"),
+            "enforcement": {"harness": "codex", "harness_version": null,
+                "model_fixed_for_session": false, "gaps": [], "applied_controls": []},
+            "state": "exited"
+        }))
+        .unwrap();
+        task::save(&dir, &record, "original prompt").unwrap();
+        durable_json(&dir.join("headless.json"), spec).unwrap();
+        confined(&attempt_dir(&dir, spec), true).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resume_recovery_restores_only_attempts_without_spawn_intent() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        for spawned in [false, true] {
+            let old = sample_spec();
+            let dir = saved_attempt(&repo, if spawned { "abc" } else { "def" }, &old);
+            recover_resume(&dir).unwrap();
+            let original = task::load(&dir).unwrap();
+            let next = Spec {
+                attempt: 2,
+                session: Some("session-2".into()),
+                ..old.clone()
+            };
+            let mut changed = original.clone();
+            changed.state = task::TaskState::Starting;
+            changed.prompt_digest = digest_bytes(b"new prompt");
+            task::save(&dir, &changed, "new prompt").unwrap();
+            durable_json(&dir.join("headless.json"), &next).unwrap();
+            durable_json(
+                &dir.join("resume-journal.json"),
+                &json!({
+                    "record": original, "spec": old, "prompt": "original prompt", "next_attempt": 2
+                }),
+            )
+            .unwrap();
+            let evidence = attempt_dir(&dir, &old).join("result.json");
+            state::write_private_file(&evidence, b"preserved previous result").unwrap();
+            if spawned {
+                durable_json(
+                    &attempt_dir(&dir, &next).join("spawn-intent.json"),
+                    &json!({}),
+                )
+                .unwrap();
+            }
+            recover_resume(&dir).unwrap();
+            assert!(!dir.join("resume-journal.json").exists());
+            assert_eq!(
+                task::load(&dir).unwrap(),
+                if spawned { changed } else { original }
+            );
+            assert_eq!(
+                task::load_prompt(&dir).unwrap(),
+                if spawned {
+                    "new prompt"
+                } else {
+                    "original prompt"
+                }
+            );
+            let recovered: Spec = read_json(&dir.join("headless.json")).unwrap();
+            assert_eq!(
+                serde_json::to_value(recovered).unwrap(),
+                serde_json::to_value(if spawned { next } else { old }).unwrap()
+            );
+            assert_eq!(
+                std::fs::read(&evidence).unwrap(),
+                b"preserved previous result"
+            );
+            recover_resume(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn parent_admission_requires_live_matching_attempt_and_consumed_request() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let parent = sample_spec();
+        let dir = saved_attempt(&repo, "abc", &parent);
+        validate_parent_attempt(&repo, &sample_spec()).unwrap();
+        let mut child = Spec {
+            parent_task: Some("abc".into()),
+            parent_attempt: Some(1),
+            broker_request: Some("0123456789abcdef".into()),
+            ..sample_spec()
+        };
+        let refused = |spec: &Spec, message: &str| {
+            assert!(
+                validate_parent_attempt(&repo, spec)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message)
+            );
+        };
+        child.parent_attempt = Some(2);
+        refused(&child, "stale parent attempt");
+        child.parent_attempt = Some(1);
+        refused(&child, "no longer live");
+        let _owner = Lock::acquire(&dir.join("owner.lock")).unwrap();
+        for path in [
+            dir.join("cancel.json"),
+            attempt_dir(&dir, &parent).join("admission-closed.json"),
+            attempt_dir(&dir, &parent).join("result.json"),
+        ] {
+            durable_json(&path, &json!({})).unwrap();
+            refused(&child, "ended or closed child admission");
+            std::fs::remove_file(path).unwrap();
+        }
+        for request in [None, Some("short"), Some("0123456789abcdeg")] {
+            child.broker_request = request.map(str::to_owned);
+            refused(&child, "lacks a broker request identity");
+        }
+        child.broker_request = Some("0123456789abcdef".into());
+        let claim = attempt_dir(&dir, &parent).join("broker/0123456789abcdef.claim.json");
+        let valid =
+            json!({"state": "dispatching", "parent_attempt": 1, "request_id": "0123456789abcdef"});
+        for (key, value) in [
+            ("state", json!("consumed")),
+            ("parent_attempt", json!(2)),
+            ("request_id", json!("fedcba9876543210")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            durable_json(&claim, &invalid).unwrap();
+            refused(&child, "does not match a consumed request");
+        }
+        durable_json(&claim, &valid).unwrap();
+        validate_parent_attempt(&repo, &child).unwrap();
+    }
+
+    #[test]
+    fn cancellation_follows_current_attempt_descendants_only() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let parent = sample_spec();
+        let root = saved_attempt(&repo, "aaa", &parent);
+        let child = Spec {
+            parent_task: Some("aaa".into()),
+            parent_attempt: Some(1),
+            attempt: 2,
+            ..sample_spec()
+        };
+        let child_dir = saved_attempt(&repo, "bbb", &child);
+        let grandchild = Spec {
+            parent_task: Some("bbb".into()),
+            parent_attempt: Some(2),
+            ..sample_spec()
+        };
+        let grandchild_dir = saved_attempt(&repo, "ccc", &grandchild);
+        let stale = Spec {
+            parent_attempt: Some(0),
+            ..child.clone()
+        };
+        let stale_dir = saved_attempt(&repo, "ddd", &stale);
+        let unrelated = saved_attempt(&repo, "eee", &sample_spec());
+        let mut ids = cancel_tree(&repo, &root, "synthetic cancellation").unwrap();
+        ids.sort();
+        assert_eq!(ids, ["aaa", "bbb", "ccc"]);
+        for (dir, spec) in [
+            (&root, &parent),
+            (&child_dir, &child),
+            (&grandchild_dir, &grandchild),
+        ] {
+            let closed: Value =
+                read_json(&attempt_dir(dir, spec).join("admission-closed.json")).unwrap();
+            assert_eq!(closed["attempt"], spec.attempt);
+            assert_eq!(closed["reason"], "synthetic cancellation");
+            let cancel: Value = read_json(&dir.join("cancel.json")).unwrap();
+            assert_eq!(cancel["descendants"], true);
+            assert_eq!(cancel["reason"], "synthetic cancellation");
+            assert_eq!(task::load_prompt(dir).unwrap(), "original prompt");
+        }
+        for (dir, spec) in [(&stale_dir, &stale), (&unrelated, &parent)] {
+            assert!(!dir.join("cancel.json").exists());
+            assert!(
+                !attempt_dir(dir, spec)
+                    .join("admission-closed.json")
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_requires_terminal_result_and_preserves_coordination_evidence() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let spec = sample_spec();
+        let dir = saved_attempt(&repo, "abc", &spec);
+        let attempt = attempt_dir(&dir, &spec);
+        let capture = attempt.join("events.jsonl");
+        state::write_private_file(&capture, b"synthetic capture").unwrap();
+        assert!(
+            control(&repo, "cleanup", "abc", None, true)
+                .unwrap_err()
+                .to_string()
+                .contains("known terminal attempt")
+        );
+        assert!(capture.exists());
+        let result =
+            json!({"schema_version": 2, "task_id": "abc", "attempt": 1, "outcome": "failed"});
+        durable_json(&attempt.join("result.json"), &result).unwrap();
+        for name in ["stderr.log", "supervisor.log", "native.log", "final.txt"] {
+            state::write_private_file(&attempt.join(name), b"synthetic capture").unwrap();
+        }
+        durable_json(
+            &attempt.join("broker/request.claim.json"),
+            &json!({"retained": true}),
+        )
+        .unwrap();
+        durable_json(&dir.join("requests/request.json"), &json!({})).unwrap();
+        durable_json(&dir.join("requests/private/nested.json"), &json!({})).unwrap();
+        durable_json(&dir.join("attempt-not-a-number/events.jsonl"), &json!({})).unwrap();
+        assert_eq!(control(&repo, "cleanup", "abc", None, true).unwrap(), 0);
+        for name in [
+            "events.jsonl",
+            "stderr.log",
+            "supervisor.log",
+            "native.log",
+            "final.txt",
+        ] {
+            assert!(!attempt.join(name).exists());
+        }
+        assert!(!dir.join("requests/request.json").exists());
+        for path in [
+            "task.json",
+            "prompt.txt",
+            "headless.json",
+            "attempt-1/result.json",
+            "attempt-1/artifacts-removed.json",
+            "attempt-1/broker/request.claim.json",
+            "requests/private/nested.json",
+            "attempt-not-a-number/events.jsonl",
+        ] {
+            assert!(dir.join(path).is_file(), "{path}");
+        }
+        assert_eq!(super::result(&dir).unwrap(), result);
+        assert_eq!(control(&repo, "cleanup", "abc", None, true).unwrap(), 0);
+    }
+
+    #[test]
+    fn isolation_owned_process_cancellation_reaps_child() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        for signal in [libc::SIGTERM, libc::SIGKILL] {
+            let mut child = Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            signal_group(child.id(), signal);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert_eq!(status.signal(), Some(signal));
+                    break;
+                }
+                if Instant::now() > deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("owned process did not terminate");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    fn isolation_profile_is_frozen_and_applies_on_resume_without_removing_context() {
+        let root = tempfile::tempdir().unwrap();
+        let request = LaunchRequest {
+            model: "synthetic-model",
+            prompt: "literal prompt",
+            cwd: root.path(),
+            permissions: crate::agent::Permissions::Prompt,
+        };
+        let mut spec = sample_spec();
+        spec.harness_version = "2.1.283 (Claude Code)".into();
+        assert!(batch_command("claude-code", &request, &spec).is_err());
+        let profile =
+            crate::harness::isolation::profile("claude-code", &spec.harness_version).unwrap();
+        spec.native_controls.push(profile.id.into());
+        for session in [None, Some("synthetic-session".into())] {
+            spec.session = session;
+            let command = batch_command("claude-code", &request, &spec).unwrap();
+            assert!(command.args.windows(2).any(|pair| pair == profile.args));
+            for forbidden in [
+                "--bare",
+                "--safe-mode",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--setting-sources",
+            ] {
+                assert!(!command.args.iter().any(|arg| arg == forbidden));
+            }
+            assert_eq!(command.args[command.prompt_arg.unwrap()], "literal prompt");
+        }
+        assert!(crate::harness::isolation::profile("codex", "0.157.2").is_none());
+        assert!(crate::harness::isolation::profile("claude-code", "2.1.284").is_none());
+    }
+
+    #[test]
+    fn codex_effective_profile_is_frozen_on_launch_and_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let request = LaunchRequest {
+            model: "synthetic-model",
+            prompt: "literal prompt",
+            cwd: root.path(),
+            permissions: crate::agent::Permissions::Prompt,
+        };
+        let mut spec = sample_spec();
+        spec.harness_version = "codex-cli 0.157.1".into();
+        assert!(batch_command("codex", &request, &spec).is_err());
+        let profile = crate::harness::isolation::profile("codex", &spec.harness_version).unwrap();
+        spec.native_controls.push(profile.id.into());
+        for session in [None, Some("synthetic-session".into())] {
+            spec.session = session;
+            let command = batch_command("codex", &request, &spec).unwrap();
+            assert!(
+                command
+                    .args
+                    .windows(profile.args.len())
+                    .any(|args| args == profile.args)
+            );
+            assert!(
+                !command
+                    .args
+                    .iter()
+                    .any(|v| v == "features.hooks=false" || v == "--dangerously-bypass-hook-trust")
+            );
+            assert_eq!(command.args[command.prompt_arg.unwrap()], "literal prompt");
+        }
+    }
+
+    #[test]
+    fn codex_auto_headless_approves_only_local_read_only_ahu_mcp_tools() {
+        use crate::agent::Permissions;
+
+        let root = tempfile::tempdir().unwrap();
+        let request = LaunchRequest {
+            model: "synthetic-model",
+            prompt: "literal prompt",
+            cwd: root.path(),
+            permissions: Permissions::Auto,
+        };
+        for session in [None, Some("session-123".to_string())] {
+            let spec = Spec {
+                harness_version: "codex-cli 0.155.1".into(),
+                session,
+                ..sample_spec()
+            };
+            let command = batch_command("codex", &request, &spec).unwrap();
+            for tool in crate::harness::codex::AUTO_LOCAL_MCP_TOOLS {
+                let config = crate::harness::codex::auto_local_mcp_config(tool);
+                assert!(command.args.contains(&config), "missing {config:?}");
+            }
+            for tool in ["ahu_typed_decide", "ahu_skills_suggest"] {
+                assert!(
+                    !command.args.iter().any(|arg| arg.contains(tool)),
+                    "provider-backed tool {tool} must retain its approval gate"
+                );
+            }
+            assert_eq!(command.args[command.prompt_arg.unwrap()], request.prompt);
+        }
+    }
+
+    fn sample_spec() -> Spec {
+        Spec {
+            schema_version: 2,
+            options: Options::default(),
+            harness_version: "1.0.0".into(),
+            executable_digest: "digest".into(),
+            parent_task: None,
+            parent_attempt: None,
+            root_task: None,
+            broker_request: None,
+            child_grants: Vec::new(),
+            depth: 0,
+            attempt: 1,
+            session: None,
+            broker_dir: None,
+            native_profile: None,
+            native_controls: Vec::new(),
+            gaps: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod filesystem_behavior_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    pub(super) fn repository() -> (tempfile::TempDir, crate::git::Repo) {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repo = crate::git::discover(root.path()).unwrap();
+        (root, repo)
+    }
+
+    #[test]
+    fn confinement_creates_only_private_directories_and_rejects_redirection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime");
+        let nested = root.join("task/attempt");
+        confined_at(&root, &nested, false).unwrap();
+        assert!(!root.exists());
+        confined_at(&root, &nested, true).unwrap();
+        for dir in [&root, &root.join("task"), &nested] {
+            assert_eq!(
+                std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert!(
+            confined_at(&root, temp.path(), false)
+                .unwrap_err()
+                .to_string()
+                .contains("outside its verified store")
+        );
+        assert!(
+            confined_at(&root, &root.join("../escape"), true)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid runtime component")
+        );
+        assert!(!temp.path().join("escape").exists());
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        symlink(&outside, root.join("redirect")).unwrap();
+        std::fs::write(root.join("file"), "keep").unwrap();
+        for name in ["redirect", "file"] {
+            assert!(
+                confined_at(&root, &root.join(name).join("child"), true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("redirected or not a directory")
+            );
+        }
+        assert!(!outside.join("child").exists());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            confined_at(&root, &nested, false)
+                .unwrap_err()
+                .to_string()
+                .contains("owner-only directory")
+        );
+    }
+
+    #[test]
+    fn missing_external_paths_resolve_ancestors_but_refuse_traversal_and_dangling_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&target, &alias).unwrap();
+        assert_eq!(
+            resolve_missing_path(&alias.join("new/state")).unwrap(),
+            target.canonicalize().unwrap().join("new/state")
+        );
+        assert!(!target.join("new").exists());
+        for path in [PathBuf::from("relative/state"), target.join("../state")] {
+            assert!(
+                resolve_missing_path(&path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("absolute without '..'")
+            );
+        }
+        let dangling = temp.path().join("dangling");
+        symlink(temp.path().join("absent"), &dangling).unwrap();
+        assert!(
+            resolve_missing_path(&dangling.join("state"))
+                .unwrap_err()
+                .to_string()
+                .contains("dangling symlink")
+        );
+    }
+
+    #[test]
+    fn cleanup_pins_directory_and_preserves_redirected_targets() {
+        let (_root, repo) = repository();
+        let store = store(&repo).unwrap();
+        let attempt = store.join("abc/attempt-1");
+        confined_in(&repo, &attempt, true).unwrap();
+        let pinned = ConfinedDir::open(&attempt).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("stdout"), "outside").unwrap();
+        std::fs::write(attempt.join("stdout"), "capture").unwrap();
+        let moved = store.join("abc/original-attempt");
+        std::fs::rename(&attempt, &moved).unwrap();
+        symlink(outside.path(), &attempt).unwrap();
+        assert!(pinned.remove_artifact("stdout").unwrap());
+        assert!(!moved.join("stdout").exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("stdout")).unwrap(),
+            "outside"
+        );
+        assert!(!pinned.remove_artifact("stdout").unwrap());
+        assert!(
+            !pinned
+                .unlink(&ConfinedDir::entry_name("stdout").unwrap())
+                .unwrap()
+        );
+        symlink(outside.path().join("stdout"), moved.join("link")).unwrap();
+        std::fs::create_dir(moved.join("directory")).unwrap();
+        for name in ["link", "directory"] {
+            assert!(
+                pinned
+                    .remove_artifact(name)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("expected a regular file")
+            );
+        }
+        assert!(!pinned.remove_mailbox_entry("directory".as_ref()).unwrap());
+        assert!(pinned.remove_mailbox_entry("link".as_ref()).unwrap());
+        assert!(!pinned.remove_mailbox_entry("link".as_ref()).unwrap());
+        assert!(outside.path().join("stdout").exists());
+        assert!(moved.join("directory").is_dir());
+        assert!(
+            pinned
+                .unlink(&ConfinedDir::entry_name("directory").unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("cannot remove runtime entry")
+        );
+        assert!(
+            pinned
+                .remove_artifact("bad\0name")
+                .unwrap_err()
+                .to_string()
+                .contains("interior NUL")
+        );
+        assert!(ConfinedDir::open(&attempt).is_err());
+        assert!(
+            ConfinedDir::open(&store.join("abc/missing"))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("refusing runtime directory")
+        );
+    }
+
+    #[test]
+    fn discovery_selects_task_names_with_records_and_refuses_foreign_stores() {
+        let (_root, repo) = repository();
+        let domain = store(&repo).unwrap();
+        assert!(discover_domain(&repo, &domain).unwrap().is_empty());
+        for name in [
+            "abc",
+            "01a0e53c-de9e-75a4-821f-9d197a88d800",
+            "not-a-task",
+            "def",
+        ] {
+            let dir = domain.join(name);
+            confined_in(&repo, &dir, true).unwrap();
+            if name != "def" {
+                state::write_private_file(&dir.join("task.json"), b"{}").unwrap();
+            }
+        }
+        let mut found = discover_domain(&repo, &domain).unwrap();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                domain.join("01a0e53c-de9e-75a4-821f-9d197a88d800"),
+                domain.join("abc")
+            ]
+        );
+        let (_other_root, other_repo) = repository();
+        assert!(
+            confined_in(&other_repo, &domain, false)
+                .unwrap_err()
+                .to_string()
+                .contains("another repository")
+        );
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), domain.join("bad")).unwrap();
+        assert!(
+            discover_domain(&repo, &domain)
+                .unwrap_err()
+                .to_string()
+                .contains("symlink")
+        );
+    }
+
+    #[test]
+    fn ownership_contention_refuses_second_supervisor_and_releases_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("owner.lock");
+        assert!(supervisor_owns_attempt(root.path()).is_err());
+        assert!(!path.exists());
+        let owner = Lock::acquire(&path).unwrap();
+        assert!(supervisor_owns_attempt(root.path()).unwrap());
+        assert!(Lock::try_acquire(&path).unwrap().is_none());
+        assert!(
+            Lock::acquire(&path)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("concurrent execution refused")
+        );
+        drop(owner);
+        assert!(!supervisor_owns_attempt(root.path()).unwrap());
+        assert!(Lock::try_acquire(&path).unwrap().is_some());
     }
 }

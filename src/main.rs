@@ -41,8 +41,8 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         })?;
     }
     match command {
-        Command::Help => {
-            println!("{}", cli::HELP);
+        Command::Help { topic } => {
+            println!("{}", cli::help_for(topic.as_deref())?);
             Ok(0)
         }
         Command::Version => {
@@ -192,6 +192,50 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 commands::knowledge_lint(console, &repo, output_json)
             })
         }
+        // The records are outside the checkout by policy, but the repository
+        // still has to be located: locating it is what makes that check real.
+        Command::EvalReport {
+            records,
+            output_json,
+        } => {
+            let repo = commands::repo_from_cwd()?;
+            commands::with_stdio_output(output_json, |console| {
+                commands::eval_report(console, &repo, &records, output_json)
+            })
+        }
+        Command::EvalRun {
+            case,
+            suite,
+            agents,
+            evaluator,
+            evaluator_repo,
+            decision_evaluator,
+            skill_selection,
+            records,
+            runs,
+            timeout_seconds,
+            allow_widened_approvals,
+            output_json,
+        } => {
+            let repo = commands::repo_from_cwd()?;
+            let request = ahu::eval::RunRequest {
+                case: case.as_deref(),
+                suite: suite.as_deref(),
+                agents: &agents,
+                evaluator: evaluator.as_deref(),
+                evaluator_repo: evaluator_repo.as_deref(),
+                decision_evaluator,
+                skill_selection,
+                records: &records,
+                runs,
+                timeout_seconds,
+                allow_widened_approvals,
+                json_output: output_json,
+            };
+            commands::with_stdio_output(output_json, |console| {
+                ahu::eval::run(console, &repo, &request)
+            })
+        }
         Command::CmuxStatus { output_json } => {
             let cwd = std::env::current_dir()?;
             let root = commands::repo_from_cwd().map(|r| r.root).unwrap_or(cwd);
@@ -206,14 +250,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             let repo = commands::repo_from_cwd()?;
             ahu::mcp::serve(&repo)
         }
-        Command::McpSetup => {
-            let repo = commands::repo_from_cwd()?;
-            ahu::mcp::setup(&repo)
-        }
         // `doctor` reports on a missing repository rather than failing on one.
-        Command::Doctor => {
+        Command::Doctor { verbose } => {
             let repo = commands::repo_from_cwd();
-            commands::with_stdio(|console| commands::doctor(console, &repo))
+            commands::with_stdio(|console| commands::doctor_with_verbosity(console, &repo, verbose))
         }
         other => {
             let repo = commands::repo_from_cwd()?;
@@ -221,7 +261,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 Command::Interactive { focus, agent } => {
                     commands::interactive(console, &repo, focus, agent.as_deref())
                 }
-                Command::Init => commands::init(console, &repo),
+                Command::Setup => ahu::setup::run(console, &repo),
                 Command::Agents => commands::agents(console, &repo),
                 Command::Onboard {
                     register,
@@ -236,41 +276,36 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                     model.as_deref(),
                     &version,
                 ),
-                Command::Inventory { agent } => {
-                    commands::inventory_cmd(console, &repo, agent.as_deref())
-                }
-                Command::Hygiene { agent } => {
-                    commands::hygiene_cmd(console, &repo, agent.as_deref())
-                }
-                Command::Tasks => commands::tasks(console, &repo),
+                Command::Lock { update } => commands::lock_cmd(console, &repo, update),
+                Command::Tasks { limit } => commands::tasks_with_limit(console, &repo, limit),
                 Command::Task {
                     task_id,
                     output_json,
                 } => commands::task_cmd(console, &repo, &task_id, output_json),
-                Command::Diff { task_id } => commands::diff_cmd(console, &repo, &task_id),
                 Command::Focus { task_id } => commands::focus(console, &repo, &task_id),
                 Command::Remove { task_id } => commands::remove_cmd(console, &repo, &task_id),
                 Command::Message { task_id, text } => {
                     commands::message_cmd(console, &repo, &task_id, &text)
                 }
-                Command::Help
+                Command::Help { .. }
                 | Command::HeadlessLaunch { .. }
                 | Command::BatchControl { .. }
                 | Command::BatchSupervisor { .. }
                 | Command::TasksJson
                 | Command::Version
                 | Command::Explain { .. }
-                | Command::Doctor
+                | Command::Doctor { .. }
                 | Command::CmuxStatus { .. }
                 | Command::CmuxInstall { .. }
                 | Command::McpServe
-                | Command::McpSetup
                 | Command::Claude
                 | Command::Codex
                 | Command::OpenCode
                 | Command::Antigravity
                 | Command::Launch { .. }
                 | Command::KnowledgeLint { .. }
+                | Command::EvalReport { .. }
+                | Command::EvalRun { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })
         }

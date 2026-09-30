@@ -1,0 +1,46 @@
+{
+  "dg-pilot-mail": {
+    "frozen_answer": {
+      "action": "B",
+      "claim": "C",
+      "validation": "C"
+    },
+    "expected_criterion_scores": {
+      "action": 1,
+      "claim": 0.5,
+      "validation": 0
+    },
+    "rationale": {
+      "action": "The mode-specific listener addresses the reproduced problem and preserves the requested live-edit experience.",
+      "claim": "The selected claim goes beyond the disconnected fixture when it predicts duplicate delivered mail.",
+      "validation": "Delivery counts do not test which preview events create cards in either local mode."
+    },
+    "critical_false_accept": {
+      "action": false,
+      "claim": false,
+      "validation": false
+    }
+  },
+  "dg-pilot-links": {
+    "frozen_answer": {
+      "action": "B",
+      "claim": "B",
+      "validation": "C"
+    },
+    "expected_criterion_scores": {
+      "action": 0,
+      "claim": 1,
+      "validation": 0.5
+    },
+    "rationale": {
+      "action": "The selected action removes useful navigation broadly and falsely treats successful page fetching as a reason fragment behavior cannot be tested.",
+      "claim": "The answer identifies the observed anchor mismatch and correctly leaves the uninventoried inbound links unresolved.",
+      "validation": "The local navigation check confirms one repair, but leaves compatibility anchors and other contexts unchecked."
+    },
+    "critical_false_accept": {
+      "action": false,
+      "claim": false,
+      "validation": false
+    }
+  }
+}

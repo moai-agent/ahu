@@ -8,10 +8,11 @@ ahu is cross-harness configuration management for agent sessions. It launches
 agents that a repository defines into separate Git worktrees
 and runs interactive sessions in cmux or unattended headless attempts.
 
-ahu is not an agent harness. It does not host a model, run an agent loop, own a
-conversation, or provide tools. Claude Code, Codex, the Antigravity CLI and OpenCode do
-that. ahu decides which of them runs, with which model and instructions, in
-which worktree, and reports visible context sources and coverage gaps.
+ahu is not an agent harness. Claude Code, Codex, the Antigravity CLI and OpenCode
+run the agent loop and own the conversation. ahu chooses the configured harness, model, instructions and
+worktree, and reports visible context sources and coverage gaps. Its MCP server
+provides agent/task inspection and typed decision tools. Its eval runner launches
+agents, checks outcomes and joins available OTel observations to each trial.
 
 An agent's harness, model, and instructions live in the repository, so changing
 how it behaves is a reviewable change like any other. A launch uses exactly that
@@ -44,9 +45,10 @@ harness or its shell tools from starting other processes.
 ahu creates the repository group and the per-task workspace through cmux, and
 interactive sessions require that connection. Headless tasks and local inspection do
 not. The harness is what actually runs the
-agent; ahu never installs, configures, or authenticates one, and it does not
-ship one. Sign-in is the harness's own, and ahu holds no API key for any of
-them.
+agent. `ahu setup` detects installed harnesses, offers available models,
+registers development agents and installs supported skills/MCP configuration.
+Harness installation and sign-in remain separate; ahu does not ship a harness
+or manage its agent-model API key.
 Git and default cmux lookup skip empty and relative PATH entries and use
 canonical executables outside Git working trees. Candidate ancestry is
 inspected without running candidate Git. Explicit AHU_CMUX_BIN retains
@@ -54,14 +56,20 @@ user-selected command semantics; these checks are not OS isolation.
 
 ahu does not use an agent-selection or system-prompt flag. A native lookup
 by name does not bind the selection to the file ahu read and digested.
-Instructions travel in the prompt on all three harnesses, attributed to
+Instructions travel in the prompt on the supported harnesses, attributed to
 their source file and delivered-text digest; delivery is not enforcement.
 
-ahu holds no credentials and speaks to no model provider. Sign-in and the
-approval boundary are the harness's own. Headless adapters pass explicit batch
-controls; manifest-requested widening remains gated. ahu cannot assert the
-effective boundary; harness settings also apply. The
-launch preview reports what ahu read in them rather than asserting a result.
+Agent-model sign-in and approval controls belong to the harness. Headless
+adapters pass explicit batch controls; manifest-requested widening remains gated.
+Harness settings also apply, so the launch preview reports observed settings
+without asserting the effective boundary.
+
+The typed decision service has a separate credential boundary: ahu can read
+`TYPESAFE_API_KEY` from its process environment or the selected repository's
+`.env` and send explicitly supplied evidence to TypeSafe. It can instead use a
+configured loopback decision service. Do not copy that key into agent prompts,
+MCP configuration, telemetry or tracked files. Read `typed-decisions` for request
+design and data handling, and `docs/typed-decisions.md` for provider configuration.
 
 ## Four rules everything else follows from
 
@@ -193,13 +201,11 @@ flowchart TB
 ```
 
 Every task gets a unique id, a fresh branch `ahu/<agent>/<task-id>`, and a fresh
-worktree under .worktrees/ in the primary checkout. The worktree starts
-at the invoking checkout's HEAD, then receives its recognized agent
-configuration as it stands at submission — including uncommitted and Git-ignored
-files, with local deletions honoured. Scan skips and depth limits bound coverage;
-committed files under skipped paths still arrive through Git. Configuration
-symlinks are not followed. Unrelated dirty source files stay behind.
-Nothing is staged, committed, stashed, or reset in your checkout, ever.
+worktree under .worktrees/ in the primary checkout. The worktree starts at the invoking checkout's HEAD. Before planning the launch,
+ahu requires every recognized context input to be tracked and clean and checks
+that `ahu.lock` matches. Operators update and commit the lock with context edits;
+ahu never stages or commits. Scan skips and depth limits still bound coverage,
+and harness-managed or global context remains outside the repository lock.
 
 ## Context sources
 
@@ -229,10 +235,10 @@ flowchart LR
     style unseen fill:#fdf1e7,stroke:#b5651d
 ```
 
-`ahu inventory` marks each source loaded, available, disabled, opaque, or absent,
+`ahu.lock` records committed recognized context; it does not prove a harness loaded every source.
 and ends with what ahu cannot see. `available` means the harness can discover a
-source, not that its contents reached the model. The inventory is never labelled
-complete.
+source, not that its contents reached the model. The lock is never described as
+proof that the harness loaded the source.
 
 ## Hooks
 
@@ -328,10 +334,10 @@ structured results, frozen inputs, native stores, branches and worktrees.
 Task worktrees are siblings under `.worktrees/` in the primary checkout.
 An interactive task's record and prompt live in `.ahu/state/` in its worktree, chosen
 by ahu at launch and passed to the session, so removing that worktree removes
-them with it. `ahu tasks`, `task`, `diff` and `focus` find them by looking through
+them with it. `ahu tasks`, `task` and `focus` find them by looking through
 `.worktrees/`, from the primary checkout or from any sibling. The launch lock,
 cmux group mapping, headless coordination and task index belong to the primary;
-hygiene timestamps stay in the checkout they were recorded from. `.ahu/` ignores
+`.ahu/` ignores
 itself in Git. Nested sessions discover state from their working checkout;
 coordination stays in the primary checkout. Legacy lookup reads the primary and
 invoking plain-checkout stores; managed worktree stores always enforce ownership.
@@ -361,9 +367,9 @@ and validates state paths before attempting cleanup. Listing never deletes them.
 - silently add, edit, or remove hooks, or reorganise native skills, settings, or histories
 - widen permissions unless a manifest asks for it, which the preview states in full before anything starts
 - claim to know the effective approval boundary: the harness's own settings decide it, and ahu only reports what it read and which flags it passed
-- install, configure, or authenticate a harness on your behalf
+- install a harness or authenticate its agent model on your behalf
 - delete a worktree, branch, or task record that may hold your work
-- call an inventory complete, or a behaviour change harmless
+- treat the recognized-context lock as proof of all harness-managed context
 
 ## Standing warnings
 

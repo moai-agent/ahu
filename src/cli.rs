@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::bail;
 use crate::util::Result;
 
-pub const HELP: &str = "ahu - The moai-agent command-line interface
+pub const HELP_ALL: &str = "ahu - The moai-agent command-line interface
 
 Launch repository-defined agents in fresh Git worktrees and organise their
 interactive sessions in cmux. Use --headless for unattended execution with
@@ -30,9 +30,9 @@ real flags is the harness, the exact model, and any permission widening a
 manifest asks for.
 
 Commands:
-  help                  Print this help message
+  help [COMMAND|all]    Print command help or the full option reference
   explain               Architecture overview and Mermaid diagrams
-  init                  Record this project's agreed harness and model order
+  setup                 Configure ahu, harness MCP access, skills, and dev agents
   @agent [prompt]       Assign work to an agent; quote multi-word prompts.
                         Also accepts --prompt or --prompt-file.
   launch @name [options]
@@ -42,10 +42,19 @@ Commands:
                         With --title alone, the description also uses that title.
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
+  lock [--update]       Check committed agent context, or refresh ahu.lock before committing it
   knowledge lint [--output json]
                         Check the OKF bundles named in [knowledge] with okf.
                         Reads only; nothing is fetched, indexed, or rewritten
-  tasks                 List tasks launched from this repository
+  eval run (--case <path> | --suite <path>) --agent @name [--agent @other]
+           --records <path> [options]
+                        Run candidates (and optionally a blind agent evaluator)
+                        over an external evaluation case or suite
+  eval report --records <path> [--output json]
+                        Compare local evaluation runs from an external JSONL
+                        record file. Reads only, and only outside this checkout
+  tasks [--limit N|--all]
+                        List recent tasks or the full history
   task <task-id> [--output json]
                         Inspect a task's recorded session state and locations
   wait <task-id> [--output json]    Wait for a headless attempt to stop
@@ -67,18 +76,23 @@ Commands:
                         Inspect native integration evidence and headless isolation
   cmux install --harness ID [--dry-run]
                         Preview or explicitly delegate a native cmux installation
-  mcp serve              Serve read-only ahu inspection tools over stdio MCP
-  mcp setup              Materialize ahu's bundled skills into this repository
-  doctor                Check repository, configuration, harness, and cmux
-  agy                   Open the Antigravity CLI here using its configured model
-                        in YOLO mode (--dangerously-skip-permissions)
-  claude                Open Claude here with permission checks bypassed
-                        (uses Claude's configured model)
-  codex                 Open Codex here with approval prompts and sandbox bypassed
-                        (uses Codex's configured model)
-  opencode              Open OpenCode here using its configured model and
-                        permissions (ahu passes no --auto and no --pure)
+  mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
+  doctor [--verbose]    Check repository, configuration, harness, and cmux
+  agy                   Open the Antigravity CLI here on this project's
+                        top-ranked Antigravity model, in YOLO mode
+                        (--dangerously-skip-permissions)
+  claude                Open Claude here on this project's top-ranked
+                        Claude Code model, with permission checks bypassed
+                        (--dangerously-skip-permissions)
+  codex                 Open Codex here on this project's top-ranked Codex
+                        model, with approval prompts and the sandbox bypassed
+                        (--dangerously-bypass-approvals-and-sandbox)
+  opencode              Open OpenCode here on this project's top-ranked OpenCode
+                        model, auto-approving every permission it does not deny
+                        (--auto; ahu passes no --pure)
   run-task              Internal: run a prepared task (used by cmux)
+  supervise --task-dir PATH
+                        Internal: supervise a detached headless task
 
 Task references:
   Use ahu:task:<id> to identify a task explicitly. Bare IDs and unique ID
@@ -86,6 +100,7 @@ Task references:
   In `launch @name`, @name selects a registered agent instead.
 
 Options:
+  help [COMMAND]        Print focused help for a command; use `help all` for this reference
   -h, --help            Print this help message
   -V, --version         Print the version
   --repo <path>         Select a repository checkout before the command.
@@ -112,6 +127,63 @@ knowledge lint options:
                         stderr. Bundles come from [knowledge] in the project
                         configuration; knowledge.fail_on_warnings decides whether
                         warnings fail the check. Errors always do.
+
+eval report options:
+  --records <path>      JSONL run records written with schema version 2.
+                        Required, and refused when it resolves inside this
+                        repository: run evidence stays in a user-owned directory
+  --output json         Emit a versioned JSON comparison on stdout, the readable
+                        report on stderr. Rows are grouped by case and corpus
+                        version, stage, agent/version, evaluator/version, model,
+                        harness/version, every input fingerprint, and skill
+                        digest. Binary answer and tool-expectation pass rates
+                        carry 95% Wilson intervals. Only schema version 2
+                        records are accepted. Token,
+                        timing, and decision-call figures are reported as
+                        coverage counts, so a missing observation is not a zero.
+                        `eval report` reads records; it runs no candidate and no
+                        evaluator
+
+eval run options:
+  --skill-selection <none|lexical|decision>
+                        Optional prelaunch skill advice (default none). Decision
+                        sends candidate-visible task and committed skill descriptions
+                        to the configured decision provider. Does not remove skills.
+  --case <path>         OKF Markdown case with YAML front matter; expected
+                        answer values, rubric, and tool expectations stay hidden
+                        from the candidate. Schema 2 prompts tool-neutrally;
+                        candidates receive a tool-neutral prompt
+  --suite <path>        OKF Markdown suite (type ahu:eval-suite) naming cases by
+                        relative path with fixed weights. An alternative to
+                        --case. The whole case x agent x run matrix is validated
+                        and capped before any model launches
+  --agent @name         Registered candidate agent (required, repeatable). The
+                        order given is the order the trials run in
+  --decision-evaluator  Send case evidence, candidate output and rubric to the
+                        configured typed decision provider for grading. Opt-in;
+                        conflicts with --evaluator and --evaluator-repo
+  --evaluator @name     Optional separate registered evaluator agent
+  --evaluator-repo <path>
+                        Run the evaluator from a separately prepared checkout,
+                        recorded as blinding `isolated`. Without it the
+                        evaluator is blinded at the prompt level only
+                        (`prompt_only`), which is not environment isolation
+  --records <path>      External JSONL destination; prompts and artifacts are
+                        written to a private sibling run directory
+  --runs <count>        Repetitions from 1 to 100 (default 1)
+  --timeout <seconds>   Per-agent headless timeout from 1 to 86400 (default 1800)
+  --allow-widened-approvals
+                        Explicitly authorize a candidate or evaluator manifest
+                        that widens harness approvals
+  --output json         Emit a versioned summary to stdout
+
+tasks options:
+  --limit <count>       Show the most recent 1 to 500 tasks (default 20)
+  --all                 Show the full task history
+  --output json         Emit the complete task list as JSON; cannot be combined with --limit/--all
+
+doctor options:
+  --verbose             Show component-level cmux, hook, drift, and context-lock details
 
 launcher options:
   --no-focus            Do not switch to the new session after launching
@@ -154,6 +226,123 @@ Exit codes:
 run-task options:
   --task-dir <path>     Directory holding the prepared task record";
 
+pub const HELP: &str = "ahu — launch and coordinate repository agents
+
+Usage: ahu [--repo PATH] [COMMAND]
+
+Start the launcher with `ahu`, or run a registered agent with
+`ahu @agent 'task prompt'`.
+
+Commands:
+  setup                 Configure this project for ahu
+  agents                List registered agents
+  onboard               Preview native agent definitions
+  doctor [--verbose]    Check project and harness readiness
+  lock [--update]       Check or refresh committed agent context
+  tasks [--limit N]     List recent tasks; use --all for the full list
+  task ID               Inspect a task
+  wait|result|cancel ID Control or inspect a task
+  resume ID --prompt-file PATH
+  cleanup|remove ID     Clean captures or remove a completed task
+  focus|message ID ...  Focus a task or send it a message
+  eval run|report       Run and compare local agent evaluations
+  knowledge lint        Check configured OKF bundles
+  cmux status|install   Inspect or install native cmux integration
+  mcp serve             Serve repository tools over stdio MCP
+  explain               Show the architecture overview
+  @agent [PROMPT]       Assign work to a registered agent
+  launch @agent         Backward-compatible launch alias
+  agy|claude|codex|opencode
+                        Open a coordinating harness session
+
+Use `ahu help COMMAND` or `ahu COMMAND --help` for focused help.
+Use `ahu help all` for the full command and option reference.
+
+Global options: --repo PATH, --color auto|always|never, --help, --version
+Docs: docs/reference.md";
+
+/// Help for a command or a command group. Detailed flag sections are sliced
+/// from the complete help text so there is one source of truth.
+pub fn help_for(topic: Option<&str>) -> Result<String> {
+    let Some(topic) = topic else {
+        return Ok(HELP.to_string());
+    };
+    let topic = topic.trim().trim_start_matches("ahu ");
+    if matches!(topic, "--help" | "-h") {
+        return Ok(HELP.to_string());
+    }
+    if matches!(topic, "all" | "--all") {
+        return Ok(HELP_ALL.to_string());
+    }
+    let help = match topic {
+        "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh ahu.lock. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
+        "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
+        "eval run" => help_section("eval run options:", "launcher options:"),
+        "eval report" => help_section("eval report options:", "eval run options:"),
+        "launch" | "@agent" => help_section("launch options:", "Exit codes:"),
+        "explain" => help_section("explain options:", "onboard options:"),
+        "onboard" => help_section("onboard options:", "knowledge lint options:"),
+        "knowledge lint" => help_section("knowledge lint options:", "eval report options:"),
+        "doctor" => "Usage: ahu doctor\n\nSummarize project, context-lock, skills, harness, telemetry, and cmux readiness. Use --verbose for component-level diagnostics.\n".to_string(),
+        "lock" => "Usage: ahu lock [--update]\n\nChecks that recognized agent context matches committed ahu.lock. --update refreshes the lock for review and commit.\n".to_string(),
+        "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
+        "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
+        "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
+        "task" => "Usage: ahu task ID [--output json]\n\nInspect a task's state, branch, worktree, and launch evidence.\n".to_string(),
+        "wait" => "Usage: ahu wait TASK [--output json]\n\nWait for a headless task to reach a terminal state.\n".to_string(),
+        "result" => "Usage: ahu result TASK [--output json]\n\nRead the durable process and harness outcomes for a headless task.\n".to_string(),
+        "cancel" => "Usage: ahu cancel TASK\n\nRequest cancellation of the task and its ahu descendants.\n".to_string(),
+        "resume" => "Usage: ahu resume TASK --prompt-file PATH [--output json]\n\nResume a root headless task using its recorded native session.\n".to_string(),
+        "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after termination is known.\n".to_string(),
+        "remove" => "Usage: ahu remove TASK\n\nRemove a completed task's record, worktree, and branch when safe.\n".to_string(),
+        "focus" => "Usage: ahu focus TASK\n\nBring an interactive task's cmux session to the front.\n".to_string(),
+        "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
+        "run-task" => "Usage: ahu run-task --task-dir PATH\n\nInternal worker command started by ahu's task supervisor.\n".to_string(),
+        "supervise" => "Usage: ahu supervise --task-dir PATH\n\nInternal supervisor command for detached headless tasks.\n".to_string(),
+        "agents" | "eval" | "knowledge" | "cmux" | "mcp" | "agy" | "claude" | "codex" | "opencode" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
+        other => return Err(crate::util::Error::new(format!("unknown help topic {other:?}; run `ahu help` for commands."))),
+    };
+    Ok(help)
+}
+
+fn help_section(start: &str, end: &str) -> String {
+    let lines: Vec<_> = HELP_ALL.lines().collect();
+    let Some(first) = lines.iter().position(|line| line.starts_with(start)) else {
+        return String::new();
+    };
+    let last = lines[first + 1..]
+        .iter()
+        .position(|line| line.starts_with(end))
+        .map(|offset| first + 1 + offset)
+        .unwrap_or(lines.len());
+    lines[first..last].join("\n") + "\n"
+}
+
+fn help_line_for(topic: &str) -> Option<&'static str> {
+    Some(match topic {
+        "agents" => "ahu agents — list registered agents",
+        "setup" => "ahu setup — configure this project",
+        "tasks" => "ahu tasks — list recent tasks",
+        "doctor" => "ahu doctor — check project readiness",
+        "lock" => "ahu lock — check committed agent context",
+        "eval" => "ahu eval — run or compare evaluations",
+        "knowledge" => "ahu knowledge lint — validate configured knowledge bundles",
+        "cmux" => "ahu cmux — inspect or install cmux integration",
+        "mcp" => "ahu mcp serve — start the MCP server",
+        "explain" => "ahu explain — show the architecture overview",
+        "onboard" => "ahu onboard — preview native agent definitions",
+        "agy" => "ahu agy — open Antigravity",
+        "claude" => "ahu claude — open Claude Code",
+        "codex" => "ahu codex — open Codex",
+        "opencode" => "ahu opencode — open OpenCode",
+        "launch" => "ahu launch @agent — backward-compatible launch alias",
+        "help" => "ahu help — show command help",
+        "run-task" => "ahu run-task — internal task worker",
+        "supervise" => "ahu supervise — internal task supervisor",
+        _ => return None,
+    })
+}
+
 /// How `ahu explain` should present itself.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ExplainFormat {
@@ -169,7 +358,9 @@ pub enum ExplainFormat {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    Help,
+    Help {
+        topic: Option<String>,
+    },
     Version,
     Explain {
         format: ExplainFormat,
@@ -178,7 +369,7 @@ pub enum Command {
         focus: bool,
         agent: Option<String>,
     },
-    Init,
+    Setup,
     Launch {
         agent: String,
         prompt: PromptSource,
@@ -211,22 +402,39 @@ pub enum Command {
         model: Option<String>,
         version: String,
     },
-    Inventory {
-        agent: Option<String>,
-    },
-    Hygiene {
-        agent: Option<String>,
+    Lock {
+        update: bool,
     },
     KnowledgeLint {
         output_json: bool,
     },
-    Tasks,
+    EvalReport {
+        records: PathBuf,
+        output_json: bool,
+    },
+    EvalRun {
+        /// A single case. Exactly one of `case` and `suite` is set.
+        case: Option<PathBuf>,
+        suite: Option<PathBuf>,
+        /// Candidate agents in the order named, which is the execution order.
+        agents: Vec<String>,
+        evaluator: Option<String>,
+        /// A separately prepared checkout the evaluator runs from.
+        evaluator_repo: Option<PathBuf>,
+        decision_evaluator: bool,
+        skill_selection: crate::skill_selection::Mode,
+        records: PathBuf,
+        runs: u32,
+        timeout_seconds: u64,
+        allow_widened_approvals: bool,
+        output_json: bool,
+    },
+    Tasks {
+        limit: Option<usize>,
+    },
     Task {
         task_id: String,
         output_json: bool,
-    },
-    Diff {
-        task_id: String,
     },
     Focus {
         task_id: String,
@@ -246,8 +454,9 @@ pub enum Command {
         dry_run: bool,
     },
     McpServe,
-    McpSetup,
-    Doctor,
+    Doctor {
+        verbose: bool,
+    },
     Codex,
     Claude,
     OpenCode,
@@ -322,10 +531,12 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             agent: None,
         });
     };
+    if let Some(help) = help_request(&args)? {
+        return Ok(help);
+    }
     match first {
         "help" | "-h" | "--help" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Help)
+            unreachable!("help requests are handled before command parsing")
         }
         "-V" | "--version" => {
             expect_no_more(&args[1..])?;
@@ -344,9 +555,9 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             }
             Ok(Command::Explain { format })
         }
-        "init" => {
+        "setup" => {
             expect_no_more(&args[1..])?;
-            Ok(Command::Init)
+            Ok(Command::Setup)
         }
         "agents" => {
             expect_no_more(&args[1..])?;
@@ -398,26 +609,58 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 json,
             })
         }
-        "tasks" if args.get(1).map(String::as_str) == Some("--output") => {
-            if args.len() != 3 || args[2] != "json" {
-                bail!("expected tasks --output json");
-            }
-            Ok(Command::TasksJson)
-        }
         "tasks" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Tasks)
+            let mut limit = Some(20usize);
+            let mut saw_limit = false;
+            let mut output_json = false;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--all" if limit == Some(20) && !saw_limit => limit = None,
+                    "--limit" if !saw_limit && limit.is_some() => {
+                        let value = value_for("--limit", &args, &mut index)?;
+                        let parsed = value
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|n| (1..=500).contains(n));
+                        limit = Some(parsed.ok_or_else(|| {
+                            crate::util::Error::new("--limit must be between 1 and 500")
+                        })?);
+                        saw_limit = true;
+                    }
+                    "--output" if !output_json => {
+                        if value_for("--output", &args, &mut index)? != "json" {
+                            bail!("expected json");
+                        }
+                        output_json = true;
+                    }
+                    other => {
+                        bail!("unexpected option {other:?} for `ahu tasks`; use `ahu help tasks`.")
+                    }
+                }
+                index += 1;
+            }
+            if output_json {
+                if saw_limit || limit.is_none() {
+                    bail!(
+                        "`ahu tasks --output json` returns the complete list; remove --all or --limit."
+                    );
+                }
+                Ok(Command::TasksJson)
+            } else {
+                Ok(Command::Tasks { limit })
+            }
         }
         "cmux" => parse_cmux(&args[1..]),
         "mcp" => match args.get(1).map(String::as_str) {
             Some("serve") if args.len() == 2 => Ok(Command::McpServe),
-            Some("setup") if args.len() == 2 => Ok(Command::McpSetup),
-            _ => bail!("expected ahu mcp serve or ahu mcp setup"),
+            _ => bail!("expected ahu mcp serve"),
         },
-        "doctor" => {
-            expect_no_more(&args[1..])?;
-            Ok(Command::Doctor)
-        }
+        "doctor" => match &args[1..] {
+            [] => Ok(Command::Doctor { verbose: false }),
+            [flag] if flag == "--verbose" => Ok(Command::Doctor { verbose: true }),
+            _ => bail!("expected ahu doctor [--verbose]"),
+        },
         "claude" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Claude)
@@ -434,26 +677,19 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             expect_no_more(&args[1..])?;
             Ok(Command::Antigravity)
         }
-        "task" | "diff" => {
+        "task" => {
             let task_id = args
                 .get(1)
                 .filter(|id| !id.is_empty() && !id.starts_with('-'))
                 .cloned()
-                .ok_or_else(|| {
-                    crate::util::Error::new(format!("`ahu {first}` needs a task id."))
-                })?;
-            let output_json = first == "task"
-                && args.get(2).map(String::as_str) == Some("--output")
+                .ok_or_else(|| crate::util::Error::new("`ahu task` needs a task id."))?;
+            let output_json = args.get(2).map(String::as_str) == Some("--output")
                 && args.get(3).map(String::as_str) == Some("json");
             expect_no_more(&args[if output_json { 4 } else { 2 }..])?;
-            if first == "task" {
-                Ok(Command::Task {
-                    task_id,
-                    output_json,
-                })
-            } else {
-                Ok(Command::Diff { task_id })
-            }
+            Ok(Command::Task {
+                task_id,
+                output_json,
+            })
         }
         "focus" => {
             let task_id = args
@@ -483,13 +719,13 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             let text = args[2..].join(" ");
             Ok(Command::Message { task_id, text })
         }
-        "inventory" => Ok(Command::Inventory {
-            agent: optional_agent(&args[1..])?,
-        }),
-        "hygiene" => Ok(Command::Hygiene {
-            agent: optional_agent(&args[1..])?,
-        }),
+        "lock" => match args.get(1).map(String::as_str) {
+            None => Ok(Command::Lock { update: false }),
+            Some("--update") if args.len() == 2 => Ok(Command::Lock { update: true }),
+            Some(other) => bail!("unknown option {other:?} for `ahu lock`."),
+        },
         "knowledge" => parse_knowledge(&args[1..]),
+        "eval" => parse_eval(&args[1..]),
         "launch" => parse_launch_backend(&args[1..], stdin_available),
         direct if direct.starts_with('@') => {
             if args.len() == 1 && !stdin_available {
@@ -516,23 +752,80 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
     }
 }
 
+fn help_request(args: &[String]) -> Result<Option<Command>> {
+    if args.first().is_some_and(|arg| arg == "help") {
+        if args.len() > 3 {
+            bail!("usage: ahu help [COMMAND]");
+        }
+        return Ok(Some(Command::Help {
+            topic: (args.len() > 1).then(|| args[1..].join(" ")),
+        }));
+    }
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "-h" | "--help"))
+    {
+        if args.len() == 1 {
+            return Ok(Some(Command::Help { topic: None }));
+        }
+        bail!("use `ahu help COMMAND` for command help");
+    }
+    if args
+        .last()
+        .is_none_or(|last| last != "--help" && last != "-h")
+        || args.first().is_some_and(|first| first == "message")
+    {
+        return Ok(None);
+    }
+    let before_help = &args[..args.len() - 1];
+    if before_help.last().is_some_and(|flag| {
+        matches!(
+            flag.as_str(),
+            "--prompt"
+                | "--prompt-file"
+                | "--records"
+                | "--case"
+                | "--suite"
+                | "--agent"
+                | "--evaluator"
+                | "--evaluator-repo"
+                | "--runs"
+                | "--timeout"
+                | "--name"
+                | "--title"
+                | "--summary"
+                | "--model"
+                | "--task-dir"
+                | "--harness"
+                | "--register"
+                | "--remove"
+                | "--agent-version"
+                | "--output"
+                | "--allow-child"
+                | "--allow-child-widened"
+                | "--native-helpers"
+        )
+    }) {
+        return Ok(None);
+    }
+    let Some(first) = before_help.first() else {
+        return Ok(Some(Command::Help { topic: None }));
+    };
+    let count = if matches!(first.as_str(), "eval" | "knowledge" | "cmux" | "mcp") {
+        before_help.len().min(2)
+    } else {
+        1
+    };
+    Ok(Some(Command::Help {
+        topic: Some(before_help[..count].join(" ")),
+    }))
+}
+
 fn expect_no_more(rest: &[String]) -> Result<()> {
     if let Some(extra) = rest.first() {
         bail!("unexpected argument {extra:?}.\n\nRun 'ahu help' for usage.");
     }
     Ok(())
-}
-
-fn optional_agent(rest: &[String]) -> Result<Option<String>> {
-    let Some(first) = rest.first() else {
-        return Ok(None);
-    };
-    expect_no_more(&rest[1..])?;
-    let name = first.strip_prefix('@').unwrap_or(first);
-    if name.is_empty() {
-        bail!("`@` on its own is not an agent name.");
-    }
-    Ok(Some(name.to_string()))
 }
 
 /// `knowledge` takes a subcommand so later knowledge operations do not have to
@@ -559,6 +852,189 @@ fn parse_knowledge(rest: &[String]) -> Result<Command> {
         index += 1;
     }
     Ok(Command::KnowledgeLint { output_json })
+}
+
+/// Parse eval orchestration and reporting commands.
+fn parse_eval(rest: &[String]) -> Result<Command> {
+    match rest.first().map(String::as_str) {
+        None => bail!("`ahu eval` needs a subcommand: `run` or `report`."),
+        Some("run") => return parse_eval_run(&rest[1..]),
+        Some("report") => {}
+        Some(other) => {
+            bail!("unknown subcommand {other:?} for `ahu eval`; expected `run` or `report`.")
+        }
+    }
+    let mut records = None;
+    let mut output_json = false;
+    let mut index = 1;
+    while index < rest.len() {
+        match rest[index].as_str() {
+            "--records" if records.is_none() => {
+                records = Some(PathBuf::from(value_for("--records", rest, &mut index)?));
+            }
+            "--output" if !output_json => {
+                let value = value_for("--output", rest, &mut index)?;
+                if value != "json" {
+                    bail!("unsupported --output {value:?}; expected json.");
+                }
+                output_json = true;
+            }
+            other => bail!("unknown or repeated option {other:?} for `ahu eval report`."),
+        }
+        index += 1;
+    }
+    let records = records.ok_or_else(|| {
+        crate::util::Error::new(
+            "`ahu eval report` needs --records <path> naming a JSONL run record file outside this repository.",
+        )
+    })?;
+    Ok(Command::EvalReport {
+        records,
+        output_json,
+    })
+}
+
+fn parse_eval_run(rest: &[String]) -> Result<Command> {
+    let mut case = None;
+    let mut suite = None;
+    let mut agents: Vec<String> = Vec::new();
+    let mut evaluator = None;
+    let mut evaluator_repo = None;
+    let mut decision_evaluator = false;
+    let mut skill_selection = None;
+    let mut records = None;
+    let mut runs = 1u32;
+    let mut timeout_seconds = 1800u64;
+    let mut saw_runs = false;
+    let mut saw_timeout = false;
+    let mut allow_widened_approvals = false;
+    let mut output_json = false;
+    let mut index = 0;
+    while index < rest.len() {
+        match rest[index].as_str() {
+            "--case" if case.is_none() => {
+                case = Some(PathBuf::from(value_for("--case", rest, &mut index)?))
+            }
+            "--suite" if suite.is_none() => {
+                suite = Some(PathBuf::from(value_for("--suite", rest, &mut index)?))
+            }
+            // Repeatable: each occurrence adds a candidate, and the order is
+            // kept because it is the order the trials run in.
+            "--agent" => agents.push(value_for("--agent", rest, &mut index)?),
+            "--decision-evaluator" if !decision_evaluator => decision_evaluator = true,
+            "--evaluator" if evaluator.is_none() => {
+                evaluator = Some(value_for("--evaluator", rest, &mut index)?)
+            }
+            "--evaluator-repo" if evaluator_repo.is_none() => {
+                evaluator_repo = Some(PathBuf::from(value_for(
+                    "--evaluator-repo",
+                    rest,
+                    &mut index,
+                )?))
+            }
+            "--skill-selection" if skill_selection.is_none() => {
+                skill_selection = Some(crate::skill_selection::Mode::parse(&value_for(
+                    "--skill-selection",
+                    rest,
+                    &mut index,
+                )?)?);
+            }
+            "--records" if records.is_none() => {
+                records = Some(PathBuf::from(value_for("--records", rest, &mut index)?))
+            }
+            "--runs" if !saw_runs => {
+                saw_runs = true;
+                runs = value_for("--runs", rest, &mut index)?
+                    .parse()
+                    .map_err(|_| {
+                        crate::util::Error::new("--runs must be an integer from 1 to 100")
+                    })?;
+                if !(1..=100).contains(&runs) {
+                    bail!("--runs must be an integer from 1 to 100");
+                }
+            }
+            "--timeout" if !saw_timeout => {
+                saw_timeout = true;
+                timeout_seconds =
+                    value_for("--timeout", rest, &mut index)?
+                        .parse()
+                        .map_err(|_| {
+                            crate::util::Error::new(
+                                "--timeout must be an integer from 1 to 86400 seconds",
+                            )
+                        })?;
+                if !(1..=86_400).contains(&timeout_seconds) {
+                    bail!("--timeout must be an integer from 1 to 86400 seconds");
+                }
+            }
+            "--allow-widened-approvals" if !allow_widened_approvals => {
+                allow_widened_approvals = true
+            }
+            "--output" if !output_json => {
+                let value = value_for("--output", rest, &mut index)?;
+                if value != "json" {
+                    bail!("unsupported --output {value:?}; expected json.");
+                }
+                output_json = true;
+            }
+            other => bail!("unknown or repeated option {other:?} for `ahu eval run`."),
+        }
+        index += 1;
+    }
+    match (&case, &suite) {
+        (None, None) => bail!("`ahu eval run` needs --case <path> or --suite <path>."),
+        (Some(_), Some(_)) => {
+            bail!("--case and --suite are alternatives for `ahu eval run`; pass one.")
+        }
+        _ => {}
+    }
+    if agents.is_empty() {
+        bail!("`ahu eval run` needs --agent @name; repeat it to compare candidates.");
+    }
+    if agents.len() > 16 {
+        bail!("`ahu eval run` accepts at most 16 --agent candidates.");
+    }
+    for agent in &agents {
+        if !agent.starts_with('@') || agent.len() < 2 {
+            bail!("--agent must name a registered agent as @name");
+        }
+    }
+    // Two spellings of the same agent are a duplicate, and the matrix would run
+    // it twice and report it as two candidates.
+    let mut seen = std::collections::BTreeSet::new();
+    for agent in &agents {
+        if !seen.insert(agent.trim_start_matches('@')) {
+            bail!("--agent {agent} is named more than once.");
+        }
+    }
+    if let Some(evaluator) = &evaluator
+        && (!evaluator.starts_with('@') || evaluator.len() < 2)
+    {
+        bail!("--evaluator must name a registered agent as @name");
+    }
+    if decision_evaluator && (evaluator.is_some() || evaluator_repo.is_some()) {
+        bail!("--decision-evaluator conflicts with --evaluator and --evaluator-repo");
+    }
+    if evaluator_repo.is_some() && evaluator.is_none() {
+        bail!("--evaluator-repo needs --evaluator @name: it names where that evaluator runs from.");
+    }
+    let records = records.ok_or_else(|| {
+        crate::util::Error::new("`ahu eval run` needs --records <external-jsonl-path>.")
+    })?;
+    Ok(Command::EvalRun {
+        case,
+        suite,
+        agents,
+        evaluator,
+        evaluator_repo,
+        decision_evaluator,
+        skill_selection: skill_selection.unwrap_or_default(),
+        records,
+        runs,
+        timeout_seconds,
+        allow_widened_approvals,
+        output_json,
+    })
 }
 
 fn parse_onboard(rest: &[String]) -> Result<Command> {
@@ -873,6 +1349,7 @@ pub fn extract_color(
                     | "--summary"
                     | "--prompt-file"
                     | "--output"
+                    | "--limit"
                     | "--register"
                     | "--remove"
                     | "--model"
@@ -930,6 +1407,556 @@ fn parse_cmux(args: &[String]) -> Result<Command> {
 }
 
 #[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    fn assert_usage(args: &[&str], diagnostic: &str) {
+        let error = parse(args.iter().copied()).unwrap_err();
+        assert_eq!(error.kind(), crate::util::ErrorKind::Usage, "{args:?}");
+        assert!(error.to_string().contains(diagnostic), "{args:?}: {error}");
+    }
+
+    #[test]
+    fn task_listing_json_conflicts_and_limit_boundaries() {
+        assert_eq!(
+            parse(["tasks", "--output", "json"]).unwrap(),
+            Command::TasksJson
+        );
+        for limit in [1, 500] {
+            assert_eq!(
+                parse(["tasks", "--limit", &limit.to_string()]).unwrap(),
+                Command::Tasks { limit: Some(limit) }
+            );
+        }
+        for selection in [vec!["--all"], vec!["--limit", "20"]] {
+            for json_first in [false, true] {
+                let mut args = vec!["tasks"];
+                if json_first {
+                    args.extend(["--output", "json"]);
+                }
+                args.extend(selection.iter().copied());
+                if !json_first {
+                    args.extend(["--output", "json"]);
+                }
+                assert_usage(&args, "returns the complete list");
+            }
+        }
+        assert_usage(&["tasks", "--output", "yaml"], "expected json");
+        assert_usage(&["tasks", "--limit", "NaN"], "between 1 and 500");
+        for options in [
+            vec!["--all", "--all"],
+            vec!["--limit", "20", "--limit", "21"],
+            vec!["--limit", "20", "--all"],
+            vec!["--output", "json", "--output", "json"],
+        ] {
+            let mut args = vec!["tasks"];
+            args.extend(options);
+            assert_usage(&args, "unexpected option");
+        }
+    }
+
+    #[test]
+    fn help_flags_preserve_option_values_and_message_payloads() {
+        assert_usage(&["help", "eval", "run", "extra"], "usage: ahu help");
+        for flag in ["--help", "-h"] {
+            assert_usage(&[flag, "tasks"], "use `ahu help COMMAND`");
+            assert_eq!(
+                parse(["eval", "run", flag]).unwrap(),
+                Command::Help {
+                    topic: Some("eval run".into()),
+                }
+            );
+            assert_eq!(
+                parse(["message", "fixture", flag]).unwrap(),
+                Command::Message {
+                    task_id: "fixture".into(),
+                    text: flag.into(),
+                }
+            );
+            assert_eq!(
+                parse(["onboard", "--model", flag]).unwrap(),
+                Command::Onboard {
+                    register: None,
+                    remove: None,
+                    model: Some(flag.into()),
+                    version: "0.1.0".into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn knowledge_lint_refuses_missing_repeated_and_unknown_options() {
+        for output_json in [false, true] {
+            let mut args = vec!["knowledge", "lint"];
+            if output_json {
+                args.extend(["--output", "json"]);
+            }
+            assert_eq!(parse(args).unwrap(), Command::KnowledgeLint { output_json });
+        }
+        for (args, diagnostic) in [
+            (vec!["knowledge"], "needs a subcommand"),
+            (vec!["knowledge", "fetch"], "unknown subcommand"),
+            (
+                vec!["knowledge", "lint", "--output"],
+                "--output needs a value",
+            ),
+            (
+                vec!["knowledge", "lint", "--output", "text"],
+                "unsupported --output",
+            ),
+            (
+                vec!["knowledge", "lint", "--output", "json", "--output", "json"],
+                "unknown or repeated option",
+            ),
+            (
+                vec!["knowledge", "lint", "--unknown"],
+                "unknown or repeated option",
+            ),
+        ] {
+            assert_usage(&args, diagnostic);
+        }
+    }
+
+    #[test]
+    fn batch_control_requires_task_and_scopes_resume_options() {
+        for action in ["wait", "result", "cancel", "cleanup", "resume"] {
+            for json in [false, true] {
+                let mut args = vec![action, "ahu:task:fixture"];
+                if json {
+                    args.extend(["--output", "json"]);
+                }
+                let prompt = if action == "resume" {
+                    args.extend(["--prompt-file", "next task.txt"]);
+                    Some(PathBuf::from("next task.txt"))
+                } else {
+                    None
+                };
+                assert_eq!(
+                    parse(args).unwrap(),
+                    Command::BatchControl {
+                        action: action.into(),
+                        task_id: "ahu:task:fixture".into(),
+                        prompt,
+                        json,
+                    }
+                );
+            }
+            assert_usage(&[action], "task id required");
+            assert_usage(&[action, "--output", "json"], "task id required");
+            assert_usage(&[action, "fixture", "--output", "yaml"], "expected json");
+            assert_usage(&[action, "fixture", "--output"], "--output needs a value");
+            assert_usage(
+                &[action, "fixture", "--output", "json", "--output", "json"],
+                "unexpected option",
+            );
+            if action != "resume" {
+                assert_usage(
+                    &[action, "fixture", "--prompt-file", "task.txt"],
+                    "unexpected option",
+                );
+            }
+        }
+        assert_usage(&["resume", "fixture"], "resume requires --prompt-file");
+        assert_usage(
+            &["resume", "fixture", "--prompt-file"],
+            "--prompt-file needs a value",
+        );
+        assert_usage(
+            &[
+                "resume",
+                "fixture",
+                "--prompt-file",
+                "a",
+                "--prompt-file",
+                "b",
+            ],
+            "unexpected option",
+        );
+    }
+
+    #[test]
+    fn onboard_parses_registration_removal_and_preview() {
+        assert_eq!(
+            parse(["onboard"]).unwrap(),
+            Command::Onboard {
+                register: None,
+                remove: None,
+                model: None,
+                version: "0.1.0".into(),
+            }
+        );
+        assert_eq!(
+            parse([
+                "onboard",
+                "--register",
+                "fixture",
+                "--model",
+                "fixture-model",
+                "--agent-version",
+                "1.2.3",
+            ])
+            .unwrap(),
+            Command::Onboard {
+                register: Some("fixture".into()),
+                remove: None,
+                model: Some("fixture-model".into()),
+                version: "1.2.3".into(),
+            }
+        );
+        assert_eq!(
+            parse(["onboard", "--remove", "fixture"]).unwrap(),
+            Command::Onboard {
+                register: None,
+                remove: Some("fixture".into()),
+                model: None,
+                version: "0.1.0".into(),
+            }
+        );
+        for flag in ["--register", "--remove", "--model", "--agent-version"] {
+            assert_usage(&["onboard", flag], &format!("{flag} needs a value"));
+        }
+        assert_usage(&["onboard", "--unknown"], "unknown option");
+        assert_usage(
+            &["onboard", "--register", "a", "--remove", "b"],
+            "cannot be combined",
+        );
+    }
+
+    #[test]
+    fn internal_workers_require_task_directory() {
+        for command in ["run-task", "supervise"] {
+            let task_dir = PathBuf::from("task directory");
+            let expected = if command == "run-task" {
+                Command::RunTask { task_dir }
+            } else {
+                Command::BatchSupervisor { task_dir }
+            };
+            assert_eq!(
+                parse([command, "--task-dir", "task directory"]).unwrap(),
+                expected
+            );
+            assert_usage(&[command], "--task-dir");
+            assert_usage(&[command, "--task-dir"], "--task-dir");
+        }
+        assert_usage(&["run-task", "--unknown"], "unknown option");
+        for args in [
+            vec!["supervise", "directory"],
+            vec!["supervise", "--unknown", "directory"],
+            vec!["supervise", "--task-dir", "directory", "extra"],
+        ] {
+            assert_usage(&args, "supervise requires --task-dir PATH");
+        }
+    }
+
+    #[test]
+    fn cmux_install_validates_harness_and_singleton_options() {
+        for harness in ["claude-code", "codex", "opencode", "antigravity"] {
+            for dry_run in [false, true] {
+                let mut args = vec!["cmux", "install"];
+                if dry_run {
+                    args.push("--dry-run");
+                }
+                args.extend(["--harness", harness]);
+                assert_eq!(
+                    parse(args).unwrap(),
+                    Command::CmuxInstall {
+                        harness: harness.into(),
+                        dry_run,
+                    }
+                );
+            }
+        }
+        assert_usage(&["cmux", "install"], "--harness ID required");
+        assert_usage(&["cmux", "install", "--harness"], "--harness needs a value");
+        assert_usage(
+            &["cmux", "install", "--harness", "unknown"],
+            "unsupported harness",
+        );
+        for args in [
+            vec![
+                "cmux",
+                "install",
+                "--harness",
+                "codex",
+                "--harness",
+                "opencode",
+            ],
+            vec![
+                "cmux",
+                "install",
+                "--harness",
+                "codex",
+                "--dry-run",
+                "--dry-run",
+            ],
+            vec!["cmux", "install", "--unknown"],
+            vec!["cmux", "status", "--output", "yaml"],
+            vec!["cmux"],
+            vec!["cmux", "unknown"],
+        ] {
+            assert_usage(&args, "expected ahu cmux");
+        }
+    }
+
+    #[test]
+    fn eval_run_checks_numeric_limits_and_candidate_identity() {
+        let base = [
+            "eval",
+            "run",
+            "--case",
+            "case.md",
+            "--records",
+            "runs.jsonl",
+        ];
+        for (flag, values, diagnostic) in [
+            (
+                "--runs",
+                vec!["0", "101", "no", "4294967296"],
+                "--runs must be an integer",
+            ),
+            (
+                "--timeout",
+                vec!["0", "86401", "no", "18446744073709551616"],
+                "--timeout must be an integer",
+            ),
+        ] {
+            for value in values {
+                let mut args = base.to_vec();
+                args.extend(["--agent", "@fixture", flag, value]);
+                assert_usage(&args, diagnostic);
+            }
+        }
+        for (extra, diagnostic) in [
+            (vec![], "needs --agent"),
+            (vec!["--agent", "@"], "--agent must name"),
+            (
+                vec!["--agent", "@fixture", "--agent", "@fixture"],
+                "named more than once",
+            ),
+            (
+                vec!["--agent", "@fixture", "--agent", "@@fixture"],
+                "named more than once",
+            ),
+            (
+                vec!["--agent", "@fixture", "--evaluator", "judge"],
+                "--evaluator must name",
+            ),
+            (
+                vec!["--agent", "@fixture", "--evaluator", "@"],
+                "--evaluator must name",
+            ),
+            (
+                vec!["--agent", "@fixture", "--output", "yaml"],
+                "unsupported --output",
+            ),
+        ] {
+            let mut args = base.to_vec();
+            args.extend(extra);
+            assert_usage(&args, diagnostic);
+        }
+        assert_usage(
+            &["eval", "run", "--case", "case.md", "--agent", "@fixture"],
+            "needs --records",
+        );
+
+        // The maximum candidate count is accepted, with input order intact.
+        let agents: Vec<String> = (0..16).map(|n| format!("@fixture{n}")).collect();
+        let mut args: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+        for agent in &agents {
+            args.extend(["--agent".into(), agent.clone()]);
+        }
+        args.extend(
+            [
+                "--runs",
+                "100",
+                "--timeout",
+                "86400",
+                "--allow-widened-approvals",
+            ]
+            .map(str::to_string),
+        );
+        assert_eq!(
+            parse(args.clone()).unwrap(),
+            Command::EvalRun {
+                case: Some("case.md".into()),
+                suite: None,
+                agents,
+                evaluator: None,
+                evaluator_repo: None,
+                decision_evaluator: false,
+                skill_selection: crate::skill_selection::Mode::None,
+                records: "runs.jsonl".into(),
+                runs: 100,
+                timeout_seconds: 86400,
+                allow_widened_approvals: true,
+                output_json: false,
+            }
+        );
+        args.extend(["--agent".into(), "@overflow".into()]);
+        assert_usage(
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            "at most 16",
+        );
+    }
+
+    #[test]
+    fn eval_skill_selection_is_explicit_bounded_and_documented() {
+        for mode in ["none", "lexical", "decision"] {
+            let parsed = parse(
+                [
+                    "eval",
+                    "run",
+                    "--case",
+                    "case.md",
+                    "--agent",
+                    "@fixture",
+                    "--records",
+                    "/tmp/records.jsonl",
+                    "--skill-selection",
+                    mode,
+                ]
+                .map(str::to_owned),
+            )
+            .unwrap();
+            assert!(
+                matches!(parsed, Command::EvalRun { skill_selection, .. } if skill_selection.as_str() == mode)
+            );
+        }
+        assert_usage(
+            &[
+                "eval",
+                "run",
+                "--case",
+                "case.md",
+                "--agent",
+                "@fixture",
+                "--records",
+                "/tmp/records.jsonl",
+                "--skill-selection",
+                "automatic",
+            ],
+            "skill selection mode",
+        );
+        assert_usage(
+            &[
+                "eval",
+                "run",
+                "--case",
+                "case.md",
+                "--agent",
+                "@fixture",
+                "--records",
+                "/tmp/records.jsonl",
+                "--skill-selection",
+                "none",
+                "--skill-selection",
+                "decision",
+            ],
+            "unknown or repeated",
+        );
+        assert!(
+            help_for(Some("eval run"))
+                .unwrap()
+                .contains("--skill-selection")
+        );
+    }
+
+    #[test]
+    fn headless_launch_keeps_options_separate_from_literal_prompt_values() {
+        for policy in ["disabled", "bounded"] {
+            let Command::HeadlessLaunch { launch, options } = parse([
+                "launch",
+                "@fixture",
+                "--headless",
+                "--background",
+                "--timeout",
+                "1",
+                "--native-helpers",
+                policy,
+                "--allow-child",
+                "@reader",
+                "--allow-child",
+                "checker",
+                "--allow-child-widened",
+                "@writer",
+                "--prompt",
+                "--background",
+                "--output",
+                "json",
+            ])
+            .unwrap() else {
+                panic!("expected headless launch")
+            };
+            assert_eq!(
+                options,
+                crate::headless::Options {
+                    background: true,
+                    timeout_seconds: 1,
+                    native_helpers: policy.into(),
+                    native_helpers_explicit: true,
+                    child_agents: vec!["reader".into(), "checker".into()],
+                    child_widened: vec!["writer".into()],
+                }
+            );
+            assert_eq!(
+                *launch,
+                Command::Launch {
+                    agent: "fixture".into(),
+                    prompt: PromptSource::Inline("--background".into()),
+                    display: crate::launch::DisplayMetadata::default(),
+                    output_json: true,
+                    dry_run: false,
+                    allow_widened_approvals: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn headless_launch_rejects_invalid_and_repeated_backend_options() {
+        for (extra, diagnostic) in [
+            (vec!["--headless", "--headless"], "repeated batch option"),
+            (
+                vec!["--background", "--background"],
+                "repeated batch option",
+            ),
+            (
+                vec!["--timeout", "1", "--timeout", "2"],
+                "repeated batch option",
+            ),
+            (
+                vec![
+                    "--native-helpers",
+                    "disabled",
+                    "--native-helpers",
+                    "bounded",
+                ],
+                "repeated batch option",
+            ),
+            (vec!["--timeout", "zero"], "--timeout needs seconds"),
+            (vec!["--timeout", "0"], "timeout must be positive"),
+            (
+                vec!["--native-helpers", "unlimited"],
+                "native helpers must be disabled or bounded",
+            ),
+            (
+                vec!["--allow-child", "../reader"],
+                "invalid child agent name",
+            ),
+            (
+                vec!["--allow-child-widened", "@"],
+                "invalid child agent name",
+            ),
+        ] {
+            let mut args = vec!["launch", "@fixture", "--prompt", "task"];
+            args.extend(extra);
+            assert_usage(&args, diagnostic);
+        }
+    }
+}
+
+#[cfg(test)]
 mod color_tests {
     use super::*;
 
@@ -980,6 +2007,103 @@ mod color_tests {
 }
 
 #[cfg(test)]
+mod focused_help_tests {
+    use super::*;
+
+    fn parse_args(args: &[&str]) -> Result<Command> {
+        parse(args.iter().copied())
+    }
+
+    #[test]
+    fn help_is_short_by_default_and_focused_by_command() {
+        assert!(help_for(None).unwrap().len() < HELP_ALL.len() / 3);
+        assert!(
+            help_for(Some("tasks"))
+                .unwrap()
+                .contains("default limit: 20")
+        );
+        assert!(help_for(Some("doctor")).unwrap().contains("--verbose"));
+        assert!(help_for(Some("all")).unwrap().contains("eval run options:"));
+        assert!(
+            parse_args(&["setup", "--help"]).unwrap()
+                == Command::Help {
+                    topic: Some("setup".into())
+                }
+        );
+        assert!(
+            parse_args(&["help", "tasks"]).unwrap()
+                == Command::Help {
+                    topic: Some("tasks".into())
+                }
+        );
+    }
+
+    #[test]
+    fn task_limits_and_doctor_verbosity_are_parsed_explicitly() {
+        assert_eq!(
+            parse_args(&["tasks"]).unwrap(),
+            Command::Tasks { limit: Some(20) }
+        );
+        assert_eq!(
+            parse_args(&["tasks", "--all"]).unwrap(),
+            Command::Tasks { limit: None }
+        );
+        assert_eq!(
+            parse_args(&["tasks", "--limit", "7"]).unwrap(),
+            Command::Tasks { limit: Some(7) }
+        );
+        assert!(parse_args(&["tasks", "--limit", "0"]).is_err());
+        assert!(parse_args(&["tasks", "--limit", "501"]).is_err());
+        assert!(parse_args(&["tasks", "--all", "--limit", "4"]).is_err());
+        assert_eq!(
+            parse_args(&["doctor"]).unwrap(),
+            Command::Doctor { verbose: false }
+        );
+        assert_eq!(
+            parse_args(&["doctor", "--verbose"]).unwrap(),
+            Command::Doctor { verbose: true }
+        );
+    }
+
+    #[test]
+    fn help_topics_and_slices_are_consistent() {
+        for topic in ["--help", "-h", "ahu tasks"] {
+            assert!(!help_for(Some(topic)).unwrap().is_empty());
+        }
+        assert_eq!(help_for(Some("all")).unwrap(), HELP_ALL);
+        for (topic, expected) in [
+            ("setup", "Detect installed harnesses"),
+            ("lock", "--update refreshes the lock"),
+            ("cmux status", "native integration evidence"),
+            ("cmux install", "Preview or delegate"),
+            ("mcp serve", "stdio MCP"),
+            ("resume", "recorded native session"),
+            ("run-task", "Internal worker"),
+            ("supervise", "Internal supervisor"),
+        ] {
+            assert!(help_for(Some(topic)).unwrap().contains(expected), "{topic}");
+        }
+        for (topic, starts_with) in [
+            ("eval run", "eval run options:"),
+            ("eval report", "eval report options:"),
+            ("launch", "launch options:"),
+            ("explain", "explain options:"),
+            ("onboard", "onboard options:"),
+            ("knowledge lint", "knowledge lint options:"),
+        ] {
+            assert!(
+                help_for(Some(topic)).unwrap().starts_with(starts_with),
+                "{topic}"
+            );
+        }
+        assert!(help_for(Some("agents")).unwrap().contains("ahu agents"));
+        assert!(help_for(Some("unknown")).is_err());
+        assert!(help_section("absent:", "also absent:").is_empty());
+        assert!(help_line_for("unlisted").is_none());
+    }
+}
+
+#[cfg(test)]
 mod direct_agent_tests {
     use super::*;
 
@@ -1025,17 +2149,26 @@ mod direct_agent_tests {
     }
 
     #[test]
-    fn help_hides_inventory_and_diff_and_positional_prompt_conflicts_are_rejected() {
+    fn help_documents_lock_and_positional_prompt_conflicts_are_rejected() {
         assert!(
-            !HELP
-                .lines()
-                .any(|line| line.trim_start().starts_with("inventory "))
+            HELP.lines()
+                .any(|line| line.trim_start().starts_with("lock [--update]"))
         );
-        assert!(
-            !HELP
-                .lines()
-                .any(|line| line.trim_start().starts_with("diff "))
-        );
+        assert!(parse(["inventory"]).is_err());
+        assert!(parse(["hygiene"]).is_err());
         assert!(parse(["@dev-glm", "positional", "--prompt", "flag"]).is_err());
+    }
+
+    /// `ahu diff` was removed; plain git on the task's branch does the same
+    /// job. It must now fail exactly like any other word ahu does not know,
+    /// not be quietly re-parsed as something else.
+    #[test]
+    fn diff_is_no_longer_a_command() {
+        let unknown = parse(["not-a-command"]).expect_err("parsed");
+        for args in [vec!["diff"], vec!["diff", "abc1"]] {
+            let error = parse(args.clone()).unwrap_err();
+            assert_eq!(error.kind(), unknown.kind(), "{args:?}");
+            assert!(error.to_string().contains("unknown command"), "{error}");
+        }
     }
 }

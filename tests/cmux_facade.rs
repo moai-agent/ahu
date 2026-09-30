@@ -545,7 +545,34 @@ fn headless_dry_run_uses_the_same_status_and_refuses_unknown_registration() {
     let result = launch();
     assert!(!result.status.success());
     assert!(
-        String::from_utf8_lossy(&result.stderr).contains("headless cmux isolation is unverified")
+        String::from_utf8_lossy(&result.stderr).contains("headless cmux isolation is unverified"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!Path::new(preview["worktree"].as_str().unwrap()).exists());
+    f.write(
+        &executable,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.1.283; exit 0; fi\nexit 99\n",
+    );
+    let result = launch();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let preview: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(preview["cmux_integration"]["headless"]["allowed"], true);
+    let profile = ahu::harness::isolation::profile("claude-code", "2.1.283").unwrap();
+    assert!(
+        preview["capabilities"]["native_controls"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(profile.id))
+    );
+    let args = preview["command"]["args"].as_array().unwrap();
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == [json!(profile.args[0]), json!(profile.args[1])])
     );
     assert!(!Path::new(preview["worktree"].as_str().unwrap()).exists());
 }
@@ -904,7 +931,19 @@ fn isolation_profile_matrix_preserves_refusals_and_representation_parity() {
         let entry = ahu::catalog::harness(harness).unwrap();
         for reviewed in entry.headless_verified_versions {
             let clean = f.inspect(harness).with_version(Some(reviewed));
-            assert!(clean.headless.allowed, "{clean:?}");
+            if harness == "codex" && *reviewed == "0.157.1" {
+                // Exact catalog admission does not replace fresh native inspection.
+                assert!(!clean.headless.allowed, "{clean:?}");
+                assert!(
+                    clean
+                        .headless
+                        .reasons
+                        .iter()
+                        .any(|r| r.contains("fresh native"))
+                );
+            } else {
+                assert!(clean.headless.allowed, "{clean:?}");
+            }
         }
         assert!(!f.inspect(harness).with_version(None).headless.allowed);
         if !source.is_empty() {
@@ -935,4 +974,142 @@ fn isolation_profile_matrix_preserves_refusals_and_representation_parity() {
     let unknown = f.inspect("unknown").with_version(Some("1.2.2"));
     assert!(unknown.profile.is_none());
     assert!(!unknown.headless.allowed);
+}
+
+#[test]
+fn claude_invocation_isolation_covers_only_parsed_nonmanaged_hooks() {
+    let f = Fixture::new();
+    let settings = f.home.join(".claude/settings.json");
+    let hook = br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch synthetic-marker"}]}]}}"#;
+    f.write(&settings, hook);
+    assert!(!f.inspect("claude-code").headless.allowed);
+    let status = integration::headless_status(f.inspect("claude-code"), "2.1.283");
+    assert!(status.headless.allowed, "{:?}", status.headless.reasons);
+    assert!(
+        status
+            .components
+            .iter()
+            .any(|c| c.name == "Stop registration 1"
+                && c.isolation == Isolation::VerifiedDisable
+                && c.registration == Registration::Unknown)
+    );
+    for version in ["2.1.270", "2.1.284", ""] {
+        assert!(
+            !integration::headless_status(f.inspect("claude-code"), version)
+                .headless
+                .allowed
+        );
+    }
+    let managed = f.root.join("managed-settings.json");
+    f.write(&managed, hook);
+    let locations = Locations {
+        managed_claude: Some(managed),
+        ..f.locations()
+    };
+    let status = integration::inspect_in(&f.root, "claude-code", &locations);
+    assert!(
+        !integration::headless_status(status, "2.1.283")
+            .headless
+            .allowed
+    );
+    for bytes in [
+        &b"{invalid"[..],
+        &br#"{"hooks":{"Stop":42}}"#[..],
+        &br#"{"enabledPlugins":{"unknown":true}}"#[..],
+    ] {
+        f.write(&settings, bytes);
+        assert!(
+            !integration::headless_status(f.inspect("claude-code"), "2.1.283")
+                .headless
+                .allowed
+        );
+    }
+}
+
+#[test]
+fn codex_effective_metadata_covers_opaque_state_but_keeps_other_boundaries() {
+    let f = Fixture::new();
+    f.write(
+        f.home.join(".codex/auth.json"),
+        "synthetic opaque content must not be read",
+    );
+    std::fs::create_dir(f.home.join(".codex/plugins")).unwrap();
+    let metadata = json!({"data":[{"cwd":f.root,"hooks":[],"warnings":[],"errors":[]}]});
+    assert!(!f.inspect("codex").headless.allowed);
+    let status =
+        integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata).unwrap();
+    let status = status.with_version(Some("0.157.1"));
+    assert!(status.headless.allowed);
+    assert!(
+        !serde_json::to_string(&status)
+            .unwrap()
+            .contains("synthetic opaque content")
+    );
+    // A version observation alone is never a substitute for native inspection.
+    assert!(
+        !integration::headless_status(f.inspect("codex"), "0.157.1")
+            .headless
+            .allowed
+    );
+    f.write(
+        f.root.join(".codex/config.toml"),
+        "include = 'unknown.toml'",
+    );
+    assert!(integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata).is_err());
+    std::fs::remove_file(f.root.join(".codex/config.toml")).unwrap();
+    let system = f.root.join("system");
+    f.write(system.join("requirements.toml"), "synthetic requirement");
+    let locations = Locations {
+        system_codex: Some(system),
+        ..f.locations()
+    };
+    let status = integration::inspect_in(&f.root, "codex", &locations);
+    assert!(integration::codex_effective_status(status, &f.root, &metadata).is_err());
+}
+
+#[test]
+fn codex_effective_metadata_refuses_unknown_hooks_even_if_disabled_or_untrusted() {
+    let f = Fixture::new();
+    for enabled in [true, false] {
+        for trust in ["trusted", "untrusted", "modified"] {
+            let hook = json!({"eventName":"stop","handlerType":"command","command":"touch synthetic-marker","isManaged":false,"enabled":enabled,"trustStatus":trust,"source":"user"});
+            let metadata =
+                json!({"data":[{"cwd":f.root,"hooks":[hook],"warnings":[],"errors":[]}]});
+            let error = integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata)
+                .unwrap_err();
+            assert!(error.to_string().contains("guarded allowlist"));
+        }
+    }
+    for hook in [
+        json!({"eventName":"stop","handlerType":"mcpTool","isManaged":false,"enabled":true,"source":"plugin"}),
+        json!({"eventName":"stop","handlerType":"command","isManaged":true,"enabled":true,"source":"cloudRequirements"}),
+        json!({"eventName":"unknown","handlerType":"command","isManaged":false,"enabled":true,"source":"user"}),
+    ] {
+        let metadata = json!({"data":[{"cwd":f.root,"hooks":[hook],"warnings":[],"errors":[]}]});
+        assert!(
+            integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata).is_err()
+        );
+    }
+}
+
+#[test]
+fn codex_effective_metadata_rejects_incomplete_scopes_and_unresolved_paths() {
+    let f = Fixture::new();
+    for metadata in [
+        json!({}),
+        json!({"data":[]}),
+        json!({"data":[{"cwd":"/unrelated","hooks":[],"warnings":[],"errors":[]}]}),
+        json!({"data":[{"cwd":f.root,"hooks":[],"warnings":["unresolved"],"errors":[]}]}),
+        json!({"data":[{"cwd":f.root,"hooks":[],"warnings":[],"errors":[{}]}]}),
+        json!({"data":[{"cwd":f.root,"hooks":[],"warnings":[]}]}),
+        json!({"data":[{"cwd":f.root,"hooks":vec![json!({});257],"warnings":[],"errors":[]}]}),
+    ] {
+        assert!(
+            integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata).is_err()
+        );
+    }
+    std::fs::create_dir(f.home.join(".codex")).unwrap();
+    std::os::unix::fs::symlink(f.root.join("missing"), f.home.join(".codex/auth.json")).unwrap();
+    let metadata = json!({"data":[{"cwd":f.root,"hooks":[],"warnings":[],"errors":[]}]});
+    assert!(integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata).is_err());
 }

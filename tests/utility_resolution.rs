@@ -388,12 +388,22 @@ fn a_multi_version_catalog_entry_matches_any_version_it_lists() {
         );
     }
 
-    // Single-version entries keep their exact-match behaviour.
-    for single in ["claude-code", "codex", "antigravity"] {
-        let entry = ahu::catalog::harness(single).expect("catalog entry");
+    // Catalog entries name only versions whose surface has been observed.
+    for (harness, expected) in [
+        ("claude-code", vec!["2.1.269", "2.1.283"]),
+        ("codex", vec!["0.154.0", "0.157.1"]),
+        ("antigravity", vec!["1.2.2"]),
+    ] {
+        let entry = ahu::catalog::harness(harness).expect("catalog entry");
+        let versions: Vec<&str> = entry
+            .verified_versions
+            .split(',')
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .collect();
         assert!(
-            !entry.verified_versions.contains(','),
-            "{single} is expected to name one version: {}",
+            versions == expected,
+            "{harness} verified versions differ: {}",
             entry.verified_versions
         );
     }

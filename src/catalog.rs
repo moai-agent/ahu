@@ -12,7 +12,7 @@ use crate::bail;
 use crate::util::Result;
 
 /// The catalog revision shipped with this ahu build.
-pub const CATALOG_VERSION: &str = "2026-09-13";
+pub const CATALOG_VERSION: &str = "2026-09-27";
 
 /// One capability a harness adapter has actually been validated to deliver.
 ///
@@ -154,13 +154,13 @@ pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
     let entry = harness(id)?;
     let evidence = match id {
         "codex" => {
-            "Absent native sources or exact reviewed hook commands with disable guards; plugins, cloud/authentication and managed sources must be resolved."
+            "Absent native sources or exact reviewed guarded hook commands. Codex 0.157.1 requires fresh native hook and requirements inspection with its frozen invocation profile; credentials remain native and unread, optional plugins and notify are disabled, and mandatory policy must be absent."
         }
         "opencode" => {
             "Absent native sources or the exact reviewed guarded Session plugin; Feed is unsafe, and authentication/account stores, substitutions and declared modules are unresolved."
         }
         "claude-code" => {
-            "Direct executable bypasses the cmux wrapper; separately configured hooks, enabled plugins and managed settings must be resolved."
+            "Direct executable bypasses the cmux wrapper; 2.1.283 headless invocations disable non-managed hooks with a frozen profile. Enabled plugins and managed settings must still be resolved."
         }
         "antigravity" => {
             "Absent inspected hook configuration; custom hooks, extensions and configuration overrides are unverified."
@@ -220,11 +220,14 @@ pub const HARNESSES: &[HarnessEntry] = &[
         display_name: "Claude Code",
         adapter_available: true,
         executable: "claude",
-        verified_versions: "2.1.269",
-        // Interactive and headless surfaces were validated on different sets:
-        // the interactive adapter was checked on 2.1.269, the batch argument
-        // surface and event stream on both.
-        headless_verified_versions: &["2.1.269", "2.1.270"],
+        // 2.1.283 was live-probed on 2026-09-27 through an ahu interactive
+        // launch: the pinned model was accepted and the task prompt was delivered.
+        verified_versions: "2.1.269, 2.1.283",
+        // Interactive and headless surfaces were validated on different sets;
+        // the batch argument surface and event stream were checked on both.
+        // 2.1.283: live prompt receipt/completion/exit/usage verified with
+        // the frozen non-managed-hook isolation profile on 2026-09-28.
+        headless_verified_versions: &["2.1.269", "2.1.270", "2.1.283"],
         enforces_model_for_session: false,
         features: &[
             Feature::InteractiveLaunch,
@@ -247,10 +250,15 @@ pub const HARNESSES: &[HarnessEntry] = &[
         display_name: "Codex",
         adapter_available: true,
         executable: "codex",
-        verified_versions: "0.154.0",
+        // 0.157.1 was live-probed on 2026-09-27 through an ahu interactive
+        // launch: the pinned model was accepted and the task prompt was delivered.
+        verified_versions: "0.154.0, 0.157.1",
         // 0.155.1 retains the batch argv surface; a live JSON launch and
         // native-session resume both emitted the expected identity and terminal events.
-        headless_verified_versions: &["0.154.0", "0.155.1"],
+        // 0.157.1: fresh native admission and authenticated prompt receipt,
+        // completion, exit and usage parsing verified on 2026-09-28 through
+        // ahu batch argv and event parsing with the frozen inspection profile.
+        headless_verified_versions: &["0.154.0", "0.155.1", "0.157.1"],
         enforces_model_for_session: false,
         features: &[
             Feature::InteractiveLaunch,
@@ -318,7 +326,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
             "--agent <name> is accepted but not validated: a missing name only warns \"agent ... not found. Falling back to default agent\" and the run continues, so the flag can never confirm an identity was applied. It would also override the agent's own model and permissions, contradicting the model ahu pins. ahu does not pass it",
             "OpenCode defaults most tool permissions to allow, so an agent declaring permissions = prompt does not mean OpenCode asks before acting; the effective boundary comes from the user's own OpenCode configuration, not from any flag ahu passes",
             "inference for an ollama/*:cloud model is performed by Ollama's cloud service reached through the local endpoint; it is not local inference, and ahu neither holds nor checks those credentials",
-            "OpenCode has no sandbox of its own and ahu passes none, so its file tools act on whatever absolute path the model names. Observed under --auto on 1.18.30: a write landed in the parent checkout rather than the task worktree ahu launched in, where `ahu diff` does not look. ahu discloses such paths: headless attempts record write-tool targets outside the worktree in the result envelope, and an empty `ahu diff` says so on stderr. The disclosure is post-run review information, not a boundary; the worktree is still where the session starts, not a wall",
+            "OpenCode has no sandbox of its own and ahu passes none, so its file tools act on whatever absolute path the model names. Observed under --auto on 1.18.30: a write landed in the parent checkout rather than the task worktree ahu launched in, where reviewing the task's branch does not look. ahu discloses such paths: headless attempts record write-tool targets outside the worktree in the result envelope, and `ahu task` and `ahu result` print them. The disclosure is post-run review information, not a boundary; the worktree is still where the session starts, not a wall",
         ],
     },
 ];
@@ -453,4 +461,55 @@ pub fn require_version(pinned: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_lookups_and_rankings_are_harness_scoped() {
+        assert!(harness("codex").is_some());
+        assert_eq!(
+            harness("codex").unwrap().verified_versions,
+            "0.154.0, 0.157.1"
+        );
+        assert_eq!(
+            harness("claude-code").unwrap().verified_versions,
+            "2.1.269, 2.1.283"
+        );
+        assert!(harness("unknown").is_none());
+        assert!(supports("codex", Feature::InteractiveLaunch));
+        assert!(!supports("unknown", Feature::InteractiveLaunch));
+        let models = models_for("codex");
+        assert!(!models.is_empty());
+        assert!(
+            models
+                .windows(2)
+                .all(|pair| pair[0].quality_rank <= pair[1].quality_rank)
+        );
+        assert!(model("codex", models[0].model).is_some());
+        assert!(model("opencode", models[0].model).is_none());
+        assert!(models_for("unknown").is_empty());
+    }
+
+    #[test]
+    fn isolation_profiles_and_headless_versions_fail_closed() {
+        for harness in ["codex", "opencode", "claude-code", "antigravity"] {
+            let profile = isolation_profile(harness).unwrap();
+            assert!(!profile.version_policy.is_empty());
+            assert!(!profile.evidence.is_empty());
+            assert!(!profile.limitations.is_empty());
+            let version = profile.headless_verified_versions[0];
+            check_headless_version(harness, version).unwrap();
+            check_headless_version(harness, &format!("{harness} {version} (reviewed)")).unwrap();
+            assert!(check_headless_version(harness, "").is_err());
+            assert!(check_headless_version(harness, "999.0.0").is_err());
+        }
+        check_headless_version("codex", "codex-cli 0.157.1").unwrap();
+        assert!(check_headless_version("codex", "0.157.2").is_err());
+        assert!(isolation_profile("unknown").is_none());
+        assert!(require_version(CATALOG_VERSION).is_ok());
+        assert!(require_version("unreleased-catalog").is_err());
+    }
 }
