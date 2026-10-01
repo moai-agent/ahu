@@ -19,6 +19,31 @@ fn call_id(value: Option<&Value>) -> Option<&str> {
         .filter(|id| !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_graphic()))
 }
 
+fn possible_skill_event(harness: &str, event: &Value) -> bool {
+    let is =
+        |value: Option<&Value>, expected: &str| value.and_then(Value::as_str) == Some(expected);
+    match harness {
+        "codex" => {
+            is(event.pointer("/item/name"), "skill") || is(event.pointer("/item/name"), "Skill")
+        }
+        "claude-code" => event
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    is(block.get("name"), "Skill") && is(block.get("type"), "tool_use")
+                })
+            }),
+        "opencode" => is(event.pointer("/part/tool"), "skill"),
+        "antigravity" => {
+            is(event.get("name"), "Skill")
+                || is(event.pointer("/step_update/tool_name"), "Skill")
+                || is(event.pointer("/step_update/tool_info/name"), "Skill")
+        }
+        _ => false,
+    }
+}
+
 impl Events {
     pub(super) fn observe_skill(&mut self, harness: &str, event: &Value) {
         use crate::telemetry::SkillEvidence;
@@ -80,6 +105,12 @@ impl Events {
                 }
             }
             _ => (),
+        }
+        if inputs.is_empty() && possible_skill_event(harness, event) {
+            self.skill_unknown_events = self.skill_unknown_events.saturating_add(1);
+            if self.skill_observation != SkillEvidence::Observed {
+                self.skill_observation = SkillEvidence::Unverified;
+            }
         }
         for (input, id, completion) in inputs {
             let name = input

@@ -1375,6 +1375,30 @@ fn skill_catalog(worktree: &Path) -> Vec<SkillCatalogEntry> {
     entries
 }
 
+/// Attribute an observed invocation only to exact local catalog entries.
+/// Duplicate paths with identical bytes establish the digest but not which
+/// copy the harness loaded; conflicting copies establish neither provenance.
+fn attribute_skill_provenance(skills: &mut [SkillInvocation], catalog: &[SkillCatalogEntry]) {
+    for skill in skills {
+        let matches: Vec<_> = catalog
+            .iter()
+            .filter(|entry| entry.name == skill.name)
+            .collect();
+        if matches.is_empty() {
+            continue;
+        }
+
+        let digests: std::collections::BTreeSet<_> =
+            matches.iter().map(|entry| entry.digest.as_str()).collect();
+        if digests.len() == 1 {
+            skill.digest = Some(matches[0].digest.clone());
+        }
+        if matches.len() == 1 {
+            skill.source = Some(matches[0].source.clone());
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Events {
     pub session: Option<String>,
@@ -2615,6 +2639,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         );
     }
     let skill_catalog = skill_catalog(&record.worktree);
+    attribute_skill_provenance(&mut events.skills, &skill_catalog);
     let outcome = if let Some((reason, _)) = stop {
         reason
     } else if !status.success() || events.failed {
@@ -2666,6 +2691,19 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
                 .collect::<Vec<_>>()
                 .join(","),
         );
+        let provenance: Vec<_> = events
+            .skills
+            .iter()
+            .filter_map(|skill| {
+                skill
+                    .digest
+                    .as_ref()
+                    .map(|digest| format!("{}=sha256:{digest}", skill.name))
+            })
+            .collect();
+        if !provenance.is_empty() {
+            telemetry_span.set_string("ahu.skills.invoked.provenance", provenance.join(","));
+        }
     }
     let helpers: Vec<Value> = events.native.helpers().iter().map(|h| json!({
         "task_id":h.task_id,"role":h.role,"depth":h.depth,"backgrounded":h.backgrounded,"status":h.status,
@@ -3523,6 +3561,72 @@ mod profile_and_metadata_tests {
                 .digest,
             digest_bytes(b"zeta")
         );
+    }
+
+    #[test]
+    fn skill_invocation_provenance_requires_unambiguous_catalog_evidence() {
+        let invocation = |name: &str| SkillInvocation {
+            name: name.into(),
+            source: None,
+            digest: None,
+            status: "invoked".into(),
+            completed_at: None,
+            elapsed_ms: None,
+            harness: Some("opencode".into()),
+            observed_at: None,
+            evidence: crate::telemetry::SkillEvidence::Observed,
+            execution: crate::telemetry::SkillEvidence::Unverified,
+        };
+        let entry = |source: &str, digest: &str| SkillCatalogEntry {
+            name: "review".into(),
+            source: source.into(),
+            digest: digest.into(),
+        };
+
+        let mut skills = vec![invocation("review"), invocation("external")];
+        attribute_skill_provenance(
+            &mut skills,
+            &[entry(".agents/skills/review/SKILL.md", &"a".repeat(64))],
+        );
+        assert_eq!(
+            skills[0].source.as_deref(),
+            Some(".agents/skills/review/SKILL.md")
+        );
+        assert!(
+            skills[0]
+                .digest
+                .as_deref()
+                .is_some_and(|digest| digest == "a".repeat(64))
+        );
+        assert!(skills[1].source.is_none());
+        assert!(skills[1].digest.is_none());
+
+        let mut identical_copies = vec![invocation("review")];
+        attribute_skill_provenance(
+            &mut identical_copies,
+            &[
+                entry(".agents/skills/review/SKILL.md", &"b".repeat(64)),
+                entry(".claude/skills/review/SKILL.md", &"b".repeat(64)),
+            ],
+        );
+        assert!(identical_copies[0].source.is_none());
+        assert!(
+            identical_copies[0]
+                .digest
+                .as_deref()
+                .is_some_and(|digest| digest == "b".repeat(64))
+        );
+
+        let mut conflicting_copies = vec![invocation("review")];
+        attribute_skill_provenance(
+            &mut conflicting_copies,
+            &[
+                entry(".agents/skills/review/SKILL.md", &"c".repeat(64)),
+                entry(".claude/skills/review/SKILL.md", &"d".repeat(64)),
+            ],
+        );
+        assert!(conflicting_copies[0].source.is_none());
+        assert!(conflicting_copies[0].digest.is_none());
     }
 
     #[cfg(unix)]

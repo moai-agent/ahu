@@ -3139,9 +3139,10 @@ fn skill_probe_normalized_records_are_bounded_and_harness_scoped() {
         events.observe(harness, &serde_json::to_vec(&drift).unwrap());
         assert!(events.skills.is_empty());
         assert_eq!(
-            serde_json::to_value(events).unwrap()["skill_observation"],
-            "unavailable"
+            serde_json::to_value(&events).unwrap()["skill_observation"],
+            "unverified"
         );
+        assert_eq!(events.skill_unknown_events, 1, "{harness}");
     }
 }
 

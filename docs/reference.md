@@ -747,8 +747,18 @@ worktree from observed skill invocations. A catalog entry records only its
 name, source path, and content digest. A skill invocation is recorded only when
 the harness emits a recognizable skill/tool event; mentioning a skill in text,
 having a skill on disk, or having an unrecognized event does not count as use.
-Invocation records are bounded and do not retain skill contents, prompts, or
-tool arguments.
+When an observed name matches one catalog entry, the invocation includes its
+repo-relative source and digest. Identical duplicate copies establish only the
+digest; conflicting copies or no local match establish neither. This is local
+catalog attribution, not proof of which path the harness loaded. OTel records
+the observed name and digest when resolved, but omits source paths. Invocation
+records are bounded and do not retain skill contents, prompts, or tool
+arguments. A present catalog entry with no invocation event is unobserved use.
+`skill_observation: unavailable` means no recognizable skill-tool event was
+seen; it does not mean a project skill itself is unavailable. Likely protocol
+drift is counted in `skill_unknown_events` and does not count as use. A catalog
+entry without a matching invocation is unobserved use, and only an explicit
+failed tool result is reported as a failed invocation.
 
 ## Sidebar text
 
