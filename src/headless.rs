@@ -1266,6 +1266,16 @@ pub struct TokenUsage {
     pub total: Option<u64>,
 }
 
+/// USD amounts reported by the harness. These are estimates/engine values,
+/// not provider billing records.
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReportedCost {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 impl TokenUsage {
     /// Shared field names for OTEL and the opt-in local metrics projection.
     pub(crate) fn normalized_fields(&self) -> [(&'static str, Option<u64>); 6] {
@@ -1343,6 +1353,51 @@ impl TokenUsage {
     }
 }
 
+impl ReportedCost {
+    fn observe_claude_result(&mut self, event: &Value) {
+        if event.get("type").and_then(Value::as_str) != Some("result") {
+            return;
+        }
+        self.observe(event.get("total_cost_usd"), "claude_code_result_total");
+    }
+
+    fn observe_opencode_step(
+        &mut self,
+        event: &Value,
+        seen: &mut std::collections::BTreeSet<String>,
+    ) {
+        if event.get("type").and_then(Value::as_str) != Some("step_finish") {
+            return;
+        }
+        let part = match event.get("part") {
+            Some(part) => part,
+            None => return,
+        };
+        let Some(id) = part.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        if !seen.insert(id.to_owned()) {
+            return;
+        }
+        self.observe(part.get("cost"), "opencode_step_finish_sum");
+    }
+
+    fn observe(&mut self, value: Option<&Value>, source: &str) {
+        let Some(value) = value.and_then(Value::as_f64) else {
+            return;
+        };
+        if !value.is_finite() || value < 0.0 {
+            return;
+        }
+        let total = self.usd.unwrap_or(0.0) + value;
+        if !total.is_finite() {
+            return;
+        }
+        self.usd = Some(total);
+        self.source = Some(source.to_owned());
+    }
+}
+
 fn skill_catalog(worktree: &Path) -> Vec<SkillCatalogEntry> {
     let roots = [
         ".agents/skills",
@@ -1417,6 +1472,8 @@ pub struct Events {
     #[serde(default)]
     pub usage: TokenUsage,
     #[serde(default)]
+    pub cost: ReportedCost,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub skills: Vec<SkillInvocation>,
@@ -1435,6 +1492,8 @@ pub struct Events {
     pub writes_outside_worktree: Vec<String>,
     #[serde(skip)]
     native_event_count: usize,
+    #[serde(skip)]
+    cost_step_ids: std::collections::BTreeSet<String>,
 }
 impl Events {
     fn observe_stderr(&mut self, line: &[u8]) {
@@ -1509,6 +1568,13 @@ impl Events {
             }
         };
         self.usage.observe(&event);
+        match harness {
+            "claude-code" => self.cost.observe_claude_result(&event),
+            "opencode" => self
+                .cost
+                .observe_opencode_step(&event, &mut self.cost_step_ids),
+            _ => (),
+        }
         self.observe_skill(harness, &event);
         if self.model.is_none() {
             self.model = event
@@ -2277,6 +2343,12 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         &spec.harness_version,
         &real,
     )?;
+    crate::auth_binding::capture_task_for_model(
+        &repo,
+        &record.identity.harness,
+        &record.identity.model,
+        dir,
+    )?;
     let eval_otel_capture = crate::telemetry::eval_endpoint_override().is_some();
     if let Some(parent) = &spec.parent_task {
         let parent_dir = lookup(&repo, parent)?;
@@ -2656,6 +2728,12 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             telemetry_span.set_u64(key, value);
         }
     }
+    if let Some(cost_usd) = events.cost.usd {
+        telemetry_span.set_f64("ahu.cost.harness_reported_usd", cost_usd);
+        if let Some(source) = events.cost.source.as_deref() {
+            telemetry_span.set_string("ahu.cost.source", source);
+        }
+    }
     telemetry_span.set_u64("ahu.skills.available", skill_catalog.len() as u64);
     telemetry_span.set_string("ahu.skills.observation", events.skill_observation.as_str());
     if events.skill_observation == crate::telemetry::SkillEvidence::Observed {
@@ -2721,7 +2799,8 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         "writes_outside_worktree":events.writes_outside_worktree,"write_evidence":"reported tool targets; not proof of writes",
         "descendant_cancellation":cancellation_results,"native_completeness":native_completeness,"ahu_children":ahu_children,
         "native_cleanup":"unknown for external/provider-managed processes"});
-    if let Some(metrics) = crate::telemetry::local_metrics(&telemetry, &events.usage) {
+    if let Some(metrics) = crate::telemetry::local_metrics(&telemetry, &events.usage, &events.cost)
+    {
         result["metrics"] = serde_json::to_value(metrics)?;
     }
     *phase = "result_persistence";
@@ -3030,6 +3109,13 @@ pub fn control(
                 );
             }
             let _owner = Lock::acquire(&dir.join("owner.lock"))?;
+            let task_record = task::load(&dir)?;
+            crate::auth_binding::verify_task_resume_for_model(
+                repo,
+                &task_record.identity.harness,
+                &task_record.identity.model,
+                &dir,
+            )?;
             recover_resume(&dir)?;
             let previous = result(&dir)?;
             if !matches!(
@@ -3270,6 +3356,55 @@ mod telemetry_usage_tests {
             ),
             serde_json::json!({"type":"turn.completed"})
         );
+    }
+
+    #[test]
+    fn reported_cost_is_normalized_without_claiming_billing() {
+        let mut claude = Events::default();
+        claude.observe(
+            "claude-code",
+            br#"{"type":"result","subtype":"success","total_cost_usd":0.0125,"usage":{"input_tokens":10}}"#,
+        );
+        assert_eq!(claude.cost.usd, Some(0.0125));
+        assert_eq!(
+            claude.cost.source.as_deref(),
+            Some("claude_code_result_total")
+        );
+
+        let mut opencode = Events::default();
+        let step =
+            br#"{"type":"step_finish","part":{"id":"step-1","cost":0.003,"reason":"tool-calls"}}"#;
+        opencode.observe("opencode", step);
+        opencode.observe("opencode", step);
+        opencode.observe(
+            "opencode",
+            br#"{"type":"step_finish","part":{"id":"step-2","cost":0.002,"reason":"stop"}}"#,
+        );
+        assert_eq!(opencode.cost.usd, Some(0.005));
+        assert_eq!(
+            opencode.cost.source.as_deref(),
+            Some("opencode_step_finish_sum")
+        );
+
+        let mut unsupported = Events::default();
+        unsupported.observe(
+            "codex",
+            br#"{"type":"turn.completed","usage":{"input_tokens":10},"total_cost_usd":99}"#,
+        );
+        assert_eq!(unsupported.cost.usd, None);
+        unsupported.observe(
+            "antigravity",
+            br#"{"type":"result","status":"success","response":"ok","total_cost_usd":99}"#,
+        );
+        assert_eq!(unsupported.cost.usd, None);
+
+        let mut invalid = Events::default();
+        invalid.observe("claude-code", br#"{"type":"result","total_cost_usd":-1}"#);
+        assert_eq!(invalid.cost.usd, None);
+
+        let encoded = serde_json::to_value(&opencode.cost).unwrap();
+        assert_eq!(encoded["usd"], 0.005);
+        assert_eq!(encoded["source"], "opencode_step_finish_sum");
     }
 }
 

@@ -18,6 +18,7 @@
 
 pub mod agent;
 pub mod agent_ref;
+pub mod auth_binding;
 pub mod catalog;
 pub mod cli;
 pub mod cmux;

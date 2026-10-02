@@ -250,6 +250,34 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             let repo = commands::repo_from_cwd()?;
             ahu::mcp::serve(&repo)
         }
+        Command::Auth {
+            action,
+            harness,
+            profile,
+            replace,
+        } => {
+            let repo = commands::repo_from_cwd()?;
+            let message = match action.as_str() {
+                "profiles" => ahu::auth_binding::list_profiles(&repo)?,
+                "bind" => match profile.as_deref() {
+                    Some(profile) => {
+                        ahu::auth_binding::bind_profile(&repo, &harness, profile, replace)?
+                    }
+                    None => ahu::auth_binding::bind(&repo, &harness, replace)?,
+                },
+                "status" => match profile.as_deref() {
+                    Some(profile) => ahu::auth_binding::status_profile(&repo, &harness, profile)?,
+                    None => ahu::auth_binding::status(&repo, &harness)?,
+                },
+                "select" => ahu::auth_binding::select_profile(
+                    &repo,
+                    profile.as_deref().expect("validated by parser"),
+                )?,
+                _ => unreachable!("auth action is validated by the parser"),
+            };
+            println!("{}", ahu::util::display_safe_block(&message));
+            Ok(0)
+        }
         // `doctor` reports on a missing repository rather than failing on one.
         Command::Doctor { verbose } => {
             let repo = commands::repo_from_cwd();
@@ -298,6 +326,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::CmuxStatus { .. }
                 | Command::CmuxInstall { .. }
                 | Command::McpServe
+                | Command::Auth { .. }
                 | Command::Claude
                 | Command::Codex
                 | Command::OpenCode

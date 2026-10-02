@@ -612,13 +612,17 @@ for source provenance.
 For local numeric headless attempt metrics without an exporter, set
 `local_metrics = true` in `[telemetry]` and leave `enabled = false`.
 Both options default to false and operate independently. Headless attempt results
-then include a `metrics` object with `schema_version = 1`, six normalized
+then include a `metrics` object with `schema_version = 2`, six normalized
 `ahu.tokens.*` fields under `values`, and
 `token_aggregation = "maximum-reported-per-field"`. Each value has
 `kind = "observed"` with an unsigned integer `value`, or
 `kind = "unavailable"` without a value. Zero is an observation, not missing data.
-No estimated values are produced; missing totals are never inferred.
-Reported maxima are not additive task totals or billing measurements.
+Schema version 2 also includes `ahu.cost.harness_reported_usd`, as
+`kind = "observed_float"` when the harness reported a finite non-negative amount,
+or `kind = "unavailable"` otherwise. This is a harness-reported USD signal,
+not a final provider bill. ahu does not derive prices from token counts. Token
+maxima are not additive task totals; the USD field follows the harness's reported
+session or step accounting described below.
 This option controls the new projection; it does not change existing
 `harness.usage` collection or retention.
 
@@ -658,7 +662,12 @@ explicit membership; a task resume uses its existing task and new attempt. Ident
 duplicates count once, conflicting duplicates fail without a partial result.
 Per-field output reports the maximum observed value and counts of observed and
 unavailable attempts. A null maximum means no observation; zero remains observed.
-Missing totals are never inferred and values are never summed: resumed sessions
+The summary includes validated repository and optional agent digests, harness,
+model, and outcome to identify a homogeneous report group. Mixed groups are
+rejected instead of pooled. Timing reports mean observed elapsed milliseconds
+and coverage. Harness-reported cost reports mean USD and coverage separately for
+each source; Claude Code and OpenCode amounts are never combined. Missing token
+totals are never inferred and token values are never summed: resumed sessions
 may repeat cumulative usage, and parent usage may overlap child usage. These are
 coverage statistics over supplied observations, not complete task totals or
 billing. Absent results, collection set to off, and undiscovered attempts are not
@@ -741,6 +750,45 @@ native OTel spans, if a harness emits them, remain harness-owned and may use
 different semantic conventions. Interactive sessions generally provide timing
 and process status; headless sessions additionally provide the structured event
 usage fields that ahu can normalize.
+
+### Cross-harness cost and quota coverage
+
+ahu records harness-reported USD only where the headless event stream exposes
+it. The field is named `ahu.cost.harness_reported_usd`; its source label is
+`claude_code_result_total` or `opencode_step_finish_sum`. Neither value is
+treated as a final bill. Claude Code's result amount can differ from account
+billing and its meaning depends on whether the account uses subscription or API
+key billing. OpenCode computes amounts from its provider/model cost data and can
+report zero when no price is configured; ahu sums each distinct `step_finish`
+part once. The JSON event stream may omit its last `step_finish`, so its observed
+amount can be incomplete. See the [Claude Code usage and limits guide](https://support.claude.com/en/articles/14552983-models-usage-and-limits-in-claude-code),
+[Claude Code monitoring guide](https://code.claude.com/docs/en/monitoring-usage),
+[OpenCode JSON run events](https://opencode.ai/docs/cli/), and
+[OpenCode stats command](https://opencode.ai/v2/docs/cli/commands/).
+
+| Harness | Token value and scope | USD value and evidence | Quota/capacity and freshness |
+| --- | --- | --- | --- |
+| Codex | `turn.completed` usage, per completed turn; absent when the event omits usage. | Unknown. The documented event schema has no cost field; ahu does not price tokens. | Unknown to ahu. No documented machine-readable per-run quota field. |
+| Claude Code | Result usage for the headless invocation; the stream also reports API-request usage. | Result `total_cost_usd`, fresh at invocation completion and labeled harness-reported. It may differ from account billing. | Unknown to ahu. `/usage` is an interactive account-level view, not a per-task signal. |
+| Antigravity CLI | `step_update` usage reported during the headless run; event scope follows the harness event. | Unknown. No documented per-run USD amount. | Unknown to ahu. Interactive `/usage` and `/credits` show account/plan state at refresh time; ahu does not scrape those views. |
+| OpenCode | `step_finish` token values, per model step. The final step event may be omitted from the JSON stream. | Per-step `cost`, summed once per observed part ID. It is an engine/provider-model value, not billing proof; a missing final event makes the sum incomplete. | Unknown in the headless stream. `opencode stats` is a separate historical report that may include other sessions, so ahu does not ingest it. |
+
+This matrix describes documented, machine-readable information that ahu can
+collect without scraping a terminal UI, reading harness databases, or deriving
+cost from list prices. Missing values stay unavailable. Token usage, USD
+estimates, provider invoices, subscription quota, and rate-limit failures are
+separate signals and must not be substituted for one another. Source references:
+[Codex event schema](https://github.com/openai/codex/blob/main/sdk/typescript/src/events.ts),
+[Antigravity headless stream](https://www.antigravity.google/docs/cli/headless/),
+[Antigravity credits](https://www.antigravity.google/docs/cli/credits/), and
+[Antigravity usage command](https://antigravity.google/docs/cli/commands/usage).
+
+These are ahu's current headless adapters; they do not establish equivalent
+coverage for interactive sessions. A model-scoped agent definition can make
+cost and capacity comparisons clearer because the harness/model identity is
+frozen per task. Such definitions should be reviewed and authored as normal ahu
+agents under the context-lock and identity rules. ahu should not generate or
+switch model variants automatically based on stale quota or price information.
 
 Headless results also distinguish the skill catalog copied into the task
 worktree from observed skill invocations. A catalog entry records only its
@@ -1699,3 +1747,68 @@ instructions to that provider and conflicts with `--evaluator` and
 provider failures remain failed judgments with unknown usage and no fallback.
 See [Typed decision evaluator](evaluations.md#typed-decision-evaluator) for
 request bounds, fingerprints, timing, and evaluator telemetry coverage.
+
+## Local harness account bindings
+
+Auth profiles are project-local and Git-ignored. They are stored under the
+primary checkout's owner-only `.ahu/state/repos/<repo-identity>/` directory,
+separate from committed `ahu.lock` because account identities are private.
+Each profile contains a fingerprint per bound provider, not account metadata,
+tokens, or API keys. A content digest detects edits outside the auth CLI;
+changes should go through `bind`, `select`, or an explicit `--replace`. This
+detects accidental or direct edits that did not update the digest; same-user
+code can still rewrite local state, so this is not a tamper-proof boundary.
+
+`ahu auth bind --harness ID` records the current identity in the active profile.
+Supported IDs are `codex`, `claude-code`, `antigravity`, and `ollama`. Use
+`--profile NAME` to bind another named profile, then
+`ahu auth select --profile NAME` to make that profile active for the project.
+`ahu auth status --harness ID` checks the active profile; add `--profile NAME`
+to inspect another. `--replace` deliberately changes that provider's binding
+inside the named profile.
+
+For Ollama, ahu reads `POST /api/me` from the loopback server named by
+`OLLAMA_HOST` (default `127.0.0.1:11434`). It requires a signed-in account and
+binds the account email and stable account ID. The confirmation identifies the
+account but never prints credentials. Remote Ollama servers are rejected so
+identity checks do not send account requests to an untrusted endpoint.
+
+Once a profile exists, ahu verifies the selected provider against the active
+project profile before creating a launch worktree. Every registered agent,
+worktree, and child task in that project inherits the same active profile;
+agents cannot select a different profile. Interactive task startup and
+headless attempts recheck immediately before process start. Each task stores
+the profile name and an identity fingerprint, never raw identity data. Before
+`ahu resume`, ahu checks both the active profile and the task's original
+profile and fingerprint before starting the harness or sending the resume
+prompt. Selecting or rebinding a profile cannot move an existing task to
+another account. A project with no profiles configured retains its prior
+interactive and headless behavior. Tasks pinned before profile names were added
+have no profile pin and must be submitted again to resume under this profile
+policy.
+
+Codex and Claude Code expose read-only identity metadata ahu can use. Ollama
+exposes its signed-in account through the local `/api/me` endpoint. For
+OpenCode, ahu applies this check only when the selected model is `ollama/...`
+and marked `:cloud` or `-cloud`; it checks the local Ollama account before
+launch and again before resume. This assumes OpenCode routes that model to the
+same loopback daemon configured by `OLLAMA_HOST`; ahu does not yet verify the
+effective provider URL. Local Ollama models do not require an account binding.
+Other OpenCode providers lack a verified identity check and are refused once
+the project has opted into auth profiles.
+
+Codex API-key mode does not expose a verified user principal. Antigravity has no
+standalone account-status command, but its startup TUI displays the signed-in
+email before the prompt. ahu captures that startup display in a bounded
+pseudo-terminal and terminates it without submitting a prompt. This check is
+version-sensitive to the visible banner; if the account email is absent or the
+startup format changes, ahu refuses to bind or resume.
+This is a preflight guard, not an atomic credential lock: a same-user process
+could change sign-in between the identity check and the provider request. A
+harness-specific isolated credential profile is required to eliminate that
+race. These bindings identify the currently active native login; they do not
+switch accounts or isolate concurrent accounts. ahu does not probe provider
+quota, predict whether a request will be billable, change project trust, or
+grant tool approvals. Provider quota and entitlement errors are reported by
+the harness during an actual request. Remote hosts, containers, and CI need a
+separately provisioned native login and are outside this local profile guard.

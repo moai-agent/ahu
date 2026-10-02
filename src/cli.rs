@@ -71,6 +71,14 @@ Commands:
                         Inspect native integration evidence and headless isolation
   cmux install --harness ID [--dry-run]
                         Preview or explicitly delegate a native cmux installation
+  auth status --harness ID [--profile NAME]
+                        Check this checkout's current harness account binding
+  auth profiles
+                        List local project auth profiles
+  auth bind --harness ID [--profile NAME] [--replace]
+                        Bind the current verified account to a local profile
+  auth select --profile NAME
+                        Select the profile ahu agents must match in this project
   mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
   doctor [--verbose]    Check repository, configuration, harness, and cmux
   agy                   Open the Antigravity CLI here on this project's
@@ -243,6 +251,8 @@ Commands:
   eval run|report       Run and compare local agent evaluations
   knowledge lint        Check configured OKF bundles
   cmux status|install   Inspect or install native cmux integration
+  auth profiles|status|bind|select
+                        Check or manage local project auth profiles
   mcp serve             Serve repository tools over stdio MCP
   explain               Show the architecture overview
   @agent [PROMPT]       Assign work to a registered agent
@@ -281,6 +291,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "lock" => "Usage: ahu lock [--update]\n\nChecks that recognized agent context matches committed ahu.lock. --update refreshes the lock for review and commit.\n".to_string(),
         "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
         "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
+        "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts.\n\nVerified: codex, claude-code, Antigravity, and Ollama's local account endpoint. Ollama binding applies to OpenCode tasks using Ollama cloud models; other OpenCode providers cannot be bound yet.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
         "task" => "Usage: ahu task ID [--output json]\n\nInspect a task's state, branch, worktree, and launch evidence.\n".to_string(),
         "wait" => "Usage: ahu wait TASK [--output json]\n\nWait for a headless task to reach a terminal state.\n".to_string(),
@@ -323,6 +334,7 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "knowledge" => "ahu knowledge lint — validate configured knowledge bundles",
         "cmux" => "ahu cmux — inspect or install cmux integration",
         "mcp" => "ahu mcp serve — start the MCP server",
+        "auth" => "ahu auth — check or bind local harness accounts",
         "explain" => "ahu explain — show the architecture overview",
         "onboard" => "ahu onboard — preview native agent definitions",
         "agy" => "ahu agy — open Antigravity",
@@ -448,6 +460,12 @@ pub enum Command {
         dry_run: bool,
     },
     McpServe,
+    Auth {
+        action: String,
+        harness: String,
+        profile: Option<String>,
+        replace: bool,
+    },
     Doctor {
         verbose: bool,
     },
@@ -650,6 +668,63 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             Some("serve") if args.len() == 2 => Ok(Command::McpServe),
             _ => bail!("expected ahu mcp serve"),
         },
+        "auth" => {
+            let action = args.get(1).map(String::as_str).unwrap_or("");
+            if !matches!(action, "status" | "bind" | "select" | "profiles") {
+                bail!(
+                    "expected `ahu auth profiles`, `ahu auth status|bind --harness ID`, or `ahu auth select --profile NAME`"
+                );
+            }
+            let mut harness = None;
+            let mut profile = None;
+            let mut replace = false;
+            let mut index = 2;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--harness" if action != "select" && harness.is_none() => {
+                        harness = Some(value_for("--harness", &args, &mut index)?);
+                    }
+                    "--profile" if profile.is_none() => {
+                        profile = Some(value_for("--profile", &args, &mut index)?);
+                    }
+                    "--replace" if action == "bind" && !replace => replace = true,
+                    other => bail!("unexpected option {other:?} for `ahu auth {action}`"),
+                }
+                index += 1;
+            }
+            let harness = if action == "profiles" {
+                if harness.is_some() || profile.is_some() || replace {
+                    bail!("`ahu auth profiles` accepts no options");
+                }
+                String::new()
+            } else if action == "select" {
+                if harness.is_some() || replace {
+                    bail!("`ahu auth select` accepts only --profile NAME");
+                }
+                String::new()
+            } else {
+                let harness = harness
+                    .ok_or_else(|| crate::util::Error::new("auth command requires --harness ID"))?;
+                if !matches!(
+                    harness.as_str(),
+                    "codex" | "claude-code" | "antigravity" | "opencode" | "ollama"
+                ) {
+                    bail!(
+                        "unsupported harness {harness:?}; use codex, claude-code, antigravity, opencode, or ollama"
+                    );
+                }
+                harness
+            };
+            if action == "select" && profile.is_none() {
+                bail!("auth select requires --profile NAME");
+            }
+            Ok(Command::Auth {
+                action: action.to_owned(),
+                harness,
+                profile,
+                replace,
+            })
+        }
         "doctor" => match &args[1..] {
             [] => Ok(Command::Doctor { verbose: false }),
             [flag] if flag == "--verbose" => Ok(Command::Doctor { verbose: true }),

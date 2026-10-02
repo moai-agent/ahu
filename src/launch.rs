@@ -212,6 +212,7 @@ pub fn plan(
             context_lock.detail
         );
     }
+    crate::auth_binding::verify_launch(repo, &pair.harness, &pair.model)?;
     // Scanning for hooks is harness-specific: `hooks::collect` knows Claude
     // Code's settings files and nothing else, so it is told which harness this
     // launch is for and reports a coverage gap rather than "none found" when it
@@ -1107,6 +1108,17 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
         );
         return Ok(HarnessOutcome::Cancelled);
     }
+
+    // The plan-time check happens before worktree creation. Recheck after the
+    // workspace starts and pin this task immediately before starting an
+    // interactive harness, so a changed native login cannot inherit the task.
+    let repo = git::discover(&record.repo_root)?;
+    crate::auth_binding::capture_interactive_task_for_model(
+        &repo,
+        &record.identity.harness,
+        &record.identity.model,
+        task_dir,
+    )?;
 
     let mut child = {
         use std::os::unix::process::CommandExt;
