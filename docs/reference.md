@@ -237,6 +237,13 @@ tool call, and confirm an `ahu.mcp.tool.call` span reached the configured local
 OTLP receiver. An initialize/tools-list handshake alone is not proof of use;
 approval denials can happen before ahu receives a call.
 
+Approval-free execution does not grant unrestricted filesystem access. Codex
+agents retain the native `workspace-write` sandbox; protected context directories
+and shared worktree Git metadata can remain unwritable. When a task authorizes
+an edit or commit but the native boundary refuses it, the agent can provide a
+patch outside the repository for the authorized coordinator to review, apply,
+validate, and commit. Ahu does not widen that boundary automatically.
+
 The canonical tree follows a strict contract: one directory per skill directly
 under `.agents/skills/`, named after the skill, holding exactly one `SKILL.md`.
 The frontmatter carries `name` (equal to the directory name) and `description`

@@ -140,7 +140,9 @@ fn permission_control(permissions: Permissions) -> String {
              agent's manifest declares permissions = auto, and approves only ahu's local \
              repository tools (ahu_agents_list, ahu_tasks_list, ahu_task_get) and \
              ahu_request_approval, which records a bounded checkpoint and pauses without \
-             performing the requested operation; \
+             performing the requested operation; workspace-write retains native filesystem \
+             restrictions, including protected context directories and shared Git metadata; \
+             authorized edits or commits can still require a coordinator-applied patch; \
              provider-backed ahu_typed_decide and ahu_skills_suggest remain approval-gated; \
              it passes no --approve-for-me, \
              --dangerously-bypass-approvals-and-sandbox, or --dangerously-bypass-hook-trust; \
@@ -155,4 +157,42 @@ fn permission_control(permissions: Permissions) -> String {
 /// probe cannot run a binary a launch would refuse.
 pub(crate) fn installed_version(program: &str) -> Option<String> {
     crate::selection::installed_version(program)
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn auto_discloses_write_limits_without_widening_the_sandbox() {
+        let command = Codex
+            .launch_command(&LaunchRequest {
+                model: "gpt-6-astra",
+                prompt: "synthetic task",
+                cwd: std::path::Path::new("/tmp"),
+                permissions: Permissions::Auto,
+            })
+            .unwrap();
+        assert!(
+            command
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "workspace-write"])
+        );
+        assert!(
+            command
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--ask-for-approval", "never"])
+        );
+        assert!(
+            !command
+                .args
+                .iter()
+                .any(|arg| arg.contains("dangerously-bypass") || arg == "--add-dir")
+        );
+        let disclosure = permission_control(Permissions::Auto);
+        assert!(disclosure.contains("protected context directories and shared Git metadata"));
+        assert!(disclosure.contains("coordinator-applied patch"));
+    }
 }
