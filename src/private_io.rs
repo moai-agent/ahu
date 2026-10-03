@@ -63,38 +63,21 @@ pub(crate) fn atomic_create(path: &Path, body: &[u8], durability: Durability) ->
         file.write_all(body)?;
         file.sync_all()?;
 
-        // linkat is an atomic no-replace publication: readers see the complete
-        // file, and a concurrent creator cannot overwrite the existing entry.
-        // SAFETY: both names are NUL terminated and relative to the pinned dir.
-        if unsafe {
-            libc::linkat(
-                directory.as_raw_fd(),
-                temp.as_ptr(),
-                directory.as_raw_fd(),
-                name.as_ptr(),
-                0,
-            )
-        } == 0
-        {
-            Ok(true)
-        } else {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                Ok(false)
-            } else {
-                Err(error)
-            }
-        }
+        rename_noreplace(&directory, &temp, &name)
     })();
 
-    // SAFETY: remove only the temporary entry in the pinned parent directory.
-    let cleanup = unsafe { libc::unlinkat(directory.as_raw_fd(), temp.as_ptr(), 0) };
-    if cleanup != 0 && matches!(&result, Ok(false)) {
-        return Err(crate::state::state_io_error(
-            "remove temporary file",
-            path,
-            std::io::Error::last_os_error(),
-        ));
+    if !matches!(&result, Ok(true)) {
+        // A successful rename consumed temp: do not unlink a name that may
+        // since have been reused. On failure, never remove the destination.
+        // SAFETY: temp is our created entry, relative to the still-pinned dir.
+        let cleanup = unsafe { libc::unlinkat(directory.as_raw_fd(), temp.as_ptr(), 0) };
+        if cleanup != 0 && matches!(&result, Ok(false)) {
+            return Err(crate::state::state_io_error(
+                "remove temporary file",
+                path,
+                std::io::Error::last_os_error(),
+            ));
+        }
     }
     if matches!(&result, Ok(true)) && matches!(durability, Durability::Durable) {
         directory
@@ -102,6 +85,72 @@ pub(crate) fn atomic_create(path: &Path, body: &[u8], durability: Durability) ->
             .map_err(|e| crate::state::state_io_error("sync parent directory", parent, e))?;
     }
     result.map_err(|e| crate::state::state_io_error("create file", path, e))
+}
+
+/// Move a completed temporary entry to an absent destination in the pinned dir.
+/// Callers supply distinct leaf names. Success consumes the source name without
+/// a hardlink's visible nlink=2 window; an existing destination is never replaced.
+fn rename_noreplace(
+    directory: &std::fs::File,
+    source: &std::ffi::CStr,
+    destination: &std::ffi::CStr,
+) -> std::io::Result<bool> {
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    ))]
+    {
+        use std::os::unix::io::AsRawFd;
+
+        #[cfg(target_os = "linux")]
+        // SAFETY: the directory stays open and both C strings stay valid for
+        // the call. RENAME_NOREPLACE makes collision detection and publication
+        // one operation on the pinned directory, without following the target.
+        let status = unsafe {
+            libc::renameat2(
+                directory.as_raw_fd(),
+                source.as_ptr(),
+                directory.as_raw_fd(),
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        // SAFETY: the same descriptor/name lifetimes apply; RENAME_EXCL is
+        // macOS's atomic no-replace operation, including symlink collisions.
+        let status = unsafe {
+            libc::renameatx_np(
+                directory.as_raw_fd(),
+                source.as_ptr(),
+                directory.as_raw_fd(),
+                destination.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        if status == 0 {
+            Ok(true)
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                Ok(false)
+            } else {
+                // Unsupported kernels/filesystems fail closed. Neither a
+                // check-then-rename nor a hardlink is a safe fallback here.
+                Err(error)
+            }
+        }
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    )))]
+    {
+        let _ = (directory, source, destination);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "atomic no-replace rename is unsupported on this platform",
+        ))
+    }
 }
 
 /// Pin the parent for creation, replacement, cleanup, and (when requested) fsync.
@@ -187,6 +236,11 @@ pub(crate) fn atomic_write_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    ))]
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     #[test]
@@ -254,6 +308,10 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    ))]
     #[test]
     fn atomic_create_publishes_complete_owner_only_contents_without_replacing() {
         use std::os::unix::fs::PermissionsExt;
@@ -272,6 +330,10 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    ))]
     #[test]
     fn concurrent_atomic_creates_publish_one_complete_value() {
         let dir = tempfile::tempdir().unwrap();
@@ -281,7 +343,10 @@ mod tests {
                 .map(|byte| {
                     let path = &path;
                     scope.spawn(move || {
-                        atomic_create(path, &vec![byte; 8192], Durability::Durable).unwrap()
+                        let created =
+                            atomic_create(path, &vec![byte; 8192], Durability::Durable).unwrap();
+                        assert_eq!(std::fs::symlink_metadata(path).unwrap().nlink(), 1);
+                        created
                     })
                 })
                 .collect();
@@ -297,5 +362,179 @@ mod tests {
         assert_eq!(bytes.len(), 8192);
         assert!(bytes.iter().all(|byte| *byte == bytes[0]));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    ))]
+    #[test]
+    fn publication_immediately_has_one_link_and_consumes_source_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(dir.path())
+            .unwrap();
+        let source = dir.path().join("source");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&source)
+            .unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        file.write_all(b"complete private contents").unwrap();
+        file.sync_all().unwrap();
+
+        assert!(rename_noreplace(&directory, c"source", c"published").unwrap());
+        // Check at the publication boundary, with no unlink/cleanup in between.
+        // Substituting linkat for the rename deterministically yields nlink=2.
+        assert_eq!(file.metadata().unwrap().nlink(), 1);
+        assert_eq!(
+            std::fs::symlink_metadata(&source).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let published = dir.path().join("published");
+        let metadata = std::fs::symlink_metadata(&published).unwrap();
+        assert_eq!(metadata.ino(), file.metadata().unwrap().ino());
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read(published).unwrap(),
+            b"complete private contents"
+        );
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    ))]
+    #[test]
+    fn publication_collisions_preserve_source_and_every_destination_type() {
+        for kind in ["file", "symlink", "dangling", "directory", "nonempty"] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("source");
+            let destination = dir.path().join("destination");
+            let referent = dir.path().join("referent");
+            std::fs::write(&source, b"new contents").unwrap();
+            std::fs::write(&referent, b"keep referent").unwrap();
+            match kind {
+                "file" => std::fs::write(&destination, b"keep destination").unwrap(),
+                "symlink" => symlink(&referent, &destination).unwrap(),
+                "dangling" => symlink(dir.path().join("missing"), &destination).unwrap(),
+                _ => {
+                    std::fs::create_dir(&destination).unwrap();
+                    if kind == "nonempty" {
+                        std::fs::write(destination.join("child"), b"keep child").unwrap();
+                    }
+                }
+            }
+            let directory = std::fs::File::open(dir.path()).unwrap();
+            let before = std::fs::symlink_metadata(&destination).unwrap();
+            assert!(!rename_noreplace(&directory, c"source", c"destination").unwrap());
+            assert_eq!(std::fs::read(&source).unwrap(), b"new contents");
+            assert_eq!(std::fs::symlink_metadata(&source).unwrap().nlink(), 1);
+            for policy in [Durability::Atomic, Durability::Durable] {
+                assert!(!atomic_create(&destination, b"replacement", policy).unwrap());
+                // The unpublished temporary file is cleaned up, not the
+                // destination, unrelated source, or a symlink's referent.
+                assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+                assert_eq!(
+                    std::fs::symlink_metadata(&destination).unwrap().ino(),
+                    before.ino()
+                );
+                assert_eq!(std::fs::read(&source).unwrap(), b"new contents");
+                assert_eq!(std::fs::read(&referent).unwrap(), b"keep referent");
+                match kind {
+                    "file" => assert_eq!(std::fs::read(&destination).unwrap(), b"keep destination"),
+                    "symlink" => assert_eq!(std::fs::read_link(&destination).unwrap(), referent),
+                    "dangling" => assert_eq!(
+                        std::fs::read_link(&destination).unwrap(),
+                        dir.path().join("missing")
+                    ),
+                    "nonempty" => assert_eq!(
+                        std::fs::read(destination.join("child")).unwrap(),
+                        b"keep child"
+                    ),
+                    _ => assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0),
+                }
+            }
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    ))]
+    #[test]
+    fn publication_uses_pinned_directory_after_path_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("parent");
+        let moved = dir.path().join("moved");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(parent.join("source"), b"publish").unwrap();
+        std::fs::write(outside.join("source"), b"keep source").unwrap();
+        std::fs::write(outside.join("destination"), b"keep destination").unwrap();
+        let directory = std::fs::File::open(&parent).unwrap();
+        std::fs::rename(&parent, &moved).unwrap();
+        symlink(&outside, &parent).unwrap();
+
+        assert!(rename_noreplace(&directory, c"source", c"destination").unwrap());
+        assert_eq!(
+            std::fs::read(moved.join("destination")).unwrap(),
+            b"publish"
+        );
+        assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read(outside.join("source")).unwrap(),
+            b"keep source"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("destination")).unwrap(),
+            b"keep destination"
+        );
+    }
+
+    #[test]
+    fn failed_atomic_create_cleans_only_its_own_temporary_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join(".create-unrelated");
+        std::fs::write(&sentinel, b"keep").unwrap();
+        // The temporary file can be created, but the destination leaf exceeds
+        // Linux/macOS NAME_MAX, so publication fails rather than colliding.
+        let invalid = dir.path().join("x".repeat(4096));
+        assert!(atomic_create(&invalid, b"private", Durability::Durable).is_err());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    )))]
+    #[test]
+    fn unsupported_publication_leaves_source_and_destination_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("source"), b"source").unwrap();
+        std::fs::write(dir.path().join("destination"), b"destination").unwrap();
+        let directory = std::fs::File::open(dir.path()).unwrap();
+        assert_eq!(
+            rename_noreplace(&directory, c"source", c"destination")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        assert_eq!(std::fs::read(dir.path().join("source")).unwrap(), b"source");
+        assert_eq!(
+            std::fs::read(dir.path().join("destination")).unwrap(),
+            b"destination"
+        );
+        assert!(atomic_create(&dir.path().join("absent"), b"new", Durability::Durable).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 }
