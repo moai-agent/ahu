@@ -390,6 +390,7 @@ fn planning_freezes_registered_identity_and_discloses_repository_inputs() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                     .args(["--exact", "launch::launch_contract_tests::planning_freezes_registered_identity_and_discloses_repository_inputs", "--nocapture"])
                     .env_clear()
+                    .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
                     .env(CASE, case)
                     .env("PATH", &bin)
                     .env("XDG_CONFIG_HOME", external.path().join("config"))

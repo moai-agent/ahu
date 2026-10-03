@@ -1159,9 +1159,14 @@ mod tests {
             "invalid-before-key",
             "invalid-before-local",
         ] {
+            let scratch = tempfile::tempdir().unwrap();
             let mut child = std::process::Command::new(std::env::current_exe().unwrap());
             child
                 .env_clear()
+                .envs(
+                    std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)),
+                )
+                .current_dir(scratch.path())
                 .args([
                     "--exact",
                     "mcp::decisions::tests::model_environment_child",

@@ -1709,6 +1709,7 @@ mod selection_tests {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
         use std::time::{Duration, Instant};
+        let scratch = tempfile::tempdir().unwrap();
         let collector = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", collector.local_addr().unwrap());
         collector.set_nonblocking(true).unwrap();
@@ -1773,6 +1774,8 @@ mod selection_tests {
         });
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .env_clear()
+            .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+            .current_dir(scratch.path())
             .env("AHU_TEST_SELECTION_ENDPOINT", endpoint)
             .env("AHU_TEST_DECISION_EXPORT", decision.to_string())
             .env("HTTP_PROXY", &proxy_url)

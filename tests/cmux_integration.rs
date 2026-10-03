@@ -435,7 +435,7 @@ fn the_socket_path_is_discovered_rather_than_hard_coded() {
 /// is started here — see the README for what that leaves unverified.
 #[test]
 fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
-    let _environment = TestEnvironment::new();
+    let mut environment = TestEnvironment::new();
     let Some(client) = client_or_skip() else {
         return;
     };
@@ -447,6 +447,8 @@ fn a_full_launch_creates_one_worktree_and_one_child_workspace() {
     // context snapshot and is inherited by the task worktree.
     repo.write(".claude/settings.local.json", "{\"local\":true}\n");
     repo.commit("fixture");
+    // Use the fixture's private context acceptance, never the developer's state.
+    environment.set("XDG_STATE_HOME", repo.state.path().as_os_str());
 
     let discovered = ahu::git::discover(repo.path()).unwrap();
     let loaded = ahu::config::load(repo.path()).unwrap().unwrap();
