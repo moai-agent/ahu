@@ -29,8 +29,10 @@ one.
 ## Inspect and accept
 
 Use `ahu tasks`, `ahu task <id>`, `ahu wait <id>`, and `ahu result <id>` to track
-assignments. A process exit is not proof of completion: read `result.md`, inspect
-the diff and validation evidence, and review the actual commit before integrating.
+assignments. A process exit is not proof of completion: read the report provided
+through the task's contract and repository policy, inspect the diff and validation
+evidence, and review the actual commit before integrating. New headless tasks
+keep final answers in native harness stores rather than a copied `result.md`.
 For an interactive task, inspect its recorded terminal surface only when that
 surface is available. CMUX uses `cmux read-screen --workspace <id> --scrollback`;
 headless tasks have no workspace to read. Do not make a terminal transcript the

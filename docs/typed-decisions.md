@@ -150,8 +150,8 @@ Ollama's prompt/generated token counts plus load, prompt, generation, and total
 time in `service` metadata. It does not ask the model to invent a confidence
 score.
 
-On this Mac, `qwen3.6:35b-mlx` is already installed. Start the adapter in a
-terminal:
+Choose a locally installed model from `ollama list`. For example, if
+`qwen3.6:35b-mlx` is available, start the adapter in a terminal:
 
 ```sh
 python3 examples/ollama_decision_service.py --model qwen3.6:35b-mlx

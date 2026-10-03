@@ -4,21 +4,6 @@ Launch repository-defined coding agents in fresh Git worktrees, interactively
 in cmux or unattended in headless mode. Agent manifests pin the harness and
 model; ahu previews the configuration, delivers instructions, and records the launch.
 
-## Typed decisions and agent evals
-
-Give agents a shared decision tool, then measure whether it helps their work.
-[TypeSafe Jev through ahu MCP](docs/typed-decisions.md) returns validated choices,
-scores, and probability estimates. A batch can apply one rubric to up to 20 items
-without asking the agent to repeat the schema for each item.
-
-[ahu Evals](docs/evaluations.md) compares registered agents using Markdown cases,
-deterministic checks, optional agent judges, and OTel tool observations. Reports
-show answer quality, failures, time, native token usage, and separate decision
-service usage. Use that evidence to improve instructions and skills; delegation
-is a tradeoff to measure, not a promise of savings. Read the
-[live comparison findings](docs/decision-eval-findings.md) for the measured
-improvements and limits.
-
 ## Install
 
 With Rust and Cargo installed (this checkout pins Rust in
@@ -84,7 +69,7 @@ Start work directly with a registered agent and a quoted prompt. With no prompt,
 this opens the interactive launcher with that agent selected:
 
 ```sh
-ahu @dev-astra 'Review configuration validation.'
+ahu @dev-astra 'Review configuration validation.' --allow-widened-approvals
 ahu @dev-astra
 ```
 
@@ -106,9 +91,7 @@ ahu @dev-astra --prompt-file assignment.txt \
 ```
 
 Direct `ahu @agent` submissions do not ask for interactive confirmation and keep
-focus on the caller. Use the direct `ahu @agent` form for all registered-agent
-launches; the removed `ahu launch @agent` form is rejected with a migration hint.
-including `--prompt` and `--prompt-file`.
+focus on the caller. The direct form also accepts `--prompt` and `--prompt-file`.
 Each task receives a short handle derived from its displayed title, such as
 `@configuration-review`. Use `--name review` to choose one. Task commands accept
 the handle: `ahu task @review`, `ahu focus @review`, or `ahu cancel @review`.
@@ -153,7 +136,8 @@ Reviewing the changes is plain Git. `ahu task` prints the task's branch,
 worktree, and launch base; run Git against those directly:
 
 ```sh
-git -C .worktrees/"$task_id" diff "$base_commit"   # base commit from ahu task
+base_commit=COMMIT  # replace with the launch base printed by ahu task
+git -C .worktrees/"$task_id" diff "$base_commit"
 git -C .worktrees/"$task_id" status
 ```
 
@@ -161,6 +145,21 @@ Headless inspection shows the attempt outcome, observed ownership, blockers,
 known native session reference, and artifact paths. A process exit does not
 prove completion. Review the changes and findings. Tasks keep their branches,
 worktrees, and records after the harness exits.
+
+## Typed decisions and agent evals
+
+Give agents a shared decision tool, then measure whether it helps their work.
+[TypeSafe Jev through ahu MCP](docs/typed-decisions.md) returns validated choices,
+scores, and probability estimates. A batch can apply one rubric to up to 20 items
+without asking the agent to repeat the schema for each item.
+
+[ahu Evals](docs/evaluations.md) compares registered agents using Markdown cases,
+deterministic checks, optional agent judges, and OTel tool observations. Reports
+show answer quality, failures, time, native token usage, and separate decision
+service usage. Use that evidence to improve instructions and skills; delegation
+is a tradeoff to measure, not a promise of savings. Read the
+[live comparison findings](docs/decision-eval-findings.md) for the measured
+improvements and limits.
 
 ## Registered agents
 
@@ -218,6 +217,8 @@ require explicit user permission.
 | `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness development agents, and refresh `ahu.lock` |
 | `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
 | `ahu doctor` | Concise readiness summary; add `--verbose` for component diagnostics |
+| `ahu auth readiness --harness codex --output json` | Check native identity and local project binding without a model request |
+| `ahu approve TASK` / `ahu reject TASK` | Resolve a task's explicit MCP approval checkpoint after inspecting it with `ahu task TASK` |
 | `ahu lock` | Check that recognized agent context and `ahu.lock` are committed and current |
 | `ahu lock --update` | Fingerprint current recognized context into `ahu.lock` for review and commit |
 | `ahu agents` | List registered agents and detected drift |
@@ -237,11 +238,11 @@ require explicit user permission.
 | `ahu eval run --suite PATH --agent @name --records PATH` | Run the named cases against a registered agent and save evidence outside the repository |
 | `ahu eval report --records PATH` | Compare answer quality, tool behavior, failures, time, and observed usage |
 
-Use the bundled `agent-context-critic` skill with `ahu eval run` and
+Use the bundled `ahu-agent-context-critic` skill with `ahu eval run` and
 `ahu eval report` to investigate context changes against measured outcomes.
 The skill treats repository files as declared context, not proof that a
 harness loaded them. Shared project inputs are covered by committed `ahu.lock`;
-recognized private local settings are accepted in owner-only per-user Ahu state.
+recognized private local settings are accepted in owner-only per-user ahu state.
 Other harness, managed, and provider context remains outside that coverage.
 The eval cases, OTel observations, and private run artifacts should stay outside
 the candidate checkout when they contain information the candidate should not
@@ -286,7 +287,7 @@ servers, and Codex must trust the repository before loading project configuratio
 service contract and limitations.
 
 External issue tracking is optional and remains policy in skills and tracker
-tools, not in ahu's task CLI. The bundled `direct-agents` skill lets a project
+tools, not in ahu's task CLI. The bundled `ahu-direct-agents` skill lets a project
 choose whether to use tracker records and, when configured, link those records
 to ahu task IDs on the provider side.
 
@@ -368,5 +369,7 @@ voice, such as required contractions and passive-voice warnings, along with the
 Oxford comma rules, which flag two-item conjunctions. The reasons are recorded
 beside each entry in `.vale.ini`.
 
-See the [0.6.0 preparation notes](docs/releases/0.6.0.md) for implemented behavior
-and validation limits. This version is prepared locally and is not yet published.
+See the [0.7.0 candidate notes](docs/releases/0.7.0.md) for account-binding guards,
+cooperative approval, streaming write detection, cost telemetry, and evaluation
+features. Final release validation and publication remain pending. The
+[0.6.0 notes](docs/releases/0.6.0.md) describe the published prerelease.

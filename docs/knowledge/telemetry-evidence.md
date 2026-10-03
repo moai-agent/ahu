@@ -4,7 +4,7 @@ title: Telemetry evidence and privacy boundaries
 description: What headless usage and cost observations mean, where they are stored, and what the private association API does not do.
 tags: [telemetry, privacy, evals, cost]
 status: draft
-generated: { by: docs-astra/1.1.1, at: 2026-10-01T00:00:00Z }
+generated: { by: docs-astra/1.1.2, at: 2026-10-03T00:00:00Z }
 sources:
   - id: telemetry
     resource: ../../src/telemetry.rs
@@ -61,10 +61,10 @@ means and show observation counts against group run counts.[^telemetry][^eval]
 
 | Data | Local task result | OTLP span | Private mapping summary |
 | --- | --- | --- | --- |
-| Task, harness, model identity | Existing bounded result metadata | Allowlisted ahu identity attributes | Caller supplies repository digest and task UUIDs |
+| Task, harness, model identity | Existing bounded result metadata | Allowlisted identity attributes | Caller supplies repository digest and task UUIDs |
 | Token usage and harness-reported USD | Numeric observation with provenance | Numeric attributes, plus a bounded cost source label | Numeric-only summary; no inferred cost |
 | Opaque local record key | Host-private mapping only | Not accepted as an OTLP attribute | Excluded from numeric summary |
-| Tracker title, URL, or body | Not read or stored | Not accepted as an OTLP attribute | Not accepted |
+| Tracker title, address, or body | Not read or stored | Not accepted as an OTLP attribute | Not accepted |
 | Prompt, transcript, tool arguments, credentials, account history | Excluded from normalized metrics | Excluded from ahu's normalized spans | Not accepted by the summary input |
 
 The telemetry endpoint is restricted to a local collector. A local collector
@@ -85,7 +85,7 @@ owner-only host state directory, outside all checkouts. The key is an opaque
 local string and ahu does not contact a tracker or verify its visibility. The
 mapping store is schema-versioned, bounded, symlink-resistant, locked during
 updates, and atomically written. It accepts validated task references only;
-task records, prompts, configs, MCP, and OTLP never receive the key.[^private]
+task records, prompts, configuration, MCP, and OTLP never receive the key.[^private]
 
 Retries and resumes retain a task UUID and are distinguished by attempt number.
 Identical duplicate observations for an attempt count once; conflicting values
@@ -109,7 +109,7 @@ make an insecure host store safe.[^private]
 and extracts opted-in numeric projections. It groups by agent identity,
 harness, model, and outcome, and shows timing, per-field token observations,
 coverage, and source-separated harness cost. Attempts without local metric
-projections remain unavailable in their groups. There is no automatic quota
+projections remain unavailable in their groups. ahu has no automatic quota
 query, final billing API, interactive-session usage reader, tracker client, or
 automatic issue visibility check. Every report explicitly shows capacity as
 unknown because no trusted per-run or account capacity signal is collected.

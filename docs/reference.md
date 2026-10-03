@@ -42,8 +42,8 @@ ahu @reviewer
 ```
 
 The canonical `ahu @name` form accepts `--prompt`, `--prompt-file`, or piped stdin.
-The removed `ahu launch @name` form is rejected with a migration hint. Do not combine a positional
-prompt with either prompt flag. Direct prompts are passed as one literal
+Do not combine a positional prompt with either prompt flag. Direct prompts are
+passed as one literal
 argument; quote multi-word prompts in the shell. `ahu lock` checks that the
 recognized repository context matches committed `ahu.lock`; `ahu lock --update`
 refreshes it for review. Every changed context input and the lock must be
@@ -86,7 +86,7 @@ in full; `@parser` is not a prefix match for `@parser-cleanup`.
 
 Handles are immutable and scoped to the repository. Linked checkouts share them;
 use `ahu --repo <checkout>` for another repository. All task controls accept them,
-including `task`, `focus`, `message`, `wait`, `result`, `cancel`, `resume`,
+including `task`, `focus`, `message`, `wait`, `result`, `cancel`, `approve`, `reject`, `resume`,
 `cleanup`, and `remove`. Resume retains the same task identity and handle.
 
 Reservations remain after removal or a failed launch. They are not recycled or
@@ -173,8 +173,8 @@ claude-code = "2.1.288"
 Omit a harness from this table to follow its installed version. Pins are shared
 project policy and are covered by `ahu.lock`; each task records the version it
 actually used. The catalog's verified versions describe where behavior has been
-checked, rather than an allowlist. Floating permits newer parseable CLI versions,
-but does not claim that every upstream change is compatible. Ahu revalidates
+checked, rather than an allowlist. Floating permits newer CLI versions with a readable semantic version,
+but does not claim that every upstream change is compatible. ahu checks
 headless isolation against the installed version before execution and resume;
 unknown native behavior or an invocation that no longer works can still prevent
 the task from starting. Use a pin when a project needs repeatable CLI behavior.
@@ -292,7 +292,7 @@ Commands return these exit codes:
 
 ## Headless execution
 
-`launch --headless` runs the selected harness in batch mode without cmux, a PTY,
+`ahu @agent --headless` runs the selected harness in batch mode without cmux, a PTY,
 or screen scraping. `--background` detaches the supervisor after startup
 acknowledgement; without it, the caller supervises in the foreground. Use the
 foreground form under CI or a host service that manages process lifetime.
@@ -300,17 +300,20 @@ A dry run performs preflight checks and prints the redacted command, frozen
 identity, capabilities, gaps, timeout, and coordination path without launching.
 Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
-The admitted CLI profiles are Codex 0.154.0/0.155.1/0.157.1, Claude Code 2.1.269/2.1.270/2.1.283,
-Antigravity CLI 1.2.2, and OpenCode 1.18.29/1.18.30/1.18.31/1.18.32. Other versions fail before
-worktree creation, with no fallback harness or model. OpenCode's batch form is
-`opencode run --format json`; its permission mapping is the interactive one, so
-a manifest declaring `permissions = "accept-edits"` is refused here too. See
-[OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models) for the
-provider setup an OpenCode agent needs. Profile admission describes the adapter's argument
-surface, not successful authentication, provider availability, or full native
-helper lifecycle validation. Codex 0.155.1 admission covers the batch launch
-and recorded-session resume surfaces checked by compatibility probes; bounded
-native helpers remain refused.
+Installed CLI versions float by default; `[harness_version_pins]` can require
+an exact version. The catalog records verified batch versions: Codex
+0.154.0/0.155.1/0.157.1, Claude Code 2.1.269/2.1.270/2.1.283, Antigravity CLI
+1.2.2, and OpenCode 1.18.29/1.18.30/1.18.31/1.18.32. These are evidence records,
+not an allowlist. A supported adapter and a readable semantic version are
+required; version-specific isolation controls and native-helper policies remain
+separate checks. Unknown native integrations can still prevent launch or resume.
+No failure selects a fallback harness or model.
+
+OpenCode's batch form is `opencode run --format json`; its permission mapping is
+the interactive one, so `permissions = "accept-edits"` is refused here too. See
+[OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models) for
+provider setup. Recorded compatibility does not establish authentication,
+provider availability, or full native-helper lifecycle validation.
 
 Codex 0.157.1 uses strict configuration validation, enables inspected hooks, disables
 optional plugins and remote plugin loading, and clears the legacy notify command
@@ -339,8 +342,8 @@ Unknown or unsafe integrations have no operator bypass, including with
 `--allow-widened-approvals`. Use interactive cmux execution while resolving native
 sources with their owner; it retains the normal approval and launch checks.
 ahu does not remove credentials, rewrite native settings, or treat interactive
-availability as headless isolation. CLI version drift requires compatibility
-validation before the reviewed version list changes. Evidence is bounded local
+availability as headless isolation. New compatibility claims require validation
+before the catalog records a version as verified. Evidence is bounded local
 inspection; live delivery, provider availability, and sandbox behavior are not implied.
 
 ```sh
@@ -363,14 +366,23 @@ The timeout is positive seconds, default 1800 per attempt. `wait` follows the
 current attempt until it stops, returning 0 for `succeeded` and 5 otherwise.
 `result` reads the durable envelope without waiting; check its `outcome`, not
 just the command's exit status. Outcomes include `running`, `succeeded`, `failed`,
-`timed_out`, `cancelled`, `capture_failed`, `supervisor_error`, and `interrupted`. New result envelopes use schema 2 and separate process exit, bounded harness
+`timed_out`, `cancelled`, `boundary_violation`, `capture_failed`, `supervisor_error`, and `interrupted`. New result envelopes use schema 2 and separate process exit, bounded harness
 outcome metadata, native references, and worktree identity. Native transcript,
 final-answer, stderr, and helper-summary text is not copied into the envelope.
-Schema 2 also records `writes_outside_worktree`: write-tool target paths from the
-evaluated event stream that fall outside the task worktree, when the stream
-exposes them. The field is disclosure for post-run review, not a boundary;
-`ahu task` and `ahu result` print the recorded paths, because looking only at
-the task's branch would show nothing and mean nothing.
+Schema 2 also records `writes_outside_worktree`: absolute target paths reported
+by recognized write tools in the harness's stdout events that resolve outside
+the task worktree. The supervisor checks these observations while the process
+runs. On detection it requests cancellation of the task and its recorded ahu
+descendants, stops the process group, and records `boundary_violation`.
+`ahu task` and `ahu result` disclose the paths for review.
+
+This is detection after an event arrives, not filesystem isolation or a
+pre-write approval gate. A reported target is not proof a write succeeded;
+the write may already have occurred. Relative paths, arbitrary shell writes,
+unrecognized tools, and missing or late events can escape detection. A report
+received only during the final stream drain can appear in the result without
+having triggered the running supervisor's stop path. Review the paths and
+native evidence even when the process outcome is successful.
 `acceptance` stays `not assessed` and `completion_verified` stays false: a provider
 success or an agent's report does not establish that the assignment was accepted.
 Treat native reports and same-user editable metadata as untrusted data.
@@ -406,7 +418,10 @@ ahu wait "$task_id" --output json
 ```
 
 Resume requires a terminal result and recorded session identity, unchanged frozen
-configuration and executable, and an available adapter mapping. Codex
+configuration and executable, and an available adapter mapping. When local auth
+profiles are configured, it also rechecks the active account and the task's
+original account/profile pin; see [account bindings](#local-harness-account-bindings).
+Codex
 `accept-edits` resume is refused because that mapping is not validated. Interrupted
 attempts are not automatically replayed.
 
@@ -748,10 +763,9 @@ are outside checkouts, owner-only, symlink-resistant, locked during updates, and
 written atomically. Bind through validated repository/task identity rather than
 caller-supplied paths; repository moves require explicit rebinding.
 Unlink associations explicitly; their retention is independent of task cleanup.
-Reads and writes are bounded. Ahu does not verify tracker visibility, fetch
+Reads and writes are bounded. ahu does not verify tracker visibility, fetch
 tracker content, inherit child task links, or promise same-user process
-isolation. Tracker access and private-key retention remain the maintainer's
-responsibility.
+isolation. Tracker access and private-key retention remain the responsibility of the maintainer.
 
 ### Local trace export
 
@@ -1183,11 +1197,10 @@ no cmux; see [headless execution](#headless-execution).
 
 `auto` is the widest of the three and OpenCode has no sandbox to narrow it:
 unlike a Codex launch, which ahu gives `--sandbox workspace-write`, an OpenCode
-session's file tools act on whatever absolute path the model names. Headless attempts disclose reported targets outside the task worktree
-when the evaluated event stream exposes them: the result envelope records
-`writes_outside_worktree`, and `ahu task` and `ahu result` print it. The
-worktree is where the session starts, not a boundary the harness is held to;
-the launch preview says so.
+session's file tools can address absolute paths outside the task worktree.
+Headless supervision detects some reported targets and stops the attempt after
+observing them; [streaming write detection](#headless-execution) describes its
+limits. This does not prevent the write or sandbox the OpenCode process.
 
 For a coordinating OpenCode session in the current terminal, rather than an
 agent in a task worktree:
@@ -1204,15 +1217,16 @@ apply; `--auto` cannot widen past them.
 
 ### Troubleshooting
 
-ahu's own preflight covers Git, project configuration, the manifest, and the
-`opencode` executable on `PATH`. Everything past launch—endpoint reachability,
-provider resolution, model availability, authentication, and context limits—is
-between OpenCode and Ollama.
+ahu's preflight covers Git, project configuration, the manifest, and the
+`opencode` executable on `PATH`. Opt-in [account bindings](#local-harness-account-bindings)
+also check a local Ollama login for recognized cloud model names. That check
+does not verify OpenCode's effective provider endpoint, model availability,
+context limits, or the identity used by a later inference request.
 
 | Symptom | Your check | What ahu does |
 | --- | --- | --- |
 | `opencode` not found; exit `4` | `command -v opencode` | Reports the missing prerequisite and stops before creating a worktree. |
-| The session cannot reach the endpoint | `curl -sS http://localhost:11434/v1/models` | Does not probe the endpoint. The failure surfaces in the session; the task, branch, and worktree remain. |
+| The session cannot reach the endpoint | `curl -sS http://localhost:11434/v1/models` | Does not probe OpenCode's effective inference endpoint. The failure surfaces in the session; the task, branch, and worktree remain. |
 | `ollama/glm-5.3:cloud` does not resolve; `opencode models` lists only `opencode/*` | The `provider` block in `opencode.json` or the global configuration | Does not write or repair OpenCode configuration. |
 | The tag is absent from `ollama list` | `ollama list`, then pull the tag yourself | Does not pull or create models. |
 | Hosted-model authentication fails | Ollama's own sign-in for cloud models | Holds no provider credentials and cannot authenticate for you. |
@@ -1220,9 +1234,9 @@ between OpenCode and Ollama.
 | Manifest declares `accept-edits` | The manifest's `permissions` value | Refuses the manifest with an error and offers no substitute mode, interactively and headless alike. Declare `prompt` or `auto`. |
 | A headless launch reports no terminal event | The bounded result metadata and harness-owned session history | Scores a run only on OpenCode's own terminal step, never on its exit status: a refused tool call ends the run with exit 0. |
 
-In every one of these cases ahu reports and stops. It never silently selects
-another model, provider, or harness, and a failed session does not remove the
-task's branch, worktree, or record.
+ahu refuses its own failed preflight checks; provider failures surface through
+the harness. It never silently selects another model, provider, or harness,
+and a failed session does not remove the task's branch, worktree, or record.
 
 ## What a task gets
 
@@ -1515,8 +1529,9 @@ the reported source with `ahu cmux status`; interactive execution remains availa
 
 The local investigation baseline is cmux 0.64.22 build ddd4a01bc, Codex 0.155.1,
 Claude Code 2.1.281, OpenCode 1.18.32, and Antigravity CLI 1.2.9. Installed versions
-are observations, not additions to the admitted [headless profiles](#headless-execution).
-In particular, Claude 2.1.281 and Antigravity 1.2.9 do not replace pinned profiles.
+are observations, not new compatibility claims. [Headless admission](#headless-execution)
+checks the installed version and integration evidence; specialized controls
+remain tied to their reviewed versions.
 
 | Evidence class | What it establishes | What remains unverified |
 | --- | --- | --- |
@@ -1544,10 +1559,10 @@ Launch and eval candidate admission refuse until shared inputs and the lock
 match committed `HEAD`.
 
 Claude's project-local `.claude/settings.local.json` can change the tools
-available to an agent, so Ahu checks its fingerprint too. That fingerprint is
+available to an agent, so ahu checks its fingerprint too. That fingerprint is
 stored in owner-only host state outside the checkout, separately for each user
 and repository. It does not enter shared `ahu.lock` or telemetry. A local
-harness may use the file to enable Ahu MCP, and a task worktree may inherit it
+harness may use the file to enable ahu MCP, and a task worktree may inherit it
 for startup. Keep it limited to settings the task agent may read. A change
 blocks launch until that user runs `ahu lock --update`; local acceptance does
 not change or require a commit to shared `ahu.lock`.
@@ -1571,7 +1586,7 @@ Headless tasks use primary-owned coordination; interactive tasks use their own
 worktree-local records. `tasks` and `task` include compatible legacy records as
 well. `focus` is for interactive cmux sessions.
 
-### Interactive CMUX ownership
+### Interactive cmux ownership
 
 All interactive harnesses enter `cmux::repository::RepositoryManager` after
 harness and model resolution. That manager owns repository-group selection and
@@ -1580,15 +1595,15 @@ task-to-group/window/workspace association. `ahu focus`, confirmed cancellation,
 task status updates, and `ahu remove` cleanup resolve that association through
 the same manager. Ambiguous or mismatched ownership fails closed rather than
 selecting or closing a similarly named workspace. Headless tasks do not require
-CMUX and do not enter this lifecycle.
+cmux and do not enter this lifecycle.
 
-ahu stores CMUX's group, window, and workspace identifiers in the task record.
-The workspace is the addressable task terminal surface in the CMUX API used by
-ahu; CMUX does not provide ahu a stable separate pane/surface identifier for
+ahu stores cmux's group, window, and workspace identifiers in the task record.
+The workspace is the addressable task terminal surface in the cmux API used by
+ahu; cmux does not provide ahu a stable separate pane/surface identifier for
 that shell. The `surface_id` returned by `markdown.open` is for the separate
 explanation viewer and is not a task-session identifier. These limits mean ahu
 can confirm and manage the task workspace, but does not claim to inspect the
-harness process or terminal internals from CMUX alone.
+harness process or terminal internals from cmux alone.
 
 Each interactive task stores `task.json` and `prompt.txt` under
 `<task-worktree>/.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Session status
@@ -1869,10 +1884,13 @@ inside the named profile.
 `ahu auth readiness --harness ID [--model MODEL] [--output json]` provides a
 concise readiness summary; JSON returns stable machine-readable fields for
 automation.
-The output contains only `identity` and `binding` states plus `ready`; it never
+The JSON includes `schema_version`, the requested `harness` and optional `model`,
+`identity` and `binding` states, and `ready`; it never
 includes principal values, credential material, or raw provider diagnostics.
 `ready: false` means identity binding is unsupported, unavailable, absent, or
-mismatched. Readiness checks do not spend a model request and do not establish
+mismatched. A project without profiles reports `binding: "not_configured"`
+and `ready: false`, even though fresh launches can proceed without the optional
+binding policy. Readiness checks do not spend a model request and do not establish
 quota, trust, or tool-approval state.
 
 For Ollama, ahu reads `POST /api/me` from the loopback server named by
@@ -1886,15 +1904,14 @@ project profile before creating a launch worktree. Every registered agent,
 worktree, and child task in that project inherits the same active profile;
 agents cannot select a different profile. Interactive task startup and
 headless attempts recheck immediately before process start. Each task stores
-the profile name and an identity fingerprint, never raw identity data. Before
-Every `ahu resume` checks both the active profile and the task's original
-profile and fingerprint before starting the harness or sending the resume
-prompt. This check is especially useful after a long pause, when a harness may
+the profile name and an identity fingerprint, never raw identity data.
+With profiles configured, every `ahu resume` checks both the active profile and
+the task's original profile and fingerprint before starting the harness or
+sending its prompt. This check is especially useful after a long pause, when a harness may
 have been signed out and back in to another account. Selecting or rebinding a
 profile cannot move an existing task to another account. A project with no
 profiles configured retains its prior interactive and headless behavior. Tasks
-pinned before profile names were added
-have no profile pin and must be submitted again to resume under this profile
+pinned before profile names were added have no profile pin and must be submitted again to resume under this profile
 policy.
 
 Codex and Claude Code expose read-only identity metadata ahu can use. Ollama
@@ -1903,15 +1920,15 @@ OpenCode, ahu applies this check only when the selected model is `ollama/...`
 and marked `:cloud` or `-cloud`; it checks the local Ollama account before
 launch and again before resume. This assumes OpenCode routes that model to the
 same loopback daemon configured by `OLLAMA_HOST`; ahu does not yet verify the
-effective provider URL. Local Ollama models do not have a cloud account identity
-that ahu can bind. When project auth binding is enabled, Ahu refuses OpenCode
+effective provider address. Local Ollama models do not have a cloud account identity
+that ahu can bind. When project auth binding is enabled, ahu refuses OpenCode
 models for which it cannot establish the provider identity. Other OpenCode
 providers lack a verified identity check and are refused once
-the project has opted into auth profiles. OpenCode permits a custom provider
-`baseURL`, so Ahu does not infer that an `ollama/...` model uses the loopback
-Ollama daemon without verifying OpenCode's effective endpoint. See the
+the project has opted into auth profiles. A custom OpenCode provider `baseURL`
+can invalidate the loopback assumption: a matching Ollama fingerprint does not
+establish which endpoint OpenCode uses. See the
 [OpenCode provider configuration](https://opencode.ai/docs/providers/) for its
-provider and base URL configuration.
+provider and base address configuration.
 
 Codex API-key mode does not expose a verified user principal. Antigravity has no
 standalone account-status command, but its startup TUI displays the signed-in
@@ -1926,7 +1943,7 @@ the chance that a long-paused task resumes under a different account; it cannot
 guarantee the identity used for every provider request. These bindings identify
 the currently active native login; they do not switch accounts or isolate
 concurrent accounts. ahu does not probe provider
-quota, predict whether a request will be billable, change project trust, or
+quota, predict request billing, change project trust, or
 grant tool approvals. Provider quota and entitlement errors are reported by
 the harness during an actual request. Remote hosts, containers, and CI need a
 separately provisioned native login and are outside this local profile guard.

@@ -112,7 +112,7 @@ Observed (Codex CLI 0.155.1): `codex debug prompt-input` reported the skill root
 `PROBE_SKILL_OK`. `codex features list` showed `skill_search` as stable. Codex
 discovers `.agents/skills/` natively.
 
-**Claude Code skill behavior**
+## Claude Code
 
 Claude Code does not document `.agents/skills/` as a skill location; its
 locations are enterprise, personal, project (`.claude/skills/`), nested,
@@ -167,7 +167,7 @@ the ahu worktree. Caveat: neither directory is in Antigravity's
 discovery on folder trust, as Claude Code does for git trust. This probe shows
 what an untrusted directory gets, not what a trusted folder would show.
 
-The current `--output-format stream-json` probe (Antigravity 1.2.9) emits an
+The recorded `--output-format stream-json` probe (Antigravity 1.2.9) emits an
 outer `event` field with nested `init`, `step_update`, and `result` objects.
 The disposable project skill was still unavailable in that session, and no
 skill invocation event was emitted. ahu's headless evaluator recognizes this

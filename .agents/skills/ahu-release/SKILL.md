@@ -48,8 +48,10 @@ Make CI prove the release boundary without paid services:
   `cargo llvm-cov --all-targets --locked --summary-only` and review the
   coverage summary before release. Inspect gaps in security-sensitive, setup,
   MCP, telemetry, and evaluation paths; record material gaps with the release
-  checks. CI runs this command on Linux and macOS. Do not add a percentage gate
-  until the team has agreed on a measured baseline and threshold.
+  checks. CI runs this command on Linux and macOS, then checks the JSON report
+  with `python3 -B scripts/check-eval-mcp-coverage.py`. That guard requires 95%
+  line coverage for each of the eval/OTel and MCP/OTel groups. The current
+  workflow reports whole-project coverage without a separate percentage gate.
 - Use hermetic stubs for harness CLIs when tests only need executable discovery
   or version output. Stubs must not contain credentials, contact providers, or
   invoke models.
