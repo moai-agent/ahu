@@ -504,6 +504,9 @@ fn bounded_config_probe(
     // SAFETY: the child has not been reaped, so the process group cannot be reused.
     // Kill descendants too: they may otherwise hold the capture pipe indefinitely.
     unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    // A native wrapper can move itself into another process group. Target the
+    // unreaped leader as well so group movement cannot defeat the deadline.
+    let _ = child.kill();
     let status = child.wait().ok()?;
     if !exited || !status.success() {
         return None;
@@ -672,5 +675,38 @@ mod compatibility_tests {
             .as_deref(),
             Some("ollama/glm-5.3:cloud\n")
         );
+    }
+
+    #[test]
+    fn native_probe_group_escape_entry() {
+        let Some(marker) = std::env::var_os("AHU_TEST_NATIVE_GROUP_ESCAPE") else {
+            return;
+        };
+        // This disposable child moves into its parent's group; cleanup must
+        // kill only this child, never that new group containing the test runner.
+        assert_eq!(
+            unsafe { libc::setpgid(0, libc::getpgid(libc::getppid())) },
+            0
+        );
+        std::fs::write(marker, "moved").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn native_probe_deadline_survives_leader_group_movement() {
+        use std::time::{Duration, Instant};
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("moved");
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "selection::compatibility_tests::native_probe_group_escape_entry",
+            ])
+            .env("AHU_TEST_NATIVE_GROUP_ESCAPE", &marker);
+        let started = Instant::now();
+        assert!(bounded_config_probe(&mut command, true, Duration::from_millis(750)).is_none());
+        assert!(marker.exists(), "synthetic child did not move its group");
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 }
