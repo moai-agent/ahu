@@ -495,7 +495,18 @@ struct Client {
 }
 impl Client {
     fn new(repo: &common::TestRepo, owner: &str) -> Self {
-        let mut child = common::ahu()
+        Self::with_task(repo, owner, None)
+    }
+    fn with_task(
+        repo: &common::TestRepo,
+        owner: &str,
+        task: Option<(&str, &std::path::Path)>,
+    ) -> Self {
+        let mut command = common::ahu();
+        if let Some((id, dir)) = task {
+            command.env("AHU_TASK_ID", id).env("AHU_TASK_DIR", dir);
+        }
+        let mut child = command
             .args(["mcp", "serve"])
             .current_dir(repo.path())
             .env("AHU_MCP_CALLER", owner)
@@ -1169,4 +1180,197 @@ fn skill_suggestions_are_local_when_lexical_and_export_only_bounded_metadata() {
     let recorded = serde_json::to_string(&observed).unwrap();
     assert!(!recorded.contains("private-marker"));
     assert!(!recorded.contains("duplicate charge"));
+}
+
+fn approval_record(repo: &common::TestRepo, id: &str) -> std::path::PathBuf {
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let record_source = repo.path().to_path_buf();
+    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
+    let command = adapter
+        .launch_command(&ahu::harness::LaunchRequest {
+            model: "claude-opus-5",
+            prompt: "secret prompt",
+            cwd: &record_source,
+            permissions: Default::default(),
+        })
+        .unwrap();
+    let enforcement = adapter
+        .enforcement("claude-opus-5", Default::default())
+        .unwrap();
+    let record = ahu::task::TaskRecord {
+        schema_version: ahu::task::TASK_SCHEMA_VERSION,
+        task_id: id.to_string(),
+        title: "private prompt title".to_string(),
+        summary: String::new(),
+        created_at: ahu::task::now_rfc3339(),
+        repo_identity: discovered.identity(),
+        repo_root: record_source.clone(),
+        branch: "ahu/auto/gone0001".to_string(),
+        worktree: record_source.clone(),
+        base_commit: discovered.head.clone(),
+        identity: ahu::task::LaunchIdentity {
+            mode: ahu::task::LaunchMode::Automatic,
+            agent: "auto".to_string(),
+            agent_version: None,
+            permissions: Default::default(),
+            harness: "claude-code".to_string(),
+            model: "claude-opus-5".to_string(),
+            instructions_source: None,
+            source_digest: None,
+            instructions_digest: None,
+            identity_digest: None,
+            selection_basis: Some("test".to_string()),
+        },
+        policy_digest: "0".repeat(64),
+        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
+        config_snapshot: Default::default(),
+        config_snapshot_digest: "0".repeat(64),
+        hooks: Default::default(),
+        hooks_digest: String::new(),
+        delivery: ahu::orchestration::deliver(None, "prompt").unwrap().1,
+        prompt_digest: String::new(),
+        harness_executable: std::path::PathBuf::from("claude"),
+        materialize: Default::default(),
+        launch_command: command,
+        reliability_warning: None,
+        enforcement,
+        cmux_group_id: None,
+        cmux_workspace_id: None,
+        cmux_window_id: None,
+        state: ahu::task::TaskState::Running,
+    };
+    let dir = repo
+        .path()
+        .join(".ahu/state/repos")
+        .join(discovered.identity())
+        .join("tasks")
+        .join(id);
+    ahu::task::save(&dir, &record, "secret prompt").unwrap();
+    dir
+}
+
+fn wait_for_approval(dir: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if ahu::task::load(dir).unwrap().state == ahu::task::TaskState::WaitingForApproval {
+            return;
+        }
+        assert!(Instant::now() < deadline, "approval did not become pending");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn durable_mcp_approval_is_resolved_by_operator_cli() {
+    for approve in [true, false] {
+        let repo = common::TestRepo::new();
+        let id = ahu::task::new_task_id().unwrap();
+        let dir = approval_record(&repo, &id);
+        let mut client = Client::with_task(&repo, "approval-fixture", Some((&id, &dir)));
+        let job = client.create("ahu_request_approval", json!({
+            "operation":"network", "summary":"Fetch synthetic issue", "target":"https://example.invalid"
+        }));
+        wait_for_approval(&dir);
+        let inspect = common::ahu()
+            .current_dir(repo.path())
+            .args(["task", &id, "--output", "json"])
+            .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
+            .output()
+            .unwrap();
+        assert!(
+            inspect.status.success(),
+            "{}",
+            String::from_utf8_lossy(&inspect.stderr)
+        );
+        let inspected: Value = serde_json::from_slice(&inspect.stdout).unwrap();
+        assert_eq!(inspected["approval_request"]["operation"], "network");
+        let decision = common::ahu()
+            .current_dir(repo.path())
+            .args([
+                if approve { "approve" } else { "reject" },
+                &id,
+                "--output",
+                "json",
+            ])
+            .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
+            .output()
+            .unwrap();
+        assert!(
+            decision.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decision.stderr)
+        );
+        let resolved: Value = serde_json::from_slice(&decision.stdout).unwrap();
+        assert_eq!(
+            resolved["decision"],
+            if approve { "approved" } else { "rejected" }
+        );
+        let result = client.until(&job, "completed");
+        if approve {
+            assert_eq!(
+                result["result"]["structuredContent"]["approved"], true,
+                "{result}"
+            );
+            assert_eq!(
+                ahu::task::load(&dir).unwrap().state,
+                ahu::task::TaskState::Running
+            );
+        } else {
+            assert!(dir.join("cancel.json").exists());
+            assert_eq!(result["result"]["isError"], true, "{result}");
+        }
+        assert!(!dir.join("approval-request.json").exists());
+        client.stop();
+    }
+}
+
+#[test]
+fn cancelling_durable_mcp_approval_releases_checkpoint_without_approval() {
+    let repo = common::TestRepo::new();
+    let id = ahu::task::new_task_id().unwrap();
+    let dir = approval_record(&repo, &id);
+    let mut client = Client::with_task(&repo, "approval-cancel-fixture", Some((&id, &dir)));
+    let job = client.create(
+        "ahu_request_approval",
+        json!({"operation":"other", "summary":"Synthetic checkpoint"}),
+    );
+    wait_for_approval(&dir);
+    assert_eq!(
+        client.task("tasks/cancel", &job)["result"]["resultType"],
+        "complete"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dir.join("approval-request.json").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "cancelled checkpoint was not released"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        ahu::task::load(&dir).unwrap().state,
+        ahu::task::TaskState::Running
+    );
+    assert!(!dir.join("cancel.json").exists());
+    client.stop();
+}
+
+#[test]
+fn approval_requires_managed_task_context_for_direct_and_durable_calls() {
+    let repo = common::TestRepo::new();
+    let mut client = Client::new(&repo, "unbound-approval-fixture");
+    let params = json!({"name":"ahu_request_approval", "arguments":{
+        "operation":"other", "summary":"Synthetic checkpoint"
+    }});
+    let direct = client.call("tools/call", modern_without_tasks(params.clone()));
+    assert_eq!(direct["result"]["isError"], true, "{direct}");
+    assert!(
+        direct["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("task context")
+    );
+    let durable = client.call("tools/call", modern(params));
+    assert!(durable.get("error").is_some(), "{durable}");
+    client.stop();
 }
