@@ -192,7 +192,7 @@ fn the_terminal_render_carries_no_markdown_syntax() {
 fn the_overview_distinguishes_headless_results_from_interactive_state() {
     for text in [explain::overview(), explain::markdown()] {
         for claim in [
-            "launch --headless",
+            "ahu @name --headless",
             "--background",
             "AHU_RUNTIME_DIR",
             "no automatic replay",
@@ -211,5 +211,7 @@ fn the_overview_distinguishes_headless_results_from_interactive_state() {
             assert!(text.contains(claim), "missing backend boundary: {claim}");
         }
         assert!(!text.contains("every task session is a cmux workspace"));
+        assert!(!text.contains("launch --headless"));
+        assert!(text.contains("Final stream observations are checked before accepting success"));
     }
 }

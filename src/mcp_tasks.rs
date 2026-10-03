@@ -1,5 +1,5 @@
-//! Durable Tasks extension for the local stdio transport. Only replay-safe
-//! inspection operations are queued. Protocol completion never accepts work.
+//! Durable Tasks extension for local inspection and task-bound approvals.
+//! Approvals freeze their originating context. Protocol completion never accepts work.
 use super::{TASKS_EXTENSION, call_response, call_response_with_cancellation, response, rpc_error};
 use crate::task::StateLock as Lock;
 use crate::{

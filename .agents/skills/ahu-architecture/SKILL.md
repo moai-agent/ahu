@@ -294,8 +294,8 @@ The supervisor evaluates native stdout events as they arrive. A recognized
 write tool naming an absolute target outside the worktree can trigger
 `boundary_violation` and cancellation. This happens after observation: it
 cannot prevent an already completed write, intercept shell writes, classify
-relative targets, or detect missing events. Final-drain observations may be
-recorded without triggering the running stop path. This is not a sandbox.
+relative targets, or detect missing events. Final stream observations are checked before accepting success,
+including cancellation of registered descendants. This is not a sandbox.
 resume explicitly continues its recorded native session, and
 cancel requests termination of the task and its recorded ahu descendants; an
 interactive (cmux) task is stopped by its run-task parent. Confirmed cancellation
