@@ -185,6 +185,14 @@ eval run options:
                         (`prompt_only`), which is not environment isolation
   --records <path>      External JSONL destination; prompts and artifacts are
                         written to a private sibling run directory
+  --max-trajectory-steps <count>
+                        CI maximum from 0 to 4294967295 native steps
+  --max-tool-error-rate <rate>
+                        CI maximum finite fraction in 0..1, errors / completed
+                        tool calls. CLI limits tighten case budgets and require
+                        complete evidence, regardless of case unknown policy.
+                        Exit 1 on any failed/unknown guard after saving all trial
+                        records and output. Answer scores remain separate.
   --runs <count>        Repetitions from 1 to 100 (default 1)
   --timeout <seconds>   Per-agent headless timeout from 1 to 86400 (default 1800)
   --allow-widened-approvals
@@ -444,6 +452,7 @@ pub enum Command {
         evaluator_repo: Option<PathBuf>,
         decision_evaluator: bool,
         skill_selection: crate::skill_selection::Mode,
+        trajectory_guardrails: crate::eval::trajectory::Guardrails,
         records: PathBuf,
         runs: u32,
         timeout_seconds: u64,
@@ -1021,6 +1030,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
     let mut timeout_seconds = 1800u64;
     let mut saw_runs = false;
     let mut saw_timeout = false;
+    let mut trajectory_guardrails = crate::eval::trajectory::Guardrails::default();
     let mut allow_widened_approvals = false;
     let mut output_json = false;
     let mut index = 0;
@@ -1066,6 +1076,21 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
                 if !(1..=100).contains(&runs) {
                     bail!("--runs must be an integer from 1 to 100");
                 }
+            }
+            "--max-trajectory-steps" if trajectory_guardrails.max_steps.is_none() => {
+                let value = value_for("--max-trajectory-steps", rest, &mut index)?;
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    bail!("--max-trajectory-steps must be an integer from 0 to 4294967295");
+                }
+                trajectory_guardrails.max_steps = Some(value.parse().map_err(|_| {
+                    crate::util::Error::new(
+                        "--max-trajectory-steps must be an integer from 0 to 4294967295",
+                    )
+                })?);
+            }
+            "--max-tool-error-rate" if trajectory_guardrails.max_tool_error_rate.is_none() => {
+                trajectory_guardrails.max_tool_error_rate =
+                    Some(value_for("--max-tool-error-rate", rest, &mut index)?.parse()?);
             }
             "--timeout" if !saw_timeout => {
                 saw_timeout = true;
@@ -1143,6 +1168,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
         evaluator_repo,
         decision_evaluator,
         skill_selection: skill_selection.unwrap_or_default(),
+        trajectory_guardrails,
         records,
         runs,
         timeout_seconds,
@@ -1991,6 +2017,7 @@ mod parser_tests {
                 evaluator_repo: None,
                 decision_evaluator: false,
                 skill_selection: crate::skill_selection::Mode::None,
+                trajectory_guardrails: Default::default(),
                 records: "runs.jsonl".into(),
                 runs: 100,
                 timeout_seconds: 86400,
@@ -2002,6 +2029,96 @@ mod parser_tests {
         assert_usage(
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
             "at most 16",
+        );
+    }
+
+    #[test]
+    fn eval_trajectory_guardrails_parse_bounds_and_reject_repeats() {
+        let base = [
+            "eval",
+            "run",
+            "--case",
+            "case.md",
+            "--agent",
+            "@test",
+            "--records",
+            "/tmp/runs.jsonl",
+        ];
+        for (flag, valid, invalid) in [
+            (
+                "--max-trajectory-steps",
+                vec!["0", "8", "4294967295"],
+                vec![
+                    "",
+                    "-1",
+                    "+1",
+                    "1.5",
+                    "1e2",
+                    "4294967296",
+                    "18446744073709551616",
+                    "NaN",
+                ],
+            ),
+            (
+                "--max-tool-error-rate",
+                vec!["0", "1", "0.25", "1e-2"],
+                vec!["", "-0.01", "1.01", "NaN", "inf", "-inf", "1e999", "bad"],
+            ),
+        ] {
+            for value in valid {
+                let args: Vec<String> = base
+                    .into_iter()
+                    .chain([flag, value])
+                    .map(str::to_owned)
+                    .collect();
+                let Command::EvalRun {
+                    trajectory_guardrails,
+                    ..
+                } = parse(args).unwrap()
+                else {
+                    panic!("wrong command")
+                };
+                assert!(trajectory_guardrails.enabled());
+            }
+            for value in invalid {
+                let args: Vec<String> = base
+                    .into_iter()
+                    .chain([flag, value])
+                    .map(str::to_owned)
+                    .collect();
+                assert!(parse(args).is_err(), "{flag} {value}");
+            }
+            let args: Vec<String> = base
+                .into_iter()
+                .chain([flag, "0", flag, "1"])
+                .map(str::to_owned)
+                .collect();
+            assert!(parse(args).unwrap_err().to_string().contains("repeated"));
+            let args: Vec<String> = base.into_iter().chain([flag]).map(str::to_owned).collect();
+            assert!(parse(args).is_err());
+            assert!(help_for(Some("eval run")).unwrap().contains(flag));
+        }
+        let args: Vec<String> = base
+            .into_iter()
+            .chain([
+                "--max-trajectory-steps",
+                "0",
+                "--max-tool-error-rate",
+                "0.5",
+            ])
+            .map(str::to_owned)
+            .collect();
+        let Command::EvalRun {
+            trajectory_guardrails,
+            ..
+        } = parse(args).unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(trajectory_guardrails.max_steps, Some(0));
+        assert_eq!(
+            trajectory_guardrails.max_tool_error_rate.map(f64::from),
+            Some(0.5)
         );
     }
 

@@ -295,12 +295,10 @@ impl EvalCase {
         {
             bail!(kind: ErrorKind::Usage, "evaluation case schema, identity, questions, or expected answer is invalid");
         }
-        if self
-            .trajectory_budgets
-            .as_ref()
-            .is_some_and(|b| b.max_steps.is_none() && b.max_tool_errors.is_none())
-        {
-            bail!(kind: ErrorKind::Usage, "trajectory_budgets requires max_steps or max_tool_errors; omit the field for no budget");
+        if self.trajectory_budgets.as_ref().is_some_and(|b| {
+            b.max_steps.is_none() && b.max_tool_errors.is_none() && b.max_tool_error_rate.is_none()
+        }) {
+            bail!(kind: ErrorKind::Usage, "trajectory_budgets requires max_steps, max_tool_errors or max_tool_error_rate; omit the field for no budget");
         }
         let threshold = self.scoring.get("exact_match_pass_threshold").copied();
         let weight_keys: BTreeSet<_> = self
@@ -695,10 +693,28 @@ mod tests {
                 .unwrap()
                 .contains("trajectory_budgets")
         );
+        let rate_only = parse(&document(
+            2,
+            "trajectory_budgets: {max_tool_error_rate: 0.25}\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            rate_only
+                .trajectory_budgets
+                .unwrap()
+                .max_tool_error_rate
+                .map(f64::from),
+            Some(0.25)
+        );
         for budget in [
             "{}",
             "{max_steps: -1}",
             "{max_steps: 1.5}",
+            "{max_tool_error_rate: -0.1}",
+            "{max_tool_error_rate: 1.1}",
+            "{max_tool_error_rate: .nan}",
+            "{max_tool_error_rate: .inf}",
+            "{max_tool_error_rate: nope}",
             "{max_steps: 1, unknown_coverage: ignore}",
             "{max_steps: 1, typo: 1}",
         ] {

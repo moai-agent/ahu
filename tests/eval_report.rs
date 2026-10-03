@@ -215,6 +215,7 @@ fn eval_run_requires_named_candidate_case_and_external_records_options() {
             evaluator_repo: None,
             decision_evaluator: false,
             skill_selection: ahu::skill_selection::Mode::None,
+            trajectory_guardrails: Default::default(),
             records: PathBuf::from("/outside/runs.jsonl"),
             runs: 3,
             timeout_seconds: 120,
@@ -250,6 +251,7 @@ fn eval_run_requires_named_candidate_case_and_external_records_options() {
             evaluator_repo: Some(PathBuf::from("/outside/judge-checkout")),
             decision_evaluator: false,
             skill_selection: ahu::skill_selection::Mode::None,
+            trajectory_guardrails: Default::default(),
             records: PathBuf::from("/outside/runs.jsonl"),
             runs: 1,
             timeout_seconds: 1800,
@@ -1718,4 +1720,81 @@ fn summary_distinguishes_grading_arms_and_uses_complete_evaluation_time() {
     assert!(output.contains("100ms total"));
     assert!(!output.contains("  grading    "));
     assert!(!output.contains("TOKENS: candidate native usage"));
+}
+
+#[test]
+fn trajectory_report_exposes_rate_coverage_and_guards_without_inventing_legacy_rates() {
+    use ahu::eval::trajectory::{Coverage, Observation, Source};
+    let repo = TestRepo::new();
+    let external = TempDir::new().unwrap();
+    let records = external.path().join("trajectory.jsonl");
+    let complete = Observation {
+        source: Source::CodexTurns,
+        coverage: Coverage::CompleteObservedStream,
+        steps: Some(1),
+        tool_calls: Some(2),
+        completed_tool_calls: Some(2),
+        tool_errors: Some(1),
+        ..Default::default()
+    };
+    let mut zero = complete.clone();
+    zero.tool_calls = Some(0);
+    zero.completed_tool_calls = Some(0);
+    zero.tool_errors = Some(0);
+    let mut partial = complete.clone();
+    partial.coverage = Coverage::Partial;
+    partial.completed_tool_calls = Some(1);
+    let mut invalid = complete.clone();
+    invalid.tool_errors = Some(3);
+    let mut legacy = serde_json::to_value(&complete).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("completed_tool_calls");
+    let observations = [
+        Value::Null,
+        serde_json::to_value(zero).unwrap(),
+        serde_json::to_value(complete).unwrap(),
+        serde_json::to_value(partial).unwrap(),
+        serde_json::to_value(invalid).unwrap(),
+        legacy,
+    ];
+    let rows: Vec<String> = observations
+        .into_iter()
+        .enumerate()
+        .map(|(i, observation)| {
+            let mut row: Value =
+                serde_json::from_str(&Row::candidate("fixture", 1.0, true).json()).unwrap();
+            if !observation.is_null() {
+                row["trajectory"] = observation;
+            }
+            row["trajectory_guard_status"] =
+                ["unknown", "pass", "fail", "unknown", "unknown", "unknown"][i].into();
+            row.to_string()
+        })
+        .collect();
+    std::fs::write(&records, rows.join("\n") + "\n").unwrap();
+    let json = report_json(&repo, &records);
+    let summary = &json["groups"][0]["trajectory"];
+    assert_eq!(summary["missing_runs"], 1);
+    assert_eq!(summary["means"]["tool_error_rate"], 0.25);
+    assert_eq!(summary["observations"]["tool_error_rate"], 2);
+    assert_eq!(
+        summary["tool_error_rate_coverage"]["complete_observed_stream"],
+        2
+    );
+    assert_eq!(summary["tool_error_rate_coverage"]["partial"], 1);
+    assert_eq!(summary["tool_error_rate_coverage"]["unknown"], 3);
+    assert_eq!(summary["guard_statuses"]["unknown"], 4);
+    assert_eq!(summary["guard_statuses"]["fail"], 1);
+    assert_eq!(summary["guard_statuses"]["pass"], 1);
+    let output = run(&repo, &["--records", records.to_str().unwrap()]);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("tool_error_rate mean 0.25 (2/6 observations)"),
+        "{text}"
+    );
+    assert!(text.contains("tool error rate coverage"));
+    assert!(text.contains("guards"));
 }
