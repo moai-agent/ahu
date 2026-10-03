@@ -1491,6 +1491,8 @@ pub struct Events {
     #[serde(default)]
     pub usage: TokenUsage,
     #[serde(default)]
+    pub trajectory: crate::eval::trajectory::Observer,
+    #[serde(default)]
     pub cost: ReportedCost,
     #[serde(default)]
     pub model: Option<String>,
@@ -1581,12 +1583,14 @@ impl Events {
         let event: Value = match serde_json::from_slice(line) {
             Ok(v) => v,
             Err(_) => {
+                self.trajectory.malformed();
                 self.failed = true;
                 self.blockers.push("malformed or truncated event".into());
                 return;
             }
         };
         self.usage.observe(&event);
+        self.trajectory.observe(harness, &event);
         match harness {
             "claude-code" => self.cost.observe_claude_result(&event),
             "opencode" => self
@@ -2240,6 +2244,7 @@ fn capture(
                 } else {
                     events.failed = true;
                     events.blockers.push("unterminated event stream".into());
+                    events.trajectory.incomplete();
                 }
             }
             Ok(())
@@ -2613,6 +2618,9 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             .lock()
             .map_err(|_| Error::new("stdout evaluator unavailable"))?,
     );
+    if !matches!(&output, Some(Ok(()))) {
+        events.trajectory.incomplete();
+    }
     match output {
         Some(Ok(())) => (),
         Some(Err(error)) => {
@@ -4054,6 +4062,14 @@ mod write_tracking_tests {
         );
         rx.recv().unwrap().unwrap();
         assert!(incomplete.lock().unwrap().failed);
+        assert!(
+            incomplete
+                .lock()
+                .unwrap()
+                .trajectory
+                .observation
+                .stream_incomplete
+        );
         assert!(
             incomplete
                 .lock()

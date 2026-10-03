@@ -1396,3 +1396,103 @@ fn decision_evaluator_preflights_later_suite_cases_before_agent_lookup_or_artifa
     assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 3);
     assert_eq!(std::fs::read_dir(checkout.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn trajectory_records_preserve_missing_zero_and_report_budget_outcomes() {
+    let observation = trajectory::Observation {
+        source: trajectory::Source::CodexTurns,
+        coverage: trajectory::Coverage::CompleteObservedStream,
+        steps: Some(1),
+        tool_calls: Some(0),
+        tool_errors: Some(0),
+        ..trajectory::Observation::default()
+    };
+    let value = serde_json::to_string(&observation).unwrap();
+    let text = format!(
+        "{}\n{}",
+        record(&[]),
+        record(&[
+            ("trajectory", &value),
+            ("trajectory_budget_status", "\"pass\"")
+        ])
+    );
+    let records = parse_records(Path::new("runs.jsonl"), &text).unwrap();
+    let groups = group(&records);
+    let summary = &groups[0].trajectory;
+    assert_eq!(summary.missing_runs, 1);
+    assert_eq!(summary.means["tool_calls"], 0.0);
+    assert_eq!(summary.observations["tool_calls"], 1);
+    assert_eq!(summary.budget_statuses["pass"], 1);
+    assert_eq!(group_json(&groups[0])["trajectory"]["means"]["steps"], 1.0);
+    let report = Report {
+        records: PathBuf::from("/tmp/synthetic.jsonl"),
+        record_count: 2,
+        groups,
+    };
+    let text = render_at(&report, 120);
+    assert!(text.contains("trajectory missing 1/2 runs"));
+    assert!(text.contains("tool_calls mean 0 (1/2 observations)"));
+}
+
+#[test]
+fn trajectory_projection_accepts_only_bounded_typed_evidence_and_scores_missing() {
+    let mut record = serde_json::Map::new();
+    let budget = trajectory::Budgets {
+        max_steps: Some(1),
+        max_tool_errors: None,
+        unknown_coverage: trajectory::UnknownPolicy::Unknown,
+    };
+    insert_trajectory_fields(&mut record, None, Some(&budget)).unwrap();
+    assert!(!record.contains_key("trajectory"));
+    assert_eq!(record["trajectory_budget_status"], "unknown");
+    let observation = trajectory::Observation::default();
+    let mut envelope = serde_json::json!({"harness":{"trajectory": observation}});
+    insert_trajectory_fields(&mut record, Some(&envelope), Some(&budget)).unwrap();
+    assert_eq!(record["trajectory"]["tool_calls"], serde_json::Value::Null);
+    envelope["harness"]["trajectory"]["prompt"] = "private payload".into();
+    let mut record = serde_json::Map::new();
+    insert_trajectory_fields(&mut record, Some(&envelope), Some(&budget)).unwrap();
+    assert!(
+        !serde_json::to_string(&record)
+            .unwrap()
+            .contains("private payload")
+    );
+    assert!(!record.contains_key("trajectory"));
+}
+
+#[test]
+fn native_trajectory_projection_preserves_reasoning_tokens_and_malformed_coverage() {
+    let mut events = crate::headless::Events::default();
+    for line in [
+        br#"{"type":"thread.started","thread_id":"synthetic"}"#.as_slice(),
+        br#"{"type":"item.completed","item":{"id":"cmd","type":"command_execution","status":"completed","exit_code":7,"aggregated_output":"private synthetic result"}}"#,
+        br#"{"type":"turn.completed","usage":{"input_tokens":4,"output_tokens":9,"reasoning_output_tokens":3}}"#,
+    ] { events.observe("codex", line); }
+    let metrics = crate::telemetry::local_metrics(
+        &crate::config::TelemetryConfig {
+            local_metrics: true,
+            ..Default::default()
+        },
+        &events.usage,
+        &events.cost,
+        None,
+    );
+    let envelope = serde_json::json!({"harness": events, "metrics": metrics});
+    let mut record = serde_json::Map::new();
+    insert_trajectory_fields(&mut record, Some(&envelope), None).unwrap();
+    assert_eq!(record["trajectory"]["tool_errors"], 1);
+    let tokens = reported_tokens(Some(&envelope), None).unwrap();
+    assert_eq!(tokens["ahu.tokens.reasoning"]["value"], 3);
+    assert!(
+        !serde_json::to_string(&record)
+            .unwrap()
+            .contains("private synthetic")
+    );
+    events.observe("codex", b"{broken");
+    assert!(events.failed);
+    assert_eq!(
+        events.trajectory.observation.coverage,
+        trajectory::Coverage::Partial
+    );
+    assert_eq!(events.usage.reasoning, Some(3));
+}

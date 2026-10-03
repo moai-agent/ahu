@@ -297,3 +297,65 @@ attributes, or authentication headers. Coverage `typed_decision_span` means this
 observation arrived; it does not claim MCP session coverage. Candidate MCP tool
 counts are unaffected. Agent telemetry retains `none`, `partial_spans`, or
 `complete_session` coverage.
+
+## Observed trajectories and budgets
+
+New records also carry a compact `trajectory` projection from the candidate's
+native stdout stream. Existing records without that field remain readable and
+count as missing trajectory observations. The text report and JSON report show
+means with per-measurement observation counts, source counts, coverage, tracking
+limits and budget outcomes. Missing values are never filled with zero.
+
+The measurements have deliberately narrow meanings:
+
+- `steps`: completed Codex turns, unique Claude assistant message IDs, or unique
+  OpenCode step-finish IDs. These are different native units, identified by
+  `source`, and do not measure hidden reasoning steps.
+- `tool_calls`: unique recognized call IDs, including calls still pending when
+  capture ends. Codex command execution, file change, web search and MCP items;
+  Claude tool-use blocks and their correlated tool-result blocks; and OpenCode
+  tool-use parts are supported. Started/completed updates are counted once.
+- `tool_errors`: explicit native errors, nonzero command exit codes, and MCP
+  `result.isError` failures among the observed calls. This is separate from the
+  existing server-side OTel MCP counters; the two are not added together.
+- `repeated_tool_calls`: subsequent invocations of the same tool, regardless of
+  arguments. Repetition does not imply waste or an identical request.
+- `repeated_tool_errors`: further observed errors from a tool that already failed.
+- `tool_recoveries`: a later observed successful completion from a tool after its
+  error. This measures the order of tool outcomes, not whether the task recovered
+  or whether the later call retried the same arguments.
+
+`complete_observed_stream` means the adapter observed the supported start and end
+shapes, with no unclassified events, malformed input, unfinished calls or capture
+loss. It describes that captured stream only, not provider internals, shell
+subcommands or native helper work. Unclassified shapes and known losses make
+coverage `partial`; their numeric observations are lower bounds. Antigravity
+trajectory coverage currently remains `none`: the inspected step-update shapes
+do not establish a deduplicable tool lifecycle. Its existing usage metrics are
+unaffected. Helper messages are excluded and make coverage partial.
+
+The projection retains no reasoning text, prompts, tool arguments, tool results,
+raw names or call IDs. In-memory SHA-256 identity keys are bounded to 4,096 calls,
+4,096 steps and 256 tools, with a 1,024-byte input identity limit. Reaching a bound
+sets `tracking_limited`; further untrackable observations cannot make a budget
+pass under the default coverage policy. Counters saturate. Existing 1 MiB event
+and 64 MiB stream limits still apply. No usefulness score is calculated.
+
+Cases can add optional front matter:
+
+```yaml
+trajectory_budgets:
+  max_steps: 8
+  max_tool_errors: 1
+  unknown_coverage: unknown
+```
+
+At least one budget is required. An observed count above a budget fails even
+with partial coverage. Otherwise complete observed coverage passes; missing or
+partial coverage defaults to `unknown`. Set `unknown_coverage: fail` to fail
+inconclusive observations, or explicitly use `observed_only` to judge available
+lower bounds. Even `observed_only` leaves a missing required measurement unknown.
+The run output and report show `trajectory_budget_status` separately from answer
+correctness and tool expectations. These are post-run checks: they neither stop
+a running agent nor change its answer score or the command's exit status. Budget
+configuration stays out of candidate and evaluator prompts.
