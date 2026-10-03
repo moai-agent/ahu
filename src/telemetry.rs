@@ -13,12 +13,16 @@ use opentelemetry::global;
 use opentelemetry::trace::{Span, Tracer};
 use opentelemetry::{KeyValue, Value};
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
-use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
+use opentelemetry_sdk::{
+    Resource,
+    trace::{BatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider},
+};
 
 use crate::config::TelemetryConfig;
 use crate::util::{Error, Result};
 
 pub mod private;
+pub mod private_store;
 
 static PROVIDER: OnceLock<Mutex<Option<SdkTracerProvider>>> = OnceLock::new();
 static MCP_REQUESTS: AtomicU64 = AtomicU64::new(0);
@@ -28,8 +32,26 @@ static MCP_TOOL_ERRORS: AtomicU64 = AtomicU64::new(0);
 static MCP_LIST_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static MCP_TRANSPORT_ERRORS: AtomicU64 = AtomicU64::new(0);
 
+const SPAN_QUEUE_CAPACITY: usize = 128;
+const SPAN_EXPORT_BATCH_SIZE: usize = 32;
+const SPAN_SCHEDULED_DELAY: Duration = Duration::from_millis(500);
+
 fn provider_slot() -> &'static Mutex<Option<SdkTracerProvider>> {
     PROVIDER.get_or_init(|| Mutex::new(None))
+}
+
+fn bounded_span_processor(
+    exporter: impl opentelemetry_sdk::trace::SpanExporter + 'static,
+) -> BatchSpanProcessor {
+    BatchSpanProcessor::builder(exporter)
+        .with_batch_config(
+            BatchConfigBuilder::default()
+                .with_max_queue_size(SPAN_QUEUE_CAPACITY)
+                .with_max_export_batch_size(SPAN_EXPORT_BATCH_SIZE)
+                .with_scheduled_delay(SPAN_SCHEDULED_DELAY)
+                .build(),
+        )
+        .build()
 }
 
 pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
@@ -117,9 +139,13 @@ fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Res
         resource = resource.with_attribute(KeyValue::new(key, value));
     }
     let resource = resource.build();
+    // Keep export asynchronous and bounded, and override OTEL_BSP_* values so
+    // an inherited environment cannot turn a local ahu process into an
+    // unbounded queue or stall task execution. Full queues drop telemetry.
+    let processor = bounded_span_processor(exporter);
     let provider = SdkTracerProvider::builder()
         .with_resource(resource)
-        .with_batch_exporter(exporter)
+        .with_span_processor(processor)
         .build();
     global::set_tracer_provider(provider.clone());
     *provider_slot().lock().expect("telemetry mutex poisoned") = Some(provider);
@@ -370,6 +396,7 @@ impl SkillEvidence {
 pub(crate) struct LocalMetrics {
     schema_version: u32,
     token_aggregation: &'static str,
+    elapsed_ms: Measurement,
     values: std::collections::BTreeMap<&'static str, Measurement>,
 }
 
@@ -377,21 +404,25 @@ pub(crate) struct LocalMetrics {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum Measurement {
     Observed(u64),
+    ObservedFloat(f64),
     Unavailable,
-    // Estimates need an explicit method and provenance before being produced.
-    // Schema v1 emits no estimates and never derives a missing total.
+    // A harness-reported amount remains labeled as such; ahu never derives a
+    // missing cost from token counts or a pricing table.
 }
 
 pub(crate) fn local_metrics(
     config: &TelemetryConfig,
     usage: &crate::headless::TokenUsage,
+    cost: &crate::headless::ReportedCost,
+    elapsed_ms: Option<u64>,
 ) -> Option<LocalMetrics> {
     (config.local_metrics || std::env::var("AHU_EVAL_LOCAL_METRICS").as_deref() == Ok("1")).then(
         || LocalMetrics {
-            schema_version: 1,
+            schema_version: 2,
             // The normalizer retains maxima across reports. These are observations,
             // not additive task totals or provider billing measurements.
             token_aggregation: "maximum-reported-per-field",
+            elapsed_ms: elapsed_ms.map_or(Measurement::Unavailable, Measurement::Observed),
             values: usage
                 .normalized_fields()
                 .into_iter()
@@ -401,6 +432,12 @@ pub(crate) fn local_metrics(
                         value.map_or(Measurement::Unavailable, Measurement::Observed),
                     )
                 })
+                .chain(std::iter::once((
+                    "ahu.cost.harness_reported_usd",
+                    cost.usd
+                        .filter(|amount| amount.is_finite() && *amount >= 0.0)
+                        .map_or(Measurement::Unavailable, Measurement::ObservedFloat),
+                )))
                 .collect(),
         },
     )
@@ -980,21 +1017,29 @@ mod tests {
         let mut events = crate::headless::Events::default();
         events.observe("codex", br#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":7,"cached_tokens":"private-marker","total_tokens":-1,"tracker_url":"private-marker"},"prompt":"private-marker","model":"private-marker"}"#);
         let mut config = TelemetryConfig::default();
-        assert!(super::local_metrics(&config, &events.usage).is_none());
+        assert!(super::local_metrics(&config, &events.usage, &events.cost, Some(12)).is_none());
         config.local_metrics = true;
-        let value = serde_json::to_value(super::local_metrics(&config, &events.usage)).unwrap();
+        let value = serde_json::to_value(super::local_metrics(
+            &config,
+            &events.usage,
+            &events.cost,
+            Some(12),
+        ))
+        .unwrap();
         assert_eq!(
             value,
             serde_json::json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "token_aggregation": "maximum-reported-per-field",
+                "elapsed_ms": {"kind":"observed", "value":12},
                 "values": {
                     "ahu.tokens.input": {"kind":"observed", "value":0},
                     "ahu.tokens.output": {"kind":"observed", "value":7},
                     "ahu.tokens.cached": {"kind":"unavailable"},
                     "ahu.tokens.cache_write": {"kind":"unavailable"},
                     "ahu.tokens.reasoning": {"kind":"unavailable"},
-                    "ahu.tokens.total": {"kind":"unavailable"}
+                    "ahu.tokens.total": {"kind":"unavailable"},
+                    "ahu.cost.harness_reported_usd": {"kind":"unavailable"}
                 }
             })
         );
@@ -1339,6 +1384,81 @@ mod tests {
         assert!(!format!("{inspected:?}").contains("private-task-id"));
     }
 
+    #[test]
+    fn a_full_span_queue_drops_telemetry_without_blocking_span_completion() {
+        use opentelemetry::trace::{Span as _, Tracer as _, TracerProvider as _};
+        use opentelemetry_sdk::error::OTelSdkResult;
+        use opentelemetry_sdk::trace::{SpanData, SpanExporter as SdkSpanExporter};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::time::{Duration, Instant};
+
+        #[derive(Debug)]
+        struct BlockingExporter {
+            gate: Arc<(Mutex<(bool, bool)>, Condvar)>,
+            exported: Arc<AtomicUsize>,
+        }
+
+        impl SdkSpanExporter for BlockingExporter {
+            async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+                let (state, ready) = &*self.gate;
+                let mut state = state.lock().unwrap();
+                state.0 = true;
+                ready.notify_all();
+                while !state.1 {
+                    state = ready.wait(state).unwrap();
+                }
+                self.exported.fetch_add(batch.len(), Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        let gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        let exported = Arc::new(AtomicUsize::new(0));
+        let processor = super::bounded_span_processor(BlockingExporter {
+            gate: gate.clone(),
+            exported: exported.clone(),
+        });
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_span_processor(processor)
+            .build();
+        let tracer = provider.tracer("ahu-backpressure-test");
+        for _ in 0..super::SPAN_EXPORT_BATCH_SIZE {
+            tracer.start("initial").end();
+        }
+
+        let (state, ready) = &*gate;
+        let state = state.lock().unwrap();
+        let (state, _) = ready
+            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.0)
+            .unwrap();
+        let export_started = state.0;
+        drop(state);
+
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let producer_tracer = tracer.clone();
+        let producer = std::thread::spawn(move || {
+            let started = Instant::now();
+            for _ in 0..1024 {
+                producer_tracer.start("saturated").end();
+            }
+            let _ = completed_tx.send(started.elapsed());
+        });
+        let producer_duration = completed_rx.recv_timeout(Duration::from_secs(1));
+
+        let (state, ready) = &*gate;
+        state.lock().unwrap().1 = true;
+        ready.notify_all();
+        let _ = provider.shutdown();
+        let _ = producer.join();
+
+        assert!(export_started, "exporter never started to occupy the queue");
+        let producer_duration =
+            producer_duration.expect("span completion blocked while the OTLP queue was full");
+        assert!(producer_duration < Duration::from_secs(1));
+        assert!(exported.load(Ordering::Relaxed) < 32 + 1024);
+    }
+
     fn string_attr(attributes: &[KeyValue], name: &str) -> Option<String> {
         attributes
             .iter()
@@ -1581,7 +1701,21 @@ mod selection_tests {
             let mut headers = String::new();
             loop {
                 let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    match reader.read_line(&mut line) {
+                        Ok(_) => break,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("cannot read local OTLP request headers: {error}"),
+                    }
+                }
                 if line == "\r\n" || line.is_empty() {
                     break;
                 }

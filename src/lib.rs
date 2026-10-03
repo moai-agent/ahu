@@ -37,6 +37,7 @@ pub mod launch;
 pub mod launcher;
 pub mod onboard;
 pub mod orchestration;
+pub(crate) mod private_context_lock;
 mod private_io;
 pub mod selection;
 pub mod setup;

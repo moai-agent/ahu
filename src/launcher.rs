@@ -437,6 +437,7 @@ fn run_setup_using(
         harness_preferences,
         model_selection: "project-ranked".to_string(),
         catalog_version: catalog::CATALOG_VERSION.to_string(),
+        harness_version_pins: Default::default(),
         model_rankings,
         // Setup asks nothing about knowledge bundles: a new project has none to
         // name yet, and an empty list makes `ahu knowledge lint` say so.

@@ -278,6 +278,70 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             println!("{}", ahu::util::display_safe_block(&message));
             Ok(0)
         }
+        Command::Telemetry {
+            action,
+            record_key,
+            task_ref,
+            output_json,
+        } => {
+            let repo = commands::repo_from_cwd()?;
+            match action.as_str() {
+                "link" => {
+                    ahu::telemetry::private_store::link(
+                        &repo,
+                        &record_key,
+                        task_ref.as_deref().expect("validated by parser"),
+                    )?;
+                    println!(
+                        "Linked task to private record key {}.",
+                        ahu::util::display_safe(&record_key)
+                    );
+                    Ok(0)
+                }
+                "unlink" => {
+                    if ahu::telemetry::private_store::unlink(
+                        &repo,
+                        &record_key,
+                        task_ref.as_deref(),
+                    )? {
+                        println!(
+                            "Removed private telemetry association for {}.",
+                            ahu::util::display_safe(&record_key)
+                        );
+                        Ok(0)
+                    } else {
+                        println!("No matching private telemetry association.");
+                        Ok(1)
+                    }
+                }
+                "report" => {
+                    let report = ahu::telemetry::private_store::report(&repo, &record_key)?;
+                    if output_json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        println!(
+                            "Private measurement report: {}",
+                            ahu::util::display_safe(&record_key)
+                        );
+                        println!("  linked tasks  {}", report["linked_tasks"]);
+                        println!("  missing tasks {}", report["missing_tasks"]);
+                        println!(
+                            "  no headless results {} task(s)",
+                            report["tasks_without_headless_attempt_results"]
+                        );
+                        println!(
+                            "  attempts      {} complete, {} with opt-in metrics",
+                            report["completed_attempts"], report["attempts_with_opt_in_metrics"]
+                        );
+                        for group in report["groups"].as_array().into_iter().flatten() {
+                            print_private_report_group(group);
+                        }
+                    }
+                    Ok(0)
+                }
+                _ => unreachable!("telemetry action is validated by parser"),
+            }
+        }
         // `doctor` reports on a missing repository rather than failing on one.
         Command::Doctor { verbose } => {
             let repo = commands::repo_from_cwd();
@@ -327,6 +391,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::CmuxInstall { .. }
                 | Command::McpServe
                 | Command::Auth { .. }
+                | Command::Telemetry { .. }
                 | Command::Claude
                 | Command::Codex
                 | Command::OpenCode
@@ -337,6 +402,67 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::EvalRun { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })
+        }
+    }
+}
+
+fn print_private_report_group(group: &serde_json::Value) {
+    let safe =
+        |value: &serde_json::Value| ahu::util::display_safe(value.as_str().unwrap_or("unknown"));
+    let number = |value: &serde_json::Value| value.as_u64().unwrap_or(0);
+    let attempts = number(&group["attempts"]);
+    println!(
+        "\n  {} · {} · {} · {} ({} attempt(s))",
+        safe(&group["agent"]),
+        safe(&group["group"]["harness"]),
+        safe(&group["group"]["model"]),
+        safe(&group["group"]["outcome"]),
+        attempts
+    );
+    if let Some(mean) = group["elapsed_ms"]["mean_observed_ms"].as_f64() {
+        println!(
+            "    time   {mean:.0} ms mean ({}/{attempts} observed)",
+            number(&group["elapsed_ms"]["observed_attempts"])
+        );
+    } else {
+        println!("    time   unavailable (0/{attempts} observed)");
+    }
+    for (key, label) in [
+        ("ahu.tokens.input", "input"),
+        ("ahu.tokens.output", "output"),
+        ("ahu.tokens.total", "total"),
+    ] {
+        let value = &group["values"][key];
+        let observed = number(&value["observed_attempts"]);
+        match value["maximum_observed"].as_u64() {
+            Some(maximum) => {
+                println!("    {label:<6} max {maximum} ({observed}/{attempts} observed)")
+            }
+            None => println!("    {label:<6} unavailable (0/{attempts} observed)"),
+        }
+    }
+    let costs = &group["reported_cost"];
+    let means = costs["mean_observed_usd_by_source"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let observations = costs["observed_attempts_by_source"].as_object();
+    if means.is_empty() {
+        println!(
+            "    cost   unavailable ({} unavailable attempt(s)); no estimate inferred",
+            number(&costs["unavailable_attempts"])
+        );
+    } else {
+        for (source, mean) in means {
+            let count = observations
+                .and_then(|values| values.get(&source))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            println!(
+                "    cost   ${:.6} mean ({count}/{attempts}; {})",
+                mean.as_f64().unwrap_or_default(),
+                safe(&serde_json::Value::String(source))
+            );
         }
     }
 }

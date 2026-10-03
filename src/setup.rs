@@ -331,16 +331,16 @@ fn run_detected(
 
     apply_plan(console, &writes)?;
 
-    // Read back native config and agent manifests, then refresh the context lock
-    // so every setup-created input is fingerprinted. Launch still requires the
-    // user to commit these project files and the lock.
+    // Read back native config and agent manifests, then refresh shared context.
+    // A first setup initializes private local-context acceptance; later setup
+    // runs must not silently accept changes to an existing user's settings.
     crate::agent::load_all(&repo.root)?;
     config::load(&repo.root)?;
     verify_client_configurations(&repo.root, detected)?;
     let snapshot = crate::snapshot::collect(&repo.root)?;
-    let lock = crate::context_lock::refresh(repo, &snapshot)?;
+    let lock = crate::context_lock::refresh_for_setup(repo, &snapshot)?;
     console.say(&format!(
-        "\nMCP stdio handshake passed; ahu MCP tools responded.\nRefreshed {}. Review and commit the setup files and lock before running ahu agents. Claude Code asks you to approve project MCP servers; Codex loads project MCP settings only for a trusted repository.\n",
+        "\nMCP stdio handshake passed; ahu MCP tools responded.\nRefreshed {} for shared context. Review and commit setup files and the lock before running agents. Local settings are accepted on first setup; later changes require `ahu lock --update` and stay in private Ahu state. Claude Code asks you to approve project MCP servers; Codex loads project MCP settings only for a trusted repository.\n",
         lock.display()
     ))?;
     Ok(0)
@@ -1626,6 +1626,7 @@ esac
             harness_preferences: vec!["codex".into()],
             model_selection: "project-ranked".into(),
             catalog_version: crate::catalog::CATALOG_VERSION.into(),
+            harness_version_pins: Default::default(),
             model_rankings: std::collections::BTreeMap::from([(
                 "codex".into(),
                 vec![crate::catalog::models_for("codex")[0].model.into()],

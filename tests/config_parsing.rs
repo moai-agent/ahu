@@ -139,6 +139,7 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
         harness_preferences: vec!["claude-code".to_string()],
         model_selection: "project-ranked".to_string(),
         catalog_version: catalog::CATALOG_VERSION.to_string(),
+        harness_version_pins: Default::default(),
         model_rankings: [("claude-code".to_string(), vec!["claude-opus-5".to_string()])]
             .into_iter()
             .collect(),
@@ -165,6 +166,9 @@ fn rendered_config_round_trips() {
         harness_preferences: vec!["claude-code".to_string()],
         model_selection: "project-ranked".to_string(),
         catalog_version: catalog::CATALOG_VERSION.to_string(),
+        harness_version_pins: [("claude-code".to_string(), "2.1.283".to_string())]
+            .into_iter()
+            .collect(),
         model_rankings: [(
             "claude-code".to_string(),
             vec!["claude-opus-5".to_string(), "claude-sonnet-5".to_string()],
@@ -189,6 +193,30 @@ fn rendered_config_round_trips() {
     config::write_new(repo.path(), &original).unwrap();
     let loaded = config::load(repo.path()).unwrap().unwrap();
     assert_eq!(loaded.config, original);
+}
+
+#[test]
+fn missing_harness_version_pins_float_and_invalid_pins_are_refused() {
+    let repo = TestRepo::new();
+    repo.write(
+        config::CONFIG_RELATIVE_PATH,
+        &format!(
+            "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = {:?}\n[model_rankings]\n\"claude-code\" = [\"claude-opus-5\"]\n",
+            catalog::CATALOG_VERSION
+        ),
+    );
+    let loaded = config::load(repo.path()).unwrap().unwrap();
+    assert!(loaded.config.harness_version_pins.is_empty());
+
+    repo.write(
+        config::CONFIG_RELATIVE_PATH,
+        &format!(
+            "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = {:?}\n[model_rankings]\n\"claude-code\" = [\"claude-opus-5\"]\n[harness_version_pins]\n\"claude-code\" = \"2.1\"\n",
+            catalog::CATALOG_VERSION
+        ),
+    );
+    let error = config::load(repo.path()).unwrap_err().to_string();
+    assert!(error.contains("exact semantic version"), "{error}");
 }
 
 // --- agent manifests ---

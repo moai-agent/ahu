@@ -193,6 +193,17 @@ pub fn plan(
     pair: ResolvedPair,
     prompt: &str,
 ) -> Result<LaunchPlan> {
+    plan_with_state_home(repo, agent, pair, prompt, None)
+}
+
+#[doc(hidden)]
+pub fn plan_with_state_home(
+    repo: &Repo,
+    agent: Option<ResolvedAgent>,
+    pair: ResolvedPair,
+    prompt: &str,
+    state_home: Option<&std::path::Path>,
+) -> Result<LaunchPlan> {
     if prompt.trim().is_empty() {
         bail!(kind: crate::util::ErrorKind::Usage, "the task prompt is empty; nothing was launched.");
     }
@@ -205,7 +216,7 @@ pub fn plan(
     }
     let adapter = harness::adapter_for(&pair.harness)?;
     let snapshot = snapshot::collect(&repo.root)?;
-    let context_lock = crate::context_lock::check(repo, &snapshot)?;
+    let context_lock = crate::context_lock::check_with_state_home(repo, &snapshot, state_home)?;
     if !context_lock.current {
         bail!(kind: crate::util::ErrorKind::Prerequisite,
             "agent context is not committed and locked: {}",
@@ -220,7 +231,7 @@ pub fn plan(
     let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
     let parent_dirty = git::is_dirty(repo)?;
     // Refuse early if `.worktrees` is a symlink, before anything is created.
-    state::ensure_worktrees_root(&repo.root)?;
+
     let task_id = task::new_task_id()?;
     let agent_segment = match &agent {
         Some(agent) => agent.manifest.name.clone(),
@@ -274,6 +285,22 @@ pub fn plan(
             .with_kind(crate::util::ErrorKind::Prerequisite)
         })?;
     let mut enforcement = adapter.enforcement(&pair.model, permissions)?;
+    let loaded = crate::config::load(&repo.root)?
+        .ok_or_else(|| Error::new("missing project configuration"))?;
+    let version = enforcement
+        .harness_version
+        .as_deref()
+        .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
+    crate::catalog::check_harness_version(
+        &pair.harness,
+        version,
+        loaded
+            .config
+            .harness_version_pins
+            .get(&pair.harness)
+            .map(String::as_str),
+    )?;
+    state::ensure_worktrees_root(&repo.root)?;
     // An *applied control* is something ahu did, stated without implying more.
     // Delivering text is something ahu did; the model heeding it is not, and the
     // gap below says so in the same block.
@@ -1054,9 +1081,27 @@ fn terminate_group(child: &mut std::process::Child) -> Result<()> {
 }
 
 pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
-    let (record, rebuilt, executable) = verify_task(task_dir, None)?;
-    let telemetry = crate::config::load(&record.worktree)?
-        .map(|loaded| loaded.config.telemetry)
+    let (mut record, rebuilt, executable) = verify_task(task_dir, None)?;
+    let loaded = crate::config::load(&record.worktree)?;
+    let config = loaded.as_ref().map(|loaded| &loaded.config);
+    let version = crate::selection::probe_version(
+        executable
+            .to_str()
+            .ok_or_else(|| Error::new("harness executable path is not UTF-8"))?,
+    )
+    .ok_or_else(|| Error::new("cannot determine installed harness version before launch"))?;
+    crate::catalog::check_harness_version(
+        &record.identity.harness,
+        &version,
+        config
+            .and_then(|config| config.harness_version_pins.get(&record.identity.harness))
+            .map(String::as_str),
+    )?;
+    record.enforcement.harness_version = Some(version);
+    record.harness_executable = executable.clone();
+    task::save(task_dir, &record, &task::load_prompt(task_dir)?)?;
+    let telemetry = config
+        .map(|config| config.telemetry.clone())
         .unwrap_or_default();
     crate::telemetry::initialize(&telemetry)?;
     let mut _span = crate::telemetry::span(

@@ -240,8 +240,9 @@ require explicit user permission.
 Use the bundled `agent-context-critic` skill with `ahu eval run` and
 `ahu eval report` to investigate context changes against measured outcomes.
 The skill treats repository files as declared context, not proof that a
-harness loaded them. `ahu.lock` covers recognized repository inputs only;
-harness, user, managed, and provider context remains outside that coverage.
+harness loaded them. Shared project inputs are covered by committed `ahu.lock`;
+recognized private local settings are accepted in owner-only per-user Ahu state.
+Other harness, managed, and provider context remains outside that coverage.
 The eval cases, OTel observations, and private run artifacts should stay outside
 the candidate checkout when they contain information the candidate should not
 see. `ahu help` lists commands, `ahu help COMMAND` shows focused options, and

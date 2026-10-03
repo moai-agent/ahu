@@ -104,7 +104,7 @@ fn every_harness_in_the_catalog_is_listed_with_its_status() {
         for harness in ahu::catalog::HARNESSES {
             assert!(text.contains(harness.id), "{} missing", harness.id);
         }
-        // Each harness shows the version its adapter was verified against.
+        // Each harness shows its observed behavior evidence; it is not a gate.
         for version in ["2.1.269", "0.154.0", "1.2.2"] {
             assert!(text.contains(version), "{version} missing from {text}");
         }
@@ -168,7 +168,7 @@ fn the_markdown_render_is_a_real_markdown_document() {
     );
     // The catalog becomes a table.
     assert!(
-        text.contains("| harness | ahu adapter | verified against |"),
+        text.contains("| harness | ahu adapter | behavior checked on |"),
         "{text}"
     );
     assert!(text.contains("| --- | --- | --- |"), "{text}");

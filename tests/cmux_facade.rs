@@ -905,6 +905,10 @@ fn opencode_native_substitution_sources_remain_unresolved() {
 
 #[test]
 fn isolation_profile_matrix_preserves_refusals_and_representation_parity() {
+    let floating = Fixture::new()
+        .inspect("antigravity")
+        .with_version(Some("1.2.3"));
+    assert!(floating.headless.allowed, "{floating:?}");
     for (harness, version, source, body) in [
         (
             "codex",
@@ -924,7 +928,7 @@ fn isolation_profile_matrix_preserves_refusals_and_representation_parity() {
             ".claude/settings.json",
             r#"{"enabledPlugins":{"synthetic":true}}"#,
         ),
-        ("antigravity", "1.2.3", "", ""),
+        ("antigravity", "latest", "", ""),
     ] {
         let f = Fixture::new();
         let entry = ahu::catalog::harness(harness).unwrap();

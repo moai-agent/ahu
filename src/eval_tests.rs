@@ -491,6 +491,109 @@ fn token_amounts_are_averaged_per_field_and_a_named_field_without_one_is_absent(
 }
 
 #[test]
+fn harness_reported_costs_are_averaged_and_rendered_separately_from_tokens() {
+    let report = report_of(&[
+        record(&[(
+            "reported_tokens",
+            r#"{"ahu.cost.harness_reported_usd":{"kind":"observed_float","value":0.0125}}"#,
+        )]),
+        record(&[(
+            "reported_tokens",
+            r#"{"ahu.cost.harness_reported_usd":{"kind":"observed_float","value":0.0075}}"#,
+        )]),
+    ]);
+    let group = &report.groups[0];
+    assert_eq!(
+        group
+            .mean_reported_cost_usd
+            .get("ahu.cost.harness_reported_usd"),
+        Some(&0.01)
+    );
+    assert!(group.mean_tokens.is_empty());
+    assert!(group.token_fields.is_empty());
+    assert_eq!(group.coverage.tokens, 0);
+    assert_eq!(
+        group
+            .reported_cost_observations
+            .get("ahu.cost.harness_reported_usd"),
+        Some(&2)
+    );
+    let rendered = render_at(&report, 120);
+    assert!(
+        rendered.contains("cost       ahu.cost.harness_reported_usd $0.010000 (2/2)"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("tokens     ahu.cost.harness_reported_usd"),
+        "{rendered}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&render_json(&report).expect("renders")).expect("valid JSON");
+    let observed = &json["groups"][0]["observed"];
+    assert_eq!(
+        observed["mean_reported_cost_usd"]["ahu.cost.harness_reported_usd"],
+        0.01
+    );
+    assert_eq!(
+        observed["reported_cost_observations"]["ahu.cost.harness_reported_usd"],
+        2
+    );
+    assert!(observed["mean_tokens"].as_object().unwrap().is_empty());
+}
+
+#[test]
+fn unavailable_harness_cost_stays_distinct_from_an_observed_zero() {
+    let report = report_of(&[record(&[(
+        "reported_tokens",
+        r#"{"ahu.cost.harness_reported_usd":{"kind":"unavailable"}}"#,
+    )])]);
+    let rendered = render_at(&report, 120);
+    assert!(
+        rendered.contains("ahu.cost.harness_reported_usd — (0/1)"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("ahu.cost.harness_reported_usd $0.000000"));
+
+    let zero_report = report_of(&[record(&[(
+        "reported_tokens",
+        r#"{"ahu.cost.harness_reported_usd":{"kind":"observed_float","value":0}}"#,
+    )])]);
+    let rendered_zero = render_at(&zero_report, 120);
+    assert!(
+        rendered_zero.contains("ahu.cost.harness_reported_usd $0.000000 (1/1)"),
+        "{rendered_zero}"
+    );
+
+    let mixed_report = report_of(&[
+        record(&[(
+            "reported_tokens",
+            r#"{"ahu.cost.harness_reported_usd":{"kind":"unavailable"}}"#,
+        )]),
+        record(&[(
+            "reported_tokens",
+            r#"{"ahu.cost.harness_reported_usd":{"kind":"observed_float","value":0}}"#,
+        )]),
+    ]);
+    let rendered_mixed = render_at(&mixed_report, 120);
+    assert!(
+        rendered_mixed.contains("ahu.cost.harness_reported_usd $0.000000 (1/2)"),
+        "{rendered_mixed}"
+    );
+}
+
+#[test]
+fn eval_cost_projection_reads_harness_result_even_without_local_metrics() {
+    let envelope = serde_json::json!({
+        "harness": {"cost": {"usd": 0.004, "source": "opencode_step_finish_sum"}}
+    });
+    let projected = super::reported_tokens(Some(&envelope), None).unwrap();
+    assert_eq!(
+        projected["ahu.cost.harness_reported_usd"],
+        serde_json::json!({"kind":"observed_float","value":0.004})
+    );
+}
+
+#[test]
 fn decision_service_usage_is_separate_from_agent_time_and_tokens() {
     let report = report_of(&[
         record(&[

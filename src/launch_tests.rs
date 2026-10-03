@@ -13,6 +13,7 @@ fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
         harness_preferences: vec!["codex".into()],
         model_selection: "project-ranked".into(),
         catalog_version: crate::catalog::CATALOG_VERSION.into(),
+        harness_version_pins: Default::default(),
         model_rankings: [("codex".into(), vec!["gpt-6".into()])].into(),
         knowledge: Default::default(),
         telemetry: Default::default(),
@@ -590,21 +591,22 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     const CASE: &str = "AHU_LAUNCH_RUN_FIXTURE";
     let Ok(case) = std::env::var(CASE) else {
-        for case in ["cancel", "success", "failure", "spawn-error"] {
+        for case in ["cancel", "success", "failure", "version-error"] {
             let bin = tempfile::tempdir().unwrap();
             symlink(
                 crate::selection::resolve_utility("git").unwrap(),
                 bin.path().join("git"),
             )
             .unwrap();
-            let script = if case == "spawn-error" {
-                "#!/nonexistent/ahu-fixture-interpreter\n".to_owned()
-            } else {
-                format!(
-                    "#!/bin/sh\nprintf started > harness-started\nexit {}\n",
-                    if case == "success" { 0 } else { 23 }
-                )
-            };
+            let script = format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then {} fi\nprintf started > harness-started\nexit {}\n",
+                if case == "version-error" {
+                    "exit 1;"
+                } else {
+                    "echo 'codex-cli 0.160.0'; exit 0;"
+                },
+                if case == "success" { 0 } else { 23 }
+            );
             let executable = bin.path().join("codex");
             std::fs::write(&executable, script).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -642,15 +644,14 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
             assert!(!plan.worktree.join("harness-started").exists());
             TaskState::Cancelled
         }
-        "spawn-error" => {
+        "version-error" => {
             let error = result.unwrap_err().to_string();
-            assert!(error.contains("cannot start"), "{error}");
             assert!(
-                error.contains("worktree and task record are preserved"),
+                error.contains("cannot determine installed harness version"),
                 "{error}"
             );
             assert!(!plan.worktree.join("harness-started").exists());
-            TaskState::Failed
+            TaskState::Starting
         }
         "success" | "failure" => {
             let HarnessOutcome::Exited(status) = result.unwrap() else {

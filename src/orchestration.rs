@@ -313,6 +313,20 @@ fn render(
         bail!("ahu will not deliver an invalid fence nonce");
     }
     let mut contract = composition.mode.contract();
+    if version <= 2 {
+        // Layouts 1 and 2 were delivered while `ahu launch @name` was the
+        // documented invocation. Keep those exact bytes for saved-delivery
+        // digest replay even though the current CLI has only the direct form.
+        contract = contract
+            .replace(
+                r#""$AHU_BIN" @name --prompt-file"#,
+                r#""$AHU_BIN" launch @name --prompt-file"#,
+            )
+            .replace(
+                r#""$AHU_BIN" @name --headless"#,
+                r#""$AHU_BIN" launch @name --headless"#,
+            );
+    }
     if version >= 3 && composition.mode != Mode::Interactive {
         contract = contract.replace("ahu delegation contract (v2, headless)", "ahu delegation contract (v3, headless)")
             .replace("Write child prompts and reports outside every repository, then launch:", "Write child assignment prompts in your task coordination directory, then launch:")

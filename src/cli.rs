@@ -79,6 +79,12 @@ Commands:
                         Bind the current verified account to a local profile
   auth select --profile NAME
                         Select the profile ahu agents must match in this project
+  telemetry link --key KEY --task TASK
+                        Associate a task with an opaque host-private record key
+  telemetry unlink --key KEY [--task TASK]
+                        Remove a task association or the full record mapping
+  telemetry report --key KEY [--output json]
+                        Report opted-in local headless measurements
   mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
   doctor [--verbose]    Check repository, configuration, harness, and cmux
   agy                   Open the Antigravity CLI here on this project's
@@ -288,10 +294,11 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "onboard" => help_section("onboard options:", "knowledge lint options:"),
         "knowledge lint" => help_section("knowledge lint options:", "eval report options:"),
         "doctor" => "Usage: ahu doctor\n\nSummarize project, context-lock, skills, harness, telemetry, and cmux readiness. Use --verbose for component-level diagnostics.\n".to_string(),
-        "lock" => "Usage: ahu lock [--update]\n\nChecks that recognized agent context matches committed ahu.lock. --update refreshes the lock for review and commit.\n".to_string(),
+        "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes ahu.lock and accepts local context in owner-only host state; review and commit ahu.lock only when shared context changed.\n".to_string(),
         "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
         "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
         "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts.\n\nVerified: codex, claude-code, Antigravity, and Ollama's local account endpoint. Ollama binding applies to OpenCode tasks using Ollama cloud models; other OpenCode providers cannot be bound yet.\n".to_string(),
+        "telemetry" => "Usage: ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
         "task" => "Usage: ahu task ID [--output json]\n\nInspect a task's state, branch, worktree, and launch evidence.\n".to_string(),
         "wait" => "Usage: ahu wait TASK [--output json]\n\nWait for a headless task to reach a terminal state.\n".to_string(),
@@ -335,6 +342,7 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "cmux" => "ahu cmux — inspect or install cmux integration",
         "mcp" => "ahu mcp serve — start the MCP server",
         "auth" => "ahu auth — check or bind local harness accounts",
+        "telemetry" => "ahu telemetry — link private records and report local measurements",
         "explain" => "ahu explain — show the architecture overview",
         "onboard" => "ahu onboard — preview native agent definitions",
         "agy" => "ahu agy — open Antigravity",
@@ -465,6 +473,12 @@ pub enum Command {
         harness: String,
         profile: Option<String>,
         replace: bool,
+    },
+    Telemetry {
+        action: String,
+        record_key: String,
+        task_ref: Option<String>,
+        output_json: bool,
     },
     Doctor {
         verbose: bool,
@@ -725,6 +739,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 replace,
             })
         }
+        "telemetry" => parse_telemetry(&args[1..]),
         "doctor" => match &args[1..] {
             [] => Ok(Command::Doctor { verbose: false }),
             [flag] if flag == "--verbose" => Ok(Command::Doctor { verbose: true }),
@@ -1440,6 +1455,49 @@ pub fn extract_color(
     Ok((remaining, choice))
 }
 
+fn parse_telemetry(args: &[String]) -> Result<Command> {
+    let action = args.first().map(String::as_str).unwrap_or("");
+    if !matches!(action, "link" | "unlink" | "report") {
+        bail!("expected `ahu telemetry link|unlink|report`");
+    }
+    let mut record_key = None;
+    let mut task_ref = None;
+    let mut output_json = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--key" if record_key.is_none() => {
+                record_key = Some(value_for("--key", args, &mut index)?);
+            }
+            "--task" if task_ref.is_none() && action != "report" => {
+                task_ref = Some(value_for("--task", args, &mut index)?);
+            }
+            "--output" if action == "report" && !output_json => {
+                if value_for("--output", args, &mut index)? != "json" {
+                    bail!("expected json");
+                }
+                output_json = true;
+            }
+            other => bail!("unexpected option {other:?} for `ahu telemetry {action}`"),
+        }
+        index += 1;
+    }
+    let record_key = record_key
+        .ok_or_else(|| crate::util::Error::new("telemetry command requires --key KEY"))?;
+    match action {
+        "link" if task_ref.is_none() => bail!("telemetry link requires --task TASK"),
+        "link" | "report" => {}
+        "unlink" => {}
+        _ => unreachable!(),
+    }
+    Ok(Command::Telemetry {
+        action: action.to_owned(),
+        record_key,
+        task_ref,
+        output_json,
+    })
+}
+
 fn parse_cmux(args: &[String]) -> Result<Command> {
     match args.first().map(String::as_str) {
         Some("status") => {
@@ -2091,6 +2149,7 @@ mod focused_help_tests {
                 .contains("default limit: 20")
         );
         assert!(help_for(Some("doctor")).unwrap().contains("--verbose"));
+        assert!(help_for(Some("telemetry")).unwrap().contains("owner-only"));
         assert!(help_for(Some("all")).unwrap().contains("eval run options:"));
         assert!(
             parse_args(&["setup", "--help"]).unwrap()
@@ -2104,6 +2163,35 @@ mod focused_help_tests {
                     topic: Some("tasks".into())
                 }
         );
+    }
+
+    #[test]
+    fn telemetry_commands_require_explicit_private_keys_and_task_scope() {
+        assert_eq!(
+            parse_args(&["telemetry", "link", "--key", "r-1", "--task", "abc"]).unwrap(),
+            Command::Telemetry {
+                action: "link".into(),
+                record_key: "r-1".into(),
+                task_ref: Some("abc".into()),
+                output_json: false,
+            }
+        );
+        assert_eq!(
+            parse_args(&["telemetry", "report", "--key", "r-1", "--output", "json"]).unwrap(),
+            Command::Telemetry {
+                action: "report".into(),
+                record_key: "r-1".into(),
+                task_ref: None,
+                output_json: true,
+            }
+        );
+        for args in [
+            vec!["telemetry", "link", "--key", "r-1"],
+            vec!["telemetry", "report", "--key", "r-1", "--task", "abc"],
+            vec!["telemetry", "unlink", "--key", "r-1", "--output", "json"],
+        ] {
+            assert!(parse_args(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]
@@ -2141,7 +2229,7 @@ mod focused_help_tests {
         assert_eq!(help_for(Some("all")).unwrap(), HELP_ALL);
         for (topic, expected) in [
             ("setup", "Detect installed harnesses"),
-            ("lock", "--update refreshes the lock"),
+            ("lock", "--update refreshes ahu.lock"),
             ("cmux status", "native integration evidence"),
             ("cmux install", "Preview or delegate"),
             ("mcp serve", "stdio MCP"),

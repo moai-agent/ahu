@@ -37,7 +37,20 @@ fn plan_for(repo: &TestRepo, harness: &str, model: &str) -> (git::Repo, launch::
         policy_digest: loaded.digest.clone(),
         catalog_version: loaded.config.catalog_version.clone(),
     };
-    let plan = launch::plan(&discovered, Some(found), pair, "review it").unwrap_or_else(|e| {
+    let plan = launch::plan_with_state_home(
+        &discovered,
+        Some(found),
+        pair,
+        "review it",
+        Some(
+            &repo
+                .state
+                .path()
+                .canonicalize()
+                .expect("canonical state home"),
+        ),
+    )
+    .unwrap_or_else(|e| {
         panic!("the fixture PATH must resolve {harness}: {e}");
     });
     (discovered, plan)

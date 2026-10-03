@@ -1054,6 +1054,17 @@ fn validate_environment(
         }
     }
     crate::catalog::check_headless_version(harness, version)?;
+    let loaded = crate::config::load(config_root)?
+        .ok_or_else(|| Error::new("missing project configuration"))?;
+    crate::catalog::check_harness_version(
+        harness,
+        version,
+        loaded
+            .config
+            .harness_version_pins
+            .get(harness)
+            .map(String::as_str),
+    )?;
     crate::cmux::integration::enforce_headless_executable(config_root, harness, version, executable)
 }
 
@@ -2356,6 +2367,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             bail!("ancestor cancellation blocks this attempt");
         }
     }
+    let measurement_started = Instant::now();
     let mut command = Command::new(&real);
     command
         .args(&rebuilt.args)
@@ -2799,7 +2811,14 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         "writes_outside_worktree":events.writes_outside_worktree,"write_evidence":"reported tool targets; not proof of writes",
         "descendant_cancellation":cancellation_results,"native_completeness":native_completeness,"ahu_children":ahu_children,
         "native_cleanup":"unknown for external/provider-managed processes"});
-    if let Some(metrics) = crate::telemetry::local_metrics(&telemetry, &events.usage, &events.cost)
+    let elapsed_ms = Some(
+        measurement_started
+            .elapsed()
+            .as_millis()
+            .min(u64::MAX as u128) as u64,
+    );
+    if let Some(metrics) =
+        crate::telemetry::local_metrics(&telemetry, &events.usage, &events.cost, elapsed_ms)
     {
         result["metrics"] = serde_json::to_value(metrics)?;
     }
@@ -2817,6 +2836,117 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         },
     )?;
     Ok(if outcome == "succeeded" { 0 } else { 5 })
+}
+
+/// Return only the opt-in, bounded numeric projections for completed headless
+/// attempts. Callers must already have established task ownership and opt-in.
+pub(crate) fn private_attempt_metrics(
+    dir: &Path,
+    expected_harness: &str,
+    observation_limit: usize,
+) -> Result<Vec<PrivateAttemptMetrics>> {
+    let spec_bytes = review::read_bytes(&dir.join("headless.json"), Some(1024 * 1024))?;
+    let spec: Spec = serde_json::from_slice(&spec_bytes)
+        .map_err(|_| Error::new("headless attempt metadata is malformed"))?;
+    if !matches!(spec.schema_version, 1 | 2) || spec.attempt == 0 || spec.attempt > 4096 {
+        bail!("unsupported headless attempt metadata");
+    }
+    let id = dir.file_name().unwrap_or_default().to_string_lossy();
+    let mut output = Vec::new();
+    for number in 1..=spec.attempt {
+        let path = dir.join(format!("attempt-{number}")).join("result.json");
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+        if output.len() >= observation_limit {
+            bail!("private report exceeds its observation bound");
+        }
+        let bytes = review::read_bytes(&path, Some(1024 * 1024))?;
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::new("invalid headless result metadata"))?;
+        review::validate_result(&value, &id, number)?;
+        let metrics = match value.get("metrics") {
+            Some(metrics) if metrics["schema_version"] == 1 => Some((metrics, 1_u64)),
+            Some(metrics) if metrics["schema_version"] == 2 => Some((metrics, 2_u64)),
+            Some(_) => bail!("unsupported local metrics projection version"),
+            None => None,
+        };
+        let empty_values = serde_json::Map::new();
+        let values = match &metrics {
+            Some((metrics, _)) => metrics["values"]
+                .as_object()
+                .ok_or_else(|| Error::new("invalid local metrics projection"))?,
+            None => &empty_values,
+        };
+        let amount = |name: &str| -> Option<u64> {
+            let value = values.get(name)?;
+            (value["kind"] == "observed")
+                .then(|| value["value"].as_u64())
+                .flatten()
+        };
+        let cost_usd = match values.get("ahu.cost.harness_reported_usd") {
+            Some(cost_value) if cost_value["kind"] == "observed_float" => cost_value["value"]
+                .as_f64()
+                .filter(|amount| amount.is_finite() && *amount >= 0.0),
+            Some(cost_value) if cost_value["kind"] == "unavailable" => None,
+            None if metrics.is_none_or(|(_, version)| version == 1) => None,
+            _ => bail!("invalid local cost projection"),
+        };
+        let elapsed_ms = match metrics.and_then(|(metrics, _)| metrics.get("elapsed_ms")) {
+            Some(value) if value["kind"] == "observed" => value["value"].as_u64(),
+            Some(value) if value["kind"] == "unavailable" => None,
+            None => None,
+            _ => bail!("invalid elapsed time projection"),
+        };
+        // Cost provenance is fixed by the adapter and checked against the
+        // frozen harness; raw event data is never copied into the report.
+        let result_harness = value.pointer("/identity/harness").and_then(Value::as_str);
+        let outcome = value["outcome"].as_str().unwrap_or("unknown");
+        if result_harness.is_some_and(|harness| harness != expected_harness)
+            || (result_harness.is_none() && outcome != "supervisor_error")
+        {
+            bail!("headless result identity unavailable or inconsistent");
+        }
+        let source = match expected_harness {
+            "claude-code" if cost_usd.is_some() => Some("claude_code_result_total".to_owned()),
+            "opencode" if cost_usd.is_some() => Some("opencode_step_finish_sum".to_owned()),
+            _ => None,
+        };
+        if cost_usd.is_some() != source.is_some() {
+            bail!("harness cost source does not match frozen identity");
+        }
+        output.push(PrivateAttemptMetrics {
+            attempt: number,
+            outcome: outcome.to_owned(),
+            elapsed_ms,
+            metrics_observed: metrics.is_some(),
+            usage: TokenUsage {
+                input: amount("ahu.tokens.input"),
+                output: amount("ahu.tokens.output"),
+                cached: amount("ahu.tokens.cached"),
+                cache_write: amount("ahu.tokens.cache_write"),
+                reasoning: amount("ahu.tokens.reasoning"),
+                total: amount("ahu.tokens.total"),
+            },
+            cost: ReportedCost {
+                usd: cost_usd,
+                source,
+            },
+        });
+    }
+    Ok(output)
+}
+
+#[derive(Debug)]
+pub(crate) struct PrivateAttemptMetrics {
+    pub attempt: u32,
+    pub outcome: String,
+    pub elapsed_ms: Option<u64>,
+    pub metrics_observed: bool,
+    pub usage: TokenUsage,
+    pub cost: ReportedCost,
 }
 
 pub(crate) fn lookup(repo: &crate::git::Repo, id: &str) -> Result<PathBuf> {
@@ -3151,20 +3281,51 @@ pub fn control(
             validate_frozen_configuration(&record)?;
             let (_, _, executable) = crate::launch::verify_task(&dir, Some(&spec))?;
             let real = validate_executable(&executable, repo)?;
-            if real != record.harness_executable
-                || digest_bytes(&std::fs::read(&real)?) != spec.executable_digest
-            {
-                bail!("harness executable changed; previous attempt preserved, resume refused");
+            if real != record.harness_executable {
+                bail!(
+                    "harness executable path changed; previous attempt preserved, resume refused"
+                );
+            }
+            let version = crate::selection::probe_version(
+                real.to_str()
+                    .ok_or_else(|| Error::new("harness executable path is not UTF-8"))?,
+            )
+            .ok_or_else(|| {
+                Error::new("cannot determine installed harness version before resume")
+            })?;
+            let loaded = crate::config::load(&record.worktree)?
+                .ok_or_else(|| Error::new("missing task configuration"))?;
+            let pin = loaded
+                .config
+                .harness_version_pins
+                .get(&record.identity.harness)
+                .map(String::as_str);
+            crate::catalog::check_harness_version(&record.identity.harness, &version, pin)?;
+            let current_digest = digest_bytes(&std::fs::read(&real)?);
+            if pin.is_some() && current_digest != spec.executable_digest {
+                bail!(
+                    "pinned harness executable changed; previous attempt preserved, resume refused"
+                );
             }
             validate_environment(
                 repo,
                 &record.worktree,
                 &record.identity.harness,
-                &spec.harness_version,
+                &version,
                 &real,
             )?;
-            let original_spec = spec.clone();
-            let original_record = record.clone();
+            // Keep the finished attempt's provenance immutable. A floating
+            // project may resume with a newer installed CLI after the same
+            // native isolation checks pass; the next attempt records its own
+            // version and executable digest.
+            let previous_spec = spec.clone();
+            let previous_record = record.clone();
+            spec.harness_version = version.clone();
+            spec.executable_digest = current_digest;
+            record.enforcement.harness_version = Some(version);
+            record.harness_executable = real;
+            let original_spec = previous_spec.clone();
+            let original_record = previous_record.clone();
             let original_prompt = task::load_prompt(&dir)?;
             // Frozen widening was explicitly accepted at launch; resume never changes it.
             let prompt = crate::cli::PromptSource::File(
@@ -3201,8 +3362,8 @@ pub fn control(
                 },
                 &spec,
             )?;
-            let old_attempt = attempt_dir(&dir, &original_spec);
-            durable_json(&old_attempt.join("submission.json"), &record)?;
+            let old_attempt = attempt_dir(&dir, &previous_spec);
+            durable_json(&old_attempt.join("submission.json"), &previous_record)?;
             state::write_private_file(
                 &old_attempt.join("prompt.txt"),
                 task::load_prompt(&dir)?.as_bytes(),
@@ -3316,6 +3477,7 @@ pub(crate) fn supervisor_owns_attempt(dir: &Path) -> Result<bool> {
 #[cfg(test)]
 mod telemetry_usage_tests {
     use super::Events;
+    use crate::state;
 
     #[test]
     fn usage_normalization_keeps_common_cumulative_snapshot_fields() {
@@ -3356,6 +3518,129 @@ mod telemetry_usage_tests {
             ),
             serde_json::json!({"type":"turn.completed"})
         );
+    }
+
+    #[test]
+    fn private_attempt_reader_extracts_only_opted_in_numeric_projections() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repo = crate::git::discover(root.path()).unwrap();
+        let id = "00000000-0000-7000-8000-000000000001";
+        let dir = super::store(&repo).unwrap().join(id);
+        state::create_private_dir_all(&dir).unwrap();
+        let spec = super::Spec {
+            schema_version: 2,
+            options: super::Options::default(),
+            harness_version: "test".into(),
+            executable_digest: "digest".into(),
+            parent_task: None,
+            parent_attempt: None,
+            root_task: None,
+            broker_request: None,
+            child_grants: Vec::new(),
+            depth: 0,
+            attempt: 3,
+            session: None,
+            broker_dir: None,
+            native_profile: None,
+            native_controls: Vec::new(),
+            gaps: Vec::new(),
+        };
+        state::write_json(&dir.join("headless.json"), &spec).unwrap();
+        let result = serde_json::json!({
+            "schema_version":2,
+            "task_id":id,
+            "attempt":1,
+            "outcome":"succeeded",
+            "identity":{"harness":"claude-code"},
+            "process":{"exit_code":0},
+            "harness":{"terminal":true,"failed":false,"summary":"private-payload"},
+            "metrics":{"schema_version":2,"elapsed_ms":{"kind":"observed","value":314},"values":{
+                "ahu.tokens.input":{"kind":"observed","value":0},
+                "ahu.tokens.output":{"kind":"unavailable"},
+                "ahu.tokens.cached":{"kind":"unavailable"},
+                "ahu.tokens.cache_write":{"kind":"unavailable"},
+                "ahu.tokens.reasoning":{"kind":"unavailable"},
+                "ahu.tokens.total":{"kind":"unavailable"},
+                "ahu.cost.harness_reported_usd":{"kind":"observed_float","value":0.0125}
+            }}
+        });
+        let attempt = dir.join("attempt-1");
+        state::create_private_dir_all(&attempt).unwrap();
+        state::write_json(&attempt.join("result.json"), &result).unwrap();
+
+        let legacy_attempt = dir.join("attempt-2");
+        state::create_private_dir_all(&legacy_attempt).unwrap();
+        state::write_json(
+            &legacy_attempt.join("result.json"),
+            &serde_json::json!({
+                "schema_version":2,
+                "task_id":id,
+                "attempt":2,
+                "outcome":"succeeded",
+                "identity":{"harness":"claude-code"},
+                "process":{"exit_code":0},
+                "harness":{"terminal":true,"failed":false},
+                "metrics":{"schema_version":1,"token_aggregation":"maximum-reported-per-field","values":{
+                    "ahu.tokens.input":{"kind":"observed","value":9},
+                    "ahu.tokens.output":{"kind":"observed","value":4},
+                    "ahu.tokens.cached":{"kind":"unavailable"},
+                    "ahu.tokens.cache_write":{"kind":"unavailable"},
+                    "ahu.tokens.reasoning":{"kind":"unavailable"},
+                    "ahu.tokens.total":{"kind":"unavailable"}
+                }}
+            }),
+        )
+        .unwrap();
+
+        let failed_attempt = dir.join("attempt-3");
+        state::create_private_dir_all(&failed_attempt).unwrap();
+        state::write_json(
+            &failed_attempt.join("result.json"),
+            &serde_json::json!({
+                "schema_version":2,
+                "task_id":id,
+                "attempt":3,
+                "outcome":"supervisor_error",
+                "failure_category":"temporary",
+                "blockers":["supervisor execution failed"]
+            }),
+        )
+        .unwrap();
+
+        let observations = super::private_attempt_metrics(&dir, "claude-code", 3).unwrap();
+        assert_eq!(observations.len(), 3);
+        assert_eq!(observations[0].attempt, 1);
+        assert_eq!(observations[0].elapsed_ms, Some(314));
+        assert!(observations[0].metrics_observed);
+        assert_eq!(observations[0].usage.input, Some(0));
+        assert_eq!(observations[0].usage.output, None);
+        assert_eq!(observations[0].cost.usd, Some(0.0125));
+        assert_eq!(
+            observations[0].cost.source.as_deref(),
+            Some("claude_code_result_total")
+        );
+        assert!(!format!("{:?}", observations[0].outcome).contains("private-payload"));
+        assert!(observations[1].metrics_observed);
+        assert_eq!(observations[1].usage.input, Some(9));
+        assert_eq!(observations[1].usage.output, Some(4));
+        assert_eq!(observations[1].elapsed_ms, None);
+        assert_eq!(observations[1].cost.usd, None);
+        assert!(!observations[2].metrics_observed);
+        assert_eq!(observations[2].outcome, "supervisor_error");
+        assert_eq!(observations[2].usage.input, None);
+        assert_eq!(observations[2].cost.usd, None);
+        assert!(super::private_attempt_metrics(&dir, "claude-code", 2).is_err());
+
+        std::fs::write(dir.join("headless.json"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        assert!(super::private_attempt_metrics(&dir, "claude-code", 3).is_err());
     }
 
     #[test]

@@ -82,8 +82,11 @@ flowchart LR
 
 `ahu.lock` gates use of recognized project context. `ahu lock --update` writes a
 candidate lock; an operator reviews and commits it with the context files. The
-lock does not cover global harness settings, managed provider policy, built-in
-harness prompts, or context the bounded scan cannot identify.[^lock][^launch]
+lock does not contain per-user settings. Recognized local settings that affect
+agent behavior are separately fingerprinted in owner-only host state per user
+and repository; changing them requires that user to accept the new fingerprint.
+Neither lock covers managed provider policy, built-in harness prompts, or
+context the bounded scan cannot identify.[^lock][^launch]
 
 The CLI launches provider harnesses and hosts ahu's MCP server as separate
 interfaces. A harness can call MCP tools while it works. The typed decision

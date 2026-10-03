@@ -87,7 +87,21 @@ impl TestRepo {
         // commit alongside recognized agent context.
         let repo = ahu::git::discover(self.path()).unwrap();
         let snapshot = ahu::snapshot::collect(self.path()).unwrap();
-        ahu::context_lock::refresh(&repo, &snapshot).unwrap();
+        let state_home = self
+            .state
+            .path()
+            .canonicalize()
+            .expect("canonical state home");
+        if snapshot
+            .symlinks
+            .iter()
+            .any(|path| path == ".claude/settings.local.json")
+        {
+            ahu::context_lock::refresh_shared_only(&repo, &snapshot).unwrap();
+        } else {
+            ahu::context_lock::refresh_with_state_home(&repo, &snapshot, Some(&state_home))
+                .unwrap();
+        }
         git(self.dir.path(), &["add", "-f", "ahu.lock"]);
         git(
             self.dir.path(),
@@ -204,6 +218,7 @@ pub fn fake_harnesses(
             &script,
             format!(
                 "#!/bin/sh\n\
+                 if [ \"$1\" = \"--version\" ]; then printf '1.2.3\\n'; exit 0; fi\n\
                  record={record}\n\
                  : > \"$record\"\n\
                  for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$record\"; done\n\

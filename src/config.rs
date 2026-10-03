@@ -71,6 +71,11 @@ pub struct ProjectConfig {
     pub model_selection: String,
     /// Required compatibility catalog revision.
     pub catalog_version: String,
+    /// Optional exact harness CLI versions. Missing entries float with the
+    /// installed CLI; these pins are project policy and are included in the
+    /// committed context lock.
+    #[serde(default)]
+    pub harness_version_pins: std::collections::BTreeMap<String, String>,
     /// Project-agreed model order per harness, best first.
     #[serde(default)]
     pub model_rankings: std::collections::BTreeMap<String, Vec<String>>,
@@ -246,6 +251,20 @@ fn validate(config: &ProjectConfig, path: &Path) -> Result<()> {
             }
         }
     }
+    for (harness_id, version) in &config.harness_version_pins {
+        if catalog::harness(harness_id).is_none() {
+            bail!(
+                "{}: harness_version_pins names unknown harness {harness_id:?}.",
+                path.display()
+            );
+        }
+        if !crate::util::is_semver(version) {
+            bail!(
+                "{}: harness_version_pins.{harness_id} must be an exact semantic version (MAJOR.MINOR.PATCH); found {version:?}.",
+                path.display()
+            );
+        }
+    }
     let mut seen_bundles = std::collections::BTreeSet::new();
     for bundle in &config.knowledge.bundles {
         validate_bundle_path(bundle, path)?;
@@ -330,6 +349,12 @@ pub fn render(config: &ProjectConfig) -> String {
     ));
     out.push_str(&format!("model_selection = {:?}\n", config.model_selection));
     out.push_str(&format!("catalog_version = {:?}\n", config.catalog_version));
+    if !config.harness_version_pins.is_empty() {
+        out.push_str("\n[harness_version_pins]\n");
+        for (harness_id, version) in &config.harness_version_pins {
+            out.push_str(&format!("{:?} = {:?}\n", harness_id, version));
+        }
+    }
     out.push_str("\n[model_rankings]\n");
     for (harness_id, models) in &config.model_rankings {
         out.push_str(&format!(

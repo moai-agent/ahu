@@ -182,7 +182,7 @@ pub fn lock_cmd(console: &mut Console<'_>, repo: &Repo, update: bool) -> Result<
     if update {
         let path = context_lock::refresh(repo, &snapshot)?;
         console.say(&format!(
-            "Wrote {} from the current recognized context. Review and commit it with every context change before launching an agent; ahu did not stage or commit.\n",
+            "Refreshed {} for shared context and accepted this user's local agent context in private Ahu state. Review and commit the lock if shared context changed; local acceptance stays on this device. ahu did not stage or commit.\n",
             display_path(&path)
         ))?;
         return Ok(0);
@@ -193,7 +193,7 @@ pub fn lock_cmd(console: &mut Console<'_>, repo: &Repo, update: bool) -> Result<
         Ok(0)
     } else {
         console.say(&format!("Context is not launchable: {}\n", status.detail))?;
-        Err(Error::new("committed context lock is not current")
+        Err(Error::new("agent context lock is not current")
             .with_kind(crate::util::ErrorKind::Prerequisite))
     }
 }
@@ -2898,8 +2898,9 @@ mod doctor_tests {
     fn local_collector_probe_only_checks_tcp_reachability() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         assert!(local_collector_reachable(listener.local_addr().unwrap()));
-        let address = listener.local_addr().unwrap();
-        drop(listener);
+        // Port zero cannot have a listening peer, unlike an ephemeral port
+        // released here that another parallel test could immediately reuse.
+        let address = "127.0.0.1:0".parse().unwrap();
         assert!(!local_collector_reachable(address));
     }
 

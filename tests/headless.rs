@@ -85,7 +85,9 @@ elif scenario=='inside_write':
 elif scenario=='outside_bad_input':
  print(json.dumps({'type':'tool_use','name':'Write','input':'not json{'}),flush=True)
 else: open('proof.txt','w').write('synthetic proof\n')
-print(json.dumps({'type':'result','subtype':'success','result':'validated synthetic proof','session_id':session,'is_error':False,'permission_denials':([{'tool':'Bash'}] if scenario=='denied' else [])}),flush=True)
+result={'type':'result','subtype':'success','result':'validated synthetic proof','session_id':session,'is_error':False,'permission_denials':([{'tool':'Bash'}] if scenario=='denied' else [])}
+if scenario=='measure': result.update({'usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120},'total_cost_usd':0.0125})
+print(json.dumps(result),flush=True)
 if scenario=='nonzero': sys.exit(7)
 "#;
         std::fs::write(bin.join("claude"), script).unwrap();
@@ -111,6 +113,14 @@ if scenario=='nonzero': sys.exit(7)
             .env(
                 "HOME",
                 self.external.path().join("home").canonicalize().unwrap(),
+            )
+            .env(
+                "XDG_STATE_HOME",
+                self.external
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("state-root"),
             )
             .env(
                 "PATH",
@@ -213,9 +223,13 @@ fn local_metrics_survive_attempt_persistence_without_an_exporter() {
         String::from_utf8_lossy(&out.stderr)
     );
     let value = Fixture::value(&out);
-    assert_eq!(value["metrics"]["schema_version"], 1);
+    assert_eq!(value["metrics"]["schema_version"], 2);
     assert_eq!(
         value["metrics"]["values"]["ahu.tokens.total"]["kind"],
+        "unavailable"
+    );
+    assert_eq!(
+        value["metrics"]["values"]["ahu.cost.harness_reported_usd"]["kind"],
         "unavailable"
     );
     let stored: Value = serde_json::from_slice(
@@ -225,6 +239,88 @@ fn local_metrics_survive_attempt_persistence_without_an_exporter() {
     assert_eq!(stored["metrics"], value["metrics"]);
     assert_eq!(stored["task_id"], value["task_id"]);
     assert_eq!(stored["attempt"], value["attempt"]);
+}
+
+#[test]
+fn private_telemetry_cli_links_and_reports_opt_in_attempt_measurements() {
+    let f = Fixture::new();
+    let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
+    config.telemetry.local_metrics = true;
+    f.repo
+        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo
+        .commit("enable local metrics for private report fixture");
+    let launched = f.launch("measure", &[]);
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let task_id = Fixture::value(&launched)["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let linked = f
+        .command()
+        .args(["telemetry", "link", "--key", "case-a4", "--task", &task_id])
+        .output()
+        .unwrap();
+    assert!(
+        linked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    let report = f
+        .command()
+        .args([
+            "telemetry",
+            "report",
+            "--key",
+            "case-a4",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let report: Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(report["linked_tasks"], 1);
+    assert_eq!(report["completed_attempts"], 1);
+    assert_eq!(report["attempts_with_opt_in_metrics"], 1);
+    let group = &report["groups"][0];
+    assert_eq!(group["group"]["harness"], "claude-code");
+    assert_eq!(group["group"]["model"], "claude-opus-5");
+    assert_eq!(group["values"]["ahu.tokens.input"]["maximum_observed"], 100);
+    assert_eq!(
+        group["reported_cost"]["mean_observed_usd_by_source"]["claude_code_result_total"],
+        0.0125
+    );
+    assert!(group["elapsed_ms"]["mean_observed_ms"].as_f64().is_some());
+    let serialized = serde_json::to_string(&report).unwrap();
+    assert!(!serialized.contains(&task_id));
+    assert!(!serialized.contains("validated synthetic proof"));
+
+    let unlinked = f
+        .command()
+        .args([
+            "telemetry",
+            "unlink",
+            "--key",
+            "case-a4",
+            "--task",
+            &task_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        unlinked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unlinked.stderr)
+    );
 }
 
 #[test]
@@ -256,7 +352,7 @@ fn exporter_setup_failure_does_not_block_headless_execution() {
     );
     let value = Fixture::value(&out);
     assert_eq!(value["outcome"], "succeeded");
-    assert_eq!(value["metrics"]["schema_version"], 1);
+    assert_eq!(value["metrics"]["schema_version"], 2);
 }
 
 #[test]
@@ -449,6 +545,9 @@ fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     assert!(out.status.success());
     let v = Fixture::value(&out);
     let id = v["task_id"].as_str().unwrap();
+    let old_cli = std::fs::read_to_string(f.bin.join("claude")).unwrap();
+    assert!(old_cli.contains("2.1.270"));
+    std::fs::write(f.bin.join("claude"), old_cli.replace("2.1.270", "2.1.999")).unwrap();
     let prompt = f.external.path().join("followup.txt");
     std::fs::write(&prompt, "continue synthetic task").unwrap();
     let resumed = f
@@ -474,6 +573,14 @@ fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     let events = PathBuf::from(next["review"]["result_path"].as_str().unwrap());
     let dir = events.parent().unwrap().parent().unwrap();
     let record = ahu::task::load(dir).unwrap();
+    assert_eq!(
+        record.enforcement.harness_version.as_deref(),
+        Some("2.1.999")
+    );
+    let previous: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("attempt-1/submission.json")).unwrap())
+            .unwrap();
+    assert_eq!(previous["enforcement"]["harness_version"], "2.1.270");
     let spec: ahu::headless::Spec =
         serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
     let composition = record.delivery.composition.as_ref().unwrap();
@@ -1846,26 +1953,19 @@ fn the_opencode_event_stream_is_terminal_only_when_a_step_stops() {
     );
 }
 
-/// An unvalidated OpenCode refuses before anything is launched.
-///
-/// The batch surface is pinned to the versions whose `run` options were read
-/// off the CLI. OpenCode updates itself in place — the catalog entry names two
-/// versions for exactly that reason — so the version gate is what stops a
-/// renamed or re-meant option from changing behaviour silently.
+/// A parseable OpenCode version newer than the catalog evidence floats by
+/// default and is recorded by the headless task.
 #[test]
-fn an_unvalidated_opencode_version_is_refused_by_the_headless_path() {
+fn an_unlisted_parseable_opencode_version_floats_by_default() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     f.repo
         .add_agent_on("oc", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
     f.repo.commit("an opencode agent");
-    // Its own stub, rather than whichever OpenCode the machine has installed:
-    // the refusal under test is about the version, so the version has to be the
-    // test's to choose.
     let stub = f.bin.join("opencode");
     std::fs::write(
         &stub,
-        "#!/bin/sh\n[ \"$1\" = \"--version\" ] && echo 1.18.5 && exit 0\nexit 9\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.18.5; exit 0; fi\nprintf '%s\\n' '{\"type\":\"step_start\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"step-start\"}}' '{\"type\":\"text\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"text\",\"text\":\"ok\"}}' '{\"type\":\"step_finish\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}'\n",
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1876,21 +1976,9 @@ fn an_unvalidated_opencode_version_is_refused_by_the_headless_path() {
         .output()
         .unwrap();
     assert!(
-        !out.status.success(),
-        "an unvalidated version must not launch"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("unvalidated headless opencode version \"1.18.5\""),
-        "the refusal must name the harness and the version it found: {stderr}"
-    );
-    assert!(
-        stderr.contains("no fallback was selected"),
-        "the refusal must say nothing was substituted: {stderr}"
-    );
-    assert!(
-        !stderr.contains("claude") && !stderr.contains("antigravity"),
-        "no other harness may be offered in its place: {stderr}"
+        out.status.success(),
+        "parseable installed versions float by default: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -2013,15 +2101,10 @@ print(json.dumps({'type':'result','subtype':'success','result':'validated synthe
     );
 }
 
-/// A probe output whose first token is not validated must be refused, however
-/// validated a later token looks.
-///
-/// The inverse of the decorated-token test: `any`-token matching admitted
-/// `1.0.0 (Claude Code 2.1.270)` because a supported version appeared inside
-/// the parenthetical. Compatibility is a property of the first token — the
-/// actual CLI the user has installed — not of any string the probe emits.
+/// A parseable leading CLI version floats, even when a later parenthetical
+/// contains an unrelated version. The task records the leading version.
 #[test]
-fn a_parenthetical_version_token_is_refused_by_the_headless_path() {
+fn a_parseable_leading_version_floats_despite_parenthetical_versions() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     f.repo.add_agent("stubbed", "1.0.0", "claude-sonnet-5");
@@ -2029,7 +2112,7 @@ fn a_parenthetical_version_token_is_refused_by_the_headless_path() {
     let stub = f.bin.join("claude");
     std::fs::write(
         &stub,
-        "#!/bin/sh\n[ \"$1\" = \"--version\" ] && echo '1.0.0 (Claude Code, profile 2.1.270)' && exit 0\nexit 9\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '1.0.0 (Claude Code, profile 2.1.270)'; exit 0; fi\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"floating-version\"}' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"floating-version\",\"is_error\":false,\"permission_denials\":[]}'\n",
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2040,13 +2123,9 @@ fn a_parenthetical_version_token_is_refused_by_the_headless_path() {
         .output()
         .unwrap();
     assert!(
-        !out.status.success(),
-        "an unvalidated first token must not launch"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("unvalidated headless claude-code version"),
-        "the refusal must name the harness and version: {stderr}"
+        out.status.success(),
+        "parseable installed versions float by default: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -2829,15 +2908,6 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             ".claude/settings.json",
             r#"{"enabledPlugins":{"synthetic":true}}"#,
             "plugin hook behavior",
-        ),
-        (
-            "antigravity",
-            "gemini-3.1-pro-high",
-            "agy",
-            "1.2.3",
-            "",
-            "",
-            "unvalidated headless antigravity version",
         ),
     ] {
         let f = Fixture::new();

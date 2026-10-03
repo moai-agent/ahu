@@ -45,6 +45,7 @@ fn configured(repo: &Repo) {
             harness_preferences: vec!["claude-code".into()],
             model_selection: "project-ranked".into(),
             catalog_version: catalog::CATALOG_VERSION.into(),
+            harness_version_pins: Default::default(),
             model_rankings: BTreeMap::from([("claude-code".into(), vec!["claude-opus-5".into()])]),
             knowledge: Default::default(),
             telemetry: Default::default(),
@@ -234,7 +235,7 @@ fn lock_update_requires_commit_and_detects_context_changes() {
     std::fs::write(repo.root.join("AGENTS.md"), "Review carefully.").unwrap();
     let (result, output) = scripted("", |c| lock_cmd(c, &repo, true));
     assert_eq!(result.unwrap(), 0);
-    assert!(output.contains("Wrote"));
+    assert!(output.contains("Refreshed"));
     git(&repo.root, &["diff", "--cached", "--exit-code"]);
     assert!(scripted("", |c| lock_cmd(c, &repo, false)).0.is_err());
     git(&repo.root, &["add", "AGENTS.md", "ahu.lock"]);
