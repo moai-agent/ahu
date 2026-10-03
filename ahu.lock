@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "2912f565ea90ebdfebb9848f6ca27d58d8b4697ce6e6fae7b9f177e1a2362bad"
+digest = "b05c9fc5d276f55407977d3fb2537ecdd2b1bf02198cc4d94c2c845d2092f7f1"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -70,20 +70,20 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/docs-astra.md"
-digest = "e0fe04da5b622f26e5b09c484b3eb7af10c9a7634c5e2a1d9e74d0937744b02b"
-bytes = 6761
+digest = "fbb3bc06c5c089c9c8be841e6c240b28d6ce8c395e19401654e700b4f984abc8"
+bytes = 6714
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/docs-glm.md"
-digest = "d5a635f7dcf9ccbf816df64ee60c2f17d59c73da75b1e1632acdc03d210a9560"
-bytes = 6767
+digest = "94b47623cfffd60f6763b8faa4be3639b06a02934db4d1dd15879bdade4225b2"
+bytes = 6720
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/docs-opus.md"
-digest = "a18638a6bfc5e164e05bf46744157baa6897791d1c20eab3f1b655caea3a90ef"
-bytes = 6766
+digest = "352e5ce02c120fe89571a58cab0021e38534f7e3a25d4fa21c8c9ccbd0ba145f"
+bytes = 6719
 executable = false
 
 [[entries]]
@@ -124,26 +124,26 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-architecture/SKILL.md"
-digest = "eeab243e56be6d0e8629fab3d61b2a943f26d52ef4d2d5eefffb0ff2bbf0be3f"
-bytes = 21861
+digest = "822d2b6ce8f5bef455d94ea69e40c95c8261302d42637edefa9a7955db2f4585"
+bytes = 23683
 executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-direct-agents/SKILL.md"
-digest = "a69a8223ce3ec32d2a377767a953a3675f08a9846c274aa19e8da7e9df976f95"
-bytes = 7557
+digest = "71a5d138dce06b575d7b093d5100085b1241cc02edb898340508264b68fd748e"
+bytes = 7805
 executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-harness-upgrade/SKILL.md"
-digest = "de5bef8a1e3289427f48e6cff36f34fb94fc54fc9e55bfd15d1c82149bd5390f"
-bytes = 4660
+digest = "4e6604b08eb811d2f957e19251426d8f8d0a9af0c10406e69696c2990c1c4abc"
+bytes = 4833
 executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-release/SKILL.md"
-digest = "49a354045ed0f38e796a6264141d54f9986eb007b09c14bfcd8692511f7f1e72"
-bytes = 6644
+digest = "e154143a3b325b733e44591f96248cdd33da97e5a325de68906a63a0210e850d"
+bytes = 6951
 executable = false
 
 [[entries]]

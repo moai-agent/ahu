@@ -456,7 +456,8 @@ pub fn capture_task_for_model(
 
 /// Pin interactive task startup to the selected project profile when the
 /// project has opted into auth bindings. Projects without profiles retain the
-/// legacy interactive behavior; headless startup always requires a binding.
+/// existing interactive behavior. Headless startup also checks bindings only
+/// after the project opts into profiles.
 pub fn capture_interactive_task_for_model(
     repo: &Repo,
     harness: &str,

@@ -56,7 +56,7 @@ Commands:
   result <task-id> [--output json]  Read durable process and harness outcomes
   approve <task-id> [--output json] Resolve a pending MCP approval request
   reject <task-id> [--output json]  Reject a pending MCP request and request cancellation
-  cleanup <task-id>                After known termination, remove recognized old captures
+  cleanup <task-id>                After headless termination, remove recognized old captures
                                   and bounded requests; retain results and native sessions,
                                   branches and worktrees
   cancel <task-id>                Request cancellation of the task and ahu descendants;
@@ -258,7 +258,7 @@ Commands:
   wait|result|cancel ID Control or inspect a task
   approve|reject ID     Resolve a task's pending MCP approval request
   resume ID --prompt-file PATH
-  cleanup|remove ID     Clean captures or remove a completed task
+  cleanup|remove ID     Clean headless captures or remove a terminal task
   focus|message ID ...  Focus a task or send it a message
   eval run|report       Run and compare local agent evaluations
   knowledge lint        Check configured OKF bundles
@@ -312,7 +312,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "cancel" => "Usage: ahu cancel TASK\n\nRequest cancellation of the task and its ahu descendants.\n".to_string(),
         "approve" | "reject" => format!("Usage: ahu {topic} TASK [--output json]\n\nResolve the task's pending explicit MCP approval checkpoint. Inspect the request first with `ahu task TASK`; rejecting requests task cancellation.\n"),
         "resume" => "Usage: ahu resume TASK --prompt-file PATH [--output json]\n\nResume a root headless task using its recorded native session.\n".to_string(),
-        "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after termination is known.\n".to_string(),
+        "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after headless termination is known. Interactive tasks have no headless captures; use ahu remove after reviewing and integrating their work.\n".to_string(),
         "remove" => "Usage: ahu remove TASK\n\nRemove a completed task's record, worktree, and branch when safe.\n".to_string(),
         "focus" => "Usage: ahu focus TASK\n\nBring an interactive task's cmux session to the front.\n".to_string(),
         "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),

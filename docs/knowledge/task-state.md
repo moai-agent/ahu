@@ -36,7 +36,7 @@ sources:
 
 Each interactive task's `task.json` and `prompt.txt` live under its own worktree at
 `.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Task directories are named by
-a version-7 universally unique identifier; record schema 3 writes these IDs, while
+a version-7 universally unique identifier; record schemas 3 and 4 write these IDs, while
 records written by schema 2 keep their original 18-character hex identifiers and
 load unchanged. Launch derives this path without an environment override, and
 registers the task in the cross-checkout index once durable state exists. Removing
@@ -60,8 +60,9 @@ outside the worktree can trigger cancellation and a `boundary_violation`
 outcome. Results retain reported targets in `writes_outside_worktree`. This
 is detection after observation, not proof of a completed write or filesystem
 isolation. Relative paths, arbitrary shell writes, unrecognized tools, and
-missing events are outside its coverage. Events received only in the final
-drain can be recorded without triggering the running stop path.[^headless]
+missing events are outside its coverage. The final event drain is checked before
+accepting success, including cancellation of registered descendants when an
+outside target is observed.[^headless]
 
 Headless child grants freeze registered identities and native policies at host
 submission. The broker in src/broker.rs binds requests to a live parent attempt

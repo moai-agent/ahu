@@ -82,9 +82,10 @@ Before handoff, reconcile the ahu tasks used to implement this release. Run
 names, and commits to identify release tasks; do not guess from agent names or
 task titles alone. Confirm each task is terminal, its result was reviewed, and
 its changes are merged or intentionally excluded before removing its local
-execution state. For each completed release task, run `ahu cleanup <task>` and
-then `ahu remove <task>` only when its worktree is clean and its branch is
-merged or safely disposable. Do not remove unrelated or still-active tasks. If
+execution state. For each completed headless release task, run `ahu cleanup <task>`
+and then `ahu remove <task>` only when its worktree is clean and its branch is
+merged or safely disposable. Interactive tasks have no headless captures; run
+`ahu remove <task>` directly after the same integration and terminal-state checks. Do not remove unrelated or still-active tasks. If
 ownership or integration status is uncertain, preserve the task and report it
 as a cleanup follow-up. Verify the release tasks no longer appear in `ahu tasks
 --all`; retain provider-side work items, acceptance evidence, and release links

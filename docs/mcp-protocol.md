@@ -31,7 +31,8 @@ optional target. The stdio server requires matching `AHU_TASK_ID` and
 live in the current checkout, and waits for `ahu approve TASK` or
 `ahu reject TASK`. The task record enters `waiting-for-approval`; rejection,
 operator cancellation, or timeout requests cancellation. A task has at most
-one pending approval request. This cooperative tool is not a general-purpose
+one pending approval request. CLI decisions refuse task or worker context;
+same-user code can remove those markers, so the check is cooperative. This tool is not a general-purpose
 interceptor for shell commands or a replacement for operating-system
 filesystem isolation.
 

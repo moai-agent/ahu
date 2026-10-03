@@ -42,9 +42,9 @@ owned by the primary checkout. Linked checkouts share the same repository names;
 removal retains the binding to its original task ID. Human handles are lookup
 references, not a replacement for task identity or delivery authority.[^commands]
 
-Record schema 3 writes these version-7 IDs; schema 2 wrote 18-character hex IDs.
-The fields are otherwise identical, so schema-2 records load unchanged and
-keep their original IDs. The build reads exactly schemas 2 and 3 and refuses
+Record schema 4 writes these version-7 IDs and adds the `waiting-for-approval`
+state. Schema 3 also used version-7 IDs; schema 2 used 18-character hex IDs.
+The build reads schemas 2, 3, and 4 without rewriting their IDs. It refuses
 schema 1, whose digest field reinterprets file bytes as delivered bytes.[^task]
 
 The repository-scoped task index maps IDs to durable state. Each entry holds the

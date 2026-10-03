@@ -68,10 +68,12 @@ Do not put private tracker identifiers, URLs, titles, or contents into ahu
 prompts, task records, result reports, public files, or commits. Tracker tools
 and skills manage the link on the provider side.
 
-`ahu cleanup` removes recognized temporary captures and bounded requests after
+`ahu cleanup` removes recognized headless captures and bounded requests after
 termination is known; it retains the task record, results, native sessions,
 branch, and worktree. `ahu remove` can remove the task record, worktree, and
-branch after the task is terminal and its changes are safely integrated. Keep
+branch after the task is terminal and its changes are safely integrated.
+Interactive tasks have no headless captures, so use `ahu remove` directly after
+these checks. Keep
 the provider-side work item and its delivery evidence according to repository
 policy when removing local ahu execution state.
 

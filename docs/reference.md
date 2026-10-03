@@ -140,7 +140,9 @@ handling details.
 `ahu_request_approval` is an explicit checkpoint for a task-bound operation.
 It waits for an operator to run `ahu approve TASK` or `ahu reject TASK`; the
 task is shown as `waiting-for-approval` while pending. Rejection or the
-30-minute timeout requests cancellation. This tool does not intercept
+30-minute timeout requests cancellation. Approve and reject require an operator
+invocation outside ahu task or worker context. Same-user code can remove these
+environment markers or edit state; this is a cooperative check. This tool does not intercept
 arbitrary shell operations, and harness write events remain reported evidence,
 not OS-level filesystem containment. Approval summaries and targets are kept
 in the task's owner-only state directory.
@@ -379,10 +381,9 @@ descendants, stops the process group, and records `boundary_violation`.
 This is detection after an event arrives, not filesystem isolation or a
 pre-write approval gate. A reported target is not proof a write succeeded;
 the write may already have occurred. Relative paths, arbitrary shell writes,
-unrecognized tools, and missing or late events can escape detection. A report
-received only during the final stream drain can appear in the result without
-having triggered the running supervisor's stop path. Review the paths and
-native evidence even when the process outcome is successful.
+unrecognized tools, and missing events can escape detection. The final stream
+drain is checked before accepting a successful result; observed outside targets
+also cancel registered descendants. Review the reported paths and native evidence.
 `acceptance` stays `not assessed` and `completion_verified` stays false: a provider
 success or an agent's report does not establish that the assignment was accepted.
 Treat native reports and same-user editable metadata as untrusted data.
@@ -1726,9 +1727,9 @@ ahu uses the one its own resolution picks; it does not search for a version that
 matches the catalog. An exact project pin can make that choice reproducible.
 Project configuration pins catalog `2026-09-27`; a mismatch is an error.
 
-Persisted task records use schema 3, whose IDs are hyphenated `UUID v7` values;
-records written with schema 2 remain readable unchanged, keeping their 18-character
-hex IDs, and older schemas are refused. Launch-preview and task-inspection JSON use
+Persisted task records use schema 4, including the `waiting-for-approval` state,
+and use hyphenated `UUID v7` IDs. Schema 3 records remain readable; schema 2 records
+also remain readable with their original 18-character hex IDs. Schema 1 is refused. Launch-preview and task-inspection JSON use
 schema 1. Incompatible persisted records are refused and listed as unreadable;
 ahu does not reinterpret their digests or delete their worktrees.
 
