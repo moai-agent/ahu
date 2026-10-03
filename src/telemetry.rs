@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use opentelemetry::global;
 use opentelemetry::trace::{Span, Tracer};
 use opentelemetry::{KeyValue, Value};
-use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::{
     Resource,
     trace::{BatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider},
@@ -35,6 +35,7 @@ static MCP_TRANSPORT_ERRORS: AtomicU64 = AtomicU64::new(0);
 const SPAN_QUEUE_CAPACITY: usize = 128;
 const SPAN_EXPORT_BATCH_SIZE: usize = 32;
 const SPAN_SCHEDULED_DELAY: Duration = Duration::from_millis(500);
+const SPAN_EXPORT_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn provider_slot() -> &'static Mutex<Option<SdkTracerProvider>> {
     PROVIDER.get_or_init(|| Mutex::new(None))
@@ -83,6 +84,17 @@ pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
             path.display()
         )));
     }
+    if !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || !matches!(endpoint.path(), "" | "/")
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(Error::new(format!(
+            "{}: telemetry.endpoint must be a collector origin without credentials, path, query, or fragment",
+            path.display()
+        )));
+    }
     Ok(())
 }
 
@@ -97,8 +109,8 @@ pub(crate) fn initialize_mcp(config: &TelemetryConfig) -> Result<()> {
 }
 
 fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Result<()> {
-    let endpoint = eval_endpoint_override().unwrap_or_else(|| config.endpoint.clone());
-    let enabled = config.enabled || std::env::var_os("AHU_EVAL_OTEL_ENDPOINT").is_some();
+    let eval_endpoint = eval_endpoint_override();
+    let enabled = config.enabled || eval_endpoint.is_some();
     if !enabled
         || provider_slot()
             .lock()
@@ -107,11 +119,32 @@ fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Res
     {
         return Ok(());
     }
+    // Config loading validates this too, but direct library callers must not
+    // bypass the same local collector boundary. An invalid eval override alone
+    // must not enable export to the default collector.
+    if eval_endpoint.is_none() && validate_config(config, Path::new("telemetry")).is_err() {
+        eprintln!("ahu: invalid telemetry endpoint; continuing without export");
+        return Ok(());
+    }
+    let endpoint = eval_endpoint.unwrap_or_else(|| config.endpoint.clone());
+    // Pin routing and deadlines independently of the inherited environment.
+    // Keep the SDK's documented header/resource inheritance at the collector.
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(SPAN_EXPORT_TIMEOUT)
+        .timeout(SPAN_EXPORT_TIMEOUT)
+        .build();
+    let Ok(client) = client else {
+        eprintln!("ahu: OTLP transport unavailable; continuing without export");
+        return Ok(());
+    };
     let exporter = SpanExporter::builder()
         .with_http()
+        .with_http_client(client)
         .with_protocol(Protocol::HttpBinary)
         .with_endpoint(format!("{}/v1/traces", endpoint.trim_end_matches('/')))
-        .with_timeout(Duration::from_millis(500))
+        .with_timeout(SPAN_EXPORT_TIMEOUT)
         .build();
     let exporter = match exporter {
         Ok(exporter) => exporter,
@@ -1065,14 +1098,38 @@ mod tests {
 
     #[test]
     fn local_endpoint_is_accepted_and_remote_is_rejected() {
-        let config = TelemetryConfig::default();
-        validate_config(&config, Path::new("config.toml")).unwrap();
-        let remote = TelemetryConfig {
-            enabled: true,
-            endpoint: "https://collector.example.test:443".to_string(),
-            ..TelemetryConfig::default()
-        };
-        assert!(validate_config(&remote, Path::new("config.toml")).is_err());
+        for endpoint in [
+            "http://localhost:4318",
+            "http://127.0.0.1:4318/",
+            "http://[::1]:4318",
+        ] {
+            let config = TelemetryConfig {
+                endpoint: endpoint.into(),
+                ..TelemetryConfig::default()
+            };
+            validate_config(&config, Path::new("config.toml")).unwrap();
+        }
+        for endpoint in [
+            "https://collector.example.test:443",
+            "http://collector.example.test:4318",
+            "http://[::2]:4318",
+            "http://127.0.0.1:4319",
+            "http://127.0.0.1",
+            "http://synthetic-user:synthetic-password@127.0.0.1:4318",
+            "http://synthetic-user@127.0.0.1:4318",
+            "http://:synthetic-password@[::1]:4318",
+            "http://127.0.0.1:4318/v1/traces",
+            "http://127.0.0.1:4318/?synthetic-query",
+            "http://127.0.0.1:4318/#synthetic-fragment",
+        ] {
+            let config = TelemetryConfig {
+                endpoint: endpoint.into(),
+                ..TelemetryConfig::default()
+            };
+            let error = validate_config(&config, Path::new("config.toml"))
+                .expect_err("only a local collector origin is valid");
+            assert!(!error.to_string().contains("synthetic-"));
+        }
     }
 
     #[test]
@@ -1522,6 +1579,305 @@ mod tests {
                 Value::F64(value) => Some(value),
                 _ => None,
             })
+    }
+}
+
+#[cfg(test)]
+mod primary_export_tests {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    // A subprocess isolates both the SDK's global provider and inherited env.
+    #[test]
+    fn primary_export_environment_child() {
+        let Ok(mode) = std::env::var("AHU_TEST_PRIMARY_MODE") else {
+            return;
+        };
+        let mut config = crate::config::TelemetryConfig::default();
+        if let Ok(endpoint) = std::env::var("AHU_TEST_CONFIG_ENDPOINT") {
+            config.enabled = true;
+            config.endpoint = endpoint;
+        }
+        if mode == "ahu-mcp" {
+            super::initialize_mcp(&config).unwrap();
+        } else {
+            super::initialize(&config).unwrap();
+        }
+        assert_eq!(super::exporter_ready(), mode != "rejected");
+        let started = Instant::now();
+        drop(super::span("ahu.synthetic.transport", []));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        println!("synthetic task completed");
+        super::shutdown();
+    }
+
+    fn listener() -> TcpListener {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        listener
+    }
+
+    fn endpoint(listener: &TcpListener) -> String {
+        format!("http://{}", listener.local_addr().unwrap())
+    }
+
+    fn child_command(mode: &str, trap: &TcpListener) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .env_clear()
+            .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+            .env("AHU_TEST_PRIMARY_MODE", mode)
+            .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint(trap))
+            .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint(trap))
+            .env("OTEL_EXPORTER_OTLP_TIMEOUT", "60000")
+            .env("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "60000")
+            .env("OTEL_BSP_SCHEDULE_DELAY", "60000")
+            .env("OTEL_BSP_MAX_QUEUE_SIZE", "65536")
+            .env("OTEL_EXPORTER_OTLP_HEADERS", "x-synthetic=ambient-header")
+            .env(
+                "OTEL_RESOURCE_ATTRIBUTES",
+                "synthetic.resource=ambient-resource",
+            )
+            .args([
+                "--exact",
+                "telemetry::primary_export_tests::primary_export_environment_child",
+                "--nocapture",
+            ]);
+        command
+    }
+
+    fn run_child(mut command: Command) -> Duration {
+        let scratch = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let mut child = command
+            .current_dir(scratch.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(4) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("telemetry blocked the synthetic task");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("synthetic task completed"));
+        started.elapsed()
+    }
+
+    fn assert_unused(listener: &TcpListener) {
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    }
+
+    fn capture(
+        collector: TcpListener,
+        response: String,
+        stall: bool,
+    ) -> std::thread::JoinHandle<Option<(String, Vec<u8>)>> {
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let (mut stream, _) = loop {
+                match collector.accept() {
+                    Ok(pair) => break pair,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("synthetic collector accept failed: {e}"),
+                }
+            };
+            // Accepted sockets may inherit the listener's nonblocking mode.
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line);
+                assert!(headers.len() < 16 * 1024);
+            }
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            assert!(length < 1024 * 1024);
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            if stall {
+                // Longer than the exporter deadline; task shutdown must finish
+                // while this otherwise healthy collector is still unresponsive.
+                std::thread::sleep(Duration::from_secs(2));
+            } else {
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            Some((headers, body))
+        })
+    }
+
+    fn assert_wire(wire: Option<(String, Vec<u8>)>, service: &str, header: &str) {
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::any_value;
+        use prost::Message;
+        let (headers, body) = wire.expect("primary exporter reached its local collector");
+        assert!(headers.starts_with("POST /v1/traces HTTP/1.1\r\n"));
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("content-type: application/x-protobuf")
+        );
+        assert!(
+            headers.contains(header),
+            "documented ambient header was lost"
+        );
+        let message = ExportTraceServiceRequest::decode(body.as_slice()).unwrap();
+        let resource = message.resource_spans[0].resource.as_ref().unwrap();
+        for (key, value) in [
+            ("service.name", service),
+            ("synthetic.resource", "ambient-resource"),
+        ] {
+            assert!(resource.attributes.iter().any(|attr| {
+                attr.key == key
+                    && attr.value.as_ref().and_then(|v| v.value.as_ref())
+                        == Some(&any_value::Value::StringValue(value.into()))
+            }));
+        }
+        assert!(
+            message
+                .resource_spans
+                .iter()
+                .flat_map(|r| &r.scope_spans)
+                .flat_map(|s| &s.spans)
+                .any(|s| s.name == "ahu.synthetic.transport")
+        );
+    }
+
+    #[test]
+    fn primary_export_ignores_proxy_and_ambient_endpoints() {
+        for service in ["ahu", "ahu-mcp"] {
+            let collector = listener();
+            let trap = listener();
+            let mut command = child_command(service, &trap);
+            command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint(&collector));
+            for key in [
+                "HTTP_PROXY",
+                "http_proxy",
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+            ] {
+                command.env(key, endpoint(&trap));
+            }
+            command.env("NO_PROXY", "").env("no_proxy", "");
+            let capture = capture(
+                collector,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                false,
+            );
+            run_child(command);
+            assert_wire(
+                capture.join().unwrap(),
+                service,
+                "x-synthetic: ambient-header",
+            );
+            assert_unused(&trap);
+        }
+    }
+
+    #[test]
+    fn primary_export_does_not_follow_redirects() {
+        for status in [307, 308] {
+            let collector = listener();
+            let trap = listener();
+            let mut command = child_command("ahu", &trap);
+            command
+                .env("AHU_EVAL_OTEL_ENDPOINT", endpoint(&collector))
+                .env(
+                    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+                    "x-synthetic-trace=ambient-trace-header",
+                );
+            let response = format!(
+                "HTTP/1.1 {status} Redirect\r\nLocation: {}/escaped\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                endpoint(&trap)
+            );
+            let capture = capture(collector, response, false);
+            run_child(command);
+            assert_wire(
+                capture.join().unwrap(),
+                "ahu",
+                "x-synthetic-trace: ambient-trace-header",
+            );
+            assert_unused(&trap);
+        }
+    }
+
+    #[test]
+    fn primary_export_failure_is_bounded_and_does_not_fail_task() {
+        let collector = listener();
+        let trap = listener();
+        let mut command = child_command("ahu", &trap);
+        command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint(&collector));
+        let capture = capture(collector, String::new(), true);
+        let elapsed = run_child(command);
+        assert_wire(
+            capture.join().unwrap(),
+            "ahu",
+            "x-synthetic: ambient-header",
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "export timeout was not bounded: {elapsed:?}"
+        );
+        assert_unused(&trap);
+    }
+
+    #[test]
+    fn primary_export_rejects_invalid_endpoints_before_transport() {
+        let trap = listener();
+        for endpoint in [
+            "http://synthetic-user:synthetic-password@127.0.0.1:4318",
+            "http://127.0.0.1:4318/path",
+            "http://127.0.0.1:4318/?query",
+            "http://127.0.0.1:4318/#fragment",
+            "https://127.0.0.1:4318",
+            "http://192.0.2.1:4318",
+        ] {
+            for key in ["AHU_TEST_CONFIG_ENDPOINT", "AHU_EVAL_OTEL_ENDPOINT"] {
+                let mut command = child_command("rejected", &trap);
+                command.env(key, endpoint);
+                run_child(command);
+                assert_unused(&trap);
+            }
+        }
     }
 }
 
