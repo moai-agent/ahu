@@ -25,7 +25,11 @@ CONFIG_FILE_NAMES = {
 }
 
 
-def run(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
+def run(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None, strip: bool = True) -> str:
+    # Worktree checkout invokes post-checkout too. Apply this to every Git
+    # operation, not just the final commit, and never invoke a user's signer.
+    if argv[0] == "git":
+        argv = ["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *argv[1:]]
     result = subprocess.run(
         argv,
         cwd=cwd,
@@ -35,7 +39,7 @@ def run(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None 
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    return result.stdout.strip()
+    return result.stdout.strip() if strip else result.stdout
 
 
 def remove_path(path: Path) -> bool:
@@ -68,16 +72,21 @@ def main() -> int:
     parser.add_argument("--branch", required=True, help="new local branch name for the control arm")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--all-project-skills", action="store_true", help="remove skills under the supported project skill roots")
-    group.add_argument("--skill", help="remove one skill by directory name from both supported project roots")
+    group.add_argument("--skill", help="remove one skill by directory name from all supported project roots")
     parser.add_argument("--ahu", default="ahu", help="ahu executable used to refresh the control lock (default: ahu on PATH)")
     args = parser.parse_args()
 
     try:
+        if any(name in os.environ for name in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")):
+            raise RuntimeError("unset Git repository/index overrides before preparing an ablation arm")
         repo = Path(run(["git", "rev-parse", "--show-toplevel"], cwd=args.repo)).resolve()
         if run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=repo):
             raise RuntimeError("the source checkout must be clean before preparing an ablation arm")
         head = run(["git", "rev-parse", "HEAD"], cwd=repo)
-        destination = args.worktree.expanduser().resolve()
+        requested_destination = args.worktree.expanduser()
+        if requested_destination.is_symlink() or requested_destination.exists():
+            raise RuntimeError(f"control worktree path already exists: {requested_destination}")
+        destination = requested_destination.resolve()
         if destination == repo or repo in destination.parents:
             raise RuntimeError("the control worktree must be outside the source checkout")
         if destination.exists():
@@ -110,17 +119,23 @@ def main() -> int:
             raise RuntimeError(
                 "the source checkout has ignored harness context; commit or remove it before preparing an arm so both arms inherit the same context"
             )
+        lock_path = repo / "ahu.lock"
+        if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
+            raise RuntimeError("ahu.lock must be a regular file, not a symlink or directory")
+        relative_targets = [
+            Path(root) if args.all_project_skills else Path(root) / skill_name
+            for root in SKILL_ROOTS
+        ]
+        # Validate every removal before creating an arm or removing anything.
+        source_targets = [confined_target(repo, repo / path) for path in relative_targets]
+        if not any(path.exists() or path.is_symlink() for path in source_targets):
+            raise RuntimeError("no project skill files matched; the control arm was not changed")
         ahu = args.ahu
         if os.sep in ahu or (os.altsep and os.altsep in ahu):
             ahu = str(Path(ahu).expanduser().resolve())
 
         run(["git", "worktree", "add", "-b", args.branch, "--", str(destination), head], cwd=repo)
-        if args.all_project_skills:
-            targets = [destination / root for root in SKILL_ROOTS]
-        else:
-            targets = [destination / root / skill_name for root in SKILL_ROOTS]
-
-        targets = [confined_target(destination, path) for path in targets]
+        targets = [confined_target(destination, destination / path) for path in relative_targets]
         removed = [str(path.relative_to(destination)) for path in targets if remove_path(path)]
         if not removed:
             raise RuntimeError("no project skill files matched; the control arm was not changed")
@@ -128,18 +143,25 @@ def main() -> int:
         # Keep user-specific lock acceptance in disposable state. The shared
         # ahu.lock is committed in the generated worktree; local fingerprints
         # are neither written to it nor left in the user's normal Ahu state.
-        with tempfile.TemporaryDirectory(prefix="ahu-skill-ablation-state-") as state_home:
+        with tempfile.TemporaryDirectory(prefix="ahu-skill-ablation-state-", dir=destination.parent) as state_home:
             env = os.environ.copy()
             env["XDG_STATE_HOME"] = state_home
             run([ahu, "--repo", str(destination), "lock", "--update"], cwd=destination, env=env)
 
-        tracked_skill_roots = [
-            root
-            for root in SKILL_ROOTS
-            if run(["git", "ls-files", "--", root], cwd=repo)
-        ]
-        stage_paths = [*tracked_skill_roots, "ahu.lock"]
-        run(["git", "add", "-A", "-f", "--", *stage_paths], cwd=destination)
+        if any(path.exists() or path.is_symlink() for path in targets):
+            raise RuntimeError("lock refresh recreated removed skills; the arm was not committed")
+        control_lock = destination / "ahu.lock"
+        if control_lock.is_symlink() or not control_lock.is_file():
+            raise RuntimeError("lock refresh did not produce a regular ahu.lock")
+        changed = run(["git", "diff", "HEAD", "--name-only", "-z"], cwd=destination, strip=False)
+        untracked = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=destination, strip=False)
+        paths = [path for path in (changed + "\0" + untracked).split("\0") if path]
+        if any(
+            path != "ahu.lock" and not any(path == root or path.startswith(root + "/") for root in removed)
+            for path in paths
+        ):
+            raise RuntimeError("lock refresh produced unexpected changes; the arm was not committed")
+        run(["git", "add", "-A", "-f", "--", *removed, "ahu.lock"], cwd=destination)
         run(
             [
                 "git",
