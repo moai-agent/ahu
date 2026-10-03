@@ -143,7 +143,7 @@ impl Status {
                 .any(|c| c.name == "native invocation profile")
         {
             self.headless.allowed = false;
-            self.headless.reasons.push("Codex 0.157.1 requires fresh native effective hook and requirements inspection using the frozen invocation profile".into());
+            self.headless.reasons.push("This Codex version requires fresh native effective hook and requirements inspection using the frozen invocation profile".into());
         }
         if let Err(error) =
             crate::catalog::check_headless_version(&self.harness, version.unwrap_or(""))
@@ -679,7 +679,7 @@ fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) 
         components, gaps, conformance: "locally_inspected; live_untested".into(), headless,
         next_action: match harness {
             "claude-code" => "Use interactive execution while independent hooks/plugins or managed settings are unresolved. Review those sources with their native owner, then inspect again. cmux Settings > Automation controls only the Claude wrapper; no native Claude installer is exposed.".into(),
-            "opencode" => "Use interactive execution for unresolved native configuration/authentication sources; credentials and account databases are not read. For unguarded Feed, explicit native removal is `cmux hooks opencode uninstall`, then inspect again. Reinstalling the same Feed does not provide isolation.".into(),
+            "opencode" => "Use interactive execution for unresolved native configuration/authentication sources; credentials and account databases are not read. Native --pure disables external plugins but does not resolve authenticated remote configuration. Changing native homes or hiding account stores can change provider/model resolution and is not an isolation repair. For unguarded Feed, explicit native removal is `cmux hooks opencode uninstall`, then inspect again. Reinstalling the same Feed does not provide isolation.".into(),
             _ => "Inspect unknown components and native scope; use interactive execution until isolation is verified. Installation is explicit: ahu cmux install --harness ID --dry-run.".into(),
         } }
 }
@@ -1244,7 +1244,7 @@ pub fn enforce_headless_executable(
     if harness != "codex" || crate::harness::isolation::profile(harness, version).is_none() {
         return enforce_headless(repo, harness, version);
     }
-    let status = inspect_codex_effective(repo, executable)?.with_version(Some(version));
+    let status = inspect_codex_effective(repo, executable, version)?.with_version(Some(version));
     if !status.headless.allowed {
         return Err(Error::new(format!(
             "headless cmux isolation is unverified for codex:\n{}",
@@ -1254,15 +1254,23 @@ pub fn enforce_headless_executable(
     Ok(status)
 }
 
-/// Compatibility probes can exercise the real metadata and component validator
-/// before catalog admission; normal launches also require the exact version gate.
-pub fn inspect_codex_effective(repo: &Path, executable: &Path) -> Result<Status> {
+/// Compatibility probes use the same version-specific invocation controls as
+/// launch. A parseable version alone never enables an unreviewed profile.
+pub fn inspect_codex_effective(repo: &Path, executable: &Path, version: &str) -> Result<Status> {
     let status = inspect(repo, "codex");
-    let metadata = crate::harness::codex_metadata::inspect(executable, repo)?;
-    codex_effective_status(status, repo, &metadata)
+    let metadata = crate::harness::codex_metadata::inspect(executable, repo, version)?;
+    codex_effective_status(status, repo, &metadata, version)
 }
 
-pub fn codex_effective_status(status: Status, repo: &Path, metadata: &Value) -> Result<Status> {
+pub fn codex_effective_status(
+    status: Status,
+    repo: &Path,
+    metadata: &Value,
+    version: &str,
+) -> Result<Status> {
+    let profile = crate::harness::isolation::profile("codex", version).ok_or_else(|| {
+        Error::new("no reviewed Codex metadata isolation profile for this version")
+    })?;
     if status.harness != "codex" {
         return Err(Error::new(
             "native Codex metadata cannot authorize another harness",
@@ -1355,7 +1363,6 @@ pub fn codex_effective_status(status: Status, repo: &Path, metadata: &Value) -> 
             item.detail = "executable consequences covered by the exact Codex invocation profile and fresh native hook metadata; credentials remain native and unread".into();
         }
     }
-    let profile = crate::harness::isolation::profile("codex", "0.157.1").expect("reviewed profile");
     let mut invocation = component(
         "native invocation profile",
         repo,
@@ -1390,8 +1397,9 @@ pub fn enforce_headless(repo: &Path, harness: &str, version: &str) -> Result<Sta
     let status = headless_status(inspect(repo, harness), version);
     if !status.headless.allowed {
         return Err(Error::new(format!(
-            "headless cmux isolation is unverified for {harness}:\n{}",
-            status.headless.reasons.join("\n")
+            "headless cmux isolation is unverified for {harness}:\n{}\n{}",
+            status.headless.reasons.join("\n"),
+            status.next_action
         )));
     }
     Ok(status)

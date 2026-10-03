@@ -154,13 +154,13 @@ pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
     let entry = harness(id)?;
     let evidence = match id {
         "codex" => {
-            "Absent native sources or exact reviewed guarded hook commands. Codex 0.157.1 requires fresh native hook and requirements inspection with its frozen invocation profile; credentials remain native and unread, optional plugins and notify are disabled, and mandatory policy must be absent."
+            "Absent native sources or exact reviewed guarded hook commands. Codex 0.157.1 and 0.160.0 require fresh native hook and requirements inspection with their frozen invocation profiles; credentials remain native and unread, optional plugins and notify are disabled, and mandatory policy must be absent."
         }
         "opencode" => {
             "Absent native sources or the exact reviewed guarded Session plugin; Feed is unsafe, and authentication/account stores, substitutions and declared modules are unresolved."
         }
         "claude-code" => {
-            "Direct executable bypasses the cmux wrapper; 2.1.283 headless invocations disable non-managed hooks with a frozen profile. Enabled plugins and managed settings must still be resolved."
+            "Direct executable bypasses the cmux wrapper; 2.1.283 and 2.1.288 headless invocations disable non-managed hooks with frozen profiles. Enabled plugins and managed settings must still be resolved."
         }
         "antigravity" => {
             "Absent inspected hook configuration; custom hooks, extensions and configuration overrides are unverified."
