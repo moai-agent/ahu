@@ -9,9 +9,11 @@ agents on when to use the tool and how to handle its output and data boundary.
 
 ## MCP tool
 
-`ahu mcp serve` advertises `ahu_typed_decide`. With no `AHU_DECISION_URL`, it
-uses TypeSafe Jev. A local-only service address set through `AHU_DECISION_URL`
-explicitly selects the existing provider-neutral HTTP adapter path instead.
+`ahu mcp serve` advertises `ahu_typed_decide`. With no local provider settings,
+it uses TypeSafe Jev. `AHU_OLLAMA_MODEL` selects native Ollama;
+`AHU_DECISION_URL` selects the provider-neutral loopback HTTP adapter.
+Configuration is validated once per call before credential access or dispatch.
+Invalid or incomplete local settings fail without falling back to TypeSafe.
 
 For Jev, ahu checks the MCP process environment for `TYPESAFE_API_KEY`, then
 the `.env` file in the repository's primary checkout. Environment values take precedence. ahu reads
@@ -142,37 +144,61 @@ round-trip duration; it does not include request or answer contents.
 
 ## Native Ollama provider
 
-ahu includes native support for Ollama 0.35+ using its `/v1/systemone` endpoint
-which implements the Jev-style API for typed decisions. This routes requests
-directly to a local Ollama instance without needing an external Python adapter.
+ahu supports Ollama 0.35+ through its
+[`/v1/systemone` API](https://github.com/ollama/ollama/blob/main/docs/openapi.yaml),
+which uses Jev-style typed questions. Requests go directly to a local Ollama
+instance without an external Python adapter. A compatible decision model must
+already be installed; ahu does not pull models or run live inference during setup.
 
 To use the native Ollama integration, set `AHU_OLLAMA_MODEL` to a vendor-documented
 decision model such as `nimble`, `tev1`, or `tev1:0.8b`. The endpoint defaults to
 `http://127.0.0.1:11434/v1/systemone`, but you can override it using `AHU_OLLAMA_URL`.
 
-A loopback connection alone cannot attest the daemon's behavior; it could proxy to a
-cloud backend. Do not use known `:cloud` tags for this local-only provider.
+The URL must use HTTP, a literal loopback IPv4 or IPv6 address, and exactly
+`/v1/systemone`, with no credentials, query, or fragment. Hostnames, abbreviated
+IPv4 addresses, and normalized path variants are rejected. The client sends no
+authentication headers, follows no redirects, ignores environment proxies, and
+uses a 30-second timeout with a 1 MiB response limit, including responses without
+a declared length. It never consults the TypeSafe credential for native calls.
 
-If `AHU_OLLAMA_MODEL` is set, ahu uses the native Ollama provider. Setting both
-`AHU_OLLAMA_MODEL` and `AHU_DECISION_URL` creates ambiguity and will be refused.
+Model identifiers must contain 1–128 ASCII letters, digits, dots, dashes,
+underscores, or colons. Known cloud variants, including `:cloud`, `-cloud`, and
+`-cloud:latest` (case insensitive), are rejected. A loopback connection cannot
+attest how the daemon is configured or whether locally named weights run locally.
+
+`AHU_OLLAMA_URL` requires `AHU_OLLAMA_MODEL`. Neither native setting may be
+combined with `AHU_DECISION_URL` or `AHU_DECISION_MODEL`; mixed settings fail
+instead of selecting a provider by precedence. Invalid UTF-8 is rejected.
+Only process environment settings select the provider; setup forwards both
+Ollama variable names to Codex MCP children without reading or storing values.
 
 ```text
 AHU_OLLAMA_MODEL=tev1:0.8b
 AHU_OLLAMA_URL=http://127.0.0.1:11434/v1/systemone
 ```
 
-The MCP call returns a typed JSON value; for example, the selected option and
-a numeric probability. Ollama's constrained output ensures the values match
-the declared JSON types and ranges, but a generated probability is still the
-model's estimate, not a calibrated confidence. The adapter reports local Ollama
-token counts for comparing usage, latency, and answers across agent runs.
+The adapter sends only `model`, `state`, and translated `questions`. Choice
+options become `criteria`, score levels become an ordered `criteria` array, and
+probability questions become `noul`. Batch item IDs remain the answer keys.
+Fractional score positions are scaled back to the requested min/max range.
+Optional legends remain compatible with TypeSafe: if supplied, they must match
+the requested level indices and descriptions exactly. Generic adapter results
+continue to use ahu's provider-neutral response shape.
+
+ahu validates returned question names, types, ranges, and distributions. Native
+responses that report a different model or malformed token counts are rejected.
+Provider error bodies are omitted from diagnostics. The service metadata reports
+Ollama, the requested/reported model, token counts, and round-trip duration.
+Probabilities and confidence remain model estimates, not calibrated correctness.
+Ollama currently limits choice questions to 26 options; ahu's portable schema
+allows up to 32, so larger choices may be refused by Ollama.
 
 ### Legacy local Python adapter
 
 The repository also includes a small standard-library adapter for older Ollama
 versions using `/api/chat` and JSON Schema. To select this generic adapter instead
 of the native Ollama backend or Jev, configure `AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions`
-and leave `AHU_OLLAMA_MODEL` unset.
+and leave both `AHU_OLLAMA_MODEL` and `AHU_OLLAMA_URL` unset.
 
 Choose a locally installed model from `ollama list`. For example, if
 `qwen3.6:35b-mlx` is available, start the adapter in a terminal:
