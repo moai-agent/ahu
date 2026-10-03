@@ -351,8 +351,8 @@ the interactive one, so `permissions = "accept-edits"` is refused here too. See
 provider setup. Recorded compatibility does not establish authentication,
 provider availability, or full native-helper lifecycle validation.
 
-Codex 0.157.1 uses strict configuration validation, enables inspected hooks, disables
-optional plugins and remote plugin loading, and clears the legacy notify command
+Codex 0.157.1 and 0.160.0 use strict configuration validation, enable inspected hooks, disable
+optional plugins and remote plugin loading, and clear the legacy notify command
 for this invocation. Before launch and resume, ahu asks a separate native metadata
 process for effective hooks and managed requirements without starting a model
 turn. Inspection has a 30-second deadline and bounded output. ahu refuses
@@ -360,6 +360,28 @@ admission for warnings, managed requirements, or hooks outside reviewed profiles
 native. This inspection cannot prevent configuration changes between inspection
 and execution. A trusted project and explicit tool approvals are still required
 for unattended MCP calls.
+
+Claude Code 2.1.283 and 2.1.288 receive
+`--settings '{"disableAllHooks":true}'` for headless launch and resume. This
+invocation setting disables non-managed hooks without replacing native settings,
+account selection, skills, or direct MCP configuration. Parsed hooks can be
+isolated this way; malformed settings, enabled plugins, and unresolved managed
+sources still refuse admission. Managed hooks retain their native precedence.
+See Claude's [hook controls](https://code.claude.com/docs/en/hooks#disable-or-remove-hooks).
+
+The 0.160.0 Codex and 2.1.288 Claude invocation controls were checked with local
+synthetic configuration and model transport fixtures. Those checks do not extend
+the catalog's authenticated provider verification records above.
+
+OpenCode's `--pure` flag disables external plugins, but does not establish the
+contents of authenticated remote configuration. Native configuration can also
+select providers and models; replacing a config or data home, hiding an account
+database, or stripping authentication plugins can change the selected identity.
+ahu does not apply those workarounds. Resolve the reported source with its native
+owner or use interactive execution; see OpenCode's
+[configuration precedence](https://opencode.ai/docs/config/#precedence-order).
+Claude's `--bare` similarly changes authentication resolution and is not used.
+Antigravity has no reviewed invocation override for unresolved hooks/extensions.
 
 `ahu cmux status` (also `--output json`) checks installed CLI versions and
 reports the same isolation profile used by launch previews. Inspection alone
@@ -369,9 +391,9 @@ other launch checks.
 
 | Harness | Required native isolation evidence |
 | --- | --- |
-| Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Version 0.157.1 additionally requires native effective metadata inspection with no warnings or managed requirements, and disables optional plugins for the invocation. Older profiles retain unresolved plugin, cloud, and managed-source checks. |
+| Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Versions 0.157.1 and 0.160.0 additionally require native effective metadata inspection with no warnings or managed requirements, and disable optional plugins for the invocation. Other versions retain unresolved plugin, cloud, and managed-source checks. |
 | OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; authentication/account stores, declared modules, and substitutions remain unresolved. |
-| Claude Code | Direct executable avoids the cmux wrapper. Independent hooks, enabled plugins, and managed settings require separate evidence. |
+| Claude Code | Direct executable avoids the cmux wrapper. Versions 2.1.283 and 2.1.288 disable parsed non-managed hooks for the invocation. Enabled plugins, malformed settings, and unresolved managed sources still refuse admission. |
 | Antigravity | Absent inspected hooks. Custom hooks, extensions, and overrides remain unverified. |
 
 Unknown or unsafe integrations have no operator bypass, including with
