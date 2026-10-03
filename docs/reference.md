@@ -1602,8 +1602,14 @@ for startup. Keep it limited to settings the task agent may read. A change
 blocks launch until that user runs `ahu lock --update`; local acceptance does
 not change or require a commit to shared `ahu.lock`.
 
+When a project has `.agents/mcp_config.json`, ahu also privately fingerprints
+the native Antigravity MCP file at `~/.gemini/config/mcp_config.json`. Its contents,
+path, and digest stay out of the shared lock. Editing or deleting that file
+requires each affected project's local acceptance to be refreshed. The file
+stays in native user storage; ahu does not copy it into task worktrees.
+
 The lock is deliberately scoped. Harness built-ins, user and managed settings
-outside the recognized local input, provider memory, and context in skipped
+outside these recognized local inputs, provider memory, and context in skipped
 scan paths cannot be guaranteed by these locks. A clean lock does not prove
 those sources are absent or that a harness loaded any particular skill. The
 lock's coverage limitations are part of the launch disclosure.

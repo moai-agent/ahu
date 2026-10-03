@@ -55,13 +55,17 @@ flowchart LR
     CLI --> Doctor["Doctor and readiness"]
     CLI --> LockCmd["ahu lock --update"]
     LockCmd --> LockFile["ahu.lock"]
+    LockCmd --> PrivateLock["Private acceptance per user and project"]
+    Local["Recognized local Claude / native Antigravity settings"] --> PrivateLock
+    PrivateLock --> Admission
     Git["Committed recognized context"] --> Admission["Launch admission"]
     LockFile --> Admission
     CLI --> Launch["ahu @agent / headless"]
     Launch --> Admission
     Admission -->|"tracked, clean, lock matches"| Plan["Resolve agent, harness, model"]
     Admission -->|"missing, stale, dirty, unsafe"| Refuse["Refuse before launch"]
-    Plan --> Snapshot["Bounded context snapshot"]
+    Plan --> NativeCheck["Native MCP / exact model admission"]
+    NativeCheck --> Snapshot["Bounded context snapshot"]
     Snapshot --> Worktree["Task worktree and task record"]
     Worktree --> Harness["Claude / Codex / OpenCode / other harness"]
     Harness --> MCPClient["Agent MCP client"]
@@ -91,6 +95,10 @@ candidate lock; an operator reviews and commits it with the context files. The
 lock does not contain per-user settings. Recognized local settings that affect
 agent behavior are separately fingerprinted in owner-only host state per user
 and repository; changing them requires that user to accept the new fingerprint.
+These inputs include local Claude settings and native Antigravity MCP settings
+for projects with an Antigravity registration. Native user settings stay on the
+host. Native inspection can also migrate project files; a detected context
+change refuses launch until it has been reviewed, accepted, and committed.
 Neither lock covers managed provider policy, built-in harness prompts, or
 context the bounded scan cannot identify.[^lock][^launch]
 

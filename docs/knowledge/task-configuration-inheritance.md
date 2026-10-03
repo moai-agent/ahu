@@ -25,9 +25,12 @@ sources:
 A task worktree starts from the parent checkout's HEAD. Before planning a launch,
 ahu compares shared recognized context with committed `ahu.lock` and requires
 those inputs and the lock to be tracked and clean. Recognized user-local Claude
-settings are checked against a separate owner-only acceptance in host state,
+settings and registered native Antigravity MCP settings are checked against a
+separate owner-only acceptance in host state,
 scoped by user and repository. A change blocks that user's launch until
 explicitly accepted with `ahu lock --update`; it does not modify the shared lock.
+The native Antigravity file stays in user storage and is checked when the project
+has `.agents/mcp_config.json`; it is not copied into task worktrees.
 ahu never stages or commits project files.[^launch][^snapshot][^lock]
 
 The snapshot recognizes `.agents`, `.claude`, `.codex`, `.agent`, `.opencode`, and `.gemini`
