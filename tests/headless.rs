@@ -291,6 +291,25 @@ fn private_telemetry_cli_links_and_reports_opt_in_attempt_measurements() {
     assert_eq!(report["linked_tasks"], 1);
     assert_eq!(report["completed_attempts"], 1);
     assert_eq!(report["attempts_with_opt_in_metrics"], 1);
+    assert_eq!(report["capacity"]["kind"], "unavailable");
+    assert_eq!(
+        report["capacity"]["reason"],
+        "no trusted per-run or account capacity signal is collected"
+    );
+    let human_report = f
+        .command()
+        .args(["telemetry", "report", "--key", "case-a4"])
+        .output()
+        .unwrap();
+    assert!(
+        human_report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human_report.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&human_report.stdout)
+            .contains("capacity      unknown (no trusted capacity signal)")
+    );
     let group = &report["groups"][0];
     assert_eq!(group["group"]["harness"], "claude-code");
     assert_eq!(group["group"]["model"], "claude-opus-5");

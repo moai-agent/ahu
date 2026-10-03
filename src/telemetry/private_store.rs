@@ -410,6 +410,10 @@ pub fn report(repo: &Repo, record_key: &str) -> Result<serde_json::Value> {
         "tasks_without_headless_attempt_results":tasks_without_completed_attempts,
         "completed_attempts":observations.len(),
         "attempts_with_opt_in_metrics":observations.iter().filter(|(_,_,attempt)| attempt.metrics_observed).count(),
+        "capacity":{
+            "kind":"unavailable",
+            "reason":"no trusted per-run or account capacity signal is collected"
+        },
         "groups":report_groups,
         "limitations":[
             "Only headless attempts with opted-in local metrics are included.",

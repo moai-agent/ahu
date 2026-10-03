@@ -111,8 +111,10 @@ harness, model, and outcome, and shows timing, per-field token observations,
 coverage, and source-separated harness cost. Attempts without local metric
 projections remain unavailable in their groups. There is no automatic quota
 query, final billing API, interactive-session usage reader, tracker client, or
-automatic issue visibility check. Offline fixtures verify adapter behavior;
-they do not prove live provider billing or quota.
+automatic issue visibility check. Every report explicitly shows capacity as
+unknown because no trusted per-run or account capacity signal is collected.
+Offline fixtures verify adapter behavior; they do not prove live provider
+billing or quota.
 
 [^headless]: `src/headless.rs` normalizes bounded harness events and persists attempt results.
 [^eval]: `src/eval.rs` aggregates observed values and renders eval comparisons.

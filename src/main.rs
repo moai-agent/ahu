@@ -333,6 +333,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                             "  attempts      {} complete, {} with opt-in metrics",
                             report["completed_attempts"], report["attempts_with_opt_in_metrics"]
                         );
+                        println!("  capacity      unknown (no trusted capacity signal)");
                         for group in report["groups"].as_array().into_iter().flatten() {
                             print_private_report_group(group);
                         }

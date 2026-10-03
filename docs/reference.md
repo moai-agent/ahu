@@ -825,12 +825,12 @@ amount can be incomplete. See the [Claude Code usage and limits guide](https://s
 [OpenCode JSON run events](https://opencode.ai/docs/cli/), and
 [OpenCode stats command](https://opencode.ai/v2/docs/cli/commands/).
 
-| Harness | Token value and scope | USD value and evidence | Quota/capacity and freshness |
-| --- | --- | --- | --- |
-| Codex | `turn.completed` usage, per completed turn; absent when the event omits usage. | Unknown. The documented event schema has no cost field; ahu does not price tokens. | Unknown to ahu. No documented machine-readable per-run quota field. |
-| Claude Code | Result usage for the headless invocation; the stream also reports API-request usage. | Result `total_cost_usd`, fresh at invocation completion and labeled harness-reported. It may differ from account billing. | Unknown to ahu. `/usage` is an interactive account-level view, not a per-task signal. |
-| Antigravity CLI | `step_update` usage reported during the headless run; event scope follows the harness event. | Unknown. No documented per-run USD amount. | Unknown to ahu. Interactive `/usage` and `/credits` show account/plan state at refresh time; ahu does not scrape those views. |
-| OpenCode | `step_finish` token values, per model step. The final step event may be omitted from the JSON stream. | Per-step `cost`, summed once per observed part ID. It is an engine/provider-model value, not billing proof; a missing final event makes the sum incomplete. | Unknown in the headless stream. `opencode stats` is a separate historical report that may include other sessions, so ahu does not ingest it. |
+| Harness | Usage/cost signal and scope | Access method and freshness | Evidence level | Limits and unavailable signals |
+| --- | --- | --- | --- | --- |
+| Codex | `turn.completed` token usage, per completed turn. No USD field. | Headless `codex exec --json` event stream; observed at turn completion. | Documented machine-readable event schema; adapter covered by protocol fixtures. | Cost and quota are unknown to ahu. No documented machine-readable per-run quota field; ahu does not price tokens. |
+| Claude Code | Result token usage and `total_cost_usd` for the headless invocation; API-request events have request scope. | Headless `--output-format stream-json`; result is fresh at invocation completion, request usage when its event arrives. | Documented result/usage and monitoring interfaces; adapter covered by protocol fixtures. | USD is harness-reported and may differ from account billing. Subscription/account quota is unknown to ahu; interactive `/usage` is not ingested. |
+| Antigravity CLI | `step_update` usage is per event; terminal `result.usage` is invocation-scoped. Cost is unavailable. | Headless `--output-format stream-json`; observed as steps arrive and, when present, at the terminal result. | Documented NDJSON schema; adapter covered by protocol fixtures. | Cost and quota are unknown to ahu. Interactive `/usage` and `/credits` are not ingested. A missing terminal result leaves task completion evidence incomplete even when step usage was observed. |
+| OpenCode | `step_finish` token usage and `cost`, per model step. | Headless `opencode run --format json`; fresh when each step event arrives. | Documented JSON run events; adapter covered by protocol fixtures. | Cost is an engine/provider-model amount, not billing proof; a missing final event can make the sum incomplete. Quota is unknown; `opencode stats` may include other sessions and is not ingested. |
 
 This matrix describes documented, machine-readable information that ahu can
 collect without scraping a terminal UI, reading harness databases, or deriving
@@ -848,6 +848,27 @@ cost and capacity comparisons clearer because the harness/model identity is
 frozen per task. Such definitions should be reviewed and authored as normal ahu
 agents under the context-lock and identity rules. ahu should not generate or
 switch model variants automatically based on stale quota or price information.
+
+### Instrumentation overhead budget
+
+Use these per-attempt regression budgets for the opt-in headless measurements:
+
+- Local numeric metrics, including their addition to the result record: at most
+  100 ms additional p95 launch time and at most 1 ms additional p95 atomic result
+  write time.
+- Local OTLP trace export: at most 1.1 s additional p95 wall time for a
+  short-lived headless process. Span completion remains nonblocking when the
+  bounded queue is full; dropping telemetry is preferable to delaying the task.
+
+A synthetic local benchmark used an instantaneous fake Antigravity CLI, a
+loopback OTLP receiver, and 12 matched launch rounds. Baseline launch median/p95
+was 2.64/2.71 s. Opt-in local metrics changed matched launch time by 4 ms median
+and 86 ms p95; local result serialization and atomic write added 18 microseconds
+median and 39 microseconds p95 across 500 paired writes. OTLP export added 780 ms
+median and 1.03 s p95; metrics plus OTLP added 774 ms median and 903 ms p95.
+These short, machine-specific synthetic measurements are evidence for the
+budgets, not a performance guarantee for other hosts, collectors, harnesses, or
+model latency. The budget is not yet automatically enforced by CI.
 
 Headless results also distinguish the skill catalog copied into the task
 worktree from observed skill invocations. A catalog entry records only its
