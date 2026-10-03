@@ -842,7 +842,9 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
             &mut slave_fd,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            // libc exposes a mutable winsize pointer on macOS and a const
+            // pointer on Linux; a raw pointer coerces correctly on both.
+            &raw mut size,
         )
     } != 0
     {
