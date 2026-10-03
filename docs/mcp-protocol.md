@@ -66,7 +66,10 @@ executing a valid inspection (such as a missing repository task) return text
 content with `isError: true`, not a top-level JSON-RPC error. Modern synchronous
 results, including tool errors and every `tools/list` variant, carry
 `resultType: "complete"`; queued calls carry `resultType: "task"`, and their
-stored final tool results carry `resultType: "complete"`.
+stored final tool results carry `resultType: "complete"`. Modern discovery and
+all tool lists also carry `ttlMs: 0` and `cacheScope: "private"`, explicitly
+disabling caching across changing repository state and client capabilities.
+Legacy tool lists omit these modern-only fields.
 
 Modern requests require version/capability metadata on every request (`-32022`
 when absent or unsupported). A validated modern request locks out `initialize`

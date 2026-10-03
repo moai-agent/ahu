@@ -2068,7 +2068,7 @@ fn an_unlisted_parseable_opencode_version_floats_by_default() {
     let stub = f.bin.join("opencode");
     std::fs::write(
         &stub,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.18.5; exit 0; fi\nprintf '%s\\n' '{\"type\":\"step_start\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"step-start\"}}' '{\"type\":\"text\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"text\",\"text\":\"ok\"}}' '{\"type\":\"step_finish\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}'\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.18.5; exit 0; fi\nif [ \"$1\" = \"models\" ]; then echo ollama/glm-5.3:cloud; exit 0; fi\nprintf '%s\\n' '{\"type\":\"step_start\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"step-start\"}}' '{\"type\":\"text\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"text\",\"text\":\"ok\"}}' '{\"type\":\"step_finish\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}'\n",
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2105,6 +2105,8 @@ fn a_registered_opencode_agent_runs_headless_and_records_its_session() {
 import sys,os,json
 if '--version' in sys.argv:
  print('1.18.30'); sys.exit(0)
+if sys.argv[1:] == ['models', 'ollama']:
+ print('ollama/glm-5.3:cloud'); sys.exit(0)
 a=sys.argv[1:]
 assert a[0]=='run', a
 assert a[a.index('--format')+1]=='json', a
@@ -3374,4 +3376,56 @@ fn skill_probe_rejects_payloads_and_bounds_records() {
         serde_json::to_value(legacy).unwrap()["evidence"],
         "unverified"
     );
+}
+
+#[test]
+fn opencode_preflight_refuses_missing_model_before_creating_a_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.repo
+        .add_agent_on("oc", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    f.repo.commit("synthetic provider selection");
+    let stub = f.bin.join("opencode");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.18.34; exit 0; fi\nif [ \"$1\" = models ] && [ \"$2\" = ollama ]; then printf '%s\\n' \"$SYNTHETIC_AVAILABLE_MODEL\"; exit 0; fi\nexit 91\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for (listed, accepted) in [
+        ("opencode/big-pickle", false),
+        ("ollama/glm-5.3:cloud-other", false),
+        ("ollama/glm-5.3:cloud", true),
+    ] {
+        let out = f
+            .command()
+            .env("SYNTHETIC_AVAILABLE_MODEL", listed)
+            .args([
+                "@oc",
+                "--headless",
+                "--dry-run",
+                "--output",
+                "json",
+                "--prompt",
+                "inspect the synthetic fixture",
+            ])
+            .output()
+            .unwrap();
+        let error = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.success(), accepted, "{error}");
+        if !accepted {
+            assert!(
+                error.contains("refuses a possible model fallback"),
+                "{error}"
+            );
+        }
+        let worktrees = common::git(f.repo.path(), &["worktree", "list", "--porcelain"]);
+        assert_eq!(
+            worktrees
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count(),
+            1
+        );
+    }
 }

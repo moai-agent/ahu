@@ -331,3 +331,311 @@ fn is_executable(path: &Path) -> bool {
         path.is_file()
     }
 }
+
+/// Check native configuration without inference or changing the selected model.
+/// Call on the submitting checkout, then again on the materialized worktree
+/// immediately before execution: provider configuration and Codex trust are
+/// directory-dependent. This does not establish entitlement or inference access.
+pub fn check_launch_compatibility(
+    executable: &Path,
+    harness: &str,
+    model: &str,
+    permissions: crate::agent::Permissions,
+    cwd: &Path,
+) -> Result<()> {
+    check_launch_compatibility_with_policy(executable, harness, model, permissions, cwd, None)
+}
+
+pub(crate) fn check_launch_compatibility_with_policy(
+    executable: &Path,
+    harness: &str,
+    model: &str,
+    permissions: crate::agent::Permissions,
+    cwd: &Path,
+    policy: Option<&crate::cmux::integration::HeadlessPolicy>,
+) -> Result<()> {
+    use crate::agent::Permissions;
+    let (args, capture) = match harness {
+        "codex" if permissions == Permissions::Auto => {
+            (crate::harness::codex::auto_mcp_probe_args(), false)
+        }
+        "opencode" => {
+            // Validate before using the provider as a positional CLI argument.
+            crate::harness::model_args(harness, model)?;
+            let provider = model.split_once('/').expect("validated model").0;
+            (vec!["models".into(), provider.into()], true)
+        }
+        _ => return Ok(()),
+    };
+    if !executable.is_absolute() || is_excluded(executable) {
+        bail!("compatibility probe requires a resolved harness outside the repository");
+    }
+    let mut command = std::process::Command::new(executable);
+    command.args(&args).current_dir(cwd);
+    if let Some(policy) = policy {
+        crate::cmux::integration::sanitize(&mut command, Some(policy));
+    }
+    let output = bounded_config_probe(&mut command, capture, std::time::Duration::from_secs(8));
+    if harness == "codex" {
+        if output.is_none() {
+            bail!(
+                "Codex cannot load its effective MCP configuration with ahu's auto tool approvals. \
+                 An untrusted project may hide .codex/config.toml, leaving an ahu server with tools \
+                 but no transport. Review project trust in Codex directly in this checkout and verify \
+                 `codex mcp list` recognizes the intended ahu server, then retry. A trusted project \
+                 transport is sufficient; global registration is not required. ahu will not \
+                 grant trust, copy a project command into CLI overrides, or remove MCP approval gates. \
+                 The native config probe failed or timed out; its output is withheld."
+            );
+        }
+    } else {
+        let Some(output) = output else {
+            bail!(
+                "OpenCode model availability could not be verified: the bounded `opencode models \
+                 <provider>` probe failed or timed out. Run it in this checkout and repair native \
+                 provider configuration before retrying; ahu refuses a possible model fallback. \
+                 Native diagnostics are withheld."
+            );
+        };
+        if !output.lines().any(|line| line.trim() == model) {
+            bail!(
+                "OpenCode did not list the exact requested model {model:?} in this checkout. \
+                 Configure and enable that provider/model in OpenCode, verify it with \
+                 `opencode models <provider>`, then retry. ahu refuses a possible model fallback."
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Bound elapsed time, captured bytes and pipe lifetime. Config diagnostics can
+/// contain secrets, so stderr is never captured and callers never echo stdout.
+/// The Codex check discards stdout too; only the OpenCode model list is read.
+fn bounded_config_probe(
+    command: &mut std::process::Command,
+    capture: bool,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    command
+        .stdin(Stdio::null())
+        .stdout(if capture {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = command.spawn().ok()?;
+    let mut reader = child.stdout.take();
+    let pid = child.id();
+    let deadline = Instant::now() + timeout;
+    let mut bytes = Vec::new();
+    let exited = (|| {
+        if let Some(pipe) = &reader {
+            use std::os::fd::AsRawFd;
+            let fd = pipe.as_raw_fd();
+            // SAFETY: pipe owns this live descriptor for the whole probe.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return false;
+            }
+        }
+        loop {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            // Drain without waiting for EOF: a detached descendant could keep
+            // the pipe open after the leader exits. No reader thread survives.
+            if let Some(pipe) = &mut reader {
+                loop {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    let mut buffer = [0; 8192];
+                    match pipe.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) if bytes.len() + n <= 1_048_576 => {
+                            bytes.extend_from_slice(&buffer[..n])
+                        }
+                        Ok(_) => return false,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => return false,
+                    }
+                }
+            }
+            match crate::headless::child_exited(pid) {
+                // One final drain after observing exit captures bytes written
+                // between the last read and the exit observation.
+                Ok(true) => {
+                    if let Some(pipe) = &mut reader {
+                        let mut tail = Vec::new();
+                        match pipe
+                            .take((1_048_577 - bytes.len()) as u64)
+                            .read_to_end(&mut tail)
+                        {
+                            Ok(_) => (),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
+                            Err(_) => return false,
+                        }
+                        bytes.extend(tail);
+                    }
+                    return bytes.len() <= 1_048_576;
+                }
+                Err(_) => return false,
+                Ok(false) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    })();
+    // SAFETY: the child has not been reaped, so the process group cannot be reused.
+    // Kill descendants too: they may otherwise hold the capture pipe indefinitely.
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    let status = child.wait().ok()?;
+    if !exited || !status.success() {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    use crate::agent::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fake(root: &Path, body: &str) -> PathBuf {
+        let file = root.join("native-probe");
+        std::fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+        file
+    }
+
+    #[test]
+    fn opencode_requires_exact_available_model_and_uses_project_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("models.txt"), "ollama/glm-5.3:cloud\n").unwrap();
+        let exe = fake(
+            root.path(),
+            "test \"$1\" = models && test \"$2\" = ollama || exit 2\ncat models.txt",
+        );
+        let check = || {
+            check_launch_compatibility(
+                &exe,
+                "opencode",
+                "ollama/glm-5.3:cloud",
+                Permissions::Prompt,
+                &project,
+            )
+        };
+        check().unwrap();
+        for unavailable in [
+            "opencode/big-pickle\n",
+            "ollama/glm-5.3:cloud-other\n",
+            "disabled: ollama/glm-5.3:cloud\n",
+            "ollama/other\n",
+            "",
+        ] {
+            std::fs::write(project.join("models.txt"), unavailable).unwrap();
+            assert!(
+                check()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("refuses a possible model fallback")
+            );
+        }
+        let exe = fake(root.path(), "printf 'ollama/glm-5.3:cloud\\n'; exit 1");
+        assert!(
+            check_launch_compatibility(
+                &exe,
+                "opencode",
+                "ollama/glm-5.3:cloud",
+                Permissions::Auto,
+                &project
+            )
+            .is_err()
+        );
+        assert!(
+            check_launch_compatibility(
+                &exe,
+                "opencode",
+                "--help/model",
+                Permissions::Prompt,
+                &project
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn codex_auto_checks_transport_without_changing_trust_or_provider_approvals() {
+        let root = tempfile::tempdir().unwrap();
+        let args = crate::harness::codex::auto_mcp_probe_args();
+        assert_eq!(&args[args.len() - 2..], ["mcp", "list"]);
+        for tool in crate::harness::codex::AUTO_LOCAL_MCP_TOOLS {
+            assert!(args.contains(&crate::harness::codex::auto_local_mcp_config(tool)));
+        }
+        assert!(!args.iter().any(|arg| arg.contains("trust")
+            || arg.contains("command=")
+            || arg.contains("ahu_typed_decide")
+            || arg.contains("ahu_skills_suggest")));
+        let exe = fake(root.path(), "test -f transport-present");
+        let check = |permissions| {
+            check_launch_compatibility(&exe, "codex", "gpt-6-astra", permissions, root.path())
+        };
+        let error = check(Permissions::Auto).unwrap_err().to_string();
+        assert!(error.contains("Review project trust"));
+        assert!(error.contains("no transport"));
+        check(Permissions::Prompt).unwrap();
+        check(Permissions::AcceptEdits).unwrap();
+        std::fs::write(root.path().join("transport-present"), "").unwrap();
+        check(Permissions::Auto).unwrap();
+    }
+
+    #[test]
+    fn probes_are_bounded_and_do_not_return_failed_or_oversized_output() {
+        use std::time::{Duration, Instant};
+        let root = tempfile::tempdir().unwrap();
+        for body in [
+            "printf 'synthetic diagnostic'; exit 1",
+            "yes x | head -c 1048577",
+        ] {
+            let exe = fake(root.path(), body);
+            assert!(
+                bounded_config_probe(
+                    &mut std::process::Command::new(exe),
+                    true,
+                    Duration::from_secs(2)
+                )
+                .is_none()
+            );
+        }
+        let exe = fake(root.path(), "sleep 30 &\nwait");
+        let start = Instant::now();
+        assert!(
+            bounded_config_probe(
+                &mut std::process::Command::new(exe),
+                true,
+                Duration::from_millis(40)
+            )
+            .is_none()
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let exe = fake(root.path(), "sleep 30 &\nprintf 'ollama/glm-5.3:cloud\\n'");
+        assert_eq!(
+            bounded_config_probe(
+                &mut std::process::Command::new(exe),
+                true,
+                Duration::from_secs(2)
+            )
+            .as_deref(),
+            Some("ollama/glm-5.3:cloud\n")
+        );
+    }
+}

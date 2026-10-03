@@ -162,6 +162,38 @@ refuses conflicting skill, agent, or MCP entries. It refreshes `ahu.lock` after
 creating the project context. Review and commit the files and lock before
 launching; setup does not stage, commit, or push them.
 
+Antigravity setup retains `.agents/mcp_config.json` for project/print-mode
+use and registers a native user-wide entry for interactive sessions at
+`~/.gemini/config/mcp_config.json`. The global entry uses an absolute ahu
+executable with `mcp serve` and inherits each session's working directory, so
+it does not pin every session to one repository. Setup preserves other native
+servers and settings and refuses conflicting ahu entries, malformed nonempty JSON,
+unsafe paths, or inputs changed during planning. Empty or whitespace-only native
+files are treated as an empty object while preserving their original bytes for
+the change guard. It writes atomically with owner-only
+permissions. Stop other native configuration writers while running setup.
+Native user settings belong to private context acceptance, not the shared lock.
+The CLI's `agy mcp list` lists user-wide entries; omission of a project server
+does not prove print-mode discovery failed. The setup handshake verifies the
+ahu server itself, not authenticated interactive client discovery.
+
+Before headless submission and execution, ahu checks OpenCode's exact selected
+model against `opencode models <provider>` in the applicable checkout. A missing
+model, failed listing, or timeout refuses the run without selecting another
+model. The [native listing](https://opencode.ai/docs/cli/#models) establishes
+configured availability, not account entitlement or successful inference.
+The probe preserves native configuration and follows isolation admission.
+
+Codex auto preflight loads native configuration with the same local-tool
+approval overrides using `codex mcp list`, without connecting to MCP servers;
+all output is discarded. An untrusted project's `.codex/config.toml` is ignored,
+which can leave tool overrides without an ahu transport. The diagnostic asks
+the operator to review project trust and native MCP configuration; ahu does
+not grant trust, promote a project command into CLI overrides, or drop approval
+gates. Trusted project-only transports are accepted; global registration is
+not required. Codex's [configuration reference](https://developers.openai.com/codex/config-reference)
+describes project trust and the separate per-tool MCP approval settings.
+
 Harness CLI versions float to the version installed on each machine by default;
 ahu does not install or update harnesses. To require an exact version for a
 project, add a pin to `.agents/ahu/config.toml`:

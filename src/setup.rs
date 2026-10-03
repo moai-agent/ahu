@@ -1,6 +1,8 @@
 //! One first-run workflow for project policy, harness MCP clients, skills, and
 //! ahu developer agents.
 
+pub mod native_mcp;
+
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -145,24 +147,55 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         .with_kind(crate::util::ErrorKind::Prerequisite));
     }
 
-    run_detected(
+    let native_mcp = if detected.iter().any(|h| h.id == "antigravity") {
+        let path = crate::native_mcp::antigravity_config_path()?.ok_or_else(|| {
+            Error::new("Antigravity interactive MCP setup needs an absolute native home")
+        })?;
+        let executable = selection::resolve_executable("ahu")
+            .ok_or_else(|| Error::new("ahu executable disappeared before MCP setup"))?;
+        let executable = Path::new(&executable).canonicalize()?;
+        Some(native_mcp::plan(&path, &executable)?)
+    } else {
+        None
+    };
+    run_detected_with_native(
         console,
         repo,
         &detected,
         crate::launcher::run_setup_with_available_models,
         check_mcp_server,
+        native_mcp,
     )
 }
 
 /// Finish configuration for an already detected set of harnesses. Keeping
 /// environment discovery at the edge makes the setup transaction testable
 /// without faking PATH or launching harness binaries.
+#[cfg(test)]
 fn run_detected(
     console: &mut Console<'_>,
     repo: &Repo,
     detected: &[Detected],
     configure_project: fn(&mut Console<'_>) -> Result<Option<crate::config::ProjectConfig>>,
     check_server: fn(&Repo) -> Result<()>,
+) -> Result<i32> {
+    run_detected_with_native(
+        console,
+        repo,
+        detected,
+        configure_project,
+        check_server,
+        None,
+    )
+}
+
+fn run_detected_with_native(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    detected: &[Detected],
+    configure_project: fn(&mut Console<'_>) -> Result<Option<crate::config::ProjectConfig>>,
+    check_server: fn(&Repo) -> Result<()>,
+    native_mcp: Option<native_mcp::Plan>,
 ) -> Result<i32> {
     console.say(&style::stdout().paint(Role::Heading, "Detected harnesses\n"))?;
     for h in detected {
@@ -331,7 +364,13 @@ fn run_detected(
         }
     }
 
+    if native_mcp.is_some() {
+        console.say("Antigravity: registering the cwd-sensitive ahu server in native user MCP configuration for interactive sessions; project configuration remains available for print mode. Other native servers are preserved.\n")?;
+    }
     apply_plan(console, &writes)?;
+    if let Some(plan) = native_mcp {
+        plan.apply()?;
+    }
 
     // Read back native config and agent manifests, then refresh shared context.
     // A first setup initializes private local-context acceptance; later setup
