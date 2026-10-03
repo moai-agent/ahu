@@ -934,7 +934,7 @@ fn isolation_profile_matrix_preserves_refusals_and_representation_parity() {
         let entry = ahu::catalog::harness(harness).unwrap();
         for reviewed in entry.headless_verified_versions {
             let clean = f.inspect(harness).with_version(Some(reviewed));
-            if harness == "codex" && *reviewed == "0.157.1" {
+            if harness == "codex" && matches!(*reviewed, "0.157.1" | "0.160.0") {
                 // Exact catalog admission does not replace fresh native inspection.
                 assert!(!clean.headless.allowed, "{clean:?}");
                 assert!(

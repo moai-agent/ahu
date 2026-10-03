@@ -364,7 +364,10 @@ fn observed_versions_are_evidence_not_an_allowlist() {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .collect();
-    assert_eq!(verified, vec!["1.18.29", "1.18.30", "1.18.31", "1.18.32"]);
+    assert_eq!(
+        verified,
+        vec!["1.18.29", "1.18.30", "1.18.31", "1.18.32", "1.18.34"]
+    );
 
     // The current installed CLI floats by default. Only a missing or
     // unparseable version produces a prerequisite note.

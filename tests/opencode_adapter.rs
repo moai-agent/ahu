@@ -341,11 +341,10 @@ fn the_catalog_entry_and_the_adapter_agree() {
         command_for(Permissions::Prompt).unwrap().program
     );
     assert!(entry.adapter_available);
-    // All three were checked live; the install moved under the probes on the
-    // review date, which is why the entry names a range.
+    // The catalog records the versions with live interactive evidence.
     assert_eq!(
         entry.verified_versions,
-        "1.18.29, 1.18.30, 1.18.31, 1.18.32"
+        "1.18.29, 1.18.30, 1.18.31, 1.18.32, 1.18.34"
     );
 
     let model = ahu::catalog::model("opencode", MODEL).expect("catalog model");
