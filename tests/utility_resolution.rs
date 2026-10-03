@@ -382,9 +382,9 @@ fn observed_versions_are_evidence_not_an_allowlist() {
 
     // Catalog entries name only versions whose surface has been observed.
     for (harness, expected) in [
-        ("claude-code", vec!["2.1.269", "2.1.283"]),
-        ("codex", vec!["0.154.0", "0.157.1"]),
-        ("antigravity", vec!["1.2.2"]),
+        ("claude-code", vec!["2.1.269", "2.1.283", "2.1.288"]),
+        ("codex", vec!["0.154.0", "0.157.1", "0.160.0"]),
+        ("antigravity", vec!["1.2.2", "1.2.16"]),
     ] {
         let entry = ahu::catalog::harness(harness).expect("catalog entry");
         let versions: Vec<&str> = entry
