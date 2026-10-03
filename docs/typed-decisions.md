@@ -140,15 +140,39 @@ reading its value. The response retains the provider's reported model version.
 Telemetry reports TypeSafe's returned input/output token counts and the
 round-trip duration; it does not include request or answer contents.
 
-## Optional local Ollama provider
+## Native Ollama provider
 
-The repository includes a small standard-library adapter for a local Ollama
-model. It binds only to `127.0.0.1`, verifies that the selected model is
-installed locally, and calls Ollama's local `/api/chat` endpoint with a
-JSON Schema tailored to the requested choices and numeric ranges. It reports
-Ollama's prompt/generated token counts plus load, prompt, generation, and total
-time in `service` metadata. It does not ask the model to invent a confidence
-score.
+ahu includes native support for Ollama 0.35+ using its `/v1/systemone` endpoint
+which implements the Jev-style API for typed decisions. This routes requests
+directly to a local Ollama instance without needing an external Python adapter.
+
+To use the native Ollama integration, set `AHU_OLLAMA_MODEL` to a vendor-documented
+decision model such as `nimble`, `tev1`, or `tev1:0.8b`. The endpoint defaults to
+`http://127.0.0.1:11434/v1/systemone`, but you can override it using `AHU_OLLAMA_URL`.
+
+A loopback connection alone cannot attest the daemon's behavior; it could proxy to a
+cloud backend. Do not use known `:cloud` tags for this local-only provider.
+
+If `AHU_OLLAMA_MODEL` is set, ahu uses the native Ollama provider. Setting both
+`AHU_OLLAMA_MODEL` and `AHU_DECISION_URL` creates ambiguity and will be refused.
+
+```text
+AHU_OLLAMA_MODEL=tev1:0.8b
+AHU_OLLAMA_URL=http://127.0.0.1:11434/v1/systemone
+```
+
+The MCP call returns a typed JSON value; for example, the selected option and
+a numeric probability. Ollama's constrained output ensures the values match
+the declared JSON types and ranges, but a generated probability is still the
+model's estimate, not a calibrated confidence. The adapter reports local Ollama
+token counts for comparing usage, latency, and answers across agent runs.
+
+### Legacy local Python adapter
+
+The repository also includes a small standard-library adapter for older Ollama
+versions using `/api/chat` and JSON Schema. To select this generic adapter instead
+of the native Ollama backend or Jev, configure `AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions`
+and leave `AHU_OLLAMA_MODEL` unset.
 
 Choose a locally installed model from `ollama list`. For example, if
 `qwen3.6:35b-mlx` is available, start the adapter in a terminal:
@@ -185,19 +209,6 @@ with 12 billion parameters and Qwen 3.6 with 35 billion parameters. Gemma took 1
 took 21.1 seconds cold (18.0 seconds to load) and 1.1 seconds warm. This is one
 example for plumbing and timing, not an accuracy comparison. The adapter keeps
 the chosen model loaded for five minutes after a call.
-
-To select the local Ollama adapter instead of Jev, configure the environment
-of each harness's `ahu mcp serve` process with:
-
-```text
-AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions
-```
-
-The MCP call returns a typed JSON value; for example, the selected option and
-a numeric probability. Ollama's constrained output ensures the values match
-the declared JSON types and ranges, but a generated probability is still the
-model's estimate, not a calibrated confidence. The adapter reports local Ollama
-token counts for comparing usage, latency, and answers across agent runs.
 
 When project OpenTelemetry is enabled, the `ahu mcp serve` process exports a
 span for each parsed MCP request, including initialize,
