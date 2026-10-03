@@ -7,7 +7,7 @@ description: Update the installed Codex, Claude Code, Antigravity CLI, and OpenC
 
 Keep the locally installed harness CLIs current and keep ahu's adapters honest
 about the exact versions they support. This skill is for maintaining ahu itself;
-do not add it to the skills bundled by `ahu setup` or `ahu mcp setup`.
+do not add it to the skills bundled by `ahu setup`.
 
 ## Upgrade workflow
 
@@ -63,10 +63,12 @@ against the exact installed version before changing `src/catalog.rs`:
    delivery, completion signal, exit status, cancellation behavior, and output
    parsing. Do not use a real project task or allow writes outside that temporary
    repository.
-5. Add an exact headless version to the catalog only after the adapter behavior
-   has passed those checks. Keep untested versions rejected. Update interactive
-   compatibility claims only when their behavior has been observed too; do not
-   infer support for every intervening version.
+5. Record a verified headless version in the catalog only after the adapter
+   behavior has passed those checks. Installed versions float by default;
+   optional project pins and specialized native controls are separate from this
+   evidence list. Update interactive compatibility claims only when their
+   behavior has been observed too; do not infer verified support for intervening
+   versions.
 6. Update catalog tests and evidence/comments with the precise validated version
    and observed behavior. Run formatting and focused tests, then run
    `ahu lock --update` (using the checkout's current binary) for agent-context
@@ -74,5 +76,6 @@ against the exact installed version before changing `src/catalog.rs`:
 
 Keep upgrade and adapter compatibility separate in reports: list the installed
 version, the version validated by ahu, which checks ran, and any blocked or
-unverified behavior. A newer CLI can be installed while ahu correctly refuses
-to launch it headlessly until compatibility is validated.
+unverified behavior. A newer CLI may pass the floating version check while
+still failing native isolation, specialized controls, or actual invocation.
+Do not describe launch admission alone as verified compatibility.

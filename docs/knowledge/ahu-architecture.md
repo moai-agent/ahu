@@ -4,7 +4,7 @@ title: ahu system architecture
 description: How ahu admits committed agent context, launches harnesses, serves MCP tools, and evaluates telemetry.
 tags: [architecture, launch, mcp, telemetry, evals]
 status: draft
-generated: { by: docs-astra/1.1.1, at: 2026-09-27T00:00:00Z }
+generated: { by: docs-astra/1.1.2, at: 2026-10-03T00:00:00Z }
 sources:
   - id: main
     resource: ../../src/main.rs
@@ -33,6 +33,12 @@ sources:
   - id: state
     resource: ../../src/task.rs
     title: Task records and outcomes
+  - id: auth
+    resource: ../../src/auth_binding.rs
+    title: Local account profiles and task resume checks
+  - id: approval
+    resource: ../../src/approval.rs
+    title: Cooperative task approval checkpoints
 ---
 
 # ahu system architecture
@@ -100,6 +106,22 @@ spans mean unknown coverage; they do not mean the agent did not use a tool. Huma
 review of traces and cases is still needed when changing instructions, skills,
 or tools.[^telemetry][^eval][^eval-run][^state]
 
+Local auth profiles opt the project into identity checks before launch/startup
+and resume. Tasks record the profile and identity fingerprint. Resume compares
+both with the active binding and observed native login; changing the binding
+does not migrate a task. Without profiles, this guard is inactive. Readiness
+reports identity/binding states without principals or credentials. These checks
+are best effort, not an atomic credential lock: sign-in can change after a
+probe. OpenCode cloud-model checks assume the model uses the loopback Ollama
+daemon selected by `OLLAMA_HOST`; they do not verify OpenCode's effective
+provider endpoint.[^auth]
+
+The task-bound `ahu_request_approval` MCP tool records a cooperative checkpoint
+and waits for `ahu approve TASK` or `ahu reject TASK`. Rejection or expiry
+requests cancellation. The checkpoint does not intercept arbitrary tool calls,
+shell commands, or filesystem writes, and does not expand native harness
+permissions.[^approval]
+
 [^main]: CLI routing in src/main.rs.
 [^launch]: Launch admission and task planning in src/launch.rs.
 [^lock]: Lock generation and checks in src/context_lock.rs.
@@ -109,3 +131,5 @@ or tools.[^telemetry][^eval][^eval-run][^state]
 [^eval]: Evaluation CLI in src/eval.rs.
 [^eval-run]: Trial orchestration in src/eval.rs.
 [^state]: Task records in src/task.rs.
+[^auth]: Profile, readiness, launch, and resume checks in src/auth_binding.rs.
+[^approval]: Explicit request and operator decision lifecycle in src/approval.rs.

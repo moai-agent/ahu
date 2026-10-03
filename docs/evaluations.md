@@ -80,6 +80,7 @@ runs within a matrix are grouped by agent.
 | Quality among valid answers | Answer correctness among results that could be graded |
 | OTel tool expectations | Required or forbidden MCP behaviors, with evidence coverage |
 | Time and native token observations | Work and delay reported by the harness |
+| Harness-reported USD | Observed amounts and coverage, separate from tokens and provider billing |
 | Decision service usage | Additional provider tokens and successful-call duration |
 | MCP argument bytes | Measured decision request sizes before provider expansion |
 
@@ -125,7 +126,9 @@ skill names/descriptions to the configured provider; it never receives hidden
 answers or grading rubrics.
 
 ```sh
-AHU_DECISION_MODEL=jev-1.13.0 ahu --repo "$CANDIDATE_REPO" eval run   --case "$CASE_FILE" --agent @candidate --skill-selection decision   --records "$EXPERIMENT_DIR/decision.jsonl"
+AHU_DECISION_MODEL=jev-1.13.0 ahu --repo "$CANDIDATE_REPO" eval run \
+  --case "$CASE_FILE" --agent @candidate --skill-selection decision \
+  --records "$EXPERIMENT_DIR/decision.jsonl"
 ```
 
 This does not remove skills, rewrite their bodies, or choose a different
@@ -181,13 +184,16 @@ python3 scripts/prepare_skill_ablation.py \
 ```
 
 For a one-skill ablation, replace `--all-project-skills` with
-`--skill typed-decisions`. The helper requires a clean source checkout, creates
-a reviewable local branch/worktree, removes selected paths from `.agents/skills`,
-`.claude/skills`, and `.opencode/skills`, refreshes `ahu.lock`, and commits only those changes. It
-uses disposable Ahu state while refreshing the lock, so per-user auth
-fingerprints are not accepted into the user's normal Ahu state. The branch and
+`--skill ahu-typed-decisions`. The helper requires a clean source checkout
+without ignored harness context and a new destination outside it. It creates a
+reviewable local branch/worktree, removes selected paths from `.agents/skills`,
+`.claude/skills`, and `.opencode/skills`, refreshes `ahu.lock`, and commits only
+those changes. It uses disposable ahu state while refreshing the lock, so
+per-user context fingerprints are not accepted into the user's normal ahu state. The branch and
 worktree remain for review and evaluation; remove them after the experiment
-when their Ahu eval tasks are no longer needed.
+when their ahu eval tasks are no longer needed. Use `--ahu /path/to/ahu` to
+select the intended executable instead of the one on `PATH`. A failed setup
+retains any created branch/worktree for inspection.
 
 Run both arms with the same candidate agent, harness, model, permissions, case
 suite, repetitions, and evaluation options. Use one harness-specific agent per
@@ -196,9 +202,11 @@ pair, then repeat the pair for every supported harness. For example:
 ```sh
 ahu --repo "$CANDIDATE_REPO" eval run \
   --suite "$SUITE_FILE" --agent @dev-codex --runs 5 \
+  --allow-widened-approvals \
   --records "$EXPERIMENT_DIR/skills-on.jsonl"
 ahu --repo "$SKILLS_OFF_REPO" eval run \
   --suite "$SUITE_FILE" --agent @dev-codex --runs 5 \
+  --allow-widened-approvals \
   --records "$EXPERIMENT_DIR/skills-off.jsonl"
 cat "$EXPERIMENT_DIR/skills-on.jsonl" "$EXPERIMENT_DIR/skills-off.jsonl" \
   > "$EXPERIMENT_DIR/skill-ablation.jsonl"
@@ -212,7 +220,7 @@ coverage. Alternate which arm runs first across repetitions or invocations to
 reduce order effects. Keep failed attempts and unknown telemetry in the result.
 
 This is a **project-skill** ablation. It controls committed files under the
-standard project skill roots used by supported harnesses. It cannot disable
+standard project skill roots used by supported harnesses. It cannot turn off
 user-level skills, global plugins, harness built-ins, or skill sources outside
 those roots, and it does not prove that a harness loaded any available skill.
 Keep user and harness configuration fixed, inspect actual skill invocation

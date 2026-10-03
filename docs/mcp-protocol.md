@@ -27,7 +27,7 @@ launches or changes harness permissions.
 `ahu_request_approval` is an explicit task-bound checkpoint tool. Its
 arguments are limited to an operation category, a short summary, and an
 optional target. The stdio server requires matching `AHU_TASK_ID` and
-`AHU_TASK_DIR` values from an Ahu-managed process, verifies that the task is
+`AHU_TASK_DIR` values from an ahu-managed process, verifies that the task is
 live in the current checkout, and waits for `ahu approve TASK` or
 `ahu reject TASK`. The task record enters `waiting-for-approval`; rejection,
 operator cancellation, or timeout requests cancellation. A task has at most
