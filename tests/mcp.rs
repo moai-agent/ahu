@@ -71,10 +71,23 @@ fn mcp_shutdown_signal_fixture(signal: libc::c_int) {
 
 #[test]
 fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
+    typed_decision_http_roundtrip(false);
+}
+
+#[test]
+fn native_ollama_tool_posts_exact_contract_without_authentication() {
+    typed_decision_http_roundtrip(true);
+}
+
+fn typed_decision_http_roundtrip(native: bool) {
     let repo = common::TestRepo::new();
     let receiver = ahu::eval_otel::Receiver::start().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}/v1/decisions", listener.local_addr().unwrap());
+    let endpoint = format!(
+        "http://{}/v1/{}",
+        listener.local_addr().unwrap(),
+        if native { "systemone" } else { "decisions" }
+    );
     let service = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -99,16 +112,33 @@ fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
         reader.read_exact(&mut body).unwrap();
         let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(request["questions"]["route"]["type"], "choice");
-        let response = serde_json::json!({
-            "answers":{"route":{"value":"billing","confidence":0.91}},
-            "service":{
-                "backend":"ollama",
-                "model":"fixture-model",
-                "prompt_tokens":12,
-                "generated_tokens":3,
-                "duration_ms":25
-            }
-        })
+        assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+        let response = if native {
+            assert!(headers.starts_with("POST /v1/systemone HTTP/1.1"));
+            assert_eq!(
+                request,
+                serde_json::json!({
+                    "model":"fixture-model",
+                    "state":{"body":"Please refund the duplicate charge."},
+                    "questions":{"route":{"type":"choice","instructions":"Which team handles this?",
+                        "criteria":{"billing":"Invoices and refunds","other":"Everything else"}}}
+                })
+            );
+            serde_json::json!({"model":"fixture-model",
+                "answers":{"route":{"type":"choice","choice":"billing","confidence":0.91}},
+                "usage":{"input_tokens":12,"output_tokens":3}})
+        } else {
+            serde_json::json!({
+                "answers":{"route":{"value":"billing","confidence":0.91}},
+                "service":{
+                    "backend":"ollama",
+                    "model":"fixture-model",
+                    "prompt_tokens":12,
+                    "generated_tokens":3,
+                    "duration_ms":25
+                }
+            })
+        }
         .to_string();
         write!(
             stream,
@@ -120,13 +150,29 @@ fn typed_decision_tool_posts_model_neutral_contract_to_local_service() {
         request
     });
 
-    let mut child = common::ahu()
+    let mut command = common::ahu();
+    for key in [
+        "AHU_DECISION_URL",
+        "AHU_DECISION_MODEL",
+        "AHU_OLLAMA_URL",
+        "AHU_OLLAMA_MODEL",
+    ] {
+        command.env_remove(key);
+    }
+    if native {
+        command
+            .env("AHU_OLLAMA_MODEL", "fixture-model")
+            .env("AHU_OLLAMA_URL", endpoint);
+    } else {
+        command.env("AHU_DECISION_URL", endpoint);
+    }
+    let mut child = command
         .args(["mcp", "serve"])
         .current_dir(repo.path())
-        .env("AHU_DECISION_URL", endpoint)
+        .env("TYPESAFE_API_KEY", "fixture-secret-must-not-be-sent")
         .env("AHU_EVAL_OTEL_ENDPOINT", receiver.endpoint())
         .env(
-            "OTEL_RESOURCE_ATTRIBUTES",
+            "AHU_MCP_RESOURCE_ATTRIBUTES",
             "ahu.task.id=decision-fixture,ahu.task.attempt=1",
         )
         .stdin(Stdio::piped())
@@ -1377,4 +1423,103 @@ fn approval_requires_managed_task_context_for_direct_and_durable_calls() {
     let durable = client.call("tools/call", modern(params));
     assert!(durable.get("error").is_some(), "{durable}");
     client.stop();
+}
+
+#[test]
+fn native_ollama_configuration_errors_precede_credentials_and_network() {
+    let repo = common::TestRepo::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+    for (settings, expected) in [
+        (
+            vec![("AHU_OLLAMA_URL", endpoint.as_str())],
+            "AHU_OLLAMA_URL requires AHU_OLLAMA_MODEL",
+        ),
+        (
+            vec![
+                ("AHU_OLLAMA_MODEL", "nimble-cloud:latest"),
+                ("AHU_OLLAMA_URL", endpoint.as_str()),
+            ],
+            "AHU_OLLAMA_MODEL cannot be a cloud model",
+        ),
+        (
+            vec![
+                ("AHU_OLLAMA_MODEL", "nimble"),
+                ("AHU_DECISION_MODEL", "jev-latest"),
+                ("AHU_OLLAMA_URL", endpoint.as_str()),
+            ],
+            "cannot be combined",
+        ),
+        (
+            vec![
+                ("AHU_OLLAMA_MODEL", "nimble"),
+                (
+                    "AHU_OLLAMA_URL",
+                    "http://private-marker:secret@127.0.0.1/v1/systemone",
+                ),
+            ],
+            "credential-free",
+        ),
+    ] {
+        let mut command = common::ahu();
+        // Only this synthetic subprocess receives these settings. An invalid
+        // fixture key ensures a regression cannot accidentally call TypeSafe.
+        for key in [
+            "AHU_OLLAMA_MODEL",
+            "AHU_OLLAMA_URL",
+            "AHU_DECISION_MODEL",
+            "AHU_DECISION_URL",
+            "AHU_EVAL_OTEL_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        ] {
+            command.env_remove(key);
+        }
+        command.env("TYPESAFE_API_KEY", "fixture\ninvalid");
+        for (key, value) in settings {
+            command.env(key, value);
+        }
+        let mut child = command
+            .args(["mcp", "serve"])
+            .current_dir(repo.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        for request in [
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ahu_typed_decide","arguments":{"state":"fixture","questions":{"route":{"type":"probability","instructions":"Does this qualify?"}}}}}),
+        ] {
+            writeln!(input, "{request}").unwrap();
+        }
+        drop(input);
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let result = &rows.iter().find(|row| row["id"] == 2).unwrap()["result"];
+        assert_eq!(result["isError"], true);
+        let message = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            message.contains(expected),
+            "expected {expected}, got {message}"
+        );
+        assert!(!message.contains("private-marker"));
+        assert!(!message.contains("fixture"));
+    }
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }

@@ -1002,22 +1002,34 @@ fn mcp_error_category(method: &str, name: &str, response: &serde_json::Value) ->
             || message.starts_with("TypeSafe API key")
             || message.starts_with("invalid AHU_DECISION_URL")
             || message.starts_with("AHU_DECISION_URL must")
+            || message.starts_with("AHU_DECISION_MODEL must")
+            || message.starts_with("invalid AHU_OLLAMA_URL")
+            || message.starts_with("AHU_OLLAMA_URL ")
+            || message.starts_with("AHU_OLLAMA_MODEL ")
+            || message.starts_with("AHU_OLLAMA_MODEL/AHU_OLLAMA_URL ")
+            || message.starts_with("cannot create Ollama decision client")
             || message.starts_with("cannot create decision client")
             || message.starts_with("cannot create TypeSafe decision client")
         {
             "decision_configuration"
         } else if message.starts_with("decision service request failed")
             || message.starts_with("TypeSafe decision request failed")
+            || message.starts_with("Ollama decision request failed")
         {
             "decision_service_unavailable"
         } else if message.starts_with("decision service returned HTTP")
             || message.starts_with("TypeSafe decision API returned HTTP")
+            || message.starts_with("Ollama decision API returned HTTP")
         {
             "decision_service_http_error"
         } else if message.starts_with("decision service returned invalid JSON")
             || message.starts_with("decision service response")
             || message.starts_with("decision service answers")
             || message.starts_with("TypeSafe decision response")
+            || message.starts_with("Ollama decision response")
+            || message.starts_with("cannot read Ollama decision response")
+            || message.starts_with("cannot read TypeSafe decision response")
+            || message.starts_with("cannot read decision response")
             || message.starts_with("TypeSafe response")
             || message.starts_with("TypeSafe answers")
             || message.starts_with("TypeSafe answer")
@@ -1353,6 +1365,62 @@ mod tests {
         assert!(!format!("{unavailable:?}").contains("private-marker"));
         for (message, category) in [
             (
+                "AHU_DECISION_MODEL must be valid: private-marker",
+                "decision_configuration",
+            ),
+            (
+                "invalid AHU_OLLAMA_URL: private-marker",
+                "decision_configuration",
+            ),
+            (
+                "AHU_OLLAMA_URL requires AHU_OLLAMA_MODEL",
+                "decision_configuration",
+            ),
+            (
+                "AHU_OLLAMA_URL path must be /v1/systemone",
+                "decision_configuration",
+            ),
+            (
+                "AHU_OLLAMA_MODEL cannot be a cloud model",
+                "decision_configuration",
+            ),
+            (
+                "AHU_OLLAMA_MODEL/AHU_OLLAMA_URL cannot be combined with AHU_DECISION_MODEL/AHU_DECISION_URL",
+                "decision_configuration",
+            ),
+            (
+                "cannot create Ollama decision client",
+                "decision_configuration",
+            ),
+            (
+                "Ollama decision request failed: private-marker",
+                "decision_service_unavailable",
+            ),
+            (
+                "Ollama decision API returned HTTP 500",
+                "decision_service_http_error",
+            ),
+            (
+                "Ollama decision response exceeds 1 MiB",
+                "decision_service_invalid_response",
+            ),
+            (
+                "Ollama decision response model does not match requested model",
+                "decision_service_invalid_response",
+            ),
+            (
+                "cannot read Ollama decision response",
+                "decision_service_invalid_response",
+            ),
+            (
+                "cannot read TypeSafe decision response",
+                "decision_service_invalid_response",
+            ),
+            (
+                "cannot read decision response",
+                "decision_service_invalid_response",
+            ),
+            (
                 "invalid AHU_DECISION_URL: private-marker",
                 "decision_configuration",
             ),
@@ -1391,6 +1459,7 @@ mod tests {
                 string_attr(&attributes, "ahu.mcp.error.category"),
                 Some(category.into())
             );
+            assert!(!format!("{attributes:?}").contains("private-marker"));
         }
         let invalid = mcp_result_attributes(
             "tools/call",
