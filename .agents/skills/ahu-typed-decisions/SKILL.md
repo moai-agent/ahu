@@ -7,7 +7,7 @@ description: Use ahu's typed decision MCP tool for bounded, non-sensitive judgme
 
 Use `ahu_typed_decide` when a task needs a bounded judgment such as routing,
 classification, prioritization, or a score against explicit criteria. It can
-save local reasoning tokens or time on some tasks, but adds a network request
+save local reasoning tokens or time on some tasks, but adds a provider request
 and its own service usage. Use it only when the expected value is worth that
 cost, including the extra agent turn needed to consume its result.
 
@@ -57,8 +57,12 @@ the final operational decision.
 ## Data and result handling
 
 The default TypeSafe Jev provider sends state and questions to TypeSafe AI over
-HTTPS. Do not send API keys, credentials, confidential material, or personal
-data unless the user and applicable policy explicitly permit that disclosure.
+HTTPS. An explicitly configured native Ollama backend uses a local decision
+model through the same tool contract. Provider selection belongs to the MCP
+server configuration; a request cannot change its endpoint or model. Local
+inference does not authorize access to additional data. Do not send API keys,
+credentials, confidential material, or personal data unless the user and
+applicable policy explicitly permit that disclosure.
 Use synthetic or minimized inputs for evaluation. `telemetry_key` is optional;
 if used, make it a stable, non-sensitive category such as `department`. Each
 question's key must be unique within the request. Omit it for a batch of similar

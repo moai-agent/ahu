@@ -1,103 +1,107 @@
 schema_version = 1
-digest = "fc950e5daa687212ac82f2575146c002a92b3d9d667708b0764af33a4ebdbad1"
-skipped_directories = [".ahu"]
+digest = "d5049d5e1b63c42d92c37399faef683f5e184f512699d559037723774a9c34f2"
+skipped_directories = [
+    ".ahu",
+    ".worktrees",
+    "target",
+]
 unscanned_config = []
 symlinks = []
 
 [[entries]]
 path = ".agents/ahu/agents/arch-astra.md"
-digest = "083c81a290281cc38c8e82eb914fa0b94e5b86b037f55409a7217d7949c2a4f8"
-bytes = 6008
+digest = "5e3d4ed6920dab5593010128c8adf43a5b902ccc7a270c247e917dc870a129ac"
+bytes = 6514
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/arch-glm.md"
-digest = "bc2aeef8a288181e821a1277ba2578df011a371deffe7264e24b17e01165ab56"
-bytes = 6016
+digest = "959a4d0eb172a594ba9225799fbb1b329ee316d8197e904808a0a46220ebcc8a"
+bytes = 6522
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/arch-opus.md"
-digest = "cd96cf30355b3ea9b9a6cb92b67021987483f9464582b95eca26e1648f269731"
-bytes = 6012
+digest = "613f01eccce3a08e61b45e1d87e9d7406261ada91d171fdda577fc038ae19e49"
+bytes = 6518
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/defsec-astra.md"
-digest = "212a43670957cb8677c1349bdacbe9d69cdde4877ea2f78a7ae374f131071aa3"
-bytes = 7036
+digest = "ee6618d29ff2a429efb814a19e85522452922c2f51293822ba112507d471f542"
+bytes = 7542
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/defsec-glm.md"
-digest = "2c42caaebeb278c856adb9a5df502b23b3596b52adb584816409fdfcb8944298"
-bytes = 7042
+digest = "0cddfd01e19daed14947a7908279bf145b2ad5e7d61cc959102ba14386028b5e"
+bytes = 7548
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/defsec-opus.md"
-digest = "55036e08eb152cbe0e0eb78e214c8eb149393792e1048ddfb14d9d4979ab9848"
-bytes = 7040
+digest = "ab1b3cbb798083827f360eb551c2dee78350f61adf7e9ff7113705d1b25049c4"
+bytes = 7546
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/dev-agy.md"
-digest = "9c482972fbefb8a6f947f841c89e41830c05911f663e169d4460463e9677112f"
-bytes = 5900
+digest = "7cde08bb25e102619b327ef8bd6a01e10c11a5faabc5451e465cfd569c3f39c1"
+bytes = 6406
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/dev-astra.md"
-digest = "4d0c39ce78c9b0995fbdcfcb3ff38c4ac7cf0d5a86ced2e20f874ecf26b640ac"
-bytes = 6947
+digest = "0158a4ba0505bba0adeda9da2f10be659c371a30e0d52e101d5d46966032ea07"
+bytes = 7453
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/dev-glm.md"
-digest = "2853e720c2b85ea168cc3c890ee974d45fdecefcdc7fcb923cc103954b3de74a"
-bytes = 6951
+digest = "7dc11e1e4b1a05d28e02e014a885cb14bcf67e953e77104586e2047fb177f63c"
+bytes = 7457
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/dev-opus.md"
-digest = "1f9f457cb4c55ba33abe1a8132b32dc0eeab41261770faf6eb60201765b12ec1"
-bytes = 3535
+digest = "9bc60d666f3021c2ffeef063962c8fae9f61ea95932696a23821fe2e02213cd5"
+bytes = 4041
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/docs-astra.md"
-digest = "fbb3bc06c5c089c9c8be841e6c240b28d6ce8c395e19401654e700b4f984abc8"
-bytes = 6714
+digest = "048ea1d124dbe17222ff1151b61cf83ee3721cb4bfa9f2d2bfaa0c6720847790"
+bytes = 7220
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/docs-glm.md"
-digest = "94b47623cfffd60f6763b8faa4be3639b06a02934db4d1dd15879bdade4225b2"
-bytes = 6720
+digest = "db5be4c56b2d10ee48162540f4909504c1d9b788ec0a061e4fa0248265197ff7"
+bytes = 7226
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/docs-opus.md"
-digest = "352e5ce02c120fe89571a58cab0021e38534f7e3a25d4fa21c8c9ccbd0ba145f"
-bytes = 6719
+digest = "d0a7bef18960188bdc6bcac218835ac2d5bb1ee9e6419001ab476453330f4246"
+bytes = 7225
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/offsec-astra.md"
-digest = "46c52c29b0a07287469e903e5607b6d332ceda737ce5f0855a6e4699414b1357"
-bytes = 6509
+digest = "2249fbb0804b28b51e6f9760569b583b45b300e2f210eedb5ba77fc5c7d19310"
+bytes = 7015
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/roadmap-architect.md"
-digest = "bdf15bdb26335a619797dcb79cb1d9052af99e951486bc4a8dfa34f95a08c924"
-bytes = 3956
+digest = "81bdeebd98364948de8e084541506c0ffc312675485522cd7a422ab07262a50b"
+bytes = 4462
 executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/roadmap-product-manager.md"
-digest = "77e16b590339c307ad693daf1a0142063c89d7a86843d964e07e4d390be67328"
-bytes = 4065
+digest = "b1575e6b244e08b12e251826bb0115582cc70e9fde2ace02327ff3a5cae70edd"
+bytes = 4571
 executable = false
 
 [[entries]]
@@ -144,8 +148,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-typed-decisions/SKILL.md"
-digest = "707077610e8b711bdef3ba6e8c7f559ca84f14aa4e2f607c0afa45d8bf174a4d"
-bytes = 5991
+digest = "e9c5c95ef657580acffd0f4e9a87cd4488dcd614eb3158de33f1cc782b77a894"
+bytes = 6268
 executable = false
 
 [[entries]]

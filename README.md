@@ -369,7 +369,8 @@ voice, such as required contractions and passive-voice warnings, along with the
 Oxford comma rules, which flag two-item conjunctions. The reasons are recorded
 beside each entry in `.vale.ini`.
 
-See the [0.7.0 release notes](docs/releases/0.7.0.md) for account-binding guards,
+See the [0.8.0 release notes](docs/releases/0.8.0.md) for local typed decisions,
+trajectory measurements, and readiness improvements. The [0.7.0 release notes](docs/releases/0.7.0.md) for account-binding guards,
 cooperative approval, streaming write detection, cost telemetry, and evaluation
 features. Final release validation and publication remain pending. The
 [0.6.0 notes](docs/releases/0.6.0.md) describe the published prerelease.
