@@ -2194,21 +2194,7 @@ pub fn approval_cmd(repo: &Repo, id: &str, approve: bool, json_output: bool) -> 
     // sufficient, even for empty/non-Unicode values, and a different target
     // task does not grant operator authority. Like the resume guard, this is
     // cooperative: same-user code can remove its environment or edit state.
-    if [
-        "AHU_WORKER_SESSION",
-        "AHU_TASK_ID",
-        "AHU_TASK_DIR",
-        "AHU_PARENT_TASK",
-        "AHU_BROKER_TOKEN",
-    ]
-    .iter()
-    .any(|name| std::env::var_os(name).is_some())
-    {
-        bail!(
-            "ahu approve and ahu reject require a host operator context; refusing a task-originated approval decision. \
-             This cooperative check is not same-user process isolation."
-        );
-    }
+    crate::util::require_host_operator("ahu approve and ahu reject")?;
     let (dir, record) = inspect_task(repo, id)?;
     if !matches!(record.state, task::TaskState::WaitingForApproval) {
         bail!(

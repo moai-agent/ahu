@@ -592,7 +592,15 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     const CASE: &str = "AHU_LAUNCH_RUN_FIXTURE";
     let Ok(case) = std::env::var(CASE) else {
-        for case in ["cancel", "success", "failure", "version-error"] {
+        for case in [
+            "cancel",
+            "success",
+            "failure",
+            "version-error",
+            "auth-error",
+            "auth-mismatch",
+            "auth-unavailable",
+        ] {
             let bin = tempfile::tempdir().unwrap();
             symlink(
                 crate::selection::resolve_utility("git").unwrap(),
@@ -600,11 +608,16 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
             )
             .unwrap();
             let script = format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then {} fi\nprintf started > harness-started\nexit {}\n",
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then {} fi\nif [ \"$1\" = app-server ]; then printf '%s\\n' '{{\"id\":1,\"result\":{{}}}}' '{}'; while read -r line; do :; done; exit 0; fi\nprintf started > harness-started\nexit {}\n",
                 if case == "version-error" {
                     "exit 1;"
                 } else {
                     "echo 'codex-cli 0.160.0'; exit 0;"
+                },
+                if case == "auth-unavailable" {
+                    r#"{"id":2,"result":{"account":{"type":"apiKey"}}}"#
+                } else {
+                    r#"{"id":2,"result":{"account":{"type":"chatgpt","email":"other@example.invalid"}}}"#
                 },
                 if case == "success" { 0 } else { 23 }
             );
@@ -638,6 +651,31 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
     if case == "cancel" {
         std::fs::write(plan.task_dir.join("cancel.json"), "{}").unwrap();
     }
+    if case == "auth-error" {
+        let auth = repo
+            .root
+            .join(".ahu/state/repos")
+            .join(repo.identity())
+            .join("auth-bindings.json");
+        state::create_private_dir_all(auth.parent().unwrap()).unwrap();
+        state::write_private_file(&auth, br#"{"schema_version":999}"#).unwrap();
+    }
+    if matches!(case.as_str(), "auth-mismatch" | "auth-unavailable") {
+        let auth = repo
+            .root
+            .join(".ahu/state/repos")
+            .join(repo.identity())
+            .join("auth-bindings.json");
+        state::create_private_dir_all(auth.parent().unwrap()).unwrap();
+        state::write_json(
+            &auth,
+            &serde_json::json!({
+                "schema_version": 1, "repo_identity": repo.identity(),
+                "bindings": {"codex": {"fingerprint": "0".repeat(64), "identity_kind": "chatgpt"}}
+            }),
+        )
+        .unwrap();
+    }
     let result = run_task(&plan.task_dir);
     let expected_state = match case.as_str() {
         "cancel" => {
@@ -652,7 +690,25 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
                 "{error}"
             );
             assert!(!plan.worktree.join("harness-started").exists());
-            TaskState::Starting
+            TaskState::Failed
+        }
+        "auth-error" => {
+            assert!(result.unwrap_err().to_string().contains("invalid JSON"));
+            assert!(!plan.worktree.join("harness-started").exists());
+            TaskState::Failed
+        }
+        "auth-mismatch" | "auth-unavailable" => {
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains(if case == "auth-mismatch" {
+                    "does not match"
+                } else {
+                    "unavailable"
+                }),
+                "{error}"
+            );
+            assert!(!plan.worktree.join("harness-started").exists());
+            TaskState::Failed
         }
         "success" | "failure" => {
             let HarnessOutcome::Exited(status) = result.unwrap() else {

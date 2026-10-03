@@ -147,11 +147,9 @@ pub fn refresh_with_state_home(
     reject_local_symlinks(snapshot)?;
     let path = write_shared_lock(repo, snapshot)?;
     let fingerprints = local_fingerprints(snapshot);
-    // With no private inputs there is nothing to accept. Avoid touching a
-    // possibly stale per-user state record for this repository identity.
-    if !fingerprints.is_empty() {
-        crate::private_context_lock::accept(repo, &fingerprints, state_home)?;
-    }
+    // Explicit acceptance includes deletion of the last private input. The
+    // private store avoids creating state when there is nothing to accept.
+    crate::private_context_lock::accept(repo, &fingerprints, state_home)?;
     Ok(path)
 }
 
@@ -536,6 +534,39 @@ mod tests {
                 .stdout
                 .is_empty()
         );
+
+        // Removing the final private input needs explicit acceptance too.
+        std::fs::remove_file(&local_settings).unwrap();
+        let removed = crate::snapshot::collect(fixture.path()).unwrap();
+        assert!(local_fingerprints(&removed).is_empty());
+        assert!(
+            !check_with_state_home(&repo, &removed, Some(&state_home))
+                .unwrap()
+                .current
+        );
+        refresh_with_state_home(&repo, &removed, Some(&state_home)).unwrap();
+        assert!(
+            check_with_state_home(&repo, &removed, Some(&state_home))
+                .unwrap()
+                .current
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join(LOCK_PATH)).unwrap(),
+            lock_text
+        );
+
+        // No private inputs must not create a store, but an existing unsafe
+        // acceptance must still be refused rather than silently replaced.
+        let fresh = tempfile::tempdir().unwrap();
+        refresh_with_state_home(&repo, &removed, Some(fresh.path())).unwrap();
+        assert!(!fresh.path().join("ahu").exists());
+        let acceptance = state_home
+            .join("ahu/context-locks")
+            .join(repo.identity())
+            .join("acceptance.json");
+        std::fs::write(&acceptance, "invalid").unwrap();
+        assert!(refresh_with_state_home(&repo, &removed, Some(&state_home)).is_err());
+        assert_eq!(std::fs::read_to_string(acceptance).unwrap(), "invalid");
     }
 
     #[test]

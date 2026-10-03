@@ -1079,7 +1079,37 @@ fn terminate_group(child: &mut std::process::Child) -> Result<()> {
 }
 
 pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
-    let (mut record, rebuilt, executable) = verify_task(task_dir, None)?;
+    // Do not mutate a task path until its frozen execution record is verified.
+    let (record, rebuilt, executable) = verify_task(task_dir, None)?;
+    run_verified_task(task_dir, record, rebuilt, executable).map_err(|error| {
+        let persist = (|| -> Result<()> {
+            let _lock = task::lock_state(task_dir)?;
+            if task::load(task_dir)?.state.is_live() {
+                let state = if task_dir.join("cancel.json").exists() {
+                    TaskState::Cancelled
+                } else {
+                    TaskState::Failed
+                };
+                task::set_state_locked(task_dir, state)?;
+            }
+            Ok(())
+        })();
+        match persist {
+            Ok(()) => error,
+            Err(state_error) => Error::new(format!(
+                "{error}. The task failure could not be recorded: {state_error}"
+            ))
+            .with_kind(error.kind()),
+        }
+    })
+}
+
+fn run_verified_task(
+    task_dir: &Path,
+    mut record: TaskRecord,
+    rebuilt: LaunchCommand,
+    executable: PathBuf,
+) -> Result<HarnessOutcome> {
     let loaded = crate::config::load(&record.worktree)?;
     let config = loaded.as_ref().map(|loaded| &loaded.config);
     let version = crate::selection::probe_version(
@@ -1131,7 +1161,7 @@ pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
 
     // Nested commands discover the checkout the session edits.
     state::ensure_checkout_state(&record.worktree)?;
-    let _ = task::set_state(task_dir, TaskState::Running);
+    task::set_state(task_dir, TaskState::Running)?;
     if let (Ok(client), Ok(repo)) = (Cmux::discover(), git::discover(&record.worktree)) {
         let _ = cmux::repository::RepositoryManager::new(&client, &repo).set_task_status(
             &record,

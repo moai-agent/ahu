@@ -179,12 +179,14 @@ fn content_digest(bindings: &BindingFile) -> Result<String> {
 }
 
 pub fn bind(repo: &Repo, harness: &str, replace: bool) -> Result<String> {
+    crate::util::require_host_operator("ahu auth bind and ahu auth select")?;
     let path = binding_path(repo)?;
     let bindings = load(repo, &path)?;
     bind_profile(repo, harness, &bindings.active_profile, replace)
 }
 
 pub fn bind_profile(repo: &Repo, harness: &str, profile: &str, replace: bool) -> Result<String> {
+    crate::util::require_host_operator("ahu auth bind and ahu auth select")?;
     validate_profile_name(profile)?;
     let identity = probe(harness, &repo.root)?;
     let path = binding_path(repo)?;
@@ -355,6 +357,7 @@ fn check_identity(
 }
 
 pub fn select_profile(repo: &Repo, profile: &str) -> Result<String> {
+    crate::util::require_host_operator("ahu auth bind and ahu auth select")?;
     validate_profile_name(profile)?;
     let path = binding_path(repo)?;
     let mut bindings = load(repo, &path)?;
