@@ -212,8 +212,10 @@ fn read_acceptance(path: &Path, identity: &str) -> Result<Option<Acceptance>> {
         || acceptance.repo_identity != identity
         || acceptance.fingerprints.len() > 64
         || acceptance.fingerprints.iter().any(|(path, digest)| {
-            path != ".claude/settings.local.json"
-                || digest.len() != 64
+            !matches!(
+                path.as_str(),
+                ".claude/settings.local.json" | crate::native_mcp::ANTIGRAVITY_KEY
+            ) || digest.len() != 64
                 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
     {

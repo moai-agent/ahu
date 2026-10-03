@@ -116,13 +116,24 @@ fn shared_snapshot(snapshot: &ConfigSnapshot) -> ConfigSnapshot {
     shared
 }
 
-fn local_fingerprints(snapshot: &ConfigSnapshot) -> BTreeMap<String, String> {
-    snapshot
+fn local_fingerprints(snapshot: &ConfigSnapshot) -> Result<BTreeMap<String, String>> {
+    let mut fingerprints: BTreeMap<String, String> = snapshot
         .entries
         .iter()
         .filter(|entry| is_local_context_path(&entry.path))
         .map(|entry| (entry.path.clone(), entry.digest.clone()))
-        .collect()
+        .collect();
+    // The project registration declares Antigravity use. Its interactive
+    // native registration is user-owned and must not churn shared ahu.lock.
+    if snapshot
+        .entries
+        .iter()
+        .any(|entry| entry.path == ".agents/mcp_config.json")
+        && let Some(digest) = crate::native_mcp::fingerprint_antigravity()?
+    {
+        fingerprints.insert(crate::native_mcp::ANTIGRAVITY_KEY.into(), digest);
+    }
+    Ok(fingerprints)
 }
 
 pub fn refresh(repo: &Repo, snapshot: &ConfigSnapshot) -> Result<PathBuf> {
@@ -134,7 +145,7 @@ pub fn refresh(repo: &Repo, snapshot: &ConfigSnapshot) -> Result<PathBuf> {
 pub fn refresh_for_setup(repo: &Repo, snapshot: &ConfigSnapshot) -> Result<PathBuf> {
     reject_local_symlinks(snapshot)?;
     let path = write_shared_lock(repo, snapshot)?;
-    crate::private_context_lock::initialize_if_missing(repo, &local_fingerprints(snapshot))?;
+    crate::private_context_lock::initialize_if_missing(repo, &local_fingerprints(snapshot)?)?;
     Ok(path)
 }
 
@@ -146,7 +157,7 @@ pub fn refresh_with_state_home(
 ) -> Result<PathBuf> {
     reject_local_symlinks(snapshot)?;
     let path = write_shared_lock(repo, snapshot)?;
-    let fingerprints = local_fingerprints(snapshot);
+    let fingerprints = local_fingerprints(snapshot)?;
     // Explicit acceptance includes deletion of the last private input. The
     // private store avoids creating state when there is nothing to accept.
     crate::private_context_lock::accept(repo, &fingerprints, state_home)?;
@@ -327,7 +338,7 @@ pub fn check_with_state_home(
     if has_local_symlink
         || !crate::private_context_lock::is_current(
             repo,
-            &local_fingerprints(snapshot),
+            &local_fingerprints(snapshot)?,
             state_home,
         )?
     {
@@ -538,7 +549,7 @@ mod tests {
         // Removing the final private input needs explicit acceptance too.
         std::fs::remove_file(&local_settings).unwrap();
         let removed = crate::snapshot::collect(fixture.path()).unwrap();
-        assert!(local_fingerprints(&removed).is_empty());
+        assert!(local_fingerprints(&removed).unwrap().is_empty());
         assert!(
             !check_with_state_home(&repo, &removed, Some(&state_home))
                 .unwrap()

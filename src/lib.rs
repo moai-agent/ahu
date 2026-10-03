@@ -36,6 +36,7 @@ pub mod hooks;
 pub mod knowledge;
 pub mod launch;
 pub mod launcher;
+mod native_mcp;
 pub mod onboard;
 pub mod orchestration;
 pub(crate) mod private_context_lock;
