@@ -8,7 +8,7 @@ Use this skill when coordinating work inside an ahu task. Registered agents are
 launched through ahu, with their configured harness, model, permissions, and
 fresh worktree. Do not impersonate an agent with native harness delegation or
 silently substitute another harness. The workflow is tracker- and terminal-
-neutral: GitHub and cmux are supported integrations, not assumptions every
+neutral. GitHub and cmux are supported integrations, not assumptions every
 project or machine must satisfy.
 
 ## Assign work
@@ -23,8 +23,13 @@ ahu @agent-name --prompt-file /absolute/path/to/task.txt
 Use `--headless --background --output json` for unattended work. Approval
 widening requires the explicit `--allow-widened-approvals` flag. Use `--dry-run`
 to inspect a launch before submitting it. Record each returned task id and
-worktree, plus a terminal-surface reference when the selected backend provides
+worktree, plus a terminal-surface reference when the selected execution mode provides
 one.
+
+Assign validation ownership as part of the task. Serialize heavyweight coverage
+and timed suites across agents on a shared host; separate build directories do
+not isolate CPU load. Use a distinct external `CARGO_TARGET_DIR` for each build
+and require reports to name the tested commit, commands, results, and skips.
 
 ## Inspect and accept
 
@@ -34,7 +39,7 @@ through the task's contract and repository policy, inspect the diff and validati
 evidence, and review the actual commit before integrating. New headless tasks
 keep final answers in native harness stores rather than a copied `result.md`.
 For an interactive task, inspect its recorded terminal surface only when that
-surface is available. CMUX uses `cmux read-screen --workspace <id> --scrollback`;
+surface is available. cmux uses `cmux read-screen --workspace <id> --scrollback`;
 headless tasks have no workspace to read. Do not make a terminal transcript the
 durable task record. Keep prompts, reports, and execution traces outside
 repositories.
@@ -68,14 +73,27 @@ Do not put private tracker identifiers, URLs, titles, or contents into ahu
 prompts, task records, result reports, public files, or commits. Tracker tools
 and skills manage the link on the provider side.
 
-`ahu cleanup` removes recognized headless captures and bounded requests after
-termination is known; it retains the task record, results, native sessions,
-branch, and worktree. `ahu remove` can remove the task record, worktree, and
-branch after the task is terminal and its changes are safely integrated.
-Interactive tasks have no headless captures, so use `ahu remove` directly after
-these checks. Keep
-the provider-side work item and its delivery evidence according to repository
-policy when removing local ahu execution state.
+Before cleanup, inventory the exact owned task IDs, worktrees, branches, and
+recorded terminal workspace/group IDs. Verify terminal state, reviewed results,
+and integration; preserve unrelated sessions and any task whose ownership or
+remaining work is uncertain. `ahu cleanup` removes recognized headless captures
+and bounded requests after termination is known; it retains the task record,
+results, native sessions, branch, and worktree. Run `ahu remove` from another
+checkout after the worktree is clean and its branch is merged into the primary
+checkout's current HEAD (or already absent). A cherry-pick may not satisfy that
+ancestry check. Interactive tasks have no headless captures, so use `ahu remove`
+directly after these checks.
+
+`ahu remove` also closes a recorded cmux workspace when its group/window
+ownership can be verified; an unverifiable relationship blocks removal. Group
+anchors and native harness stores are not generally removed. Separately inspect
+any remaining fixture anchor against the inventory, its current members, and
+session activity before closing it. Close only an owned, disposable fixture
+anchor with no needed session or unrelated members. A title or apparently empty
+group is not proof of ownership. Verify removal of owned task records,
+worktrees, branches, and workspaces, and preservation of unrelated sessions;
+report partial cleanup and retained anchors. Keep the provider-side work item
+and its delivery evidence according to repository policy.
 
 Use a provider adapter or MCP server for tracker operations. When the provider
 is GitHub, issues, labels, projects, and milestones are one possible mapping;
@@ -120,15 +138,28 @@ a task, but it does not become the source of task truth. This skill supplies the
 operator workflow;
 it does not grant authority or change those checks. Report unavailable agents,
 denied launches, missing credentials, incomplete reports, and unjoined children
-as blockers. Never replace a configured harness or model after failure.
+as blockers. Native admission refusal is evidence of the refusal, not successful
+execution. Preserve native controls and report the blocker without changing
+accounts, hooks, plugins, or approval settings. Never replace a configured
+harness or model after failure.
 
 Maintain this file at `.agents/skills/ahu-direct-agents/SKILL.md`. Run `ahu setup`
 to install the user-facing skills in the paths supported by detected harnesses.
 Codex, OpenCode, and Antigravity use `.agents/skills/`; Claude Code uses
 `.claude/skills/`. A skill file being present does not prove that a harness
-loaded it. When the ahu MCP server is connected, its inspection tools are
-available alongside the ahu CLI; use `ahu_agents_list`, `ahu_tasks_list`, and
-`ahu_task_get` when they fit the task.
+loaded or used it. Explicit invocation and completion observations are separate
+from evidence that the agent followed the skill. When the ahu MCP server is
+connected, use `ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get` when they
+fit the task. For an assignment verifying MCP access, call the actual tool and
+record its result or exact failure; CLI output cannot establish MCP success.
+
+For MCP and OTel compatibility assignments, report evidence separately for each
+harness version, exact model, and execution mode. Require an actual MCP call
+and result and observed telemetry export for a successful row, with task/attempt
+and ahu revision. Keep missing telemetry, telemetry that is off, native admission refusal,
+execution failure, and success distinct. Configuration or tool discovery proves
+neither invocation nor export; interactive success does not validate headless
+mode, and synthetic fixtures do not establish live provider compatibility.
 
 For a task-bound operation that needs the operator to decide first, use the
 `ahu_request_approval` MCP tool with a concise operation category, summary, and

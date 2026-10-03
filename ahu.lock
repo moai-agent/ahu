@@ -1,10 +1,6 @@
 schema_version = 1
-digest = "d7e0a5f6d32af3d63ee56c0d41b525f23a67b8fc9f9855f7659c297c14c7c6b3"
-skipped_directories = [
-    ".ahu",
-    ".worktrees",
-    "target",
-]
+digest = "fc950e5daa687212ac82f2575146c002a92b3d9d667708b0764af33a4ebdbad1"
+skipped_directories = [".ahu"]
 unscanned_config = []
 symlinks = []
 
@@ -130,8 +126,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-direct-agents/SKILL.md"
-digest = "71a5d138dce06b575d7b093d5100085b1241cc02edb898340508264b68fd748e"
-bytes = 7805
+digest = "f00a0cf2f681d68e7622b8dd9d5ee91bece21a255adf60f6b02123914ee85c63"
+bytes = 10044
 executable = false
 
 [[entries]]
@@ -142,8 +138,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-release/SKILL.md"
-digest = "e154143a3b325b733e44591f96248cdd33da97e5a325de68906a63a0210e850d"
-bytes = 6951
+digest = "df1a4f18e9a6d6e2101072b2d796d3f930faa75fc4e7d9274cf7d5cded6ccbb6"
+bytes = 10941
 executable = false
 
 [[entries]]
