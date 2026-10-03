@@ -131,3 +131,75 @@ fn auth_mutations_require_operator_before_probing_or_changing_state() {
         assert!(run(&args, None).status.success());
     }
 }
+
+#[test]
+fn doctor_reports_account_changes_without_disclosing_identity_or_mutating_bindings() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("one", "1.0.0", "claude-opus-5");
+    repo.add_agent("two", "1.0.0", "claude-opus-5");
+    repo.commit("fixture agents");
+    let scratch = tempfile::tempdir().unwrap();
+    let script = scratch.path().join("claude");
+    std::fs::write(&script, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.288\\n'; else printf '%s\\n' \"$AHU_TEST_IDENTITY\"; fi\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(std::iter::once(scratch.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let run = |args: &[&str], email: &str| {
+        common::ahu()
+            .current_dir(repo.path())
+            .args(args)
+            .env("PATH", &path)
+            .env("AHU_CMUX_BIN", scratch.path().join("absent-cmux"))
+            .env(
+                "AHU_TEST_IDENTITY",
+                serde_json::json!({
+                    "loggedIn": true, "email": email, "orgId": "private-org-marker",
+                    "authMethod": "oauth", "apiProvider": "first-party"
+                })
+                .to_string(),
+            )
+            .output()
+            .unwrap()
+    };
+    assert!(
+        run(
+            &["auth", "bind", "--harness", "claude-code"],
+            "first@example.invalid"
+        )
+        .status
+        .success()
+    );
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let binding = repo
+        .path()
+        .join(".ahu/state/repos")
+        .join(discovered.identity())
+        .join("auth-bindings.json");
+    let before = std::fs::read(&binding).unwrap();
+    for (email, expected) in [
+        ("first@example.invalid", "account binding matches"),
+        (
+            "second@example.invalid",
+            "blocked: account differs from project binding",
+        ),
+    ] {
+        let out = run(&["doctor"], email);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains(expected), "{text}");
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("auth "))
+                .count(),
+            1,
+            "{text}"
+        );
+        for secret in [email, "private-org-marker"] {
+            assert!(!text.contains(secret), "{text}");
+            assert!(!String::from_utf8_lossy(&out.stderr).contains(secret));
+        }
+        assert_eq!(std::fs::read(&binding).unwrap(), before);
+    }
+}
