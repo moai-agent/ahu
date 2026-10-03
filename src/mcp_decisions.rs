@@ -268,30 +268,41 @@ pub(super) fn call(arguments: &Value, repo: &crate::git::Repo) -> Result<Value> 
     let normalized = normalize_arguments(arguments)?;
     let arguments = &normalized;
     let _configuration = configuration()?;
-    if let Some(model) = std::env::var_os("AHU_OLLAMA_MODEL") {
+    let ollama_model_os = std::env::var_os("AHU_OLLAMA_MODEL");
+    let generic_url_os = std::env::var_os("AHU_DECISION_URL");
+
+    if let Some(model) = ollama_model_os {
         let model = ollama_decision_model(&model)?;
-        let endpoint = std::env::var("AHU_OLLAMA_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:11434/v1/systemone".into());
-        return call_ollama(arguments, &endpoint, model);
+        let endpoint = ollama_url()?;
+        let url = parse_local_url(&endpoint, "AHU_OLLAMA_URL")?;
+        return call_ollama(arguments, url, model);
     }
     let configured_model = std::env::var_os("AHU_DECISION_MODEL");
     let model = decision_model(configured_model.as_deref())?;
-    if let Ok(endpoint) = std::env::var("AHU_DECISION_URL") {
-        return call_endpoint(arguments, &endpoint);
+    if let Some(endpoint) = generic_url_os {
+        let endpoint = endpoint
+            .to_str()
+            .unwrap(); // verified in configuration()
+        let url = parse_local_url(endpoint, "AHU_DECISION_URL")?;
+        return call_endpoint(arguments, url);
     }
     let api_key = typesafe_api_key(repo)?;
     call_typesafe(arguments, &api_key, model)
 }
 
 fn ollama_decision_model(value: &std::ffi::OsStr) -> Result<&str> {
-    value.to_str().filter(|value| {
+    let model = value.to_str().filter(|value| {
         (1..=128).contains(&value.len())
             && value.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':')
             })
     }).ok_or_else(|| Error::new(
         "AHU_OLLAMA_MODEL must be 1 to 128 ASCII letters, digits, dots, dashes, underscores, or colons"
-    ))
+    ))?;
+    if model.ends_with(":cloud") {
+        return Err(Error::new("AHU_OLLAMA_MODEL cannot be a cloud model"));
+    }
+    Ok(model)
 }
 
 /// Only the process environment can select a model; never consult dotenv.
@@ -314,21 +325,29 @@ fn decision_model(value: Option<&std::ffi::OsStr>) -> Result<&str> {
 
 /// Non-secret configured identity, frozen independently of response outcomes.
 pub(super) fn configuration() -> Result<Value> {
-    if let Some(model) = std::env::var_os("AHU_OLLAMA_MODEL") {
+    let ollama_model_os = std::env::var_os("AHU_OLLAMA_MODEL");
+    let generic_url_os = std::env::var_os("AHU_DECISION_URL");
+    if ollama_model_os.is_some() && generic_url_os.is_some() {
+        return Err(Error::new("Cannot specify both AHU_OLLAMA_MODEL and AHU_DECISION_URL"));
+    }
+
+    if let Some(model) = ollama_model_os {
         let model = ollama_decision_model(&model)?;
-        let endpoint = std::env::var("AHU_OLLAMA_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:11434/v1/systemone".into());
-        let url = local_url(&endpoint)?;
+        let endpoint = ollama_url()?;
+        let url = parse_local_url(&endpoint, "AHU_OLLAMA_URL")?;
+        if url.path() != "/v1/systemone" {
+            return Err(Error::new("AHU_OLLAMA_URL path must be /v1/systemone"));
+        }
         return Ok(json!({"backend":"ollama","requested_model":model,
             "endpoint_digest":crate::util::digest_bytes(url.as_str().as_bytes())}));
     }
     let configured_model = std::env::var_os("AHU_DECISION_MODEL");
     let model = decision_model(configured_model.as_deref())?;
-    if let Some(endpoint) = std::env::var_os("AHU_DECISION_URL") {
+    if let Some(endpoint) = generic_url_os {
         let endpoint = endpoint
             .to_str()
             .ok_or_else(|| Error::new("AHU_DECISION_URL must be UTF-8"))?;
-        let url = local_url(endpoint)?;
+        let url = parse_local_url(endpoint, "AHU_DECISION_URL")?;
         return Ok(json!({"backend":"local","requested_model":null,
             "endpoint_digest":crate::util::digest_bytes(url.as_str().as_bytes())}));
     }
@@ -470,9 +489,8 @@ fn call_typesafe_at(
     Ok(result)
 }
 
-fn call_ollama(arguments: &Value, endpoint: &str, model: &str) -> Result<Value> {
-    let url = local_url(endpoint)?;
-    let body = typesafe_request(arguments, model)?;
+fn call_ollama(arguments: &Value, url: url::Url, model: &str) -> Result<Value> {
+        let body = typesafe_request(arguments, model)?;
     let started = std::time::Instant::now();
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -590,6 +608,23 @@ fn typesafe_response(arguments: &Value, response: Value, model: &str) -> Result<
                 json!(choice)
             }
             "score" if response_kind == "score" => {
+                if let Some(legend) = answer.get("legend") {
+                    let expected_criteria = question.get("levels").cloned().unwrap_or_else(|| json!([
+                        format!("Minimum score ({})", question["min"]),
+                        format!("Maximum score ({})", question["max"])
+                    ]));
+                    let expected_array = expected_criteria.as_array().unwrap();
+                    let legend_obj = legend.as_object().ok_or_else(|| Error::new(format!("TypeSafe score legend for {name:?} must be an object")))?;
+                    if legend_obj.len() != expected_array.len() {
+                        return Err(Error::new(format!("TypeSafe score legend for {name:?} does not match requested criteria scale")));
+                    }
+                    for (i, expected_level) in expected_array.iter().enumerate() {
+                        if legend_obj.get(&i.to_string()) != Some(expected_level) {
+                            return Err(Error::new(format!("TypeSafe score legend for {name:?} does not match requested criteria at level {i}")));
+                        }
+                    }
+                }
+
                 let raw = answer.get("score").and_then(Value::as_f64).ok_or_else(|| {
                     Error::new(format!("TypeSafe score answer {name:?} is missing"))
                 })?;
@@ -659,9 +694,16 @@ fn typesafe_response(arguments: &Value, response: Value, model: &str) -> Result<
     Ok(json!({"answers":normalized,"service":service}))
 }
 
-fn local_url(endpoint: &str) -> Result<url::Url> {
+fn ollama_url() -> Result<String> {
+    match std::env::var_os("AHU_OLLAMA_URL") {
+        None => Ok("http://127.0.0.1:11434/v1/systemone".into()),
+        Some(value) => value.into_string().map_err(|_| Error::new("AHU_OLLAMA_URL must be UTF-8")),
+    }
+}
+
+fn parse_local_url(endpoint: &str, env_name: &str) -> Result<url::Url> {
     let url = url::Url::parse(endpoint)
-        .map_err(|error| Error::new(format!("invalid AHU_DECISION_URL: {error}")))?;
+        .map_err(|error| Error::new(format!("invalid {env_name}: {error}")))?;
     if url.scheme() != "http"
         || url.username() != ""
         || url.password().is_some()
@@ -672,16 +714,15 @@ fn local_url(endpoint: &str) -> Result<url::Url> {
                 .is_ok_and(|ip| ip.is_loopback())
         })
     {
-        return Err(Error::new(
-            "AHU_DECISION_URL must be a credential-free http:// URL with a loopback IP literal",
-        ));
+        return Err(Error::new(format!(
+            "{env_name} must be a credential-free http:// URL with a loopback IP literal"
+        )));
     }
     Ok(url)
 }
 
-fn call_endpoint(arguments: &Value, endpoint: &str) -> Result<Value> {
-    let url = local_url(endpoint)?;
-    let client = reqwest::blocking::Client::builder()
+fn call_endpoint(arguments: &Value, url: url::Url) -> Result<Value> {
+        let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
@@ -853,6 +894,7 @@ mod tests {
         );
         for (raw, expected) in [(0.0, -10.0), (0.5, 0.0), (1.0, 10.0), (2.0, 30.0)] {
             let mut response = jev_response();
+            response["answers"]["urgency"]["legend"] = json!({"0":"Low","1":"Medium","2":"High"});
             response["answers"]["urgency"]["score"] = json!(raw);
             assert_eq!(
                 typesafe_response(&request, response).unwrap()["answers"]["urgency"]["value"],
@@ -878,6 +920,16 @@ mod tests {
             validate_response(&typed_request(), result.clone()).unwrap(),
             result
         );
+    }
+
+
+    #[test]
+    fn validates_score_legend_against_requested_criteria() {
+        let request = typed_request();
+        let mut response = jev_response();
+        // modify the legend to mismatch
+        response["answers"]["urgency"]["legend"] = json!({"0":"Wrong score","1":"Maximum score (2)"});
+        assert!(typesafe_response(&request, response).unwrap_err().to_string().contains("does not match requested criteria"));
     }
 
     #[test]
@@ -1004,6 +1056,7 @@ mod tests {
             json!(true),
         ] {
             let mut response = jev_response();
+            response["answers"]["urgency"]["legend"] = json!({"0":"Low","1":"Medium","2":"High"});
             response["answers"]["urgency"]["score"] = raw;
             assert!(typesafe_response(&request, response).is_err());
         }
@@ -1012,6 +1065,7 @@ mod tests {
         validate_arguments(&request).unwrap();
         for (raw, expected) in [(0.0, -f64::MAX), (1.0, 0.0), (2.0, f64::MAX)] {
             let mut response = jev_response();
+            response["answers"]["urgency"]["legend"] = json!({"0":"Low","1":"Medium","2":"High"});
             response["answers"]["urgency"]["score"] = json!(raw);
             let result = typesafe_response(&request, response).unwrap();
             assert_eq!(result["answers"]["urgency"]["value"], expected);
@@ -1023,6 +1077,7 @@ mod tests {
             request["questions"]["urgency"]["max"] = json!(maximum);
             for (raw, expected) in [(0.0, minimum), (2.0, maximum)] {
                 let mut response = jev_response();
+                response["answers"]["urgency"]["legend"] = json!({"0":"Low","1":"Medium","2":"High"});
                 response["answers"]["urgency"]["score"] = json!(raw);
                 assert_eq!(
                     typesafe_response(&request, response).unwrap()["answers"]["urgency"]["value"],
@@ -1045,6 +1100,9 @@ mod tests {
                 json!({"0":0.25,"1":0.75})
             };
             let mut upstream = jev_response();
+            if levels.is_some() {
+                upstream["answers"]["urgency"]["legend"] = json!({"0":"Low","1":"Medium","2":"High"});
+            }
             upstream["answers"]["urgency"]["probabilities"] = valid.clone();
             let normalized = typesafe_response(&request, upstream).unwrap();
             assert_eq!(normalized["answers"]["urgency"]["probabilities"], valid);
@@ -1062,6 +1120,9 @@ mod tests {
                 json!({"0":0,"1":2}),
             ] {
                 let mut upstream = jev_response();
+                if levels.is_some() {
+                    upstream["answers"]["urgency"]["legend"] = json!({"0":"Low","1":"Medium","2":"High"});
+                }
                 upstream["answers"]["urgency"]["probabilities"] = invalid.clone();
                 assert!(typesafe_response(&request, upstream).is_err());
                 let mut local = normalized.clone();
@@ -1935,6 +1996,16 @@ mod tests {
         assert!(validate_response(&typed_request(), response).is_err());
     }
 
+    fn try_endpoint(arguments: &Value, endpoint: &str) -> crate::util::Result<Value> {
+        let url = super::parse_local_url(endpoint, "AHU_DECISION_URL")?;
+        super::call_endpoint(arguments, url)
+    }
+
+    fn try_ollama(arguments: &Value, endpoint: &str, model: &str) -> crate::util::Result<Value> {
+        let url = super::parse_local_url(endpoint, "AHU_OLLAMA_URL")?;
+        super::call_ollama(arguments, url, model)
+    }
+
     fn serve_once(response: &'static [u8]) -> String {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = format!("http://{}/decide", listener.local_addr().unwrap());
@@ -1980,7 +2051,7 @@ mod tests {
             ("http://user@127.0.0.1", "loopback IP literal"),
         ] {
             assert!(
-                super::call_endpoint(&typed_request(), endpoint)
+                try_endpoint(&typed_request(), endpoint)
                     .unwrap_err()
                     .to_string()
                     .contains(needle)
@@ -1993,7 +2064,7 @@ mod tests {
             (b"oversized".as_slice(), Some("exceeds 1 MiB")),
         ] {
             let url = serve_once(body);
-            let result = super::call_endpoint(&typed_request(), &url);
+            let result = try_endpoint(&typed_request(), &url);
             if let Some(needle) = expected_error {
                 assert!(result.unwrap_err().to_string().contains(needle));
             } else {
@@ -2010,16 +2081,14 @@ mod tests {
             ("http://localhost", "loopback IP literal"),
             ("http://user@127.0.0.1", "loopback IP literal"),
         ] {
-            // we patch the error string since local_url says "invalid AHU_DECISION_URL"
-            // Wait, local_url returns "invalid AHU_DECISION_URL", so we just check for "AHU_DECISION_URL" or "loopback IP literal"
-            assert!(
-                super::call_ollama(&typed_request(), endpoint, "nimble")
+                        assert!(
+                try_ollama(&typed_request(), endpoint, "nimble")
                     .unwrap_err()
                     .to_string()
-                    .contains(if needle == "invalid AHU_OLLAMA_URL" { "AHU_DECISION_URL" } else { needle })
+                    .contains(needle)
             );
         }
-        
+
         for (body, expected_error) in [
             (br#"{"model":"nimble","answers":{"route":{"type":"choice","choice":"billing","confidence":0.9,"probabilities":{"billing":0.9,"other":0.1}},"urgency":{"type":"score","score":0.75,"confidence":0.8,"legend":{"0":"Minimum score (0)","1":"Maximum score (2)"}},"refund":{"type":"noul","noul":0.8}},"usage":{"input_tokens":123,"output_tokens":17}}"#.as_slice(), None),
             (b"bad-status".as_slice(), Some("HTTP 503")),
@@ -2027,7 +2096,7 @@ mod tests {
             (b"oversized".as_slice(), Some("exceeds 1 MiB")),
         ] {
             let url = serve_once(body);
-            let result = super::call_ollama(&typed_request(), &url, "nimble");
+            let result = try_ollama(&typed_request(), &url, "nimble");
             if let Some(needle) = expected_error {
                 assert!(result.unwrap_err().to_string().contains(needle));
             } else {

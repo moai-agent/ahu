@@ -146,12 +146,18 @@ ahu includes native support for Ollama 0.35+ using its `/v1/systemone` endpoint
 which implements the Jev-style API for typed decisions. This routes requests
 directly to a local Ollama instance without needing an external Python adapter.
 
-To use the native Ollama integration, set `AHU_OLLAMA_MODEL` to your locally
-installed model name (e.g. `nimble` or `qwen2.5:32b`). The endpoint defaults to
+To use the native Ollama integration, set `AHU_OLLAMA_MODEL` to a vendor-documented
+decision model such as `nimble`, `tev1`, or `tev1:0.8b`. The endpoint defaults to
 `http://127.0.0.1:11434/v1/systemone`, but you can override it using `AHU_OLLAMA_URL`.
 
+A loopback connection alone cannot attest the daemon's behavior; it could proxy to a
+cloud backend. Do not use known `:cloud` tags for this local-only provider.
+
+If `AHU_OLLAMA_MODEL` is set, ahu uses the native Ollama provider. Setting both
+`AHU_OLLAMA_MODEL` and `AHU_DECISION_URL` creates ambiguity and will be refused.
+
 ```text
-AHU_OLLAMA_MODEL=qwen2.5:32b
+AHU_OLLAMA_MODEL=tev1:0.8b
 AHU_OLLAMA_URL=http://127.0.0.1:11434/v1/systemone
 ```
 
@@ -165,7 +171,44 @@ token counts for comparing usage, latency, and answers across agent runs.
 
 The repository also includes a small standard-library adapter for older Ollama
 versions using `/api/chat` and JSON Schema. To select this generic adapter instead
-of the native Ollama backend or Jev, configure `AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions`.
+of the native Ollama backend or Jev, configure `AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions`
+and leave `AHU_OLLAMA_MODEL` unset.
+
+Choose a locally installed model from `ollama list`. For example, if
+`qwen3.6:35b-mlx` is available, start the adapter in a terminal:
+
+```sh
+python3 examples/ollama_decision_service.py --model qwen3.6:35b-mlx
+```
+
+In a second terminal, check readiness and send a sample request:
+
+```sh
+curl --fail-with-body -sS http://127.0.0.1:8001/health
+curl --fail-with-body -sS http://127.0.0.1:8001/v1/decisions \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "state": {"subject": "Duplicate charge", "body": "Please refund this."},
+    "questions": {
+      "department": {
+        "type": "choice",
+        "instructions": "Which team should handle this?",
+        "options": {"billing": "Invoices and refunds", "other": "Everything else"}
+      },
+      "refund_requested": {
+        "type": "probability",
+        "instructions": "Is a refund explicitly requested?"
+      }
+    }
+  }'
+```
+
+The selected Qwen model was already present locally. In a spot check on this
+M1 Max, the same two-question request returned the same answers from Gemma 4
+with 12 billion parameters and Qwen 3.6 with 35 billion parameters. Gemma took 10.7 seconds cold and 4.2 seconds warm; Qwen
+took 21.1 seconds cold (18.0 seconds to load) and 1.1 seconds warm. This is one
+example for plumbing and timing, not an accuracy comparison. The adapter keeps
+the chosen model loaded for five minutes after a call.
 
 When project OpenTelemetry is enabled, the `ahu mcp serve` process exports a
 span for each parsed MCP request, including initialize,
