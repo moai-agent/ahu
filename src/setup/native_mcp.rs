@@ -82,6 +82,13 @@ pub fn plan(path: &Path, executable: &Path) -> Result<Plan> {
     servers.insert("ahu".into(), wanted);
     let mut after = serde_json::to_vec_pretty(&value).map_err(|_| invalid())?;
     after.push(b'\n');
+    // Pretty-printing can expand a compact input beyond the reader's bound.
+    // Refuse before any publication rather than install an unreadable config.
+    if after.len() > 1024 * 1024 {
+        return Err(Error::new(
+            "Antigravity native MCP configuration would exceed the supported size; existing content was not changed",
+        ));
+    }
     Ok(Plan {
         path,
         before,
@@ -256,5 +263,17 @@ mod tests {
         std::fs::remove_dir(target.parent().unwrap()).unwrap();
         symlink(&root, target.parent().unwrap()).unwrap();
         assert!(plan(&target, exe).is_err());
+    }
+
+    #[test]
+    fn native_setup_refuses_serialization_expansion_without_changing_input() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".gemini/config/mcp_config.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let before = serde_json::to_vec(&serde_json::json!({"extra": vec![0; 250_000]})).unwrap();
+        assert!(before.len() < LIMIT as usize);
+        std::fs::write(&path, &before).unwrap();
+        assert!(plan(&path, Path::new("/usr/bin/true")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }
