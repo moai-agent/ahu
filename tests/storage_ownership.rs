@@ -2,6 +2,40 @@ mod common;
 use ahu::storage::HeadlessStore;
 
 #[test]
+fn cached_primary_rechecks_created_and_changed_worktree_configuration() {
+    for initially_present in [false, true] {
+        let root = common::TestRepo::new();
+        let alternate = tempfile::tempdir().unwrap();
+        common::git(
+            root.path(),
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        let config = root.path().join(".git/config.worktree");
+        if initially_present {
+            std::fs::write(&config, "[core]\nfilemode = true\n").unwrap();
+        }
+        let repo = ahu::git::discover(root.path()).unwrap();
+        let store = HeadlessStore::for_repo(&repo).unwrap();
+        assert!(
+            HeadlessStore::containing(&store.directory)
+                .unwrap()
+                .is_some()
+        );
+        common::git(
+            root.path(),
+            &[
+                "config",
+                "--worktree",
+                "core.worktree",
+                alternate.path().to_str().unwrap(),
+            ],
+        );
+        assert_ne!(ahu::git::discover(root.path()).unwrap().root, repo.root);
+        assert!(HeadlessStore::containing(&store.directory).is_err());
+    }
+}
+
+#[test]
 fn review_regression_fake_git_marker_is_not_verified_ownership() {
     let root = tempfile::tempdir().unwrap();
     let primary = root.path().canonicalize().unwrap();

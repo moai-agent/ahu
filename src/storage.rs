@@ -266,6 +266,7 @@ fn verified_primary(primary: &Path) -> Result<std::sync::Arc<VerifiedPrimary>> {
         "",
         "HEAD",
         "config",
+        "config.worktree",
         "commondir",
         "gitdir",
         "objects",

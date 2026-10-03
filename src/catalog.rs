@@ -112,7 +112,7 @@ pub struct HarnessEntry {
     pub adapter_available: bool,
     /// Executable ahu probes to decide whether the harness is installed here.
     pub executable: &'static str,
-    /// Harness versions the adapter was verified against.
+    /// Harness versions with recorded interactive verification evidence.
     pub verified_versions: &'static str,
     /// Harness versions the headless (batch) profile was verified against.
     pub headless_verified_versions: &'static [&'static str],
@@ -245,7 +245,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
         executable: "claude",
         // 2.1.283 was live-probed on 2026-09-27 through an ahu interactive
         // launch: the pinned model was accepted and the task prompt was delivered.
-        verified_versions: "2.1.269, 2.1.283",
+        verified_versions: "2.1.269, 2.1.283, 2.1.288",
         // Interactive and headless surfaces were validated on different sets;
         // the batch argument surface and event stream were checked on both.
         // 2.1.283: live prompt receipt/completion/exit/usage verified with
@@ -275,13 +275,15 @@ pub const HARNESSES: &[HarnessEntry] = &[
         executable: "codex",
         // 0.157.1 was live-probed on 2026-09-27 through an ahu interactive
         // launch: the pinned model was accepted and the task prompt was delivered.
-        verified_versions: "0.154.0, 0.157.1",
+        verified_versions: "0.154.0, 0.157.1, 0.160.0",
         // 0.155.1 retains the batch argv surface; a live JSON launch and
         // native-session resume both emitted the expected identity and terminal events.
         // 0.157.1: fresh native admission and authenticated prompt receipt,
         // completion, exit and usage parsing verified on 2026-09-28 through
         // ahu batch argv and event parsing with the frozen inspection profile.
-        headless_verified_versions: &["0.154.0", "0.155.1", "0.157.1"],
+        // 0.160.0: live headless MCP decision call, answer completion and
+        // collector export observed on 2026-10-03.
+        headless_verified_versions: &["0.154.0", "0.155.1", "0.157.1", "0.160.0"],
         enforces_model_for_session: false,
         features: &[
             Feature::InteractiveLaunch,
@@ -302,8 +304,10 @@ pub const HARNESSES: &[HarnessEntry] = &[
         display_name: "Antigravity CLI",
         adapter_available: true,
         executable: "agy",
-        verified_versions: "1.2.2",
-        headless_verified_versions: &["1.2.2"],
+        verified_versions: "1.2.2, 1.2.16",
+        // 1.2.16: live headless implementation and decision eval tasks
+        // completed with actual MCP calls and collector export on 2026-10-03.
+        headless_verified_versions: &["1.2.2", "1.2.16"],
         enforces_model_for_session: false,
         features: &[
             Feature::InteractiveLaunch,
@@ -326,7 +330,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
         executable: "opencode",
         // Both were checked on 2026-09-13; the install updated itself in place
         // between the two probe runs, which is why the entry lists a pair.
-        verified_versions: "1.18.29, 1.18.30, 1.18.31, 1.18.32",
+        verified_versions: "1.18.29, 1.18.30, 1.18.31, 1.18.32, 1.18.34",
         // The batch surface was inspected on 1.18.30; 1.18.29 carries the same
         // `run` options and is the other version the catalog entry names.
         // 1.18.31 was live-probed on 2026-09-15: a fresh `run --format json`
@@ -495,11 +499,11 @@ mod tests {
         assert!(harness("codex").is_some());
         assert_eq!(
             harness("codex").unwrap().verified_versions,
-            "0.154.0, 0.157.1"
+            "0.154.0, 0.157.1, 0.160.0"
         );
         assert_eq!(
             harness("claude-code").unwrap().verified_versions,
-            "2.1.269, 2.1.283"
+            "2.1.269, 2.1.283, 2.1.288"
         );
         assert!(harness("unknown").is_none());
         assert!(supports("codex", Feature::InteractiveLaunch));

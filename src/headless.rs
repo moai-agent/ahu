@@ -305,6 +305,42 @@ fn build_native_profile(harness: &str, model: &str, spec: &Spec) -> Result<crate
     })
 }
 
+// Only called after fresh native admission. The old attempt stays immutable;
+// retain helper policy and approvals while freezing this version's isolation.
+fn refresh_resume_profile(
+    spec: &mut Spec,
+    harness: &str,
+    model: &str,
+    version: &str,
+) -> Result<()> {
+    if let Some(previous) = crate::harness::isolation::profile(harness, &spec.harness_version)
+        && !spec.native_controls.iter().any(|id| id == previous.id)
+    {
+        bail!(
+            "previous headless isolation profile differs from frozen controls; submit a new assignment"
+        );
+    }
+    let mut next = spec.clone();
+    next.harness_version = version.into();
+    let profile = build_native_profile(harness, model, &next)?;
+    if spec
+        .native_profile
+        .as_ref()
+        .is_some_and(|previous| previous != &profile)
+    {
+        bail!(
+            "native helper policy changed across harness versions; previous attempt preserved, submit a new assignment"
+        );
+    }
+    next.native_controls = profile.control_ids();
+    if let Some(isolation) = crate::harness::isolation::profile(harness, version) {
+        next.native_controls.push(isolation.id.into());
+    }
+    next.native_profile = Some(profile);
+    *spec = next;
+    Ok(())
+}
+
 fn validate_executable(path: &Path, repo: &crate::git::Repo) -> Result<PathBuf> {
     if let Some(note) = crate::harness::wrapper_interposed(path) {
         bail!("headless launch refuses cmux wrappers: {note}");
@@ -3394,7 +3430,12 @@ pub fn control(
             // version and executable digest.
             let previous_spec = spec.clone();
             let previous_record = record.clone();
-            spec.harness_version = version.clone();
+            refresh_resume_profile(
+                &mut spec,
+                &record.identity.harness,
+                &record.identity.model,
+                &version,
+            )?;
             spec.executable_digest = current_digest;
             record.enforcement.harness_version = Some(version);
             record.harness_executable = real;
@@ -4971,6 +5012,56 @@ mod profile_and_metadata_tests {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
+        }
+    }
+
+    #[test]
+    fn resume_profile_refresh_keeps_helper_policy_and_refuses_changed_controls() {
+        let root = tempfile::tempdir().unwrap();
+        let request = LaunchRequest {
+            model: "synthetic-model",
+            prompt: "literal prompt",
+            cwd: root.path(),
+            permissions: crate::agent::Permissions::Prompt,
+        };
+        for (harness, old, new) in [
+            ("codex", "0.157.1", "0.160.0"),
+            ("claude-code", "2.1.283", "2.1.288"),
+        ] {
+            let mut spec = sample_spec();
+            spec.harness_version = old.into();
+            spec.native_profile =
+                Some(super::build_native_profile(harness, request.model, &spec).unwrap());
+            let profile = spec.native_profile.as_ref().unwrap();
+            spec.native_controls = profile.control_ids();
+            spec.native_controls.push(
+                crate::harness::isolation::profile(harness, old)
+                    .unwrap()
+                    .id
+                    .into(),
+            );
+            spec.session = Some("synthetic-session".into());
+            let before = spec.clone();
+            super::refresh_resume_profile(&mut spec, harness, request.model, new).unwrap();
+            assert_eq!(spec.native_profile, before.native_profile);
+            assert_eq!(spec.options, before.options);
+            assert_eq!(spec.session, before.session);
+            assert_eq!(spec.harness_version, new);
+            assert!(batch_command(harness, &request, &spec).is_ok());
+            assert_ne!(spec.native_controls, before.native_controls);
+
+            let mut broken = before.clone();
+            broken.native_controls.clear();
+            assert!(
+                super::refresh_resume_profile(&mut broken, harness, request.model, new).is_err()
+            );
+            assert_eq!(broken.harness_version, old);
+            let mut changed = before.clone();
+            changed.native_profile.as_mut().unwrap().max_depth = 99;
+            assert!(
+                super::refresh_resume_profile(&mut changed, harness, request.model, new).is_err()
+            );
+            assert_eq!(changed.harness_version, old);
         }
     }
 
