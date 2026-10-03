@@ -12,13 +12,17 @@ use std::time::{Duration, Instant};
 use opentelemetry::global;
 use opentelemetry::trace::{Span, Tracer};
 use opentelemetry::{KeyValue, Value};
-use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
-use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
+use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
+use opentelemetry_sdk::{
+    Resource,
+    trace::{BatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider},
+};
 
 use crate::config::TelemetryConfig;
 use crate::util::{Error, Result};
 
 pub mod private;
+pub mod private_store;
 
 static PROVIDER: OnceLock<Mutex<Option<SdkTracerProvider>>> = OnceLock::new();
 static MCP_REQUESTS: AtomicU64 = AtomicU64::new(0);
@@ -28,8 +32,27 @@ static MCP_TOOL_ERRORS: AtomicU64 = AtomicU64::new(0);
 static MCP_LIST_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static MCP_TRANSPORT_ERRORS: AtomicU64 = AtomicU64::new(0);
 
+const SPAN_QUEUE_CAPACITY: usize = 128;
+const SPAN_EXPORT_BATCH_SIZE: usize = 32;
+const SPAN_SCHEDULED_DELAY: Duration = Duration::from_millis(500);
+const SPAN_EXPORT_TIMEOUT: Duration = Duration::from_millis(500);
+
 fn provider_slot() -> &'static Mutex<Option<SdkTracerProvider>> {
     PROVIDER.get_or_init(|| Mutex::new(None))
+}
+
+fn bounded_span_processor(
+    exporter: impl opentelemetry_sdk::trace::SpanExporter + 'static,
+) -> BatchSpanProcessor {
+    BatchSpanProcessor::builder(exporter)
+        .with_batch_config(
+            BatchConfigBuilder::default()
+                .with_max_queue_size(SPAN_QUEUE_CAPACITY)
+                .with_max_export_batch_size(SPAN_EXPORT_BATCH_SIZE)
+                .with_scheduled_delay(SPAN_SCHEDULED_DELAY)
+                .build(),
+        )
+        .build()
 }
 
 pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
@@ -61,6 +84,17 @@ pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
             path.display()
         )));
     }
+    if !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || !matches!(endpoint.path(), "" | "/")
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(Error::new(format!(
+            "{}: telemetry.endpoint must be a collector origin without credentials, path, query, or fragment",
+            path.display()
+        )));
+    }
     Ok(())
 }
 
@@ -75,8 +109,8 @@ pub(crate) fn initialize_mcp(config: &TelemetryConfig) -> Result<()> {
 }
 
 fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Result<()> {
-    let endpoint = eval_endpoint_override().unwrap_or_else(|| config.endpoint.clone());
-    let enabled = config.enabled || std::env::var_os("AHU_EVAL_OTEL_ENDPOINT").is_some();
+    let eval_endpoint = eval_endpoint_override();
+    let enabled = config.enabled || eval_endpoint.is_some();
     if !enabled
         || provider_slot()
             .lock()
@@ -85,11 +119,32 @@ fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Res
     {
         return Ok(());
     }
+    // Config loading validates this too, but direct library callers must not
+    // bypass the same local collector boundary. An invalid eval override alone
+    // must not enable export to the default collector.
+    if eval_endpoint.is_none() && validate_config(config, Path::new("telemetry")).is_err() {
+        eprintln!("ahu: invalid telemetry endpoint; continuing without export");
+        return Ok(());
+    }
+    let endpoint = eval_endpoint.unwrap_or_else(|| config.endpoint.clone());
+    // Pin routing and deadlines independently of the inherited environment.
+    // Keep the SDK's documented header/resource inheritance at the collector.
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(SPAN_EXPORT_TIMEOUT)
+        .timeout(SPAN_EXPORT_TIMEOUT)
+        .build();
+    let Ok(client) = client else {
+        eprintln!("ahu: OTLP transport unavailable; continuing without export");
+        return Ok(());
+    };
     let exporter = SpanExporter::builder()
         .with_http()
+        .with_http_client(client)
         .with_protocol(Protocol::HttpBinary)
         .with_endpoint(format!("{}/v1/traces", endpoint.trim_end_matches('/')))
-        .with_timeout(Duration::from_millis(500))
+        .with_timeout(SPAN_EXPORT_TIMEOUT)
         .build();
     let exporter = match exporter {
         Ok(exporter) => exporter,
@@ -117,9 +172,13 @@ fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Res
         resource = resource.with_attribute(KeyValue::new(key, value));
     }
     let resource = resource.build();
+    // Keep export asynchronous and bounded, and override OTEL_BSP_* values so
+    // an inherited environment cannot turn a local ahu process into an
+    // unbounded queue or stall task execution. Full queues drop telemetry.
+    let processor = bounded_span_processor(exporter);
     let provider = SdkTracerProvider::builder()
         .with_resource(resource)
-        .with_batch_exporter(exporter)
+        .with_span_processor(processor)
         .build();
     global::set_tracer_provider(provider.clone());
     *provider_slot().lock().expect("telemetry mutex poisoned") = Some(provider);
@@ -370,6 +429,7 @@ impl SkillEvidence {
 pub(crate) struct LocalMetrics {
     schema_version: u32,
     token_aggregation: &'static str,
+    elapsed_ms: Measurement,
     values: std::collections::BTreeMap<&'static str, Measurement>,
 }
 
@@ -377,21 +437,25 @@ pub(crate) struct LocalMetrics {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum Measurement {
     Observed(u64),
+    ObservedFloat(f64),
     Unavailable,
-    // Estimates need an explicit method and provenance before being produced.
-    // Schema v1 emits no estimates and never derives a missing total.
+    // A harness-reported amount remains labeled as such; ahu never derives a
+    // missing cost from token counts or a pricing table.
 }
 
 pub(crate) fn local_metrics(
     config: &TelemetryConfig,
     usage: &crate::headless::TokenUsage,
+    cost: &crate::headless::ReportedCost,
+    elapsed_ms: Option<u64>,
 ) -> Option<LocalMetrics> {
     (config.local_metrics || std::env::var("AHU_EVAL_LOCAL_METRICS").as_deref() == Ok("1")).then(
         || LocalMetrics {
-            schema_version: 1,
+            schema_version: 2,
             // The normalizer retains maxima across reports. These are observations,
             // not additive task totals or provider billing measurements.
             token_aggregation: "maximum-reported-per-field",
+            elapsed_ms: elapsed_ms.map_or(Measurement::Unavailable, Measurement::Observed),
             values: usage
                 .normalized_fields()
                 .into_iter()
@@ -401,6 +465,12 @@ pub(crate) fn local_metrics(
                         value.map_or(Measurement::Unavailable, Measurement::Observed),
                     )
                 })
+                .chain(std::iter::once((
+                    "ahu.cost.harness_reported_usd",
+                    cost.usd
+                        .filter(|amount| amount.is_finite() && *amount >= 0.0)
+                        .map_or(Measurement::Unavailable, Measurement::ObservedFloat),
+                )))
                 .collect(),
         },
     )
@@ -537,6 +607,19 @@ fn mcp_tool_attributes(name: &str, arguments: &serde_json::Value) -> Vec<KeyValu
         "unknown"
     };
     let mut attributes = vec![KeyValue::new("ahu.mcp.tool.name", name.to_string())];
+    if name == "ahu_request_approval"
+        && let Some(operation) = arguments
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .filter(|operation| {
+                ["external-write", "network", "destructive", "other"].contains(operation)
+            })
+    {
+        attributes.push(KeyValue::new(
+            "ahu.mcp.approval.operation",
+            operation.to_owned(),
+        ));
+    }
     if name == "ahu_typed_decide" {
         if let Ok(bytes) = serde_json::to_vec(arguments) {
             attributes.push(KeyValue::new(
@@ -980,21 +1063,29 @@ mod tests {
         let mut events = crate::headless::Events::default();
         events.observe("codex", br#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":7,"cached_tokens":"private-marker","total_tokens":-1,"tracker_url":"private-marker"},"prompt":"private-marker","model":"private-marker"}"#);
         let mut config = TelemetryConfig::default();
-        assert!(super::local_metrics(&config, &events.usage).is_none());
+        assert!(super::local_metrics(&config, &events.usage, &events.cost, Some(12)).is_none());
         config.local_metrics = true;
-        let value = serde_json::to_value(super::local_metrics(&config, &events.usage)).unwrap();
+        let value = serde_json::to_value(super::local_metrics(
+            &config,
+            &events.usage,
+            &events.cost,
+            Some(12),
+        ))
+        .unwrap();
         assert_eq!(
             value,
             serde_json::json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "token_aggregation": "maximum-reported-per-field",
+                "elapsed_ms": {"kind":"observed", "value":12},
                 "values": {
                     "ahu.tokens.input": {"kind":"observed", "value":0},
                     "ahu.tokens.output": {"kind":"observed", "value":7},
                     "ahu.tokens.cached": {"kind":"unavailable"},
                     "ahu.tokens.cache_write": {"kind":"unavailable"},
                     "ahu.tokens.reasoning": {"kind":"unavailable"},
-                    "ahu.tokens.total": {"kind":"unavailable"}
+                    "ahu.tokens.total": {"kind":"unavailable"},
+                    "ahu.cost.harness_reported_usd": {"kind":"unavailable"}
                 }
             })
         );
@@ -1007,14 +1098,38 @@ mod tests {
 
     #[test]
     fn local_endpoint_is_accepted_and_remote_is_rejected() {
-        let config = TelemetryConfig::default();
-        validate_config(&config, Path::new("config.toml")).unwrap();
-        let remote = TelemetryConfig {
-            enabled: true,
-            endpoint: "https://collector.example.test:443".to_string(),
-            ..TelemetryConfig::default()
-        };
-        assert!(validate_config(&remote, Path::new("config.toml")).is_err());
+        for endpoint in [
+            "http://localhost:4318",
+            "http://127.0.0.1:4318/",
+            "http://[::1]:4318",
+        ] {
+            let config = TelemetryConfig {
+                endpoint: endpoint.into(),
+                ..TelemetryConfig::default()
+            };
+            validate_config(&config, Path::new("config.toml")).unwrap();
+        }
+        for endpoint in [
+            "https://collector.example.test:443",
+            "http://collector.example.test:4318",
+            "http://[::2]:4318",
+            "http://127.0.0.1:4319",
+            "http://127.0.0.1",
+            "http://synthetic-user:synthetic-password@127.0.0.1:4318",
+            "http://synthetic-user@127.0.0.1:4318",
+            "http://:synthetic-password@[::1]:4318",
+            "http://127.0.0.1:4318/v1/traces",
+            "http://127.0.0.1:4318/?synthetic-query",
+            "http://127.0.0.1:4318/#synthetic-fragment",
+        ] {
+            let config = TelemetryConfig {
+                endpoint: endpoint.into(),
+                ..TelemetryConfig::default()
+            };
+            let error = validate_config(&config, Path::new("config.toml"))
+                .expect_err("only a local collector origin is valid");
+            assert!(!error.to_string().contains("synthetic-"));
+        }
     }
 
     #[test]
@@ -1115,6 +1230,28 @@ mod tests {
             ),
             Some("questions".into())
         );
+    }
+
+    #[test]
+    fn approval_telemetry_records_only_the_bounded_operation_category() {
+        let input = serde_json::json!({
+            "operation":"network",
+            "summary":"private approval summary",
+            "target":"https://private.invalid/path"
+        });
+        let attributes = mcp_tool_attributes("ahu_request_approval", &input);
+        assert_eq!(
+            string_attr(&attributes, "ahu.mcp.approval.operation"),
+            Some("network".into())
+        );
+        let encoded = format!("{attributes:?}");
+        assert!(!encoded.contains("private approval summary"));
+        assert!(!encoded.contains("private.invalid"));
+        let invalid = mcp_tool_attributes(
+            "ahu_request_approval",
+            &serde_json::json!({"operation":"private-operation","summary":"secret"}),
+        );
+        assert_eq!(string_attr(&invalid, "ahu.mcp.approval.operation"), None);
     }
 
     #[test]
@@ -1339,6 +1476,81 @@ mod tests {
         assert!(!format!("{inspected:?}").contains("private-task-id"));
     }
 
+    #[test]
+    fn a_full_span_queue_drops_telemetry_without_blocking_span_completion() {
+        use opentelemetry::trace::{Span as _, Tracer as _, TracerProvider as _};
+        use opentelemetry_sdk::error::OTelSdkResult;
+        use opentelemetry_sdk::trace::{SpanData, SpanExporter as SdkSpanExporter};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::time::{Duration, Instant};
+
+        #[derive(Debug)]
+        struct BlockingExporter {
+            gate: Arc<(Mutex<(bool, bool)>, Condvar)>,
+            exported: Arc<AtomicUsize>,
+        }
+
+        impl SdkSpanExporter for BlockingExporter {
+            async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+                let (state, ready) = &*self.gate;
+                let mut state = state.lock().unwrap();
+                state.0 = true;
+                ready.notify_all();
+                while !state.1 {
+                    state = ready.wait(state).unwrap();
+                }
+                self.exported.fetch_add(batch.len(), Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        let gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        let exported = Arc::new(AtomicUsize::new(0));
+        let processor = super::bounded_span_processor(BlockingExporter {
+            gate: gate.clone(),
+            exported: exported.clone(),
+        });
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_span_processor(processor)
+            .build();
+        let tracer = provider.tracer("ahu-backpressure-test");
+        for _ in 0..super::SPAN_EXPORT_BATCH_SIZE {
+            tracer.start("initial").end();
+        }
+
+        let (state, ready) = &*gate;
+        let state = state.lock().unwrap();
+        let (state, _) = ready
+            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.0)
+            .unwrap();
+        let export_started = state.0;
+        drop(state);
+
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let producer_tracer = tracer.clone();
+        let producer = std::thread::spawn(move || {
+            let started = Instant::now();
+            for _ in 0..1024 {
+                producer_tracer.start("saturated").end();
+            }
+            let _ = completed_tx.send(started.elapsed());
+        });
+        let producer_duration = completed_rx.recv_timeout(Duration::from_secs(1));
+
+        let (state, ready) = &*gate;
+        state.lock().unwrap().1 = true;
+        ready.notify_all();
+        let _ = provider.shutdown();
+        let _ = producer.join();
+
+        assert!(export_started, "exporter never started to occupy the queue");
+        let producer_duration =
+            producer_duration.expect("span completion blocked while the OTLP queue was full");
+        assert!(producer_duration < Duration::from_secs(1));
+        assert!(exported.load(Ordering::Relaxed) < 32 + 1024);
+    }
+
     fn string_attr(attributes: &[KeyValue], name: &str) -> Option<String> {
         attributes
             .iter()
@@ -1367,6 +1579,305 @@ mod tests {
                 Value::F64(value) => Some(value),
                 _ => None,
             })
+    }
+}
+
+#[cfg(test)]
+mod primary_export_tests {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    // A subprocess isolates both the SDK's global provider and inherited env.
+    #[test]
+    fn primary_export_environment_child() {
+        let Ok(mode) = std::env::var("AHU_TEST_PRIMARY_MODE") else {
+            return;
+        };
+        let mut config = crate::config::TelemetryConfig::default();
+        if let Ok(endpoint) = std::env::var("AHU_TEST_CONFIG_ENDPOINT") {
+            config.enabled = true;
+            config.endpoint = endpoint;
+        }
+        if mode == "ahu-mcp" {
+            super::initialize_mcp(&config).unwrap();
+        } else {
+            super::initialize(&config).unwrap();
+        }
+        assert_eq!(super::exporter_ready(), mode != "rejected");
+        let started = Instant::now();
+        drop(super::span("ahu.synthetic.transport", []));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        println!("synthetic task completed");
+        super::shutdown();
+    }
+
+    fn listener() -> TcpListener {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        listener
+    }
+
+    fn endpoint(listener: &TcpListener) -> String {
+        format!("http://{}", listener.local_addr().unwrap())
+    }
+
+    fn child_command(mode: &str, trap: &TcpListener) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .env_clear()
+            .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+            .env("AHU_TEST_PRIMARY_MODE", mode)
+            .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint(trap))
+            .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint(trap))
+            .env("OTEL_EXPORTER_OTLP_TIMEOUT", "60000")
+            .env("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "60000")
+            .env("OTEL_BSP_SCHEDULE_DELAY", "60000")
+            .env("OTEL_BSP_MAX_QUEUE_SIZE", "65536")
+            .env("OTEL_EXPORTER_OTLP_HEADERS", "x-synthetic=ambient-header")
+            .env(
+                "OTEL_RESOURCE_ATTRIBUTES",
+                "synthetic.resource=ambient-resource",
+            )
+            .args([
+                "--exact",
+                "telemetry::primary_export_tests::primary_export_environment_child",
+                "--nocapture",
+            ]);
+        command
+    }
+
+    fn run_child(mut command: Command) -> Duration {
+        let scratch = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let mut child = command
+            .current_dir(scratch.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(4) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("telemetry blocked the synthetic task");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("synthetic task completed"));
+        started.elapsed()
+    }
+
+    fn assert_unused(listener: &TcpListener) {
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    }
+
+    fn capture(
+        collector: TcpListener,
+        response: String,
+        stall: bool,
+    ) -> std::thread::JoinHandle<Option<(String, Vec<u8>)>> {
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let (mut stream, _) = loop {
+                match collector.accept() {
+                    Ok(pair) => break pair,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("synthetic collector accept failed: {e}"),
+                }
+            };
+            // Accepted sockets may inherit the listener's nonblocking mode.
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line);
+                assert!(headers.len() < 16 * 1024);
+            }
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            assert!(length < 1024 * 1024);
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            if stall {
+                // Longer than the exporter deadline; task shutdown must finish
+                // while this otherwise healthy collector is still unresponsive.
+                std::thread::sleep(Duration::from_secs(2));
+            } else {
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            Some((headers, body))
+        })
+    }
+
+    fn assert_wire(wire: Option<(String, Vec<u8>)>, service: &str, header: &str) {
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::any_value;
+        use prost::Message;
+        let (headers, body) = wire.expect("primary exporter reached its local collector");
+        assert!(headers.starts_with("POST /v1/traces HTTP/1.1\r\n"));
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("content-type: application/x-protobuf")
+        );
+        assert!(
+            headers.contains(header),
+            "documented ambient header was lost"
+        );
+        let message = ExportTraceServiceRequest::decode(body.as_slice()).unwrap();
+        let resource = message.resource_spans[0].resource.as_ref().unwrap();
+        for (key, value) in [
+            ("service.name", service),
+            ("synthetic.resource", "ambient-resource"),
+        ] {
+            assert!(resource.attributes.iter().any(|attr| {
+                attr.key == key
+                    && attr.value.as_ref().and_then(|v| v.value.as_ref())
+                        == Some(&any_value::Value::StringValue(value.into()))
+            }));
+        }
+        assert!(
+            message
+                .resource_spans
+                .iter()
+                .flat_map(|r| &r.scope_spans)
+                .flat_map(|s| &s.spans)
+                .any(|s| s.name == "ahu.synthetic.transport")
+        );
+    }
+
+    #[test]
+    fn primary_export_ignores_proxy_and_ambient_endpoints() {
+        for service in ["ahu", "ahu-mcp"] {
+            let collector = listener();
+            let trap = listener();
+            let mut command = child_command(service, &trap);
+            command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint(&collector));
+            for key in [
+                "HTTP_PROXY",
+                "http_proxy",
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+            ] {
+                command.env(key, endpoint(&trap));
+            }
+            command.env("NO_PROXY", "").env("no_proxy", "");
+            let capture = capture(
+                collector,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                false,
+            );
+            run_child(command);
+            assert_wire(
+                capture.join().unwrap(),
+                service,
+                "x-synthetic: ambient-header",
+            );
+            assert_unused(&trap);
+        }
+    }
+
+    #[test]
+    fn primary_export_does_not_follow_redirects() {
+        for status in [307, 308] {
+            let collector = listener();
+            let trap = listener();
+            let mut command = child_command("ahu", &trap);
+            command
+                .env("AHU_EVAL_OTEL_ENDPOINT", endpoint(&collector))
+                .env(
+                    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+                    "x-synthetic-trace=ambient-trace-header",
+                );
+            let response = format!(
+                "HTTP/1.1 {status} Redirect\r\nLocation: {}/escaped\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                endpoint(&trap)
+            );
+            let capture = capture(collector, response, false);
+            run_child(command);
+            assert_wire(
+                capture.join().unwrap(),
+                "ahu",
+                "x-synthetic-trace: ambient-trace-header",
+            );
+            assert_unused(&trap);
+        }
+    }
+
+    #[test]
+    fn primary_export_failure_is_bounded_and_does_not_fail_task() {
+        let collector = listener();
+        let trap = listener();
+        let mut command = child_command("ahu", &trap);
+        command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint(&collector));
+        let capture = capture(collector, String::new(), true);
+        let elapsed = run_child(command);
+        assert_wire(
+            capture.join().unwrap(),
+            "ahu",
+            "x-synthetic: ambient-header",
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "export timeout was not bounded: {elapsed:?}"
+        );
+        assert_unused(&trap);
+    }
+
+    #[test]
+    fn primary_export_rejects_invalid_endpoints_before_transport() {
+        let trap = listener();
+        for endpoint in [
+            "http://synthetic-user:synthetic-password@127.0.0.1:4318",
+            "http://127.0.0.1:4318/path",
+            "http://127.0.0.1:4318/?query",
+            "http://127.0.0.1:4318/#fragment",
+            "https://127.0.0.1:4318",
+            "http://192.0.2.1:4318",
+        ] {
+            for key in ["AHU_TEST_CONFIG_ENDPOINT", "AHU_EVAL_OTEL_ENDPOINT"] {
+                let mut command = child_command("rejected", &trap);
+                command.env(key, endpoint);
+                run_child(command);
+                assert_unused(&trap);
+            }
+        }
     }
 }
 
@@ -1554,6 +2065,7 @@ mod selection_tests {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
         use std::time::{Duration, Instant};
+        let scratch = tempfile::tempdir().unwrap();
         let collector = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", collector.local_addr().unwrap());
         collector.set_nonblocking(true).unwrap();
@@ -1581,7 +2093,21 @@ mod selection_tests {
             let mut headers = String::new();
             loop {
                 let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    match reader.read_line(&mut line) {
+                        Ok(_) => break,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("cannot read local OTLP request headers: {error}"),
+                    }
+                }
                 if line == "\r\n" || line.is_empty() {
                     break;
                 }
@@ -1604,6 +2130,8 @@ mod selection_tests {
         });
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .env_clear()
+            .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+            .current_dir(scratch.path())
             .env("AHU_TEST_SELECTION_ENDPOINT", endpoint)
             .env("AHU_TEST_DECISION_EXPORT", decision.to_string())
             .env("HTTP_PROXY", &proxy_url)

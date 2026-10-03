@@ -1,7 +1,7 @@
 //! Provider-free tests of the in-memory private host boundary.
 use ahu::{
     config::TelemetryConfig,
-    headless::TokenUsage,
+    headless::{ReportedCost, TokenUsage},
     telemetry::private::{AttemptObservation, PrivateMapping},
 };
 use serde_json::{Value, json};
@@ -9,6 +9,11 @@ use serde_json::{Value, json};
 const REPO: &str = "0123456789abcdef";
 const TASK: &str = "00000000-0000-7000-8000-000000000001";
 const CHILD: &str = "00000000-0000-7000-8000-000000000002";
+const AGENT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const NO_COST: ReportedCost = ReportedCost {
+    usd: None,
+    source: None,
+};
 
 fn input() -> Value {
     json!({"schema_version":1,"record_key":"synthetic-marker","repo_identity":REPO,"tasks":[TASK, CHILD]})
@@ -27,7 +32,44 @@ fn sample<'a>(task: &'a str, attempt: u32, usage: &'a TokenUsage) -> AttemptObse
         repo_identity: REPO,
         task_id: task,
         attempt,
+        agent_identity_digest: Some(AGENT),
+        harness: "codex",
+        model: "gpt-6-astra",
+        outcome: "succeeded",
+        elapsed_ms: Some(10),
         usage,
+        cost: &NO_COST,
+    }
+}
+
+fn cost(source: &str, usd: f64) -> ReportedCost {
+    ReportedCost {
+        usd: Some(usd),
+        source: Some(source.into()),
+    }
+}
+
+fn sample_with_cost<'a>(
+    task: &'a str,
+    attempt: u32,
+    usage: &'a TokenUsage,
+    cost: &'a ReportedCost,
+) -> AttemptObservation<'a> {
+    AttemptObservation {
+        repo_identity: REPO,
+        task_id: task,
+        attempt,
+        agent_identity_digest: Some(AGENT),
+        harness: if cost.source.as_deref() == Some("opencode_step_finish_sum") {
+            "opencode"
+        } else {
+            "claude-code"
+        },
+        model: "test/model",
+        outcome: "succeeded",
+        elapsed_ms: Some(10),
+        usage,
+        cost,
     }
 }
 
@@ -117,6 +159,11 @@ fn retries_resumes_and_children_count_once_without_inventing_totals() {
     );
     let summary = serde_json::to_value(mapping.summarize(&enabled(), &samples).unwrap()).unwrap();
     assert_eq!(summary["attempts"], 3);
+    assert_eq!(summary["schema_version"], 2);
+    assert_eq!(summary["group"]["harness"], "codex");
+    assert_eq!(summary["group"]["model"], "gpt-6-astra");
+    assert_eq!(summary["elapsed_ms"]["mean_observed_ms"], 10.0);
+    assert_eq!(summary["elapsed_ms"]["observed_attempts"], 3);
     assert_eq!(
         summary["values"]["ahu.tokens.input"],
         json!({"maximum_observed":u64::MAX,"observed_attempts":3,"unavailable_attempts":0})
@@ -129,10 +176,15 @@ fn retries_resumes_and_children_count_once_without_inventing_totals() {
         summary["values"]["ahu.tokens.total"],
         json!({"maximum_observed":null,"observed_attempts":0,"unavailable_attempts":3})
     );
-    assert_eq!(summary.as_object().unwrap().len(), 4);
+    assert_eq!(summary["reported_cost"]["unavailable_attempts"], 3);
+    assert_eq!(
+        summary["reported_cost"]["mean_observed_usd_by_source"],
+        json!({})
+    );
+    assert_eq!(summary.as_object().unwrap().len(), 7);
     assert_eq!(summary["values"].as_object().unwrap().len(), 6);
     let text = summary.to_string();
-    for secret in ["synthetic-marker", REPO, TASK, CHILD] {
+    for secret in ["synthetic-marker", TASK, CHILD] {
         assert!(!text.contains(secret));
     }
     let zero = serde_json::to_value(
@@ -148,6 +200,45 @@ fn retries_resumes_and_children_count_once_without_inventing_totals() {
         empty["values"]["ahu.tokens.total"]["maximum_observed"],
         Value::Null
     );
+}
+
+#[test]
+fn private_summary_keeps_cost_sources_separate_and_reports_attempt_coverage() {
+    let mapping = parse(input()).unwrap();
+    let usage = TokenUsage::default();
+    let claude_a = cost("claude_code_result_total", 0.01);
+    let claude_b = cost("claude_code_result_total", 0.03);
+    let opencode = cost("opencode_step_finish_sum", 0.005);
+    let samples = [
+        sample_with_cost(TASK, 1, &usage, &claude_a),
+        sample_with_cost(TASK, 2, &usage, &claude_b),
+    ];
+    let report = serde_json::to_value(mapping.summarize(&enabled(), &samples).unwrap()).unwrap();
+    let mean = report["reported_cost"]["mean_observed_usd_by_source"]["claude_code_result_total"]
+        .as_f64()
+        .unwrap();
+    assert!((mean - 0.02).abs() < f64::EPSILON * 2.0);
+    assert_eq!(
+        report["reported_cost"]["observed_attempts_by_source"],
+        json!({"claude_code_result_total": 2})
+    );
+    assert_eq!(report["reported_cost"]["unavailable_attempts"], 0);
+    assert_eq!(report["group"]["harness"], "claude-code");
+    let open_report = serde_json::to_value(
+        mapping
+            .summarize(&enabled(), &[sample_with_cost(CHILD, 1, &usage, &opencode)])
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(open_report["group"]["harness"], "opencode");
+    assert_eq!(
+        open_report["reported_cost"]["mean_observed_usd_by_source"],
+        json!({"opencode_step_finish_sum": 0.005})
+    );
+    let encoded = report.to_string();
+    for secret in ["synthetic-marker", TASK, CHILD] {
+        assert!(!encoded.contains(secret));
+    }
 }
 
 #[test]
@@ -167,6 +258,13 @@ fn membership_conflicts_and_attempt_bounds_fail_without_partial_results() {
         }],
         vec![sample(TASK, 1, &usage), sample(TASK, 1, &changed)],
         (0..4097).map(|_| sample(TASK, 1, &usage)).collect(),
+        vec![
+            sample(TASK, 1, &usage),
+            AttemptObservation {
+                harness: "opencode",
+                ..sample(TASK, 2, &usage)
+            },
+        ],
     ] {
         assert_eq!(
             mapping

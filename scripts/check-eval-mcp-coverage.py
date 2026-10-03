@@ -18,6 +18,7 @@ def is_eval(path: str) -> bool:
 def is_mcp(path: str) -> bool:
     return path.endswith(
         (
+            "/src/approval.rs",
             "/src/mcp.rs",
             "/src/mcp_decisions.rs",
             "/src/mcp_tasks.rs",

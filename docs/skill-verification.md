@@ -112,7 +112,7 @@ Observed (Codex CLI 0.155.1): `codex debug prompt-input` reported the skill root
 `PROBE_SKILL_OK`. `codex features list` showed `skill_search` as stable. Codex
 discovers `.agents/skills/` natively.
 
-**Claude Code skill behavior**
+## Claude Code
 
 Claude Code does not document `.agents/skills/` as a skill location; its
 locations are enterprise, personal, project (`.claude/skills/`), nested,
@@ -167,7 +167,7 @@ the ahu worktree. Caveat: neither directory is in Antigravity's
 discovery on folder trust, as Claude Code does for git trust. This probe shows
 what an untrusted directory gets, not what a trusted folder would show.
 
-The current `--output-format stream-json` probe (Antigravity 1.2.9) emits an
+The recorded `--output-format stream-json` probe (Antigravity 1.2.9) emits an
 outer `event` field with nested `init`, `step_update`, and `result` objects.
 The disposable project skill was still unavailable in that session, and no
 skill invocation event was emitted. ahu's headless evaluator recognizes this
@@ -212,10 +212,18 @@ records without evidence fields are read as unverified.
 `harness.skill_observation` distinguishes:
 
 - `observed`: at least one accepted invocation report.
-- `unavailable`: no accepted or malformed recognized skill report; this is not
-  an observed zero invocations or proof that skills are unsupported.
+- `unavailable`: no recognizable skill-tool event was seen. This is not proof
+  that a project skill is unavailable or that the invocation count was zero.
 - `unverified`: a recognized skill tool report lacked a valid name and no
   accepted report was seen.
+
+`skill_unknown_events` counts bounded skill-tool candidates whose event shape,
+input, status, or correlation was malformed, unsupported, ambiguous, or
+conflicting. The counter makes likely protocol drift visible without accepting
+it as an invocation or retaining the candidate payload. An available catalog
+entry with no matching invocation record is unobserved use. An explicit failed
+tool result is recorded with `status: failed`; ahu does not infer that a failed
+call means the skill itself was unavailable.
 
 The normalizer accepts only these synthetic protocol shapes:
 
@@ -239,14 +247,18 @@ Antigravity tool-name aliases produce one report. OpenCode and nested
 Antigravity snapshots with the same bounded call ID update one record. Reports
 without IDs remain separate; counts do not establish unique successful executions.
 
-The filesystem catalog remains separate. A same-named local file cannot prove
-which skill a harness loaded; new invocation records therefore leave the
-legacy `source` and `digest` fields unset. OTel exports the same bounded names
-and observation state, and emits an invocation count only when reports were
-observed. Missing evidence is not exported as zero. These provider-free tests
-establish parser behavior only; live skill invocation conformance for these
-shapes remains unverified, including the synthetic Codex function-call and
-Antigravity skill-tool fixtures.
+The filesystem catalog remains separate from invocation evidence. When an
+observed skill name matches exactly one catalog entry, its repo-relative source
+and SHA-256 content digest are attached to the invocation record. If multiple
+copies have identical bytes, only the digest is resolvable; if copies conflict,
+or no project copy matches, neither field is inferred. This does not claim the
+harness loaded that exact path. OTel exports the bounded invoked names and, for
+unambiguous content, a `name=sha256:digest` provenance attribute; it does not
+export source paths. Observation state and invocation counts are emitted only
+when evidence exists. Provider-free fixtures establish parser behavior, not
+live conformance for every harness release. Codex and Antigravity event shapes
+without version-pinned explicit invocation evidence remain visible as
+unobserved or unverified rather than being claimed as skill use.
 
 
 ### Completion evidence

@@ -1,5 +1,5 @@
 ---
-name: direct-agents
+name: ahu-direct-agents
 description: Coordinate repository work through registered ahu agents and task records.
 ---
 # Direct agents
@@ -17,7 +17,7 @@ Discover identities with `ahu agents`. Put the complete assignment in a UTF-8
 file outside every repository, then launch it with:
 
 ```sh
-ahu launch @agent-name --prompt-file /absolute/path/to/task.txt
+ahu @agent-name --prompt-file /absolute/path/to/task.txt
 ```
 
 Use `--headless --background --output json` for unattended work. Approval
@@ -29,8 +29,10 @@ one.
 ## Inspect and accept
 
 Use `ahu tasks`, `ahu task <id>`, `ahu wait <id>`, and `ahu result <id>` to track
-assignments. A process exit is not proof of completion: read `result.md`, inspect
-the diff and validation evidence, and review the actual commit before integrating.
+assignments. A process exit is not proof of completion: read the report provided
+through the task's contract and repository policy, inspect the diff and validation
+evidence, and review the actual commit before integrating. New headless tasks
+keep final answers in native harness stores rather than a copied `result.md`.
 For an interactive task, inspect its recorded terminal surface only when that
 surface is available. CMUX uses `cmux read-screen --workspace <id> --scrollback`;
 headless tasks have no workspace to read. Do not make a terminal transcript the
@@ -66,10 +68,12 @@ Do not put private tracker identifiers, URLs, titles, or contents into ahu
 prompts, task records, result reports, public files, or commits. Tracker tools
 and skills manage the link on the provider side.
 
-`ahu cleanup` removes recognized temporary captures and bounded requests after
+`ahu cleanup` removes recognized headless captures and bounded requests after
 termination is known; it retains the task record, results, native sessions,
 branch, and worktree. `ahu remove` can remove the task record, worktree, and
-branch after the task is terminal and its changes are safely integrated. Keep
+branch after the task is terminal and its changes are safely integrated.
+Interactive tasks have no headless captures, so use `ahu remove` directly after
+these checks. Keep
 the provider-side work item and its delivery evidence according to repository
 policy when removing local ahu execution state.
 
@@ -118,10 +122,16 @@ it does not grant authority or change those checks. Report unavailable agents,
 denied launches, missing credentials, incomplete reports, and unjoined children
 as blockers. Never replace a configured harness or model after failure.
 
-Maintain this file at `.agents/skills/direct-agents/SKILL.md`. Run `ahu setup`
+Maintain this file at `.agents/skills/ahu-direct-agents/SKILL.md`. Run `ahu setup`
 to install the user-facing skills in the paths supported by detected harnesses.
 Codex, OpenCode, and Antigravity use `.agents/skills/`; Claude Code uses
 `.claude/skills/`. A skill file being present does not prove that a harness
 loaded it. When the ahu MCP server is connected, its inspection tools are
 available alongside the ahu CLI; use `ahu_agents_list`, `ahu_tasks_list`, and
 `ahu_task_get` when they fit the task.
+
+For a task-bound operation that needs the operator to decide first, use the
+`ahu_request_approval` MCP tool with a concise operation category, summary, and
+optional target, then wait for its result. The operator resolves it with
+`ahu approve TASK` or `ahu reject TASK`. This is an explicit cooperative
+checkpoint; it does not intercept other shell or file operations.

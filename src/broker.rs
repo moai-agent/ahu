@@ -219,7 +219,6 @@ impl Broker {
             command
                 .current_dir(&self.owner.worktree)
                 .args([
-                    "launch",
                     &format!("@{}", request.agent),
                     "--headless",
                     "--background",

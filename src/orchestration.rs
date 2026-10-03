@@ -32,7 +32,7 @@ named specialists. Native harness sub-agents are not valid ahu child agents.
 Run "$AHU_BIN" agents to discover the registered agents. Their manifests specify
 which harness and exact model must execute each assignment.
 For each assignment, write its complete task to a UTF-8 file, then run:
-  "$AHU_BIN" launch @name --prompt-file /absolute/path/to/task.txt
+  "$AHU_BIN" @name --prompt-file /absolute/path/to/task.txt
 That command starts the session without an interactive confirmation. An agent
 whose manifest widens the harness's approval boundary (permissions = auto or
 accept-edits) is refused on this path unless you also pass
@@ -77,7 +77,7 @@ Registered agents and independently owned assignments MUST run through ahu,
 with their configured harness/model. Never impersonate a registered agent with
 a native helper. Run "$AHU_BIN" agents to discover registered identities.
 Write child prompts and reports outside every repository, then launch:
-  "$AHU_BIN" launch @name --headless --background --output json --prompt-file PATH
+  "$AHU_BIN" @name --headless --background --output json --prompt-file PATH
 Approval widening still requires --allow-widened-approvals on each launch.
 Record task IDs; inspect "$AHU_BIN" wait ID --output json and result ID --output json.
 Read actual reports and diffs before accepting work. Process success is not acceptance.
@@ -313,6 +313,20 @@ fn render(
         bail!("ahu will not deliver an invalid fence nonce");
     }
     let mut contract = composition.mode.contract();
+    if version <= 2 {
+        // Layouts 1 and 2 were delivered while `ahu launch @name` was the
+        // documented invocation. Keep those exact bytes for saved-delivery
+        // digest replay even though the current CLI has only the direct form.
+        contract = contract
+            .replace(
+                r#""$AHU_BIN" @name --prompt-file"#,
+                r#""$AHU_BIN" launch @name --prompt-file"#,
+            )
+            .replace(
+                r#""$AHU_BIN" @name --headless"#,
+                r#""$AHU_BIN" launch @name --headless"#,
+            );
+    }
     if version >= 3 && composition.mode != Mode::Interactive {
         contract = contract.replace("ahu delegation contract (v2, headless)", "ahu delegation contract (v3, headless)")
             .replace("Write child prompts and reports outside every repository, then launch:", "Write child assignment prompts in your task coordination directory, then launch:")

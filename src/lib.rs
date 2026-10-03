@@ -18,6 +18,8 @@
 
 pub mod agent;
 pub mod agent_ref;
+pub mod approval;
+pub mod auth_binding;
 pub mod catalog;
 pub mod cli;
 pub mod cmux;
@@ -34,8 +36,10 @@ pub mod hooks;
 pub mod knowledge;
 pub mod launch;
 pub mod launcher;
+mod native_mcp;
 pub mod onboard;
 pub mod orchestration;
+pub(crate) mod private_context_lock;
 mod private_io;
 pub mod selection;
 pub mod setup;

@@ -64,6 +64,26 @@ impl From<serde_json::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Cooperative operator boundary, not isolation from other same-user code.
+/// Presence matters even when a marker is empty or not valid Unicode.
+pub(crate) fn require_host_operator(operation: &str) -> Result<()> {
+    if [
+        "AHU_WORKER_SESSION",
+        "AHU_TASK_ID",
+        "AHU_TASK_DIR",
+        "AHU_PARENT_TASK",
+        "AHU_BROKER_TOKEN",
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some())
+    {
+        return Err(Error::new(format!(
+            "{operation} require a host operator context; refusing a task-originated policy decision. This is a cooperative boundary, not same-user process isolation."
+        )));
+    }
+    Ok(())
+}
+
 /// Build an [`Error`] with `format!` syntax.
 #[macro_export]
 macro_rules! bail {

@@ -337,6 +337,7 @@ fn opencode_session_inherits_terminal_context_and_uses_local_state_without_cmux(
     std::fs::write(
         bin.join("opencode"),
         r#"#!/bin/sh
+if [ "$1" = models ]; then echo 'ollama/glm-5.3:cloud'; exit 0; fi
 printf '%s\n' "$@" > "$AHU_TEST_ARGS"
 pwd > "$AHU_TEST_CWD"
 printf '%s' "${AHU_STATE_DIR-unset}" > "$AHU_TEST_STATE"

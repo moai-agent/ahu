@@ -170,7 +170,7 @@ pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
     Some(IsolationProfile {
         harness: entry.id,
         headless_verified_versions: entry.headless_verified_versions,
-        version_policy: "exact reviewed CLI version; missing or unvalidated versions refuse headless execution",
+        version_policy: "installed CLI version floats by default; an exact project pin is optional; specialized native controls remain version-specific",
         evidence,
         unknown_integration_opt_in: false,
         interactive_supported: entry.supports(Feature::InteractiveLaunch),
@@ -178,21 +178,44 @@ pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
     })
 }
 
-/// Shared by preflight disclosure and the execution gate. Never widens a version
-/// range based on an installed CLI or a successful interactive launch.
-pub fn check_headless_version(harness: &str, version: &str) -> Result<()> {
-    let supported = isolation_profile(harness)
-        .map(|p| p.headless_verified_versions)
-        .unwrap_or(&[]);
-    // Preserve native CLI-name prefixes and whitespace-delimited decoration;
-    // empty, malformed, and unreviewed version tokens still fail closed.
-    let token = version
-        .split_whitespace()
-        .find(|v| crate::util::is_semver(v))
-        .unwrap_or_else(|| version.split_whitespace().next().unwrap_or(""));
-    if !supported.contains(&token) {
+/// The actual CLI version string, with common harness decoration removed.
+pub fn version_token(version: &str) -> Option<&str> {
+    version.split_whitespace().find_map(|token| {
+        let token = token.strip_prefix('v').unwrap_or(token);
+        crate::util::is_semver(token).then_some(token)
+    })
+}
+
+/// Check the default floating policy or an optional exact project pin.
+pub fn check_harness_version(harness_id: &str, version: &str, pin: Option<&str>) -> Result<()> {
+    if harness(harness_id).is_none() {
+        bail!("unknown harness {harness_id:?}; no version policy is available");
+    }
+    let observed = version_token(version).ok_or_else(|| {
+        crate::util::Error::new(format!(
+            "{harness_id} did not report a parseable semantic CLI version; cannot record or pin this run"
+        ))
+    })?;
+    if let Some(pin) = pin
+        && observed != pin
+    {
+        bail!("{harness_id} CLI version {observed} does not match the project pin {pin}");
+    }
+    Ok(())
+}
+
+/// Validate that this Ahu build has a batch adapter. Installed CLI versions
+/// float by default; projects may add an exact pin through project config.
+pub fn check_headless_version(harness_id: &str, version: &str) -> Result<()> {
+    let entry = harness(harness_id)
+        .filter(|entry| entry.supports(Feature::HeadlessLaunch))
+        .ok_or_else(|| {
+            crate::util::Error::new(format!("ahu has no headless adapter for {harness_id}"))
+        })?;
+    if version_token(version).is_none() {
         bail!(
-            "unvalidated headless {harness} version {version:?}; supported CLI profiles: {supported:?}. Update the compatibility validation before launching; no fallback was selected."
+            "{} did not report a parseable semantic CLI version",
+            entry.display_name
         );
     }
     Ok(())
@@ -494,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn isolation_profiles_and_headless_versions_fail_closed() {
+    fn headless_versions_float_and_optional_pins_are_exact() {
         for harness in ["codex", "opencode", "claude-code", "antigravity"] {
             let profile = isolation_profile(harness).unwrap();
             assert!(!profile.version_policy.is_empty());
@@ -504,10 +527,15 @@ mod tests {
             check_headless_version(harness, version).unwrap();
             check_headless_version(harness, &format!("{harness} {version} (reviewed)")).unwrap();
             assert!(check_headless_version(harness, "").is_err());
-            assert!(check_headless_version(harness, "999.0.0").is_err());
+            check_headless_version(harness, "999.0.0").unwrap();
         }
         check_headless_version("codex", "codex-cli 0.157.1").unwrap();
-        assert!(check_headless_version("codex", "0.157.2").is_err());
+        check_headless_version("codex", "codex-cli 0.160.0").unwrap();
+        assert!(check_headless_version("unknown", "1.2.3").is_err());
+        assert!(check_harness_version("codex", "codex-cli 0.160.0", None).is_ok());
+        assert!(check_harness_version("codex", "codex-cli 0.160.0", Some("0.160.0")).is_ok());
+        assert!(check_harness_version("codex", "codex-cli 0.160.0", Some("0.157.1")).is_err());
+        assert!(check_harness_version("codex", "codex-cli latest", None).is_err());
         assert!(isolation_profile("unknown").is_none());
         assert!(require_version(CATALOG_VERSION).is_ok());
         assert!(require_version("unreleased-catalog").is_err());

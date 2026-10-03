@@ -45,7 +45,6 @@ fn labels_are_bounded_and_display_safe() {
 fn metadata_options_preserve_values_and_reject_duplicates() {
     let (args, color) = ahu::cli::extract_color(
         [
-            "launch",
             "@sable",
             "--prompt",
             "assignment",
@@ -65,10 +64,10 @@ fn metadata_options_preserve_values_and_reject_duplicates() {
     assert_eq!(display.title.as_deref(), Some("--color=always"));
     assert_eq!(display.summary.as_deref(), Some("--color=never"));
     for option in ["--title", "--summary"] {
-        assert!(parse(["launch", "@sable", "--prompt", "task", option]).is_err());
+        assert!(parse(["@sable", "--prompt", "task", option]).is_err());
         assert!(
             parse([
-                "launch", "@sable", "--prompt", "task", option, "first", option, "second"
+                "@sable", "--prompt", "task", option, "first", option, "second"
             ])
             .is_err()
         );
@@ -108,7 +107,6 @@ fn cli_transports_metadata_to_plan_without_changing_assignment() {
         let output = common::ahu()
             .current_dir(repo.path())
             .args([
-                "launch",
                 "@sable",
                 "--prompt",
                 prompt,

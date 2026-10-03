@@ -22,8 +22,8 @@ changes tracked agent context, then review the lockfile. `ahu eval run` and
 `ahu eval report` run and compare eval records, which belong outside the checkout.
 `ahu mcp serve` exposes read-only agent/task inspection plus `ahu_typed_decide`
 when a decision backend is configured. Read `.agents/skills/ahu-architecture/SKILL.md`
-for current system behavior; use `direct-agents`, `agent-context-critic`, and
-`typed-decisions` for their matching workflows. Use
+for current system behavior; use `ahu-direct-agents`, `ahu-agent-context-critic`, and
+`ahu-typed-decisions` for their matching workflows. Use
 `.agents/skills/ahu-harness-upgrade/SKILL.md` for harness updates and compatibility
 work. Skills are guidance, not proof a harness loaded them; verify actual prompt,
 tool, and telemetry evidence before drawing conclusions.

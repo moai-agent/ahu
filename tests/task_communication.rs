@@ -436,3 +436,118 @@ fn an_unrecognized_inbox_entry_stops_delivery() {
     assert!(text.contains("ahu will not write next to it."), "{text}");
     assert!(!inbox.join("0001.md").exists());
 }
+
+// Approval fixtures need only a local task record, not a new Git worktree or
+// live harness. The real CLI runs in a child with an isolated caller context.
+fn pending_approval(repo: &TestRepo, id: &str) -> PathBuf {
+    let discovered = git::discover(repo.path()).unwrap();
+    let dir = state::worktree_task_dir(repo.path(), &discovered.identity(), id);
+    let mut record = record_for(repo, id, repo.path());
+    record.state = task::TaskState::WaitingForApproval;
+    task::save(&dir, &record, "synthetic approval").unwrap();
+    state::write_json(
+        &dir.join("approval-request.json"),
+        &serde_json::json!({
+            "schema_version": 1,
+            "request_id": "0123456789abcdef",
+            "task_id": id,
+            "operation": "network",
+            "summary": "Read synthetic metadata",
+            "target": "https://example.invalid",
+            "requested_at": task::now_rfc3339(),
+        }),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn approval_commands_refuse_task_callers_before_lookup_or_mutation() {
+    let repo = fixture();
+    let id = task::new_task_id().unwrap();
+    let dir = pending_approval(&repo, &id);
+    let record_before = std::fs::read(dir.join("task.json")).unwrap();
+    let request_before = std::fs::read(dir.join("approval-request.json")).unwrap();
+    let mut contexts: Vec<(&str, std::ffi::OsString)> = vec![
+        ("AHU_WORKER_SESSION", "cmux".into()),
+        ("AHU_WORKER_SESSION", "headless".into()),
+        ("AHU_TASK_ID", id.clone().into()),
+        ("AHU_TASK_ID", task::new_task_id().unwrap().into()),
+        ("AHU_TASK_DIR", dir.as_os_str().to_owned()),
+        ("AHU_PARENT_TASK", "synthetic-parent".into()),
+        ("AHU_BROKER_TOKEN", "synthetic-token".into()),
+    ];
+    for marker in [
+        "AHU_WORKER_SESSION",
+        "AHU_TASK_ID",
+        "AHU_TASK_DIR",
+        "AHU_PARENT_TASK",
+        "AHU_BROKER_TOKEN",
+    ] {
+        contexts.push((marker, "".into()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        contexts.push(("AHU_TASK_ID", std::ffi::OsString::from_vec(vec![0xff])));
+    }
+    for action in ["approve", "reject"] {
+        for (marker, value) in &contexts {
+            for target in [id.as_str(), "missing-task"] {
+                let out = common::ahu()
+                    .current_dir(repo.path())
+                    .args([action, target, "--output", "json"])
+                    .env("AHU_CMUX_BIN", repo.path().join("no-such-cmux"))
+                    .env(marker, value)
+                    .output()
+                    .unwrap();
+                let text = text_of(&out);
+                assert_eq!(out.status.code(), Some(5), "{action} {marker}: {text}");
+                assert!(text.contains("require a host operator context"), "{text}");
+                assert!(text.contains("not same-user process isolation"), "{text}");
+            }
+        }
+    }
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), record_before);
+    assert_eq!(
+        std::fs::read(dir.join("approval-request.json")).unwrap(),
+        request_before
+    );
+    assert!(!dir.join("approval-response.json").exists());
+    assert!(!dir.join("cancel.json").exists());
+    assert!(!dir.join("state.lock").exists());
+}
+
+#[test]
+fn approval_commands_allow_host_approve_and_reject() {
+    let repo = fixture();
+    for action in ["approve", "reject"] {
+        let id = task::new_task_id().unwrap();
+        let dir = pending_approval(&repo, &id);
+        let out = ahu_in(repo.path(), &[action, &id, "--output", "json"]);
+        assert!(out.status.success(), "{}", text_of(&out));
+        let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(result["task_id"], id);
+        assert_eq!(result["request_id"], "0123456789abcdef");
+        assert_eq!(
+            result["decision"],
+            if action == "approve" {
+                "approved"
+            } else {
+                "rejected"
+            }
+        );
+        let response: serde_json::Value =
+            state::read_json(&dir.join("approval-response.json")).unwrap();
+        assert_eq!(response["decision"], action);
+        assert_eq!(dir.join("cancel.json").exists(), action == "reject");
+        assert_eq!(
+            task::load(&dir).unwrap().state,
+            if action == "approve" {
+                task::TaskState::Running
+            } else {
+                task::TaskState::WaitingForApproval
+            }
+        );
+    }
+}

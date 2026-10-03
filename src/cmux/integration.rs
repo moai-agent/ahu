@@ -151,7 +151,7 @@ impl Status {
             self.headless.allowed = false;
             self.headless.reasons.push(error.to_string());
             self.next_action = format!(
-                "Use a reviewed CLI version or validate the new CLI profile before headless execution. Interactive execution remains available subject to normal prerequisites. {}",
+                "Use a CLI that reports a parseable semantic version. Interactive execution remains available subject to normal prerequisites. {}",
                 self.next_action
             );
         }
@@ -1467,7 +1467,7 @@ pub fn render(status: &Status) -> String {
     ));
     if let Some(profile) = &status.profile {
         text.push_str(&format!(
-            "  profile {}: {}; reviewed versions: {}\n  evidence: {}\n  unknown integration opt-in: {}; interactive supported: {}\n  limitations: {}\n",
+            "  profile {}: {}; behavior checked on: {}\n  evidence: {}\n  unknown integration opt-in: {}; interactive supported: {}\n  limitations: {}\n",
             profile.harness, profile.version_policy, profile.headless_verified_versions.join(", "),
             profile.evidence, profile.unknown_integration_opt_in, profile.interactive_supported, profile.limitations
         ));

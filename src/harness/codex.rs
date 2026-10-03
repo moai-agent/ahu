@@ -27,15 +27,33 @@ use crate::util::Result;
 pub struct Codex;
 
 /// MCP's approval gate is separate from Codex's shell approval policy. When
-/// an agent explicitly declares `permissions = auto`, let it use ahu's local,
-/// read-only repository tools in headless runs. Provider-backed decision and
-/// skill-suggestion calls stay approval-gated because their arguments can be
-/// sent outside the machine.
-pub(crate) const AUTO_LOCAL_MCP_TOOLS: &[&str] =
-    &["ahu_agents_list", "ahu_tasks_list", "ahu_task_get"];
+/// an agent explicitly declares `permissions = auto`, let it use ahu's local
+/// repository tools and request an operator checkpoint in headless runs. The
+/// checkpoint tool only pauses and records bounded metadata; it cannot perform
+/// the requested operation. Provider-backed calls stay approval-gated because
+/// their arguments can be sent outside the machine.
+pub(crate) const AUTO_LOCAL_MCP_TOOLS: &[&str] = &[
+    "ahu_agents_list",
+    "ahu_tasks_list",
+    "ahu_task_get",
+    "ahu_request_approval",
+];
 
 pub(crate) fn auto_local_mcp_config(tool: &str) -> String {
     format!("mcp_servers.ahu.tools.{tool}.approval_mode=\"approve\"")
+}
+
+/// Load native config with the same overrides as an auto launch, without
+/// connecting to servers or making a model request. Codex ignores untrusted
+/// project layers; tool-only overrides then create an invalid transport.
+pub(crate) fn auto_mcp_probe_args() -> Vec<String> {
+    let mut args = Vec::new();
+    for tool in AUTO_LOCAL_MCP_TOOLS {
+        args.push("-c".into());
+        args.push(auto_local_mcp_config(tool));
+    }
+    args.extend(["mcp".into(), "list".into()]);
+    args
 }
 
 impl Adapter for Codex {
@@ -120,7 +138,9 @@ fn permission_control(permissions: Permissions) -> String {
         Permissions::Auto => format!(
             "ahu passes --ask-for-approval never and --sandbox workspace-write because this \
              agent's manifest declares permissions = auto, and approves only ahu's local \
-             read-only MCP tools (ahu_agents_list, ahu_tasks_list, ahu_task_get); \
+             repository tools (ahu_agents_list, ahu_tasks_list, ahu_task_get) and \
+             ahu_request_approval, which records a bounded checkpoint and pauses without \
+             performing the requested operation; \
              provider-backed ahu_typed_decide and ahu_skills_suggest remain approval-gated; \
              it passes no --approve-for-me, \
              --dangerously-bypass-approvals-and-sandbox, or --dangerously-bypass-hook-trust; \

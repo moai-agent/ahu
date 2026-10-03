@@ -117,14 +117,8 @@ fn repository_utilities_are_excluded_before_discovery_and_launch() {
         for args in [
             vec!["agents"],
             vec!["doctor"],
-            vec![
-                "launch",
-                "@sable",
-                "--prompt-file",
-                "assignment.txt",
-                "--dry-run",
-            ],
-            vec!["launch", "@sable", "--prompt-file", "assignment.txt"],
+            vec!["@sable", "--prompt-file", "assignment.txt", "--dry-run"],
+            vec!["@sable", "--prompt-file", "assignment.txt"],
         ] {
             let result = fixture
                 .command(fixture.repo.path(), &path)
@@ -356,7 +350,7 @@ fn utility_marker_inspection_does_not_follow_git_pointers_or_unbounded_ancestry(
 /// a user on the other that the adapter was verified against a version they do
 /// not have, which is a false warning rather than a cautious one.
 #[test]
-fn a_multi_version_catalog_entry_matches_any_version_it_lists() {
+fn observed_versions_are_evidence_not_an_allowlist() {
     let entry = ahu::catalog::harness("opencode").expect("catalog entry");
     assert!(
         entry.verified_versions.contains(','),
@@ -372,20 +366,15 @@ fn a_multi_version_catalog_entry_matches_any_version_it_lists() {
         .collect();
     assert_eq!(verified, vec!["1.18.29", "1.18.30", "1.18.31", "1.18.32"]);
 
-    // Whatever this machine has, a note appears only for a version the entry
-    // does not list — never for one it does.
+    // The current installed CLI floats by default. Only a missing or
+    // unparseable version produces a prerequisite note.
     let prerequisite = ahu::selection::check_prerequisite("opencode");
     if let Some(version) = &prerequisite.version {
-        let listed = verified.iter().any(|v| version.contains(v));
-        let noted = prerequisite
-            .notes
-            .iter()
-            .any(|note| note.contains("the ahu adapter was verified against"));
-        assert_eq!(
-            listed, !noted,
-            "installed {version:?} against {:?}: notes {:?}",
-            entry.verified_versions, prerequisite.notes
+        assert!(
+            ahu::catalog::version_token(version).is_some(),
+            "{version:?}"
         );
+        assert!(prerequisite.notes.is_empty(), "{:?}", prerequisite.notes);
     }
 
     // Catalog entries name only versions whose surface has been observed.

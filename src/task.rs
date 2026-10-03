@@ -36,6 +36,7 @@ pub enum LaunchMode {
 pub enum TaskState {
     Starting,
     Running,
+    WaitingForApproval,
     Exited,
     Failed,
     Cancelled,
@@ -46,6 +47,7 @@ impl TaskState {
         match self {
             TaskState::Starting => "starting",
             TaskState::Running => "running",
+            TaskState::WaitingForApproval => "waiting-for-approval",
             TaskState::Exited => "exited",
             TaskState::Failed => "failed",
             TaskState::Cancelled => "cancelled",
@@ -56,7 +58,10 @@ impl TaskState {
     /// meaningfully be cancelled; the rest describe sessions that already
     /// stopped for some reason.
     pub fn is_live(self) -> bool {
-        matches!(self, TaskState::Starting | TaskState::Running)
+        matches!(
+            self,
+            TaskState::Starting | TaskState::Running | TaskState::WaitingForApproval
+        )
     }
 }
 
@@ -209,10 +214,10 @@ pub(crate) const PROMPT_FILE: &str = "prompt.txt";
 /// Schema 3 changes the task identifier from 18 hex characters to a hyphenated
 /// UUID v7. The fields are otherwise identical, so schema-2 records still load
 /// unchanged; they keep their original ids.
-pub const TASK_SCHEMA_VERSION: u32 = 3;
+pub const TASK_SCHEMA_VERSION: u32 = 4;
 /// The schema versions this build can read: the current one and its immediate
 /// predecessor. `load` refuses everything else.
-pub const READABLE_SCHEMA_VERSIONS: [u32; 2] = [2, TASK_SCHEMA_VERSION];
+pub const READABLE_SCHEMA_VERSIONS: [u32; 3] = [2, 3, TASK_SCHEMA_VERSION];
 
 /// A time-ordered, collision-resistant task identifier: a UUID v7 whose random
 /// bits come from `os_entropy`. Fails closed rather than minting a guessable id.
@@ -338,7 +343,7 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
         };
         bail!(
             "{} was written by a different ahu schema version ({version}); this ahu \
-             build reads schema {TASK_SCHEMA_VERSION} and legacy schema 2 task records.\n\
+             build reads task schemas 2, 3, and {TASK_SCHEMA_VERSION}.\n\
              ahu will not reinterpret it: {reason}",
             path.display()
         );
@@ -356,7 +361,7 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
     if !READABLE_SCHEMA_VERSIONS.contains(&record.schema_version) {
         bail!(
             "{} declares ahu schema version {}; this ahu build reads \
-             {TASK_SCHEMA_VERSION} and legacy schema 2 task records.",
+             2, 3, and {TASK_SCHEMA_VERSION}.",
             path.display(),
             record.schema_version
         );
@@ -374,6 +379,16 @@ pub fn load_prompt(dir: &Path) -> Result<String> {
 
 /// Update the recorded state of a task.
 pub fn set_state(dir: &Path, new_state: TaskState) -> Result<()> {
+    let _lock = lock_state(dir)?;
+    set_state_locked(dir, new_state)
+}
+
+pub(crate) fn lock_state(dir: &Path) -> Result<StateLock> {
+    StateLock::acquire(&dir.join("state.lock"))
+}
+
+/// Caller holds the task state lock, including any related approval mutation.
+pub(crate) fn set_state_locked(dir: &Path, new_state: TaskState) -> Result<()> {
     let mut record = load(dir)?;
     record.state = new_state;
     state::write_json(&crate::storage::TaskStorage::new(dir).record(), &record)
@@ -807,6 +822,52 @@ fn scan_worktrees(
     Ok(())
 }
 
+// Persistent lock files must never be unlinked: all processes must lock the
+// same inode. Kernel ownership, rather than a timestamp, survives crashes safely.
+pub(crate) struct StateLock(std::fs::File);
+impl StateLock {
+    pub(crate) fn acquire(path: &std::path::Path) -> Result<Self> {
+        for _ in 0..50 {
+            if let Some(lock) = Self::try_acquire(path)? {
+                return Ok(lock);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Err(Error::new("task state busy; retry request"))
+    }
+    pub(crate) fn try_acquire(path: &std::path::Path) -> Result<Option<Self>> {
+        use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+        state::confine_file(path)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)?;
+        crate::storage::validate_owned_metadata(&file.metadata()?, true)?;
+        // SAFETY: the file owns a valid descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error.into());
+        }
+        Ok(Some(Self(file)))
+    }
+}
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the file is still open.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,7 +916,22 @@ mod state_tests {
     }
 
     #[test]
-    fn live_states_are_starting_and_running_only() {
+    fn waiting_for_approval_is_live_and_round_trips() {
+        assert_eq!(
+            TaskState::WaitingForApproval.as_str(),
+            "waiting-for-approval"
+        );
+        let value = serde_json::to_value(TaskState::WaitingForApproval).unwrap();
+        assert_eq!(value, serde_json::json!("waiting-for-approval"));
+        assert_eq!(
+            serde_json::from_value::<TaskState>(value).unwrap(),
+            TaskState::WaitingForApproval
+        );
+        assert!(TaskState::WaitingForApproval.is_live());
+    }
+
+    #[test]
+    fn terminal_states_are_not_live() {
         assert!(TaskState::Starting.is_live());
         assert!(TaskState::Running.is_live());
         assert!(!TaskState::Exited.is_live());

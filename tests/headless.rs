@@ -53,7 +53,7 @@ if scenario in ('child','mailbox'):
  child=os.environ['CHILD_PROMPT']
  env=dict(os.environ,SCENARIO='success')
  extra=['--name',os.environ['CHILD_TASK_NAME']] if 'CHILD_TASK_NAME' in os.environ else []
- r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--headless','--background','--output','json','--prompt-file',child]+extra,env=env,capture_output=True,text=True)
+ r=subprocess.run([os.environ['AHU_BIN'],'@worker','--headless','--background','--output','json','--prompt-file',child]+extra,env=env,capture_output=True,text=True)
  assert r.returncode==0, r.stderr
  child_id=json.loads(r.stdout)['task_id']
  r=subprocess.run([os.environ['AHU_BIN'],'wait',child_id,'--output','json'],env=env,capture_output=True,text=True)
@@ -75,17 +75,23 @@ if scenario.startswith('native_'):
 elif scenario=='outside_write':
  target=os.path.join(os.path.dirname(os.getcwd()),'escape.txt')
  print(json.dumps({'type':'tool_use','name':'Write','input':{'file_path':target}}),flush=True)
+ time.sleep(0.3)
  open(target,'w').write('escaped\n')
 elif scenario=='outside_event':
  target=os.environ['OUTSIDE_PATH']
  print(json.dumps({'type':'assistant','message':{'content':[{'type':'tool_use','name':'Edit','input':{'file_path':target}}]}}),flush=True)
+ time.sleep(0.3)
 elif scenario=='inside_write':
  print(json.dumps({'type':'tool_use','name':'Write','input':{'file_path':'inside.txt'}}),flush=True)
  print(json.dumps({'type':'tool_use','name':'Write','input':{'file_path':os.path.join(os.getcwd(),'kept.txt')}}),flush=True)
 elif scenario=='outside_bad_input':
  print(json.dumps({'type':'tool_use','name':'Write','input':'not json{'}),flush=True)
+elif scenario=='measure_no_terminal':
+ print(json.dumps({'type':'assistant','usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120}}),flush=True)
 else: open('proof.txt','w').write('synthetic proof\n')
-print(json.dumps({'type':'result','subtype':'success','result':'validated synthetic proof','session_id':session,'is_error':False,'permission_denials':([{'tool':'Bash'}] if scenario=='denied' else [])}),flush=True)
+result={'type':'result','subtype':'success','result':'validated synthetic proof','session_id':session,'is_error':False,'permission_denials':([{'tool':'Bash'}] if scenario=='denied' else [])}
+if scenario in ('measure','measure_no_terminal'): result.update({'usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120},'total_cost_usd':0.0125})
+if scenario!='measure_no_terminal': print(json.dumps(result),flush=True)
 if scenario=='nonzero': sys.exit(7)
 "#;
         std::fs::write(bin.join("claude"), script).unwrap();
@@ -113,6 +119,14 @@ if scenario=='nonzero': sys.exit(7)
                 self.external.path().join("home").canonicalize().unwrap(),
             )
             .env(
+                "XDG_STATE_HOME",
+                self.external
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("state-root"),
+            )
+            .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin:/opt/homebrew/bin", self.bin.display()),
             )
@@ -127,7 +141,6 @@ if scenario=='nonzero': sys.exit(7)
         self.command()
             .env("SCENARIO", scenario)
             .args([
-                "launch",
                 "@worker",
                 "--headless",
                 "--output",
@@ -214,9 +227,13 @@ fn local_metrics_survive_attempt_persistence_without_an_exporter() {
         String::from_utf8_lossy(&out.stderr)
     );
     let value = Fixture::value(&out);
-    assert_eq!(value["metrics"]["schema_version"], 1);
+    assert_eq!(value["metrics"]["schema_version"], 2);
     assert_eq!(
         value["metrics"]["values"]["ahu.tokens.total"]["kind"],
+        "unavailable"
+    );
+    assert_eq!(
+        value["metrics"]["values"]["ahu.cost.harness_reported_usd"]["kind"],
         "unavailable"
     );
     let stored: Value = serde_json::from_slice(
@@ -226,6 +243,187 @@ fn local_metrics_survive_attempt_persistence_without_an_exporter() {
     assert_eq!(stored["metrics"], value["metrics"]);
     assert_eq!(stored["task_id"], value["task_id"]);
     assert_eq!(stored["attempt"], value["attempt"]);
+}
+
+#[test]
+fn private_telemetry_cli_links_and_reports_opt_in_attempt_measurements() {
+    let f = Fixture::new();
+    let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
+    config.telemetry.local_metrics = true;
+    f.repo
+        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo
+        .commit("enable local metrics for private report fixture");
+    let launched = f.launch("measure", &[]);
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let task_id = Fixture::value(&launched)["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let linked = f
+        .command()
+        .args(["telemetry", "link", "--key", "case-a4", "--task", &task_id])
+        .output()
+        .unwrap();
+    assert!(
+        linked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    let report = f
+        .command()
+        .args([
+            "telemetry",
+            "report",
+            "--key",
+            "case-a4",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let report: Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(report["linked_tasks"], 1);
+    assert_eq!(report["completed_attempts"], 1);
+    assert_eq!(report["attempts_with_opt_in_metrics"], 1);
+    assert_eq!(report["capacity"]["kind"], "unavailable");
+    assert_eq!(
+        report["capacity"]["reason"],
+        "no trusted per-run or account capacity signal is collected"
+    );
+    assert_eq!(report["native_completeness"]["complete_attempts"], 1);
+    assert_eq!(report["native_completeness"]["incomplete_attempts"], 0);
+    assert_eq!(report["native_completeness"]["unknown_attempts"], 0);
+    let human_report = f
+        .command()
+        .args(["telemetry", "report", "--key", "case-a4"])
+        .output()
+        .unwrap();
+    assert!(
+        human_report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human_report.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&human_report.stdout)
+            .contains("capacity      unknown (no trusted capacity signal)")
+    );
+    assert!(
+        String::from_utf8_lossy(&human_report.stdout)
+            .contains("native events 1/0/0 complete/incomplete/unknown")
+    );
+    let group = &report["groups"][0];
+    assert_eq!(group["group"]["harness"], "claude-code");
+    assert_eq!(group["group"]["model"], "claude-opus-5");
+    assert_eq!(group["values"]["ahu.tokens.input"]["maximum_observed"], 100);
+    assert_eq!(
+        group["reported_cost"]["mean_observed_usd_by_source"]["claude_code_result_total"],
+        0.0125
+    );
+    assert!(group["elapsed_ms"]["mean_observed_ms"].as_f64().is_some());
+    let serialized = serde_json::to_string(&report).unwrap();
+    assert!(!serialized.contains(&task_id));
+    assert!(!serialized.contains("validated synthetic proof"));
+
+    let unlinked = f
+        .command()
+        .args([
+            "telemetry",
+            "unlink",
+            "--key",
+            "case-a4",
+            "--task",
+            &task_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        unlinked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unlinked.stderr)
+    );
+}
+
+#[test]
+fn private_report_keeps_observed_usage_separate_from_missing_terminal_evidence() {
+    let f = Fixture::new();
+    let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
+    config.telemetry.local_metrics = true;
+    f.repo
+        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo
+        .commit("enable local metrics for incomplete stream fixture");
+
+    let launched = f.launch("measure_no_terminal", &[]);
+    assert_eq!(launched.status.code(), Some(5));
+    let envelope = Fixture::value(&launched);
+    assert_eq!(envelope["outcome"], "failed");
+    assert_eq!(envelope["native_completeness"]["complete"], false);
+    let task_id = envelope["task_id"].as_str().unwrap();
+    let linked = f
+        .command()
+        .args([
+            "telemetry",
+            "link",
+            "--key",
+            "case-incomplete",
+            "--task",
+            task_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        linked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    let report = f
+        .command()
+        .args([
+            "telemetry",
+            "report",
+            "--key",
+            "case-incomplete",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let report: Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(report["native_completeness"]["incomplete_attempts"], 1);
+    assert_eq!(report["native_completeness"]["unknown_attempts"], 0);
+    assert_eq!(report["groups"][0]["group"]["outcome"], "failed");
+    assert_eq!(
+        report["groups"][0]["native_completeness"]["incomplete_attempts"],
+        1
+    );
+    assert_eq!(
+        report["groups"][0]["values"]["ahu.tokens.total"]["maximum_observed"],
+        120
+    );
+    let serialized = serde_json::to_string(&report).unwrap();
+    assert!(!serialized.contains(task_id));
+
+    let unlinked = f
+        .command()
+        .args(["telemetry", "unlink", "--key", "case-incomplete"])
+        .output()
+        .unwrap();
+    assert!(unlinked.status.success());
 }
 
 #[test]
@@ -241,7 +439,6 @@ fn exporter_setup_failure_does_not_block_headless_execution() {
         .command()
         .env("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "gzip")
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--output",
@@ -258,7 +455,7 @@ fn exporter_setup_failure_does_not_block_headless_execution() {
     );
     let value = Fixture::value(&out);
     assert_eq!(value["outcome"], "succeeded");
-    assert_eq!(value["metrics"]["schema_version"], 1);
+    assert_eq!(value["metrics"]["schema_version"], 2);
 }
 
 #[test]
@@ -451,6 +648,9 @@ fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     assert!(out.status.success());
     let v = Fixture::value(&out);
     let id = v["task_id"].as_str().unwrap();
+    let old_cli = std::fs::read_to_string(f.bin.join("claude")).unwrap();
+    assert!(old_cli.contains("2.1.270"));
+    std::fs::write(f.bin.join("claude"), old_cli.replace("2.1.270", "2.1.999")).unwrap();
     let prompt = f.external.path().join("followup.txt");
     std::fs::write(&prompt, "continue synthetic task").unwrap();
     let resumed = f
@@ -476,6 +676,14 @@ fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     let events = PathBuf::from(next["review"]["result_path"].as_str().unwrap());
     let dir = events.parent().unwrap().parent().unwrap();
     let record = ahu::task::load(dir).unwrap();
+    assert_eq!(
+        record.enforcement.harness_version.as_deref(),
+        Some("2.1.999")
+    );
+    let previous: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("attempt-1/submission.json")).unwrap())
+            .unwrap();
+    assert_eq!(previous["enforcement"]["harness_version"], "2.1.270");
     let spec: ahu::headless::Spec =
         serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
     let composition = record.delivery.composition.as_ref().unwrap();
@@ -533,7 +741,6 @@ fn recursive_registered_child_inherits_headless_and_is_discoverable() {
         .env("CHILD_TASK_NAME", "@nested-worker")
         .env("CHILD_PROMPT", prompt)
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--output",
@@ -599,7 +806,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "codex",
             vec![
                 json!({"type":"thread.started","thread_id":"thr-codex"}),
-                json!({"type":"item.completed","item":{"type":"function_call","name":"skill","input":{"skill":"direct-agents"}}}),
+                json!({"type":"item.completed","item":{"type":"function_call","name":"skill","input":{"skill":"ahu-direct-agents"}}}),
                 json!({"type":"item.completed","item":{"type":"agent_message","text":"done"}}),
                 json!({"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18},"model":"gpt-test"}),
             ],
@@ -608,7 +815,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "claude-code",
             vec![
                 json!({"type":"system","session_id":"ses-claude","subtype":"init"}),
-                json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"direct-agents"}}]}}),
+                json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"ahu-direct-agents"}}]}}),
                 json!({"type":"assistant","message":{"content":[]}}),
                 json!({"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18},"model":"claude-test"}),
             ],
@@ -617,7 +824,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "antigravity",
             vec![
                 json!({"type":"init","session_id":"ses-agy"}),
-                json!({"type":"tool_use","name":"Skill","input":{"skill":"direct-agents"}}),
+                json!({"type":"tool_use","name":"Skill","input":{"skill":"ahu-direct-agents"}}),
                 json!({"type":"result","status":"success","response":"done","usage":{"prompt_tokens":17,"completion_tokens":4,"total_tokens":21},"model_name":"gemini-test"}),
             ],
         ),
@@ -625,7 +832,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             "opencode",
             vec![
                 json!({"type":"step_start","sessionID":"ses-opencode","part":{"type":"step-start"}}),
-                json!({"type":"tool_use","sessionID":"ses-opencode","part":{"type":"tool","tool":"skill","state":{"input":{"skill":"direct-agents"}}}}),
+                json!({"type":"tool_use","sessionID":"ses-opencode","part":{"type":"tool","tool":"skill","state":{"input":{"skill":"ahu-direct-agents"}}}}),
                 json!({"type":"text","sessionID":"ses-opencode","part":{"type":"text","text":"done"}}),
                 json!({"type":"step_finish","sessionID":"ses-opencode","part":{"type":"step-finish","reason":"stop","usage":{"input_tokens":19,"output_tokens":6,"total_tokens":25},"model":"glm-test"}}),
             ],
@@ -667,7 +874,7 @@ fn protocol_coverage_matrix_normalizes_common_lifecycle_and_usage_fields() {
             1,
             "{harness} skill invocation was not captured"
         );
-        assert_eq!(events.skills[0].name, "direct-agents");
+        assert_eq!(events.skills[0].name, "ahu-direct-agents");
     }
 }
 
@@ -749,7 +956,7 @@ fn skill_probe_antigravity_nested_tool_event_records_only_invocation_metadata() 
 #[test]
 fn cli_values_never_become_batch_options_and_duplicates_are_refused() {
     for field in ["--prompt", "--title", "--summary"] {
-        let mut args = vec!["launch", "@worker", "--headless", field, "--dry-run"];
+        let mut args = vec!["@worker", "--headless", field, "--dry-run"];
         if field != "--prompt" {
             args.extend(["--prompt", "task"]);
         }
@@ -767,7 +974,7 @@ fn cli_values_never_become_batch_options_and_duplicates_are_refused() {
         vec!["--headless", "--background", "--background"],
         vec!["--headless", "--timeout", "1", "--timeout", "1"],
     ] {
-        let mut args = vec!["launch", "@worker", "--prompt", "task"];
+        let mut args = vec!["@worker", "--prompt", "task"];
         args.extend(extra);
         assert!(ahu::cli::parse(args).is_err());
     }
@@ -794,7 +1001,7 @@ fn missing_native_home_beneath_checkout_alias_is_refused() {
     let out = f
         .command()
         .env("CODEX_HOME", alias.join("missing/home"))
-        .args(["launch", "@worker", "--headless", "--prompt", "task"])
+        .args(["@worker", "--headless", "--prompt", "task"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -984,7 +1191,6 @@ fn cancelled_parent_refuses_later_child_admission() {
         .env("AHU_PARENT_TASK", id)
         .env("AHU_EXECUTION_BACKEND", "headless")
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--prompt",
@@ -1014,7 +1220,6 @@ fn batch_options_without_headless_refuse_ambient_execution_backend() {
         .command()
         .env("AHU_EXECUTION_BACKEND", "headless")
         .args([
-            "launch",
             "@worker",
             "--background",
             "--prompt",
@@ -1038,7 +1243,6 @@ fn ambient_broker_dispatch_admits_batch_options() {
         .command()
         .env("AHU_BROKER_DISPATCH", "1111111111111111")
         .args([
-            "launch",
             "@missing",
             "--background",
             "--prompt",
@@ -1064,7 +1268,6 @@ fn malformed_mailbox_requests_are_isolated_and_consumed_ids_do_not_replay() {
         .env("SCENARIO", "mailbox")
         .env("CHILD_PROMPT", prompt)
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--prompt",
@@ -1135,7 +1338,6 @@ fn a_dispatch_from_an_old_parent_attempt_is_refused_before_child_creation() {
         .env("AHU_PARENT_ATTEMPT", "2")
         .env("AHU_BROKER_DISPATCH", "1111111111111111")
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--prompt",
@@ -1313,7 +1515,7 @@ if '--version' in sys.argv: print('2.1.270');sys.exit(0)
 print(json.dumps({'type':'system','subtype':'init','session_id':os.environ['AHU_PARENT_TASK']}),flush=True)
 if '\nparent-shutdown</ahu-request-' in sys.argv[-1]:
  time.sleep(1)
- r=subprocess.run([os.environ['AHU_BIN'],'launch','@worker','--headless','--background','--timeout','30','--prompt','slow-child','--output','json'],capture_output=True,text=True)
+ r=subprocess.run([os.environ['AHU_BIN'],'@worker','--headless','--background','--timeout','30','--prompt','slow-child','--output','json'],capture_output=True,text=True)
  assert r.returncode==0,r.stderr
  open(os.environ['CHILD_ID_FILE'],'w').write(json.loads(r.stdout)['task_id'])
  if os.environ['STOP_MODE']=='capture_failed': print('x'*(1024*1024+1),flush=True)
@@ -1331,7 +1533,6 @@ else:
             .env("LATE_FILE", &late_file)
             .env("STOP_MODE", mode)
             .args([
-                "launch",
                 "@worker",
                 "--headless",
                 "--timeout",
@@ -1382,7 +1583,6 @@ fn child_and_worker_resume_refuse_before_mutating_attempts() {
         .env("SCENARIO", "child")
         .env("CHILD_PROMPT", &prompt)
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--prompt",
@@ -1441,7 +1641,7 @@ if os.environ['MAILBOX_MODE']=='noise':
 else:
  # The host dispatch inherits the supervisor environment; the parent version
  # probe must complete first, so delay only probes in a task worktree.
- subprocess.Popen([os.environ['AHU_BIN'],'launch','@worker','--background','--prompt','child','--output','json'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+ subprocess.Popen([os.environ['AHU_BIN'],'@worker','--background','--prompt','child','--output','json'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 time.sleep(30)
 "#;
         let script = script.replace(
@@ -1454,7 +1654,6 @@ time.sleep(30)
             .command()
             .env("MAILBOX_MODE", mode)
             .args([
-                "launch",
                 "@worker",
                 "--headless",
                 "--timeout",
@@ -1501,7 +1700,6 @@ print(json.dumps({'type':'result','status':'SUCCESS','response':'plausible succe
     let out = f
         .command()
         .args([
-            "launch",
             "@agy-worker",
             "--headless",
             "--prompt",
@@ -1858,57 +2056,32 @@ fn the_opencode_event_stream_is_terminal_only_when_a_step_stops() {
     );
 }
 
-/// An unvalidated OpenCode refuses before anything is launched.
-///
-/// The batch surface is pinned to the versions whose `run` options were read
-/// off the CLI. OpenCode updates itself in place — the catalog entry names two
-/// versions for exactly that reason — so the version gate is what stops a
-/// renamed or re-meant option from changing behaviour silently.
+/// A parseable OpenCode version newer than the catalog evidence floats by
+/// default and is recorded by the headless task.
 #[test]
-fn an_unvalidated_opencode_version_is_refused_by_the_headless_path() {
+fn an_unlisted_parseable_opencode_version_floats_by_default() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     f.repo
         .add_agent_on("oc", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
     f.repo.commit("an opencode agent");
-    // Its own stub, rather than whichever OpenCode the machine has installed:
-    // the refusal under test is about the version, so the version has to be the
-    // test's to choose.
     let stub = f.bin.join("opencode");
     std::fs::write(
         &stub,
-        "#!/bin/sh\n[ \"$1\" = \"--version\" ] && echo 1.18.5 && exit 0\nexit 9\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.18.5; exit 0; fi\nif [ \"$1\" = \"models\" ]; then echo ollama/glm-5.3:cloud; exit 0; fi\nprintf '%s\\n' '{\"type\":\"step_start\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"step-start\"}}' '{\"type\":\"text\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"text\",\"text\":\"ok\"}}' '{\"type\":\"step_finish\",\"sessionID\":\"floating-opencode\",\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}'\n",
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let out = f
         .command()
-        .args([
-            "launch",
-            "@oc",
-            "--headless",
-            "--prompt",
-            "perform synthetic task",
-        ])
+        .args(["@oc", "--headless", "--prompt", "perform synthetic task"])
         .output()
         .unwrap();
     assert!(
-        !out.status.success(),
-        "an unvalidated version must not launch"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("unvalidated headless opencode version \"1.18.5\""),
-        "the refusal must name the harness and the version it found: {stderr}"
-    );
-    assert!(
-        stderr.contains("no fallback was selected"),
-        "the refusal must say nothing was substituted: {stderr}"
-    );
-    assert!(
-        !stderr.contains("claude") && !stderr.contains("antigravity"),
-        "no other harness may be offered in its place: {stderr}"
+        out.status.success(),
+        "parseable installed versions float by default: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -1932,6 +2105,8 @@ fn a_registered_opencode_agent_runs_headless_and_records_its_session() {
 import sys,os,json
 if '--version' in sys.argv:
  print('1.18.30'); sys.exit(0)
+if sys.argv[1:] == ['models', 'ollama']:
+ print('ollama/glm-5.3:cloud'); sys.exit(0)
 a=sys.argv[1:]
 assert a[0]=='run', a
 assert a[a.index('--format')+1]=='json', a
@@ -1957,7 +2132,6 @@ emit('step_finish',{'type':'step-finish','reason':'stop'})
     let out = f
         .command()
         .args([
-            "launch",
             "@oc",
             "--headless",
             "--output",
@@ -2022,7 +2196,7 @@ print(json.dumps({'type':'result','subtype':'success','result':'validated synthe
 
     let out = f
         .command()
-        .args(["launch", "@stubbed", "--headless", "--prompt", "ok"])
+        .args(["@stubbed", "--headless", "--prompt", "ok"])
         .output()
         .unwrap();
     assert!(
@@ -2032,15 +2206,10 @@ print(json.dumps({'type':'result','subtype':'success','result':'validated synthe
     );
 }
 
-/// A probe output whose first token is not validated must be refused, however
-/// validated a later token looks.
-///
-/// The inverse of the decorated-token test: `any`-token matching admitted
-/// `1.0.0 (Claude Code 2.1.270)` because a supported version appeared inside
-/// the parenthetical. Compatibility is a property of the first token — the
-/// actual CLI the user has installed — not of any string the probe emits.
+/// A parseable leading CLI version floats, even when a later parenthetical
+/// contains an unrelated version. The task records the leading version.
 #[test]
-fn a_parenthetical_version_token_is_refused_by_the_headless_path() {
+fn a_parseable_leading_version_floats_despite_parenthetical_versions() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     f.repo.add_agent("stubbed", "1.0.0", "claude-sonnet-5");
@@ -2048,24 +2217,20 @@ fn a_parenthetical_version_token_is_refused_by_the_headless_path() {
     let stub = f.bin.join("claude");
     std::fs::write(
         &stub,
-        "#!/bin/sh\n[ \"$1\" = \"--version\" ] && echo '1.0.0 (Claude Code, profile 2.1.270)' && exit 0\nexit 9\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '1.0.0 (Claude Code, profile 2.1.270)'; exit 0; fi\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"floating-version\"}' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"floating-version\",\"is_error\":false,\"permission_denials\":[]}'\n",
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let out = f
         .command()
-        .args(["launch", "@stubbed", "--headless", "--prompt", "ok"])
+        .args(["@stubbed", "--headless", "--prompt", "ok"])
         .output()
         .unwrap();
     assert!(
-        !out.status.success(),
-        "an unvalidated first token must not launch"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("unvalidated headless claude-code version"),
-        "the refusal must name the harness and version: {stderr}"
+        out.status.success(),
+        "parseable installed versions float by default: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -2120,7 +2285,6 @@ print(json.dumps({'type':'turn.completed'}),flush=True)
     let out = f
         .command()
         .args([
-            "launch",
             "@cx",
             "--headless",
             "--output",
@@ -2225,32 +2389,28 @@ fn cleanup_refuses_an_artifact_name_that_is_not_a_regular_file() {
     assert!(planted.symlink_metadata().unwrap().file_type().is_symlink());
 }
 
-/// A write tool call that escapes the task worktree is disclosed in the
-/// result envelope, next to the evidence that the worktree itself stayed
-/// clean. The classification is a disclosure, not a gate: the attempt still
-/// succeeds and the escaped file is left exactly where the harness put it.
+/// An out-of-worktree write event stops the owning harness and fails the
+/// attempt. The target is still evidence from the harness stream, not proof
+/// that the harness did or did not perform the write before emitting the event.
 #[test]
-fn writes_outside_worktree_are_disclosed_in_the_result_envelope() {
+fn writes_outside_worktree_stop_the_attempt_and_are_disclosed() {
     let f = Fixture::new();
     let out = f.launch("outside_write", &[]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(!out.status.success());
     let v = Fixture::value(&out);
-    assert_eq!(v["outcome"], "succeeded");
+    assert_eq!(v["outcome"], "boundary_violation");
     let worktree = PathBuf::from(v["worktree"].as_str().unwrap());
-    let escaped = worktree
-        .parent()
-        .unwrap()
-        .join("escape.txt")
-        .canonicalize()
-        .unwrap();
-    assert_eq!(std::fs::read_to_string(&escaped).unwrap(), "escaped\n");
+    let escaped = worktree.parent().unwrap().join("escape.txt");
+    assert!(
+        !escaped.exists(),
+        "the synthetic worker continued after abort"
+    );
     let recorded = v["writes_outside_worktree"].as_array().unwrap();
     assert_eq!(recorded.len(), 1);
-    assert_eq!(PathBuf::from(recorded[0].as_str().unwrap()), escaped);
+    assert_eq!(
+        PathBuf::from(recorded[0].as_str().unwrap()),
+        escaped.canonicalize().unwrap_or(escaped)
+    );
 }
 
 /// A write tool call nested inside an assistant message is found the same as
@@ -2273,7 +2433,6 @@ fn a_planned_write_outside_the_worktree_is_disclosed_without_the_file() {
         .env("SCENARIO", "outside_event")
         .env("OUTSIDE_PATH", &planned)
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--output",
@@ -2283,13 +2442,9 @@ fn a_planned_write_outside_the_worktree_is_disclosed_without_the_file() {
         ])
         .output()
         .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(!out.status.success());
     let v = Fixture::value(&out);
-    assert_eq!(v["outcome"], "succeeded");
+    assert_eq!(v["outcome"], "boundary_violation");
     assert!(!planned.exists());
     let recorded = v["writes_outside_worktree"].as_array().unwrap();
     assert_eq!(recorded.len(), 1);
@@ -2627,7 +2782,6 @@ fn primary_records_remain_readable_after_submitting_sibling_is_removed() {
         .command()
         .current_dir(&sibling)
         .args([
-            "launch",
             "@worker",
             "--headless",
             "--prompt",
@@ -2852,15 +3006,6 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             r#"{"enabledPlugins":{"synthetic":true}}"#,
             "plugin hook behavior",
         ),
-        (
-            "antigravity",
-            "gemini-3.1-pro-high",
-            "agy",
-            "1.2.3",
-            "",
-            "",
-            "unvalidated headless antigravity version",
-        ),
     ] {
         let f = Fixture::new();
         f.repo.add_agent_on("matrix", "1.0.0", harness, model);
@@ -2917,7 +3062,6 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
         let interactive = f
             .command()
             .args([
-                "launch",
                 "@matrix",
                 "--dry-run",
                 "--output",
@@ -2944,7 +3088,6 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             let refused = f
                 .command()
                 .args([
-                    "launch",
                     "@matrix",
                     "--headless",
                     "--output",
@@ -3063,12 +3206,7 @@ else: raise AssertionError(method)
     let launched = f
         .command()
         .env("AHU_CMUX_BIN", &cmux)
-        .args([
-            "launch",
-            "@worker",
-            "--prompt",
-            "synthetic interactive task",
-        ])
+        .args(["@worker", "--prompt", "synthetic interactive task"])
         .output()
         .unwrap();
     assert!(
@@ -3168,9 +3306,10 @@ fn skill_probe_normalized_records_are_bounded_and_harness_scoped() {
         events.observe(harness, &serde_json::to_vec(&drift).unwrap());
         assert!(events.skills.is_empty());
         assert_eq!(
-            serde_json::to_value(events).unwrap()["skill_observation"],
-            "unavailable"
+            serde_json::to_value(&events).unwrap()["skill_observation"],
+            "unverified"
         );
+        assert_eq!(events.skill_unknown_events, 1, "{harness}");
     }
 }
 
@@ -3237,4 +3376,56 @@ fn skill_probe_rejects_payloads_and_bounds_records() {
         serde_json::to_value(legacy).unwrap()["evidence"],
         "unverified"
     );
+}
+
+#[test]
+fn opencode_preflight_refuses_missing_model_before_creating_a_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.repo
+        .add_agent_on("oc", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    f.repo.commit("synthetic provider selection");
+    let stub = f.bin.join("opencode");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.18.34; exit 0; fi\nif [ \"$1\" = models ] && [ \"$2\" = ollama ]; then printf '%s\\n' \"$SYNTHETIC_AVAILABLE_MODEL\"; exit 0; fi\nexit 91\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for (listed, accepted) in [
+        ("opencode/big-pickle", false),
+        ("ollama/glm-5.3:cloud-other", false),
+        ("ollama/glm-5.3:cloud", true),
+    ] {
+        let out = f
+            .command()
+            .env("SYNTHETIC_AVAILABLE_MODEL", listed)
+            .args([
+                "@oc",
+                "--headless",
+                "--dry-run",
+                "--output",
+                "json",
+                "--prompt",
+                "inspect the synthetic fixture",
+            ])
+            .output()
+            .unwrap();
+        let error = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.success(), accepted, "{error}");
+        if !accepted {
+            assert!(
+                error.contains("refuses a possible model fallback"),
+                "{error}"
+            );
+        }
+        let worktrees = common::git(f.repo.path(), &["worktree", "list", "--porcelain"]);
+        assert_eq!(
+            worktrees
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count(),
+            1
+        );
+    }
 }

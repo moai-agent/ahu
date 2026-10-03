@@ -397,6 +397,10 @@ pub struct Group {
     /// How many runs reported an amount for each token field, so a mean is
     /// read against the sample it was taken over rather than the run count.
     pub token_field_observations: BTreeMap<String, usize>,
+    /// Harness-reported USD fields, kept separate from token amounts.
+    pub reported_cost_fields: BTreeSet<String>,
+    pub mean_reported_cost_usd: BTreeMap<String, f64>,
+    pub reported_cost_observations: BTreeMap<String, usize>,
     pub mean_mcp_requests: Option<f64>,
     pub mean_mcp_tool_lists: Option<f64>,
     pub mean_mcp_tool_calls: Option<f64>,
@@ -487,7 +491,10 @@ fn token_amount(value: &serde_json::Value) -> Option<f64> {
     let amount = match value {
         serde_json::Value::Number(number) => number.as_f64(),
         serde_json::Value::Object(fields) => {
-            if fields.get("kind").and_then(serde_json::Value::as_str) == Some("observed") {
+            if matches!(
+                fields.get("kind").and_then(serde_json::Value::as_str),
+                Some("observed" | "observed_float")
+            ) {
                 fields.get("value").and_then(serde_json::Value::as_f64)
             } else {
                 None
@@ -510,9 +517,12 @@ fn or_unspecified(value: &Option<String>, fallback: &str) -> String {
 
 fn observed_token(value: &serde_json::Value) -> bool {
     let number = value.as_f64().or_else(|| {
-        (value.get("kind").and_then(serde_json::Value::as_str) == Some("observed"))
-            .then(|| value.get("value").and_then(serde_json::Value::as_f64))
-            .flatten()
+        (matches!(
+            value.get("kind").and_then(serde_json::Value::as_str),
+            Some("observed" | "observed_float")
+        ))
+        .then(|| value.get("value").and_then(serde_json::Value::as_f64))
+        .flatten()
     });
     number.is_some_and(|number| number.is_finite() && number >= 0.0)
 }
@@ -851,6 +861,8 @@ fn group(records: &[Record]) -> Vec<Group> {
             let mut coverage = Coverage::default();
             let mut token_fields = BTreeSet::new();
             let mut token_amounts: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+            let mut reported_cost_fields = BTreeSet::new();
+            let mut reported_cost_amounts: BTreeMap<String, Vec<f64>> = BTreeMap::new();
             let mut elapsed = Vec::new();
             let mut calls = Vec::new();
             let mut decision_service_durations = Vec::new();
@@ -1016,9 +1028,21 @@ fn group(records: &[Record]) -> Vec<Group> {
                         .push(*count);
                 }
                 if let Some(tokens) = &item.reported_tokens {
-                    token_fields.extend(tokens.keys().cloned());
+                    token_fields.extend(
+                        tokens
+                            .keys()
+                            .filter(|name| !name.starts_with("ahu.cost."))
+                            .cloned(),
+                    );
+                    reported_cost_fields.extend(
+                        tokens
+                            .keys()
+                            .filter(|name| name.starts_with("ahu.cost."))
+                            .cloned(),
+                    );
                     let observed: Vec<_> = tokens
                         .iter()
+                        .filter(|(name, _)| !name.starts_with("ahu.cost."))
                         .filter_map(|(name, value)| observed_token(value).then_some(name.clone()))
                         .collect();
                     if !observed.is_empty() {
@@ -1028,7 +1052,14 @@ fn group(records: &[Record]) -> Vec<Group> {
                         // A field named but not measured is not an amount of
                         // zero, so only a reported number joins the mean.
                         if let Some(amount) = token_amount(value) {
-                            token_amounts.entry(field.clone()).or_default().push(amount);
+                            if field.starts_with("ahu.cost.") {
+                                reported_cost_amounts
+                                    .entry(field.clone())
+                                    .or_default()
+                                    .push(amount);
+                            } else {
+                                token_amounts.entry(field.clone()).or_default().push(amount);
+                            }
                         }
                     }
                 }
@@ -1134,6 +1165,15 @@ fn group(records: &[Record]) -> Vec<Group> {
                     .filter_map(|(field, amounts)| mean(&amounts).map(|value| (field, value)))
                     .collect(),
                 token_field_observations,
+                reported_cost_observations: reported_cost_amounts
+                    .iter()
+                    .map(|(field, amounts)| (field.clone(), amounts.len()))
+                    .collect(),
+                reported_cost_fields,
+                mean_reported_cost_usd: reported_cost_amounts
+                    .into_iter()
+                    .filter_map(|(field, amounts)| mean(&amounts).map(|value| (field, value)))
+                    .collect(),
                 mean_mcp_requests: mean(&mcp_requests),
                 mean_mcp_tool_lists: mean(&mcp_tool_lists),
                 mean_mcp_tool_calls: mean(&mcp_tool_calls),
@@ -1478,6 +1518,32 @@ pub fn render_at(report: &Report, width: usize) -> String {
                     .join("  ")
             }
         ));
+        if !group.reported_cost_fields.is_empty() {
+            out.push_str(&format!(
+                "  cost       {}\n",
+                group
+                    .reported_cost_fields
+                    .iter()
+                    .map(|field| {
+                        format!(
+                            "{} {} ({}/{})",
+                            display_safe(field),
+                            group.mean_reported_cost_usd.get(field).map_or_else(
+                                || style.paint(Role::Gap, MISSING),
+                                |mean| format!("${mean:.6}"),
+                            ),
+                            group
+                                .reported_cost_observations
+                                .get(field)
+                                .copied()
+                                .unwrap_or(0),
+                            group.runs
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            ));
+        }
     }
     out.push_str(&style.paint(
         Role::Hint,
@@ -3073,6 +3139,16 @@ fn reported_tokens(
         .and_then(serde_json::Value::as_object)
         .cloned()
         .unwrap_or_default();
+    if let Some(amount) = envelope
+        .and_then(|value| value.pointer("/harness/cost/usd"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|amount| amount.is_finite() && *amount >= 0.0)
+    {
+        tokens.insert(
+            "ahu.cost.harness_reported_usd".into(),
+            serde_json::json!({"kind":"observed_float","value":amount}),
+        );
+    }
     if let Some(telemetry) = telemetry {
         for (name, value) in [
             ("decision_service.input", telemetry.decision_input_tokens),
@@ -3264,6 +3340,9 @@ fn group_json(group: &Group) -> serde_json::Value {
             // wants amounts gets them only for the fields a run measured.
             "mean_tokens": group.mean_tokens,
             "token_field_observations": group.token_field_observations,
+            "reported_cost_fields": group.reported_cost_fields,
+            "mean_reported_cost_usd": group.mean_reported_cost_usd,
+            "reported_cost_observations": group.reported_cost_observations,
             "mean_total_tokens": group.mean_total_tokens(),
         },
     }));

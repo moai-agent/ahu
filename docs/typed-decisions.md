@@ -4,7 +4,7 @@ This is an exploratory, model-neutral MCP interface for letting an ahu agent
 ask a configured decision provider for bounded typed answers. The default
 provider is TypeSafe Jev; an explicit local provider can still be selected for
 offline experiments. ahu does not run an agent loop. The bundled
-[`typed-decisions` skill](../.agents/skills/typed-decisions/SKILL.md) guides
+[`ahu-typed-decisions` skill](../.agents/skills/ahu-typed-decisions/SKILL.md) guides
 agents on when to use the tool and how to handle its output and data boundary.
 
 ## MCP tool
@@ -150,8 +150,8 @@ Ollama's prompt/generated token counts plus load, prompt, generation, and total
 time in `service` metadata. It does not ask the model to invent a confidence
 score.
 
-On this Mac, `qwen3.6:35b-mlx` is already installed. Start the adapter in a
-terminal:
+Choose a locally installed model from `ollama list`. For example, if
+`qwen3.6:35b-mlx` is available, start the adapter in a terminal:
 
 ```sh
 python3 examples/ollama_decision_service.py --model qwen3.6:35b-mlx

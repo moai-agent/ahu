@@ -23,15 +23,22 @@ sources:
 # Task configuration inheritance
 
 A task worktree starts from the parent checkout's HEAD. Before planning a launch,
-ahu compares the current recognized context with the committed `ahu.lock` and
-requires the lock and every recognized input to be tracked and clean. Context
-changes must be reviewed and committed before agents can use them. ahu never stages
-or commits these files.[^launch][^snapshot][^lock]
+ahu compares shared recognized context with committed `ahu.lock` and requires
+those inputs and the lock to be tracked and clean. Recognized user-local Claude
+settings and registered native Antigravity MCP settings are checked against a
+separate owner-only acceptance in host state,
+scoped by user and repository. A change blocks that user's launch until
+explicitly accepted with `ahu lock --update`; it does not modify the shared lock.
+The native Antigravity file stays in user storage and is checked when the project
+has `.agents/mcp_config.json`; it is not copied into task worktrees.
+ahu never stages or commits project files.[^launch][^snapshot][^lock]
 
 The snapshot recognizes `.agents`, `.claude`, `.codex`, `.agent`, `.opencode`, and `.gemini`
 directories, along with supported instruction and configuration filenames,
 including `GEMINI.md`, `opencode.json` and `opencode.jsonc`. It records content
-digests and executable bits. Collection has a depth limit and skips directories
+digests and executable bits. User-local settings needed by a harness still
+travel with the task snapshot, but their fingerprints are kept in private host
+state rather than `ahu.lock`. Collection has a depth limit and skips directories
 such as `.git`, `.worktrees`, and build output; it does not cover every possible
 configuration location. The lock records recognized configuration it could not
 scan, along with symlinks, and refuses those cases. It cannot discover all nested

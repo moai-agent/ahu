@@ -13,6 +13,7 @@ fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
         harness_preferences: vec!["codex".into()],
         model_selection: "project-ranked".into(),
         catalog_version: crate::catalog::CATALOG_VERSION.into(),
+        harness_version_pins: Default::default(),
         model_rankings: [("codex".into(), vec!["gpt-6".into()])].into(),
         knowledge: Default::default(),
         telemetry: Default::default(),
@@ -389,6 +390,7 @@ fn planning_freezes_registered_identity_and_discloses_repository_inputs() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                     .args(["--exact", "launch::launch_contract_tests::planning_freezes_registered_identity_and_discloses_repository_inputs", "--nocapture"])
                     .env_clear()
+                    .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
                     .env(CASE, case)
                     .env("PATH", &bin)
                     .env("XDG_CONFIG_HOME", external.path().join("config"))
@@ -586,25 +588,68 @@ fn verification_refuses_record_held_by_a_sibling_checkout() {
 }
 
 #[test]
+fn startup_failure_does_not_claim_post_spawn_termination() {
+    for started in [false, true] {
+        for cancelled in [false, true] {
+            for state in [TaskState::Starting, TaskState::Running, TaskState::Exited] {
+                let (_temp, repo, loaded, plan) = fixture();
+                std::fs::create_dir_all(&plan.worktree).unwrap();
+                let mut record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+                record.state = state;
+                task::save(&plan.task_dir, &record, PROMPT).unwrap();
+                if cancelled {
+                    std::fs::write(plan.task_dir.join("cancel.json"), "{}").unwrap();
+                }
+                let error =
+                    record_startup_error(&plan.task_dir, started, Error::new("synthetic failure"));
+                assert_eq!(error.to_string(), "synthetic failure");
+                let expected = if started || !state.is_live() {
+                    state
+                } else if cancelled {
+                    TaskState::Cancelled
+                } else {
+                    TaskState::Failed
+                };
+                assert_eq!(task::load(&plan.task_dir).unwrap().state, expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     const CASE: &str = "AHU_LAUNCH_RUN_FIXTURE";
     let Ok(case) = std::env::var(CASE) else {
-        for case in ["cancel", "success", "failure", "spawn-error"] {
+        for case in [
+            "cancel",
+            "success",
+            "failure",
+            "version-error",
+            "auth-error",
+            "auth-mismatch",
+            "auth-unavailable",
+        ] {
             let bin = tempfile::tempdir().unwrap();
             symlink(
                 crate::selection::resolve_utility("git").unwrap(),
                 bin.path().join("git"),
             )
             .unwrap();
-            let script = if case == "spawn-error" {
-                "#!/nonexistent/ahu-fixture-interpreter\n".to_owned()
-            } else {
-                format!(
-                    "#!/bin/sh\nprintf started > harness-started\nexit {}\n",
-                    if case == "success" { 0 } else { 23 }
-                )
-            };
+            let script = format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then {} fi\nif [ \"$1\" = app-server ]; then printf '%s\\n' '{{\"id\":1,\"result\":{{}}}}' '{}'; while read -r line; do :; done; exit 0; fi\nprintf started > harness-started\nexit {}\n",
+                if case == "version-error" {
+                    "exit 1;"
+                } else {
+                    "echo 'codex-cli 0.160.0'; exit 0;"
+                },
+                if case == "auth-unavailable" {
+                    r#"{"id":2,"result":{"account":{"type":"apiKey"}}}"#
+                } else {
+                    r#"{"id":2,"result":{"account":{"type":"chatgpt","email":"other@example.invalid"}}}"#
+                },
+                if case == "success" { 0 } else { 23 }
+            );
             let executable = bin.path().join("codex");
             std::fs::write(&executable, script).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -635,6 +680,31 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
     if case == "cancel" {
         std::fs::write(plan.task_dir.join("cancel.json"), "{}").unwrap();
     }
+    if case == "auth-error" {
+        let auth = repo
+            .root
+            .join(".ahu/state/repos")
+            .join(repo.identity())
+            .join("auth-bindings.json");
+        state::create_private_dir_all(auth.parent().unwrap()).unwrap();
+        state::write_private_file(&auth, br#"{"schema_version":999}"#).unwrap();
+    }
+    if matches!(case.as_str(), "auth-mismatch" | "auth-unavailable") {
+        let auth = repo
+            .root
+            .join(".ahu/state/repos")
+            .join(repo.identity())
+            .join("auth-bindings.json");
+        state::create_private_dir_all(auth.parent().unwrap()).unwrap();
+        state::write_json(
+            &auth,
+            &serde_json::json!({
+                "schema_version": 1, "repo_identity": repo.identity(),
+                "bindings": {"codex": {"fingerprint": "0".repeat(64), "identity_kind": "chatgpt"}}
+            }),
+        )
+        .unwrap();
+    }
     let result = run_task(&plan.task_dir);
     let expected_state = match case.as_str() {
         "cancel" => {
@@ -642,11 +712,28 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
             assert!(!plan.worktree.join("harness-started").exists());
             TaskState::Cancelled
         }
-        "spawn-error" => {
+        "version-error" => {
             let error = result.unwrap_err().to_string();
-            assert!(error.contains("cannot start"), "{error}");
             assert!(
-                error.contains("worktree and task record are preserved"),
+                error.contains("cannot determine installed harness version"),
+                "{error}"
+            );
+            assert!(!plan.worktree.join("harness-started").exists());
+            TaskState::Failed
+        }
+        "auth-error" => {
+            assert!(result.unwrap_err().to_string().contains("invalid JSON"));
+            assert!(!plan.worktree.join("harness-started").exists());
+            TaskState::Failed
+        }
+        "auth-mismatch" | "auth-unavailable" => {
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains(if case == "auth-mismatch" {
+                    "does not match"
+                } else {
+                    "unavailable"
+                }),
                 "{error}"
             );
             assert!(!plan.worktree.join("harness-started").exists());

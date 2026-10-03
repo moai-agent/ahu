@@ -203,7 +203,7 @@ fn tasks_lists_the_readable_record_and_reports_the_unreadable_one() {
         "{text}"
     );
     assert!(
-        text.contains("schema version (1)") && text.contains("reads schema 3"),
+        text.contains("schema version (1)") && text.contains("reads task schemas 2, 3, and 4"),
         "the reason must say why, not just that: {text}"
     );
     assert!(
@@ -398,7 +398,7 @@ fn launch_displays_a_prominent_drift_warning() {
     let bin = common::fake_harness(scratch.path(), &scratch.path().join("argv"));
 
     let output = common::ahu()
-        .args(["launch", "@chris", "--prompt", "review", "--dry-run"])
+        .args(["@chris", "--prompt", "review", "--dry-run"])
         .current_dir(repo.path())
         .env(
             "PATH",
@@ -1003,7 +1003,7 @@ fn a_launch_says_when_drift_could_not_read_earlier_records() {
     let bin = common::fake_harness(repo.state_path(), &repo.state_path().join("argv"));
     let output = common::ahu()
         .current_dir(repo.path())
-        .args(["launch", "@chris", "--prompt-file"])
+        .args(["@chris", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .arg("--dry-run")
         .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))

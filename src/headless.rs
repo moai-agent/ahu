@@ -824,6 +824,14 @@ pub fn launch(
         &spec.harness_version,
         &plan.harness_executable,
     )?;
+    crate::selection::check_launch_compatibility_with_policy(
+        &plan.harness_executable,
+        &plan.pair.harness,
+        &plan.pair.model,
+        permissions,
+        &repo.root,
+        Some(&cmux_integration.headless),
+    )?;
     plan.cmux_integration = cmux_integration.clone();
     spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", cmux_integration.headless.evidence_digest));
     let (delivered, delivery) = crate::orchestration::deliver_composed(
@@ -1054,6 +1062,17 @@ fn validate_environment(
         }
     }
     crate::catalog::check_headless_version(harness, version)?;
+    let loaded = crate::config::load(config_root)?
+        .ok_or_else(|| Error::new("missing project configuration"))?;
+    crate::catalog::check_harness_version(
+        harness,
+        version,
+        loaded
+            .config
+            .harness_version_pins
+            .get(harness)
+            .map(String::as_str),
+    )?;
     crate::cmux::integration::enforce_headless_executable(config_root, harness, version, executable)
 }
 
@@ -1266,6 +1285,16 @@ pub struct TokenUsage {
     pub total: Option<u64>,
 }
 
+/// USD amounts reported by the harness. These are estimates/engine values,
+/// not provider billing records.
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReportedCost {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 impl TokenUsage {
     /// Shared field names for OTEL and the opt-in local metrics projection.
     pub(crate) fn normalized_fields(&self) -> [(&'static str, Option<u64>); 6] {
@@ -1343,6 +1372,51 @@ impl TokenUsage {
     }
 }
 
+impl ReportedCost {
+    fn observe_claude_result(&mut self, event: &Value) {
+        if event.get("type").and_then(Value::as_str) != Some("result") {
+            return;
+        }
+        self.observe(event.get("total_cost_usd"), "claude_code_result_total");
+    }
+
+    fn observe_opencode_step(
+        &mut self,
+        event: &Value,
+        seen: &mut std::collections::BTreeSet<String>,
+    ) {
+        if event.get("type").and_then(Value::as_str) != Some("step_finish") {
+            return;
+        }
+        let part = match event.get("part") {
+            Some(part) => part,
+            None => return,
+        };
+        let Some(id) = part.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        if !seen.insert(id.to_owned()) {
+            return;
+        }
+        self.observe(part.get("cost"), "opencode_step_finish_sum");
+    }
+
+    fn observe(&mut self, value: Option<&Value>, source: &str) {
+        let Some(value) = value.and_then(Value::as_f64) else {
+            return;
+        };
+        if !value.is_finite() || value < 0.0 {
+            return;
+        }
+        let total = self.usd.unwrap_or(0.0) + value;
+        if !total.is_finite() {
+            return;
+        }
+        self.usd = Some(total);
+        self.source = Some(source.to_owned());
+    }
+}
+
 fn skill_catalog(worktree: &Path) -> Vec<SkillCatalogEntry> {
     let roots = [
         ".agents/skills",
@@ -1375,6 +1449,30 @@ fn skill_catalog(worktree: &Path) -> Vec<SkillCatalogEntry> {
     entries
 }
 
+/// Attribute an observed invocation only to exact local catalog entries.
+/// Duplicate paths with identical bytes establish the digest but not which
+/// copy the harness loaded; conflicting copies establish neither provenance.
+fn attribute_skill_provenance(skills: &mut [SkillInvocation], catalog: &[SkillCatalogEntry]) {
+    for skill in skills {
+        let matches: Vec<_> = catalog
+            .iter()
+            .filter(|entry| entry.name == skill.name)
+            .collect();
+        if matches.is_empty() {
+            continue;
+        }
+
+        let digests: std::collections::BTreeSet<_> =
+            matches.iter().map(|entry| entry.digest.as_str()).collect();
+        if digests.len() == 1 {
+            skill.digest = Some(matches[0].digest.clone());
+        }
+        if matches.len() == 1 {
+            skill.source = Some(matches[0].source.clone());
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Events {
     pub session: Option<String>,
@@ -1392,6 +1490,8 @@ pub struct Events {
     pub stderr_informational_lines: u64,
     #[serde(default)]
     pub usage: TokenUsage,
+    #[serde(default)]
+    pub cost: ReportedCost,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -1411,6 +1511,8 @@ pub struct Events {
     pub writes_outside_worktree: Vec<String>,
     #[serde(skip)]
     native_event_count: usize,
+    #[serde(skip)]
+    cost_step_ids: std::collections::BTreeSet<String>,
 }
 impl Events {
     fn observe_stderr(&mut self, line: &[u8]) {
@@ -1485,6 +1587,13 @@ impl Events {
             }
         };
         self.usage.observe(&event);
+        match harness {
+            "claude-code" => self.cost.observe_claude_result(&event),
+            "opencode" => self
+                .cost
+                .observe_opencode_step(&event, &mut self.cost_step_ids),
+            _ => (),
+        }
         self.observe_skill(harness, &event);
         if self.model.is_none() {
             self.model = event
@@ -1718,66 +1827,49 @@ fn normalize_token(token: &str) -> String {
         .collect()
 }
 
-/// Lexically collapse `.` and `..` without touching the filesystem.
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => (),
-            std::path::Component::ParentDir => {
-                normalized.pop();
+/// Resolve existing prefixes before applying `..`: a symlink followed by a
+/// parent component must retain filesystem traversal semantics, including when
+/// the final write target does not yet exist.
+fn real_path(path: &Path) -> Result<PathBuf> {
+    fn resolve(path: &Path, links: usize) -> Result<PathBuf> {
+        if links > 40 {
+            bail!("reported write path exceeds the symlink traversal bound");
+        }
+        let mut resolved = PathBuf::new();
+        let mut components = path.components();
+        while let Some(component) = components.next() {
+            match component {
+                std::path::Component::CurDir => (),
+                std::path::Component::ParentDir => {
+                    resolved.pop();
+                }
+                other => {
+                    resolved.push(other);
+                    match std::fs::symlink_metadata(&resolved) {
+                        Ok(metadata) if metadata.file_type().is_symlink() => {
+                            let target = std::fs::read_link(&resolved)?;
+                            resolved.pop();
+                            resolved.push(target);
+                            resolved.push(components.as_path());
+                            return resolve(&resolved, links + 1);
+                        }
+                        Ok(_) => (),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
             }
-            other => normalized.push(other),
         }
+        Ok(resolved)
     }
-    normalized
+    resolve(path, 0)
 }
 
-/// Canonicalize, or resolve via the nearest existing ancestor so paths the
-/// harness named but never created are still classified. Lexical fallback
-/// only when even the ancestor cannot be canonicalized (e.g. CWD removed).
-fn real_path(path: &Path) -> PathBuf {
-    if let Ok(real) = path.canonicalize() {
-        return real;
-    }
-    let mut tail = Vec::new();
-    let mut current = path.to_path_buf();
-    while !current.exists() {
-        let Some(file_name) = current.file_name().map(ToOwned::to_owned) else {
-            break;
-        };
-        current = current.parent().map(Path::to_path_buf).unwrap_or_default();
-        tail.push(file_name);
-        if current.as_os_str().is_empty() {
-            break;
-        }
-    }
-    if let Ok(base) = current.canonicalize() {
-        let mut real = base;
-        for file_name in tail.iter().rev() {
-            real.push(file_name);
-        }
-        return real;
-    }
-    lexical_normalize(path)
-}
-
-/// Resolve a recorded write-path candidate. Only absolute paths are
-/// classified; relative paths cannot be attributed to the worktree
-/// confidently after the run ends.
+/// Only absolute paths are classified; a relative path's tool working
+/// directory is not known from the event. Preserve `..` until symlinks resolve.
 fn resolve_write_path(candidate: &str) -> Option<PathBuf> {
-    if candidate.is_empty() {
-        return None;
-    }
     let raw: PathBuf = candidate.into();
-    if !raw.is_absolute() {
-        return None;
-    }
-    let resolved = lexical_normalize(&raw);
-    if resolved.as_os_str().is_empty() {
-        return None;
-    }
-    Some(resolved)
+    raw.is_absolute().then_some(raw)
 }
 
 /// Walk a write-tool call's subtree, collecting path candidates and decoding
@@ -1965,7 +2057,16 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
     let Ok(event) = serde_json::from_slice::<Value>(line) else {
         return;
     };
-    let worktree = real_path(worktree);
+    let worktree = match real_path(worktree) {
+        Ok(worktree) => worktree,
+        Err(_) => {
+            events.failed = true;
+            events
+                .blockers
+                .push("task worktree could not be resolved for write observation".into());
+            return;
+        }
+    };
     for candidate in collect_write_paths(&event) {
         if candidate.len() > 4096 {
             events.failed = true;
@@ -1974,7 +2075,14 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
         let Some(resolved) = resolve_write_path(&candidate) else {
             continue;
         };
-        let real = real_path(&resolved);
+        let real = match real_path(&resolved) {
+            Ok(real) => real,
+            Err(_) => {
+                events.failed = true;
+                events.blockers.push("reported write target could not be resolved within the symlink traversal bound".into());
+                continue;
+            }
+        };
         if !real.starts_with(&worktree) {
             let path = real.to_string_lossy().into_owned();
             if !events.writes_outside_worktree.contains(&path) {
@@ -1989,6 +2097,19 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
             }
         }
     }
+}
+
+/// The pipe reader can finish after the process-exit poll. Reconcile its final
+/// boundary evidence before accepting a successful exit or joining children.
+fn boundary_after_drain(events: &mut Events, stop: &mut Option<(&'static str, Instant)>) -> bool {
+    if stop.is_some() || events.writes_outside_worktree.is_empty() {
+        return false;
+    }
+    events.blockers.push(
+        "harness reported a write target outside the task worktree in its final event drain".into(),
+    );
+    *stop = Some(("boundary_violation", Instant::now()));
+    true
 }
 
 /// Recorded `writes_outside_worktree` from a finished attempt's result
@@ -2024,7 +2145,7 @@ impl SessionCheckpoint {
         if self.schema_version != 2
             || self.task_id != id
             || record.task_id != id
-            || !matches!(record.schema_version, 2 | 3)
+            || !matches!(record.schema_version, 2..=4)
             || self.attempt == 0
             || self.attempt != spec.attempt
             || self.harness != record.identity.harness
@@ -2253,6 +2374,20 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         &spec.harness_version,
         &real,
     )?;
+    crate::selection::check_launch_compatibility_with_policy(
+        &real,
+        &record.identity.harness,
+        &record.identity.model,
+        record.identity.permissions,
+        &record.worktree,
+        Some(&cmux_integration.headless),
+    )?;
+    crate::auth_binding::capture_task_for_model(
+        &repo,
+        &record.identity.harness,
+        &record.identity.model,
+        dir,
+    )?;
     let eval_otel_capture = crate::telemetry::eval_endpoint_override().is_some();
     if let Some(parent) = &spec.parent_task {
         let parent_dir = lookup(&repo, parent)?;
@@ -2260,6 +2395,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             bail!("ancestor cancellation blocks this attempt");
         }
     }
+    let measurement_started = Instant::now();
     let mut command = Command::new(&real);
     command
         .args(&rebuilt.args)
@@ -2404,6 +2540,12 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         if stop.is_none() {
             let reason = if dir.join("cancel.json").exists() {
                 Some("cancelled")
+            } else if stdout_events
+                .lock()
+                .map(|events| !events.writes_outside_worktree.is_empty())
+                .unwrap_or(false)
+            {
+                Some("boundary_violation")
             } else if Instant::now() >= deadline {
                 Some("timed_out")
             } else if storage_failed || broker_failure.is_some() {
@@ -2412,6 +2554,13 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
                 None
             };
             if let Some(reason) = reason {
+                if reason == "boundary_violation"
+                    && let Ok(mut events) = stdout_events.lock()
+                {
+                    events.blockers.push(
+                        "harness reported a write target outside the task worktree; process stopped after observing the event".into(),
+                    );
+                }
                 cancelled_tasks = cancel_tree(&repo, dir, reason)?;
                 signal_group(pid, libc::SIGTERM);
                 stop = Some((reason, Instant::now()));
@@ -2550,6 +2699,9 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             }
         }
     }
+    if boundary_after_drain(&mut events, &mut stop) {
+        cancelled_tasks = cancel_tree(&repo, dir, "boundary_violation")?;
+    }
     *phase = "child_reconciliation";
     broker.finish()?;
     if broker_failure.is_some() {
@@ -2615,6 +2767,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         );
     }
     let skill_catalog = skill_catalog(&record.worktree);
+    attribute_skill_provenance(&mut events.skills, &skill_catalog);
     let outcome = if let Some((reason, _)) = stop {
         reason
     } else if !status.success() || events.failed {
@@ -2629,6 +2782,12 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     for (key, value) in events.usage.normalized_fields() {
         if let Some(value) = value {
             telemetry_span.set_u64(key, value);
+        }
+    }
+    if let Some(cost_usd) = events.cost.usd {
+        telemetry_span.set_f64("ahu.cost.harness_reported_usd", cost_usd);
+        if let Some(source) = events.cost.source.as_deref() {
+            telemetry_span.set_string("ahu.cost.source", source);
         }
     }
     telemetry_span.set_u64("ahu.skills.available", skill_catalog.len() as u64);
@@ -2666,6 +2825,19 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
                 .collect::<Vec<_>>()
                 .join(","),
         );
+        let provenance: Vec<_> = events
+            .skills
+            .iter()
+            .filter_map(|skill| {
+                skill
+                    .digest
+                    .as_ref()
+                    .map(|digest| format!("{}=sha256:{digest}", skill.name))
+            })
+            .collect();
+        if !provenance.is_empty() {
+            telemetry_span.set_string("ahu.skills.invoked.provenance", provenance.join(","));
+        }
     }
     let helpers: Vec<Value> = events.native.helpers().iter().map(|h| json!({
         "task_id":h.task_id,"role":h.role,"depth":h.depth,"backgrounded":h.backgrounded,"status":h.status,
@@ -2683,7 +2855,15 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         "writes_outside_worktree":events.writes_outside_worktree,"write_evidence":"reported tool targets; not proof of writes",
         "descendant_cancellation":cancellation_results,"native_completeness":native_completeness,"ahu_children":ahu_children,
         "native_cleanup":"unknown for external/provider-managed processes"});
-    if let Some(metrics) = crate::telemetry::local_metrics(&telemetry, &events.usage) {
+    let elapsed_ms = Some(
+        measurement_started
+            .elapsed()
+            .as_millis()
+            .min(u64::MAX as u128) as u64,
+    );
+    if let Some(metrics) =
+        crate::telemetry::local_metrics(&telemetry, &events.usage, &events.cost, elapsed_ms)
+    {
         result["metrics"] = serde_json::to_value(metrics)?;
     }
     *phase = "result_persistence";
@@ -2700,6 +2880,121 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         },
     )?;
     Ok(if outcome == "succeeded" { 0 } else { 5 })
+}
+
+/// Return only the opt-in, bounded numeric projections for completed headless
+/// attempts. Callers must already have established task ownership and opt-in.
+pub(crate) fn private_attempt_metrics(
+    dir: &Path,
+    expected_harness: &str,
+    observation_limit: usize,
+) -> Result<Vec<PrivateAttemptMetrics>> {
+    let spec_bytes = review::read_bytes(&dir.join("headless.json"), Some(1024 * 1024))?;
+    let spec: Spec = serde_json::from_slice(&spec_bytes)
+        .map_err(|_| Error::new("headless attempt metadata is malformed"))?;
+    if !matches!(spec.schema_version, 1 | 2) || spec.attempt == 0 || spec.attempt > 4096 {
+        bail!("unsupported headless attempt metadata");
+    }
+    let id = dir.file_name().unwrap_or_default().to_string_lossy();
+    let mut output = Vec::new();
+    for number in 1..=spec.attempt {
+        let path = dir.join(format!("attempt-{number}")).join("result.json");
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+        if output.len() >= observation_limit {
+            bail!("private report exceeds its observation bound");
+        }
+        let bytes = review::read_bytes(&path, Some(1024 * 1024))?;
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::new("invalid headless result metadata"))?;
+        review::validate_result(&value, &id, number)?;
+        let metrics = match value.get("metrics") {
+            Some(metrics) if metrics["schema_version"] == 1 => Some((metrics, 1_u64)),
+            Some(metrics) if metrics["schema_version"] == 2 => Some((metrics, 2_u64)),
+            Some(_) => bail!("unsupported local metrics projection version"),
+            None => None,
+        };
+        let empty_values = serde_json::Map::new();
+        let values = match &metrics {
+            Some((metrics, _)) => metrics["values"]
+                .as_object()
+                .ok_or_else(|| Error::new("invalid local metrics projection"))?,
+            None => &empty_values,
+        };
+        let amount = |name: &str| -> Option<u64> {
+            let value = values.get(name)?;
+            (value["kind"] == "observed")
+                .then(|| value["value"].as_u64())
+                .flatten()
+        };
+        let cost_usd = match values.get("ahu.cost.harness_reported_usd") {
+            Some(cost_value) if cost_value["kind"] == "observed_float" => cost_value["value"]
+                .as_f64()
+                .filter(|amount| amount.is_finite() && *amount >= 0.0),
+            Some(cost_value) if cost_value["kind"] == "unavailable" => None,
+            None if metrics.is_none_or(|(_, version)| version == 1) => None,
+            _ => bail!("invalid local cost projection"),
+        };
+        let elapsed_ms = match metrics.and_then(|(metrics, _)| metrics.get("elapsed_ms")) {
+            Some(value) if value["kind"] == "observed" => value["value"].as_u64(),
+            Some(value) if value["kind"] == "unavailable" => None,
+            None => None,
+            _ => bail!("invalid elapsed time projection"),
+        };
+        // Cost provenance is fixed by the adapter and checked against the
+        // frozen harness; raw event data is never copied into the report.
+        let result_harness = value.pointer("/identity/harness").and_then(Value::as_str);
+        let outcome = value["outcome"].as_str().unwrap_or("unknown");
+        if result_harness.is_some_and(|harness| harness != expected_harness)
+            || (result_harness.is_none() && outcome != "supervisor_error")
+        {
+            bail!("headless result identity unavailable or inconsistent");
+        }
+        let source = match expected_harness {
+            "claude-code" if cost_usd.is_some() => Some("claude_code_result_total".to_owned()),
+            "opencode" if cost_usd.is_some() => Some("opencode_step_finish_sum".to_owned()),
+            _ => None,
+        };
+        if cost_usd.is_some() != source.is_some() {
+            bail!("harness cost source does not match frozen identity");
+        }
+        output.push(PrivateAttemptMetrics {
+            attempt: number,
+            outcome: outcome.to_owned(),
+            native_complete: value
+                .pointer("/native_completeness/complete")
+                .and_then(Value::as_bool),
+            elapsed_ms,
+            metrics_observed: metrics.is_some(),
+            usage: TokenUsage {
+                input: amount("ahu.tokens.input"),
+                output: amount("ahu.tokens.output"),
+                cached: amount("ahu.tokens.cached"),
+                cache_write: amount("ahu.tokens.cache_write"),
+                reasoning: amount("ahu.tokens.reasoning"),
+                total: amount("ahu.tokens.total"),
+            },
+            cost: ReportedCost {
+                usd: cost_usd,
+                source,
+            },
+        });
+    }
+    Ok(output)
+}
+
+#[derive(Debug)]
+pub(crate) struct PrivateAttemptMetrics {
+    pub attempt: u32,
+    pub outcome: String,
+    pub native_complete: Option<bool>,
+    pub elapsed_ms: Option<u64>,
+    pub metrics_observed: bool,
+    pub usage: TokenUsage,
+    pub cost: ReportedCost,
 }
 
 pub(crate) fn lookup(repo: &crate::git::Repo, id: &str) -> Result<PathBuf> {
@@ -2922,7 +3217,14 @@ pub fn control(
             let current = result(&dir)?;
             if !matches!(
                 current["outcome"].as_str(),
-                Some("succeeded" | "failed" | "cancelled" | "timed_out" | "capture_failed")
+                Some(
+                    "succeeded"
+                        | "failed"
+                        | "cancelled"
+                        | "timed_out"
+                        | "capture_failed"
+                        | "boundary_violation"
+                )
             ) {
                 bail!(
                     "cleanup requires a known terminal attempt; unknown/interrupted ownership must be resolved first"
@@ -2992,11 +3294,18 @@ pub fn control(
                 );
             }
             let _owner = Lock::acquire(&dir.join("owner.lock"))?;
+            let task_record = task::load(&dir)?;
+            crate::auth_binding::verify_task_resume_for_model(
+                repo,
+                &task_record.identity.harness,
+                &task_record.identity.model,
+                &dir,
+            )?;
             recover_resume(&dir)?;
             let previous = result(&dir)?;
             if !matches!(
                 previous["outcome"].as_str(),
-                Some("succeeded" | "failed" | "cancelled" | "timed_out")
+                Some("succeeded" | "failed" | "cancelled" | "timed_out" | "boundary_violation")
             ) {
                 bail!(
                     "resume requires a recorded terminal result with known process ownership; interrupted attempts cannot be replayed"
@@ -3027,20 +3336,51 @@ pub fn control(
             validate_frozen_configuration(&record)?;
             let (_, _, executable) = crate::launch::verify_task(&dir, Some(&spec))?;
             let real = validate_executable(&executable, repo)?;
-            if real != record.harness_executable
-                || digest_bytes(&std::fs::read(&real)?) != spec.executable_digest
-            {
-                bail!("harness executable changed; previous attempt preserved, resume refused");
+            if real != record.harness_executable {
+                bail!(
+                    "harness executable path changed; previous attempt preserved, resume refused"
+                );
+            }
+            let version = crate::selection::probe_version(
+                real.to_str()
+                    .ok_or_else(|| Error::new("harness executable path is not UTF-8"))?,
+            )
+            .ok_or_else(|| {
+                Error::new("cannot determine installed harness version before resume")
+            })?;
+            let loaded = crate::config::load(&record.worktree)?
+                .ok_or_else(|| Error::new("missing task configuration"))?;
+            let pin = loaded
+                .config
+                .harness_version_pins
+                .get(&record.identity.harness)
+                .map(String::as_str);
+            crate::catalog::check_harness_version(&record.identity.harness, &version, pin)?;
+            let current_digest = digest_bytes(&std::fs::read(&real)?);
+            if pin.is_some() && current_digest != spec.executable_digest {
+                bail!(
+                    "pinned harness executable changed; previous attempt preserved, resume refused"
+                );
             }
             validate_environment(
                 repo,
                 &record.worktree,
                 &record.identity.harness,
-                &spec.harness_version,
+                &version,
                 &real,
             )?;
-            let original_spec = spec.clone();
-            let original_record = record.clone();
+            // Keep the finished attempt's provenance immutable. A floating
+            // project may resume with a newer installed CLI after the same
+            // native isolation checks pass; the next attempt records its own
+            // version and executable digest.
+            let previous_spec = spec.clone();
+            let previous_record = record.clone();
+            spec.harness_version = version.clone();
+            spec.executable_digest = current_digest;
+            record.enforcement.harness_version = Some(version);
+            record.harness_executable = real;
+            let original_spec = previous_spec.clone();
+            let original_record = previous_record.clone();
             let original_prompt = task::load_prompt(&dir)?;
             // Frozen widening was explicitly accepted at launch; resume never changes it.
             let prompt = crate::cli::PromptSource::File(
@@ -3077,8 +3417,10 @@ pub fn control(
                 },
                 &spec,
             )?;
-            let old_attempt = attempt_dir(&dir, &original_spec);
-            durable_json(&old_attempt.join("submission.json"), &record)?;
+            let approval_lease =
+                crate::approval::retire_for_resume(&dir, &record.task_id, previous_spec.attempt)?;
+            let old_attempt = attempt_dir(&dir, &previous_spec);
+            durable_json(&old_attempt.join("submission.json"), &previous_record)?;
             state::write_private_file(
                 &old_attempt.join("prompt.txt"),
                 task::load_prompt(&dir)?.as_bytes(),
@@ -3102,6 +3444,7 @@ pub fn control(
             if dir.join("cancel.json").exists() {
                 std::fs::remove_file(dir.join("cancel.json"))?;
             }
+            drop(approval_lease);
             drop(_owner);
             if let Err(error) = start(&dir, &spec) {
                 if !attempt_dir(&dir, &spec).join("spawn-intent.json").exists()
@@ -3192,6 +3535,7 @@ pub(crate) fn supervisor_owns_attempt(dir: &Path) -> Result<bool> {
 #[cfg(test)]
 mod telemetry_usage_tests {
     use super::Events;
+    use crate::state;
 
     #[test]
     fn usage_normalization_keeps_common_cumulative_snapshot_fields() {
@@ -3232,6 +3576,178 @@ mod telemetry_usage_tests {
             ),
             serde_json::json!({"type":"turn.completed"})
         );
+    }
+
+    #[test]
+    fn private_attempt_reader_extracts_only_opted_in_numeric_projections() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repo = crate::git::discover(root.path()).unwrap();
+        let id = "00000000-0000-7000-8000-000000000001";
+        let dir = super::store(&repo).unwrap().join(id);
+        state::create_private_dir_all(&dir).unwrap();
+        let spec = super::Spec {
+            schema_version: 2,
+            options: super::Options::default(),
+            harness_version: "test".into(),
+            executable_digest: "digest".into(),
+            parent_task: None,
+            parent_attempt: None,
+            root_task: None,
+            broker_request: None,
+            child_grants: Vec::new(),
+            depth: 0,
+            attempt: 3,
+            session: None,
+            broker_dir: None,
+            native_profile: None,
+            native_controls: Vec::new(),
+            gaps: Vec::new(),
+        };
+        state::write_json(&dir.join("headless.json"), &spec).unwrap();
+        let result = serde_json::json!({
+            "schema_version":2,
+            "task_id":id,
+            "attempt":1,
+            "outcome":"succeeded",
+            "identity":{"harness":"claude-code"},
+            "process":{"exit_code":0},
+            "harness":{"terminal":true,"failed":false,"summary":"private-payload"},
+            "metrics":{"schema_version":2,"elapsed_ms":{"kind":"observed","value":314},"values":{
+                "ahu.tokens.input":{"kind":"observed","value":0},
+                "ahu.tokens.output":{"kind":"unavailable"},
+                "ahu.tokens.cached":{"kind":"unavailable"},
+                "ahu.tokens.cache_write":{"kind":"unavailable"},
+                "ahu.tokens.reasoning":{"kind":"unavailable"},
+                "ahu.tokens.total":{"kind":"unavailable"},
+                "ahu.cost.harness_reported_usd":{"kind":"observed_float","value":0.0125}
+            }}
+        });
+        let attempt = dir.join("attempt-1");
+        state::create_private_dir_all(&attempt).unwrap();
+        state::write_json(&attempt.join("result.json"), &result).unwrap();
+
+        let legacy_attempt = dir.join("attempt-2");
+        state::create_private_dir_all(&legacy_attempt).unwrap();
+        state::write_json(
+            &legacy_attempt.join("result.json"),
+            &serde_json::json!({
+                "schema_version":2,
+                "task_id":id,
+                "attempt":2,
+                "outcome":"succeeded",
+                "identity":{"harness":"claude-code"},
+                "process":{"exit_code":0},
+                "harness":{"terminal":true,"failed":false},
+                "metrics":{"schema_version":1,"token_aggregation":"maximum-reported-per-field","values":{
+                    "ahu.tokens.input":{"kind":"observed","value":9},
+                    "ahu.tokens.output":{"kind":"observed","value":4},
+                    "ahu.tokens.cached":{"kind":"unavailable"},
+                    "ahu.tokens.cache_write":{"kind":"unavailable"},
+                    "ahu.tokens.reasoning":{"kind":"unavailable"},
+                    "ahu.tokens.total":{"kind":"unavailable"}
+                }}
+            }),
+        )
+        .unwrap();
+
+        let failed_attempt = dir.join("attempt-3");
+        state::create_private_dir_all(&failed_attempt).unwrap();
+        state::write_json(
+            &failed_attempt.join("result.json"),
+            &serde_json::json!({
+                "schema_version":2,
+                "task_id":id,
+                "attempt":3,
+                "outcome":"supervisor_error",
+                "failure_category":"temporary",
+                "blockers":["supervisor execution failed"]
+            }),
+        )
+        .unwrap();
+
+        let observations = super::private_attempt_metrics(&dir, "claude-code", 3).unwrap();
+        assert_eq!(observations.len(), 3);
+        assert_eq!(observations[0].attempt, 1);
+        assert_eq!(observations[0].elapsed_ms, Some(314));
+        assert!(observations[0].metrics_observed);
+        assert_eq!(observations[0].usage.input, Some(0));
+        assert_eq!(observations[0].usage.output, None);
+        assert_eq!(observations[0].cost.usd, Some(0.0125));
+        assert_eq!(
+            observations[0].cost.source.as_deref(),
+            Some("claude_code_result_total")
+        );
+        assert!(!format!("{:?}", observations[0].outcome).contains("private-payload"));
+        assert!(observations[1].metrics_observed);
+        assert_eq!(observations[1].usage.input, Some(9));
+        assert_eq!(observations[1].usage.output, Some(4));
+        assert_eq!(observations[1].elapsed_ms, None);
+        assert_eq!(observations[1].cost.usd, None);
+        assert!(!observations[2].metrics_observed);
+        assert_eq!(observations[2].outcome, "supervisor_error");
+        assert_eq!(observations[2].usage.input, None);
+        assert_eq!(observations[2].cost.usd, None);
+        assert!(super::private_attempt_metrics(&dir, "claude-code", 2).is_err());
+
+        std::fs::write(dir.join("headless.json"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        assert!(super::private_attempt_metrics(&dir, "claude-code", 3).is_err());
+    }
+
+    #[test]
+    fn reported_cost_is_normalized_without_claiming_billing() {
+        let mut claude = Events::default();
+        claude.observe(
+            "claude-code",
+            br#"{"type":"result","subtype":"success","total_cost_usd":0.0125,"usage":{"input_tokens":10}}"#,
+        );
+        assert_eq!(claude.cost.usd, Some(0.0125));
+        assert_eq!(
+            claude.cost.source.as_deref(),
+            Some("claude_code_result_total")
+        );
+
+        let mut opencode = Events::default();
+        let step =
+            br#"{"type":"step_finish","part":{"id":"step-1","cost":0.003,"reason":"tool-calls"}}"#;
+        opencode.observe("opencode", step);
+        opencode.observe("opencode", step);
+        opencode.observe(
+            "opencode",
+            br#"{"type":"step_finish","part":{"id":"step-2","cost":0.002,"reason":"stop"}}"#,
+        );
+        assert_eq!(opencode.cost.usd, Some(0.005));
+        assert_eq!(
+            opencode.cost.source.as_deref(),
+            Some("opencode_step_finish_sum")
+        );
+
+        let mut unsupported = Events::default();
+        unsupported.observe(
+            "codex",
+            br#"{"type":"turn.completed","usage":{"input_tokens":10},"total_cost_usd":99}"#,
+        );
+        assert_eq!(unsupported.cost.usd, None);
+        unsupported.observe(
+            "antigravity",
+            br#"{"type":"result","status":"success","response":"ok","total_cost_usd":99}"#,
+        );
+        assert_eq!(unsupported.cost.usd, None);
+
+        let mut invalid = Events::default();
+        invalid.observe("claude-code", br#"{"type":"result","total_cost_usd":-1}"#);
+        assert_eq!(invalid.cost.usd, None);
+
+        let encoded = serde_json::to_value(&opencode.cost).unwrap();
+        assert_eq!(encoded["usd"], 0.005);
+        assert_eq!(encoded["source"], "opencode_step_finish_sum");
     }
 }
 
@@ -3289,10 +3805,124 @@ mod write_tracking_tests {
         assert!(!paths.iter().any(|path| path == "/tmp/not-a-write.txt"));
         assert_eq!(
             resolve_write_path("/tmp/project/../outside/new.txt").unwrap(),
-            PathBuf::from("/tmp/outside/new.txt")
+            PathBuf::from("/tmp/project/../outside/new.txt")
         );
         assert!(resolve_write_path("").is_none());
         assert!(resolve_write_path("relative/file.txt").is_none());
+    }
+
+    #[test]
+    fn final_stream_drain_cannot_accept_a_reported_outside_write() {
+        let worktree = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stream = format!(
+            "{}\n{}\n",
+            json!({"tool":"Write", "input":{"path":outside.path().join("new.txt")}}),
+            json!({"type":"turn.completed"})
+        );
+        capture(
+            std::io::Cursor::new(stream.into_bytes()),
+            worktree.path().join("unused.json"),
+            worktree.path().to_path_buf(),
+            Some(SessionOwner {
+                task_id: "synthetic".into(),
+                attempt: 1,
+                harness: "codex".into(),
+            }),
+            shared.clone(),
+            tx,
+        );
+        // The process-exit poll has already completed with no stop reason.
+        let mut stop = None;
+        rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        let mut events = shared.lock().unwrap();
+        assert!(events.terminal);
+        assert!(boundary_after_drain(&mut events, &mut stop));
+        assert_eq!(stop.unwrap().0, "boundary_violation");
+        assert!(!boundary_after_drain(&mut events, &mut stop));
+        let mut cancelled = Some(("cancelled", Instant::now()));
+        assert!(!boundary_after_drain(&mut events, &mut cancelled));
+        assert_eq!(cancelled.unwrap().0, "cancelled");
+    }
+
+    #[test]
+    fn dangling_write_symlinks_are_classified_and_cycles_fail_closed() {
+        let worktree = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("not-created.txt");
+        let link = worktree.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let event = serde_json::to_vec(&json!({"tool":"Write", "input":{"path":link}})).unwrap();
+        let mut events = Events::default();
+        observe_writes(&mut events, &event, worktree.path());
+        assert_eq!(
+            events.writes_outside_worktree,
+            vec![
+                outside
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("not-created.txt")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("link", &link).unwrap();
+        let mut events = Events::default();
+        observe_writes(&mut events, &event, worktree.path());
+        assert!(events.failed);
+        assert!(
+            events
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("symlink traversal bound"))
+        );
+    }
+
+    #[test]
+    fn missing_write_targets_resolve_symlinks_before_parent_components() {
+        let worktree = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join("child")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("child"), worktree.path().join("link"))
+            .unwrap();
+        let target = worktree.path().join("link/../new/file.txt");
+        let event = json!({"tool":"Write", "input":{"path":target}});
+        let mut events = Events::default();
+        observe_writes(
+            &mut events,
+            &serde_json::to_vec(&event).unwrap(),
+            worktree.path(),
+        );
+        assert_eq!(
+            events.writes_outside_worktree,
+            vec![
+                outside
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("new/file.txt")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
+        );
+
+        // The reverse alias stays inside and must not cause a false violation.
+        std::fs::create_dir(worktree.path().join("child")).unwrap();
+        std::os::unix::fs::symlink(worktree.path().join("child"), outside.path().join("link"))
+            .unwrap();
+        let event =
+            json!({"tool":"Write", "input":{"path":outside.path().join("link/../new.txt")}});
+        let mut events = Events::default();
+        observe_writes(
+            &mut events,
+            &serde_json::to_vec(&event).unwrap(),
+            worktree.path(),
+        );
+        assert!(events.writes_outside_worktree.is_empty());
     }
 
     #[test]
@@ -3523,6 +4153,72 @@ mod profile_and_metadata_tests {
                 .digest,
             digest_bytes(b"zeta")
         );
+    }
+
+    #[test]
+    fn skill_invocation_provenance_requires_unambiguous_catalog_evidence() {
+        let invocation = |name: &str| SkillInvocation {
+            name: name.into(),
+            source: None,
+            digest: None,
+            status: "invoked".into(),
+            completed_at: None,
+            elapsed_ms: None,
+            harness: Some("opencode".into()),
+            observed_at: None,
+            evidence: crate::telemetry::SkillEvidence::Observed,
+            execution: crate::telemetry::SkillEvidence::Unverified,
+        };
+        let entry = |source: &str, digest: &str| SkillCatalogEntry {
+            name: "review".into(),
+            source: source.into(),
+            digest: digest.into(),
+        };
+
+        let mut skills = vec![invocation("review"), invocation("external")];
+        attribute_skill_provenance(
+            &mut skills,
+            &[entry(".agents/skills/review/SKILL.md", &"a".repeat(64))],
+        );
+        assert_eq!(
+            skills[0].source.as_deref(),
+            Some(".agents/skills/review/SKILL.md")
+        );
+        assert!(
+            skills[0]
+                .digest
+                .as_deref()
+                .is_some_and(|digest| digest == "a".repeat(64))
+        );
+        assert!(skills[1].source.is_none());
+        assert!(skills[1].digest.is_none());
+
+        let mut identical_copies = vec![invocation("review")];
+        attribute_skill_provenance(
+            &mut identical_copies,
+            &[
+                entry(".agents/skills/review/SKILL.md", &"b".repeat(64)),
+                entry(".claude/skills/review/SKILL.md", &"b".repeat(64)),
+            ],
+        );
+        assert!(identical_copies[0].source.is_none());
+        assert!(
+            identical_copies[0]
+                .digest
+                .as_deref()
+                .is_some_and(|digest| digest == "b".repeat(64))
+        );
+
+        let mut conflicting_copies = vec![invocation("review")];
+        attribute_skill_provenance(
+            &mut conflicting_copies,
+            &[
+                entry(".agents/skills/review/SKILL.md", &"c".repeat(64)),
+                entry(".claude/skills/review/SKILL.md", &"d".repeat(64)),
+            ],
+        );
+        assert!(conflicting_copies[0].source.is_none());
+        assert!(conflicting_copies[0].digest.is_none());
     }
 
     #[cfg(unix)]
@@ -4291,7 +4987,7 @@ mod profile_and_metadata_tests {
     }
 
     #[test]
-    fn codex_auto_headless_approves_only_local_read_only_ahu_mcp_tools() {
+    fn codex_auto_headless_approves_local_tools_and_checkpoint_request() {
         use crate::agent::Permissions;
 
         let root = tempfile::tempdir().unwrap();

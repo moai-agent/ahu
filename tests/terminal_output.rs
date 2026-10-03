@@ -92,7 +92,6 @@ fn normal_harness_capabilities_are_not_warnings_but_failures_still_surface() {
     for args in [
         vec!["doctor"],
         vec![
-            "launch",
             "@chris",
             "--prompt",
             "review",
@@ -422,7 +421,7 @@ fn redirected_commands_match_explicit_plain_output() {
         &["knowledge", "lint"],
         &["knowledge", "lint", "--output", "json"],
         &["focus", "missing"],
-        &["launch", "@missing", "--prompt", "fixture", "--dry-run"],
+        &["@missing", "--prompt", "fixture", "--dry-run"],
         &["run-task", "--task-dir", "missing"],
     ];
     for args in cases {

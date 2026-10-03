@@ -1,5 +1,5 @@
 ---
-name: release
+name: ahu-release
 description: Prepare, verify, merge, and tag a repository release candidate with hermetic CI and explicit publication gates; use with Codex or OpenCode, never Claude Code.
 ---
 
@@ -17,7 +17,7 @@ one work item maps to exactly one pull request. Follow repository policy for
 whether release work items are required and how they link to ahu task IDs. If no
 tracker is configured, keep coordination in the release workflow and ahu task
 records; do not create an assumed GitHub or private-roadmap workflow.
-Use the bundled `direct-agents` skill for task IDs, provider-side links, and
+Use the bundled `ahu-direct-agents` skill for task IDs, provider-side links, and
 tracker lifecycle rules; this release skill adds release-specific local task
 cleanup without changing the provider's records.
 
@@ -48,8 +48,10 @@ Make CI prove the release boundary without paid services:
   `cargo llvm-cov --all-targets --locked --summary-only` and review the
   coverage summary before release. Inspect gaps in security-sensitive, setup,
   MCP, telemetry, and evaluation paths; record material gaps with the release
-  checks. CI runs this command on Linux and macOS. Do not add a percentage gate
-  until the team has agreed on a measured baseline and threshold.
+  checks. CI runs this command on Linux and macOS, then checks the JSON report
+  with `python3 -B scripts/check-eval-mcp-coverage.py`. That guard requires 95%
+  line coverage for each of the eval/OTel and MCP/OTel groups. The current
+  workflow reports whole-project coverage without a separate percentage gate.
 - Use hermetic stubs for harness CLIs when tests only need executable discovery
   or version output. Stubs must not contain credentials, contact providers, or
   invoke models.
@@ -80,9 +82,10 @@ Before handoff, reconcile the ahu tasks used to implement this release. Run
 names, and commits to identify release tasks; do not guess from agent names or
 task titles alone. Confirm each task is terminal, its result was reviewed, and
 its changes are merged or intentionally excluded before removing its local
-execution state. For each completed release task, run `ahu cleanup <task>` and
-then `ahu remove <task>` only when its worktree is clean and its branch is
-merged or safely disposable. Do not remove unrelated or still-active tasks. If
+execution state. For each completed headless release task, run `ahu cleanup <task>`
+and then `ahu remove <task>` only when its worktree is clean and its branch is
+merged or safely disposable. Interactive tasks have no headless captures; run
+`ahu remove <task>` directly after the same integration and terminal-state checks. Do not remove unrelated or still-active tasks. If
 ownership or integration status is uncertain, preserve the task and report it
 as a cleanup follow-up. Verify the release tasks no longer appear in `ahu tasks
 --all`; retain provider-side work items, acceptance evidence, and release links

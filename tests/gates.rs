@@ -16,7 +16,7 @@ fn launch(repo: &TestRepo, extra: &[&str]) -> std::process::Output {
     let bin = common::fake_harness(temp, &temp.join("argv"));
     let mut cmd = common::ahu();
     cmd.current_dir(repo.path())
-        .args(["launch", "@deploy", "--prompt-file"])
+        .args(["@deploy", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .args(extra)
         // cmux is deliberately absent, so a launch that gets past the gate
@@ -107,7 +107,7 @@ fn launch_still_needs_no_opt_in_for_an_agent_that_widens_nothing() {
     let bin = common::fake_harness(temp, &temp.join("argv"));
     let output = common::ahu()
         .current_dir(repo.path())
-        .args(["launch", "@sable", "--prompt-file"])
+        .args(["@sable", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .arg("--dry-run")
         .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
@@ -147,21 +147,14 @@ fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
 
     // It is a real option, parsed and rejected when repeated or unknown.
     assert!(matches!(
-        ahu::cli::parse([
-            "launch",
-            "@deploy",
-            "--prompt-file",
-            "p",
-            "--allow-widened-approvals",
-        ])
-        .unwrap(),
+        ahu::cli::parse(["@deploy", "--prompt-file", "p", "--allow-widened-approvals",]).unwrap(),
         ahu::cli::Command::Launch {
             allow_widened_approvals: true,
             ..
         }
     ));
     assert!(matches!(
-        ahu::cli::parse(["launch", "@deploy", "--prompt-file", "p"]).unwrap(),
+        ahu::cli::parse(["@deploy", "--prompt-file", "p"]).unwrap(),
         ahu::cli::Command::Launch {
             allow_widened_approvals: false,
             ..
@@ -169,7 +162,6 @@ fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
     ));
     assert!(
         ahu::cli::parse([
-            "launch",
             "@deploy",
             "--prompt-file",
             "p",
@@ -530,7 +522,7 @@ fn write_record(
     ahu::task::save(task_dir, &record, prompt).unwrap();
 }
 
-// --- schema 2: an old record is refused, never reinterpreted ---
+// --- schema 1: an old record is refused, never reinterpreted ---
 
 /// Schema 1 wrote the *whole file's* digest into a field named
 /// `instructions_digest`. Schema 2 gives that name to the delivered text and
@@ -539,11 +531,7 @@ fn write_record(
 /// name, which is worse than failing.
 #[test]
 fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
-    assert_eq!(
-        ahu::task::TASK_SCHEMA_VERSION,
-        3,
-        "the digest split and the task id change are schema changes and must be versioned as one"
-    );
+    assert_eq!(ahu::task::TASK_SCHEMA_VERSION, 4);
     assert!(
         ahu::task::READABLE_SCHEMA_VERSIONS.contains(&2),
         "schema 2 is this build's immediate predecessor and must stay readable"

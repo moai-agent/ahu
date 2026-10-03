@@ -159,6 +159,7 @@ fn focus_by_handle_selects_the_bound_workspace_and_json_keeps_canonical_identity
     let path = dir.join("task.json");
     let mut saved: ahu::task::TaskRecord =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved.cmux_group_id = Some("only-this-group".into());
     saved.cmux_workspace_id = Some("only-this-workspace".into());
     ahu::state::write_json(&path, &saved).unwrap();
     let discovered = ahu::git::discover(repo.path()).unwrap();
@@ -169,9 +170,14 @@ fn focus_by_handle_selects_the_bound_workspace_and_json_keeps_canonical_identity
         r#"#!/usr/bin/env python3
 import json,sys
 if sys.argv[1] == 'ping': print('PONG'); sys.exit(0)
-assert sys.argv[1:3] == ['rpc','workspace.select']
-assert json.loads(sys.argv[3]) == {'workspace_id':'only-this-workspace'}
-print('{}')
+method,params = sys.argv[2],json.loads(sys.argv[3])
+if method == 'window.list': print(json.dumps({'windows':[{'id':'window'}]}))
+elif method == 'workspace.list': print(json.dumps({'workspaces':[{'id':'only-this-workspace','current_directory':'/tmp'}]}))
+elif method == 'workspace.group.list': print(json.dumps({'groups':[{'id':'only-this-group','name':'fixture','anchor_workspace_id':'anchor','member_workspace_ids':['anchor','only-this-workspace']}]}))
+elif method == 'workspace.select':
+ assert params == {'workspace_id':'only-this-workspace'}
+ print('{}')
+else: raise AssertionError(method)
 "#,
     )
     .unwrap();
@@ -438,6 +444,7 @@ fn interactive_cancel_case(case: &str) {
     let repo = TestRepo::new();
     let dir = record(&repo, "cancel-fixture");
     let mut saved = ahu::task::load(&dir).unwrap();
+    saved.cmux_group_id = Some("owned-fixture-group".into());
     saved.cmux_workspace_id = Some("owned-fixture".into());
     if case == "terminal" {
         saved.state = ahu::task::TaskState::Cancelled;
@@ -445,7 +452,18 @@ fn interactive_cancel_case(case: &str) {
     ahu::task::save(&dir, &saved, "synthetic input").unwrap();
     let cmux = repo.state_path().join("cmux");
     let calls = repo.state_path().join("calls");
-    std::fs::write(&cmux, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AHU_TEST_CMUX_CALLS\"\nprintf '{\"ok\":true,\"result\":{}}\\n'\n").unwrap();
+    std::fs::write(&cmux, r##"#!/usr/bin/env python3
+import json,os,sys
+if sys.argv[1] == 'ping': print('PONG'); sys.exit(0)
+method,params = sys.argv[2],json.loads(sys.argv[3])
+if method == 'window.list': print(json.dumps({'windows':[{'id':'window'}]}))
+elif method == 'workspace.list': print(json.dumps({'workspaces':[{'id':'owned-fixture','current_directory':'/tmp'}]}))
+elif method == 'workspace.group.list': print(json.dumps({'groups':[{'id':'owned-fixture-group','name':'fixture','anchor_workspace_id':'anchor','member_workspace_ids':['anchor','owned-fixture']}]}))
+elif method == 'workspace.close':
+ open(os.environ['AHU_TEST_CMUX_CALLS'],'a').write(method+' '+json.dumps(params)+'\n')
+ print('{}')
+else: raise AssertionError(method)
+"##).unwrap();
     std::fs::set_permissions(&cmux, std::fs::Permissions::from_mode(0o700)).unwrap();
     let transition = match case {
         "confirmed" => Some(ahu::task::TaskState::Cancelled),

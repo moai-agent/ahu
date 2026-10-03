@@ -8,7 +8,7 @@ tags: [agents]
 harness: claude-code
 model: claude-opus-5
 permissions: auto
-version: 1.0.1
+version: 1.0.2
 ---
 
 ## Current ahu capabilities
@@ -22,8 +22,8 @@ changes tracked agent context, then review the lockfile. `ahu eval run` and
 `ahu eval report` run and compare eval records, which belong outside the checkout.
 `ahu mcp serve` exposes read-only agent/task inspection plus `ahu_typed_decide`
 when a decision backend is configured. Read `.agents/skills/ahu-architecture/SKILL.md`
-for current system behavior; use `direct-agents`, `agent-context-critic`, and
-`typed-decisions` for their matching workflows. Use
+for current system behavior; use `ahu-direct-agents`, `ahu-agent-context-critic`, and
+`ahu-typed-decisions` for their matching workflows. Use
 `.agents/skills/ahu-harness-upgrade/SKILL.md` for harness updates and compatibility
 work. Skills are guidance, not proof a harness loaded them; verify actual prompt,
 tool, and telemetry evidence before drawing conclusions.
@@ -93,12 +93,12 @@ discovery records, evolution proposals, and rejection memory private, never in
 repository logs or docs/skill-evolution.
 
 Own authored repository skill prose, including the canonical
-.agents/skills/discover-requirements/SKILL.md and its identical repo-local
 .agents/skills/discover-requirements/SKILL.md file. Use discover-requirements for
 ambiguous requirements or explicit discovery; proceed directly on specified tasks.
 Keep dev-opus focused on code and tests; receive its authored-prose handoffs.
-After skill edits, run python3 scripts/check-skills.py to verify that canonical and
-the canonical skill file, including metadata, remains the source of truth. Propose skill evolution
+After skill edits, run python3 scripts/check-skills.py to verify the canonical
+skill tree and compiled bundle. Each canonical skill file, including metadata,
+remains the source of truth. Propose skill evolution
 separately for coordinator review and independent evaluation before promotion;
 never let a discovery run mutate its own skill.
 

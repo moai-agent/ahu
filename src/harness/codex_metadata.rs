@@ -11,6 +11,86 @@ use std::time::{Duration, Instant};
 
 const LIMIT: usize = 1024 * 1024;
 
+/// Read the current Codex account through the native app-server without
+/// starting a thread or refreshing credentials. Raw account responses are
+/// returned only to the in-process identity normalizer and are never logged.
+pub fn read_account(executable: &Path, cwd: &Path) -> Result<Value> {
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(executable);
+    command
+        .args(["app-server", "--listen", "stdio://"])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::cmux::integration::sanitize(&mut command, None);
+    command.process_group(0);
+    let mut child = command
+        .spawn()
+        .map_err(|_| Error::new("cannot start read-only Codex account inspection"))?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let outcome = (|| {
+        let fd = stdout.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(Error::new("cannot bound Codex account reads"));
+        }
+        let mut reader = BufReader::new(stdout);
+        let mut total = 0;
+        let send = |stdin: &mut std::process::ChildStdin, value: Value| -> Result<()> {
+            let mut bytes = serde_json::to_vec(&value)?;
+            bytes.push(b'\n');
+            stdin
+                .write_all(&bytes)
+                .map_err(|_| Error::new("Codex account inspection input closed"))
+        };
+        send(
+            &mut stdin,
+            json!({"id":1,"method":"initialize","params":{
+                "clientInfo":{"name":"ahu_auth_binding","version":"1.0.0"},
+                "capabilities":{"experimentalApi":true}}}),
+        )?;
+        let mut initialized = false;
+        for _ in 0..128 {
+            let line = read_metadata_line(&mut reader, &mut total, deadline)?;
+            let event: Value = serde_json::from_slice(&line)
+                .map_err(|_| Error::new("invalid Codex account response"))?;
+            if let Some(error) = event.get("error").filter(|v| !v.is_null()) {
+                return Err(Error::new(format!(
+                    "Codex account inspection RPC failed (code {:?}); response omitted",
+                    error.get("code").and_then(Value::as_i64)
+                )));
+            }
+            match event.get("id").and_then(Value::as_u64) {
+                Some(1) if !initialized => {
+                    initialized = true;
+                    send(&mut stdin, json!({"method":"initialized"}))?;
+                    send(
+                        &mut stdin,
+                        json!({"id":2,"method":"account/read","params":{"refreshToken":false}}),
+                    )?;
+                }
+                Some(2) if initialized => {
+                    let result = event
+                        .get("result")
+                        .filter(|v| v.is_object())
+                        .ok_or_else(|| Error::new("Codex returned no account metadata"))?;
+                    return Ok(result.clone());
+                }
+                None if event.get("id").is_none() => (),
+                _ => return Err(Error::new("unexpected Codex account response")),
+            }
+        }
+        Err(Error::new("Codex account event limit exceeded"))
+    })();
+    drop(stdin);
+    crate::headless::signal_group(child.id(), libc::SIGKILL);
+    let _ = child.wait();
+    outcome
+}
+
 /// Uses exactly the executable and isolation switches used by batch execution.
 /// Requirements must be absent: a future policy change refuses admission rather
 /// than suppressing mandatory plugin hooks or changing the required features.

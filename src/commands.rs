@@ -121,6 +121,15 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
         ))
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
+    if let Some(ranked) = &ranked {
+        selection::check_launch_compatibility(
+            std::path::Path::new(&executable),
+            harness,
+            ranked,
+            crate::agent::Permissions::Prompt,
+            &repo.root,
+        )?;
+    }
     crate::state::ensure_checkout_state(&repo.root)?;
     let placement = launch::group_coordinator(repo, &executable, label, harness, &model, &args)?;
     for note in placement.notes {
@@ -182,7 +191,7 @@ pub fn lock_cmd(console: &mut Console<'_>, repo: &Repo, update: bool) -> Result<
     if update {
         let path = context_lock::refresh(repo, &snapshot)?;
         console.say(&format!(
-            "Wrote {} from the current recognized context. Review and commit it with every context change before launching an agent; ahu did not stage or commit.\n",
+            "Refreshed {} for shared context and accepted this user's local agent context in private Ahu state. Review and commit the lock if shared context changed; local acceptance stays on this device. ahu did not stage or commit.\n",
             display_path(&path)
         ))?;
         return Ok(0);
@@ -193,7 +202,7 @@ pub fn lock_cmd(console: &mut Console<'_>, repo: &Repo, update: bool) -> Result<
         Ok(0)
     } else {
         console.say(&format!("Context is not launchable: {}\n", status.detail))?;
-        Err(Error::new("committed context lock is not current")
+        Err(Error::new("agent context lock is not current")
             .with_kind(crate::util::ErrorKind::Prerequisite))
     }
 }
@@ -259,7 +268,7 @@ pub fn agents(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
 }
 
 /// The `ahu agents` table. The agent cell is what a reader types into
-/// `ahu launch`, and a truncated handle selects nothing, so it is fixed. The
+/// `ahu @agent`, and a truncated handle selects nothing, so it is fixed. The
 /// harness and model are the identity a manifest pins -- the reason the listing
 /// exists -- and neither says anything in part, so they are fixed too.
 ///
@@ -1113,6 +1122,7 @@ fn short_branch(record: &task::TaskRecord) -> String {
 fn state_role(state: &str) -> Role {
     match state {
         "starting" | "running" => Role::Success,
+        "waiting-for-approval" => Role::Warning,
         "failed" | "cancelled" => Role::Error,
         "interrupted" => Role::Warning,
         // `exited` and anything a later schema adds: stopped, nothing claimed.
@@ -1482,7 +1492,11 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
     } else {
         None
     };
-    let value = task_summary(&dir, &record, workspaces.as_ref())?;
+    let mut value = task_summary(&dir, &record, workspaces.as_ref())?;
+    let approval = crate::approval::pending(&dir, &record.task_id)?;
+    if let Some(request) = &approval {
+        value["approval_request"] = serde_json::to_value(request)?;
+    }
     if json {
         console.say(&format!("{}\n", serde_json::to_string(&value)?))?;
     } else {
@@ -1500,6 +1514,18 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
             console.say(&format!(
                 "  cmux      {}\n",
                 display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none"))
+            ))?;
+        }
+        if let Some(request) = &approval {
+            console.say(&format!(
+                "\napproval request {} — {}\n  operation  {}\n  target     {}\n  summary    {}\n  resolve    ahu approve {} | ahu reject {}\n",
+                request.request_id,
+                record.state.as_str(),
+                display_safe(&request.operation),
+                display_safe(request.target.as_deref().unwrap_or("none")),
+                display_safe(&request.summary),
+                display_safe(&record.task_id),
+                display_safe(&record.task_id),
             ))?;
         }
         console.say(&format!("  review    {}\n", review_command(&record)))?;
@@ -1817,11 +1843,11 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
             );
         }
     };
-    let Some(workspace) = record.cmux_workspace_id.as_deref() else {
+    if record.cmux_workspace_id.is_none() {
         bail!("task {} has no recorded cmux session.", record.task_id);
-    };
+    }
     let client = Cmux::discover()?;
-    client.select_workspace(workspace)?;
+    cmux::repository::RepositoryManager::new(&client, repo).select_task_workspace(&record)?;
     console.say(&format!(
         "Focused {} — {}\n  worktree {}\n",
         style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
@@ -1931,6 +1957,21 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     } else {
         None
     };
+    let cmux_status = if record.cmux_workspace_id.is_some() {
+        let client = Cmux::discover().map_err(|error| {
+            Error::new(format!(
+                "cannot safely remove task {} while its recorded cmux workspace cannot be checked: {error}",
+                display_safe(task_id)
+            ))
+        })?;
+        if cmux::repository::RepositoryManager::new(&client, gate).close_task_workspace(&record)? {
+            "closed"
+        } else {
+            "already absent"
+        }
+    } else {
+        "not used"
+    };
     let mut completed: Vec<(&str, String)> = Vec::new();
     let mut not_removed: Vec<(&str, String)> = Vec::new();
     let mut worktree_removed = false;
@@ -1998,8 +2039,8 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     }
     let mut said = format!("removed task {}\n", display_safe(task_id));
     said.push_str(&format!(
-        "  worktree  {}\n  branch    {}\n  record    {}\n",
-        completed[0].1, completed[2].1, completed[1].1
+        "  worktree  {}\n  branch    {}\n  record    {}\n  cmux      {cmux_status}\n",
+        completed[0].1, completed[2].1, completed[1].1,
     ));
     console.say(&said)?;
     Ok(0)
@@ -2124,9 +2165,13 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
     // read failure preserves the pane; closing it is not process supervision.
     let workspace = match record.cmux_workspace_id.as_deref() {
         None => "absent",
-        Some(workspace_id) if cancellation == "confirmed" => {
+        Some(_workspace_id) if cancellation == "confirmed" => {
             Cmux::discover()
-                .and_then(|client| client.close_workspace(workspace_id))
+                .and_then(|client| {
+                    cmux::repository::RepositoryManager::new(&client, repo)
+                        .close_task_workspace(&record)
+                        .map(|_| ())
+                })
                 .map_err(|error| {
                     crate::util::Error::new(format!(
                         "cancellation confirmed, but cmux workspace close failed: {error}"
@@ -2149,6 +2194,55 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
         }),
         json_output,
     )?;
+    Ok(0)
+}
+
+/// Resolve the single durable MCP approval checkpoint attached to a task.
+pub fn approval_cmd(repo: &Repo, id: &str, approve: bool, json_output: bool) -> Result<i32> {
+    // Both interactive and headless callers carry task context. Presence is
+    // sufficient, even for empty/non-Unicode values, and a different target
+    // task does not grant operator authority. Like the resume guard, this is
+    // cooperative: same-user code can remove its environment or edit state.
+    crate::util::require_host_operator("ahu approve and ahu reject")?;
+    let (dir, record) = inspect_task(repo, id)?;
+    if !matches!(record.state, task::TaskState::WaitingForApproval) {
+        bail!(
+            "task {} is not waiting for approval (state: {})",
+            display_safe(id),
+            record.state.as_str()
+        );
+    }
+    let request = crate::approval::decide(repo, &dir, &record.task_id, approve)?;
+    let decision = if approve { "approved" } else { "rejected" };
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "task_id": record.task_id,
+        "request_id": request.request_id,
+        "decision": decision,
+        "operation": request.operation,
+        "summary": request.summary,
+        "target": request.target,
+    });
+    if json_output {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        println!(
+            "{decision} {} approval: {}{}",
+            request.operation,
+            request.summary,
+            request
+                .target
+                .as_deref()
+                .map(|target| format!(" (target: {target})"))
+                .unwrap_or_default()
+        );
+        if !approve {
+            println!(
+                "The task cancellation was requested; verify it with `ahu task {}`.",
+                record.task_id
+            );
+        }
+    }
     Ok(0)
 }
 
@@ -2312,7 +2406,7 @@ pub fn launch_cmd(
         bail!(kind: crate::util::ErrorKind::Usage,
             "@{} runs with permissions = {}, which widens the harness's own approval boundary:\n  \
              {}\n\
-             `ahu launch` starts a session with no interactive confirmation, so it will not widen \
+             `ahu @agent` starts a session with no interactive confirmation, so it will not widen \
              approvals on your behalf.\n\
              Re-run with --allow-widened-approvals if that is what you intend. Passing it puts \
              the widening in the command line your own harness shows you before it runs, and \
@@ -2879,8 +2973,9 @@ mod doctor_tests {
     fn local_collector_probe_only_checks_tcp_reachability() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         assert!(local_collector_reachable(listener.local_addr().unwrap()));
-        let address = listener.local_addr().unwrap();
-        drop(listener);
+        // Port zero cannot have a listening peer, unlike an ephemeral port
+        // released here that another parallel test could immediately reuse.
+        let address = "127.0.0.1:0".parse().unwrap();
         assert!(!local_collector_reachable(address));
     }
 
@@ -3067,6 +3162,7 @@ mod artifact_and_inbox_tests {
     #[test]
     fn task_state_roles_and_record_path_prefixes_are_stable() {
         assert!(matches!(state_role("running"), Role::Success));
+        assert!(matches!(state_role("waiting-for-approval"), Role::Warning));
         assert!(matches!(state_role("failed"), Role::Error));
         assert!(matches!(state_role("interrupted"), Role::Warning));
         assert!(matches!(state_role("new-future-state"), Role::Hint));

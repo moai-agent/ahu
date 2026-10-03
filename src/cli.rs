@@ -35,11 +35,6 @@ Commands:
   setup                 Configure ahu, harness MCP access, skills, and dev agents
   @agent [prompt]       Assign work to an agent; quote multi-word prompts.
                         Also accepts --prompt or --prompt-file.
-  launch @name [options]
-                        Backward-compatible alias. Reads no confirmation, so
-                        approval widening needs an explicit flag.
-                        --title <text> and --summary <text> set plain sidebar text.
-                        With --title alone, the description also uses that title.
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
   lock [--update]       Check committed agent context, or refresh ahu.lock before committing it
@@ -59,7 +54,9 @@ Commands:
                         Inspect a task's recorded session state and locations
   wait <task-id> [--output json]    Wait for a headless attempt to stop
   result <task-id> [--output json]  Read durable process and harness outcomes
-  cleanup <task-id>                After known termination, remove recognized old captures
+  approve <task-id> [--output json] Resolve a pending MCP approval request
+  reject <task-id> [--output json]  Reject a pending MCP request and request cancellation
+  cleanup <task-id>                After headless termination, remove recognized old captures
                                   and bounded requests; retain results and native sessions,
                                   branches and worktrees
   cancel <task-id>                Request cancellation of the task and ahu descendants;
@@ -76,6 +73,22 @@ Commands:
                         Inspect native integration evidence and headless isolation
   cmux install --harness ID [--dry-run]
                         Preview or explicitly delegate a native cmux installation
+  auth status --harness ID [--profile NAME]
+                        Check this checkout's current harness account binding
+  auth readiness --harness ID [--model MODEL]
+                        Report secret-free identity and project-binding readiness
+  auth profiles
+                        List local project auth profiles
+  auth bind --harness ID [--profile NAME] [--replace]
+                        Bind the current verified account to a local profile
+  auth select --profile NAME
+                        Select the profile ahu agents must match in this project
+  telemetry link --key KEY --task TASK
+                        Associate a task with an opaque host-private record key
+  telemetry unlink --key KEY [--task TASK]
+                        Remove a task association or the full record mapping
+  telemetry report --key KEY [--output json]
+                        Report opted-in local headless measurements
   mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
   doctor [--verbose]    Check repository, configuration, harness, and cmux
   agy                   Open the Antigravity CLI here on this project's
@@ -97,7 +110,7 @@ Commands:
 Task references:
   Use ahu:task:<id> to identify a task explicitly. Bare IDs and unique ID
   prefixes remain accepted. Exact @name handles select tasks in this repository.
-  In `launch @name`, @name selects a registered agent instead.
+  In `ahu @name`, @name selects a registered agent instead.
 
 Options:
   help [COMMAND]        Print focused help for a command; use `help all` for this reference
@@ -106,6 +119,8 @@ Options:
   --repo <path>         Select a repository checkout before the command.
                         Also accepts --repo=<path>; paths in the command are
                         relative to this checkout. No environment override.
+  --no-focus            Open the interactive launcher without switching to the new
+                        session after launch: `ahu --no-focus`. Select @name there.
   --color <choice>      auto, always, or never (also --color=<choice>).
                         Always/never override NO_COLOR. Auto honors any
                         NO_COLOR value and requires stdout to be a
@@ -185,10 +200,9 @@ tasks options:
 doctor options:
   --verbose             Show component-level cmux, hook, drift, and context-lock details
 
-launcher options:
-  --no-focus            Do not switch to the new session after launching
+agent assignment options:
+  Scripted assignments already leave focus unchanged; omit --no-focus.
 
-launch options:
   --name <name>        Reserve an immutable @name for this task in the repository.
                         By default, generate a short name from the displayed title.
   --prompt <text>       Use an inline prompt (conflicts with --prompt-file)
@@ -216,7 +230,7 @@ launch options:
   --dry-run             Show the preview and create nothing
   --allow-widened-approvals
                         Required to launch an agent whose manifest declares
-                        permissions = auto or accept-edits. `ahu launch` reads no
+                        permissions = auto or accept-edits. `ahu @agent` reads no
                         confirmation, so widening is opt-in on the command line
 
 Exit codes:
@@ -242,16 +256,18 @@ Commands:
   tasks [--limit N]     List recent tasks; use --all for the full list
   task ID               Inspect a task
   wait|result|cancel ID Control or inspect a task
+  approve|reject ID     Resolve a task's pending MCP approval request
   resume ID --prompt-file PATH
-  cleanup|remove ID     Clean captures or remove a completed task
+  cleanup|remove ID     Clean headless captures or remove a terminal task
   focus|message ID ...  Focus a task or send it a message
   eval run|report       Run and compare local agent evaluations
   knowledge lint        Check configured OKF bundles
   cmux status|install   Inspect or install native cmux integration
+  auth profiles|status|readiness|bind|select
+                        Check or manage local project auth profiles
   mcp serve             Serve repository tools over stdio MCP
   explain               Show the architecture overview
   @agent [PROMPT]       Assign work to a registered agent
-  launch @agent         Backward-compatible launch alias
   agy|claude|codex|opencode
                         Open a coordinating harness session
 
@@ -277,23 +293,26 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
     let help = match topic {
         "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh ahu.lock. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
-        "eval run" => help_section("eval run options:", "launcher options:"),
+        "eval run" => help_section("eval run options:", "tasks options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
-        "launch" | "@agent" => help_section("launch options:", "Exit codes:"),
+        "@agent" => help_section("agent assignment options:", "Exit codes:"),
         "explain" => help_section("explain options:", "onboard options:"),
         "onboard" => help_section("onboard options:", "knowledge lint options:"),
         "knowledge lint" => help_section("knowledge lint options:", "eval report options:"),
         "doctor" => "Usage: ahu doctor\n\nSummarize project, context-lock, skills, harness, telemetry, and cmux readiness. Use --verbose for component-level diagnostics.\n".to_string(),
-        "lock" => "Usage: ahu lock [--update]\n\nChecks that recognized agent context matches committed ahu.lock. --update refreshes the lock for review and commit.\n".to_string(),
+        "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes ahu.lock and accepts local context in owner-only host state; review and commit ahu.lock only when shared context changed.\n".to_string(),
         "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
         "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
+        "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics.\n\nIdentity probes: codex, claude-code, antigravity, and ollama. Use --harness ollama to check the loopback daemon selected by OLLAMA_HOST (default 127.0.0.1:11434). OpenCode readiness requires --model with an Ollama cloud model; other OpenCode providers remain unsupported. Readiness checks account identity and project binding only: it does not verify OpenCode's configured provider endpoint, model availability, or inference access.\n".to_string(),
+        "telemetry" => "Usage: ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
         "task" => "Usage: ahu task ID [--output json]\n\nInspect a task's state, branch, worktree, and launch evidence.\n".to_string(),
         "wait" => "Usage: ahu wait TASK [--output json]\n\nWait for a headless task to reach a terminal state.\n".to_string(),
         "result" => "Usage: ahu result TASK [--output json]\n\nRead the durable process and harness outcomes for a headless task.\n".to_string(),
         "cancel" => "Usage: ahu cancel TASK\n\nRequest cancellation of the task and its ahu descendants.\n".to_string(),
+        "approve" | "reject" => format!("Usage: ahu {topic} TASK [--output json]\n\nResolve the task's pending explicit MCP approval checkpoint. Inspect the request first with `ahu task TASK`; rejecting requests task cancellation.\n"),
         "resume" => "Usage: ahu resume TASK --prompt-file PATH [--output json]\n\nResume a root headless task using its recorded native session.\n".to_string(),
-        "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after termination is known.\n".to_string(),
+        "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after headless termination is known. Interactive tasks have no headless captures; use ahu remove after reviewing and integrating their work.\n".to_string(),
         "remove" => "Usage: ahu remove TASK\n\nRemove a completed task's record, worktree, and branch when safe.\n".to_string(),
         "focus" => "Usage: ahu focus TASK\n\nBring an interactive task's cmux session to the front.\n".to_string(),
         "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
@@ -329,13 +348,15 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "knowledge" => "ahu knowledge lint — validate configured knowledge bundles",
         "cmux" => "ahu cmux — inspect or install cmux integration",
         "mcp" => "ahu mcp serve — start the MCP server",
+        "auth" => "ahu auth — check or bind local harness accounts",
+        "telemetry" => "ahu telemetry — link private records and report local measurements",
         "explain" => "ahu explain — show the architecture overview",
         "onboard" => "ahu onboard — preview native agent definitions",
         "agy" => "ahu agy — open Antigravity",
         "claude" => "ahu claude — open Claude Code",
         "codex" => "ahu codex — open Codex",
         "opencode" => "ahu opencode — open OpenCode",
-        "launch" => "ahu launch @agent — backward-compatible launch alias",
+        "@agent" => "ahu @agent — assign work to a registered agent",
         "help" => "ahu help — show command help",
         "run-task" => "ahu run-task — internal task worker",
         "supervise" => "ahu supervise — internal task supervisor",
@@ -454,6 +475,20 @@ pub enum Command {
         dry_run: bool,
     },
     McpServe,
+    Auth {
+        action: String,
+        harness: String,
+        profile: Option<String>,
+        replace: bool,
+        model: Option<String>,
+        json: bool,
+    },
+    Telemetry {
+        action: String,
+        record_key: String,
+        task_ref: Option<String>,
+        output_json: bool,
+    },
     Doctor {
         verbose: bool,
     },
@@ -487,7 +522,7 @@ impl PromptSource {
             Self::Stdin => {
                 if stdin_is_terminal {
                     return Err(crate::util::Error::new(
-                        "ahu launch needs --prompt or --prompt-file when stdin is a terminal.",
+                        "ahu @agent needs --prompt or --prompt-file when stdin is a terminal.",
                     )
                     .with_kind(crate::util::ErrorKind::Usage));
                 }
@@ -571,7 +606,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 task_dir: PathBuf::from(&args[2]),
             })
         }
-        "wait" | "result" | "cancel" | "resume" | "cleanup" => {
+        "wait" | "result" | "cancel" | "approve" | "reject" | "resume" | "cleanup" => {
             let task_id = args
                 .get(1)
                 .filter(|s| !s.starts_with('-'))
@@ -656,6 +691,83 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             Some("serve") if args.len() == 2 => Ok(Command::McpServe),
             _ => bail!("expected ahu mcp serve"),
         },
+        "auth" => {
+            let action = args.get(1).map(String::as_str).unwrap_or("");
+            if !matches!(
+                action,
+                "status" | "readiness" | "bind" | "select" | "profiles"
+            ) {
+                bail!(
+                    "expected `ahu auth profiles`, `ahu auth status|readiness|bind --harness ID`, or `ahu auth select --profile NAME`"
+                );
+            }
+            let mut harness = None;
+            let mut profile = None;
+            let mut model = None;
+            let mut json = false;
+            let mut replace = false;
+            let mut index = 2;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--harness" if action != "select" && harness.is_none() => {
+                        harness = Some(value_for("--harness", &args, &mut index)?);
+                    }
+                    "--profile" if profile.is_none() => {
+                        profile = Some(value_for("--profile", &args, &mut index)?);
+                    }
+                    "--model" if action == "readiness" && model.is_none() => {
+                        model = Some(value_for("--model", &args, &mut index)?);
+                    }
+                    "--output" if action == "readiness" && !json => {
+                        if value_for("--output", &args, &mut index)? != "json" {
+                            bail!("expected json");
+                        }
+                        json = true;
+                    }
+                    "--replace" if action == "bind" && !replace => replace = true,
+                    other => bail!("unexpected option {other:?} for `ahu auth {action}`"),
+                }
+                index += 1;
+            }
+            let harness = if action == "profiles" {
+                if harness.is_some() || profile.is_some() || replace || model.is_some() || json {
+                    bail!("`ahu auth profiles` accepts no options");
+                }
+                String::new()
+            } else if action == "select" {
+                if harness.is_some() || replace || model.is_some() || json {
+                    bail!("`ahu auth select` accepts only --profile NAME");
+                }
+                String::new()
+            } else {
+                let harness = harness
+                    .ok_or_else(|| crate::util::Error::new("auth command requires --harness ID"))?;
+                if !matches!(
+                    harness.as_str(),
+                    "codex" | "claude-code" | "antigravity" | "opencode" | "ollama"
+                ) {
+                    bail!(
+                        "unsupported harness {harness:?}; use codex, claude-code, antigravity, opencode, or ollama"
+                    );
+                }
+                harness
+            };
+            if action == "select" && profile.is_none() {
+                bail!("auth select requires --profile NAME");
+            }
+            if action == "readiness" && (profile.is_some() || replace) {
+                bail!("auth readiness accepts --harness, optional --model, and --output json");
+            }
+            Ok(Command::Auth {
+                action: action.to_owned(),
+                harness,
+                profile,
+                replace,
+                model,
+                json,
+            })
+        }
+        "telemetry" => parse_telemetry(&args[1..]),
         "doctor" => match &args[1..] {
             [] => Ok(Command::Doctor { verbose: false }),
             [flag] if flag == "--verbose" => Ok(Command::Doctor { verbose: true }),
@@ -726,7 +838,6 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         },
         "knowledge" => parse_knowledge(&args[1..]),
         "eval" => parse_eval(&args[1..]),
-        "launch" => parse_launch_backend(&args[1..], stdin_available),
         direct if direct.starts_with('@') => {
             if args.len() == 1 && !stdin_available {
                 let agent = direct.strip_prefix('@').unwrap_or_default();
@@ -748,6 +859,9 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 agent: None,
             })
         }
+        "launch" => bail!(
+            "`ahu launch` was removed. Use `ahu @agent [prompt]`; see `ahu help @agent` for options."
+        ),
         other => bail!("unknown command {other:?}.\n\nRun 'ahu help' for usage."),
     }
 }
@@ -1183,7 +1297,7 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
 fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
     let name = rest
         .first()
-        .ok_or_else(|| crate::util::Error::new("ahu launch needs @agent --prompt-file <path>."))?;
+        .ok_or_else(|| crate::util::Error::new("ahu @agent needs --prompt-file <path>."))?;
     let agent = name.strip_prefix('@').unwrap_or(name);
     validate_agent_name(agent)?;
     let mut display = crate::launch::DisplayMetadata::default();
@@ -1225,7 +1339,7 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
                 allow_widened_approvals = true;
             }
             value if !value.starts_with('-') => positional_prompt.push(value.to_string()),
-            other => bail!("unknown or repeated option {other:?} for ahu launch."),
+            other => bail!("unknown or repeated option {other:?} for ahu @agent."),
         }
         index += 1;
     }
@@ -1241,7 +1355,7 @@ fn parse_launch(rest: &[String], stdin_available: bool) -> Result<Command> {
         (Some(path), None) => PromptSource::File(path),
         (None, Some(text)) => PromptSource::Inline(text),
         (None, None) if stdin_available => PromptSource::Stdin,
-        (None, None) => bail!("ahu launch needs --prompt, --prompt-file, or piped stdin."),
+        (None, None) => bail!("ahu @agent needs --prompt, --prompt-file, or piped stdin."),
     };
     if output_json && !dry_run {
         bail!("--output json requires --dry-run.");
@@ -1369,6 +1483,49 @@ pub fn extract_color(
     Ok((remaining, choice))
 }
 
+fn parse_telemetry(args: &[String]) -> Result<Command> {
+    let action = args.first().map(String::as_str).unwrap_or("");
+    if !matches!(action, "link" | "unlink" | "report") {
+        bail!("expected `ahu telemetry link|unlink|report`");
+    }
+    let mut record_key = None;
+    let mut task_ref = None;
+    let mut output_json = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--key" if record_key.is_none() => {
+                record_key = Some(value_for("--key", args, &mut index)?);
+            }
+            "--task" if task_ref.is_none() && action != "report" => {
+                task_ref = Some(value_for("--task", args, &mut index)?);
+            }
+            "--output" if action == "report" && !output_json => {
+                if value_for("--output", args, &mut index)? != "json" {
+                    bail!("expected json");
+                }
+                output_json = true;
+            }
+            other => bail!("unexpected option {other:?} for `ahu telemetry {action}`"),
+        }
+        index += 1;
+    }
+    let record_key = record_key
+        .ok_or_else(|| crate::util::Error::new("telemetry command requires --key KEY"))?;
+    match action {
+        "link" if task_ref.is_none() => bail!("telemetry link requires --task TASK"),
+        "link" | "report" => {}
+        "unlink" => {}
+        _ => unreachable!(),
+    }
+    Ok(Command::Telemetry {
+        action: action.to_owned(),
+        record_key,
+        task_ref,
+        output_json,
+    })
+}
+
 fn parse_cmux(args: &[String]) -> Result<Command> {
     match args.first().map(String::as_str) {
         Some("status") => {
@@ -1453,6 +1610,54 @@ mod parser_tests {
             args.extend(options);
             assert_usage(&args, "unexpected option");
         }
+    }
+
+    #[test]
+    fn auth_readiness_requires_harness_and_only_accepts_json_output() {
+        assert_eq!(
+            parse([
+                "auth",
+                "readiness",
+                "--harness",
+                "opencode",
+                "--model",
+                "ollama/model:cloud",
+                "--output",
+                "json"
+            ])
+            .unwrap(),
+            Command::Auth {
+                action: "readiness".into(),
+                harness: "opencode".into(),
+                profile: None,
+                replace: false,
+                model: Some("ollama/model:cloud".into()),
+                json: true,
+            }
+        );
+        assert_usage(&["auth", "readiness"], "requires --harness");
+        assert_usage(
+            &[
+                "auth",
+                "readiness",
+                "--harness",
+                "codex",
+                "--profile",
+                "default",
+            ],
+            "accepts --harness",
+        );
+        assert_usage(
+            &[
+                "auth",
+                "readiness",
+                "--harness",
+                "codex",
+                "--output",
+                "yaml",
+            ],
+            "expected json",
+        );
     }
 
     #[test]
@@ -1866,7 +2071,6 @@ mod parser_tests {
     fn headless_launch_keeps_options_separate_from_literal_prompt_values() {
         for policy in ["disabled", "bounded"] {
             let Command::HeadlessLaunch { launch, options } = parse([
-                "launch",
                 "@fixture",
                 "--headless",
                 "--background",
@@ -1949,7 +2153,7 @@ mod parser_tests {
                 "invalid child agent name",
             ),
         ] {
-            let mut args = vec!["launch", "@fixture", "--prompt", "task"];
+            let mut args = vec!["@fixture", "--prompt", "task"];
             args.extend(extra);
             assert_usage(&args, diagnostic);
         }
@@ -1970,14 +2174,13 @@ mod color_tests {
         let (args, choice) = extract_color(vec![
             "--color".into(),
             "never".into(),
-            "launch".into(),
             "@fixture".into(),
             "--prompt".into(),
             "--color=always".into(),
         ])
         .unwrap();
         assert_eq!(choice, Some(crate::style::ColorChoice::Never));
-        assert_eq!(args, ["launch", "@fixture", "--prompt", "--color=always"]);
+        assert_eq!(args, ["@fixture", "--prompt", "--color=always"]);
         for args in [
             vec!["--color"],
             vec!["--color="],
@@ -1992,7 +2195,6 @@ mod color_tests {
         for option in ["--prompt", "--prompt-file"] {
             for value in ["--color", "--color=always"] {
                 let (args, choice) = extract_color(vec![
-                    "launch".into(),
                     "@fixture".into(),
                     option.into(),
                     value.into(),
@@ -2000,7 +2202,7 @@ mod color_tests {
                 ])
                 .unwrap();
                 assert_eq!(choice, Some(crate::style::ColorChoice::Never));
-                assert_eq!(args, ["launch", "@fixture", option, value]);
+                assert_eq!(args, ["@fixture", option, value]);
             }
         }
     }
@@ -2023,6 +2225,7 @@ mod focused_help_tests {
                 .contains("default limit: 20")
         );
         assert!(help_for(Some("doctor")).unwrap().contains("--verbose"));
+        assert!(help_for(Some("telemetry")).unwrap().contains("owner-only"));
         assert!(help_for(Some("all")).unwrap().contains("eval run options:"));
         assert!(
             parse_args(&["setup", "--help"]).unwrap()
@@ -2036,6 +2239,35 @@ mod focused_help_tests {
                     topic: Some("tasks".into())
                 }
         );
+    }
+
+    #[test]
+    fn telemetry_commands_require_explicit_private_keys_and_task_scope() {
+        assert_eq!(
+            parse_args(&["telemetry", "link", "--key", "r-1", "--task", "abc"]).unwrap(),
+            Command::Telemetry {
+                action: "link".into(),
+                record_key: "r-1".into(),
+                task_ref: Some("abc".into()),
+                output_json: false,
+            }
+        );
+        assert_eq!(
+            parse_args(&["telemetry", "report", "--key", "r-1", "--output", "json"]).unwrap(),
+            Command::Telemetry {
+                action: "report".into(),
+                record_key: "r-1".into(),
+                task_ref: None,
+                output_json: true,
+            }
+        );
+        for args in [
+            vec!["telemetry", "link", "--key", "r-1"],
+            vec!["telemetry", "report", "--key", "r-1", "--task", "abc"],
+            vec!["telemetry", "unlink", "--key", "r-1", "--output", "json"],
+        ] {
+            assert!(parse_args(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]
@@ -2066,6 +2298,102 @@ mod focused_help_tests {
     }
 
     #[test]
+    fn full_help_lists_public_commands_with_resolvable_focused_help() {
+        for command in [
+            "help",
+            "explain",
+            "setup",
+            "@agent",
+            "agents",
+            "onboard",
+            "lock",
+            "knowledge",
+            "eval",
+            "tasks",
+            "task",
+            "wait",
+            "result",
+            "cleanup",
+            "cancel",
+            "approve",
+            "reject",
+            "resume",
+            "focus",
+            "remove",
+            "message",
+            "cmux",
+            "auth",
+            "telemetry",
+            "mcp",
+            "doctor",
+            "agy",
+            "claude",
+            "codex",
+            "opencode",
+            "run-task",
+            "supervise",
+        ] {
+            assert!(
+                HELP_ALL.lines().any(|line| {
+                    line.strip_prefix("  ")
+                        .and_then(|line| line.split_whitespace().next())
+                        == Some(command)
+                }),
+                "missing from help all: {command}"
+            );
+            assert!(!help_for(Some(command)).unwrap().contains("Unknown command"));
+        }
+        for action in ["approve", "reject"] {
+            assert!(
+                matches!(parse_args(&[action, "fixture", "--output", "json"]).unwrap(),
+                Command::BatchControl { action: parsed, json: true, .. } if parsed == action)
+            );
+        }
+        let eval = help_for(Some("eval run")).unwrap();
+        assert!(!eval.contains("tasks options:"));
+        assert!(!eval.contains("doctor options:"));
+        assert_eq!(HELP_ALL.matches("agent assignment options:").count(), 1);
+    }
+
+    #[test]
+    fn no_focus_help_matches_interactive_and_scripted_syntax() {
+        assert_eq!(
+            parse_args(&["--no-focus"]).unwrap(),
+            Command::Interactive {
+                focus: false,
+                agent: None,
+            }
+        );
+        assert!(HELP_ALL.contains("`ahu --no-focus`"));
+        let args = [
+            "@fixture",
+            "--prompt-file",
+            "fixture.txt",
+            "--allow-widened-approvals",
+            "--name",
+            "fixture-task",
+            "--dry-run",
+            "--output",
+            "json",
+        ];
+        assert!(matches!(
+            parse_args(&args).unwrap(),
+            Command::Launch { dry_run: true, .. }
+        ));
+        let mut unsupported = args.to_vec();
+        unsupported.push("--no-focus");
+        assert!(parse_args(&unsupported).is_err());
+        let help = help_for(Some("@agent")).unwrap();
+        assert!(help.contains("assignments already leave focus unchanged"));
+        assert!(!help.lines().any(|line| line.starts_with("  --no-focus")));
+        assert!(
+            help_for(Some("auth"))
+                .unwrap()
+                .contains("does not verify OpenCode's configured provider endpoint")
+        );
+    }
+
+    #[test]
     fn help_topics_and_slices_are_consistent() {
         for topic in ["--help", "-h", "ahu tasks"] {
             assert!(!help_for(Some(topic)).unwrap().is_empty());
@@ -2073,7 +2401,7 @@ mod focused_help_tests {
         assert_eq!(help_for(Some("all")).unwrap(), HELP_ALL);
         for (topic, expected) in [
             ("setup", "Detect installed harnesses"),
-            ("lock", "--update refreshes the lock"),
+            ("lock", "--update refreshes ahu.lock"),
             ("cmux status", "native integration evidence"),
             ("cmux install", "Preview or delegate"),
             ("mcp serve", "stdio MCP"),
@@ -2086,7 +2414,7 @@ mod focused_help_tests {
         for (topic, starts_with) in [
             ("eval run", "eval run options:"),
             ("eval report", "eval report options:"),
-            ("launch", "launch options:"),
+            ("@agent", "agent assignment options:"),
             ("explain", "explain options:"),
             ("onboard", "onboard options:"),
             ("knowledge lint", "knowledge lint options:"),
@@ -2097,6 +2425,12 @@ mod focused_help_tests {
             );
         }
         assert!(help_for(Some("agents")).unwrap().contains("ahu agents"));
+        assert!(
+            help_for(Some("@agent"))
+                .unwrap()
+                .contains("--allow-widened-approvals")
+        );
+        assert!(help_for(Some("launch")).is_err());
         assert!(help_for(Some("unknown")).is_err());
         assert!(help_section("absent:", "also absent:").is_empty());
         assert!(help_line_for("unlisted").is_none());
@@ -2108,10 +2442,10 @@ mod direct_agent_tests {
     use super::*;
 
     #[test]
-    fn direct_agent_syntax_accepts_positional_prompt_and_launch_alias_remains() {
+    fn direct_agent_syntax_accepts_positional_prompt() {
         for args in [
             vec!["@dev-glm", "fix", "the", "parser"],
-            vec!["launch", "@dev-glm", "fix", "the", "parser"],
+            vec!["@dev-glm", "--prompt", "fix the parser"],
         ] {
             let Command::Launch {
                 agent,

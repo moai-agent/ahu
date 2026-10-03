@@ -1,5 +1,5 @@
 ---
-name: agent-context-critic
+name: ahu-agent-context-critic
 description: Use ahu evals and available telemetry to diagnose and improve an agent's committed context without overstating what the harness loaded.
 ---
 
@@ -83,6 +83,6 @@ changes and commits them; never commit or push as part of this workflow.
 - OTel is process evidence. A missing observation is unknown coverage, not proof
   that an agent did not use a tool. A tool call is not proof the task succeeded.
 
-Maintain `.agents/skills/agent-context-critic/SKILL.md` as the canonical
+Maintain `.agents/skills/ahu-agent-context-critic/SKILL.md` as the canonical
 repository skill. `ahu setup` distributes the exact bundled bytes to detected
 harnesses. After editing this skill, run `python3 scripts/check-skills.py`.

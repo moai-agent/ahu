@@ -26,8 +26,8 @@ agents, each using its configured harness and model in a separate worktree.
 Headless children inherit that backend; interactive children use cmux.
 Use `ahu @name 'assignment text'` for a direct launch, or
 `ahu @name --prompt-file /path/to/task.txt` for a file-backed assignment.
-`ahu launch @name` remains a supported alias and accepts the older
-`--prompt` form.
+The direct form also accepts `--prompt`; without a prompt, `ahu @name` opens
+the interactive launcher with that agent selected.
 Headless native helpers follow the frozen policy described below. Every
 launch supplies its backend delegation contract as prompt text on every
 harness, inside a fence tagged with a per-launch nonce,
@@ -68,7 +68,7 @@ The typed decision service has a separate credential boundary: ahu can read
 `TYPESAFE_API_KEY` from its process environment or the selected repository's
 `.env` and send explicitly supplied evidence to TypeSafe. It can instead use a
 configured loopback decision service. Do not copy that key into agent prompts,
-MCP configuration, telemetry or tracked files. Read `typed-decisions` for request
+MCP configuration, telemetry or tracked files. Read `ahu-typed-decisions` for request
 design and data handling, and `docs/typed-decisions.md` for provider configuration.
 
 ## Four rules everything else follows from
@@ -276,10 +276,12 @@ says so rather than reporting one number that could mean either.
 
 ## Headless attempts and results
 
-launch --headless uses batch execution without cmux or a PTY. Add --background
+`ahu @name --headless` uses batch execution without cmux or a PTY. Add --background
 to return after supervisor startup; otherwise execution stays in the foreground.
-The preview names the admitted CLI profile, exact command, timeout and gaps.
-Known cmux wrappers and unsupported versions fail without a fallback.
+The preview names the observed CLI version, exact command, timeout and gaps.
+Installed versions float unless the project pins one. Known cmux wrappers,
+missing adapters, version-pin mismatches, and unresolved isolation fail without
+a fallback. Specialized native controls remain version-specific.
 Minimal coordination belongs to the primary checkout's owner-only .ahu/state/.
 Native event streams, stderr, final text and helper summaries are not copied.
 New results use schema 2, with bounded outcome metadata and native references.
@@ -288,6 +290,12 @@ Native harness session stores keep their own external homes and retention.
 tasks and task show backend, attempt, ownership and blockers; wait follows an attempt, result
 reads its outcome and known native session with provenance and artifact locations.
 Human inspection bounds and escapes metadata; process completion is not acceptance.
+The supervisor evaluates native stdout events as they arrive. A recognized
+write tool naming an absolute target outside the worktree can trigger
+`boundary_violation` and cancellation. This happens after observation: it
+cannot prevent an already completed write, intercept shell writes, classify
+relative targets, or detect missing events. Final stream observations are checked before accepting success,
+including cancellation of registered descendants. This is not a sandbox.
 resume explicitly continues its recorded native session, and
 cancel requests termination of the task and its recorded ahu descendants; an
 interactive (cmux) task is stopped by its run-task parent. Confirmed cancellation
@@ -321,13 +329,31 @@ USD 5 budget per attempt. Roles are requested; total helper count is not capped.
 MCP and slash commands are excluded; settings and deny rules remain discoverable.
 The model tool ceiling does not prove hooks cannot write or spawn processes.
 Known successful helper joins are required. Provider-side cleanup stays unknown.
-Codex 0.154.0/0.155.1, Antigravity 1.2.2 and OpenCode 1.18.29/1.18.30/1.18.31 admit ordinary
-headless execution, but refuse bounded helpers. Claude 2.1.269 also admits only
-the disabled profile.
+The catalog records verified versions as compatibility evidence, not an
+allowlist. Ordinary headless admission also checks native isolation; bounded
+helpers keep their exact version requirement. See `docs/reference.md` for the
+profiles and limits. Admission does not establish live provider availability.
 Same-user code is not isolated from broker state. Hooks and arbitrary shell
 commands require a vetted environment; ahu's backend itself does not use cmux.
 Explicit cleanup removes recognized old captures and bounded requests, retaining
 structured results, frozen inputs, native stores, branches and worktrees.
+
+## Account checks and cooperative approval
+
+Local auth profiles opt a project into account checks before launch/startup and
+resume. Task pins contain a fingerprint and profile name. Resume compares the
+current native login with both the active binding and the task pin; rebinding
+does not migrate an existing task. Without profiles, these checks are inactive.
+`ahu auth readiness` exposes identity/binding states without account details or
+a model request. It does not establish quota, project trust, or tool approval.
+Checks are best effort, not an atomic credential lock. In particular, the
+OpenCode cloud-model check probes the loopback Ollama account selected by
+`OLLAMA_HOST` without verifying OpenCode's effective provider address.
+
+`ahu_request_approval` lets a live task request an explicit operator decision.
+Inspect it with `ahu task TASK`, then use `ahu approve TASK` or `ahu reject TASK`.
+Rejection or the 30-minute timeout requests task cancellation. This cooperative
+checkpoint does not intercept arbitrary actions or expand harness permissions.
 
 ## State and records
 

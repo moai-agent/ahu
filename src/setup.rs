@@ -1,6 +1,8 @@
 //! One first-run workflow for project policy, harness MCP clients, skills, and
 //! ahu developer agents.
 
+pub mod native_mcp;
+
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -23,6 +25,8 @@ struct Detected {
 // Codex filters the environment of stdio MCP children. Forward names only;
 // credentials are resolved by the server, never read or persisted by setup.
 const CODEX_MCP_ENV: &[&str] = &[
+    "AHU_TASK_ID",
+    "AHU_TASK_DIR",
     "AHU_EVAL_OTEL_ENDPOINT",
     "AHU_MCP_RESOURCE_ATTRIBUTES",
     "OTEL_RESOURCE_ATTRIBUTES",
@@ -143,24 +147,55 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         .with_kind(crate::util::ErrorKind::Prerequisite));
     }
 
-    run_detected(
+    let native_mcp = if detected.iter().any(|h| h.id == "antigravity") {
+        let path = crate::native_mcp::antigravity_config_path()?.ok_or_else(|| {
+            Error::new("Antigravity interactive MCP setup needs an absolute native home")
+        })?;
+        let executable = selection::resolve_executable("ahu")
+            .ok_or_else(|| Error::new("ahu executable disappeared before MCP setup"))?;
+        let executable = Path::new(&executable).canonicalize()?;
+        Some(native_mcp::plan(&path, &executable)?)
+    } else {
+        None
+    };
+    run_detected_with_native(
         console,
         repo,
         &detected,
         crate::launcher::run_setup_with_available_models,
         check_mcp_server,
+        native_mcp,
     )
 }
 
 /// Finish configuration for an already detected set of harnesses. Keeping
 /// environment discovery at the edge makes the setup transaction testable
 /// without faking PATH or launching harness binaries.
+#[cfg(test)]
 fn run_detected(
     console: &mut Console<'_>,
     repo: &Repo,
     detected: &[Detected],
     configure_project: fn(&mut Console<'_>) -> Result<Option<crate::config::ProjectConfig>>,
     check_server: fn(&Repo) -> Result<()>,
+) -> Result<i32> {
+    run_detected_with_native(
+        console,
+        repo,
+        detected,
+        configure_project,
+        check_server,
+        None,
+    )
+}
+
+fn run_detected_with_native(
+    console: &mut Console<'_>,
+    repo: &Repo,
+    detected: &[Detected],
+    configure_project: fn(&mut Console<'_>) -> Result<Option<crate::config::ProjectConfig>>,
+    check_server: fn(&Repo) -> Result<()>,
+    native_mcp: Option<native_mcp::Plan>,
 ) -> Result<i32> {
     console.say(&style::stdout().paint(Role::Heading, "Detected harnesses\n"))?;
     for h in detected {
@@ -329,18 +364,24 @@ fn run_detected(
         }
     }
 
+    if native_mcp.is_some() {
+        console.say("Antigravity: registering the cwd-sensitive ahu server in native user MCP configuration for interactive sessions; project configuration remains available for print mode. Other native servers are preserved.\n")?;
+    }
     apply_plan(console, &writes)?;
+    if let Some(plan) = native_mcp {
+        plan.apply()?;
+    }
 
-    // Read back native config and agent manifests, then refresh the context lock
-    // so every setup-created input is fingerprinted. Launch still requires the
-    // user to commit these project files and the lock.
+    // Read back native config and agent manifests, then refresh shared context.
+    // A first setup initializes private local-context acceptance; later setup
+    // runs must not silently accept changes to an existing user's settings.
     crate::agent::load_all(&repo.root)?;
     config::load(&repo.root)?;
     verify_client_configurations(&repo.root, detected)?;
     let snapshot = crate::snapshot::collect(&repo.root)?;
-    let lock = crate::context_lock::refresh(repo, &snapshot)?;
+    let lock = crate::context_lock::refresh_for_setup(repo, &snapshot)?;
     console.say(&format!(
-        "\nMCP stdio handshake passed; ahu MCP tools responded.\nRefreshed {}. Review and commit the setup files and lock before running ahu agents. Claude Code asks you to approve project MCP servers; Codex loads project MCP settings only for a trusted repository.\n",
+        "\nMCP stdio handshake passed; ahu MCP tools responded.\nRefreshed {} for shared context. Review and commit setup files and the lock before running agents. Local settings are accepted on first setup; later changes require `ahu lock --update` and stay in private Ahu state. Claude Code asks you to approve project MCP servers; Codex loads project MCP settings only for a trusted repository.\n",
         lock.display()
     ))?;
     Ok(0)
@@ -394,7 +435,7 @@ fn rollback(paths: &[PathBuf]) {
 
 fn dev_agent(harness: &str, model: &str) -> String {
     format!(
-        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: dev-{harness}\nversion: 1.0.0\ndescription: Development agent for {harness}\nharness: {harness}\nmodel: {model}\npermissions: prompt\nstatus: stable\n---\n\nYou are the project's development agent for the {harness} harness. Follow the committed repository instructions and skills that your harness exposes. Use the ahu MCP tools when available: ahu_agents_list, ahu_tasks_list, ahu_task_get, and ahu_typed_decide. Do not claim a skill was loaded merely because its file exists. Ask for approval when an action crosses the permissions available to you."
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: dev-{harness}\nversion: 1.0.0\ndescription: Development agent for {harness}\nharness: {harness}\nmodel: {model}\npermissions: prompt\nstatus: stable\n---\n\nYou are the project's development agent for the {harness} harness. Follow the committed repository instructions and skills that your harness exposes. Use the ahu MCP tools when available: ahu_agents_list, ahu_tasks_list, ahu_task_get, ahu_typed_decide, and ahu_request_approval for an explicit operator checkpoint before a consequential operation. The approval tool only pauses and records bounded request details; it never performs the requested operation. Do not claim a skill was loaded merely because its file exists. Ask for approval when an action crosses the permissions available to you."
     )
 }
 
@@ -1043,7 +1084,7 @@ mod tests {
         assert!(root.path().join(".codex/config.toml").is_file());
         assert!(
             root.path()
-                .join(".agents/skills/direct-agents/SKILL.md")
+                .join(".agents/skills/ahu-direct-agents/SKILL.md")
                 .is_file()
         );
         assert!(root.path().join(crate::context_lock::LOCK_PATH).is_file());
@@ -1327,7 +1368,9 @@ mod tests {
     fn setup_conflicts_are_detected_before_any_planned_write() {
         for directory in [false, true] {
             let (root, repo) = setup_repo();
-            let path = root.path().join(".agents/skills/direct-agents/SKILL.md");
+            let path = root
+                .path()
+                .join(".agents/skills/ahu-direct-agents/SKILL.md");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             if directory {
                 std::fs::create_dir(&path).unwrap();
@@ -1624,6 +1667,7 @@ esac
             harness_preferences: vec!["codex".into()],
             model_selection: "project-ranked".into(),
             catalog_version: crate::catalog::CATALOG_VERSION.into(),
+            harness_version_pins: Default::default(),
             model_rankings: std::collections::BTreeMap::from([(
                 "codex".into(),
                 vec![crate::catalog::models_for("codex")[0].model.into()],
