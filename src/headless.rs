@@ -2326,6 +2326,17 @@ pub fn supervise(dir: &Path) -> Result<i32> {
     supervise_authorized(dir, &expected)
 }
 
+// Persist only an allowlisted category, never arbitrary subprocess or filesystem
+// error text, which can contain paths, request contents or credentials.
+fn supervisor_failure_code(error: &Error) -> &'static str {
+    match error.to_string().as_str() {
+        "Git ownership changed during storage verification" => "git_ownership_changed",
+        "storage ownership verification unavailable" => "storage_verification_unavailable",
+        "stdout evaluator unavailable" => "stream_evaluator_unavailable",
+        _ => "unclassified",
+    }
+}
+
 fn supervise_authorized(dir: &Path, expected: &str) -> Result<i32> {
     confined(dir, false)?;
     if expected != frozen_digest(dir)? {
@@ -2349,7 +2360,7 @@ fn supervise_authorized(dir: &Path, expected: &str) -> Result<i32> {
         let _ = durable_json(
             &attempt.join("result.json"),
             &json!({"schema_version":2,"task_id":dir.file_name().unwrap_or_default().to_string_lossy(),"attempt":spec.attempt,
-            "outcome":"supervisor_error","failure_phase":phase,"failure_category":format!("{:?}",error.kind()),"blockers":["supervisor execution failed"],"acceptance":"not assessed","worktree_preserved":true}),
+            "outcome":"supervisor_error","failure_phase":phase,"failure_category":format!("{:?}",error.kind()),"failure_code":supervisor_failure_code(error),"blockers":["supervisor execution failed"],"acceptance":"not assessed","worktree_preserved":true}),
         );
         let _ = task::set_state(dir, task::TaskState::Failed);
     }
@@ -4398,6 +4409,34 @@ mod profile_and_metadata_tests {
                 .unwrap_err()
                 .to_string()
                 .contains("unsupported headless attempt")
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_failure_codes_never_persist_arbitrary_error_text() {
+        for (message, expected) in [
+            (
+                "Git ownership changed during storage verification",
+                "git_ownership_changed",
+            ),
+            (
+                "storage ownership verification unavailable",
+                "storage_verification_unavailable",
+            ),
+            (
+                "stdout evaluator unavailable",
+                "stream_evaluator_unavailable",
+            ),
+            ("provider failed with secret-marker", "unclassified"),
+            (
+                "Git ownership changed during storage verification secret-marker",
+                "unclassified",
+            ),
+        ] {
+            assert_eq!(
+                super::supervisor_failure_code(&Error::new(message)),
+                expected
             );
         }
     }

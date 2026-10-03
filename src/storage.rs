@@ -171,6 +171,8 @@ struct FileStamp {
     device: u64,
     inode: u64,
     mode: u32,
+    uid: u32,
+    gid: u32,
     size: u64,
     modified: (i64, i64),
     changed: (i64, i64),
@@ -182,9 +184,23 @@ impl FileStamp {
             device: meta.dev(),
             inode: meta.ino(),
             mode: meta.mode(),
-            size: meta.len(),
-            modified: (meta.mtime(), meta.mtime_nsec()),
-            changed: (meta.ctime(), meta.ctime_nsec()),
+            uid: meta.uid(),
+            gid: meta.gid(),
+            // Git creates/removes lockfiles and worktree entries during normal
+            // coordination. Directory children do not change ownership; retain
+            // inode, mode, owner and canonical-path checks. Actual locator files
+            // (HEAD, config, commondir, gitdir) keep their full change stamps.
+            size: if meta.is_dir() { 0 } else { meta.len() },
+            modified: if meta.is_dir() {
+                (0, 0)
+            } else {
+                (meta.mtime(), meta.mtime_nsec())
+            },
+            changed: if meta.is_dir() {
+                (0, 0)
+            } else {
+                (meta.ctime(), meta.ctime_nsec())
+            },
         }
     }
 }
@@ -425,6 +441,54 @@ mod ownership_tests {
     use super::*;
 
     #[test]
+    fn directory_watch_tracks_identity_not_ordinary_git_child_activity() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let git = root.path().join(".git");
+        std::fs::create_dir(&git).unwrap();
+        let before = WatchedPath::read(git.clone()).unwrap();
+        std::fs::write(git.join("index.lock"), b"synthetic lock").unwrap();
+        assert!(
+            before.unchanged(),
+            "child file activity is not directory ownership drift"
+        );
+        std::fs::remove_file(git.join("index.lock")).unwrap();
+        assert!(before.unchanged());
+        let mode = std::fs::metadata(&git).unwrap().permissions().mode();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(mode ^ 0o010)).unwrap();
+        assert!(
+            !before.unchanged(),
+            "directory permissions remain part of ownership evidence"
+        );
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(mode)).unwrap();
+        let moved = root.path().join("moved");
+        std::fs::rename(&git, &moved).unwrap();
+        std::fs::create_dir(&git).unwrap();
+        assert!(
+            !before.unchanged(),
+            "replacement inode must invalidate verification"
+        );
+        std::fs::remove_dir(&git).unwrap();
+        symlink(&moved, &git).unwrap();
+        assert!(
+            !before.unchanged(),
+            "symlink replacement must invalidate verification"
+        );
+    }
+
+    #[test]
+    fn regular_git_locator_changes_still_invalidate_the_watch() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        std::fs::write(&config, b"original").unwrap();
+        let before = WatchedPath::read(config.clone()).unwrap();
+        std::fs::write(&config, b"new ownership configuration").unwrap();
+        assert!(!before.unchanged());
+        std::fs::remove_file(&config).unwrap();
+        assert!(!before.unchanged());
+    }
+
+    #[test]
     fn descriptor_owner_validation_refuses_another_uid() {
         use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();
@@ -453,8 +517,8 @@ mod ownership_tests {
             .join(&first.identity)
             .join("headless");
         crate::state::create_private_dir_all(&directory).unwrap();
-        // Creating .ahu changes the checkout metadata once. Subsequent writes
-        // beneath it reuse the same positive verification, without Git probes.
+        // Creating state directories and records preserves directory ownership;
+        // these writes reuse positive verification without Git probes.
         let stable = verified_primary(&primary).unwrap();
         for n in 0..3 {
             crate::headless::durable_json(
