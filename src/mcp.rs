@@ -609,7 +609,7 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
 }
 
 fn call_response(repo: &Repo, id: &Value, params: &Value, modern: bool) -> Value {
-    call_response_with_cancellation(repo, id, params, modern, None)
+    call_response_with_cancellation(repo, id, params, modern, None, None)
 }
 
 pub(super) fn call_response_with_cancellation(
@@ -618,6 +618,7 @@ pub(super) fn call_response_with_cancellation(
     params: &Value,
     modern: bool,
     cancellation: Option<&std::path::Path>,
+    approval_context: Option<&crate::approval::Context>,
 ) -> Value {
     if let Err(error) = validate_tool_call(params, false) {
         return rpc_error(id, -32602, error.to_string());
@@ -634,12 +635,13 @@ pub(super) fn call_response_with_cancellation(
         "ahu_tasks_list" => tasks(repo),
         "ahu_task_get" => task_get(repo, &arguments),
         "ahu_typed_decide" => decisions::call(&arguments, repo),
-        "ahu_request_approval" => crate::approval::request(
+        "ahu_request_approval" => crate::approval::request_with_context(
             repo,
             arguments["operation"].as_str().unwrap_or_default(),
             arguments["summary"].as_str().unwrap_or_default(),
             arguments.get("target").and_then(Value::as_str),
             cancellation,
+            approval_context,
         ),
         "ahu_skills_suggest" => {
             crate::skill_selection::Mode::parse(arguments["mode"].as_str().unwrap_or("decision"))

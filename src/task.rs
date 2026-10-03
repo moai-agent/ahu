@@ -379,6 +379,16 @@ pub fn load_prompt(dir: &Path) -> Result<String> {
 
 /// Update the recorded state of a task.
 pub fn set_state(dir: &Path, new_state: TaskState) -> Result<()> {
+    let _lock = lock_state(dir)?;
+    set_state_locked(dir, new_state)
+}
+
+pub(crate) fn lock_state(dir: &Path) -> Result<StateLock> {
+    StateLock::acquire(&dir.join("state.lock"))
+}
+
+/// Caller holds the task state lock, including any related approval mutation.
+pub(crate) fn set_state_locked(dir: &Path, new_state: TaskState) -> Result<()> {
     let mut record = load(dir)?;
     record.state = new_state;
     state::write_json(&crate::storage::TaskStorage::new(dir).record(), &record)
@@ -810,6 +820,52 @@ fn scan_worktrees(
         }
     }
     Ok(())
+}
+
+// Persistent lock files must never be unlinked: all processes must lock the
+// same inode. Kernel ownership, rather than a timestamp, survives crashes safely.
+pub(crate) struct StateLock(std::fs::File);
+impl StateLock {
+    pub(crate) fn acquire(path: &std::path::Path) -> Result<Self> {
+        for _ in 0..50 {
+            if let Some(lock) = Self::try_acquire(path)? {
+                return Ok(lock);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Err(Error::new("task state busy; retry request"))
+    }
+    pub(crate) fn try_acquire(path: &std::path::Path) -> Result<Option<Self>> {
+        use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+        state::confine_file(path)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)?;
+        crate::storage::validate_owned_metadata(&file.metadata()?, true)?;
+        // SAFETY: the file owns a valid descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error.into());
+        }
+        Ok(Some(Self(file)))
+    }
+}
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the file is still open.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 #[cfg(test)]

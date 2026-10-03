@@ -669,16 +669,14 @@ pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
         let Some(workspace_id) = record.cmux_workspace_id.as_deref() else {
             continue;
         };
-        if !live.contains_key(workspace_id)
-            && matches!(record.state, TaskState::Starting | TaskState::Running)
-        {
+        if !live.contains_key(workspace_id) && record.state.is_live() {
             record.state = TaskState::Exited;
             // Best effort, and deliberately not fatal: reconciliation is a
             // status refresh, and a state directory that has gone read-only
             // must not stop `ahu tasks` listing what exists. The value returned
             // to the caller is the true one either way — cmux is the authority
             // on whether the workspace is still there, not this file.
-            let _ = state::write_json(&dir.join("task.json"), record);
+            let _ = task::set_state(dir, TaskState::Exited);
         }
     }
     Ok(tasks)
