@@ -110,6 +110,10 @@ fn binding_path_without_creation(repo: &Repo) -> Result<PathBuf> {
 }
 
 fn load(repo: &Repo, path: &Path) -> Result<BindingFile> {
+    load_with_migration(repo, path, true)
+}
+
+fn load_with_migration(repo: &Repo, path: &Path, persist_migration: bool) -> Result<BindingFile> {
     let value: Value = crate::state::read_json(path)?;
     let migrate_legacy = value.get("schema_version").and_then(Value::as_u64) == Some(1);
     let mut bindings = if value.is_null() {
@@ -150,7 +154,7 @@ fn load(repo: &Repo, path: &Path) -> Result<BindingFile> {
         ));
     }
     bindings.repo_identity = expected;
-    if migrate_legacy {
+    if migrate_legacy && persist_migration {
         save(path, &bindings)?;
     }
     Ok(bindings)
@@ -226,7 +230,20 @@ pub fn status(repo: &Repo, harness: &str) -> Result<String> {
 /// reports whether identity can be checked and whether the active project
 /// binding matches, not the account details themselves.
 pub fn readiness(repo: &Repo, harness: &str, model: Option<&str>) -> Value {
-    let binding_harness = if harness == "opencode" {
+    readiness_with_probe(repo, harness, model, probe)
+}
+
+fn readiness_with_probe(
+    repo: &Repo,
+    harness: &str,
+    model: Option<&str>,
+    probe_identity: impl FnOnce(&str, &Path) -> Result<Identity>,
+) -> Value {
+    // Ollama is an auth provider, not a launchable harness. Keep the direct
+    // readiness alias separate from task admission's harness/model mapping.
+    let binding_harness = if harness == "ollama" {
+        Some("ollama")
+    } else if harness == "opencode" {
         model.and_then(|model| task_binding_harness(harness, model))
     } else {
         task_binding_harness(harness, "")
@@ -249,14 +266,14 @@ pub fn readiness(repo: &Repo, harness: &str, model: Option<&str>) -> Value {
         return readiness_error(harness, model, "unavailable", "unavailable");
     }
     let bindings = if path.exists() {
-        match load(repo, &path) {
+        match load_with_migration(repo, &path, false) {
             Ok(bindings) => Some(bindings),
             Err(_) => return readiness_error(harness, model, "unavailable", "unavailable"),
         }
     } else {
         None
     };
-    let identity = match probe(binding_harness, &repo.root) {
+    let identity = match probe_identity(binding_harness, &repo.root) {
         Ok(identity) => identity,
         Err(_) => return readiness_error(harness, model, "unavailable", "unavailable"),
     };
@@ -1063,6 +1080,83 @@ mod profile_tests {
         assert!(!serialized.contains("@"));
         assert!(!serialized.contains("token"));
         assert!(!serialized.contains("auth.json"));
+    }
+
+    #[test]
+    fn ollama_readiness_checks_bindings_without_changing_launch_admission() {
+        let (_temp, repo) = repo_fixture();
+        let identity = Identity {
+            harness: "ollama".into(),
+            identity_kind: "ollama-account".into(),
+            principal: "fixture@example.invalid".into(),
+            organization: None,
+            workspace: Some("fixture-account".into()),
+        };
+        let check = |harness, model| {
+            readiness_with_probe(&repo, harness, model, |provider, _| {
+                assert_eq!(provider, "ollama");
+                Ok(identity.clone())
+            })
+        };
+        assert_eq!(check("ollama", None)["binding"], "not_configured");
+        assert!(!repo.root.join(".ahu").exists());
+        let path = binding_path(&repo).unwrap();
+        let mut bindings = BindingFile {
+            profiles: BTreeMap::from([("default".into(), BTreeMap::new())]),
+            ..BindingFile::default()
+        };
+        save(&path, &bindings).unwrap();
+        assert_eq!(check("ollama", None)["binding"], "not_bound");
+        bindings.profiles.get_mut("default").unwrap().insert(
+            "ollama".into(),
+            StoredBinding {
+                fingerprint: identity.fingerprint().unwrap(),
+                identity_kind: identity.identity_kind.clone(),
+                profile: None,
+            },
+        );
+        save(&path, &bindings).unwrap();
+        for (harness, model) in [("ollama", None), ("opencode", Some("ollama/fixture:cloud"))] {
+            let status = check(harness, model);
+            assert_eq!(status["identity"], "verified");
+            assert_eq!(status["binding"], "matched");
+            assert_eq!(status["ready"], true);
+            assert!(!status.to_string().contains("fixture@example.invalid"));
+        }
+        let mismatch = readiness_with_probe(&repo, "ollama", None, |_, _| {
+            Ok(Identity {
+                principal: "changed@example.invalid".into(),
+                ..identity.clone()
+            })
+        });
+        assert_eq!(mismatch["binding"], "mismatch");
+        assert_eq!(mismatch["ready"], false);
+        let unavailable = readiness_with_probe(&repo, "ollama", None, |_, _| {
+            Err(Error::new("private provider diagnostic"))
+        });
+        assert_eq!(unavailable["identity"], "unavailable");
+        assert_eq!(unavailable["ready"], false);
+        assert!(
+            !unavailable
+                .to_string()
+                .contains("private provider diagnostic")
+        );
+        assert_eq!(task_binding_harness("ollama", ""), None);
+        assert!(verify_launch(&repo, "ollama", "fixture:cloud").is_err());
+        assert!(verify_launch(&repo, "opencode", "openai/fixture").is_err());
+    }
+
+    #[test]
+    fn readiness_preserves_legacy_binding_bytes() {
+        let (_temp, repo) = repo_fixture();
+        let path = binding_path(&repo).unwrap();
+        let legacy = br#"{"schema_version":1,"bindings":{}}"#;
+        std::fs::write(&path, legacy).unwrap();
+        let status = readiness_with_probe(&repo, "codex", None, |_, _| {
+            Err(Error::new("synthetic unavailable identity"))
+        });
+        assert_eq!(status["ready"], false);
+        assert_eq!(std::fs::read(&path).unwrap(), legacy);
     }
 
     #[test]

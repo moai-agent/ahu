@@ -54,6 +54,8 @@ Commands:
                         Inspect a task's recorded session state and locations
   wait <task-id> [--output json]    Wait for a headless attempt to stop
   result <task-id> [--output json]  Read durable process and harness outcomes
+  approve <task-id> [--output json] Resolve a pending MCP approval request
+  reject <task-id> [--output json]  Reject a pending MCP request and request cancellation
   cleanup <task-id>                After known termination, remove recognized old captures
                                   and bounded requests; retain results and native sessions,
                                   branches and worktrees
@@ -117,6 +119,8 @@ Options:
   --repo <path>         Select a repository checkout before the command.
                         Also accepts --repo=<path>; paths in the command are
                         relative to this checkout. No environment override.
+  --no-focus            Open the interactive launcher without switching to the new
+                        session after launch: `ahu --no-focus`. Select @name there.
   --color <choice>      auto, always, or never (also --color=<choice>).
                         Always/never override NO_COLOR. Auto honors any
                         NO_COLOR value and requires stdout to be a
@@ -197,9 +201,8 @@ doctor options:
   --verbose             Show component-level cmux, hook, drift, and context-lock details
 
 agent assignment options:
-  --no-focus            Do not switch to the new session after launching
+  Scripted assignments already leave focus unchanged; omit --no-focus.
 
-agent assignment options:
   --name <name>        Reserve an immutable @name for this task in the repository.
                         By default, generate a short name from the displayed title.
   --prompt <text>       Use an inline prompt (conflicts with --prompt-file)
@@ -290,7 +293,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
     let help = match topic {
         "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh ahu.lock. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
-        "eval run" => help_section("eval run options:", "agent assignment options:"),
+        "eval run" => help_section("eval run options:", "tasks options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
         "@agent" => help_section("agent assignment options:", "Exit codes:"),
         "explain" => help_section("explain options:", "onboard options:"),
@@ -300,7 +303,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes ahu.lock and accepts local context in owner-only host state; review and commit ahu.lock only when shared context changed.\n".to_string(),
         "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
         "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
-        "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics.\n\nVerified: codex, claude-code, Antigravity, and Ollama's local account endpoint. Ollama binding applies to OpenCode tasks using Ollama cloud models; other OpenCode providers cannot yet be bound.\n".to_string(),
+        "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics.\n\nIdentity probes: codex, claude-code, antigravity, and ollama. Use --harness ollama to check the loopback daemon selected by OLLAMA_HOST (default 127.0.0.1:11434). OpenCode readiness requires --model with an Ollama cloud model; other OpenCode providers remain unsupported. Readiness checks account identity and project binding only: it does not verify OpenCode's configured provider endpoint, model availability, or inference access.\n".to_string(),
         "telemetry" => "Usage: ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
         "task" => "Usage: ahu task ID [--output json]\n\nInspect a task's state, branch, worktree, and launch evidence.\n".to_string(),
@@ -2291,6 +2294,102 @@ mod focused_help_tests {
         assert_eq!(
             parse_args(&["doctor", "--verbose"]).unwrap(),
             Command::Doctor { verbose: true }
+        );
+    }
+
+    #[test]
+    fn full_help_lists_public_commands_with_resolvable_focused_help() {
+        for command in [
+            "help",
+            "explain",
+            "setup",
+            "@agent",
+            "agents",
+            "onboard",
+            "lock",
+            "knowledge",
+            "eval",
+            "tasks",
+            "task",
+            "wait",
+            "result",
+            "cleanup",
+            "cancel",
+            "approve",
+            "reject",
+            "resume",
+            "focus",
+            "remove",
+            "message",
+            "cmux",
+            "auth",
+            "telemetry",
+            "mcp",
+            "doctor",
+            "agy",
+            "claude",
+            "codex",
+            "opencode",
+            "run-task",
+            "supervise",
+        ] {
+            assert!(
+                HELP_ALL.lines().any(|line| {
+                    line.strip_prefix("  ")
+                        .and_then(|line| line.split_whitespace().next())
+                        == Some(command)
+                }),
+                "missing from help all: {command}"
+            );
+            assert!(!help_for(Some(command)).unwrap().contains("Unknown command"));
+        }
+        for action in ["approve", "reject"] {
+            assert!(
+                matches!(parse_args(&[action, "fixture", "--output", "json"]).unwrap(),
+                Command::BatchControl { action: parsed, json: true, .. } if parsed == action)
+            );
+        }
+        let eval = help_for(Some("eval run")).unwrap();
+        assert!(!eval.contains("tasks options:"));
+        assert!(!eval.contains("doctor options:"));
+        assert_eq!(HELP_ALL.matches("agent assignment options:").count(), 1);
+    }
+
+    #[test]
+    fn no_focus_help_matches_interactive_and_scripted_syntax() {
+        assert_eq!(
+            parse_args(&["--no-focus"]).unwrap(),
+            Command::Interactive {
+                focus: false,
+                agent: None,
+            }
+        );
+        assert!(HELP_ALL.contains("`ahu --no-focus`"));
+        let args = [
+            "@fixture",
+            "--prompt-file",
+            "fixture.txt",
+            "--allow-widened-approvals",
+            "--name",
+            "fixture-task",
+            "--dry-run",
+            "--output",
+            "json",
+        ];
+        assert!(matches!(
+            parse_args(&args).unwrap(),
+            Command::Launch { dry_run: true, .. }
+        ));
+        let mut unsupported = args.to_vec();
+        unsupported.push("--no-focus");
+        assert!(parse_args(&unsupported).is_err());
+        let help = help_for(Some("@agent")).unwrap();
+        assert!(help.contains("assignments already leave focus unchanged"));
+        assert!(!help.lines().any(|line| line.starts_with("  --no-focus")));
+        assert!(
+            help_for(Some("auth"))
+                .unwrap()
+                .contains("does not verify OpenCode's configured provider endpoint")
         );
     }
 
