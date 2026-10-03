@@ -588,6 +588,35 @@ fn verification_refuses_record_held_by_a_sibling_checkout() {
 }
 
 #[test]
+fn startup_failure_does_not_claim_post_spawn_termination() {
+    for started in [false, true] {
+        for cancelled in [false, true] {
+            for state in [TaskState::Starting, TaskState::Running, TaskState::Exited] {
+                let (_temp, repo, loaded, plan) = fixture();
+                std::fs::create_dir_all(&plan.worktree).unwrap();
+                let mut record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+                record.state = state;
+                task::save(&plan.task_dir, &record, PROMPT).unwrap();
+                if cancelled {
+                    std::fs::write(plan.task_dir.join("cancel.json"), "{}").unwrap();
+                }
+                let error =
+                    record_startup_error(&plan.task_dir, started, Error::new("synthetic failure"));
+                assert_eq!(error.to_string(), "synthetic failure");
+                let expected = if started || !state.is_live() {
+                    state
+                } else if cancelled {
+                    TaskState::Cancelled
+                } else {
+                    TaskState::Failed
+                };
+                assert_eq!(task::load(&plan.task_dir).unwrap().state, expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     const CASE: &str = "AHU_LAUNCH_RUN_FIXTURE";

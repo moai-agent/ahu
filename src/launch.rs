@@ -1081,27 +1081,36 @@ fn terminate_group(child: &mut std::process::Child) -> Result<()> {
 pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     // Do not mutate a task path until its frozen execution record is verified.
     let (record, rebuilt, executable) = verify_task(task_dir, None)?;
-    run_verified_task(task_dir, record, rebuilt, executable).map_err(|error| {
-        let persist = (|| -> Result<()> {
-            let _lock = task::lock_state(task_dir)?;
-            if task::load(task_dir)?.state.is_live() {
-                let state = if task_dir.join("cancel.json").exists() {
-                    TaskState::Cancelled
-                } else {
-                    TaskState::Failed
-                };
-                task::set_state_locked(task_dir, state)?;
-            }
-            Ok(())
-        })();
-        match persist {
-            Ok(()) => error,
-            Err(state_error) => Error::new(format!(
-                "{error}. The task failure could not be recorded: {state_error}"
-            ))
-            .with_kind(error.kind()),
+    let mut started = false;
+    run_verified_task(task_dir, record, rebuilt, executable, &mut started)
+        .map_err(|error| record_startup_error(task_dir, started, error))
+}
+
+fn record_startup_error(task_dir: &Path, started: bool, error: Error) -> Error {
+    // After spawn, only supervision can establish that the process stopped.
+    // A failed termination request must not turn a live task into a terminal one.
+    if started {
+        return error;
+    }
+    let persist = (|| -> Result<()> {
+        let _lock = task::lock_state(task_dir)?;
+        if task::load(task_dir)?.state.is_live() {
+            let state = if task_dir.join("cancel.json").exists() {
+                TaskState::Cancelled
+            } else {
+                TaskState::Failed
+            };
+            task::set_state_locked(task_dir, state)?;
         }
-    })
+        Ok(())
+    })();
+    match persist {
+        Ok(()) => error,
+        Err(state_error) => Error::new(format!(
+            "{error}. The task failure could not be recorded: {state_error}"
+        ))
+        .with_kind(error.kind()),
+    }
 }
 
 fn run_verified_task(
@@ -1109,6 +1118,7 @@ fn run_verified_task(
     mut record: TaskRecord,
     rebuilt: LaunchCommand,
     executable: PathBuf,
+    started: &mut bool,
 ) -> Result<HarnessOutcome> {
     let loaded = crate::config::load(&record.worktree)?;
     let config = loaded.as_ref().map(|loaded| &loaded.config);
@@ -1221,20 +1231,15 @@ fn run_verified_task(
             .process_group(0)
             .spawn()
             .map_err(|error| {
-                let state_failure = task::set_state(task_dir, TaskState::Failed)
-                    .err()
-                    .map(|state_error| {
-                        format!(" The task state could not be recorded as failed: {state_error}.")
-                    })
-                    .unwrap_or_default();
                 Error::new(format!(
-                    "cannot start {}: {error}.{state_failure}\nThe worktree and task record are preserved at {} and {}.",
+                    "cannot start {}: {error}.\nThe worktree and task record are preserved at {} and {}.",
                     executable.display(),
                     record.worktree.display(),
                     task_dir.display()
                 ))
             })?
     };
+    *started = true;
 
     // The TUI harness needs the terminal's foreground or its first stdin read
     // stops it with SIGTTIN; hand it over now and take it back when the
