@@ -20,7 +20,12 @@ Run `ahu --help` for the concise public command list. `ahu doctor` gives a
 concise readiness summary; `ahu doctor --verbose` shows component-level
 details. It checks
 repository and harness readiness, the committed context lock, bundled skill
-bytes, telemetry configuration, and registered-agent configuration drift. For a
+bytes, telemetry configuration, registered-agent configuration drift, and account
+binding readiness for each registered harness/model pair. Account checks display
+status only, without principal values. Mismatched or missing bindings in an active
+profile are launch blockers; unsupported or unavailable identity checks remain
+explicitly uncertain. A general prerequisite check does not prove every execution
+mode is available. For a
 configured local telemetry endpoint, doctor reports TCP reachability only; it
 does not verify OTLP delivery. `ahu agents` displays the registered agents, pinned
 harnesses and models, manifest paths, and detected drift in a table. `ahu tasks`

@@ -441,6 +441,34 @@ pub fn onboard_cmd(
     Ok(0)
 }
 
+/// Map only the secret-free readiness vocabulary, never provider diagnostics.
+fn auth_readiness_summary(status: &serde_json::Value) -> (&'static str, bool, bool) {
+    match status.get("binding").and_then(serde_json::Value::as_str) {
+        Some("matched") => ("account binding matches", false, false),
+        Some("mismatch") => ("blocked: account differs from project binding", true, false),
+        Some("not_bound") => (
+            "blocked: account is not bound in the active profile",
+            true,
+            false,
+        ),
+        Some("not_configured") => (
+            "account verified; project protection is not configured",
+            false,
+            true,
+        ),
+        Some("unsupported") => (
+            "account verification unsupported for this provider",
+            false,
+            true,
+        ),
+        _ => (
+            "account readiness unavailable; launch checks still apply",
+            false,
+            true,
+        ),
+    }
+}
+
 /// `ahu doctor`
 pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
     doctor_with_verbosity(console, repo, false)
@@ -597,6 +625,38 @@ pub fn doctor_with_verbosity(
             "harness      {} {status}\n",
             display_safe(harness)
         ))?;
+    }
+
+    if let Ok(repo) = repo {
+        // Inspect each registered harness/model pair once. Readiness projects
+        // status only: doctor must never print account principals or tokens.
+        let pairs: std::collections::BTreeSet<_> = registered_agents
+            .iter()
+            .map(|agent| {
+                (
+                    agent.manifest.harness.as_str(),
+                    agent.manifest.model.as_str(),
+                )
+            })
+            .collect();
+        for (harness, model) in pairs {
+            let status = crate::auth_binding::readiness(repo, harness, Some(model));
+            let (label, blocked, uncertain) = auth_readiness_summary(&status);
+            problems += usize::from(blocked);
+            warnings += usize::from(uncertain);
+            console.say(&format!(
+                "auth         {} / {}: {label}\n",
+                display_safe(harness),
+                display_safe(model),
+            ))?;
+            if blocked || (verbose && uncertain) {
+                console.say(&format!(
+                    "  inspect    ahu auth readiness --harness {} --model {}\n",
+                    display_safe(harness),
+                    display_safe(model),
+                ))?;
+            }
+        }
     }
 
     if let Ok(repo) = repo
@@ -789,11 +849,11 @@ pub fn doctor_with_verbosity(
     let summary = match (problems, warnings) {
         (0, 0) => "\nNo blocking problems found.\n".to_string(),
         (0, w) => format!(
-            "\nNo blocking problems found. {w} warning(s) above affect behaviour but do not stop a launch.\n"
+            "\nNo general prerequisite failures found. Review {w} warning(s); some modes or account checks may still prevent launch.\n"
         ),
         (p, 0) => format!("\n{p} problem(s) would block a launch.\n"),
         (p, w) => format!(
-            "\n{p} problem(s) would block a launch, and {w} warning(s) affect behaviour without stopping one.\n"
+            "\n{p} problem(s) would block affected launches; review {w} additional warning(s).\n"
         ),
     };
     console.say(&style::stdout().paint(
@@ -2959,6 +3019,31 @@ mod doctor_tests {
     use super::{local_collector_reachable, telemetry_collector_status};
     use crate::config::TelemetryConfig;
     use std::net::TcpListener;
+
+    #[test]
+    fn account_readiness_distinguishes_blockers_from_optional_protection() {
+        for (binding, blocked, uncertain) in [
+            ("matched", false, false),
+            ("mismatch", true, false),
+            ("not_bound", true, false),
+            ("not_configured", false, true),
+            ("unsupported", false, true),
+            ("unavailable", false, true),
+            ("future-status", false, true),
+        ] {
+            let status = serde_json::json!({
+                "binding": binding,
+                "principal": "private@example.invalid",
+                "error": "provider-secret-diagnostic",
+            });
+            let (text, actual_blocked, actual_uncertain) = super::auth_readiness_summary(&status);
+            assert_eq!((actual_blocked, actual_uncertain), (blocked, uncertain));
+            assert!(!text.contains("private@example.invalid"));
+            assert!(!text.contains("provider-secret-diagnostic"));
+        }
+        assert!(!super::auth_readiness_summary(&serde_json::Value::Null).1);
+        assert!(super::auth_readiness_summary(&serde_json::Value::Null).2);
+    }
 
     #[test]
     fn telemetry_is_off_by_default_and_describes_listener_evidence_precisely() {
