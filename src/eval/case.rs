@@ -205,6 +205,9 @@ pub struct EvalCase {
     /// Schema 2 only. Absent means the case expects nothing about tools.
     #[serde(default)]
     pub tool_expectations: Option<ToolExpectations>,
+    /// Optional observed-stream budgets, never shown to the candidate.
+    #[serde(default)]
+    pub trajectory_budgets: Option<super::trajectory::Budgets>,
     /// SHA-256 of the case file exactly as it was read, front matter included.
     #[serde(skip)]
     pub digest: String,
@@ -291,6 +294,13 @@ impl EvalCase {
             || !simple_json(&self.state, 0)
         {
             bail!(kind: ErrorKind::Usage, "evaluation case schema, identity, questions, or expected answer is invalid");
+        }
+        if self
+            .trajectory_budgets
+            .as_ref()
+            .is_some_and(|b| b.max_steps.is_none() && b.max_tool_errors.is_none())
+        {
+            bail!(kind: ErrorKind::Usage, "trajectory_budgets requires max_steps or max_tool_errors; omit the field for no budget");
         }
         let threshold = self.scoring.get("exact_match_pass_threshold").copied();
         let weight_keys: BTreeSet<_> = self
@@ -667,6 +677,32 @@ mod tests {
                 .map(|(name, count)| ((*name).to_owned(), *count))
                 .collect(),
             ..TaskTelemetry::default()
+        }
+    }
+
+    #[test]
+    fn trajectory_budgets_are_validated_and_hidden_from_prompts() {
+        let case = parse(&document(
+            2,
+            "trajectory_budgets: {max_steps: 3, max_tool_errors: 0, unknown_coverage: fail}\n",
+        ))
+        .unwrap();
+        assert_eq!(case.trajectory_budgets.as_ref().unwrap().max_steps, Some(3));
+        assert!(!case.candidate_prompt().contains("trajectory_budgets"));
+        assert!(
+            !case
+                .evaluator_prompt(&serde_json::json!({"route":"billing"}))
+                .unwrap()
+                .contains("trajectory_budgets")
+        );
+        for budget in [
+            "{}",
+            "{max_steps: -1}",
+            "{max_steps: 1.5}",
+            "{max_steps: 1, unknown_coverage: ignore}",
+            "{max_steps: 1, typo: 1}",
+        ] {
+            assert!(parse(&document(2, &format!("trajectory_budgets: {budget}\n"))).is_err());
         }
     }
 

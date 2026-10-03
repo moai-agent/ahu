@@ -41,6 +41,7 @@ pub mod decision;
 pub mod fingerprint;
 pub mod stats;
 pub mod suite;
+pub mod trajectory;
 
 pub use case::{PromptProfile, ToolExpectationStatus, ToolExpectations, score_tool_expectations};
 pub use fingerprint::{AgentFingerprint, Blinding, BuildIdentity, InputFingerprint, SuiteIdentity};
@@ -228,6 +229,10 @@ struct Record {
     /// that failed or timed out and never reached the telemetry receiver.
     #[serde(default)]
     launch_elapsed_ms: Option<f64>,
+    #[serde(default)]
+    trajectory: Option<trajectory::Observation>,
+    #[serde(default)]
+    trajectory_budget_status: Option<trajectory::BudgetStatus>,
 }
 
 /// Terminal statuses that mean no valid answer existed to score.
@@ -349,6 +354,7 @@ pub struct Coverage {
 /// One comparable configuration.
 #[derive(Debug, Clone)]
 pub struct Group {
+    pub trajectory: trajectory::Summary,
     pub key: GroupKey,
     pub runs: usize,
     pub passes: usize,
@@ -1121,6 +1127,11 @@ fn group(records: &[Record]) -> Vec<Group> {
                 .map(|(field, amounts)| (field.clone(), amounts.len()))
                 .collect();
             Group {
+                trajectory: trajectory::Summary::collect(
+                    items
+                        .iter()
+                        .map(|r| (r.trajectory.as_ref(), r.trajectory_budget_status)),
+                ),
                 key,
                 runs,
                 passes,
@@ -1287,6 +1298,34 @@ pub fn render_at(report: &Report, width: usize) -> String {
             display_safe(&key.harness_version),
             display_safe(&key.ahu_version),
             display_safe(&key.skill_digest)
+        ));
+        let trajectory = &group.trajectory;
+        out.push_str(&format!(
+            "  trajectory missing {}/{} runs; coverage {}; sources {}; tracking limited {}\n",
+            trajectory.missing_runs,
+            group.runs,
+            serde_json::to_string(&trajectory.coverage).unwrap_or_default(),
+            serde_json::to_string(&trajectory.sources).unwrap_or_default(),
+            trajectory.limited_runs
+        ));
+        for name in [
+            "steps",
+            "tool_calls",
+            "tool_errors",
+            "repeated_tool_calls",
+            "repeated_tool_errors",
+            "tool_recoveries",
+        ] {
+            out.push_str(&format!(
+                "             {name} mean {} ({}/{} observations)\n",
+                measurement(trajectory.means.get(name).copied()),
+                trajectory.observations.get(name).copied().unwrap_or(0),
+                group.runs
+            ));
+        }
+        out.push_str(&format!(
+            "             budgets {}\n",
+            serde_json::to_string(&trajectory.budget_statuses).unwrap_or_default()
         ));
         if matches!(key.evaluator_kind.as_str(), "agent" | "typed_decision") {
             let metrics = &group.evaluator_metrics;
@@ -2137,9 +2176,12 @@ pub fn run(
                     "telemetry_receiver".into(),
                     serde_json::to_value(receiver.receiver_stats().since(receiver_stats_before))?,
                 );
+                insert_trajectory_fields(&mut record, envelope, case.trajectory_budgets.as_ref())?;
                 insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
+                let trajectory_budget_status = record.get("trajectory_budget_status").cloned();
                 append_jsonl(&records, &serde_json::Value::Object(record))?;
                 outputs.push(serde_json::json!({
+                    "trajectory_budget_status": trajectory_budget_status,
                     "trial": trial.index,
                     "case_id": case.id,
                     "agent": candidate.manifest.name,
@@ -2219,9 +2261,16 @@ pub fn run(
                     "telemetry_receiver".into(),
                     serde_json::to_value(receiver.receiver_stats().since(receiver_stats_before))?,
                 );
+                insert_trajectory_fields(
+                    &mut record,
+                    Some(&candidate_result),
+                    case.trajectory_budgets.as_ref(),
+                )?;
                 insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
+                let trajectory_budget_status = record.get("trajectory_budget_status").cloned();
                 append_jsonl(&records, &serde_json::Value::Object(record))?;
                 outputs.push(serde_json::json!({
+                    "trajectory_budget_status": trajectory_budget_status,
                     "trial": trial.index, "case_id": case.id,
                     "agent": candidate.manifest.name, "run_index": trial.run_index,
                     "task_id": candidate_task, "terminal_status": status,
@@ -2552,9 +2601,16 @@ pub fn run(
         )?;
         insert_candidate_selection_fields(&mut record, telemetry.as_ref());
         record.retain(|_, value| !value.is_null());
+        insert_trajectory_fields(
+            &mut record,
+            Some(&candidate_result),
+            case.trajectory_budgets.as_ref(),
+        )?;
         insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
+        let trajectory_budget_status = record.get("trajectory_budget_status").cloned();
         append_jsonl(&records, &serde_json::Value::Object(record))?;
         outputs.push(serde_json::json!({
+                    "trajectory_budget_status": trajectory_budget_status,
             "trial": trial.index,
             "case_id": case.id,
             "agent": candidate.manifest.name,
@@ -2598,7 +2654,7 @@ pub fn run(
     ))?;
     for row in result["trials"].as_array().into_iter().flatten() {
         console.say(&format!(
-            "  trial {}  {} {}  run {}  score {}  answer {}  judge {}  tools {}  telemetry {}\n",
+            "  trial {}  {} {}  run {}  score {}  answer {}  judge {}  tools {}  telemetry {}  trajectory budget {}\n",
             row["trial"],
             display_safe(row["case_id"].as_str().unwrap_or("?")),
             display_safe(row["agent"].as_str().unwrap_or("?")),
@@ -2608,6 +2664,7 @@ pub fn run(
             display_safe(row["judge_status"].as_str().unwrap_or("?")),
             display_safe(row["tool_expectation_status"].as_str().unwrap_or("?")),
             display_safe(row["telemetry_coverage"].as_str().unwrap_or("?")),
+            display_safe(row["trajectory_budget_status"].as_str().unwrap_or("not_applicable")),
         ))?;
     }
     console.say(&format!(
@@ -3122,6 +3179,29 @@ fn harness_version(result: &serde_json::Value) -> Option<String> {
     .map(str::to_owned)
 }
 
+fn insert_trajectory_fields(
+    record: &mut serde_json::Map<String, serde_json::Value>,
+    envelope: Option<&serde_json::Value>,
+    budgets: Option<&trajectory::Budgets>,
+) -> Result<()> {
+    // Typed projection: never copy unrecognized payload fields into eval records.
+    let observation = envelope
+        .and_then(|value| value.pointer("/harness/trajectory"))
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::from_value::<trajectory::Observation>(value.clone()).ok());
+    if let Some(observation) = &observation {
+        record.insert("trajectory".into(), serde_json::to_value(observation)?);
+    }
+    if let Some(budgets) = budgets {
+        record.insert("trajectory_budgets".into(), serde_json::to_value(budgets)?);
+        record.insert(
+            "trajectory_budget_status".into(),
+            serde_json::to_value(budgets.score(observation.as_ref()))?,
+        );
+    }
+    Ok(())
+}
+
 /// Everything one attempt reported about token usage, from both of its sources.
 ///
 /// The harness's own counters come from the launch envelope; the decision
@@ -3208,6 +3288,7 @@ fn group_json(group: &Group) -> serde_json::Value {
         }
     };
     merge(serde_json::json!({
+        "trajectory": group.trajectory,
         "case_id": key.case_id,
         "corpus_version": key.corpus_version,
         "stage": key.stage,
