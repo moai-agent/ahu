@@ -100,7 +100,7 @@ impl Session {
         if method == "tools/list" && self.inspection_adapter && capable(params) {
             let mut tools = super::tools();
             tools.push(json!({"name":"ahu_task_inspect", "description":"Inspect a repository task, requesting a task selector when omitted (experimental inspection adapter).", "inputSchema":{"type":"object","properties":{"task":{"type":"string","maxLength":256}},"additionalProperties":false}}));
-            return Some(response(id, json!({"resultType":"complete","tools":tools})));
+            return Some(response(id, super::tool_list_result(tools, true)));
         }
         if method == "tools/call" && capable(params) {
             // Decision calls are synchronous service requests, not durable

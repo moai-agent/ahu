@@ -43,6 +43,19 @@ pub(crate) fn auto_local_mcp_config(tool: &str) -> String {
     format!("mcp_servers.ahu.tools.{tool}.approval_mode=\"approve\"")
 }
 
+/// Load native config with the same overrides as an auto launch, without
+/// connecting to servers or making a model request. Codex ignores untrusted
+/// project layers; tool-only overrides then create an invalid transport.
+pub(crate) fn auto_mcp_probe_args() -> Vec<String> {
+    let mut args = Vec::new();
+    for tool in AUTO_LOCAL_MCP_TOOLS {
+        args.push("-c".into());
+        args.push(auto_local_mcp_config(tool));
+    }
+    args.extend(["mcp".into(), "list".into()]);
+    args
+}
+
 impl Adapter for Codex {
     fn id(&self) -> &'static str {
         "codex"

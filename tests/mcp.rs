@@ -947,6 +947,8 @@ fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
     for (params, count) in [(modern_without_tasks(json!({})), 6), (modern(json!({})), 7)] {
         let result = client.call("tools/list", params)["result"].clone();
         assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["ttlMs"], 0);
+        assert_eq!(result["cacheScope"], "private");
         assert_eq!(result["tools"].as_array().unwrap().len(), count);
         assert_eq!(
             result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
@@ -977,6 +979,8 @@ fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
         assert!(result.get("resultType").is_none(), "{result}");
         assert!(result.get("taskId").is_none());
         if method == "tools/list" {
+            assert!(result.get("ttlMs").is_none());
+            assert!(result.get("cacheScope").is_none());
             assert_eq!(result["tools"].as_array().unwrap().len(), 6);
         }
     }

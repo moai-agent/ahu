@@ -72,6 +72,9 @@ import json, os, subprocess, sys
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
+if sys.argv[1:] == ['models', 'ollama']:
+    print('ollama/glm-5.3:cloud')
+    raise SystemExit(0)
 prompt = sys.argv[-1]
 if 'Score this candidate output' in prompt:
     with open('score.json', 'w', encoding='utf-8') as score:
@@ -334,6 +337,9 @@ fn eval_run_records_invalid_candidate_answers_without_scoring_them_as_zero() {
 import json, os, subprocess, sys, time
 if '--version' in sys.argv:
     print('1.18.32')
+    raise SystemExit(0)
+if sys.argv[1:] == ['models', 'ollama']:
+    print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
 mode = os.environ['AHU_TEST_ANSWER']
 if mode == 'launch_failed':
@@ -673,6 +679,9 @@ import json, os, subprocess, sys
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
+if sys.argv[1:] == ['models', 'ollama']:
+    print('ollama/glm-5.3:cloud')
+    raise SystemExit(0)
 rows = [
  {'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
  {'jsonrpc':'2.0','method':'notifications/initialized'},
@@ -828,6 +837,9 @@ fn typed_evaluator_cli_keeps_failure_and_real_score_metadata_in_one_arm() {
 import json, os, subprocess, sys
 if '--version' in sys.argv:
     print('1.18.32')
+    raise SystemExit(0)
+if sys.argv[1:] == ['models', 'ollama']:
+    print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
 with open('answer.json', 'w') as f: json.dump({'route':'billing'}, f)
 rows = [{'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},

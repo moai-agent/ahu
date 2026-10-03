@@ -377,6 +377,18 @@ fn response(id: &Value, result: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":result})
 }
 
+fn tool_list_result(tools: Vec<Value>, modern: bool) -> Value {
+    let mut result = json!({"tools": tools});
+    if modern {
+        result["resultType"] = json!("complete");
+        // Lists vary with client capabilities and repository configuration.
+        // Modern MCP requires explicit cache metadata even when caching is off.
+        result["ttlMs"] = json!(0);
+        result["cacheScope"] = json!("private");
+    }
+    result
+}
+
 fn rpc_error(id: &Value, code: i64, message: impl Into<String>) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message.into()}})
 }
@@ -418,13 +430,7 @@ fn handle(repo: &Repo, request: &Value, session: &mut task_protocol::Session) ->
                 "cacheScope": "private",
             }),
         )),
-        "tools/list" => {
-            let mut result = json!({"tools": tools()});
-            if session.modern() {
-                result["resultType"] = json!("complete");
-            }
-            Some(response(&id, result))
-        }
+        "tools/list" => Some(response(&id, tool_list_result(tools(), session.modern()))),
         "tools/call" => Some(call_response(repo, &id, &params, session.modern())),
         _ => Some(rpc_error(
             &id,

@@ -824,6 +824,14 @@ pub fn launch(
         &spec.harness_version,
         &plan.harness_executable,
     )?;
+    crate::selection::check_launch_compatibility_with_policy(
+        &plan.harness_executable,
+        &plan.pair.harness,
+        &plan.pair.model,
+        permissions,
+        &repo.root,
+        Some(&cmux_integration.headless),
+    )?;
     plan.cmux_integration = cmux_integration.clone();
     spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", cmux_integration.headless.evidence_digest));
     let (delivered, delivery) = crate::orchestration::deliver_composed(
@@ -2365,6 +2373,14 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         &record.identity.harness,
         &spec.harness_version,
         &real,
+    )?;
+    crate::selection::check_launch_compatibility_with_policy(
+        &real,
+        &record.identity.harness,
+        &record.identity.model,
+        record.identity.permissions,
+        &record.worktree,
+        Some(&cmux_integration.headless),
     )?;
     crate::auth_binding::capture_task_for_model(
         &repo,
