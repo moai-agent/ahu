@@ -1819,66 +1819,49 @@ fn normalize_token(token: &str) -> String {
         .collect()
 }
 
-/// Lexically collapse `.` and `..` without touching the filesystem.
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => (),
-            std::path::Component::ParentDir => {
-                normalized.pop();
+/// Resolve existing prefixes before applying `..`: a symlink followed by a
+/// parent component must retain filesystem traversal semantics, including when
+/// the final write target does not yet exist.
+fn real_path(path: &Path) -> Result<PathBuf> {
+    fn resolve(path: &Path, links: usize) -> Result<PathBuf> {
+        if links > 40 {
+            bail!("reported write path exceeds the symlink traversal bound");
+        }
+        let mut resolved = PathBuf::new();
+        let mut components = path.components();
+        while let Some(component) = components.next() {
+            match component {
+                std::path::Component::CurDir => (),
+                std::path::Component::ParentDir => {
+                    resolved.pop();
+                }
+                other => {
+                    resolved.push(other);
+                    match std::fs::symlink_metadata(&resolved) {
+                        Ok(metadata) if metadata.file_type().is_symlink() => {
+                            let target = std::fs::read_link(&resolved)?;
+                            resolved.pop();
+                            resolved.push(target);
+                            resolved.push(components.as_path());
+                            return resolve(&resolved, links + 1);
+                        }
+                        Ok(_) => (),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
             }
-            other => normalized.push(other),
         }
+        Ok(resolved)
     }
-    normalized
+    resolve(path, 0)
 }
 
-/// Canonicalize, or resolve via the nearest existing ancestor so paths the
-/// harness named but never created are still classified. Lexical fallback
-/// only when even the ancestor cannot be canonicalized (e.g. CWD removed).
-fn real_path(path: &Path) -> PathBuf {
-    if let Ok(real) = path.canonicalize() {
-        return real;
-    }
-    let mut tail = Vec::new();
-    let mut current = path.to_path_buf();
-    while !current.exists() {
-        let Some(file_name) = current.file_name().map(ToOwned::to_owned) else {
-            break;
-        };
-        current = current.parent().map(Path::to_path_buf).unwrap_or_default();
-        tail.push(file_name);
-        if current.as_os_str().is_empty() {
-            break;
-        }
-    }
-    if let Ok(base) = current.canonicalize() {
-        let mut real = base;
-        for file_name in tail.iter().rev() {
-            real.push(file_name);
-        }
-        return real;
-    }
-    lexical_normalize(path)
-}
-
-/// Resolve a recorded write-path candidate. Only absolute paths are
-/// classified; relative paths cannot be attributed to the worktree
-/// confidently after the run ends.
+/// Only absolute paths are classified; a relative path's tool working
+/// directory is not known from the event. Preserve `..` until symlinks resolve.
 fn resolve_write_path(candidate: &str) -> Option<PathBuf> {
-    if candidate.is_empty() {
-        return None;
-    }
     let raw: PathBuf = candidate.into();
-    if !raw.is_absolute() {
-        return None;
-    }
-    let resolved = lexical_normalize(&raw);
-    if resolved.as_os_str().is_empty() {
-        return None;
-    }
-    Some(resolved)
+    raw.is_absolute().then_some(raw)
 }
 
 /// Walk a write-tool call's subtree, collecting path candidates and decoding
@@ -2066,7 +2049,16 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
     let Ok(event) = serde_json::from_slice::<Value>(line) else {
         return;
     };
-    let worktree = real_path(worktree);
+    let worktree = match real_path(worktree) {
+        Ok(worktree) => worktree,
+        Err(_) => {
+            events.failed = true;
+            events
+                .blockers
+                .push("task worktree could not be resolved for write observation".into());
+            return;
+        }
+    };
     for candidate in collect_write_paths(&event) {
         if candidate.len() > 4096 {
             events.failed = true;
@@ -2075,7 +2067,14 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
         let Some(resolved) = resolve_write_path(&candidate) else {
             continue;
         };
-        let real = real_path(&resolved);
+        let real = match real_path(&resolved) {
+            Ok(real) => real,
+            Err(_) => {
+                events.failed = true;
+                events.blockers.push("reported write target could not be resolved within the symlink traversal bound".into());
+                continue;
+            }
+        };
         if !real.starts_with(&worktree) {
             let path = real.to_string_lossy().into_owned();
             if !events.writes_outside_worktree.contains(&path) {
@@ -2090,6 +2089,19 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
             }
         }
     }
+}
+
+/// The pipe reader can finish after the process-exit poll. Reconcile its final
+/// boundary evidence before accepting a successful exit or joining children.
+fn boundary_after_drain(events: &mut Events, stop: &mut Option<(&'static str, Instant)>) -> bool {
+    if stop.is_some() || events.writes_outside_worktree.is_empty() {
+        return false;
+    }
+    events.blockers.push(
+        "harness reported a write target outside the task worktree in its final event drain".into(),
+    );
+    *stop = Some(("boundary_violation", Instant::now()));
+    true
 }
 
 /// Recorded `writes_outside_worktree` from a finished attempt's result
@@ -2670,6 +2682,9 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
                     .push("a native helper did not complete successfully".into());
             }
         }
+    }
+    if boundary_after_drain(&mut events, &mut stop) {
+        cancelled_tasks = cancel_tree(&repo, dir, "boundary_violation")?;
     }
     *phase = "child_reconciliation";
     broker.finish()?;
@@ -3386,6 +3401,8 @@ pub fn control(
                 },
                 &spec,
             )?;
+            let approval_lease =
+                crate::approval::retire_for_resume(&dir, &record.task_id, previous_spec.attempt)?;
             let old_attempt = attempt_dir(&dir, &previous_spec);
             durable_json(&old_attempt.join("submission.json"), &previous_record)?;
             state::write_private_file(
@@ -3411,6 +3428,7 @@ pub fn control(
             if dir.join("cancel.json").exists() {
                 std::fs::remove_file(dir.join("cancel.json"))?;
             }
+            drop(approval_lease);
             drop(_owner);
             if let Err(error) = start(&dir, &spec) {
                 if !attempt_dir(&dir, &spec).join("spawn-intent.json").exists()
@@ -3771,10 +3789,124 @@ mod write_tracking_tests {
         assert!(!paths.iter().any(|path| path == "/tmp/not-a-write.txt"));
         assert_eq!(
             resolve_write_path("/tmp/project/../outside/new.txt").unwrap(),
-            PathBuf::from("/tmp/outside/new.txt")
+            PathBuf::from("/tmp/project/../outside/new.txt")
         );
         assert!(resolve_write_path("").is_none());
         assert!(resolve_write_path("relative/file.txt").is_none());
+    }
+
+    #[test]
+    fn final_stream_drain_cannot_accept_a_reported_outside_write() {
+        let worktree = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stream = format!(
+            "{}\n{}\n",
+            json!({"tool":"Write", "input":{"path":outside.path().join("new.txt")}}),
+            json!({"type":"turn.completed"})
+        );
+        capture(
+            std::io::Cursor::new(stream.into_bytes()),
+            worktree.path().join("unused.json"),
+            worktree.path().to_path_buf(),
+            Some(SessionOwner {
+                task_id: "synthetic".into(),
+                attempt: 1,
+                harness: "codex".into(),
+            }),
+            shared.clone(),
+            tx,
+        );
+        // The process-exit poll has already completed with no stop reason.
+        let mut stop = None;
+        rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        let mut events = shared.lock().unwrap();
+        assert!(events.terminal);
+        assert!(boundary_after_drain(&mut events, &mut stop));
+        assert_eq!(stop.unwrap().0, "boundary_violation");
+        assert!(!boundary_after_drain(&mut events, &mut stop));
+        let mut cancelled = Some(("cancelled", Instant::now()));
+        assert!(!boundary_after_drain(&mut events, &mut cancelled));
+        assert_eq!(cancelled.unwrap().0, "cancelled");
+    }
+
+    #[test]
+    fn dangling_write_symlinks_are_classified_and_cycles_fail_closed() {
+        let worktree = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("not-created.txt");
+        let link = worktree.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let event = serde_json::to_vec(&json!({"tool":"Write", "input":{"path":link}})).unwrap();
+        let mut events = Events::default();
+        observe_writes(&mut events, &event, worktree.path());
+        assert_eq!(
+            events.writes_outside_worktree,
+            vec![
+                outside
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("not-created.txt")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("link", &link).unwrap();
+        let mut events = Events::default();
+        observe_writes(&mut events, &event, worktree.path());
+        assert!(events.failed);
+        assert!(
+            events
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("symlink traversal bound"))
+        );
+    }
+
+    #[test]
+    fn missing_write_targets_resolve_symlinks_before_parent_components() {
+        let worktree = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join("child")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("child"), worktree.path().join("link"))
+            .unwrap();
+        let target = worktree.path().join("link/../new/file.txt");
+        let event = json!({"tool":"Write", "input":{"path":target}});
+        let mut events = Events::default();
+        observe_writes(
+            &mut events,
+            &serde_json::to_vec(&event).unwrap(),
+            worktree.path(),
+        );
+        assert_eq!(
+            events.writes_outside_worktree,
+            vec![
+                outside
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("new/file.txt")
+                    .to_string_lossy()
+                    .into_owned()
+            ]
+        );
+
+        // The reverse alias stays inside and must not cause a false violation.
+        std::fs::create_dir(worktree.path().join("child")).unwrap();
+        std::os::unix::fs::symlink(worktree.path().join("child"), outside.path().join("link"))
+            .unwrap();
+        let event =
+            json!({"tool":"Write", "input":{"path":outside.path().join("link/../new.txt")}});
+        let mut events = Events::default();
+        observe_writes(
+            &mut events,
+            &serde_json::to_vec(&event).unwrap(),
+            worktree.path(),
+        );
+        assert!(events.writes_outside_worktree.is_empty());
     }
 
     #[test]

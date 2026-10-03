@@ -38,6 +38,40 @@ struct Response {
     decided_at: String,
 }
 
+/// Frozen when a durable MCP job is submitted, never inferred from its worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Context {
+    task_id: String,
+    task_dir: std::path::PathBuf,
+    attempt: Option<u32>,
+}
+
+impl Context {
+    pub(crate) fn current() -> Result<Self> {
+        let task_id = std::env::var("AHU_TASK_ID")
+            .map_err(|_| Error::new("approval requests require an Ahu-managed task context"))?;
+        let task_dir = std::env::var_os("AHU_TASK_DIR")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| Error::new("approval requests require an Ahu-managed task context"))?;
+        let attempt = current_attempt(&task_dir)?;
+        Ok(Self {
+            task_id,
+            task_dir,
+            attempt,
+        })
+    }
+}
+
+fn current_attempt(dir: &Path) -> Result<Option<u32>> {
+    let path = dir.join("headless.json");
+    if crate::state::confine_file(&path)?.is_none() {
+        return Ok(None);
+    }
+    let spec: crate::headless::Spec =
+        serde_json::from_slice(&crate::state::read_private_file(&path)?)?;
+    Ok(Some(spec.attempt))
+}
+
 struct RequestInput<'a> {
     operation: &'a str,
     summary: &'a str,
@@ -59,6 +93,17 @@ pub fn request(
     target: Option<&str>,
     cancellation: Option<&Path>,
 ) -> Result<serde_json::Value> {
+    request_with_context(repo, operation, summary, target, cancellation, None)
+}
+
+pub(crate) fn request_with_context(
+    repo: &crate::git::Repo,
+    operation: &str,
+    summary: &str,
+    target: Option<&str>,
+    cancellation: Option<&Path>,
+    context: Option<&Context>,
+) -> Result<serde_json::Value> {
     if !matches!(
         operation,
         "external-write" | "network" | "destructive" | "other"
@@ -67,15 +112,17 @@ pub fn request(
     {
         return Err(Error::new("invalid approval request"));
     }
-    let task_id = std::env::var("AHU_TASK_ID")
-        .map_err(|_| Error::new("approval requests require an Ahu-managed task context"))?;
-    let task_dir = std::env::var_os("AHU_TASK_DIR")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| Error::new("approval requests require an Ahu-managed task context"))?;
+    let captured;
+    let context = match context {
+        Some(context) => context,
+        None => {
+            captured = Context::current()?;
+            &captured
+        }
+    };
     request_for_task(
         repo,
-        &task_id,
-        &task_dir,
+        context,
         RequestInput {
             operation,
             summary,
@@ -88,32 +135,40 @@ pub fn request(
 
 fn request_for_task(
     repo: &crate::git::Repo,
-    task_id: &str,
-    task_dir: &Path,
+    context: &Context,
     input: RequestInput<'_>,
     cancellation: Option<&Path>,
     max_wait: Duration,
 ) -> Result<serde_json::Value> {
+    let task_id = context.task_id.as_str();
+    let task_dir = context.task_dir.as_path();
     crate::state::confine_file(&task_dir.join("task.json"))?;
+    // Keep the execution lease until this waiter consumes its response. A new
+    // request must never steal an approved response from an existing waiter.
+    let _lease = crate::task::StateLock::try_acquire(&task_dir.join("approval.worker"))?
+        .ok_or_else(|| Error::new("another approval request is already pending"))?;
+    let state_lock = crate::task::lock_state(task_dir)?;
     let record = crate::task::load(task_dir)?;
+    let attempt = context.attempt;
+    if current_attempt(task_dir)? != attempt {
+        return Err(Error::new("approval belongs to a different task attempt"));
+    }
     if record.task_id != task_id
         || record.repo_identity != repo.identity()
-        || record.worktree.canonicalize().ok() != repo.root.canonicalize().ok()
-        || !record.state.is_live()
+        || record.worktree.canonicalize()? != repo.root.canonicalize()?
+        || !matches!(record.state, crate::task::TaskState::Running)
+        || crate::state::confine_file(&task_dir.join("cancel.json"))?.is_some()
     {
         return Err(Error::new(
             "approval request does not belong to the current live task",
         ));
     }
     let (request_path, response_path) = paths(task_dir);
-    if response_path.exists() {
-        let response: Response = crate::state::read_json(&response_path)?;
-        if response.request_id != read_request(&request_path)?.request_id {
-            return Err(Error::new("a stale approval response is present"));
-        }
-        std::fs::remove_file(&request_path)?;
-        std::fs::remove_file(&response_path)?;
-    } else if request_path.exists() {
+    // Orphaned checkpoints remain unresolved; never silently replay an operation
+    // after a server crash or recycle a prior attempt's approval.
+    if crate::state::confine_file(&response_path)?.is_some()
+        || crate::state::confine_file(&request_path)?.is_some()
+    {
         return Err(Error::new("another approval request is already pending"));
     }
     let request = Request {
@@ -126,43 +181,124 @@ fn request_for_task(
         requested_at: crate::task::now_rfc3339(),
     };
     crate::state::write_json(&request_path, &request)?;
-    if let Err(error) = set_task_waiting(repo, task_dir, &record) {
+    if let Err(error) =
+        crate::task::set_state_locked(task_dir, crate::task::TaskState::WaitingForApproval)
+    {
         let _ = std::fs::remove_file(&request_path);
         return Err(error);
     }
+    drop(state_lock);
+    notify_cmux(repo, &record, "Waiting for approval");
     let deadline = Instant::now() + max_wait;
-    loop {
-        if cancellation.is_some_and(|path| path.exists()) {
-            let _ = std::fs::remove_file(&request_path);
-            crate::task::set_state(task_dir, crate::task::TaskState::Running)?;
-            notify_cmux(repo, &record, "Running");
-            return Err(Error::new(
-                "approval request was cancelled by the MCP client",
-            ));
-        }
-        if task_dir.join("cancel.json").exists() {
-            return Err(Error::new("task was cancelled while approval was pending"));
-        }
-        if response_path.exists() {
-            let response: Response = crate::state::read_json(&response_path)?;
-            if response.schema_version != 1 || response.request_id != request.request_id {
-                return Err(Error::new("approval response does not match this request"));
+    let outcome = (|| {
+        loop {
+            let state_lock = crate::task::lock_state(task_dir)?;
+            if current_attempt(task_dir)? != attempt
+                || !crate::task::load(task_dir)?.state.is_live()
+            {
+                return Err(Error::new("task stopped while approval was pending"));
             }
-            let _ = std::fs::remove_file(&request_path);
-            let _ = std::fs::remove_file(&response_path);
-            if response.decision == "approve" {
-                crate::task::set_state(task_dir, crate::task::TaskState::Running)?;
+            if crate::state::confine_file(&task_dir.join("cancel.json"))?.is_some() {
+                return Err(Error::new("task was cancelled while approval was pending"));
+            }
+            if cancellation.is_some_and(|path| path.exists()) {
+                crate::task::set_state_locked(task_dir, crate::task::TaskState::Running)?;
+                drop(state_lock);
                 notify_cmux(repo, &record, "Running");
-                return Ok(json!({"approved":true,"request_id":request.request_id}));
+                return Err(Error::new(
+                    "approval request was cancelled by the MCP client",
+                ));
             }
-            return Err(Error::new("operator rejected the requested operation"));
+            if crate::state::confine_file(&response_path)?.is_some() {
+                let response: Response = crate::state::read_json(&response_path)?;
+                if response.schema_version != 1
+                    || response.request_id != request.request_id
+                    || !matches!(response.decision.as_str(), "approve" | "reject")
+                {
+                    return Err(Error::new("approval response does not match this request"));
+                }
+                if response.decision == "approve" {
+                    crate::task::set_state_locked(task_dir, crate::task::TaskState::Running)?;
+                    drop(state_lock);
+                    notify_cmux(repo, &record, "Running");
+                    return Ok(json!({"approved":true,"request_id":request.request_id}));
+                }
+                return Err(Error::new("operator rejected the requested operation"));
+            }
+            if Instant::now() >= deadline {
+                decide_locked(repo, task_dir, &request.task_id, false)?;
+                drop(state_lock);
+                notify_cmux(repo, &record, "Approval rejected");
+                return Err(Error::new("approval request expired after 30 minutes"));
+            }
+            drop(state_lock);
+            std::thread::sleep(Duration::from_millis(100));
         }
-        if Instant::now() >= deadline {
-            let _ = decide(repo, task_dir, &request.task_id, false);
-            return Err(Error::new("approval request expired after 30 minutes"));
+    })();
+    // Retire this checkpoint on every completed waiter path, including task
+    // cancellation and terminal/attempt changes. Keep the execution lease until
+    // retirement finishes, and never change task state during cleanup.
+    let _state = crate::task::lock_state(task_dir)?;
+    retire_checkpoint(task_dir, &request)?;
+    outcome
+}
+
+/// Caller holds the state lock and the approval execution lease. Validate all
+/// surviving files before deleting either; another checkpoint is never ours.
+fn retire_checkpoint(dir: &Path, expected: &Request) -> Result<()> {
+    let (request_path, response_path) = paths(dir);
+    let request_exists = crate::state::confine_file(&request_path)?.is_some();
+    if request_exists {
+        let current = read_request(&request_path)?;
+        if current.task_id != expected.task_id || current.request_id != expected.request_id {
+            return Err(Error::new("cannot retire a different approval checkpoint"));
         }
-        std::thread::sleep(Duration::from_millis(100));
     }
+    let response_exists = crate::state::confine_file(&response_path)?.is_some();
+    if response_exists {
+        let response: Response = crate::state::read_json(&response_path)?;
+        if response.schema_version != 1
+            || response.request_id != expected.request_id
+            || !matches!(response.decision.as_str(), "approve" | "reject")
+        {
+            return Err(Error::new("cannot retire a mismatched approval response"));
+        }
+        // Removing the response first leaves an attributable request if the
+        // process exits between removals; explicit resume can retire it later.
+        std::fs::remove_file(&response_path)?;
+    }
+    if request_exists {
+        std::fs::remove_file(&request_path)?;
+    }
+    Ok(())
+}
+
+/// Explicit resume calls this after validating a terminal result and acquiring
+/// supervisor ownership. Retire abandoned checkpoints without replaying their
+/// decisions, and hold the returned lease until the next attempt is prepared.
+pub(crate) fn retire_for_resume(
+    dir: &Path,
+    task_id: &str,
+    attempt: u32,
+) -> Result<crate::task::StateLock> {
+    let lease =
+        crate::task::StateLock::try_acquire(&dir.join("approval.worker"))?.ok_or_else(|| {
+            Error::new("approval worker is still active; retry resume after it stops")
+        })?;
+    let _state = crate::task::lock_state(dir)?;
+    let record = crate::task::load(dir)?;
+    if record.task_id != task_id || record.state.is_live() || current_attempt(dir)? != Some(attempt)
+    {
+        return Err(Error::new(
+            "approval cleanup requires the same terminal task attempt",
+        ));
+    }
+    if let Some(request) = pending(dir, task_id)? {
+        retire_checkpoint(dir, &request)?;
+    } else if crate::state::confine_file(&dir.join(RESPONSE_FILE))?.is_some() {
+        return Err(Error::new("approval response has no attributable request"));
+    }
+    Ok(lease)
 }
 
 fn read_request(path: &Path) -> Result<Request> {
@@ -173,6 +309,10 @@ fn read_request(path: &Path) -> Result<Request> {
             .request_id
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
+        || !matches!(
+            request.operation.as_str(),
+            "external-write" | "network" | "destructive" | "other"
+        )
         || !valid_text(&request.summary)
         || request
             .target
@@ -186,7 +326,7 @@ fn read_request(path: &Path) -> Result<Request> {
 
 pub fn pending(dir: &Path, expected_task_id: &str) -> Result<Option<Request>> {
     let (request_path, _) = paths(dir);
-    if !request_path.exists() {
+    if crate::state::confine_file(&request_path)?.is_none() {
         return Ok(None);
     }
     let request = read_request(&request_path)?;
@@ -202,6 +342,28 @@ pub fn decide(
     expected_task_id: &str,
     approve: bool,
 ) -> Result<Request> {
+    let lock = crate::task::lock_state(dir)?;
+    let request = decide_locked(repo, dir, expected_task_id, approve)?;
+    let record = crate::task::load(dir)?;
+    drop(lock);
+    notify_cmux(
+        repo,
+        &record,
+        if approve {
+            "Running"
+        } else {
+            "Approval rejected"
+        },
+    );
+    Ok(request)
+}
+
+fn decide_locked(
+    repo: &crate::git::Repo,
+    dir: &Path,
+    expected_task_id: &str,
+    approve: bool,
+) -> Result<Request> {
     let request_path = dir.join(REQUEST_FILE);
     let response_path = dir.join(RESPONSE_FILE);
     let request = read_request(&request_path)?;
@@ -210,8 +372,8 @@ pub fn decide(
         || record.task_id != expected_task_id
         || !matches!(record.state, crate::task::TaskState::WaitingForApproval)
         || record.repo_identity != repo.identity()
-        || dir.join("cancel.json").exists()
-        || response_path.exists()
+        || crate::state::confine_file(&dir.join("cancel.json"))?.is_some()
+        || crate::state::confine_file(&response_path)?.is_some()
     {
         return Err(Error::new("approval is stale or already resolved"));
     }
@@ -223,8 +385,7 @@ pub fn decide(
     };
     crate::state::write_json(&response_path, &response)?;
     if approve {
-        crate::task::set_state(dir, crate::task::TaskState::Running)?;
-        notify_cmux(repo, &record, "Running");
+        crate::task::set_state_locked(dir, crate::task::TaskState::Running)?;
     } else {
         crate::state::write_private_file(
             &dir.join("cancel.json"),
@@ -234,22 +395,14 @@ pub fn decide(
             }))?
             .as_bytes(),
         )?;
-        notify_cmux(repo, &record, "Approval rejected");
     }
     Ok(request)
 }
 
-fn set_task_waiting(
-    repo: &crate::git::Repo,
-    dir: &Path,
-    record: &crate::task::TaskRecord,
-) -> Result<()> {
-    crate::task::set_state(dir, crate::task::TaskState::WaitingForApproval)?;
-    notify_cmux(repo, record, "Waiting for approval");
-    Ok(())
-}
-
 fn notify_cmux(repo: &crate::git::Repo, record: &crate::task::TaskRecord, status: &str) {
+    if record.cmux_workspace_id.is_none() {
+        return;
+    }
     if let Ok(client) = crate::cmux::Cmux::discover()
         && let manager = crate::cmux::repository::RepositoryManager::new(&client, repo)
     {
@@ -339,6 +492,357 @@ mod tests {
         (temp, repo, task_id, dir)
     }
 
+    fn start_request_with_context(
+        repo: &crate::git::Repo,
+        task_id: &str,
+        dir: &Path,
+        cancellation: Option<std::path::PathBuf>,
+    ) -> std::thread::JoinHandle<Result<serde_json::Value>> {
+        std::fs::remove_file(dir.join(REQUEST_FILE)).unwrap();
+        crate::task::set_state(dir, crate::task::TaskState::Running).unwrap();
+        spawn_checkpoint(repo, task_id, dir, cancellation)
+    }
+
+    fn spawn_checkpoint(
+        repo: &crate::git::Repo,
+        task_id: &str,
+        dir: &Path,
+        cancellation: Option<std::path::PathBuf>,
+    ) -> std::thread::JoinHandle<Result<serde_json::Value>> {
+        let repo = repo.clone();
+        // Exercise durable context serialization without the live environment.
+        let context = Context {
+            task_id: task_id.into(),
+            task_dir: dir.into(),
+            attempt: current_attempt(dir).unwrap(),
+        };
+        let context: Context =
+            serde_json::from_slice(&serde_json::to_vec(&context).unwrap()).unwrap();
+        let worker = std::thread::spawn(move || {
+            request_with_context(
+                &repo,
+                "network",
+                "inspect synthetic metadata",
+                None,
+                cancellation.as_deref(),
+                Some(&context),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while crate::task::load(dir).unwrap().state != crate::task::TaskState::WaitingForApproval {
+            assert!(
+                Instant::now() < deadline,
+                "waiter did not publish its checkpoint"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        worker
+    }
+
+    #[test]
+    fn simultaneous_operator_decisions_have_exactly_one_winner() {
+        let (_temp, repo, task_id, dir) = fixture();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let workers: Vec<_> = [true, false]
+            .into_iter()
+            .map(|approve| {
+                let (repo, task_id, dir, barrier) =
+                    (repo.clone(), task_id.clone(), dir.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    decide(&repo, &dir, &task_id, approve).is_ok()
+                })
+            })
+            .collect();
+        barrier.wait();
+        let wins = workers
+            .into_iter()
+            .filter_map(|worker| worker.join().ok())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(wins, 1);
+        let response: Response = crate::state::read_json(&dir.join(RESPONSE_FILE)).unwrap();
+        assert_eq!(
+            dir.join("cancel.json").exists(),
+            response.decision == "reject"
+        );
+    }
+
+    #[test]
+    fn duplicate_request_cannot_steal_an_unconsumed_approval() {
+        let (_temp, repo, task_id, dir) = fixture();
+        let _lease = crate::task::StateLock::try_acquire(&dir.join("approval.worker"))
+            .unwrap()
+            .unwrap();
+        decide(&repo, &dir, &task_id, true).unwrap();
+        let before = std::fs::read(dir.join(RESPONSE_FILE)).unwrap();
+        let result = request_for_task(
+            &repo,
+            &Context {
+                task_id: task_id.clone(),
+                task_dir: dir.clone(),
+                attempt: None,
+            },
+            RequestInput {
+                operation: "network",
+                summary: "second request",
+                target: None,
+            },
+            None,
+            Duration::ZERO,
+        );
+        assert!(result.unwrap_err().to_string().contains("already pending"));
+        assert_eq!(std::fs::read(dir.join(RESPONSE_FILE)).unwrap(), before);
+        assert!(dir.join(REQUEST_FILE).exists());
+    }
+
+    #[test]
+    fn cancellation_and_late_approval_preserve_terminal_state() {
+        for terminal in [
+            crate::task::TaskState::Exited,
+            crate::task::TaskState::Failed,
+            crate::task::TaskState::Cancelled,
+        ] {
+            let (_temp, repo, task_id, dir) = fixture();
+            let cancellation = dir.join("mcp.cancel");
+            let worker =
+                start_request_with_context(&repo, &task_id, &dir, Some(cancellation.clone()));
+            // Publish terminal state and client cancellation under the same
+            // lock as the waiter, so it must see both on its next poll.
+            let lock = crate::task::lock_state(&dir).unwrap();
+            crate::task::set_state_locked(&dir, terminal).unwrap();
+            std::fs::write(cancellation, b"cancelled").unwrap();
+            drop(lock);
+            assert!(decide(&repo, &dir, &task_id, true).is_err());
+            assert!(worker.join().unwrap().is_err());
+            assert_eq!(crate::task::load(&dir).unwrap().state, terminal);
+            assert!(pending(&dir, &task_id).unwrap().is_none());
+            assert!(!dir.join(RESPONSE_FILE).exists());
+        }
+    }
+
+    #[test]
+    fn rejected_request_never_returns_approval_and_prevents_reentry() {
+        let (_temp, repo, task_id, dir) = fixture();
+        let worker = start_request_with_context(&repo, &task_id, &dir, None);
+        decide(&repo, &dir, &task_id, false).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        assert!(dir.join("cancel.json").exists());
+        assert!(pending(&dir, &task_id).unwrap().is_none());
+        assert!(!dir.join(RESPONSE_FILE).exists());
+        assert!(
+            request_for_task(
+                &repo,
+                &Context {
+                    task_id: task_id.clone(),
+                    task_dir: dir.clone(),
+                    attempt: None
+                },
+                RequestInput {
+                    operation: "network",
+                    summary: "retry",
+                    target: None
+                },
+                None,
+                Duration::ZERO
+            )
+            .is_err()
+        );
+    }
+
+    fn write_attempt(dir: &Path, attempt: u32) {
+        crate::state::write_json(
+            &dir.join("headless.json"),
+            &json!({
+                "schema_version":2, "options":crate::headless::Options::default(),
+                "harness_version":"synthetic", "executable_digest":"synthetic",
+                "parent_task":null, "depth":0, "attempt":attempt, "session":null,
+                "native_controls":[], "gaps":[]
+            }),
+        )
+        .unwrap();
+    }
+
+    fn approve_after_resume(repo: &crate::git::Repo, id: &str, dir: &Path) {
+        crate::task::set_state(dir, crate::task::TaskState::Failed).unwrap();
+        let lease = retire_for_resume(dir, id, 1).unwrap();
+        write_attempt(dir, 2);
+        if dir.join("cancel.json").exists() {
+            std::fs::remove_file(dir.join("cancel.json")).unwrap();
+        }
+        crate::task::set_state(dir, crate::task::TaskState::Running).unwrap();
+        drop(lease);
+        let worker = spawn_checkpoint(repo, id, dir, None);
+        decide(repo, dir, id, true).unwrap();
+        assert_eq!(worker.join().unwrap().unwrap()["approved"], true);
+        assert!(pending(dir, id).unwrap().is_none());
+        assert!(!dir.join(RESPONSE_FILE).exists());
+    }
+
+    #[test]
+    fn rejected_and_cancelled_checkpoints_retire_before_resume() {
+        for rejected in [true, false] {
+            let (_temp, repo, id, dir) = fixture();
+            write_attempt(&dir, 1);
+            let worker = start_request_with_context(&repo, &id, &dir, None);
+            if rejected {
+                decide(&repo, &dir, &id, false).unwrap();
+            } else {
+                crate::state::write_json(&dir.join("cancel.json"), &json!({"reason":"synthetic"}))
+                    .unwrap();
+            }
+            assert!(worker.join().unwrap().is_err());
+            assert!(pending(&dir, &id).unwrap().is_none());
+            assert!(!dir.join(RESPONSE_FILE).exists());
+            assert!(dir.join("cancel.json").exists());
+            assert_eq!(
+                crate::task::load(&dir).unwrap().state,
+                crate::task::TaskState::WaitingForApproval
+            );
+            approve_after_resume(&repo, &id, &dir);
+        }
+    }
+
+    #[test]
+    fn timed_out_checkpoint_retires_before_resume() {
+        let (_temp, repo, id, dir) = fixture();
+        write_attempt(&dir, 1);
+        std::fs::remove_file(dir.join(REQUEST_FILE)).unwrap();
+        crate::task::set_state(&dir, crate::task::TaskState::Running).unwrap();
+        let result = request_for_task(
+            &repo,
+            &Context {
+                task_id: id.clone(),
+                task_dir: dir.clone(),
+                attempt: Some(1),
+            },
+            RequestInput {
+                operation: "network",
+                summary: "timeout",
+                target: None,
+            },
+            None,
+            Duration::ZERO,
+        );
+        assert!(result.unwrap_err().to_string().contains("expired"));
+        assert!(pending(&dir, &id).unwrap().is_none());
+        assert!(!dir.join(RESPONSE_FILE).exists());
+        assert!(dir.join("cancel.json").exists());
+        approve_after_resume(&repo, &id, &dir);
+    }
+
+    #[test]
+    fn attempt_change_retires_old_checkpoint_without_restoring_running() {
+        let (_temp, repo, id, dir) = fixture();
+        write_attempt(&dir, 1);
+        let worker = start_request_with_context(&repo, &id, &dir, None);
+        let lock = crate::task::lock_state(&dir).unwrap();
+        write_attempt(&dir, 2);
+        crate::task::set_state_locked(&dir, crate::task::TaskState::Starting).unwrap();
+        drop(lock);
+        assert!(worker.join().unwrap().is_err());
+        assert!(pending(&dir, &id).unwrap().is_none());
+        assert!(!dir.join(RESPONSE_FILE).exists());
+        assert_eq!(
+            crate::task::load(&dir).unwrap().state,
+            crate::task::TaskState::Starting
+        );
+    }
+
+    #[test]
+    fn explicit_resume_retires_abandoned_decisions_without_replaying_them() {
+        for decision in [None, Some(false), Some(true)] {
+            let (_temp, repo, id, dir) = fixture();
+            write_attempt(&dir, 1);
+            if let Some(approve) = decision {
+                decide(&repo, &dir, &id, approve).unwrap();
+            }
+            crate::task::set_state(&dir, crate::task::TaskState::Failed).unwrap();
+            let before = crate::task::load(&dir).unwrap().state;
+            let lease = retire_for_resume(&dir, &id, 1).unwrap();
+            assert_eq!(crate::task::load(&dir).unwrap().state, before);
+            assert!(pending(&dir, &id).unwrap().is_none());
+            assert!(!dir.join(RESPONSE_FILE).exists());
+            drop(lease);
+            approve_after_resume(&repo, &id, &dir);
+        }
+    }
+
+    #[test]
+    fn resume_cleanup_refuses_active_workers_foreign_attempts_and_mismatched_responses() {
+        let (_temp, _repo, id, dir) = fixture();
+        write_attempt(&dir, 1);
+        assert!(retire_for_resume(&dir, &id, 1).is_err());
+        crate::task::set_state(&dir, crate::task::TaskState::Failed).unwrap();
+        assert!(retire_for_resume(&dir, "other-task", 1).is_err());
+        assert!(retire_for_resume(&dir, &id, 2).is_err());
+        let lease = crate::task::StateLock::try_acquire(&dir.join("approval.worker"))
+            .unwrap()
+            .unwrap();
+        assert!(retire_for_resume(&dir, &id, 1).is_err());
+        drop(lease);
+        crate::state::write_json(
+            &dir.join(RESPONSE_FILE),
+            &Response {
+                schema_version: 1,
+                request_id: "fedcba9876543210".into(),
+                decision: "approve".into(),
+                decided_at: crate::task::now_rfc3339(),
+            },
+        )
+        .unwrap();
+        assert!(retire_for_resume(&dir, &id, 1).is_err());
+        assert!(pending(&dir, &id).unwrap().is_some());
+        assert!(dir.join(RESPONSE_FILE).exists());
+    }
+
+    #[test]
+    fn dangling_checkpoint_links_are_refused() {
+        let (_temp, repo, task_id, dir) = fixture();
+        std::fs::remove_file(dir.join(REQUEST_FILE)).unwrap();
+        std::os::unix::fs::symlink(dir.join("missing"), dir.join(REQUEST_FILE)).unwrap();
+        assert!(pending(&dir, &task_id).is_err());
+        assert!(decide(&repo, &dir, &task_id, true).is_err());
+    }
+
+    #[test]
+    fn durable_context_refuses_another_task_or_attempt() {
+        let (_temp, repo, _task_id, dir) = fixture();
+        let context = Context {
+            task_id: "another-task".into(),
+            task_dir: dir.clone(),
+            attempt: None,
+        };
+        assert!(
+            request_with_context(
+                &repo,
+                "network",
+                "synthetic request",
+                None,
+                None,
+                Some(&context)
+            )
+            .is_err()
+        );
+        let context = Context {
+            attempt: Some(2),
+            ..context
+        };
+        assert!(
+            request_with_context(
+                &repo,
+                "network",
+                "synthetic request",
+                None,
+                None,
+                Some(&context)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("different task attempt")
+        );
+    }
+
     #[test]
     fn pending_approval_round_trips_and_is_scoped_to_its_task() {
         let (_temp, _repo, task_id, dir) = fixture();
@@ -359,8 +863,11 @@ mod tests {
         let worker = std::thread::spawn(move || {
             request_for_task(
                 &worker_repo,
-                &worker_task_id,
-                &worker_dir,
+                &Context {
+                    task_id: worker_task_id.clone(),
+                    task_dir: worker_dir.clone(),
+                    attempt: None,
+                },
                 RequestInput {
                     operation: "external-write",
                     summary: "publish the reviewed release",
@@ -405,8 +912,11 @@ mod tests {
         let worker_dir = dir.clone();
         let timed_out = request_for_task(
             &worker_repo,
-            &worker_task_id,
-            &worker_dir,
+            &Context {
+                task_id: worker_task_id.clone(),
+                task_dir: worker_dir.clone(),
+                attempt: None,
+            },
             RequestInput {
                 operation: "network",
                 summary: "fetch remote context",
@@ -417,8 +927,11 @@ mod tests {
         );
         assert!(timed_out.unwrap_err().to_string().contains("expired"));
         assert!(dir.join("cancel.json").exists());
+        assert!(pending(&dir, &task_id).unwrap().is_none());
+        assert!(!dir.join(RESPONSE_FILE).exists());
 
-        std::fs::remove_file(dir.join("cancel.json")).unwrap();
+        let (_temp2, repo, task_id, dir) = fixture();
+        std::fs::remove_file(dir.join(REQUEST_FILE)).unwrap();
         crate::task::set_state(&dir, crate::task::TaskState::Running).unwrap();
         let cancellation = dir.join("mcp.cancel");
         let worker_repo = repo.clone();
@@ -428,8 +941,11 @@ mod tests {
         let worker = std::thread::spawn(move || {
             request_for_task(
                 &worker_repo,
-                &worker_task_id,
-                &worker_dir,
+                &Context {
+                    task_id: worker_task_id.clone(),
+                    task_dir: worker_dir.clone(),
+                    attempt: None,
+                },
                 RequestInput {
                     operation: "network",
                     summary: "fetch remote context",
@@ -460,6 +976,11 @@ mod tests {
             crate::task::load(&dir).unwrap().state,
             crate::task::TaskState::Running
         );
+        assert!(pending(&dir, &task_id).unwrap().is_none());
+        assert!(!dir.join(RESPONSE_FILE).exists());
+        let next = spawn_checkpoint(&repo, &task_id, &dir, None);
+        decide(&repo, &dir, &task_id, true).unwrap();
+        assert_eq!(next.join().unwrap().unwrap()["approved"], true);
     }
 
     #[test]
@@ -478,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_records_cancellation_without_clearing_the_pending_evidence() {
+    fn reject_keeps_its_decision_available_until_the_waiter_retires_it() {
         let (_temp, repo, task_id, dir) = fixture();
         let request = decide(&repo, &dir, &task_id, false).unwrap();
         assert_eq!(request.task_id, task_id);

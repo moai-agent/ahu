@@ -1,6 +1,7 @@
 //! Durable Tasks extension for the local stdio transport. Only replay-safe
 //! inspection operations are queued. Protocol completion never accepts work.
 use super::{TASKS_EXTENSION, call_response, call_response_with_cancellation, response, rpc_error};
+use crate::task::StateLock as Lock;
 use crate::{
     git::Repo,
     state,
@@ -211,6 +212,11 @@ impl Session {
             },
             request_input: adapter && object.get("task").is_none(),
             arguments,
+            approval_context: if name == "ahu_request_approval" {
+                Some(crate::approval::Context::current()?)
+            } else {
+                None
+            },
             input_requests: None,
             result: None,
             error: None,
@@ -306,6 +312,8 @@ struct StoredTask {
     cancel_requested: bool,
     name: String,
     arguments: Value,
+    #[serde(default)]
+    approval_context: Option<crate::approval::Context>,
     request_input: bool,
     input_requests: Option<Value>,
     result: Option<Value>,
@@ -468,22 +476,30 @@ fn work(repo: &Repo, owner: &str) -> Result<()> {
             }
             task
         };
-        let output = if snapshot.name == "ahu_request_approval" {
-            call_response_with_cancellation(
-                repo,
-                &Value::Null,
-                &json!({"name":snapshot.name,"arguments":snapshot.arguments}),
-                true,
-                Some(&path.with_extension("cancel")),
-            )
-        } else {
-            call_response(
-                repo,
-                &Value::Null,
-                &json!({"name":snapshot.name,"arguments":snapshot.arguments}),
-                true,
-            )
-        };
+        let output =
+            if snapshot.name == "ahu_request_approval" && snapshot.approval_context.is_none() {
+                rpc_error(
+                    &Value::Null,
+                    -32602,
+                    "approval task has no frozen originating context",
+                )
+            } else if snapshot.name == "ahu_request_approval" {
+                call_response_with_cancellation(
+                    repo,
+                    &Value::Null,
+                    &json!({"name":snapshot.name,"arguments":snapshot.arguments}),
+                    true,
+                    Some(&path.with_extension("cancel")),
+                    snapshot.approval_context.as_ref(),
+                )
+            } else {
+                call_response(
+                    repo,
+                    &Value::Null,
+                    &json!({"name":snapshot.name,"arguments":snapshot.arguments}),
+                    true,
+                )
+            };
         let _lock = Lock::acquire(&path.with_extension("lock"))?;
         let mut task = load(repo, id, owner)?;
         if task.status != "working" || task.cancel_requested || task.revision != snapshot.revision {
@@ -500,52 +516,6 @@ fn work(repo: &Repo, owner: &str) -> Result<()> {
         task.save(repo)?;
     }
     Ok(())
-}
-
-// Persistent lock files must never be unlinked: all processes must lock the
-// same inode. Kernel ownership, rather than a timestamp, survives crashes safely.
-struct Lock(std::fs::File);
-impl Lock {
-    fn acquire(path: &std::path::Path) -> Result<Self> {
-        for _ in 0..50 {
-            if let Some(lock) = Self::try_acquire(path)? {
-                return Ok(lock);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        Err(Error::new("MCP task busy; retry request"))
-    }
-    fn try_acquire(path: &std::path::Path) -> Result<Option<Self>> {
-        use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
-        state::confine_file(path)?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(path)?;
-        crate::storage::validate_owned_metadata(&file.metadata()?, true)?;
-        // SAFETY: the file owns a valid descriptor.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                return Ok(None);
-            }
-            return Err(error.into());
-        }
-        Ok(Some(Self(file)))
-    }
-}
-impl Drop for Lock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // SAFETY: the file is still open.
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -566,6 +536,7 @@ mod tests {
             cancel_requested: false,
             name: "ahu_task_get".into(),
             arguments: json!({}),
+            approval_context: None,
             request_input: true,
             input_requests: Some(json!({"task-selection":{}})),
             result: None,
@@ -579,6 +550,30 @@ mod tests {
             "_meta":{"io.modelcontextprotocol/clientCapabilities":{"elicitation":{"form":{}}}},
             "inputResponses":{"task-selection":action}
         })
+    }
+
+    #[test]
+    fn legacy_approval_jobs_never_inherit_the_reconnecting_workers_task() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::git::run_ok(temp.path(), &["init", "-q"]).unwrap();
+        let repo = crate::git::discover(temp.path()).unwrap();
+        let mut queued = task();
+        queued.repository = repo.identity();
+        queued.checkout = repo.root.clone();
+        queued.status = "working".into();
+        queued.request_input = false;
+        queued.name = "ahu_request_approval".into();
+        queued.arguments = json!({"operation":"network", "summary":"synthetic request"});
+        queued.save(&repo).unwrap();
+        work(&repo, &queued.owner).unwrap();
+        let result = load(&repo, &queued.task_id, &queued.owner).unwrap();
+        assert_eq!(result.status, "failed");
+        assert!(
+            result.error.unwrap()["message"]
+                .as_str()
+                .unwrap()
+                .contains("no frozen originating context")
+        );
     }
 
     #[test]
