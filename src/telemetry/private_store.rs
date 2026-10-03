@@ -400,6 +400,11 @@ pub fn report(repo: &Repo, record_key: &str) -> Result<serde_json::Value> {
         if let Some((record, _, _)) = selected.first() {
             summary["agent"] = serde_json::Value::String(record.agent_label());
         }
+        summary["native_completeness"] = completeness_counts(
+            selected
+                .iter()
+                .map(|(_, _, attempt)| attempt.native_complete),
+        );
         report_groups.push(summary);
     }
     Ok(serde_json::json!({
@@ -414,14 +419,34 @@ pub fn report(repo: &Repo, record_key: &str) -> Result<serde_json::Value> {
             "kind":"unavailable",
             "reason":"no trusted per-run or account capacity signal is collected"
         },
+        "native_completeness":completeness_counts(
+            observations.iter().map(|(_,_,attempt)| attempt.native_complete)
+        ),
         "groups":report_groups,
         "limitations":[
             "Only headless attempts with opted-in local metrics are included.",
             "Interactive task usage is unavailable to this report.",
+            "Native event completeness is reported separately from process outcome; missing or incomplete evidence is not treated as complete.",
             "Token values are per-attempt observations and are not summed across retries or child agents.",
             "USD values are harness-reported and remain separated by source; quota and billing are not inferred."
         ]
     }))
+}
+
+fn completeness_counts(values: impl Iterator<Item = Option<bool>>) -> serde_json::Value {
+    let (mut complete, mut incomplete, mut unknown) = (0usize, 0usize, 0usize);
+    for value in values {
+        match value {
+            Some(true) => complete += 1,
+            Some(false) => incomplete += 1,
+            None => unknown += 1,
+        }
+    }
+    serde_json::json!({
+        "complete_attempts": complete,
+        "incomplete_attempts": incomplete,
+        "unknown_attempts": unknown
+    })
 }
 
 fn group_keys(

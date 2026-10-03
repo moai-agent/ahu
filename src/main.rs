@@ -420,6 +420,12 @@ fn print_private_report_group(group: &serde_json::Value) {
         safe(&group["group"]["outcome"]),
         attempts
     );
+    println!(
+        "    native events {}/{}/{} complete/incomplete/unknown",
+        number(&group["native_completeness"]["complete_attempts"]),
+        number(&group["native_completeness"]["incomplete_attempts"]),
+        number(&group["native_completeness"]["unknown_attempts"])
+    );
     if let Some(mean) = group["elapsed_ms"]["mean_observed_ms"].as_f64() {
         println!(
             "    time   {mean:.0} ms mean ({}/{attempts} observed)",

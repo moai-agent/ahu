@@ -2920,6 +2920,9 @@ pub(crate) fn private_attempt_metrics(
         output.push(PrivateAttemptMetrics {
             attempt: number,
             outcome: outcome.to_owned(),
+            native_complete: value
+                .pointer("/native_completeness/complete")
+                .and_then(Value::as_bool),
             elapsed_ms,
             metrics_observed: metrics.is_some(),
             usage: TokenUsage {
@@ -2943,6 +2946,7 @@ pub(crate) fn private_attempt_metrics(
 pub(crate) struct PrivateAttemptMetrics {
     pub attempt: u32,
     pub outcome: String,
+    pub native_complete: Option<bool>,
     pub elapsed_ms: Option<u64>,
     pub metrics_observed: bool,
     pub usage: TokenUsage,

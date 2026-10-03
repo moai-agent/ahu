@@ -113,6 +113,8 @@ projections remain unavailable in their groups. There is no automatic quota
 query, final billing API, interactive-session usage reader, tracker client, or
 automatic issue visibility check. Every report explicitly shows capacity as
 unknown because no trusted per-run or account capacity signal is collected.
+Each group separately counts complete, incomplete, and unknown native-event
+evidence so process exit status is not mistaken for a complete harness stream.
 Offline fixtures verify adapter behavior; they do not prove live provider
 billing or quota.
 

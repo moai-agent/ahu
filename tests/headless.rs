@@ -84,10 +84,12 @@ elif scenario=='inside_write':
  print(json.dumps({'type':'tool_use','name':'Write','input':{'file_path':os.path.join(os.getcwd(),'kept.txt')}}),flush=True)
 elif scenario=='outside_bad_input':
  print(json.dumps({'type':'tool_use','name':'Write','input':'not json{'}),flush=True)
+elif scenario=='measure_no_terminal':
+ print(json.dumps({'type':'assistant','usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120}}),flush=True)
 else: open('proof.txt','w').write('synthetic proof\n')
 result={'type':'result','subtype':'success','result':'validated synthetic proof','session_id':session,'is_error':False,'permission_denials':([{'tool':'Bash'}] if scenario=='denied' else [])}
-if scenario=='measure': result.update({'usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120},'total_cost_usd':0.0125})
-print(json.dumps(result),flush=True)
+if scenario in ('measure','measure_no_terminal'): result.update({'usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120},'total_cost_usd':0.0125})
+if scenario!='measure_no_terminal': print(json.dumps(result),flush=True)
 if scenario=='nonzero': sys.exit(7)
 "#;
         std::fs::write(bin.join("claude"), script).unwrap();
@@ -296,6 +298,9 @@ fn private_telemetry_cli_links_and_reports_opt_in_attempt_measurements() {
         report["capacity"]["reason"],
         "no trusted per-run or account capacity signal is collected"
     );
+    assert_eq!(report["native_completeness"]["complete_attempts"], 1);
+    assert_eq!(report["native_completeness"]["incomplete_attempts"], 0);
+    assert_eq!(report["native_completeness"]["unknown_attempts"], 0);
     let human_report = f
         .command()
         .args(["telemetry", "report", "--key", "case-a4"])
@@ -309,6 +314,10 @@ fn private_telemetry_cli_links_and_reports_opt_in_attempt_measurements() {
     assert!(
         String::from_utf8_lossy(&human_report.stdout)
             .contains("capacity      unknown (no trusted capacity signal)")
+    );
+    assert!(
+        String::from_utf8_lossy(&human_report.stdout)
+            .contains("native events 1/0/0 complete/incomplete/unknown")
     );
     let group = &report["groups"][0];
     assert_eq!(group["group"]["harness"], "claude-code");
@@ -340,6 +349,79 @@ fn private_telemetry_cli_links_and_reports_opt_in_attempt_measurements() {
         "{}",
         String::from_utf8_lossy(&unlinked.stderr)
     );
+}
+
+#[test]
+fn private_report_keeps_observed_usage_separate_from_missing_terminal_evidence() {
+    let f = Fixture::new();
+    let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
+    config.telemetry.local_metrics = true;
+    f.repo
+        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo
+        .commit("enable local metrics for incomplete stream fixture");
+
+    let launched = f.launch("measure_no_terminal", &[]);
+    assert_eq!(launched.status.code(), Some(5));
+    let envelope = Fixture::value(&launched);
+    assert_eq!(envelope["outcome"], "failed");
+    assert_eq!(envelope["native_completeness"]["complete"], false);
+    let task_id = envelope["task_id"].as_str().unwrap();
+    let linked = f
+        .command()
+        .args([
+            "telemetry",
+            "link",
+            "--key",
+            "case-incomplete",
+            "--task",
+            task_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        linked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    let report = f
+        .command()
+        .args([
+            "telemetry",
+            "report",
+            "--key",
+            "case-incomplete",
+            "--output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let report: Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(report["native_completeness"]["incomplete_attempts"], 1);
+    assert_eq!(report["native_completeness"]["unknown_attempts"], 0);
+    assert_eq!(report["groups"][0]["group"]["outcome"], "failed");
+    assert_eq!(
+        report["groups"][0]["native_completeness"]["incomplete_attempts"],
+        1
+    );
+    assert_eq!(
+        report["groups"][0]["values"]["ahu.tokens.total"]["maximum_observed"],
+        120
+    );
+    let serialized = serde_json::to_string(&report).unwrap();
+    assert!(!serialized.contains(task_id));
+
+    let unlinked = f
+        .command()
+        .args(["telemetry", "unlink", "--key", "case-incomplete"])
+        .output()
+        .unwrap();
+    assert!(unlinked.status.success());
 }
 
 #[test]

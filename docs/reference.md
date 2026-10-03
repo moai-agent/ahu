@@ -688,7 +688,9 @@ maximum token observations, observation coverage, and harness-reported USD
 separated by source. Retry/token values are not summed, and child task values
 are not implicitly added to a parent. Attempts without an opted-in projection
 remain in denominators as unavailable; tasks without a completed result and
-removed task records are disclosed separately. The report is printed locally;
+removed task records are disclosed separately. Each group also reports complete,
+incomplete, and unknown native-event evidence separately from process outcome;
+missing evidence is never counted as complete. The report is printed locally;
 JSON output contains the opaque key, so do not send it to a public log or
 telemetry destination.
 
