@@ -324,7 +324,7 @@ The measurements have deliberately narrow meanings:
   without this field have an unknown tool error rate.
 - `tool_error_rate`: observed errors divided by completed tool calls. Zero
   completed calls gives zero only with complete coverage and zero errors.
-  Missing counters, errors above completions, or completions above calls are
+  Missing counters, errors exceeding completions, or completions exceeding calls are
   unknown; complete coverage also requires all observed calls to have completed.
   The per-record `trajectory_tool_error_rate` includes value, coverage, numerator
   and denominator. A partial rate describes observed outcomes only and is not a
@@ -341,17 +341,17 @@ The measurements have deliberately narrow meanings:
 
 `complete_observed_stream` means the adapter observed the supported start and end
 shapes, with no unclassified events, malformed input, unfinished calls or capture
-loss. It describes that captured stream only, not provider internals, shell
-subcommands or native helper work. Unclassified shapes and known losses make
+loss. It describes that captured stream only, not provider internals, commands
+within a shell or native helper work. Unclassified shapes and known losses make
 coverage `partial`; their counts are lower bounds (rates are not). Antigravity
 trajectory coverage currently remains `none`: the inspected step-update shapes
-do not establish a deduplicable tool lifecycle. Its existing usage metrics are
+do not establish a tool lifecycle with reliable duplicate detection. Its existing usage metrics are
 unaffected. Helper messages are excluded and make coverage partial.
 
 The projection retains no reasoning text, prompts, tool arguments, tool results,
 raw names or call IDs. In-memory SHA-256 identity keys are bounded to 4,096 calls,
 4,096 steps and 256 tools, with a 1,024-byte input identity limit. Reaching a bound
-sets `tracking_limited`; further untrackable observations cannot make a budget
+sets `tracking_limited`; further observations that cannot be tracked cannot make a budget
 pass under the default coverage policy. Counters saturate. Existing 1 MiB event
 and 64 MiB stream limits still apply. No usefulness score is calculated.
 
@@ -366,19 +366,19 @@ trajectory_budgets:
 ```
 
 At least one budget is required. Rates must be finite fractions in `0..1`.
-An observed count above a budget fails even
+An observed count exceeding a budget fails even
 with partial coverage. Otherwise complete observed coverage passes; missing or
 partial coverage defaults to `unknown`. Set `unknown_coverage: fail` to fail
 inconclusive observations, or explicitly use `observed_only` to judge available
 counts and rates. Even `observed_only` leaves a missing or invalid required
-measurement unknown. A partial rate above its maximum remains unknown unless
+measurement unknown. A partial rate exceeding its maximum remains unknown unless
 `observed_only` explicitly opts into judging it.
 The run output and report show `trajectory_budget_status` separately from answer
 correctness and tool expectations. These are post-run checks: they neither stop
 a running agent nor change its answer score or the command's exit status. Budget
 configuration stays out of candidate and evaluator prompts.
 
-### CI trajectory guardrails
+### Trajectory command guardrails
 
 Opt into post-run CI checks with either or both flags:
 

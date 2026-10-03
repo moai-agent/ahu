@@ -154,8 +154,8 @@ To use the native Ollama integration, set `AHU_OLLAMA_MODEL` to a vendor-documen
 decision model such as `nimble`, `tev1`, or `tev1:0.8b`. The endpoint defaults to
 `http://127.0.0.1:11434/v1/systemone`, but you can override it using `AHU_OLLAMA_URL`.
 
-The URL must use HTTP, a literal loopback IPv4 or IPv6 address, and exactly
-`/v1/systemone`, with no credentials, query, or fragment. Hostnames, abbreviated
+The address must use HTTP, a literal loopback IPv4 or IPv6 address, and exactly
+`/v1/systemone`, with no credentials, query, or fragment. Host names, abbreviated
 IPv4 addresses, and normalized path variants are rejected. The client sends no
 authentication headers, follows no redirects, ignores environment proxies, and
 uses a 30-second timeout with a 1 MiB response limit, including responses without
@@ -193,11 +193,11 @@ Probabilities and confidence remain model estimates, not calibrated correctness.
 Ollama currently limits choice questions to 26 options; ahu's portable schema
 allows up to 32, so larger choices may be refused by Ollama.
 
-### Legacy local Python adapter
+### Legacy local adapter
 
 The repository also includes a small standard-library adapter for older Ollama
 versions using `/api/chat` and JSON Schema. To select this generic adapter instead
-of the native Ollama backend or Jev, configure `AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions`
+of the native Ollama provider or Jev, configure `AHU_DECISION_URL=http://127.0.0.1:8001/v1/decisions`
 and leave both `AHU_OLLAMA_MODEL` and `AHU_OLLAMA_URL` unset.
 
 Choose a locally installed model from `ollama list`. For example, if
