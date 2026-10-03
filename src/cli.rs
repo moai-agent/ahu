@@ -73,6 +73,8 @@ Commands:
                         Preview or explicitly delegate a native cmux installation
   auth status --harness ID [--profile NAME]
                         Check this checkout's current harness account binding
+  auth readiness --harness ID [--model MODEL]
+                        Report secret-free identity and project-binding readiness
   auth profiles
                         List local project auth profiles
   auth bind --harness ID [--profile NAME] [--replace]
@@ -251,13 +253,14 @@ Commands:
   tasks [--limit N]     List recent tasks; use --all for the full list
   task ID               Inspect a task
   wait|result|cancel ID Control or inspect a task
+  approve|reject ID     Resolve a task's pending MCP approval request
   resume ID --prompt-file PATH
   cleanup|remove ID     Clean captures or remove a completed task
   focus|message ID ...  Focus a task or send it a message
   eval run|report       Run and compare local agent evaluations
   knowledge lint        Check configured OKF bundles
   cmux status|install   Inspect or install native cmux integration
-  auth profiles|status|bind|select
+  auth profiles|status|readiness|bind|select
                         Check or manage local project auth profiles
   mcp serve             Serve repository tools over stdio MCP
   explain               Show the architecture overview
@@ -297,13 +300,14 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes ahu.lock and accepts local context in owner-only host state; review and commit ahu.lock only when shared context changed.\n".to_string(),
         "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
         "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
-        "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts.\n\nVerified: codex, claude-code, Antigravity, and Ollama's local account endpoint. Ollama binding applies to OpenCode tasks using Ollama cloud models; other OpenCode providers cannot be bound yet.\n".to_string(),
+        "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics.\n\nVerified: codex, claude-code, Antigravity, and Ollama's local account endpoint. Ollama binding applies to OpenCode tasks using Ollama cloud models; other OpenCode providers cannot yet be bound.\n".to_string(),
         "telemetry" => "Usage: ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
         "task" => "Usage: ahu task ID [--output json]\n\nInspect a task's state, branch, worktree, and launch evidence.\n".to_string(),
         "wait" => "Usage: ahu wait TASK [--output json]\n\nWait for a headless task to reach a terminal state.\n".to_string(),
         "result" => "Usage: ahu result TASK [--output json]\n\nRead the durable process and harness outcomes for a headless task.\n".to_string(),
         "cancel" => "Usage: ahu cancel TASK\n\nRequest cancellation of the task and its ahu descendants.\n".to_string(),
+        "approve" | "reject" => format!("Usage: ahu {topic} TASK [--output json]\n\nResolve the task's pending explicit MCP approval checkpoint. Inspect the request first with `ahu task TASK`; rejecting requests task cancellation.\n"),
         "resume" => "Usage: ahu resume TASK --prompt-file PATH [--output json]\n\nResume a root headless task using its recorded native session.\n".to_string(),
         "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after termination is known.\n".to_string(),
         "remove" => "Usage: ahu remove TASK\n\nRemove a completed task's record, worktree, and branch when safe.\n".to_string(),
@@ -473,6 +477,8 @@ pub enum Command {
         harness: String,
         profile: Option<String>,
         replace: bool,
+        model: Option<String>,
+        json: bool,
     },
     Telemetry {
         action: String,
@@ -597,7 +603,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 task_dir: PathBuf::from(&args[2]),
             })
         }
-        "wait" | "result" | "cancel" | "resume" | "cleanup" => {
+        "wait" | "result" | "cancel" | "approve" | "reject" | "resume" | "cleanup" => {
             let task_id = args
                 .get(1)
                 .filter(|s| !s.starts_with('-'))
@@ -684,13 +690,18 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         },
         "auth" => {
             let action = args.get(1).map(String::as_str).unwrap_or("");
-            if !matches!(action, "status" | "bind" | "select" | "profiles") {
+            if !matches!(
+                action,
+                "status" | "readiness" | "bind" | "select" | "profiles"
+            ) {
                 bail!(
-                    "expected `ahu auth profiles`, `ahu auth status|bind --harness ID`, or `ahu auth select --profile NAME`"
+                    "expected `ahu auth profiles`, `ahu auth status|readiness|bind --harness ID`, or `ahu auth select --profile NAME`"
                 );
             }
             let mut harness = None;
             let mut profile = None;
+            let mut model = None;
+            let mut json = false;
             let mut replace = false;
             let mut index = 2;
             while index < args.len() {
@@ -701,18 +712,27 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                     "--profile" if profile.is_none() => {
                         profile = Some(value_for("--profile", &args, &mut index)?);
                     }
+                    "--model" if action == "readiness" && model.is_none() => {
+                        model = Some(value_for("--model", &args, &mut index)?);
+                    }
+                    "--output" if action == "readiness" && !json => {
+                        if value_for("--output", &args, &mut index)? != "json" {
+                            bail!("expected json");
+                        }
+                        json = true;
+                    }
                     "--replace" if action == "bind" && !replace => replace = true,
                     other => bail!("unexpected option {other:?} for `ahu auth {action}`"),
                 }
                 index += 1;
             }
             let harness = if action == "profiles" {
-                if harness.is_some() || profile.is_some() || replace {
+                if harness.is_some() || profile.is_some() || replace || model.is_some() || json {
                     bail!("`ahu auth profiles` accepts no options");
                 }
                 String::new()
             } else if action == "select" {
-                if harness.is_some() || replace {
+                if harness.is_some() || replace || model.is_some() || json {
                     bail!("`ahu auth select` accepts only --profile NAME");
                 }
                 String::new()
@@ -732,11 +752,16 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             if action == "select" && profile.is_none() {
                 bail!("auth select requires --profile NAME");
             }
+            if action == "readiness" && (profile.is_some() || replace) {
+                bail!("auth readiness accepts --harness, optional --model, and --output json");
+            }
             Ok(Command::Auth {
                 action: action.to_owned(),
                 harness,
                 profile,
                 replace,
+                model,
+                json,
             })
         }
         "telemetry" => parse_telemetry(&args[1..]),
@@ -1582,6 +1607,54 @@ mod parser_tests {
             args.extend(options);
             assert_usage(&args, "unexpected option");
         }
+    }
+
+    #[test]
+    fn auth_readiness_requires_harness_and_only_accepts_json_output() {
+        assert_eq!(
+            parse([
+                "auth",
+                "readiness",
+                "--harness",
+                "opencode",
+                "--model",
+                "ollama/model:cloud",
+                "--output",
+                "json"
+            ])
+            .unwrap(),
+            Command::Auth {
+                action: "readiness".into(),
+                harness: "opencode".into(),
+                profile: None,
+                replace: false,
+                model: Some("ollama/model:cloud".into()),
+                json: true,
+            }
+        );
+        assert_usage(&["auth", "readiness"], "requires --harness");
+        assert_usage(
+            &[
+                "auth",
+                "readiness",
+                "--harness",
+                "codex",
+                "--profile",
+                "default",
+            ],
+            "accepts --harness",
+        );
+        assert_usage(
+            &[
+                "auth",
+                "readiness",
+                "--harness",
+                "codex",
+                "--output",
+                "yaml",
+            ],
+            "expected json",
+        );
     }
 
     #[test]

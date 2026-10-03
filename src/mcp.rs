@@ -476,6 +476,15 @@ fn tools() -> Vec<Value> {
         }),
         decisions::tool_definition(),
         json!({
+            "name":"ahu_request_approval",
+            "description":"Pause the current Ahu task and wait for the operator to approve or reject a bounded operation. This is an explicit checkpoint; it does not intercept arbitrary shell actions.",
+            "inputSchema":{"type":"object","properties":{
+                "operation":{"type":"string","enum":["external-write","network","destructive","other"]},
+                "summary":{"type":"string","minLength":1,"maxLength":2048},
+                "target":{"type":"string","maxLength":2048}
+            },"required":["operation","summary"],"additionalProperties":false}
+        }),
+        json!({
             "name":"ahu_skills_suggest",
             "description":"Suggest up to three committed repository skills for a task, or abstain. Advisory only; does not load skills or change agent identity. Decision mode sends the task and skill names/descriptions to the configured typed decision provider (TypeSafe HTTPS by default). Use lexical mode for local token matching.",
             "inputSchema":{"type":"object","properties":{
@@ -486,15 +495,17 @@ fn tools() -> Vec<Value> {
     ]
 }
 
-/// Every read-only tool name an ahu MCP session can expose.
+/// Every tool name an ahu MCP session can expose, including the explicit
+/// operator approval checkpoint.
 ///
 /// Evaluation case tool expectations and evaluation record validation are both
 /// bounded by this list, so neither can name a tool that does not exist.
-pub const TOOL_NAMES: [&str; 5] = [
+pub const TOOL_NAMES: [&str; 6] = [
     "ahu_agents_list",
     "ahu_tasks_list",
     "ahu_task_get",
     "ahu_typed_decide",
+    "ahu_request_approval",
     "ahu_skills_suggest",
 ];
 
@@ -512,7 +523,11 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
         .as_str()
         .ok_or_else(|| Error::new("tools/call requires a string params.name"))?;
     let selector = match name {
-        "ahu_agents_list" | "ahu_tasks_list" | "ahu_typed_decide" | "ahu_skills_suggest" => false,
+        "ahu_agents_list"
+        | "ahu_tasks_list"
+        | "ahu_typed_decide"
+        | "ahu_skills_suggest"
+        | "ahu_request_approval" => false,
         "ahu_task_get" => true,
         "ahu_task_inspect" if inspection_adapter => true,
         _ => return Err(Error::new(format!("unknown ahu MCP tool: {name}"))),
@@ -521,6 +536,35 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
     let arguments = params.get("arguments").unwrap_or(&empty);
     if name == "ahu_typed_decide" {
         return decisions::validate_arguments(arguments);
+    }
+    if name == "ahu_request_approval" {
+        let object = arguments
+            .as_object()
+            .ok_or_else(|| Error::new("approval arguments must be an object"))?;
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "operation" | "summary" | "target"))
+            || !matches!(
+                object.get("operation").and_then(Value::as_str),
+                Some("external-write" | "network" | "destructive" | "other")
+            )
+            || !object
+                .get("summary")
+                .and_then(Value::as_str)
+                .is_some_and(|value| {
+                    !value.trim().is_empty()
+                        && value.len() <= 2048
+                        && !value.chars().any(char::is_control)
+                })
+            || object.get("target").is_some_and(|value| {
+                !value
+                    .as_str()
+                    .is_some_and(|text| text.len() <= 2048 && !text.chars().any(char::is_control))
+            })
+        {
+            return Err(Error::new("invalid approval request arguments"));
+        }
+        return Ok(());
     }
     if name == "ahu_skills_suggest" {
         let object = arguments
@@ -565,6 +609,16 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
 }
 
 fn call_response(repo: &Repo, id: &Value, params: &Value, modern: bool) -> Value {
+    call_response_with_cancellation(repo, id, params, modern, None)
+}
+
+pub(super) fn call_response_with_cancellation(
+    repo: &Repo,
+    id: &Value,
+    params: &Value,
+    modern: bool,
+    cancellation: Option<&std::path::Path>,
+) -> Value {
     if let Err(error) = validate_tool_call(params, false) {
         return rpc_error(id, -32602, error.to_string());
     }
@@ -580,6 +634,13 @@ fn call_response(repo: &Repo, id: &Value, params: &Value, modern: bool) -> Value
         "ahu_tasks_list" => tasks(repo),
         "ahu_task_get" => task_get(repo, &arguments),
         "ahu_typed_decide" => decisions::call(&arguments, repo),
+        "ahu_request_approval" => crate::approval::request(
+            repo,
+            arguments["operation"].as_str().unwrap_or_default(),
+            arguments["summary"].as_str().unwrap_or_default(),
+            arguments.get("target").and_then(Value::as_str),
+            cancellation,
+        ),
         "ahu_skills_suggest" => {
             crate::skill_selection::Mode::parse(arguments["mode"].as_str().unwrap_or("decision"))
                 .and_then(|mode| {
@@ -767,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_tools_are_explicit_and_bounded() {
+    fn served_tools_are_explicit_and_bounded() {
         let names: Vec<_> = tools()
             .into_iter()
             .map(|tool| tool["name"].as_str().unwrap().to_string())
@@ -779,7 +840,8 @@ mod tests {
                 "ahu_tasks_list",
                 "ahu_task_get",
                 "ahu_typed_decide",
-                "ahu_skills_suggest"
+                "ahu_request_approval",
+                "ahu_skills_suggest",
             ]
         );
         // The exported name list is what bounds evaluation tool expectations,
@@ -788,6 +850,30 @@ mod tests {
         let digest = tool_definitions_digest();
         assert_eq!(digest.len(), 64);
         assert_eq!(digest, tool_definitions_digest());
+    }
+
+    #[test]
+    fn approval_tool_accepts_only_bounded_checkpoint_metadata() {
+        let valid = serde_json::json!({
+            "name":"ahu_request_approval",
+            "arguments":{"operation":"network","summary":"Fetch the requested issue metadata","target":"https://example.invalid"}
+        });
+        assert!(validate_tool_call(&valid, false).is_ok());
+        for arguments in [
+            serde_json::json!({"operation":"shell","summary":"run command"}),
+            serde_json::json!({"operation":"network","summary":"\u{001b}[31munsafe"}),
+            serde_json::json!({"operation":"network","summary":"ok","secret":"value"}),
+            serde_json::json!({"operation":"network","summary":"ok","target":1}),
+        ] {
+            assert!(
+                validate_tool_call(
+                    &serde_json::json!({"name":"ahu_request_approval","arguments":arguments}),
+                    false
+                )
+                .is_err(),
+                "accepted invalid approval metadata"
+            );
+        }
     }
 
     #[test]

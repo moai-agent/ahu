@@ -898,7 +898,7 @@ fn approval_widening_is_opt_in_and_harness_native() {
 }
 
 #[test]
-fn codex_auto_approves_only_local_read_only_ahu_mcp_tools() {
+fn codex_auto_approves_local_ahu_tools_and_checkpoint_request() {
     use ahu::agent::Permissions;
 
     let command = harness::adapter_for("codex")
@@ -910,7 +910,12 @@ fn codex_auto_approves_only_local_read_only_ahu_mcp_tools() {
             permissions: Permissions::Auto,
         })
         .unwrap();
-    for tool in ["ahu_agents_list", "ahu_tasks_list", "ahu_task_get"] {
+    for tool in [
+        "ahu_agents_list",
+        "ahu_tasks_list",
+        "ahu_task_get",
+        "ahu_request_approval",
+    ] {
         let config = format!("mcp_servers.ahu.tools.{tool}.approval_mode=\"approve\"");
         assert!(command.args.contains(&config), "missing {config:?}");
     }
@@ -927,7 +932,9 @@ fn codex_auto_approves_only_local_read_only_ahu_mcp_tools() {
         .unwrap()
         .applied_controls
         .join(" ");
-    assert!(disclosure.contains("ahu_agents_list, ahu_tasks_list, ahu_task_get"));
+    assert!(disclosure.contains("ahu_agents_list, ahu_tasks_list"));
+    assert!(disclosure.contains("ahu_request_approval"));
+    assert!(disclosure.contains("pauses without"));
     assert!(disclosure.contains("remain approval-gated"));
 }
 

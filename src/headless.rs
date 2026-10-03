@@ -2125,7 +2125,7 @@ impl SessionCheckpoint {
         if self.schema_version != 2
             || self.task_id != id
             || record.task_id != id
-            || !matches!(record.schema_version, 2 | 3)
+            || !matches!(record.schema_version, 2..=4)
             || self.attempt == 0
             || self.attempt != spec.attempt
             || self.harness != record.identity.harness
@@ -2512,6 +2512,12 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         if stop.is_none() {
             let reason = if dir.join("cancel.json").exists() {
                 Some("cancelled")
+            } else if stdout_events
+                .lock()
+                .map(|events| !events.writes_outside_worktree.is_empty())
+                .unwrap_or(false)
+            {
+                Some("boundary_violation")
             } else if Instant::now() >= deadline {
                 Some("timed_out")
             } else if storage_failed || broker_failure.is_some() {
@@ -2520,6 +2526,13 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
                 None
             };
             if let Some(reason) = reason {
+                if reason == "boundary_violation"
+                    && let Ok(mut events) = stdout_events.lock()
+                {
+                    events.blockers.push(
+                        "harness reported a write target outside the task worktree; process stopped after observing the event".into(),
+                    );
+                }
                 cancelled_tasks = cancel_tree(&repo, dir, reason)?;
                 signal_group(pid, libc::SIGTERM);
                 stop = Some((reason, Instant::now()));
@@ -3173,7 +3186,14 @@ pub fn control(
             let current = result(&dir)?;
             if !matches!(
                 current["outcome"].as_str(),
-                Some("succeeded" | "failed" | "cancelled" | "timed_out" | "capture_failed")
+                Some(
+                    "succeeded"
+                        | "failed"
+                        | "cancelled"
+                        | "timed_out"
+                        | "capture_failed"
+                        | "boundary_violation"
+                )
             ) {
                 bail!(
                     "cleanup requires a known terminal attempt; unknown/interrupted ownership must be resolved first"
@@ -3254,7 +3274,7 @@ pub fn control(
             let previous = result(&dir)?;
             if !matches!(
                 previous["outcome"].as_str(),
-                Some("succeeded" | "failed" | "cancelled" | "timed_out")
+                Some("succeeded" | "failed" | "cancelled" | "timed_out" | "boundary_violation")
             ) {
                 bail!(
                     "resume requires a recorded terminal result with known process ownership; interrupted attempts cannot be replayed"
@@ -4819,7 +4839,7 @@ mod profile_and_metadata_tests {
     }
 
     #[test]
-    fn codex_auto_headless_approves_only_local_read_only_ahu_mcp_tools() {
+    fn codex_auto_headless_approves_local_tools_and_checkpoint_request() {
         use crate::agent::Permissions;
 
         let root = tempfile::tempdir().unwrap();

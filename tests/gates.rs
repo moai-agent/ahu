@@ -522,7 +522,7 @@ fn write_record(
     ahu::task::save(task_dir, &record, prompt).unwrap();
 }
 
-// --- schema 2: an old record is refused, never reinterpreted ---
+// --- schema 1: an old record is refused, never reinterpreted ---
 
 /// Schema 1 wrote the *whole file's* digest into a field named
 /// `instructions_digest`. Schema 2 gives that name to the delivered text and
@@ -531,11 +531,7 @@ fn write_record(
 /// name, which is worse than failing.
 #[test]
 fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
-    assert_eq!(
-        ahu::task::TASK_SCHEMA_VERSION,
-        3,
-        "the digest split and the task id change are schema changes and must be versioned as one"
-    );
+    assert_eq!(ahu::task::TASK_SCHEMA_VERSION, 4);
     assert!(
         ahu::task::READABLE_SCHEMA_VERSIONS.contains(&2),
         "schema 2 is this build's immediate predecessor and must stay readable"

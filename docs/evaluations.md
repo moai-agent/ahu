@@ -159,6 +159,67 @@ suggestions on no-skill cases. Calibrate on development cases and evaluate on
 fresh held-out tasks. Report selection accuracy separately from completed-task
 quality, native usage, service usage and latency.
 
+## Ablate committed project skills across harnesses
+
+`ahu eval run` compares agents and records the target commit and skill bundle
+digest, but no supported harness has a common, safe switch for disabling
+project skills at launch. Prepare a second committed context in a linked
+worktree, then run the same case or suite against both checkouts. Because both
+are worktrees of the same repository, they retain the same repository identity
+and local auth binding. The generated lock is current in each arm, so the
+comparison does not bypass the context-drift gate.
+
+Prepare a control arm with all project skills removed, or remove one skill by
+directory name:
+
+```sh
+python3 scripts/prepare_skill_ablation.py \
+  --repo "$CANDIDATE_REPO" \
+  --worktree "$SKILLS_OFF_REPO" \
+  --branch eval/skills-off \
+  --all-project-skills
+```
+
+For a one-skill ablation, replace `--all-project-skills` with
+`--skill typed-decisions`. The helper requires a clean source checkout, creates
+a reviewable local branch/worktree, removes selected paths from `.agents/skills`,
+`.claude/skills`, and `.opencode/skills`, refreshes `ahu.lock`, and commits only those changes. It
+uses disposable Ahu state while refreshing the lock, so per-user auth
+fingerprints are not accepted into the user's normal Ahu state. The branch and
+worktree remain for review and evaluation; remove them after the experiment
+when their Ahu eval tasks are no longer needed.
+
+Run both arms with the same candidate agent, harness, model, permissions, case
+suite, repetitions, and evaluation options. Use one harness-specific agent per
+pair, then repeat the pair for every supported harness. For example:
+
+```sh
+ahu --repo "$CANDIDATE_REPO" eval run \
+  --suite "$SUITE_FILE" --agent @dev-codex --runs 5 \
+  --records "$EXPERIMENT_DIR/skills-on.jsonl"
+ahu --repo "$SKILLS_OFF_REPO" eval run \
+  --suite "$SUITE_FILE" --agent @dev-codex --runs 5 \
+  --records "$EXPERIMENT_DIR/skills-off.jsonl"
+cat "$EXPERIMENT_DIR/skills-on.jsonl" "$EXPERIMENT_DIR/skills-off.jsonl" \
+  > "$EXPERIMENT_DIR/skill-ablation.jsonl"
+ahu eval report --records "$EXPERIMENT_DIR/skill-ablation.jsonl"
+```
+
+Use unique arm record files and an external experiment directory. The report
+keeps the arms separate by target commit and skill digest and reports answer
+quality, tool expectations, token observations, latency, and telemetry
+coverage. Alternate which arm runs first across repetitions or invocations to
+reduce order effects. Keep failed attempts and unknown telemetry in the result.
+
+This is a **project-skill** ablation. It controls committed files under the
+standard project skill roots used by supported harnesses. It cannot disable
+user-level skills, global plugins, harness built-ins, or skill sources outside
+those roots, and it does not prove that a harness loaded any available skill.
+Keep user and harness configuration fixed, inspect actual skill invocation
+telemetry where available, and describe the result as the effect of committed
+project skill context in that harness/model/case set. The first run is a
+bounded experiment, not a universal skill score.
+
 ### Answer encoding
 
 The tool-neutral prompt template (version 3) explicitly asks for choice option

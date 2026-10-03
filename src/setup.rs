@@ -23,6 +23,8 @@ struct Detected {
 // Codex filters the environment of stdio MCP children. Forward names only;
 // credentials are resolved by the server, never read or persisted by setup.
 const CODEX_MCP_ENV: &[&str] = &[
+    "AHU_TASK_ID",
+    "AHU_TASK_DIR",
     "AHU_EVAL_OTEL_ENDPOINT",
     "AHU_MCP_RESOURCE_ATTRIBUTES",
     "OTEL_RESOURCE_ATTRIBUTES",
@@ -394,7 +396,7 @@ fn rollback(paths: &[PathBuf]) {
 
 fn dev_agent(harness: &str, model: &str) -> String {
     format!(
-        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: dev-{harness}\nversion: 1.0.0\ndescription: Development agent for {harness}\nharness: {harness}\nmodel: {model}\npermissions: prompt\nstatus: stable\n---\n\nYou are the project's development agent for the {harness} harness. Follow the committed repository instructions and skills that your harness exposes. Use the ahu MCP tools when available: ahu_agents_list, ahu_tasks_list, ahu_task_get, and ahu_typed_decide. Do not claim a skill was loaded merely because its file exists. Ask for approval when an action crosses the permissions available to you."
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: dev-{harness}\nversion: 1.0.0\ndescription: Development agent for {harness}\nharness: {harness}\nmodel: {model}\npermissions: prompt\nstatus: stable\n---\n\nYou are the project's development agent for the {harness} harness. Follow the committed repository instructions and skills that your harness exposes. Use the ahu MCP tools when available: ahu_agents_list, ahu_tasks_list, ahu_task_get, ahu_typed_decide, and ahu_request_approval for an explicit operator checkpoint before a consequential operation. The approval tool only pauses and records bounded request details; it never performs the requested operation. Do not claim a skill was loaded merely because its file exists. Ask for approval when an action crosses the permissions available to you."
     )
 }
 

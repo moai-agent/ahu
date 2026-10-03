@@ -125,3 +125,9 @@ Codex, OpenCode, and Antigravity use `.agents/skills/`; Claude Code uses
 loaded it. When the ahu MCP server is connected, its inspection tools are
 available alongside the ahu CLI; use `ahu_agents_list`, `ahu_tasks_list`, and
 `ahu_task_get` when they fit the task.
+
+For a task-bound operation that needs the operator to decide first, use the
+`ahu_request_approval` MCP tool with a concise operation category, summary, and
+optional target, then wait for its result. The operator resolves it with
+`ahu approve TASK` or `ahu reject TASK`. This is an explicit cooperative
+checkpoint; it does not intercept other shell or file operations.

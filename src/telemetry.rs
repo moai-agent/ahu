@@ -574,6 +574,19 @@ fn mcp_tool_attributes(name: &str, arguments: &serde_json::Value) -> Vec<KeyValu
         "unknown"
     };
     let mut attributes = vec![KeyValue::new("ahu.mcp.tool.name", name.to_string())];
+    if name == "ahu_request_approval"
+        && let Some(operation) = arguments
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .filter(|operation| {
+                ["external-write", "network", "destructive", "other"].contains(operation)
+            })
+    {
+        attributes.push(KeyValue::new(
+            "ahu.mcp.approval.operation",
+            operation.to_owned(),
+        ));
+    }
     if name == "ahu_typed_decide" {
         if let Ok(bytes) = serde_json::to_vec(arguments) {
             attributes.push(KeyValue::new(
@@ -1160,6 +1173,28 @@ mod tests {
             ),
             Some("questions".into())
         );
+    }
+
+    #[test]
+    fn approval_telemetry_records_only_the_bounded_operation_category() {
+        let input = serde_json::json!({
+            "operation":"network",
+            "summary":"private approval summary",
+            "target":"https://private.invalid/path"
+        });
+        let attributes = mcp_tool_attributes("ahu_request_approval", &input);
+        assert_eq!(
+            string_attr(&attributes, "ahu.mcp.approval.operation"),
+            Some("network".into())
+        );
+        let encoded = format!("{attributes:?}");
+        assert!(!encoded.contains("private approval summary"));
+        assert!(!encoded.contains("private.invalid"));
+        let invalid = mcp_tool_attributes(
+            "ahu_request_approval",
+            &serde_json::json!({"operation":"private-operation","summary":"secret"}),
+        );
+        assert_eq!(string_attr(&invalid, "ahu.mcp.approval.operation"), None);
     }
 
     #[test]

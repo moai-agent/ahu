@@ -106,6 +106,7 @@ pub(super) fn validate_result(value: &Value, id: &str, attempt: u32) -> Result<(
                     | "cancelled"
                     | "timed_out"
                     | "capture_failed"
+                    | "boundary_violation"
                     | "supervisor_error"
             )
         )

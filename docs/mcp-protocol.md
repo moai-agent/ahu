@@ -24,6 +24,17 @@ completed results remain completed. Neither terminal protocol status nor an
 inspection result accepts, merges, or approves harness work. No MCP tool
 launches or changes harness permissions.
 
+`ahu_request_approval` is an explicit task-bound checkpoint tool. Its
+arguments are limited to an operation category, a short summary, and an
+optional target. The stdio server requires matching `AHU_TASK_ID` and
+`AHU_TASK_DIR` values from an Ahu-managed process, verifies that the task is
+live in the current checkout, and waits for `ahu approve TASK` or
+`ahu reject TASK`. The task record enters `waiting-for-approval`; rejection,
+operator cancellation, or timeout requests cancellation. A task has at most
+one pending approval request. This cooperative tool is not a general-purpose
+interceptor for shell commands or a replacement for operating-system
+filesystem isolation.
+
 The stdio binding is newline-delimited UTF-8 JSON-RPC: each line is one request,
 notification, or response, and stdout contains no other bytes. Diagnostics go
 to stderr. Frames are limited to 1 MiB, including the newline; an overlarge
@@ -110,4 +121,3 @@ revision) legacy inspection path for the connection. It always returns ordinary
 synchronous tool results and refuses Tasks methods even if later requests
 include modern capabilities. `tasks/list` and `tasks/result` are not
 implemented.
-

@@ -242,7 +242,7 @@ fn stdio_server_negotiates_and_lists_repository_agents_and_tasks() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(rows[0]["result"]["serverInfo"]["name"], "ahu");
-    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 6);
     assert_eq!(
         rows[2]["result"]["structuredContent"]["agents"][0]["name"],
         "@reviewer"
@@ -933,7 +933,7 @@ fn conformance_notifications_are_silent_and_do_not_select_modes_or_queue_work() 
 fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
     let repo = common::TestRepo::new();
     let mut client = Client::new(&repo, "alice");
-    for (params, count) in [(modern_without_tasks(json!({})), 5), (modern(json!({})), 6)] {
+    for (params, count) in [(modern_without_tasks(json!({})), 6), (modern(json!({})), 7)] {
         let result = client.call("tools/list", params)["result"].clone();
         assert_eq!(result["resultType"], "complete");
         assert_eq!(result["tools"].as_array().unwrap().len(), count);
@@ -966,7 +966,7 @@ fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
         assert!(result.get("resultType").is_none(), "{result}");
         assert!(result.get("taskId").is_none());
         if method == "tools/list" {
-            assert_eq!(result["tools"].as_array().unwrap().len(), 5);
+            assert_eq!(result["tools"].as_array().unwrap().len(), 6);
         }
     }
     assert_eq!(
@@ -1099,7 +1099,7 @@ fn conformance_failed_probes_allow_legacy_and_adapter_requires_both_opt_ins() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["id"], 0);
     assert_eq!(rows[0]["result"]["resultType"], "complete");
-    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 6);
     assert_eq!(rows[1]["id"], -1);
     assert_eq!(rows[1]["error"]["code"], -32602);
     assert_eq!(rows[2]["id"], "");

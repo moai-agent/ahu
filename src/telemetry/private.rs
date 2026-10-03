@@ -130,6 +130,7 @@ impl PrivateMapping {
                         | "cancelled"
                         | "timed_out"
                         | "capture_failed"
+                        | "boundary_violation"
                         | "interrupted"
                         | "supervisor_error"
                         | "unknown"

@@ -103,6 +103,7 @@ pub struct TaskTelemetry {
     pub mcp_observed: bool,
     pub tool_calls_by_name: BTreeMap<String, u64>,
     pub tool_errors_by_name: BTreeMap<String, u64>,
+    pub approval_requests_by_operation: BTreeMap<String, u64>,
     /// Every span accepted for this task, whatever its name.
     ///
     /// Distinguishes "nothing was observed" from "spans arrived but no session
@@ -574,6 +575,15 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                         if let Some(name) = attrs.get("ahu.mcp.tool.name") {
                             let count = task.tool_calls_by_name.entry(name.clone()).or_default();
                             *count = count.saturating_add(1);
+                            if name == "ahu_request_approval"
+                                && let Some(operation) = attrs.get("ahu.mcp.approval.operation")
+                            {
+                                let count = task
+                                    .approval_requests_by_operation
+                                    .entry(operation.clone())
+                                    .or_default();
+                                *count = count.saturating_add(1);
+                            }
                             if name == "ahu_skills_suggest"
                                 && attrs.get("ahu.mcp.outcome").is_some_and(|v| v == "success")
                             {
@@ -698,22 +708,28 @@ fn string_attributes(
                     | "ahu.task.attempt"
                     | "ahu.mcp.method"
                     | "ahu.mcp.tool.name"
+                    | "ahu.mcp.approval.operation"
                     | "ahu.mcp.outcome"
                     | "ahu.eval.decision.status"
                     | "ahu.mcp.decision.request.format"
             )
             .then(|| (attribute.key.clone(), value.clone()))
         })
-        .filter(|(key, value)| {
-            key.as_str() != "ahu.mcp.tool.name"
-                || matches!(
-                    value.as_str(),
-                    "ahu_agents_list"
-                        | "ahu_tasks_list"
-                        | "ahu_task_get"
-                        | "ahu_typed_decide"
-                        | "ahu_skills_suggest"
-                )
+        .filter(|(key, value)| match key.as_str() {
+            "ahu.mcp.tool.name" => matches!(
+                value.as_str(),
+                "ahu_agents_list"
+                    | "ahu_tasks_list"
+                    | "ahu_task_get"
+                    | "ahu_typed_decide"
+                    | "ahu_skills_suggest"
+                    | "ahu_request_approval"
+            ),
+            "ahu.mcp.approval.operation" => matches!(
+                value.as_str(),
+                "external-write" | "network" | "destructive" | "other"
+            ),
+            _ => true,
         })
         .collect()
 }
@@ -876,6 +892,15 @@ mod tests {
                         Span {
                             name: "ahu.mcp.tool.call".into(),
                             attributes: vec![
+                                string_attribute("ahu.mcp.tool.name", "ahu_request_approval"),
+                                string_attribute("ahu.mcp.approval.operation", "network"),
+                                string_attribute("ahu.mcp.outcome", "success"),
+                            ],
+                            ..Span::default()
+                        },
+                        Span {
+                            name: "ahu.mcp.tool.call".into(),
+                            attributes: vec![
                                 string_attribute("ahu.mcp.tool.name", "ahu_typed_decide"),
                                 string_attribute("ahu.mcp.outcome", "success"),
                                 count_attribute("ahu.mcp.decision.tokens.input", 10),
@@ -898,6 +923,11 @@ mod tests {
         assert!(task.mcp_observed);
         assert_eq!(task.mcp_requests, 8);
         assert_eq!(task.tool_calls_by_name.get("ahu_typed_decide"), Some(&2));
+        assert_eq!(
+            task.tool_calls_by_name.get("ahu_request_approval"),
+            Some(&1)
+        );
+        assert_eq!(task.approval_requests_by_operation.get("network"), Some(&1));
         assert_eq!(task.typed_decision_errors, 1);
         assert_eq!(task.decision_input_tokens, Some(10));
         assert_eq!(task.decision_output_tokens, Some(4));

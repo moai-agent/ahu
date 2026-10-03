@@ -1,6 +1,6 @@
 //! Durable Tasks extension for the local stdio transport. Only replay-safe
 //! inspection operations are queued. Protocol completion never accepts work.
-use super::{TASKS_EXTENSION, call_response, response, rpc_error};
+use super::{TASKS_EXTENSION, call_response, call_response_with_cancellation, response, rpc_error};
 use crate::{
     git::Repo,
     state,
@@ -153,6 +153,12 @@ impl Session {
                     // rechecks persisted cancellation before publishing output.
                     task.status = "cancelled".into();
                     task.input_requests = None;
+                    if task.name == "ahu_request_approval"
+                        && let Err(error) =
+                            state::write_private_file(&path.with_extension("cancel"), b"cancelled")
+                    {
+                        return Some(rpc_error(id, -32603, error.to_string()));
+                    }
                     task.changed();
                 }
                 Ok(())
@@ -462,12 +468,22 @@ fn work(repo: &Repo, owner: &str) -> Result<()> {
             }
             task
         };
-        let output = call_response(
-            repo,
-            &Value::Null,
-            &json!({"name":snapshot.name,"arguments":snapshot.arguments}),
-            true,
-        );
+        let output = if snapshot.name == "ahu_request_approval" {
+            call_response_with_cancellation(
+                repo,
+                &Value::Null,
+                &json!({"name":snapshot.name,"arguments":snapshot.arguments}),
+                true,
+                Some(&path.with_extension("cancel")),
+            )
+        } else {
+            call_response(
+                repo,
+                &Value::Null,
+                &json!({"name":snapshot.name,"arguments":snapshot.arguments}),
+                true,
+            )
+        };
         let _lock = Lock::acquire(&path.with_extension("lock"))?;
         let mut task = load(repo, id, owner)?;
         if task.status != "working" || task.cancel_requested || task.revision != snapshot.revision {

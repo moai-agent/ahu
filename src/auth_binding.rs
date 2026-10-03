@@ -221,6 +221,87 @@ pub fn status(repo: &Repo, harness: &str) -> Result<String> {
     check_identity(repo, harness, &bindings.active_profile, &bindings)
 }
 
+/// Return a secret-free account readiness projection for scripts and evals.
+/// Provider diagnostics and principal values are deliberately omitted: this
+/// reports whether identity can be checked and whether the active project
+/// binding matches, not the account details themselves.
+pub fn readiness(repo: &Repo, harness: &str, model: Option<&str>) -> Value {
+    let binding_harness = if harness == "opencode" {
+        model.and_then(|model| task_binding_harness(harness, model))
+    } else {
+        task_binding_harness(harness, "")
+    };
+    let Some(binding_harness) = binding_harness else {
+        return json!({
+            "schema_version": 1,
+            "harness": harness,
+            "model": model,
+            "identity": "unsupported",
+            "binding": "unsupported",
+            "ready": false,
+        });
+    };
+    let path = match binding_path_without_creation(repo) {
+        Ok(path) => path,
+        Err(_) => return readiness_error(harness, model, "unavailable", "unavailable"),
+    };
+    if crate::state::confine_file(&path).is_err() {
+        return readiness_error(harness, model, "unavailable", "unavailable");
+    }
+    let bindings = if path.exists() {
+        match load(repo, &path) {
+            Ok(bindings) => Some(bindings),
+            Err(_) => return readiness_error(harness, model, "unavailable", "unavailable"),
+        }
+    } else {
+        None
+    };
+    let identity = match probe(binding_harness, &repo.root) {
+        Ok(identity) => identity,
+        Err(_) => return readiness_error(harness, model, "unavailable", "unavailable"),
+    };
+    let Some(bindings) = bindings.filter(|bindings| !bindings.profiles.is_empty()) else {
+        return json!({
+            "schema_version": 1,
+            "harness": harness,
+            "model": model,
+            "identity": "verified",
+            "binding": "not_configured",
+            "ready": false,
+        });
+    };
+    let binding = bindings
+        .profiles
+        .get(&bindings.active_profile)
+        .and_then(|items| items.get(binding_harness));
+    let binding_status = match binding {
+        None => "not_bound",
+        Some(expected) if identity.fingerprint().ok().as_deref() == Some(&expected.fingerprint) => {
+            "matched"
+        }
+        Some(_) => "mismatch",
+    };
+    json!({
+        "schema_version": 1,
+        "harness": harness,
+        "model": model,
+        "identity": "verified",
+        "binding": binding_status,
+        "ready": binding_status == "matched",
+    })
+}
+
+fn readiness_error(harness: &str, model: Option<&str>, identity: &str, binding: &str) -> Value {
+    json!({
+        "schema_version": 1,
+        "harness": harness,
+        "model": model,
+        "identity": identity,
+        "binding": binding,
+        "ready": false,
+    })
+}
+
 pub fn status_profile(repo: &Repo, harness: &str, profile: &str) -> Result<String> {
     validate_profile_name(profile)?;
     let path = binding_path(repo)?;
@@ -454,6 +535,16 @@ pub fn verify_task_resume_for_model(
         )));
     };
     let identity = probe(binding_harness, &repo.root)?;
+    verify_task_resume_identity(harness, binding_harness, task_dir, &bindings, &identity)
+}
+
+fn verify_task_resume_identity(
+    harness: &str,
+    binding_harness: &str,
+    task_dir: &Path,
+    bindings: &BindingFile,
+    identity: &Identity,
+) -> Result<()> {
     let fingerprint = identity.fingerprint()?;
     let expected = bindings
         .profiles
@@ -959,6 +1050,91 @@ mod profile_tests {
                 .to_string()
                 .contains("changed outside `ahu auth`")
         );
+    }
+
+    #[test]
+    fn readiness_does_not_disclose_principals_or_provider_diagnostics() {
+        let (_temp, repo) = repo_fixture();
+        let status = readiness(&repo, "opencode", Some("openai/model"));
+        assert_eq!(status["identity"], "unsupported");
+        assert_eq!(status["binding"], "unsupported");
+        assert_eq!(status["ready"], false);
+        let serialized = serde_json::to_string(&status).unwrap();
+        assert!(!serialized.contains("@"));
+        assert!(!serialized.contains("token"));
+        assert!(!serialized.contains("auth.json"));
+    }
+
+    #[test]
+    fn readiness_error_projection_contains_only_status_fields() {
+        let status = readiness_error("codex", None, "unavailable", "unavailable");
+        assert_eq!(
+            status,
+            json!({
+                "schema_version": 1,
+                "harness": "codex",
+                "model": null,
+                "identity": "unavailable",
+                "binding": "unavailable",
+                "ready": false,
+            })
+        );
+    }
+
+    #[test]
+    fn long_paused_resume_refuses_a_changed_account_against_the_original_task_pin() {
+        let (_temp, repo) = repo_fixture();
+        let task_dir = tempfile::tempdir().unwrap();
+        let original = Identity {
+            harness: "claude-code".into(),
+            identity_kind: "oauth/first-party".into(),
+            principal: "personal@example.invalid".into(),
+            organization: Some("personal-org".into()),
+            workspace: None,
+        };
+        let changed = Identity {
+            principal: "work@example.invalid".into(),
+            organization: Some("work-org".into()),
+            ..original.clone()
+        };
+        let bindings = BindingFile {
+            repo_identity: repo.identity(),
+            profiles: BTreeMap::from([(
+                "default".into(),
+                BTreeMap::from([(
+                    "claude-code".into(),
+                    StoredBinding {
+                        fingerprint: original.fingerprint().unwrap(),
+                        identity_kind: original.identity_kind.clone(),
+                        profile: None,
+                    },
+                )]),
+            )]),
+            ..BindingFile::default()
+        };
+        save(&binding_path(&repo).unwrap(), &bindings).unwrap();
+        crate::state::write_json(
+            &task_dir.path().join("auth-identity.json"),
+            &StoredBinding {
+                fingerprint: original.fingerprint().unwrap(),
+                identity_kind: original.identity_kind.clone(),
+                profile: Some("default".into()),
+            },
+        )
+        .unwrap();
+
+        let error = verify_task_resume_identity(
+            "claude-code",
+            "claude-code",
+            task_dir.path(),
+            &bindings,
+            &changed,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match"));
+        let pin: StoredBinding =
+            crate::state::read_json(&task_dir.path().join("auth-identity.json")).unwrap();
+        assert_eq!(pin.fingerprint, original.fingerprint().unwrap());
     }
 
     #[test]

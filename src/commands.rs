@@ -1113,6 +1113,7 @@ fn short_branch(record: &task::TaskRecord) -> String {
 fn state_role(state: &str) -> Role {
     match state {
         "starting" | "running" => Role::Success,
+        "waiting-for-approval" => Role::Warning,
         "failed" | "cancelled" => Role::Error,
         "interrupted" => Role::Warning,
         // `exited` and anything a later schema adds: stopped, nothing claimed.
@@ -1482,7 +1483,11 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
     } else {
         None
     };
-    let value = task_summary(&dir, &record, workspaces.as_ref())?;
+    let mut value = task_summary(&dir, &record, workspaces.as_ref())?;
+    let approval = crate::approval::pending(&dir, &record.task_id)?;
+    if let Some(request) = &approval {
+        value["approval_request"] = serde_json::to_value(request)?;
+    }
     if json {
         console.say(&format!("{}\n", serde_json::to_string(&value)?))?;
     } else {
@@ -1500,6 +1505,18 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
             console.say(&format!(
                 "  cmux      {}\n",
                 display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none"))
+            ))?;
+        }
+        if let Some(request) = &approval {
+            console.say(&format!(
+                "\napproval request {} — {}\n  operation  {}\n  target     {}\n  summary    {}\n  resolve    ahu approve {} | ahu reject {}\n",
+                request.request_id,
+                record.state.as_str(),
+                display_safe(&request.operation),
+                display_safe(request.target.as_deref().unwrap_or("none")),
+                display_safe(&request.summary),
+                display_safe(&record.task_id),
+                display_safe(&record.task_id),
             ))?;
         }
         console.say(&format!("  review    {}\n", review_command(&record)))?;
@@ -2168,6 +2185,50 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
         }),
         json_output,
     )?;
+    Ok(0)
+}
+
+/// Resolve the single durable MCP approval checkpoint attached to a task.
+pub fn approval_cmd(repo: &Repo, id: &str, approve: bool, json_output: bool) -> Result<i32> {
+    let (dir, record) = inspect_task(repo, id)?;
+    if !matches!(record.state, task::TaskState::WaitingForApproval) {
+        bail!(
+            "task {} is not waiting for approval (state: {})",
+            display_safe(id),
+            record.state.as_str()
+        );
+    }
+    let request = crate::approval::decide(repo, &dir, &record.task_id, approve)?;
+    let decision = if approve { "approved" } else { "rejected" };
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "task_id": record.task_id,
+        "request_id": request.request_id,
+        "decision": decision,
+        "operation": request.operation,
+        "summary": request.summary,
+        "target": request.target,
+    });
+    if json_output {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        println!(
+            "{decision} {} approval: {}{}",
+            request.operation,
+            request.summary,
+            request
+                .target
+                .as_deref()
+                .map(|target| format!(" (target: {target})"))
+                .unwrap_or_default()
+        );
+        if !approve {
+            println!(
+                "The task cancellation was requested; verify it with `ahu task {}`.",
+                record.task_id
+            );
+        }
+    }
     Ok(0)
 }
 
@@ -3087,6 +3148,7 @@ mod artifact_and_inbox_tests {
     #[test]
     fn task_state_roles_and_record_path_prefixes_are_stable() {
         assert!(matches!(state_role("running"), Role::Success));
+        assert!(matches!(state_role("waiting-for-approval"), Role::Warning));
         assert!(matches!(state_role("failed"), Role::Error));
         assert!(matches!(state_role("interrupted"), Role::Warning));
         assert!(matches!(state_role("new-future-state"), Role::Hint));

@@ -137,6 +137,14 @@ questions, so review TypeSafe's data policy before sending sensitive content.
 See [typed decisions](typed-decisions.md) for the provider mapping and secret
 handling details.
 
+`ahu_request_approval` is an explicit checkpoint for a task-bound operation.
+It waits for an operator to run `ahu approve TASK` or `ahu reject TASK`; the
+task is shown as `waiting-for-approval` while pending. Rejection or the
+30-minute timeout requests cancellation. This tool does not intercept
+arbitrary shell operations, and harness write events remain reported evidence,
+not OS-level filesystem containment. Approval summaries and targets are kept
+in the task's owner-only state directory.
+
 `ahu setup` is the only setup command. It detects installed supported harnesses,
 asks for a model per detected harness, creates an ahu `dev-<harness>` agent for
 each, installs bundled skills in project locations, and adds a local `ahu mcp
@@ -178,10 +186,11 @@ needed to establish that the client connected and exposed its tools. Skill
 presence does not prove that a particular run loaded the skill. See
 [skill verification](skill-verification.md) for per-harness discovery evidence.
 
-For Codex agents declaring `permissions = auto`, ahu approves only its local
-read-only `ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get` tools for
-that launch. Provider-backed `ahu_typed_decide` and `ahu_skills_suggest` calls
-stay gated because their inputs may leave the machine. Before release, verify
+For Codex agents declaring `permissions = auto`, ahu approves its local agent
+and task lookup tools and `ahu_request_approval` for that launch. The latter
+only records a bounded checkpoint and pauses; it cannot perform the requested
+action. Provider-backed `ahu_typed_decide` and `ahu_skills_suggest` calls stay
+gated because their inputs may leave the machine. Before release, verify
 each supported harness in both interactive and headless mode with a real ahu
 tool call, and confirm an `ahu.mcp.tool.call` span reached the configured local
 OTLP receiver. An initialize/tools-list handshake alone is not proof of use;
@@ -1857,6 +1866,15 @@ Supported IDs are `codex`, `claude-code`, `antigravity`, and `ollama`. Use
 to inspect another. `--replace` deliberately changes that provider's binding
 inside the named profile.
 
+`ahu auth readiness --harness ID [--model MODEL] [--output json]` provides a
+concise readiness summary; JSON returns stable machine-readable fields for
+automation.
+The output contains only `identity` and `binding` states plus `ready`; it never
+includes principal values, credential material, or raw provider diagnostics.
+`ready: false` means identity binding is unsupported, unavailable, absent, or
+mismatched. Readiness checks do not spend a model request and do not establish
+quota, trust, or tool-approval state.
+
 For Ollama, ahu reads `POST /api/me` from the loopback server named by
 `OLLAMA_HOST` (default `127.0.0.1:11434`). It requires a signed-in account and
 binds the account email and stable account ID. The confirmation identifies the
@@ -1869,11 +1887,13 @@ worktree, and child task in that project inherits the same active profile;
 agents cannot select a different profile. Interactive task startup and
 headless attempts recheck immediately before process start. Each task stores
 the profile name and an identity fingerprint, never raw identity data. Before
-`ahu resume`, ahu checks both the active profile and the task's original
+Every `ahu resume` checks both the active profile and the task's original
 profile and fingerprint before starting the harness or sending the resume
-prompt. Selecting or rebinding a profile cannot move an existing task to
-another account. A project with no profiles configured retains its prior
-interactive and headless behavior. Tasks pinned before profile names were added
+prompt. This check is especially useful after a long pause, when a harness may
+have been signed out and back in to another account. Selecting or rebinding a
+profile cannot move an existing task to another account. A project with no
+profiles configured retains its prior interactive and headless behavior. Tasks
+pinned before profile names were added
 have no profile pin and must be submitted again to resume under this profile
 policy.
 
@@ -1883,9 +1903,15 @@ OpenCode, ahu applies this check only when the selected model is `ollama/...`
 and marked `:cloud` or `-cloud`; it checks the local Ollama account before
 launch and again before resume. This assumes OpenCode routes that model to the
 same loopback daemon configured by `OLLAMA_HOST`; ahu does not yet verify the
-effective provider URL. Local Ollama models do not require an account binding.
-Other OpenCode providers lack a verified identity check and are refused once
-the project has opted into auth profiles.
+effective provider URL. Local Ollama models do not have a cloud account identity
+that ahu can bind. When project auth binding is enabled, Ahu refuses OpenCode
+models for which it cannot establish the provider identity. Other OpenCode
+providers lack a verified identity check and are refused once
+the project has opted into auth profiles. OpenCode permits a custom provider
+`baseURL`, so Ahu does not infer that an `ollama/...` model uses the loopback
+Ollama daemon without verifying OpenCode's effective endpoint. See the
+[OpenCode provider configuration](https://opencode.ai/docs/providers/) for its
+provider and base URL configuration.
 
 Codex API-key mode does not expose a verified user principal. Antigravity has no
 standalone account-status command, but its startup TUI displays the signed-in
@@ -1893,11 +1919,13 @@ email before the prompt. ahu captures that startup display in a bounded
 pseudo-terminal and terminates it without submitting a prompt. This check is
 version-sensitive to the visible banner; if the account email is absent or the
 startup format changes, ahu refuses to bind or resume.
-This is a preflight guard, not an atomic credential lock: a same-user process
-could change sign-in between the identity check and the provider request. A
-harness-specific isolated credential profile is required to eliminate that
-race. These bindings identify the currently active native login; they do not
-switch accounts or isolate concurrent accounts. ahu does not probe provider
+This is best-effort identity checking at launch and resume, not an atomic
+credential lock. ahu does not monitor sign-in changes during an active session,
+and a same-user process could change sign-in after a check. The check reduces
+the chance that a long-paused task resumes under a different account; it cannot
+guarantee the identity used for every provider request. These bindings identify
+the currently active native login; they do not switch accounts or isolate
+concurrent accounts. ahu does not probe provider
 quota, predict whether a request will be billable, change project trust, or
 grant tool approvals. Provider quota and entitlement errors are reported by
 the harness during an actual request. Remote hosts, containers, and CI need a

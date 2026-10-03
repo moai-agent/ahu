@@ -36,6 +36,7 @@ pub enum LaunchMode {
 pub enum TaskState {
     Starting,
     Running,
+    WaitingForApproval,
     Exited,
     Failed,
     Cancelled,
@@ -46,6 +47,7 @@ impl TaskState {
         match self {
             TaskState::Starting => "starting",
             TaskState::Running => "running",
+            TaskState::WaitingForApproval => "waiting-for-approval",
             TaskState::Exited => "exited",
             TaskState::Failed => "failed",
             TaskState::Cancelled => "cancelled",
@@ -56,7 +58,10 @@ impl TaskState {
     /// meaningfully be cancelled; the rest describe sessions that already
     /// stopped for some reason.
     pub fn is_live(self) -> bool {
-        matches!(self, TaskState::Starting | TaskState::Running)
+        matches!(
+            self,
+            TaskState::Starting | TaskState::Running | TaskState::WaitingForApproval
+        )
     }
 }
 
@@ -209,10 +214,10 @@ pub(crate) const PROMPT_FILE: &str = "prompt.txt";
 /// Schema 3 changes the task identifier from 18 hex characters to a hyphenated
 /// UUID v7. The fields are otherwise identical, so schema-2 records still load
 /// unchanged; they keep their original ids.
-pub const TASK_SCHEMA_VERSION: u32 = 3;
+pub const TASK_SCHEMA_VERSION: u32 = 4;
 /// The schema versions this build can read: the current one and its immediate
 /// predecessor. `load` refuses everything else.
-pub const READABLE_SCHEMA_VERSIONS: [u32; 2] = [2, TASK_SCHEMA_VERSION];
+pub const READABLE_SCHEMA_VERSIONS: [u32; 3] = [2, 3, TASK_SCHEMA_VERSION];
 
 /// A time-ordered, collision-resistant task identifier: a UUID v7 whose random
 /// bits come from `os_entropy`. Fails closed rather than minting a guessable id.
@@ -338,7 +343,7 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
         };
         bail!(
             "{} was written by a different ahu schema version ({version}); this ahu \
-             build reads schema {TASK_SCHEMA_VERSION} and legacy schema 2 task records.\n\
+             build reads task schemas 2, 3, and {TASK_SCHEMA_VERSION}.\n\
              ahu will not reinterpret it: {reason}",
             path.display()
         );
@@ -356,7 +361,7 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
     if !READABLE_SCHEMA_VERSIONS.contains(&record.schema_version) {
         bail!(
             "{} declares ahu schema version {}; this ahu build reads \
-             {TASK_SCHEMA_VERSION} and legacy schema 2 task records.",
+             2, 3, and {TASK_SCHEMA_VERSION}.",
             path.display(),
             record.schema_version
         );
@@ -855,7 +860,22 @@ mod state_tests {
     }
 
     #[test]
-    fn live_states_are_starting_and_running_only() {
+    fn waiting_for_approval_is_live_and_round_trips() {
+        assert_eq!(
+            TaskState::WaitingForApproval.as_str(),
+            "waiting-for-approval"
+        );
+        let value = serde_json::to_value(TaskState::WaitingForApproval).unwrap();
+        assert_eq!(value, serde_json::json!("waiting-for-approval"));
+        assert_eq!(
+            serde_json::from_value::<TaskState>(value).unwrap(),
+            TaskState::WaitingForApproval
+        );
+        assert!(TaskState::WaitingForApproval.is_live());
+    }
+
+    #[test]
+    fn terminal_states_are_not_live() {
         assert!(TaskState::Starting.is_live());
         assert!(TaskState::Running.is_live());
         assert!(!TaskState::Exited.is_live());

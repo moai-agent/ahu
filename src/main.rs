@@ -98,6 +98,8 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             let repo = commands::repo_from_cwd()?;
             if action == "cancel" {
                 commands::cancel_cmd(&repo, &task_id, json)
+            } else if matches!(action.as_str(), "approve" | "reject") {
+                commands::approval_cmd(&repo, &task_id, action == "approve", json)
             } else {
                 ahu::headless::control(&repo, &action, &task_id, prompt.as_deref(), json)
             }
@@ -255,8 +257,29 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             harness,
             profile,
             replace,
+            model,
+            json,
         } => {
             let repo = commands::repo_from_cwd()?;
+            if action == "readiness" {
+                let readiness = ahu::auth_binding::readiness(&repo, &harness, model.as_deref());
+                if json {
+                    println!("{}", serde_json::to_string(&readiness)?);
+                } else {
+                    let model = readiness["model"].as_str().unwrap_or("not specified");
+                    println!(
+                        "Auth readiness for {harness} ({model}): identity {}, binding {}; {}.",
+                        readiness["identity"].as_str().unwrap_or("unknown"),
+                        readiness["binding"].as_str().unwrap_or("unknown"),
+                        if readiness["ready"] == true {
+                            "ready"
+                        } else {
+                            "not ready"
+                        }
+                    );
+                }
+                return Ok(if readiness["ready"] == true { 0 } else { 5 });
+            }
             let message = match action.as_str() {
                 "profiles" => ahu::auth_binding::list_profiles(&repo)?,
                 "bind" => match profile.as_deref() {
