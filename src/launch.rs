@@ -539,6 +539,15 @@ pub fn execute(
     prompt: &str,
     focus: bool,
 ) -> Result<Launched> {
+    // Interactive admission runs in the submitting checkout. Headless callers
+    // perform their native probe only after their isolation policy is admitted.
+    crate::selection::check_launch_compatibility(
+        &plan.harness_executable,
+        &plan.pair.harness,
+        &plan.pair.model,
+        plan.permissions,
+        &repo.root,
+    )?;
     let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
     let mut notes = Vec::new();
 
@@ -1196,6 +1205,13 @@ fn run_verified_task(
     // workspace starts and pin this task immediately before starting an
     // interactive harness, so a changed native login cannot inherit the task.
     let repo = git::discover(&record.repo_root)?;
+    crate::selection::check_launch_compatibility(
+        &executable,
+        &record.identity.harness,
+        &record.identity.model,
+        record.identity.permissions,
+        &record.worktree,
+    )?;
     crate::auth_binding::capture_interactive_task_for_model(
         &repo,
         &record.identity.harness,

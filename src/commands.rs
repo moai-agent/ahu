@@ -121,6 +121,15 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
         ))
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
+    if let Some(ranked) = &ranked {
+        selection::check_launch_compatibility(
+            std::path::Path::new(&executable),
+            harness,
+            ranked,
+            crate::agent::Permissions::Prompt,
+            &repo.root,
+        )?;
+    }
     crate::state::ensure_checkout_state(&repo.root)?;
     let placement = launch::group_coordinator(repo, &executable, label, harness, &model, &args)?;
     for note in placement.notes {
