@@ -370,12 +370,21 @@ pub(crate) fn check_launch_compatibility_with_policy(
     if !executable.is_absolute() || is_excluded(executable) {
         bail!("compatibility probe requires a resolved harness outside the repository");
     }
+    // Native config loading may migrate files even for a listing command.
+    // Refuse newly changed project context before executing an agent.
+    let before = crate::snapshot::collect(cwd)?.digest();
     let mut command = std::process::Command::new(executable);
     command.args(&args).current_dir(cwd);
     if let Some(policy) = policy {
         crate::cmux::integration::sanitize(&mut command, Some(policy));
     }
     let output = bounded_config_probe(&mut command, capture, std::time::Duration::from_secs(8));
+    if crate::snapshot::collect(cwd)?.digest() != before {
+        bail!(
+            "native compatibility inspection changed project agent context; review the changes, \
+             run `ahu lock --update`, commit the context and lock, then retry"
+        );
+    }
     if harness == "codex" {
         if output.is_none() {
             bail!(
@@ -596,6 +605,32 @@ mod compatibility_tests {
         check(Permissions::AcceptEdits).unwrap();
         std::fs::write(root.path().join("transport-present"), "").unwrap();
         check(Permissions::Auto).unwrap();
+    }
+
+    #[test]
+    fn native_migration_requires_accepting_context_before_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = fake(
+            root.path(),
+            "printf '{}\\n' > opencode.json\nprintf 'ollama/glm-5.3:cloud\\n'",
+        );
+        let result = check_launch_compatibility(
+            &exe,
+            "opencode",
+            "ollama/glm-5.3:cloud",
+            Permissions::Prompt,
+            root.path(),
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("inspection changed project agent context")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("opencode.json")).unwrap(),
+            "{}\n"
+        );
     }
 
     #[test]

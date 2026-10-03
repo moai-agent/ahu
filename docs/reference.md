@@ -177,12 +177,14 @@ The CLI's `agy mcp list` lists user-wide entries; omission of a project server
 does not prove print-mode discovery failed. The setup handshake verifies the
 ahu server itself, not authenticated interactive client discovery.
 
-Before headless submission and execution, ahu checks OpenCode's exact selected
+Before task submission and execution, ahu checks OpenCode's exact selected
 model against `opencode models <provider>` in the applicable checkout. A missing
 model, failed listing, or timeout refuses the run without selecting another
 model. The [native listing](https://opencode.ai/docs/cli/#models) establishes
 configured availability, not account entitlement or successful inference.
-The probe preserves native configuration and follows isolation admission.
+Headless probes follow isolation admission. Native listing commands may migrate
+configuration; if inspection changes recognized project context, ahu refuses the
+launch until you review, accept, and commit that change.
 
 Codex auto preflight loads native configuration with the same local-tool
 approval overrides using `codex mcp list`, without connecting to MCP servers;
