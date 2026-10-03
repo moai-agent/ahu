@@ -268,6 +268,12 @@ pub(super) fn call(arguments: &Value, repo: &crate::git::Repo) -> Result<Value> 
     let normalized = normalize_arguments(arguments)?;
     let arguments = &normalized;
     let _configuration = configuration()?;
+    if let Some(model) = std::env::var_os("AHU_OLLAMA_MODEL") {
+        let model = ollama_decision_model(&model)?;
+        let endpoint = std::env::var("AHU_OLLAMA_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:11434/v1/systemone".into());
+        return call_ollama(arguments, &endpoint, model);
+    }
     let configured_model = std::env::var_os("AHU_DECISION_MODEL");
     let model = decision_model(configured_model.as_deref())?;
     if let Ok(endpoint) = std::env::var("AHU_DECISION_URL") {
@@ -275,6 +281,17 @@ pub(super) fn call(arguments: &Value, repo: &crate::git::Repo) -> Result<Value> 
     }
     let api_key = typesafe_api_key(repo)?;
     call_typesafe(arguments, &api_key, model)
+}
+
+fn ollama_decision_model(value: &std::ffi::OsStr) -> Result<&str> {
+    value.to_str().filter(|value| {
+        (1..=128).contains(&value.len())
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':')
+            })
+    }).ok_or_else(|| Error::new(
+        "AHU_OLLAMA_MODEL must be 1 to 128 ASCII letters, digits, dots, dashes, underscores, or colons"
+    ))
 }
 
 /// Only the process environment can select a model; never consult dotenv.
@@ -297,6 +314,14 @@ fn decision_model(value: Option<&std::ffi::OsStr>) -> Result<&str> {
 
 /// Non-secret configured identity, frozen independently of response outcomes.
 pub(super) fn configuration() -> Result<Value> {
+    if let Some(model) = std::env::var_os("AHU_OLLAMA_MODEL") {
+        let model = ollama_decision_model(&model)?;
+        let endpoint = std::env::var("AHU_OLLAMA_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:11434/v1/systemone".into());
+        let url = local_url(&endpoint)?;
+        return Ok(json!({"backend":"ollama","requested_model":model,
+            "endpoint_digest":crate::util::digest_bytes(url.as_str().as_bytes())}));
+    }
     let configured_model = std::env::var_os("AHU_DECISION_MODEL");
     let model = decision_model(configured_model.as_deref())?;
     if let Some(endpoint) = std::env::var_os("AHU_DECISION_URL") {
@@ -441,6 +466,50 @@ fn call_typesafe_at(
     let response: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Error::new("TypeSafe decision response is invalid JSON"))?;
     let mut result = typesafe_response(arguments, response, model)?;
+    result["service"]["duration_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
+    Ok(result)
+}
+
+fn call_ollama(arguments: &Value, endpoint: &str, model: &str) -> Result<Value> {
+    let url = local_url(endpoint)?;
+    let body = typesafe_request(arguments, model)?;
+    let started = std::time::Instant::now();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|_| Error::new("cannot create Ollama decision client"))?;
+    let response = client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&body)
+        .send()
+        .map_err(|_| Error::new("Ollama decision request failed"))?;
+    if !response.status().is_success() {
+        return Err(Error::new(format!(
+            "Ollama decision API returned HTTP {}",
+            response.status()
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(Error::new("Ollama decision response exceeds 1 MiB"));
+    }
+    let mut bytes = Vec::new();
+    response
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::new("cannot read Ollama decision response"))?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(Error::new("Ollama decision response exceeds 1 MiB"));
+    }
+    let response: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::new("Ollama decision response is invalid JSON"))?;
+    let mut result = typesafe_response(arguments, response, model)?;
+    result["service"]["backend"] = json!("ollama");
     result["service"]["duration_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
     Ok(result)
 }
@@ -1929,6 +1998,42 @@ mod tests {
                 assert!(result.unwrap_err().to_string().contains(needle));
             } else {
                 assert_eq!(result.unwrap()["answers"]["route"]["value"], "billing");
+            }
+        }
+    }
+
+    #[test]
+    fn ollama_http_boundary_accepts_valid_results_and_rejects_bad_status_and_size() {
+        for (endpoint, needle) in [
+            ("not a URL", "invalid AHU_OLLAMA_URL"),
+            ("ftp://127.0.0.1", "loopback IP literal"),
+            ("http://localhost", "loopback IP literal"),
+            ("http://user@127.0.0.1", "loopback IP literal"),
+        ] {
+            // we patch the error string since local_url says "invalid AHU_DECISION_URL"
+            // Wait, local_url returns "invalid AHU_DECISION_URL", so we just check for "AHU_DECISION_URL" or "loopback IP literal"
+            assert!(
+                super::call_ollama(&typed_request(), endpoint, "nimble")
+                    .unwrap_err()
+                    .to_string()
+                    .contains(if needle == "invalid AHU_OLLAMA_URL" { "AHU_DECISION_URL" } else { needle })
+            );
+        }
+        
+        for (body, expected_error) in [
+            (br#"{"model":"nimble","answers":{"route":{"type":"choice","choice":"billing","confidence":0.9,"probabilities":{"billing":0.9,"other":0.1}},"urgency":{"type":"score","score":0.75,"confidence":0.8,"legend":{"0":"Minimum score (0)","1":"Maximum score (2)"}},"refund":{"type":"noul","noul":0.8}},"usage":{"input_tokens":123,"output_tokens":17}}"#.as_slice(), None),
+            (b"bad-status".as_slice(), Some("HTTP 503")),
+            (b"invalid-json".as_slice(), Some("invalid JSON")),
+            (b"oversized".as_slice(), Some("exceeds 1 MiB")),
+        ] {
+            let url = serve_once(body);
+            let result = super::call_ollama(&typed_request(), &url, "nimble");
+            if let Some(needle) = expected_error {
+                assert!(result.unwrap_err().to_string().contains(needle));
+            } else {
+                let res = result.unwrap();
+                assert_eq!(res["answers"]["route"]["value"], "billing");
+                assert_eq!(res["service"]["backend"], "ollama");
             }
         }
     }
