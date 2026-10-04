@@ -17,6 +17,7 @@ fn reviewed_profiles_are_required_on_launch_and_resume_without_relocating_native
         ("codex", "0.160.0", "0.157.1"),
         ("claude-code", "2.1.283", "2.1.288"),
         ("claude-code", "2.1.288", "2.1.283"),
+        ("claude-code", "2.1.289 (Claude Code)", "2.1.288"),
     ] {
         let profile = isolation::profile(harness, version).unwrap();
         let other = isolation::profile(harness, other_version).unwrap();
@@ -68,7 +69,8 @@ fn reviewed_profiles_are_required_on_launch_and_resume_without_relocating_native
     }
     for (harness, version) in [
         ("codex", "0.160.1"),
-        ("claude-code", "2.1.289"),
+        ("claude-code", "2.1.290"),
+        ("claude-code", "2.1.289-beta.1"),
         ("opencode", "1.18.34"),
         ("antigravity", "1.2.16"),
     ] {
