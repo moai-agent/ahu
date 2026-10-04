@@ -273,7 +273,7 @@ Commands:
   eval run|report       Run and compare local agent evaluations
   knowledge lint        Check configured OKF bundles
   cmux status|install   Inspect or install native cmux integration
-  auth profiles|status|readiness|bind|select
+  auth profiles|status|readiness|budget|bind|select
                         Check or manage local project auth profiles
   mcp serve             Serve repository tools over stdio MCP
   explain               Show the architecture overview
