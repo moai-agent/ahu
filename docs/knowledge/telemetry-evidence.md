@@ -112,7 +112,10 @@ coverage, and source-separated harness cost. Attempts without local metric
 projections remain unavailable in their groups. ahu has no automatic quota
 query, final billing API, interactive-session usage reader, tracker client, or
 automatic issue visibility check. Every report explicitly shows capacity as
-unknown because no trusted per-run or account capacity signal is collected.
+unknown because this path collects no per-run or account capacity signal.
+Account rate-limit windows are read only by an explicit `ahu auth budget`
+request against the active auth profile; that view is a separate signal and
+never joins a telemetry report, a run record, or an eval projection.
 Each group separately counts complete, incomplete, and unknown native-event
 evidence so process exit status is not mistaken for a complete harness stream.
 Offline fixtures verify adapter behavior; they do not prove live provider

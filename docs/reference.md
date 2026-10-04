@@ -359,8 +359,9 @@ Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
 Installed CLI versions float by default; `[harness_version_pins]` can require
 an exact version. The catalog records verified batch versions: Codex
-0.154.0/0.155.1/0.157.1, Claude Code 2.1.269/2.1.270/2.1.283, Antigravity CLI
-1.2.2, and OpenCode 1.18.29/1.18.30/1.18.31/1.18.32. These are evidence records,
+0.154.0/0.155.1/0.157.1/0.160.0, Claude Code 2.1.269/2.1.270/2.1.283,
+Antigravity CLI 1.2.2/1.2.16, and OpenCode
+1.18.29/1.18.30/1.18.31/1.18.32. These are evidence records,
 not an allowlist. A supported adapter and a readable semantic version are
 required; version-specific isolation controls and native-helper policies remain
 separate checks. Unknown native integrations can still prevent launch or resume.
@@ -2016,6 +2017,24 @@ or unknown capacity; ahu does not estimate it from run telemetry, scrape a TUI,
 or send an inference request. The MCP tool's name and outcome join ordinary MCP
 telemetry, while its arguments and result values are not added to OTel.
 
+The view reports one row per probed provider: `codex`, `claude-code`,
+`antigravity`, and `ollama`. OpenCode has no row, so an agent on that harness is
+never an eligible routing candidate. Each row carries one status:
+
+| Status | Meaning |
+| --- | --- |
+| `available` | At least one rate-limit window was read for the verified account |
+| `unknown` | The provider was probed but reported no usable window |
+| `unsupported` | ahu has no machine-readable rate-limit view for this provider |
+| `not_bound` | The active profile exists but holds no binding for this provider |
+| `not_configured` | The project has no active profile to check against |
+
+Only `available` rows can make a candidate eligible. Codex exposes `primary`
+and `secondary` windows when its account reports them; a reported window
+reflects the account, not a per-task or per-agent allowance. A mismatch between
+the current Codex sign-in and the active profile fails the whole command rather
+than returning capacity for an unverified account.
+
 For Ollama, ahu reads `POST /api/me` from the loopback server named by
 `OLLAMA_HOST` (default `127.0.0.1:11434`). It requires a signed-in account and
 binds the account email and stable account ID. The confirmation identifies the
@@ -2056,17 +2075,27 @@ provider and base address configuration.
 Codex API-key mode does not expose a verified user principal. Antigravity has no
 standalone account-status command, but its startup TUI displays the signed-in
 email before the prompt. ahu captures that startup display in a bounded
-pseudo-terminal and terminates it without submitting a prompt. This check is
-version-sensitive to the visible banner; if the account email is absent or the
-startup format changes, ahu refuses to bind or resume.
+pseudo-terminal and terminates it without submitting a prompt. The probe sets
+`NO_COLOR=1` for that capture only, because terminal color escape sequences
+split the email apart and defeat extraction. The capture waits a bounded 12
+seconds for a recognizable account line. This check is
+version-sensitive to the visible banner; if the account email is absent, the
+startup format changes, or no account line arrives in that window, ahu reports
+readiness as unavailable and refuses to bind or resume. A startup that reports an
+API key rather than a signed-in account is refused as well: an API key exposes no
+user principal to bind. Turning color off does not establish that every
+Antigravity version prints a banner ahu can read; verify the pair with
+`ahu auth readiness --harness antigravity` rather than assuming it binds.
 This is best-effort identity checking at launch and resume, not an atomic
 credential lock. ahu does not monitor sign-in changes during an active session,
 and a same-user process could change sign-in after a check. The check reduces
 the chance that a long-paused task resumes under a different account; it cannot
 guarantee the identity used for every provider request. These bindings identify
 the currently active native login; they do not switch accounts or isolate
-concurrent accounts. ahu does not probe provider
-quota, predict request billing, change project trust, or
-grant tool approvals. Provider quota and entitlement errors are reported by
+concurrent accounts. Binding, readiness, launch, and resume checks do not probe
+provider quota, predict request billing, change project trust, or
+grant tool approvals. Reading rate-limit windows is a separate, explicit
+request through `ahu auth budget` and its MCP tool; no launch path calls it.
+Provider quota and entitlement errors are reported by
 the harness during an actual request. Remote hosts, containers, and CI need a
 separately provisioned native login and are outside this local profile guard.
