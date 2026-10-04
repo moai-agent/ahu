@@ -33,6 +33,8 @@ const CODEX_MCP_ENV: &[&str] = &[
     "TYPESAFE_API_KEY",
     "AHU_DECISION_URL",
     "AHU_DECISION_MODEL",
+    "AHU_OLLAMA_MODEL",
+    "AHU_OLLAMA_URL",
 ];
 
 fn codex_env_forwarding(existing: &str, parsed: &toml::Value) -> Result<Option<String>> {
@@ -901,7 +903,10 @@ mod tests {
             let parsed: toml::Value = toml::from_str(text).unwrap();
             let updated = codex_env_forwarding(text, &parsed).unwrap().unwrap();
             let value: toml::Value = toml::from_str(&updated).unwrap();
-            for name in CODEX_MCP_ENV {
+            for name in ["AHU_OLLAMA_MODEL", "AHU_OLLAMA_URL"]
+                .iter()
+                .chain(CODEX_MCP_ENV.iter())
+            {
                 assert!(
                     value["mcp_servers"]["ahu"]["env_vars"]
                         .as_array()

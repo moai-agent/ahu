@@ -749,6 +749,7 @@ fn fixture_request<'a>(case: &'a Path, records: &'a Path) -> RunRequest<'a> {
         evaluator_repo: None,
         decision_evaluator: false,
         skill_selection: crate::skill_selection::Mode::None,
+        trajectory_guardrails: Default::default(),
         records,
         runs: 1,
         timeout_seconds: 1,
@@ -1395,4 +1396,201 @@ fn decision_evaluator_preflights_later_suite_cases_before_agent_lookup_or_artifa
     assert!(!records.exists());
     assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 3);
     assert_eq!(std::fs::read_dir(checkout.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn trajectory_records_preserve_missing_zero_and_report_budget_outcomes() {
+    let observation = trajectory::Observation {
+        source: trajectory::Source::CodexTurns,
+        coverage: trajectory::Coverage::CompleteObservedStream,
+        steps: Some(1),
+        tool_calls: Some(0),
+        tool_errors: Some(0),
+        ..trajectory::Observation::default()
+    };
+    let value = serde_json::to_string(&observation).unwrap();
+    let text = format!(
+        "{}\n{}",
+        record(&[]),
+        record(&[
+            ("trajectory", &value),
+            ("trajectory_budget_status", "\"pass\"")
+        ])
+    );
+    let records = parse_records(Path::new("runs.jsonl"), &text).unwrap();
+    let groups = group(&records);
+    let summary = &groups[0].trajectory;
+    assert_eq!(summary.missing_runs, 1);
+    assert_eq!(summary.means["tool_calls"], 0.0);
+    assert_eq!(summary.observations["tool_calls"], 1);
+    assert_eq!(summary.budget_statuses["pass"], 1);
+    assert_eq!(group_json(&groups[0])["trajectory"]["means"]["steps"], 1.0);
+    let report = Report {
+        records: PathBuf::from("/tmp/synthetic.jsonl"),
+        record_count: 2,
+        groups,
+    };
+    let text = render_at(&report, 120);
+    assert!(text.contains("trajectory missing 1/2 runs"));
+    assert!(text.contains("tool_calls mean 0 (1/2 observations)"));
+}
+
+#[test]
+fn trajectory_projection_accepts_only_bounded_typed_evidence_and_scores_missing() {
+    let mut record = serde_json::Map::new();
+    let budget = trajectory::Budgets {
+        max_steps: Some(1),
+        max_tool_errors: None,
+        max_tool_error_rate: None,
+        unknown_coverage: trajectory::UnknownPolicy::Unknown,
+    };
+    insert_trajectory_fields(&mut record, None, Some(&budget), &Default::default()).unwrap();
+    assert!(!record.contains_key("trajectory"));
+    assert_eq!(record["trajectory_budget_status"], "unknown");
+    let observation = trajectory::Observation::default();
+    let mut envelope = serde_json::json!({"harness":{"trajectory": observation}});
+    insert_trajectory_fields(
+        &mut record,
+        Some(&envelope),
+        Some(&budget),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(record["trajectory"]["tool_calls"], serde_json::Value::Null);
+    envelope["harness"]["trajectory"]["prompt"] = "private payload".into();
+    let mut record = serde_json::Map::new();
+    insert_trajectory_fields(
+        &mut record,
+        Some(&envelope),
+        Some(&budget),
+        &Default::default(),
+    )
+    .unwrap();
+    assert!(
+        !serde_json::to_string(&record)
+            .unwrap()
+            .contains("private payload")
+    );
+    assert!(!record.contains_key("trajectory"));
+}
+
+#[test]
+fn native_trajectory_projection_preserves_reasoning_tokens_and_malformed_coverage() {
+    let mut events = crate::headless::Events::default();
+    for line in [
+        br#"{"type":"thread.started","thread_id":"synthetic"}"#.as_slice(),
+        br#"{"type":"item.completed","item":{"id":"cmd","type":"command_execution","status":"completed","exit_code":7,"aggregated_output":"private synthetic result"}}"#,
+        br#"{"type":"turn.completed","usage":{"input_tokens":4,"output_tokens":9,"reasoning_output_tokens":3}}"#,
+    ] { events.observe("codex", line); }
+    let metrics = crate::telemetry::local_metrics(
+        &crate::config::TelemetryConfig {
+            local_metrics: true,
+            ..Default::default()
+        },
+        &events.usage,
+        &events.cost,
+        None,
+    );
+    let envelope = serde_json::json!({"harness": events, "metrics": metrics});
+    let mut record = serde_json::Map::new();
+    insert_trajectory_fields(&mut record, Some(&envelope), None, &Default::default()).unwrap();
+    assert_eq!(record["trajectory"]["tool_errors"], 1);
+    let tokens = reported_tokens(Some(&envelope), None).unwrap();
+    assert_eq!(tokens["ahu.tokens.reasoning"]["value"], 3);
+    assert!(
+        !serde_json::to_string(&record)
+            .unwrap()
+            .contains("private synthetic")
+    );
+    events.observe("codex", b"{broken");
+    assert!(events.failed);
+    assert_eq!(
+        events.trajectory.observation.coverage,
+        trajectory::Coverage::Partial
+    );
+    assert_eq!(events.usage.reasoning, Some(3));
+}
+
+#[test]
+fn trajectory_run_records_keep_guards_separate_and_gate_every_terminal_path() {
+    use trajectory::{Coverage, Guardrails, Observation, Source};
+    let guards = Guardrails {
+        max_steps: Some(4),
+        max_tool_error_rate: Some("0.25".parse().unwrap()),
+    };
+    let case = trajectory::Budgets {
+        max_steps: Some(2),
+        unknown_coverage: trajectory::UnknownPolicy::ObservedOnly,
+        ..Default::default()
+    };
+    let complete = Observation {
+        source: Source::CodexTurns,
+        coverage: Coverage::CompleteObservedStream,
+        steps: Some(2),
+        tool_calls: Some(4),
+        completed_tool_calls: Some(4),
+        tool_errors: Some(1),
+        ..Default::default()
+    };
+    let mut fail = complete.clone();
+    fail.tool_errors = Some(2);
+    let mut partial = complete.clone();
+    partial.coverage = Coverage::Partial;
+    let external = tempfile::tempdir().unwrap();
+    let records = external.path().join("runs.jsonl");
+    let mut outputs = Vec::new();
+    for (terminal, observation, expected) in [
+        ("scored", Some(complete), "pass"),
+        ("scored", Some(fail), "fail"),
+        ("candidate_answer_missing", Some(partial), "unknown"),
+        ("candidate_launch_failed", None, "unknown"),
+    ] {
+        let mut row = serde_json::from_str::<serde_json::Value>(&record(&[]))
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        row.insert("answer_passed".into(), true.into());
+        row.insert("terminal_status".into(), terminal.into());
+        let envelope = observation.map(|o| serde_json::json!({"harness":{"trajectory":o}}));
+        insert_trajectory_fields(&mut row, envelope.as_ref(), Some(&case), &guards).unwrap();
+        assert_eq!(row["answer_passed"], true);
+        assert_eq!(row["trajectory_guard_status"], expected);
+        assert_eq!(row["trajectory_effective_limits"]["max_steps"], 2);
+        assert_eq!(
+            row["trajectory_effective_limits"]["max_tool_error_rate"],
+            0.25
+        );
+        assert_eq!(
+            row["trajectory_effective_limits"]["unknown_coverage"],
+            "unknown"
+        );
+        if expected != "unknown" {
+            assert_eq!(row["trajectory_tool_error_rate"]["completed_tool_calls"], 4);
+        }
+        let row = serde_json::Value::Object(row);
+        append_jsonl(&records, &row).unwrap();
+        outputs.push(row);
+    }
+    assert_eq!(trajectory_exit_code(&guards, &outputs), 1);
+    assert_eq!(trajectory_exit_code(&guards, &outputs[..1]), 0);
+    assert_eq!(trajectory_exit_code(&guards, &outputs[2..]), 1);
+    assert_eq!(trajectory_exit_code(&guards, &[serde_json::json!({})]), 1);
+    assert_eq!(trajectory_exit_code(&Default::default(), &outputs), 0);
+    let saved = std::fs::read_to_string(records).unwrap();
+    assert_eq!(saved.lines().count(), 4);
+    let loaded = parse_records(Path::new("runs.jsonl"), &saved).unwrap();
+    let groups = group(&loaded);
+    let summary = &groups[0].trajectory;
+    assert_eq!(summary.guard_statuses["pass"], 1);
+    assert_eq!(summary.guard_statuses["fail"], 1);
+    assert_eq!(summary.guard_statuses["unknown"], 2);
+    assert_eq!(
+        summary.tool_error_rate_coverage["complete_observed_stream"],
+        2
+    );
+    assert_eq!(summary.tool_error_rate_coverage["partial"], 1);
+    assert_eq!(summary.tool_error_rate_coverage["unknown"], 1);
+    assert_eq!(summary.observations["tool_error_rate"], 2);
+    assert_eq!(summary.means["tool_error_rate"], 0.375);
 }

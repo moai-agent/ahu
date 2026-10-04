@@ -297,3 +297,119 @@ attributes, or authentication headers. Coverage `typed_decision_span` means this
 observation arrived; it does not claim MCP session coverage. Candidate MCP tool
 counts are unaffected. Agent telemetry retains `none`, `partial_spans`, or
 `complete_session` coverage.
+
+## Observed trajectories and budgets
+
+New records also carry a compact `trajectory` projection from the candidate's
+native stdout stream. Existing records without that field remain readable and
+count as missing trajectory observations. The text report and JSON report show
+means with per-measurement observation counts, source counts, coverage, tracking
+limits, case budget outcomes and CLI guard outcomes. Missing values are never
+filled with zero. The tool error rate mean uses only runs with complete observed
+coverage and valid counts, gives each run equal weight, and carries its observation
+count. `tool_error_rate_coverage` counts complete, partial and unknown runs
+separately; partial rates are not included in that mean.
+
+The measurements have deliberately narrow meanings:
+
+- `steps`: completed Codex turns, unique Claude assistant message IDs, or unique
+  OpenCode step-finish IDs. These are different native units, identified by
+  `source`, and do not measure hidden reasoning steps.
+- `tool_calls`: unique recognized call IDs, including calls still pending when
+  capture ends. Codex command execution, file change, web search and MCP items;
+  Claude tool-use blocks and their correlated tool-result blocks; and OpenCode
+  tool-use parts are supported. Started/completed updates are counted once.
+- `completed_tool_calls`: unique calls with an observed, classified terminal
+  outcome. A start alone never enters this denominator. Older trajectory records
+  without this field have an unknown tool error rate.
+- `tool_error_rate`: observed errors divided by completed tool calls. Zero
+  completed calls gives zero only with complete coverage and zero errors.
+  Missing counters, errors exceeding completions, or completions exceeding calls are
+  unknown; complete coverage also requires all observed calls to have completed.
+  The per-record `trajectory_tool_error_rate` includes value, coverage, numerator
+  and denominator. A partial rate describes observed outcomes only and is not a
+  lower bound on the final rate.
+- `tool_errors`: explicit native errors, nonzero command exit codes, and MCP
+  `result.isError` failures among the observed calls. This is separate from the
+  existing server-side OTel MCP counters; the two are not added together.
+- `repeated_tool_calls`: subsequent invocations of the same tool, regardless of
+  arguments. Repetition does not imply waste or an identical request.
+- `repeated_tool_errors`: further observed errors from a tool that already failed.
+- `tool_recoveries`: a later observed successful completion from a tool after its
+  error. This measures the order of tool outcomes, not whether the task recovered
+  or whether the later call retried the same arguments.
+
+`complete_observed_stream` means the adapter observed the supported start and end
+shapes, with no unclassified events, malformed input, unfinished calls or capture
+loss. It describes that captured stream only, not provider internals, commands
+within a shell or native helper work. Unclassified shapes and known losses make
+coverage `partial`; their counts are lower bounds (rates are not). Antigravity
+trajectory coverage currently remains `none`: the inspected step-update shapes
+do not establish a tool lifecycle with reliable duplicate detection. Its existing usage metrics are
+unaffected. Helper messages are excluded and make coverage partial.
+
+The projection retains no reasoning text, prompts, tool arguments, tool results,
+raw names or call IDs. In-memory SHA-256 identity keys are bounded to 4,096 calls,
+4,096 steps and 256 tools, with a 1,024-byte input identity limit. Reaching a bound
+sets `tracking_limited`; further observations that cannot be tracked cannot make a budget
+pass under the default coverage policy. Counters saturate. Existing 1 MiB event
+and 64 MiB stream limits still apply. No usefulness score is calculated.
+
+Cases can add optional front matter:
+
+```yaml
+trajectory_budgets:
+  max_steps: 8
+  max_tool_errors: 1
+  max_tool_error_rate: 0.25
+  unknown_coverage: unknown
+```
+
+At least one budget is required. Rates must be finite fractions in `0..1`.
+An observed count exceeding a budget fails even
+with partial coverage. Otherwise complete observed coverage passes; missing or
+partial coverage defaults to `unknown`. Set `unknown_coverage: fail` to fail
+inconclusive observations, or explicitly use `observed_only` to judge available
+counts and rates. Even `observed_only` leaves a missing or invalid required
+measurement unknown. A partial rate exceeding its maximum remains unknown unless
+`observed_only` explicitly opts into judging it.
+The run output and report show `trajectory_budget_status` separately from answer
+correctness and tool expectations. These are post-run checks: they neither stop
+a running agent nor change its answer score or the command's exit status. Budget
+configuration stays out of candidate and evaluator prompts.
+
+### Trajectory command guardrails
+
+Opt into post-run CI checks with either or both flags:
+
+```sh
+ahu eval run --case "$CASE_FILE" --agent @candidate \
+  --records /tmp/ahu-evals/runs.jsonl \
+  --max-trajectory-steps 8 --max-tool-error-rate 0.25 --output json
+```
+
+`--max-trajectory-steps` accepts an integer from 0 to 4294967295, inclusive;
+`--max-tool-error-rate` accepts a finite fraction from 0 to 1, inclusive. Repeated
+flags, missing values and malformed values are refused before launching trials.
+The flags are maximums: for each measurement, the effective maximum is the
+smaller of the CLI and case values. Other case constraints, including
+`max_tool_errors`, remain part of the effective guard. For example, a case step
+budget of 4 with CLI maximum 8 still enforces 4; CLI maximum 2 enforces 2.
+
+CLI guards always require complete observed evidence, even if the case chooses
+`observed_only`. Missing, partial, unsupported or legacy evidence without a
+required counter yields `unknown`, never an assumed zero or passing guard.
+An observed count exceeding its maximum can already establish `fail`; partial
+rates remain unknown. The original case budget and its coverage policy are
+still evaluated separately.
+
+Every trial record persists the requested `trajectory_guardrails`, tightened
+`trajectory_effective_limits` and `trajectory_guard_status` (`pass`, `fail` or
+`unknown`). Guard status stays separate from `answer_passed`, `passed`, answer
+scores, case budget status and tool expectations. All planned trials run and
+append their records before the command emits its summary and returns exit 1
+if any guard failed or remained unknown. Ordinary execution or storage errors
+still use the existing error contract. Without either CLI flag, the existing
+exit contract is unchanged, including for failing case budgets. These checks
+do not interrupt the agent or impose a live execution limit. No composite
+trajectory efficiency index is calculated.

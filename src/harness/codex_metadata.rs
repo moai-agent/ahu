@@ -1,4 +1,4 @@
-//! Bounded Codex 0.157.1 metadata inspection, before any thread is started.
+//! Bounded metadata inspection for reviewed Codex profiles, before any thread starts.
 //! The native process retains authentication and managed policy. Raw responses
 //! and stderr are never persisted or included in diagnostics.
 use crate::util::{Error, Result};
@@ -94,9 +94,10 @@ pub fn read_account(executable: &Path, cwd: &Path) -> Result<Value> {
 /// Uses exactly the executable and isolation switches used by batch execution.
 /// Requirements must be absent: a future policy change refuses admission rather
 /// than suppressing mandatory plugin hooks or changing the required features.
-pub fn inspect(executable: &Path, cwd: &Path) -> Result<Value> {
-    let profile =
-        super::isolation::profile("codex", "0.157.1").expect("reviewed Codex metadata profile");
+pub fn inspect(executable: &Path, cwd: &Path, version: &str) -> Result<Value> {
+    let profile = super::isolation::profile("codex", version).ok_or_else(|| {
+        Error::new("no reviewed Codex metadata isolation profile for this version")
+    })?;
     let mut command = Command::new(executable);
     command
         .args(["app-server", "--listen", "stdio://"])
@@ -362,8 +363,10 @@ mod tests {
             );
             std::fs::write(&executable, script).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let result = inspect(&executable, &cwd);
-            assert_eq!(result.is_ok(), requirements.is_null());
+            for version in ["0.157.1", "0.160.0"] {
+                let result = inspect(&executable, &cwd, version);
+                assert_eq!(result.is_ok(), requirements.is_null());
+            }
             let methods: Vec<String> = std::fs::read_to_string(&requests)
                 .unwrap()
                 .lines()
@@ -387,6 +390,22 @@ mod tests {
     }
 
     #[test]
+    fn unreviewed_metadata_profile_is_refused_before_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let error = inspect(
+            &root.path().join("not-an-executable"),
+            root.path(),
+            "0.160.1",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no reviewed Codex metadata isolation profile")
+        );
+    }
+
+    #[test]
     fn metadata_protocol_refuses_exit_malformed_and_oversized_output() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
@@ -400,7 +419,9 @@ mod tests {
         ] {
             std::fs::write(&executable, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-            assert!(inspect(&executable, &cwd).is_err());
+            for version in ["0.157.1", "0.160.0"] {
+                assert!(inspect(&executable, &cwd, version).is_err());
+            }
         }
     }
 }

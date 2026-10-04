@@ -20,7 +20,12 @@ Run `ahu --help` for the concise public command list. `ahu doctor` gives a
 concise readiness summary; `ahu doctor --verbose` shows component-level
 details. It checks
 repository and harness readiness, the committed context lock, bundled skill
-bytes, telemetry configuration, and registered-agent configuration drift. For a
+bytes, telemetry configuration, registered-agent configuration drift, and account
+binding readiness for each registered harness/model pair. Account checks display
+status only, without principal values. Mismatched or missing bindings in an active
+profile are launch blockers; unsupported or unavailable identity checks remain
+explicitly uncertain. A general prerequisite check does not prove every execution
+mode is available. For a
 configured local telemetry endpoint, doctor reports TCP reachability only; it
 does not verify OTLP delivery. `ahu agents` displays the registered agents, pinned
 harnesses and models, manifest paths, and detected drift in a table. `ahu tasks`
@@ -232,6 +237,13 @@ tool call, and confirm an `ahu.mcp.tool.call` span reached the configured local
 OTLP receiver. An initialize/tools-list handshake alone is not proof of use;
 approval denials can happen before ahu receives a call.
 
+Approval-free execution does not grant unrestricted filesystem access. Codex
+agents retain the native `workspace-write` sandbox; protected context directories
+and shared worktree Git metadata can remain read-only. When a task authorizes
+an edit or commit but the native boundary refuses it, the agent can provide a
+patch outside the repository for the authorized coordinator to review, apply,
+validate, and commit. ahu does not widen that boundary automatically.
+
 The canonical tree follows a strict contract: one directory per skill directly
 under `.agents/skills/`, named after the skill, holding exactly one `SKILL.md`.
 The frontmatter carries `name` (equal to the directory name) and `description`
@@ -351,8 +363,8 @@ the interactive one, so `permissions = "accept-edits"` is refused here too. See
 provider setup. Recorded compatibility does not establish authentication,
 provider availability, or full native-helper lifecycle validation.
 
-Codex 0.157.1 uses strict configuration validation, enables inspected hooks, disables
-optional plugins and remote plugin loading, and clears the legacy notify command
+Codex 0.157.1 and 0.160.0 use strict configuration validation, enable inspected hooks, turn off
+optional plugins and remote plugin loading, and clear the legacy notify command
 for this invocation. Before launch and resume, ahu asks a separate native metadata
 process for effective hooks and managed requirements without starting a model
 turn. Inspection has a 30-second deadline and bounded output. ahu refuses
@@ -360,6 +372,30 @@ admission for warnings, managed requirements, or hooks outside reviewed profiles
 native. This inspection cannot prevent configuration changes between inspection
 and execution. A trusted project and explicit tool approvals are still required
 for unattended MCP calls.
+
+Claude Code 2.1.283 and 2.1.288 receive
+`--settings '{"disableAllHooks":true}'` for headless launch and resume. This
+invocation setting disables non-managed hooks without replacing native settings,
+account selection, skills, or direct MCP configuration. Parsed hooks can be
+isolated this way; malformed settings, enabled plugins, and unresolved managed
+sources still refuse admission. Managed hooks retain their native precedence.
+See Claude's [hook controls](https://code.claude.com/docs/en/hooks#disable-or-remove-hooks).
+
+The 0.160.0 Codex and 2.1.288 Claude invocation controls were checked with local
+synthetic configuration and model transport fixtures. Those checks do not extend
+Claude's authenticated headless verification records. Codex 0.160.0 also
+completed live headless decision calls and answer generation with observed MCP
+telemetry during the 0.8.0 evaluation pilots.
+
+OpenCode's `--pure` flag disables external plugins, but does not establish the
+contents of authenticated remote configuration. Native configuration can also
+select providers and models; replacing a configuration or data home, hiding an account
+database, or stripping authentication plugins can change the selected identity.
+ahu does not apply those workarounds. Resolve the reported source with its native
+owner or use interactive execution; see OpenCode's
+[configuration precedence](https://opencode.ai/docs/config/#precedence-order).
+Claude's `--bare` similarly changes authentication resolution and is not used.
+Antigravity has no reviewed invocation override for unresolved hooks/extensions.
 
 `ahu cmux status` (also `--output json`) checks installed CLI versions and
 reports the same isolation profile used by launch previews. Inspection alone
@@ -369,9 +405,9 @@ other launch checks.
 
 | Harness | Required native isolation evidence |
 | --- | --- |
-| Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Version 0.157.1 additionally requires native effective metadata inspection with no warnings or managed requirements, and disables optional plugins for the invocation. Older profiles retain unresolved plugin, cloud, and managed-source checks. |
+| Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Versions 0.157.1 and 0.160.0 additionally require native effective metadata inspection with no warnings or managed requirements, and turn off optional plugins for the invocation. Other versions retain unresolved plugin, cloud, and managed-source checks. |
 | OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; authentication/account stores, declared modules, and substitutions remain unresolved. |
-| Claude Code | Direct executable avoids the cmux wrapper. Independent hooks, enabled plugins, and managed settings require separate evidence. |
+| Claude Code | Direct executable avoids the cmux wrapper. Versions 2.1.283 and 2.1.288 turn off parsed non-managed hooks for the invocation. Enabled plugins, malformed settings, and unresolved managed sources still refuse admission. |
 | Antigravity | Absent inspected hooks. Custom hooks, extensions, and overrides remain unverified. |
 
 Unknown or unsafe integrations have no operator bypass, including with

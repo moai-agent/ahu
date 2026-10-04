@@ -8,7 +8,7 @@ tags: [agents]
 harness: codex
 model: gpt-6-astra
 permissions: auto
-version: 1.0.2
+version: 1.0.3
 ---
 
 ## Current ahu capabilities
@@ -20,8 +20,14 @@ model selection, dev-agent registration, skills, and MCP configuration. `ahu loc
 checks committed agent context; use `ahu lock --update` when an authorized task
 changes tracked agent context, then review the lockfile. `ahu eval run` and
 `ahu eval report` run and compare eval records, which belong outside the checkout.
-`ahu mcp serve` exposes read-only agent/task inspection plus `ahu_typed_decide`
-when a decision backend is configured. Read `.agents/skills/ahu-architecture/SKILL.md`
+`ahu mcp serve` exposes agent/task inspection, skill suggestions, cooperative
+approval checkpoints, and `ahu_typed_decide` when a decision backend is configured.
+Typed decisions can use hosted TypeSafe Jev, native local Ollama decision models,
+or a generic local adapter. Select providers through server configuration, not
+request arguments. Compare answer quality, complete workflow time, native usage,
+and separate provider usage before claiming a benefit. Eval trajectory records
+show observed steps, tool outcomes, and coverage; unknown coverage is not zero.
+Read `ahu eval run --help` before using opt-in CI guardrails. Read `.agents/skills/ahu-architecture/SKILL.md`
 for current system behavior; use `ahu-direct-agents`, `ahu-agent-context-critic`, and
 `ahu-typed-decisions` for their matching workflows. Use
 `.agents/skills/ahu-harness-upgrade/SKILL.md` for harness updates and compatibility

@@ -1025,3 +1025,139 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
     );
     assert_eq!(report.groups[0].evaluator_metrics.statuses["failed"], 1);
 }
+
+#[test]
+fn trajectory_guards_save_all_trials_and_output_before_nonzero_exit() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent_on("triage", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
+    repo.commit("synthetic trajectory candidate");
+    let external = TempDir::new().unwrap();
+    let bin = external.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let harness = bin.join("opencode");
+    std::fs::write(&harness, r#"#!/usr/bin/env python3
+import json, os, sys
+if '--version' in sys.argv:
+    print('1.18.32')
+    raise SystemExit(0)
+if sys.argv[1:] == ['models', 'ollama']:
+    print('ollama/glm-5.3:cloud')
+    raise SystemExit(0)
+with open('answer.json', 'w', encoding='utf-8') as answer:
+    json.dump({'route':'billing'}, answer)
+mode = os.environ['AHU_TEST_TRAJECTORY_MODE']
+def emit(kind, part):
+    print(json.dumps({'type':kind,'timestamp':1,'sessionID':os.environ['AHU_PARENT_TASK'],'part':part}), flush=True)
+if mode != 'missing':
+    emit('step_start', {'id':'start','type':'step-start'})
+    emit('tool_use', {'id':'call','callID':'call','tool':'read','state':{'status':'error' if mode == 'fail' else 'completed'}})
+    if mode == 'partial':
+        emit('tool_use', {'id':'pending','callID':'pending','tool':'read','state':{'status':'running'}})
+    emit('step_finish', {'id':'end','type':'step-finish','reason':'stop'})
+else:
+    emit('text', {'type':'text','text':'answer saved without trajectory evidence'})
+"#).unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let home = external.path().canonicalize().unwrap().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    for (index, (mode, enabled, case_steps, status, code)) in [
+        ("pass", true, 1, "pass", 0),
+        ("fail", true, 1, "fail", 1),
+        ("partial", true, 1, "unknown", 1),
+        ("missing", true, 1, "unknown", 1),
+        ("pass", true, 0, "fail", 1),
+        ("fail", false, 0, "", 0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let case = external.path().join(format!("case-{index}.md"));
+        fixture_case_named(
+            &case,
+            "trajectory-fixture",
+            &format!(
+                "trajectory_budgets: {{max_steps: {case_steps}, unknown_coverage: observed_only}}\n"
+            ),
+        );
+        let records = external.path().join(format!("runs-{index}.jsonl"));
+        let mut command = common::ahu();
+        command.current_dir(repo.path()).args([
+            "eval",
+            "run",
+            "--case",
+            case.to_str().unwrap(),
+            "--agent",
+            "@triage",
+            "--records",
+            records.to_str().unwrap(),
+            "--runs",
+            "2",
+            "--output",
+            "json",
+        ]);
+        if enabled {
+            command.args([
+                "--max-trajectory-steps",
+                "8",
+                "--max-tool-error-rate",
+                "0.25",
+            ]);
+        }
+        let output = command
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("AHU_TEST_TRAJECTORY_MODE", mode)
+            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        if output.status.code() != Some(code) {
+            let kept = external.keep();
+            panic!(
+                "{mode}: expected exit {code}, got {:?}; synthetic artifacts kept at {}\n{}",
+                output.status.code(),
+                kept.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let summary: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(summary["trials"].as_array().unwrap().len(), 2);
+        assert_eq!(summary["trajectory_guard_exit_code"], code);
+        let rows: Vec<Value> = std::fs::read_to_string(records)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        for (i, row) in rows.iter().enumerate() {
+            if mode == "missing" {
+                // No terminal native result is a launch failure, not a correct
+                // answer, even though the stub wrote an answer artifact.
+                assert_eq!(row["terminal_status"], "candidate_launch_failed");
+                assert_eq!(row["score"], Value::Null);
+            } else {
+                assert_eq!(row["answer_passed"], true, "{mode}: {row}");
+                assert_eq!(row["score"], 1.0);
+            }
+            if enabled {
+                assert_eq!(row["trajectory_guard_status"], status);
+                assert_eq!(summary["trials"][i]["trajectory_guard_status"], status);
+                assert_eq!(row["trajectory_effective_limits"]["max_steps"], case_steps);
+                assert_eq!(
+                    row["trajectory_effective_limits"]["max_tool_error_rate"],
+                    0.25
+                );
+            } else {
+                assert!(row.get("trajectory_guard_status").is_none());
+                assert_eq!(row["trajectory_budget_status"], "fail");
+            }
+        }
+    }
+}

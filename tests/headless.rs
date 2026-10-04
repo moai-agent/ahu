@@ -642,6 +642,79 @@ fn timeout_and_cancel_are_distinct_terminal_outcomes() {
     assert_eq!(Fixture::value(&out)["outcome"], "cancelled");
 }
 #[test]
+fn floating_resume_refreshes_isolation_profile_and_preserves_previous_attempt() {
+    let f = Fixture::new();
+    let executable = f.bin.join("claude");
+    let source = std::fs::read_to_string(&executable).unwrap();
+    std::fs::write(&executable, source.replace("2.1.270", "2.1.283")).unwrap();
+    let out = f.launch("success", &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let first = Fixture::value(&out);
+    let id = first["task_id"].as_str().unwrap();
+    let result_path = PathBuf::from(first["review"]["result_path"].as_str().unwrap());
+    let dir = result_path.parent().unwrap().parent().unwrap();
+    let previous_result = std::fs::read(&result_path).unwrap();
+    let old_spec: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
+    std::fs::write(&executable, source.replace("2.1.270", "2.1.288")).unwrap();
+    let prompt = f.external.path().join("resume.txt");
+    std::fs::write(&prompt, "continue synthetic task").unwrap();
+    let resumed = f
+        .command()
+        .args(["resume", id, "--prompt-file"])
+        .arg(&prompt)
+        .args(["--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let waited = f
+        .command()
+        .args(["wait", id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        waited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&waited.stderr)
+    );
+    let next = Fixture::value(&waited);
+    assert_eq!(next["outcome"], "succeeded");
+    assert_eq!(next["attempt"], 2);
+    assert_eq!(next["harness"]["session"], first["harness"]["session"]);
+    assert_eq!(std::fs::read(&result_path).unwrap(), previous_result);
+    let spec: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
+    assert_eq!(spec["harness_version"], "2.1.288");
+    assert_eq!(spec["native_profile"], old_spec["native_profile"]);
+    let old = ahu::harness::isolation::profile("claude-code", "2.1.283").unwrap();
+    let new = ahu::harness::isolation::profile("claude-code", "2.1.288").unwrap();
+    assert!(
+        spec["native_controls"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(new.id))
+    );
+    assert!(
+        !spec["native_controls"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(old.id))
+    );
+    let previous: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("attempt-1/submission.json")).unwrap())
+            .unwrap();
+    assert_eq!(previous["enforcement"]["harness_version"], "2.1.283");
+}
+
+#[test]
 fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     let f = Fixture::new();
     let out = f.launch("success", &["--allow-child", "@worker"]);
