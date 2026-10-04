@@ -218,6 +218,7 @@ require explicit user permission.
 | `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
 | `ahu doctor` | Concise readiness summary; add `--verbose` for component diagnostics |
 | `ahu auth readiness --harness codex --output json` | Check native identity and local project binding without a model request |
+| `ahu auth budget --output json` / MCP `ahu_auth_budget` | View the active profile's verified provider rate-limit windows; unsupported budgets remain unknown |
 | `ahu approve TASK` / `ahu reject TASK` | Resolve a task's explicit MCP approval checkpoint after inspecting it with `ahu task TASK` |
 | `ahu lock` | Check that recognized agent context and `ahu.lock` are committed and current |
 | `ahu lock --update` | Fingerprint current recognized context into `ahu.lock` for review and commit |

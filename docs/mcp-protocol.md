@@ -12,6 +12,14 @@ Modern stdio requests do not use `initialize`: every request carries
 returns `resultType: "complete"`, supported versions, capabilities, cache hints,
 and server identity under `_meta["io.modelcontextprotocol/serverInfo"]`.
 
+The synchronous `ahu_auth_budget` tool accepts no arguments. It returns the
+active project's profile label and per-provider rate-limit status; supported
+windows expose percentages and reset periods, not token counts. Codex capacity
+is returned only after ahu verifies the current account against the active
+profile in the same native app-server session. Other providers may be marked
+unsupported or unknown. The tool neither reserves capacity nor assigns tasks,
+and its result does not include identity values or raw provider responses.
+
 Declare `io.modelcontextprotocol/tasks: {}` inside
 `params._meta["io.modelcontextprotocol/clientCapabilities"].extensions` on every
 Tasks request. Inspection calls return a persisted `working` handle before

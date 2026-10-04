@@ -2,12 +2,13 @@
 # One policy for every ahu user in this project. Share it by committing it;
 # ahu never stages, commits, or pushes this file for you.
 schema_version = 1
-harness_preferences = ["codex"]
+harness_preferences = ["antigravity", "codex"]
 model_selection = "project-ranked"
 catalog_version = "2026-09-27"
 
 [model_rankings]
 "codex" = ["gpt-6-astra"]
+"antigravity" = ["gemini-3.1-pro-high"]
 
 
 [knowledge]

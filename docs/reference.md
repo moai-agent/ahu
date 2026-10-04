@@ -121,7 +121,9 @@ references or grant permission to retrieve provider history.
 
 `ahu mcp serve` starts a local newline-delimited JSON request/response server on stdin and
 stdout. Its repository inspection tools are read-only and scoped to the current checkout:
-`ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get`. The server reports
+`ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get`. The read-only
+`ahu_auth_budget` tool reports supported provider rate-limit windows for the
+active auth profile, without returning identity values. The server reports
 canonical task IDs and verified `@name` handles while using ahu's existing
 repository ownership and task-resolution rules. Protocol handles describe
 inspection operations and do not replace ahu task records or identities.
@@ -930,7 +932,7 @@ amount can be incomplete. See the [Claude Code usage and limits guide](https://s
 
 | Harness | Usage/cost signal and scope | Access method and freshness | Evidence level | Limits and unavailable signals |
 | --- | --- | --- | --- | --- |
-| Codex | `turn.completed` token usage, per completed turn. No USD field. | Headless `codex exec --json` event stream; observed at turn completion. | Documented machine-readable event schema; adapter covered by protocol fixtures. | Cost and quota are unknown to ahu. No documented machine-readable per-run quota field; ahu does not price tokens. |
+| Codex | `turn.completed` token usage, per completed turn. No USD field. | Headless `codex exec --json` event stream; observed at turn completion. | Documented machine-readable event schema; adapter covered by protocol fixtures. | Cost is unknown. The separate account rate-limit RPC reports used percentage, window duration and reset time, not token counts; ahu reads it only through `ahu auth budget` for a matching active project profile. |
 | Claude Code | Result token usage and `total_cost_usd` for the headless invocation; API-request events have request scope. | Headless `--output-format stream-json`; result is fresh at invocation completion, request usage when its event arrives. | Documented result/usage and monitoring interfaces; adapter covered by protocol fixtures. | USD is harness-reported and may differ from account billing. Subscription/account quota is unknown to ahu; interactive `/usage` is not ingested. |
 | Antigravity CLI | `step_update` usage is per event; terminal `result.usage` is invocation-scoped. Cost is unavailable. | Headless `--output-format stream-json`; observed as steps arrive and, when present, at the terminal result. | Documented NDJSON schema; adapter covered by protocol fixtures. | Cost and quota are unknown to ahu. Interactive `/usage` and `/credits` are not ingested. A missing terminal result leaves task completion evidence incomplete even when step usage was observed. |
 | OpenCode | `step_finish` token usage and `cost`, per model step. | Headless `opencode run --format json`; fresh when each step event arrives. | Documented JSON run events; adapter covered by protocol fixtures. | Cost is an engine/provider-model amount, not billing proof; a missing final event can make the sum incomplete. Quota is unknown; `opencode stats` may include other sessions and is not ingested. |
@@ -941,6 +943,8 @@ cost from list prices. Missing values stay unavailable. Token usage, USD
 estimates, provider invoices, subscription quota, and rate-limit failures are
 separate signals and must not be substituted for one another. Source references:
 [Codex event schema](https://github.com/openai/codex/blob/main/sdk/typescript/src/events.ts),
+[Codex app-server account rate-limit RPC](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/common.rs),
+[Codex rate-limit response schema](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/v2/account.rs),
 [Antigravity headless stream](https://www.antigravity.google/docs/cli/headless/),
 [Antigravity credits](https://www.antigravity.google/docs/cli/credits/), and
 [Antigravity usage command](https://antigravity.google/docs/cli/commands/usage).
@@ -1976,6 +1980,22 @@ mismatched. A project without profiles reports `binding: "not_configured"`
 and `ready: false`, even though fresh launches can proceed without the optional
 binding policy. Readiness checks do not spend a model request and do not establish
 quota, trust, or tool-approval state.
+
+`ahu auth budget [--output json]` and the MCP tool `ahu_auth_budget` provide a
+read-only, secret-free rate-limit view for the active project profile. The JSON
+contains the profile label and provider status, plus supported windows with
+`used_percent`, `remaining_percent`, `window_duration_minutes`, and the provider's
+reset timestamp. It never contains account identifiers, credentials, prompts, or
+raw provider responses. Codex is currently the only provider with a supported
+machine-readable view: ahu requests `account/read` and
+`account/rateLimits/read` in one native app-server session, verifies that account
+against the active profile fingerprint, and refuses to return capacity on a
+mismatch. The reported percentage and time window are rate-limit signals, not
+literal token balances, monthly credits, or per-agent allocations. Agents using
+the same Codex account share those windows. Other providers return unsupported
+or unknown capacity; ahu does not estimate it from run telemetry, scrape a TUI,
+or send an inference request. The MCP tool's name and outcome join ordinary MCP
+telemetry, while its arguments and result values are not added to OTel.
 
 For Ollama, ahu reads `POST /api/me` from the loopback server named by
 `OLLAMA_HOST` (default `127.0.0.1:11434`). It requires a signed-in account and

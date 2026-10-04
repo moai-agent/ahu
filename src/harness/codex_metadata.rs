@@ -91,6 +91,95 @@ pub fn read_account(executable: &Path, cwd: &Path) -> Result<Value> {
     outcome
 }
 
+pub fn read_budget(executable: &Path, cwd: &Path) -> Result<(Value, Value)> {
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(executable);
+    command
+        .args(["app-server", "--listen", "stdio://"])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::cmux::integration::sanitize(&mut command, None);
+    command.process_group(0);
+    let mut child = command
+        .spawn()
+        .map_err(|_| Error::new("cannot start read-only Codex budget inspection"))?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let outcome = (|| {
+        let fd = stdout.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(Error::new("cannot bound Codex budget reads"));
+        }
+        let mut reader = BufReader::new(stdout);
+        let mut total = 0;
+        let send = |stdin: &mut std::process::ChildStdin, value: Value| -> Result<()> {
+            let mut bytes = serde_json::to_vec(&value)?;
+            bytes.push(b'\n');
+            stdin
+                .write_all(&bytes)
+                .map_err(|_| Error::new("Codex budget inspection input closed"))
+        };
+        send(
+            &mut stdin,
+            json!({"id":1,"method":"initialize","params":{
+                "clientInfo":{"name":"ahu_auth_binding","version":"1.0.0"},
+                "capabilities":{"experimentalApi":true}}}),
+        )?;
+        let mut initialized = false;
+        let mut account_meta = None;
+        for _ in 0..128 {
+            let line = read_metadata_line(&mut reader, &mut total, deadline)?;
+            let event: Value = serde_json::from_slice(&line)
+                .map_err(|_| Error::new("invalid Codex budget response"))?;
+            if let Some(error) = event.get("error").filter(|v| !v.is_null()) {
+                return Err(Error::new(format!(
+                    "Codex budget inspection RPC failed (code {:?}); response omitted",
+                    error.get("code").and_then(Value::as_i64)
+                )));
+            }
+            match event.get("id").and_then(Value::as_u64) {
+                Some(1) if !initialized => {
+                    initialized = true;
+                    send(&mut stdin, json!({"method":"initialized"}))?;
+                    send(
+                        &mut stdin,
+                        json!({"id":2,"method":"account/read","params":{"refreshToken":false}}),
+                    )?;
+                }
+                Some(2) if initialized => {
+                    let result = event
+                        .get("result")
+                        .filter(|v| v.is_object())
+                        .ok_or_else(|| Error::new("Codex returned no account metadata"))?;
+                    account_meta = Some(result.clone());
+                    send(
+                        &mut stdin,
+                        json!({"id":3,"method":"account/rateLimits/read","params":{}}),
+                    )?;
+                }
+                Some(3) if initialized && account_meta.is_some() => {
+                    let result = event
+                        .get("result")
+                        .filter(|v| v.is_object())
+                        .ok_or_else(|| Error::new("Codex returned no rate limits metadata"))?;
+                    return Ok((account_meta.unwrap(), result.clone()));
+                }
+                None if event.get("id").is_none() => (),
+                _ => return Err(Error::new("unexpected Codex budget response")),
+            }
+        }
+        Err(Error::new("Codex budget event limit exceeded"))
+    })();
+    drop(stdin);
+    crate::headless::signal_group(child.id(), libc::SIGKILL);
+    let _ = child.wait();
+    outcome
+}
+
 /// Uses exactly the executable and isolation switches used by batch execution.
 /// Requirements must be absent: a future policy change refuses admission rather
 /// than suppressing mandatory plugin hooks or changing the required features.
@@ -423,5 +512,55 @@ mod tests {
                 assert!(inspect(&executable, &cwd, version).is_err());
             }
         }
+    }
+
+    #[test]
+    fn budget_protocol_reads_account_and_limits_in_one_native_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let executable = cwd.join("native");
+        let requests = cwd.join("budget-requests");
+        let quote = crate::util::shell_single_quote;
+        let account = json!({
+            "id":2,
+            "result":{"account":{"type":"chatgpt","email":"private@example.invalid"},"workspaceRouting":{"chatgptAccountId":"private-id"}}
+        });
+        let limits = json!({
+            "id":3,
+            "result":{"rateLimits":{"primary":{"usedPercent":31.5,"windowDurationMins":300,"resetsAt":1800000000}}}
+        });
+        let script = format!(
+            "#!/bin/sh\nread -r initialize\nprintf '%s\\n' '{{\"id\":1,\"result\":{{}}}}'\nread -r initialized\nread -r account\nprintf '%s\\n' \"$initialize\" \"$initialized\" \"$account\" > {}\nprintf '%s\\n' {}\nread -r limits\nprintf '%s\\n' \"$limits\" >> {}\nprintf '%s\\n' {}\n",
+            quote(&requests.to_string_lossy()),
+            quote(&account.to_string()),
+            quote(&requests.to_string_lossy()),
+            quote(&limits.to_string()),
+        );
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let (account, limits) = read_budget(&executable, &cwd).unwrap();
+        assert_eq!(account["account"]["type"], "chatgpt");
+        assert_eq!(limits["rateLimits"]["primary"]["usedPercent"], 31.5);
+        let methods: Vec<String> = std::fs::read_to_string(&requests)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["method"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "initialized",
+                "account/read",
+                "account/rateLimits/read"
+            ]
+        );
     }
 }

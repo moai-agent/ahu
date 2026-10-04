@@ -471,6 +471,11 @@ fn tools() -> Vec<Value> {
             "inputSchema":{"type":"object","properties":{},"additionalProperties":false}
         }),
         json!({
+            "name":"ahu_auth_budget",
+            "description":"Read current verified provider rate-limit windows for this repository's active auth profile. Reports percentages and reset periods, not token counts. Unsupported provider budgets remain unknown. Agents using the same account share its capacity; this tool does not allocate or reserve budget.",
+            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}
+        }),
+        json!({
             "name":"ahu_tasks_list",
             "description":"List ahu tasks belonging to this repository, including canonical IDs and verified @name handles.",
             "inputSchema":{"type":"object","properties":{},"additionalProperties":false}
@@ -506,8 +511,9 @@ fn tools() -> Vec<Value> {
 ///
 /// Evaluation case tool expectations and evaluation record validation are both
 /// bounded by this list, so neither can name a tool that does not exist.
-pub const TOOL_NAMES: [&str; 6] = [
+pub const TOOL_NAMES: [&str; 7] = [
     "ahu_agents_list",
+    "ahu_auth_budget",
     "ahu_tasks_list",
     "ahu_task_get",
     "ahu_typed_decide",
@@ -530,6 +536,7 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
         .ok_or_else(|| Error::new("tools/call requires a string params.name"))?;
     let selector = match name {
         "ahu_agents_list"
+        | "ahu_auth_budget"
         | "ahu_tasks_list"
         | "ahu_typed_decide"
         | "ahu_skills_suggest"
@@ -540,6 +547,11 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
     };
     let empty = json!({});
     let arguments = params.get("arguments").unwrap_or(&empty);
+    if name == "ahu_auth_budget"
+        && (!arguments.is_object() || arguments.as_object().is_some_and(|o| !o.is_empty()))
+    {
+        return Err(Error::new("ahu_auth_budget accepts no arguments"));
+    }
     if name == "ahu_typed_decide" {
         return decisions::validate_arguments(arguments);
     }
@@ -638,6 +650,7 @@ pub(super) fn call_response_with_cancellation(
         .unwrap_or_else(|| json!({}));
     let result = match name {
         "ahu_agents_list" => agents(repo),
+        "ahu_auth_budget" => crate::auth_binding::budget(repo),
         "ahu_tasks_list" => tasks(repo),
         "ahu_task_get" => task_get(repo, &arguments),
         "ahu_typed_decide" => decisions::call(&arguments, repo),
@@ -845,6 +858,7 @@ mod tests {
             names,
             [
                 "ahu_agents_list",
+                "ahu_auth_budget",
                 "ahu_tasks_list",
                 "ahu_task_get",
                 "ahu_typed_decide",
@@ -858,6 +872,42 @@ mod tests {
         let digest = tool_definitions_digest();
         assert_eq!(digest.len(), 64);
         assert_eq!(digest, tool_definitions_digest());
+    }
+
+    #[test]
+    fn auth_budget_tool_is_read_only_and_accepts_no_arguments() {
+        assert!(
+            validate_tool_call(
+                &serde_json::json!({"name":"ahu_auth_budget","arguments":{}}),
+                false
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_tool_call(
+                &serde_json::json!({"name":"ahu_auth_budget","arguments":{"profile":"work"}}),
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn auth_budget_tool_dispatch_returns_a_secret_free_unconfigured_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::git::run_ok(temp.path(), &["init", "-q"]).unwrap();
+        let repo = crate::git::discover(temp.path()).unwrap();
+        let reply = super::call_response(
+            &repo,
+            &serde_json::json!(1),
+            &serde_json::json!({"name":"ahu_auth_budget","arguments":{}}),
+            false,
+        );
+        let budget = &reply["result"]["structuredContent"];
+        assert_eq!(budget["profile"], serde_json::Value::Null);
+        assert_eq!(budget["signal"], "provider_rate_limit_windows");
+        assert_eq!(budget["providers"][0]["status"], "not_configured");
+        assert!(!budget.to_string().contains("@"));
     }
 
     #[test]
