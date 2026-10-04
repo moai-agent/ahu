@@ -143,7 +143,11 @@ git -C .worktrees/"$task_id" status
 
 Headless inspection shows the attempt outcome, observed ownership, blockers,
 known native session reference, and artifact paths. A process exit does not
-prove completion. Review the changes and findings. Tasks keep their branches,
+prove completion, so `task` and `result` report the root outcome and helper
+lifecycle coverage on separate lines: unknown helper coverage does not mean the
+root result is missing. A `supervisor_error` attempt is never resumed
+automatically; it prints the recorded failure phase and the recovery steps to
+follow. Review the changes and findings. Tasks keep their branches,
 worktrees, and records after the harness exits.
 
 ## Typed decisions and agent evals
@@ -218,6 +222,7 @@ require explicit user permission.
 | `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
 | `ahu doctor` | Concise readiness summary; add `--verbose` for component diagnostics |
 | `ahu auth readiness --harness codex --output json` | Check native identity and local project binding without a model request |
+| `ahu auth budget --output json` / MCP `ahu_auth_budget` | View the active profile's verified provider rate-limit windows; unsupported budgets remain unknown |
 | `ahu approve TASK` / `ahu reject TASK` | Resolve a task's explicit MCP approval checkpoint after inspecting it with `ahu task TASK` |
 | `ahu lock` | Check that recognized agent context and `ahu.lock` are committed and current |
 | `ahu lock --update` | Fingerprint current recognized context into `ahu.lock` for review and commit |
@@ -333,7 +338,9 @@ for project configuration and machine-readable results.
 Tests use temporary repositories and stand-in harness executables. Live cmux
 tests are opt-in through `AHU_TEST_CMUX=1`; ordinary test runs do not open cmux
 workspaces. Once opted in, unreachable cmux is an error. Run live checks only
-with authorization.
+with authorization. CI probes for a reachable cmux first and skips the live job
+with a visible notice when the runner provides none, so a missing optional
+integration is never reported as a passing live probe.
 
 ```sh
 cargo test --locked --doc
@@ -369,8 +376,6 @@ voice, such as required contractions and passive-voice warnings, along with the
 Oxford comma rules, which flag two-item conjunctions. The reasons are recorded
 beside each entry in `.vale.ini`.
 
-See the [0.8.0 release notes](docs/releases/0.8.0.md) for local typed decisions,
-trajectory measurements, and readiness improvements. The [0.7.0 release notes](docs/releases/0.7.0.md) for account-binding guards,
-cooperative approval, streaming write detection, cost telemetry, and evaluation
-features. Final release validation and publication remain pending. The
-[0.6.0 notes](docs/releases/0.6.0.md) describe the published prerelease.
+See the [0.9.0 release notes](docs/releases/0.9.0.md) for provider rate-limit
+budgets, capacity-aware delegation candidates, and headless completion and
+recovery reporting. Earlier notes are in [docs/releases/](docs/releases/).

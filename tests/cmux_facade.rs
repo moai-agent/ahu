@@ -549,31 +549,35 @@ fn headless_dry_run_uses_the_same_status_and_refuses_unknown_registration() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(!Path::new(preview["worktree"].as_str().unwrap()).exists());
-    f.write(
-        &executable,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.1.283; exit 0; fi\nexit 99\n",
-    );
-    let result = launch();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let preview: Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(preview["cmux_integration"]["headless"]["allowed"], true);
-    let profile = ahu::harness::isolation::profile("claude-code", "2.1.283").unwrap();
-    assert!(
-        preview["capabilities"]["native_controls"]
-            .as_array()
-            .unwrap()
-            .contains(&json!(profile.id))
-    );
-    let args = preview["command"]["args"].as_array().unwrap();
-    assert!(
-        args.windows(2)
-            .any(|pair| pair == [json!(profile.args[0]), json!(profile.args[1])])
-    );
-    assert!(!Path::new(preview["worktree"].as_str().unwrap()).exists());
+    for version in ["2.1.283", "2.1.288", "2.1.289"] {
+        f.write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; exit 0; fi\nexit 99\n"
+            ),
+        );
+        let result = launch();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let preview: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(preview["cmux_integration"]["headless"]["allowed"], true);
+        let profile = ahu::harness::isolation::profile("claude-code", version).unwrap();
+        assert!(
+            preview["capabilities"]["native_controls"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(profile.id))
+        );
+        let args = preview["command"]["args"].as_array().unwrap();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == [json!(profile.args[0]), json!(profile.args[1])])
+        );
+        assert!(!Path::new(preview["worktree"].as_str().unwrap()).exists());
+    }
 }
 
 #[test]
@@ -1031,35 +1035,37 @@ fn claude_invocation_isolation_covers_only_parsed_nonmanaged_hooks() {
 
 #[test]
 fn current_claude_isolates_hooks_without_admitting_plugins_or_managed_sources() {
-    let f = Fixture::new();
-    let settings = f.home.join(".claude/settings.json");
-    let hook = br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch synthetic-marker"}]}]}}"#;
-    f.write(&settings, hook);
-    let status = integration::headless_status(f.inspect("claude-code"), "2.1.288 (Claude Code)");
-    assert!(status.headless.allowed, "{:?}", status.headless.reasons);
-    let managed = f.root.join("managed-settings.json");
-    f.write(&managed, hook);
-    let locations = Locations {
-        managed_claude: Some(managed),
-        ..f.locations()
-    };
-    let status = integration::inspect_in(&f.root, "claude-code", &locations);
-    assert!(
-        !integration::headless_status(status, "2.1.288")
-            .headless
-            .allowed
-    );
-    for bytes in [
-        &b"{invalid"[..],
-        &br#"{"hooks":{"Stop":42}}"#[..],
-        &br#"{"enabledPlugins":{"unknown":true}}"#[..],
-    ] {
-        f.write(&settings, bytes);
+    for version in ["2.1.288 (Claude Code)", "2.1.289 (Claude Code)"] {
+        let f = Fixture::new();
+        let settings = f.home.join(".claude/settings.json");
+        let hook = br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch synthetic-marker"}]}]}}"#;
+        f.write(&settings, hook);
+        let status = integration::headless_status(f.inspect("claude-code"), version);
+        assert!(status.headless.allowed, "{:?}", status.headless.reasons);
+        let managed = f.root.join("managed-settings.json");
+        f.write(&managed, hook);
+        let locations = Locations {
+            managed_claude: Some(managed),
+            ..f.locations()
+        };
+        let status = integration::inspect_in(&f.root, "claude-code", &locations);
         assert!(
-            !integration::headless_status(f.inspect("claude-code"), "2.1.288")
+            !integration::headless_status(status, version)
                 .headless
                 .allowed
         );
+        for bytes in [
+            &b"{invalid"[..],
+            &br#"{"hooks":{"Stop":42}}"#[..],
+            &br#"{"enabledPlugins":{"unknown":true}}"#[..],
+        ] {
+            f.write(&settings, bytes);
+            assert!(
+                !integration::headless_status(f.inspect("claude-code"), version)
+                    .headless
+                    .allowed
+            );
+        }
     }
 }
 

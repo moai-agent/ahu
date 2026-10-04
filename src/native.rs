@@ -863,7 +863,7 @@ impl Observations {
     ///
     /// `complete` is false whenever a helper started without reaching a terminal
     /// event, whenever an observation contradicts the frozen policy, whenever the
-    /// stream ended without a terminal harness event, or whenever the harness
+    /// native helper stream ended without its terminal event, or whenever the harness
     /// accounted for helper work that ahu never saw. A parent's final message
     /// does not join a helper, so none of those conditions is waived by the
     /// attempt having produced a result.
@@ -955,7 +955,10 @@ impl Observations {
             ));
         }
         if !self.terminal_seen {
-            unknown.push("the attempt ended without a terminal harness event".to_string());
+            unknown.push(
+                "native helper lifecycle coverage has no terminal event; helper completion is unknown"
+                    .to_string(),
+            );
         }
 
         // Two separate questions, kept apart because conflating them is what let
@@ -989,7 +992,9 @@ pub struct Completeness {
     /// Both halves hold: nothing is outstanding and nothing is missing.
     pub complete: bool,
     /// Every helper ahu saw joined, nothing contradicted the policy, and the
-    /// stream ended with a terminal harness event.
+    /// native helper stream contained no unresolved helper or policy violation,
+    /// and its terminal event was observed. Root process completion is recorded
+    /// separately in the headless result.
     pub terminated_cleanly: bool,
     /// Everything that happened was visible: no helper work reached ahu only as
     /// a counter, and no helper event was unreadable.

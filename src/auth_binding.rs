@@ -90,6 +90,105 @@ impl Identity {
     }
 }
 
+/// Return a privacy-safe view of current provider rate-limit windows for the
+/// active project auth profile. Only Codex currently has a reviewed,
+/// machine-readable read-only limit interface; other bound providers remain
+/// explicitly unsupported rather than being estimated from historical usage.
+pub fn budget(repo: &Repo) -> Result<Value> {
+    budget_with_probe(repo, |cwd| {
+        let executable = crate::selection::resolve_executable("codex")
+            .ok_or_else(|| Error::new("Codex is not available on PATH"))?;
+        let (account, limits) =
+            crate::harness::codex_metadata::read_budget(&PathBuf::from(executable), cwd)?;
+        Ok((codex_identity(&account)?, limits))
+    })
+}
+
+fn budget_with_probe(
+    repo: &Repo,
+    mut probe_codex: impl FnMut(&Path) -> Result<(Identity, Value)>,
+) -> Result<Value> {
+    let path = binding_path_without_creation(repo)?;
+    crate::state::confine_file(&path)?;
+    let bindings = match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BindingFile::default(),
+        Err(error) => {
+            return Err(Error::new(format!(
+                "cannot inspect local auth profile: {error}"
+            )));
+        }
+        Ok(_) => load(repo, &path)?,
+    };
+    let active = bindings.active_profile.clone();
+    let profile = bindings.profiles.get(&active);
+    let mut providers = Vec::new();
+    for harness in ["codex", "claude-code", "antigravity", "ollama"] {
+        let Some(binding) = profile.and_then(|items| items.get(harness)) else {
+            providers.push(json!({"harness":harness,"status":if profile.is_some() {"not_bound"} else {"not_configured"},"windows":[]}));
+            continue;
+        };
+        if harness != "codex" {
+            providers.push(json!({"harness":harness,"status":"unsupported","windows":[]}));
+            continue;
+        }
+        let (identity, response) = probe_codex(&repo.root)?;
+        if identity.fingerprint()? != binding.fingerprint {
+            return Err(Error::new(
+                "current Codex account does not match the active project auth profile; budget omitted",
+            ));
+        }
+        let rate_limits = response.get("rateLimits").unwrap_or(&response);
+        let mut windows = Vec::new();
+        for (name, key) in [("primary", "primary"), ("secondary", "secondary")] {
+            if let Some(values) = rate_limits.get(key).and_then(normalize_rate_window) {
+                windows.push(normalize_window(name, values));
+            }
+        }
+        let status = if windows.is_empty() {
+            "unknown"
+        } else {
+            "available"
+        };
+        providers.push(json!({"harness":"codex","status":status,"windows":windows}));
+    }
+    let observed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(json!({
+        "schema_version": 1,
+        "profile": if profile.is_some() {Some(active)} else {None::<String>},
+        "signal": "provider_rate_limit_windows",
+        "token_counts": "not_provided",
+        "observed_at_unix": observed_at,
+        "shared_account_capacity": true,
+        "providers": providers
+    }))
+}
+
+fn normalize_rate_window(value: &Value) -> Option<(f64, u64, Option<u64>)> {
+    let used = value.get("usedPercent")?.as_f64()?;
+    if !used.is_finite() || !(0.0..=100.0).contains(&used) {
+        return None;
+    }
+    let duration = value.get("windowDurationMins")?.as_u64()?;
+    if duration == 0 || duration > 525_600 {
+        return None;
+    }
+    let reset = value.get("resetsAt").and_then(Value::as_u64);
+    Some((used, duration, reset))
+}
+
+fn normalize_window(name: &str, (used, duration, reset): (f64, u64, Option<u64>)) -> Value {
+    json!({
+        "name": name,
+        "used_percent": used,
+        "remaining_percent": 100.0 - used,
+        "window_duration_minutes": duration,
+        "resets_at_unix": reset
+    })
+}
+
 fn binding_path(repo: &Repo) -> Result<PathBuf> {
     let root = repo.primary_root()?;
     crate::state::ensure_checkout_state(&root)?;
@@ -747,12 +846,16 @@ fn probe_codex(cwd: &Path) -> Result<Identity> {
     let executable = crate::selection::resolve_executable("codex")
         .ok_or_else(|| Error::new("Codex is not available on PATH"))?;
     let account = crate::harness::codex_metadata::read_account(&PathBuf::from(executable), cwd)?;
+    codex_identity(&account)
+}
+
+fn codex_identity(account: &Value) -> Result<Identity> {
     // account/read returns an envelope with `account` and routing metadata;
     // tolerate a flattened shape as well for compatible app-server versions.
     let account_details = account
         .get("account")
         .filter(|value| value.is_object())
-        .unwrap_or(&account);
+        .unwrap_or(account);
     if account_details.get("type").and_then(Value::as_str) != Some("chatgpt") {
         return Err(Error::new(
             "Codex API-key authentication does not expose a verifiable user principal; account binding is unavailable",
@@ -798,10 +901,14 @@ fn probe_antigravity(cwd: &Path) -> Result<Identity> {
     let executable = crate::selection::resolve_executable("agy")
         .ok_or_else(|| Error::new("Antigravity CLI is not available on PATH"))?;
     let output = antigravity_startup(&executable, cwd)?;
-    let principal = extract_email(&output).ok_or_else(|| {
+    parse_antigravity_identity(&output)
+}
+
+fn parse_antigravity_identity(output: &[u8]) -> Result<Identity> {
+    let principal = extract_email(output).ok_or_else(|| {
         Error::new("Antigravity startup did not expose a signed-in account email")
     })?;
-    let visible = String::from_utf8_lossy(&output);
+    let visible = String::from_utf8_lossy(output);
     let identity_kind = if visible.contains("Agent Platform") {
         "agent-platform"
     } else if visible.contains("Gemini API key") {
@@ -865,7 +972,10 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(slave));
     crate::cmux::integration::sanitize(&mut command, None);
-    command.env("TERM", "xterm-256color").process_group(0);
+    command
+        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "1")
+        .process_group(0);
     let mut child = command
         .spawn()
         .map_err(|_| Error::new("cannot start Antigravity identity probe"))?;
@@ -1153,6 +1263,164 @@ mod profile_tests {
     }
 
     #[test]
+    fn budget_is_active_profile_scoped_and_exposes_only_normalized_codex_windows() {
+        let (_temp, repo) = repo_fixture();
+        let identity = Identity {
+            harness: "codex".into(),
+            identity_kind: "chatgpt".into(),
+            principal: "private@example.invalid".into(),
+            organization: None,
+            workspace: Some("private-workspace".into()),
+        };
+        let path = binding_path(&repo).unwrap();
+        let bindings = BindingFile {
+            repo_identity: repo.identity(),
+            profiles: BTreeMap::from([(
+                "personal".into(),
+                BTreeMap::from([
+                    (
+                        "codex".into(),
+                        StoredBinding {
+                            fingerprint: identity.fingerprint().unwrap(),
+                            identity_kind: "chatgpt".into(),
+                            profile: None,
+                        },
+                    ),
+                    (
+                        "claude-code".into(),
+                        StoredBinding {
+                            fingerprint: "a".repeat(64),
+                            identity_kind: "subscription".into(),
+                            profile: None,
+                        },
+                    ),
+                ]),
+            )]),
+            active_profile: "personal".into(),
+            ..BindingFile::default()
+        };
+        save(&path, &bindings).unwrap();
+
+        let budget = budget_with_probe(&repo, |cwd| {
+            assert_eq!(cwd, repo.root);
+            Ok((
+                identity.clone(),
+                json!({"rateLimits": {
+                    "primary": {"usedPercent": 25.0, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
+                    "secondary": {"usedPercent": 87.5, "windowDurationMins": 10_080, "resetsAt": 1_800_086_400}
+                }, "private":"must not escape"}),
+            ))
+        })
+        .unwrap();
+        assert_eq!(budget["profile"], "personal");
+        assert_eq!(budget["signal"], "provider_rate_limit_windows");
+        assert_eq!(budget["token_counts"], "not_provided");
+        assert_eq!(budget["providers"][0]["status"], "available");
+        assert_eq!(
+            budget["providers"][0]["windows"][0]["remaining_percent"],
+            75.0
+        );
+        assert_eq!(
+            budget["providers"][0]["windows"][1]["window_duration_minutes"],
+            10_080
+        );
+        assert_eq!(budget["providers"][1]["status"], "unsupported");
+        let serialized = budget.to_string();
+        for secret in [
+            "private@example.invalid",
+            "private-workspace",
+            "must not escape",
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+    }
+
+    #[test]
+    fn budget_refuses_a_different_codex_account_and_omits_malformed_windows() {
+        let (_temp, repo) = repo_fixture();
+        let bound = Identity {
+            harness: "codex".into(),
+            identity_kind: "chatgpt".into(),
+            principal: "bound@example.invalid".into(),
+            organization: None,
+            workspace: None,
+        };
+        let path = binding_path(&repo).unwrap();
+        let bindings = BindingFile {
+            repo_identity: repo.identity(),
+            profiles: BTreeMap::from([(
+                "default".into(),
+                BTreeMap::from([(
+                    "codex".into(),
+                    StoredBinding {
+                        fingerprint: bound.fingerprint().unwrap(),
+                        identity_kind: "chatgpt".into(),
+                        profile: None,
+                    },
+                )]),
+            )]),
+            ..BindingFile::default()
+        };
+        save(&path, &bindings).unwrap();
+
+        let mismatch = budget_with_probe(&repo, |_| {
+            Ok((
+                Identity {
+                    principal: "other@example.invalid".into(),
+                    ..bound.clone()
+                },
+                json!({"rateLimits":{"primary":{"usedPercent":1,"windowDurationMins":5}}}),
+            ))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(mismatch.contains("does not match"));
+        assert!(!mismatch.contains("other@example.invalid"));
+
+        let malformed = budget_with_probe(&repo, |_| {
+            Ok((
+                bound.clone(),
+                json!({"rateLimits": {
+                    "primary": {"usedPercent": 120.0, "windowDurationMins": 5},
+                    "secondary": {"usedPercent": 10.0, "windowDurationMins": 0}
+                }}),
+            ))
+        })
+        .unwrap();
+        assert_eq!(malformed["providers"][0]["status"], "unknown");
+        assert!(
+            malformed["providers"][0]["windows"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn budget_does_not_probe_when_profile_is_absent_or_codex_is_unbound() {
+        let (_temp, repo) = repo_fixture();
+        let absent =
+            budget_with_probe(&repo, |_| panic!("must not probe without a bound profile")).unwrap();
+        assert_eq!(absent["profile"], Value::Null);
+        assert_eq!(absent["providers"][0]["status"], "not_configured");
+        assert!(!repo.root.join(".ahu").exists());
+
+        let path = binding_path(&repo).unwrap();
+        save(
+            &path,
+            &BindingFile {
+                profiles: BTreeMap::from([("default".into(), BTreeMap::new())]),
+                ..BindingFile::default()
+            },
+        )
+        .unwrap();
+        let unbound =
+            budget_with_probe(&repo, |_| panic!("must not probe an unbound provider")).unwrap();
+        assert_eq!(unbound["profile"], "default");
+        assert_eq!(unbound["providers"][0]["status"], "not_bound");
+    }
+
+    #[test]
     fn readiness_preserves_legacy_binding_bytes() {
         let (_temp, repo) = repo_fixture();
         let path = binding_path(&repo).unwrap();
@@ -1263,5 +1531,41 @@ mod profile_tests {
             .unwrap();
 
         assert!(!task_dir.path().join("auth-identity.json").exists());
+    }
+
+    #[test]
+    fn extract_email_accepts_plain_identity_and_rejects_ansi_wrapped_token() {
+        assert_eq!(
+            extract_email(b"Signed in as personal@example.com").as_deref(),
+            Some("personal@example.com")
+        );
+        // The fallback extraction fails on raw ANSI since it breaks token boundaries,
+        // demonstrating why NO_COLOR=1 presentation override is used.
+        assert_eq!(extract_email(b"\x1b[32mpersonal@example.com\x1b[0m"), None);
+    }
+
+    #[test]
+    fn parse_antigravity_identity_rejects_api_key_and_extracts_workspace() {
+        let output = b"Welcome to Antigravity CLI\nSigned in as work@example.com\nGCP Project: my-gcp-project\n";
+        let identity = parse_antigravity_identity(output).unwrap();
+        assert_eq!(identity.harness, "antigravity");
+        assert_eq!(identity.identity_kind, "antigravity-account");
+        assert_eq!(identity.principal, "work@example.com");
+        assert_eq!(identity.workspace.as_deref(), Some("my-gcp-project"));
+
+        let api_key_output = b"Using Gemini API key\n";
+        assert!(parse_antigravity_identity(api_key_output).is_err());
+        let api_key_with_email = b"Using Gemini API key\ncontact: fixture@example.invalid\n";
+        assert!(
+            parse_antigravity_identity(api_key_with_email)
+                .unwrap_err()
+                .to_string()
+                .contains("API-key authentication")
+        );
+
+        let platform_output = b"Connected to Agent Platform\naccount: dev@example.com\n";
+        let platform_id = parse_antigravity_identity(platform_output).unwrap();
+        assert_eq!(platform_id.identity_kind, "agent-platform");
+        assert_eq!(platform_id.principal, "dev@example.com");
     }
 }

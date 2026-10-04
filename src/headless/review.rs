@@ -221,6 +221,26 @@ pub(super) fn projection(
     } else {
         Vec::new()
     };
+    let supervisor_recovery = result
+        .filter(|value| value["outcome"] == "supervisor_error")
+        .map(|value| {
+            let allowed = |field: &str, choices: &[&str]| {
+                value[field]
+                    .as_str()
+                    .filter(|candidate| choices.iter().any(|allowed| allowed == candidate))
+                    .unwrap_or("unknown")
+            };
+            json!({
+                "failure_phase": allowed("failure_phase", &[
+                    "frozen_execution_validation", "worker_spawn",
+                    "stream_evaluation_and_lifecycle", "child_reconciliation", "result_persistence"
+                ]),
+                "failure_code": allowed("failure_code", &[
+                    "git_ownership_changed", "storage_verification_unavailable", "stream_evaluator_unavailable", "unclassified"
+                ]),
+                "next_step": "Automatic resume is refused for supervisor_error. Preserve the attempt and worktree; inspect the recorded phase/code and Git diff, determine whether native work ran, then submit a new registered assignment if more work is needed. Do not replay this attempt."
+            })
+        });
     let attempt = spec.map(|s| super::attempt_dir(dir, s));
     json!({
         "backend":"headless", "task_id":id, "task_ref":crate::task_ref::display(&id), "number":spec.map(|s| s.attempt),
@@ -231,6 +251,13 @@ pub(super) fn projection(
         "session_state":read::<Value>(&dir.join("task.json")).ok().and_then(|v| v["state"].as_str().map(str::to_owned)),
         "native_session":session, "native_session_source":source,
         "native_data":"harness-owned; no verified native data location recorded",
+        "root_completion":result.map(|v| json!({
+            "outcome":v["outcome"],
+            "terminal_event_observed":v["harness"]["terminal"],
+            "process_exit_code":v["process"]["exit_code"]
+        })),
+        "native_completeness":result.map(|v| v["native_completeness"].clone()),
+        "supervisor_recovery":supervisor_recovery,
         "blockers":blockers, "runtime":dir, "record_path":dir.join("task.json"),
         "result_path":attempt.as_ref().map(|p| p.join("result.json")),
         "result_metadata":if error.is_some() {"unavailable"} else if result.is_some_and(|v| v["outcome"] == "running" || v["outcome"] == "interrupted") {"missing"} else {"available"},
@@ -280,6 +307,29 @@ pub(crate) fn render(value: &Value, concise: bool) -> String {
         }
         return out;
     }
+    if let Some(root) = value["root_completion"].as_object() {
+        out.push_str(&format!(
+            "  root      {} (terminal event: {}; process exit: {})\n",
+            field(&Value::Object(root.clone()), "outcome"),
+            field(&Value::Object(root.clone()), "terminal_event_observed"),
+            field(&Value::Object(root.clone()), "process_exit_code")
+        ));
+    }
+    if let Some(native) = value["native_completeness"].as_object() {
+        out.push_str(&format!(
+            "  helpers   {} (lifecycle coverage)\n",
+            if native.get("complete").and_then(Value::as_bool) == Some(true) {
+                "complete"
+            } else {
+                "incomplete or unknown"
+            }
+        ));
+        if let Some(unknown) = native.get("unknown").and_then(Value::as_array) {
+            for item in unknown.iter().take(3).filter_map(Value::as_str) {
+                out.push_str(&format!("  helper?   {}\n", safe(item)));
+            }
+        }
+    }
     out.push_str(&format!("  ownership {} (owner.lock observation)\n  native    {} ({})\n  data      {}\n  runtime   {}\n  attempt directory {}\n  result metadata {} ({})\n  agent report {} (if provided)\n  captured final {} (if retained)\n  captures removed {}\n",
         field(value,"liveness"),field(value,"native_session"),field(value,"native_session_source"),field(value,"native_data"),field(value,"runtime"),field(value,"attempt_path"),field(value,"result_path"),field(value,"result_metadata"),field(value,"agent_report_path"),field(value,"final_path"),field(value,"captured_artifacts_removed")));
     if let Some(blockers) = value["blockers"].as_array() {
@@ -292,6 +342,9 @@ pub(crate) fn render(value: &Value, concise: bool) -> String {
         if blockers.len() > 8 {
             out.push_str("  blockers  additional entries omitted; inspect result JSON\n");
         }
+    }
+    if let Some(guidance) = value["supervisor_recovery"]["next_step"].as_str() {
+        out.push_str(&format!("  recovery  {}\n", safe(guidance)));
     }
     if let Some(commands) = value["commands"].as_array() {
         for command in commands.iter().filter_map(Value::as_str) {

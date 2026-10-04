@@ -668,6 +668,23 @@ fn a_stream_without_a_terminal_event_is_not_complete() {
     );
 }
 
+#[test]
+fn foreign_harness_missing_helper_terminal_is_unknown_not_a_missing_root_result() {
+    let mut observations = Observations::default();
+    observations.observe("antigravity", &json!({"type":"step_update"}));
+    let completeness = observations.completeness(&profile_of(&bounded()));
+    assert!(!completeness.complete);
+    assert!(completeness.unknown.iter().any(|entry| {
+        entry.contains("native helper lifecycle") && entry.contains("helper completion is unknown")
+    }));
+    assert!(
+        completeness
+            .unknown
+            .iter()
+            .all(|entry| !entry.contains("attempt ended without a terminal harness event"))
+    );
+}
+
 /// A helper deeper than the frozen policy is a violation, not a curiosity, and
 /// it is reported whether it is seen per-helper or only in the statistics.
 #[test]

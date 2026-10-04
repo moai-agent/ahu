@@ -121,10 +121,19 @@ references or grant permission to retrieve provider history.
 
 `ahu mcp serve` starts a local newline-delimited JSON request/response server on stdin and
 stdout. Its repository inspection tools are read-only and scoped to the current checkout:
-`ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get`. The server reports
+`ahu_agents_list`, `ahu_tasks_list`, and `ahu_task_get`. The read-only
+`ahu_auth_budget` tool reports supported provider rate-limit windows for the
+active auth profile, without returning identity values. The server reports
 canonical task IDs and verified `@name` handles while using ahu's existing
 repository ownership and task-resolution rules. Protocol handles describe
 inspection operations and do not replace ahu task records or identities.
+
+Agents may pass `minimum_remaining_percent` to `ahu_auth_budget` to filter its
+registered-agent candidates against supported rate-limit windows. A candidate
+is eligible only when every reported window meets the threshold; unknown
+provider capacity stays unknown. This helps route work away from a constrained
+known account, but does not compare token prices, confirm model availability,
+or reserve shared capacity.
 
 The advisory `ahu_skills_suggest` MCP tool accepts a task and a lexical or
 decision policy. It suggests committed skills without loading them. Decision
@@ -350,8 +359,9 @@ Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
 Installed CLI versions float by default; `[harness_version_pins]` can require
 an exact version. The catalog records verified batch versions: Codex
-0.154.0/0.155.1/0.157.1, Claude Code 2.1.269/2.1.270/2.1.283, Antigravity CLI
-1.2.2, and OpenCode 1.18.29/1.18.30/1.18.31/1.18.32. These are evidence records,
+0.154.0/0.155.1/0.157.1/0.160.0, Claude Code 2.1.269/2.1.270/2.1.283,
+Antigravity CLI 1.2.2/1.2.16, and OpenCode
+1.18.29/1.18.30/1.18.31/1.18.32. These are evidence records,
 not an allowlist. A supported adapter and a readable semantic version are
 required; version-specific isolation controls and native-helper policies remain
 separate checks. Unknown native integrations can still prevent launch or resume.
@@ -373,7 +383,7 @@ native. This inspection cannot prevent configuration changes between inspection
 and execution. A trusted project and explicit tool approvals are still required
 for unattended MCP calls.
 
-Claude Code 2.1.283 and 2.1.288 receive
+Claude Code 2.1.283, 2.1.288 and 2.1.289 receive
 `--settings '{"disableAllHooks":true}'` for headless launch and resume. This
 invocation setting disables non-managed hooks without replacing native settings,
 account selection, skills, or direct MCP configuration. Parsed hooks can be
@@ -386,6 +396,13 @@ synthetic configuration and model transport fixtures. Those checks do not extend
 Claude's authenticated headless verification records. Codex 0.160.0 also
 completed live headless decision calls and answer generation with observed MCP
 telemetry during the 0.8.0 evaluation pilots.
+
+The 2.1.289 Claude invocation profile was separately checked against the installed
+native help, vendor hook controls, and a loopback model fixture: user, project
+and local SessionStart, UserPromptSubmit and Stop hooks ran in the control case
+and were suppressed by the invocation setting. The exact requested model and a
+direct user MCP server remained available. These synthetic checks do not extend
+the authenticated headless verification records.
 
 OpenCode's `--pure` flag disables external plugins, but does not establish the
 contents of authenticated remote configuration. Native configuration can also
@@ -407,7 +424,7 @@ other launch checks.
 | --- | --- |
 | Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Versions 0.157.1 and 0.160.0 additionally require native effective metadata inspection with no warnings or managed requirements, and turn off optional plugins for the invocation. Other versions retain unresolved plugin, cloud, and managed-source checks. |
 | OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; authentication/account stores, declared modules, and substitutions remain unresolved. |
-| Claude Code | Direct executable avoids the cmux wrapper. Versions 2.1.283 and 2.1.288 turn off parsed non-managed hooks for the invocation. Enabled plugins, malformed settings, and unresolved managed sources still refuse admission. |
+| Claude Code | Direct executable avoids the cmux wrapper. Versions 2.1.283, 2.1.288 and 2.1.289 turn off parsed non-managed hooks for the invocation. Enabled plugins, malformed settings, and unresolved managed sources still refuse admission. |
 | Antigravity | Absent inspected hooks. Custom hooks, extensions, and overrides remain unverified. |
 
 Unknown or unsafe integrations have no operator bypass, including with
@@ -457,6 +474,16 @@ also cancel registered descendants. Review the reported paths and native evidenc
 `acceptance` stays `not assessed` and `completion_verified` stays false: a provider
 success or an agent's report does not establish that the assignment was accepted.
 Treat native reports and same-user editable metadata as untrusted data.
+
+Headless result views separate `root_completion` from `native_completeness`.
+The former reports the root harness terminal event and process exit; the latter
+reports observed helper lifecycle coverage. A missing helper terminal event on
+a harness whose helper stream is unsupported leaves helper completion unknown;
+it does not mean the root result was missing or prove that no helpers ran.
+For `supervisor_error`, ahu shows the bounded failure phase/code and recommends
+preserving the attempt, reviewing its worktree diff, and submitting a new
+registered assignment only after checking whether native work ran. It does not
+automatically resume or clean an uncertain attempt.
 
 Human-readable `tasks` summarizes the headless attempt number and outcome on
 its own line under each row, so a headless task is identifiable even in a
@@ -923,7 +950,7 @@ amount can be incomplete. See the [Claude Code usage and limits guide](https://s
 
 | Harness | Usage/cost signal and scope | Access method and freshness | Evidence level | Limits and unavailable signals |
 | --- | --- | --- | --- | --- |
-| Codex | `turn.completed` token usage, per completed turn. No USD field. | Headless `codex exec --json` event stream; observed at turn completion. | Documented machine-readable event schema; adapter covered by protocol fixtures. | Cost and quota are unknown to ahu. No documented machine-readable per-run quota field; ahu does not price tokens. |
+| Codex | `turn.completed` token usage, per completed turn. No USD field. | Headless `codex exec --json` event stream; observed at turn completion. | Documented machine-readable event schema; adapter covered by protocol fixtures. | Cost is unknown. The separate account rate-limit RPC reports used percentage, window duration and reset time, not token counts; ahu reads it only through `ahu auth budget` for a matching active project profile. |
 | Claude Code | Result token usage and `total_cost_usd` for the headless invocation; API-request events have request scope. | Headless `--output-format stream-json`; result is fresh at invocation completion, request usage when its event arrives. | Documented result/usage and monitoring interfaces; adapter covered by protocol fixtures. | USD is harness-reported and may differ from account billing. Subscription/account quota is unknown to ahu; interactive `/usage` is not ingested. |
 | Antigravity CLI | `step_update` usage is per event; terminal `result.usage` is invocation-scoped. Cost is unavailable. | Headless `--output-format stream-json`; observed as steps arrive and, when present, at the terminal result. | Documented NDJSON schema; adapter covered by protocol fixtures. | Cost and quota are unknown to ahu. Interactive `/usage` and `/credits` are not ingested. A missing terminal result leaves task completion evidence incomplete even when step usage was observed. |
 | OpenCode | `step_finish` token usage and `cost`, per model step. | Headless `opencode run --format json`; fresh when each step event arrives. | Documented JSON run events; adapter covered by protocol fixtures. | Cost is an engine/provider-model amount, not billing proof; a missing final event can make the sum incomplete. Quota is unknown; `opencode stats` may include other sessions and is not ingested. |
@@ -934,6 +961,8 @@ cost from list prices. Missing values stay unavailable. Token usage, USD
 estimates, provider invoices, subscription quota, and rate-limit failures are
 separate signals and must not be substituted for one another. Source references:
 [Codex event schema](https://github.com/openai/codex/blob/main/sdk/typescript/src/events.ts),
+[Codex app-server account rate-limit RPC](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/common.rs),
+[Codex rate-limit response schema](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/v2/account.rs),
 [Antigravity headless stream](https://www.antigravity.google/docs/cli/headless/),
 [Antigravity credits](https://www.antigravity.google/docs/cli/credits/), and
 [Antigravity usage command](https://antigravity.google/docs/cli/commands/usage).
@@ -1970,6 +1999,42 @@ and `ready: false`, even though fresh launches can proceed without the optional
 binding policy. Readiness checks do not spend a model request and do not establish
 quota, trust, or tool-approval state.
 
+`ahu auth budget [--output json]` and the MCP tool `ahu_auth_budget` provide a
+read-only, secret-free rate-limit view for the active project profile. The MCP
+tool can also return registered agent candidates that meet a requested
+`minimum_remaining_percent`; unknown capacities are not eligible. The JSON
+contains the profile label and provider status, plus supported windows with
+`used_percent`, `remaining_percent`, `window_duration_minutes`, and the provider's
+reset timestamp. It never contains account identifiers, credentials, prompts, or
+raw provider responses. Codex is currently the only provider with a supported
+machine-readable view: ahu requests `account/read` and
+`account/rateLimits/read` in one native app-server session, verifies that account
+against the active profile fingerprint, and refuses to return capacity on a
+mismatch. The reported percentage and time window are rate-limit signals, not
+literal token balances, monthly credits, or per-agent allocations. Agents using
+the same Codex account share those windows. Other providers return unsupported
+or unknown capacity; ahu does not estimate it from run telemetry, scrape a TUI,
+or send an inference request. The MCP tool's name and outcome join ordinary MCP
+telemetry, while its arguments and result values are not added to OTel.
+
+The view reports one row per probed provider: `codex`, `claude-code`,
+`antigravity`, and `ollama`. OpenCode has no row, so an agent on that harness is
+never an eligible routing candidate. Each row carries one status:
+
+| Status | Meaning |
+| --- | --- |
+| `available` | At least one rate-limit window was read for the verified account |
+| `unknown` | The provider was probed but reported no usable window |
+| `unsupported` | ahu has no machine-readable rate-limit view for this provider |
+| `not_bound` | The active profile exists but holds no binding for this provider |
+| `not_configured` | The project has no active profile to check against |
+
+Only `available` rows can make a candidate eligible. Codex exposes `primary`
+and `secondary` windows when its account reports them; a reported window
+reflects the account, not a per-task or per-agent allowance. A mismatch between
+the current Codex sign-in and the active profile fails the whole command rather
+than returning capacity for an unverified account.
+
 For Ollama, ahu reads `POST /api/me` from the loopback server named by
 `OLLAMA_HOST` (default `127.0.0.1:11434`). It requires a signed-in account and
 binds the account email and stable account ID. The confirmation identifies the
@@ -2010,17 +2075,27 @@ provider and base address configuration.
 Codex API-key mode does not expose a verified user principal. Antigravity has no
 standalone account-status command, but its startup TUI displays the signed-in
 email before the prompt. ahu captures that startup display in a bounded
-pseudo-terminal and terminates it without submitting a prompt. This check is
-version-sensitive to the visible banner; if the account email is absent or the
-startup format changes, ahu refuses to bind or resume.
+pseudo-terminal and terminates it without submitting a prompt. The probe sets
+`NO_COLOR=1` for that capture only, because terminal color escape sequences
+split the email apart and defeat extraction. The capture waits a bounded 12
+seconds for a recognizable account line. This check is
+version-sensitive to the visible banner; if the account email is absent, the
+startup format changes, or no account line arrives in that window, ahu reports
+readiness as unavailable and refuses to bind or resume. A startup that reports an
+API key rather than a signed-in account is refused as well: an API key exposes no
+user principal to bind. Turning color off does not establish that every
+Antigravity version prints a banner ahu can read; verify the pair with
+`ahu auth readiness --harness antigravity` rather than assuming it binds.
 This is best-effort identity checking at launch and resume, not an atomic
 credential lock. ahu does not monitor sign-in changes during an active session,
 and a same-user process could change sign-in after a check. The check reduces
 the chance that a long-paused task resumes under a different account; it cannot
 guarantee the identity used for every provider request. These bindings identify
 the currently active native login; they do not switch accounts or isolate
-concurrent accounts. ahu does not probe provider
-quota, predict request billing, change project trust, or
-grant tool approvals. Provider quota and entitlement errors are reported by
+concurrent accounts. Binding, readiness, launch, and resume checks do not probe
+provider quota, predict request billing, change project trust, or
+grant tool approvals. Reading rate-limit windows is a separate, explicit
+request through `ahu auth budget` and its MCP tool; no launch path calls it.
+Provider quota and entitlement errors are reported by
 the harness during an actual request. Remote hosts, containers, and CI need a
 separately provisioned native login and are outside this local profile guard.

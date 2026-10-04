@@ -2908,7 +2908,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         "native_reference":{"session":events.session,"source":"harness event stream","harness":record.identity.harness,"harness_version":spec.harness_version,"data_location":null,"location_status":"unknown; harness-owned"},
         "native_helpers":helpers,"native_shell_tasks":events.native.shell_tasks(),"native_refusals":events.native.refusals(),"acceptance":"not assessed","completion_verified":false,
         "writes_outside_worktree":events.writes_outside_worktree,"write_evidence":"reported tool targets; not proof of writes",
-        "descendant_cancellation":cancellation_results,"native_completeness":native_completeness,"ahu_children":ahu_children,
+        "descendant_cancellation":cancellation_results,"root_completion":{"outcome":outcome,"terminal_event_observed":events.terminal,"process_exit_code":status.code()},"native_completeness":native_completeness,"ahu_children":ahu_children,
         "native_cleanup":"unknown for external/provider-managed processes"});
     let elapsed_ms = Some(
         measurement_started
@@ -5027,6 +5027,7 @@ mod profile_and_metadata_tests {
         for (harness, old, new) in [
             ("codex", "0.157.1", "0.160.0"),
             ("claude-code", "2.1.283", "2.1.288"),
+            ("claude-code", "2.1.288", "2.1.289"),
         ] {
             let mut spec = sample_spec();
             spec.harness_version = old.into();

@@ -226,6 +226,11 @@ fn terminal_outcomes_show_known_session_locations_and_never_accept_work() {
         let value = f.json("result");
         assert_eq!(value["task_id"], "abc1");
         assert_eq!(value["review"]["outcome"], outcome);
+        assert_eq!(value["review"]["root_completion"]["outcome"], outcome);
+        assert_eq!(
+            value["review"]["root_completion"]["terminal_event_observed"],
+            true
+        );
         assert_eq!(value["review"]["native_session"], "native-session-1");
         assert_eq!(
             value["review"]["native_session_source"],
@@ -246,6 +251,63 @@ fn terminal_outcomes_show_known_session_locations_and_never_accept_work() {
             }
         }
     }
+}
+
+#[test]
+fn supervisor_errors_show_bounded_recovery_guidance_without_replaying() {
+    let f = Fixture::new();
+    let path = f.dir.join("attempt-1/result.json");
+    write_json(
+        &path,
+        &json!({
+            "schema_version":1,"task_id":"abc1","attempt":1,
+            "outcome":"supervisor_error","failure_phase":"result_persistence",
+            "failure_code":"storage_verification_unavailable",
+            "blockers":["supervisor execution failed"],"acceptance":"not assessed"
+        }),
+    );
+    let result = f.json("result");
+    assert_eq!(
+        result["review"]["supervisor_recovery"]["failure_phase"],
+        "result_persistence"
+    );
+    assert_eq!(
+        result["review"]["supervisor_recovery"]["failure_code"],
+        "storage_verification_unavailable"
+    );
+    assert!(
+        result["review"]["supervisor_recovery"]["next_step"]
+            .as_str()
+            .unwrap()
+            .contains("Do not replay this attempt")
+    );
+    let rendered = text(f.run(&["result", "abc1"]));
+    assert!(rendered.contains("recovery"));
+    assert!(rendered.contains("submit a new registered assignment"));
+}
+
+#[test]
+fn root_completion_remains_clear_when_native_helper_coverage_is_unknown() {
+    let f = Fixture::new();
+    f.terminal("succeeded");
+    let path = f.dir.join("attempt-1/result.json");
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["native_completeness"] = json!({
+        "complete":false,"terminated_cleanly":false,"evidence_complete":false,
+        "unknown":["native helper lifecycle coverage has no terminal event; helper completion is unknown"]
+    });
+    write_json(&path, &value);
+    let result = f.json("result");
+    assert_eq!(result["review"]["root_completion"]["outcome"], "succeeded");
+    assert_eq!(
+        result["review"]["root_completion"]["terminal_event_observed"],
+        true
+    );
+    assert_eq!(result["review"]["native_completeness"]["complete"], false);
+    let rendered = text(f.run(&["result", "abc1"]));
+    assert!(rendered.contains("root      succeeded (terminal event: true; process exit: 0)"));
+    assert!(rendered.contains("helpers   incomplete or unknown (lifecycle coverage)"));
+    assert!(rendered.contains("helper completion is unknown"));
 }
 
 #[test]

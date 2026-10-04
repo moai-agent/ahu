@@ -1267,6 +1267,30 @@ mod tests {
     }
 
     #[test]
+    fn auth_budget_telemetry_records_tool_use_without_profile_or_capacity_values() {
+        let tool = mcp_tool_attributes("ahu_auth_budget", &serde_json::json!({}));
+        assert_eq!(
+            string_attr(&tool, "ahu.mcp.tool.name"),
+            Some("ahu_auth_budget".into())
+        );
+        let result = mcp_result_attributes(
+            "tools/call",
+            "ahu_auth_budget",
+            &serde_json::json!({"result":{"structuredContent":{
+                "profile":"private-profile",
+                "providers":[{"harness":"codex","status":"available","windows":[{"remaining_percent":88.0,"resets_at_unix":1800000000}]}]
+            }}}),
+        );
+        assert_eq!(
+            string_attr(&result, "ahu.mcp.outcome"),
+            Some("success".into())
+        );
+        assert_eq!(result.len(), 1);
+        assert!(!format!("{tool:?}{result:?}").contains("private-profile"));
+        assert!(!format!("{tool:?}{result:?}").contains("remaining_percent"));
+    }
+
+    #[test]
     fn mcp_decision_attributes_are_payload_free_and_capture_use_and_usage() {
         let arguments = serde_json::json!({
             "state":{"body":"private decision payload"},
