@@ -166,18 +166,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install pinned Rust and components
-        run: rustup toolchain install --no-self-update
-      - name: Run live cmux plumbing when the runner provides cmux
+      - name: Check whether live cmux is available
+        id: cmux
         run: |
           set -euo pipefail
           if ! command -v cmux >/dev/null 2>&1; then
             echo '::notice::GitHub-hosted macOS runner does not provide cmux; live probe skipped.'
-            exit 0
-          fi
-          cmux --version
-          if ! cmux ping >/dev/null 2>&1; then
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+          elif ! cmux ping >/dev/null 2>&1; then
             echo '::notice::cmux is installed but unreachable; live probe skipped.'
-            exit 0
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+          else
+            cmux --version
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install pinned Rust and components
+        if: steps.cmux.outputs.available == 'true'
+        run: rustup toolchain install --no-self-update
+      - name: Run live cmux plumbing
+        if: steps.cmux.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v cmux >/dev/null 2>&1 || ! cmux ping >/dev/null 2>&1; then
+            echo '::error::cmux became unavailable after the initial probe.'
+            exit 1
           fi
           AHU_TEST_CMUX=1 cargo test --locked --test cmux_integration -- --test-threads=1

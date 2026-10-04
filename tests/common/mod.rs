@@ -254,14 +254,15 @@ second line with 'single' and \"double\" quotes && a pipe | and ; a semicolon\n\
 third line with a trailing backslash \\\n\
 --not-a-flag";
 
-/// The environment an ahu worker session exports into its children.
+/// Ahu worker context and eval-only variables that must not leak into test
+/// fixture subprocesses unless a test explicitly sets them itself.
 ///
 /// When `cargo test` itself runs from inside an ahu session, these variables
 /// are ambient in every test process. A test that spawns `ahu` without
 /// removing them does not measure its fixture: it measures the developer's
 /// live session, whose resume guard then refuses, and whose state and runtime
 /// directories are the real ones.
-const WORKER_ENV: &[&str] = &[
+const TEST_CONTEXT_ENV: &[&str] = &[
     "AHU_EXECUTION_BACKEND",
     "AHU_PARENT_TASK",
     "AHU_PARENT_ATTEMPT",
@@ -279,6 +280,7 @@ const WORKER_ENV: &[&str] = &[
     "AHU_WORKER_SESSION",
     "AHU_TASK_ID",
     "AHU_TASK_DIR",
+    "AHU_EVAL_OTEL_ENDPOINT",
 ];
 
 /// Strip the ambient worker environment from a command.
@@ -287,7 +289,7 @@ const WORKER_ENV: &[&str] = &[
 /// earlier `.env_remove` — so a test that deliberately simulates worker context
 /// configures its own variables on top.
 pub fn clear_worker_env(command: &mut Command) {
-    for var in WORKER_ENV {
+    for var in TEST_CONTEXT_ENV {
         command.env_remove(var);
     }
 }

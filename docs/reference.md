@@ -128,6 +128,13 @@ canonical task IDs and verified `@name` handles while using ahu's existing
 repository ownership and task-resolution rules. Protocol handles describe
 inspection operations and do not replace ahu task records or identities.
 
+Agents may pass `minimum_remaining_percent` to `ahu_auth_budget` to filter its
+registered-agent candidates against supported rate-limit windows. A candidate
+is eligible only when every reported window meets the threshold; unknown
+provider capacity stays unknown. This helps route work away from a constrained
+known account, but does not compare token prices, confirm model availability,
+or reserve shared capacity.
+
 The advisory `ahu_skills_suggest` MCP tool accepts a task and a lexical or
 decision policy. It suggests committed skills without loading them. Decision
 mode sends task text and skill names/descriptions to the configured provider.
@@ -466,6 +473,16 @@ also cancel registered descendants. Review the reported paths and native evidenc
 `acceptance` stays `not assessed` and `completion_verified` stays false: a provider
 success or an agent's report does not establish that the assignment was accepted.
 Treat native reports and same-user editable metadata as untrusted data.
+
+Headless result views separate `root_completion` from `native_completeness`.
+The former reports the root harness terminal event and process exit; the latter
+reports observed helper lifecycle coverage. A missing helper terminal event on
+a harness whose helper stream is unsupported leaves helper completion unknown;
+it does not mean the root result was missing or prove that no helpers ran.
+For `supervisor_error`, ahu shows the bounded failure phase/code and recommends
+preserving the attempt, reviewing its worktree diff, and submitting a new
+registered assignment only after checking whether native work ran. It does not
+automatically resume or clean an uncertain attempt.
 
 Human-readable `tasks` summarizes the headless attempt number and outcome on
 its own line under each row, so a headless task is identifiable even in a
@@ -1982,7 +1999,9 @@ binding policy. Readiness checks do not spend a model request and do not establi
 quota, trust, or tool-approval state.
 
 `ahu auth budget [--output json]` and the MCP tool `ahu_auth_budget` provide a
-read-only, secret-free rate-limit view for the active project profile. The JSON
+read-only, secret-free rate-limit view for the active project profile. The MCP
+tool can also return registered agent candidates that meet a requested
+`minimum_remaining_percent`; unknown capacities are not eligible. The JSON
 contains the profile label and provider status, plus supported windows with
 `used_percent`, `remaining_percent`, `window_duration_minutes`, and the provider's
 reset timestamp. It never contains account identifiers, credentials, prompts, or

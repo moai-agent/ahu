@@ -155,11 +155,15 @@ record its result or exact failure; CLI output cannot establish MCP success.
 
 Before delegating costly work across harnesses, call `ahu_auth_budget` when it
 is available and use its active-profile rate-limit windows as one input alongside
-agent compatibility, task load, and model suitability. It reports percentages
-and reset periods, not token counts or an allocation per agent. Agents on the
-same provider account share that capacity; the tool does not reserve it. Treat
-unsupported, unknown, or unbound providers as unavailable evidence, never as
-proof of spare capacity. Do not switch auth profiles to route work.
+agent compatibility, task load, and model suitability. Pass
+`minimum_remaining_percent` when you need a conservative capacity filter; only
+`eligible` candidates have every reported window above that threshold and
+strictly above zero. This is a rate-limit filter, not a token-price comparison,
+model availability check, or reservation. It reports percentages and reset
+periods, not token counts or an allocation per agent. Agents on the same
+provider account share that capacity. Treat unsupported, unknown, or unbound
+providers as unavailable evidence, never as proof of spare capacity. Do not
+switch auth profiles to route work.
 
 For MCP and OTel compatibility assignments, report evidence separately for each
 harness version, exact model, and execution mode. Require an actual MCP call

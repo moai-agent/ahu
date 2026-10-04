@@ -3002,6 +3002,32 @@ fn malformed_spec_domain_probe(during_execution: bool, own_domain: bool) {
             );
             if during_execution {
                 assert_eq!(Fixture::value(&out)["outcome"], "supervisor_error");
+                if malformed {
+                    let value = Fixture::value(&out);
+                    let id = value["task_id"].as_str().unwrap().to_owned();
+                    let attempt = primary.join(&id);
+                    let inspected = f
+                        .command()
+                        .args(["result", &id, "--output", "json"])
+                        .output()
+                        .unwrap();
+                    assert!(inspected.status.success());
+                    let inspected: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+                    assert_eq!(inspected["review"]["liveness"], "stale");
+                    let result: Value = serde_json::from_slice(
+                        &std::fs::read(attempt.join("attempt-1/result.json")).unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(result["outcome"], "supervisor_error");
+                    let cleanup = f.command().args(["cleanup", &id]).output().unwrap();
+                    assert!(!cleanup.status.success());
+                    assert!(
+                        String::from_utf8_lossy(&cleanup.stderr)
+                            .contains("cleanup requires a known terminal attempt")
+                    );
+                    assert!(attempt.join("task.json").exists());
+                    assert!(attempt.join("attempt-1/result.json").exists());
+                }
             }
         } else {
             assert!(out.status.success(), "{out:?}");

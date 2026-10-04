@@ -472,8 +472,8 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name":"ahu_auth_budget",
-            "description":"Read current verified provider rate-limit windows for this repository's active auth profile. Reports percentages and reset periods, not token counts. Unsupported provider budgets remain unknown. Agents using the same account share its capacity; this tool does not allocate or reserve budget.",
-            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}
+            "description":"Read current verified provider rate-limit windows for this repository's active auth profile and identify registered agent/model candidates meeting an optional minimum remaining quota. Reports percentages and reset periods, not token counts or costs. Unsupported provider budgets remain unknown and are never treated as available. Agents using the same account share its capacity; this tool does not allocate or reserve budget.",
+            "inputSchema":{"type":"object","properties":{"minimum_remaining_percent":{"type":"number","minimum":0,"maximum":100,"description":"Only mark candidates eligible when every reported provider window has at least this much capacity remaining. Defaults to 0."}},"additionalProperties":false}
         }),
         json!({
             "name":"ahu_tasks_list",
@@ -547,10 +547,25 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
     };
     let empty = json!({});
     let arguments = params.get("arguments").unwrap_or(&empty);
-    if name == "ahu_auth_budget"
-        && (!arguments.is_object() || arguments.as_object().is_some_and(|o| !o.is_empty()))
-    {
-        return Err(Error::new("ahu_auth_budget accepts no arguments"));
+    if name == "ahu_auth_budget" {
+        let Some(object) = arguments.as_object() else {
+            return Err(Error::new("ahu_auth_budget arguments must be an object"));
+        };
+        if object.keys().any(|key| key != "minimum_remaining_percent") {
+            return Err(Error::new(
+                "ahu_auth_budget accepts only minimum_remaining_percent",
+            ));
+        }
+        if let Some(value) = object.get("minimum_remaining_percent")
+            && !value
+                .as_f64()
+                .is_some_and(|v| v.is_finite() && (0.0..=100.0).contains(&v))
+        {
+            return Err(Error::new(
+                "minimum_remaining_percent must be between 0 and 100",
+            ));
+        }
+        return Ok(());
     }
     if name == "ahu_typed_decide" {
         return decisions::validate_arguments(arguments);
@@ -650,7 +665,7 @@ pub(super) fn call_response_with_cancellation(
         .unwrap_or_else(|| json!({}));
     let result = match name {
         "ahu_agents_list" => agents(repo),
-        "ahu_auth_budget" => crate::auth_binding::budget(repo),
+        "ahu_auth_budget" => auth_budget(repo, &arguments),
         "ahu_tasks_list" => tasks(repo),
         "ahu_task_get" => task_get(repo, &arguments),
         "ahu_typed_decide" => decisions::call(&arguments, repo),
@@ -714,6 +729,80 @@ fn agents(repo: &Repo) -> Result<Value> {
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({"schema_version":1,"repository":repo.identity(),"agents":rows}))
+}
+
+/// Add a conservative agent-routing view to the raw account budget snapshot.
+/// Eligibility means only that every currently reported rate window meets the
+/// requested threshold. It is not a cost estimate, model availability check,
+/// or reservation of shared account capacity.
+fn auth_budget(repo: &Repo, arguments: &Value) -> Result<Value> {
+    let mut snapshot = crate::auth_binding::budget(repo)?;
+    let minimum = arguments["minimum_remaining_percent"]
+        .as_f64()
+        .unwrap_or(0.0);
+    let providers: std::collections::BTreeMap<String, &Value> = snapshot["providers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|provider| {
+            provider["harness"]
+                .as_str()
+                .map(|harness| (harness.to_owned(), provider))
+        })
+        .collect();
+    let candidates = crate::agent::load_all(&repo.root)?
+        .into_iter()
+        .map(|agent| {
+            let harness = agent.manifest.harness;
+            let provider = providers.get(&harness).copied();
+            let windows = provider
+                .and_then(|value| value["windows"].as_array())
+                .cloned()
+                .unwrap_or_default();
+            let provider_status = provider
+                .and_then(|value| value["status"].as_str())
+                .unwrap_or("unknown");
+            let routing_status = candidate_routing_status(provider_status, &windows, minimum);
+            json!({
+                "name": format!("@{}", agent.manifest.name),
+                "harness": harness,
+                "model": agent.manifest.model,
+                "provider_status": provider_status,
+                "routing_status": routing_status,
+                "windows": windows,
+            })
+        })
+        .collect::<Vec<_>>();
+    snapshot["routing"] = json!({
+        "minimum_remaining_percent": minimum,
+        "eligibility_basis": "all_reported_windows_meet_threshold",
+        "candidates": candidates,
+        "limitations": [
+            "Eligibility does not estimate token or dollar cost, verify model availability, or reserve capacity.",
+            "Unknown provider budgets are not eligible; verify them independently before delegating.",
+            "Capacity is shared with all agents using the same provider account."
+        ]
+    });
+    Ok(snapshot)
+}
+
+fn candidate_routing_status(
+    provider_status: &str,
+    windows: &[Value],
+    minimum: f64,
+) -> &'static str {
+    if provider_status != "available" || windows.is_empty() {
+        return "unknown";
+    }
+    if windows.iter().all(|window| {
+        window["remaining_percent"]
+            .as_f64()
+            .is_some_and(|remaining| remaining > 0.0 && remaining >= minimum)
+    }) {
+        "eligible"
+    } else {
+        "below_threshold"
+    }
 }
 
 fn tasks(repo: &Repo) -> Result<Value> {
@@ -889,6 +978,53 @@ mod tests {
                 false
             )
             .is_err()
+        );
+        for minimum in [0, 25, 100] {
+            assert!(validate_tool_call(
+                &serde_json::json!({"name":"ahu_auth_budget","arguments":{"minimum_remaining_percent":minimum}}),
+                false
+            ).is_ok());
+        }
+        for minimum in [
+            serde_json::json!(-1),
+            serde_json::json!(101),
+            serde_json::json!("25"),
+            serde_json::Value::Null,
+        ] {
+            assert!(validate_tool_call(
+                &serde_json::json!({"name":"ahu_auth_budget","arguments":{"minimum_remaining_percent":minimum}}),
+                false
+            ).is_err());
+        }
+    }
+
+    #[test]
+    fn budget_routing_requires_all_windows_to_have_positive_capacity() {
+        let windows = |values: &[f64]| {
+            values
+                .iter()
+                .map(|remaining| serde_json::json!({"remaining_percent":remaining}))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            super::candidate_routing_status("available", &windows(&[80.0, 35.0]), 25.0),
+            "eligible"
+        );
+        assert_eq!(
+            super::candidate_routing_status("available", &windows(&[80.0, 20.0]), 25.0),
+            "below_threshold"
+        );
+        assert_eq!(
+            super::candidate_routing_status("available", &windows(&[80.0, 0.0]), 0.0),
+            "below_threshold"
+        );
+        assert_eq!(
+            super::candidate_routing_status("unsupported", &windows(&[80.0]), 0.0),
+            "unknown"
+        );
+        assert_eq!(
+            super::candidate_routing_status("available", &[], 0.0),
+            "unknown"
         );
     }
 
