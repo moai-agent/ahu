@@ -798,10 +798,14 @@ fn probe_antigravity(cwd: &Path) -> Result<Identity> {
     let executable = crate::selection::resolve_executable("agy")
         .ok_or_else(|| Error::new("Antigravity CLI is not available on PATH"))?;
     let output = antigravity_startup(&executable, cwd)?;
-    let principal = extract_email(&output).ok_or_else(|| {
+    parse_antigravity_identity(&output)
+}
+
+fn parse_antigravity_identity(output: &[u8]) -> Result<Identity> {
+    let principal = extract_email(output).ok_or_else(|| {
         Error::new("Antigravity startup did not expose a signed-in account email")
     })?;
-    let visible = String::from_utf8_lossy(&output);
+    let visible = String::from_utf8_lossy(output);
     let identity_kind = if visible.contains("Agent Platform") {
         "agent-platform"
     } else if visible.contains("Gemini API key") {
@@ -865,7 +869,10 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(slave));
     crate::cmux::integration::sanitize(&mut command, None);
-    command.env("TERM", "xterm-256color").process_group(0);
+    command
+        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "1")
+        .process_group(0);
     let mut child = command
         .spawn()
         .map_err(|_| Error::new("cannot start Antigravity identity probe"))?;
@@ -1263,5 +1270,34 @@ mod profile_tests {
             .unwrap();
 
         assert!(!task_dir.path().join("auth-identity.json").exists());
+    }
+
+    #[test]
+    fn extract_email_handles_unadorned_output_and_ignores_ansi() {
+        assert_eq!(
+            extract_email(b"Signed in as personal@example.com").as_deref(),
+            Some("personal@example.com")
+        );
+        // The fallback extraction fails on raw ANSI since it breaks token boundaries,
+        // demonstrating why NO_COLOR=1 presentation override is used.
+        assert_eq!(extract_email(b"\x1b[32mpersonal@example.com\x1b[0m"), None);
+    }
+
+    #[test]
+    fn parse_antigravity_identity_rejects_api_key_and_extracts_workspace() {
+        let output = b"Welcome to Antigravity CLI\nSigned in as work@example.com\nGCP Project: my-gcp-project\n";
+        let identity = parse_antigravity_identity(output).unwrap();
+        assert_eq!(identity.harness, "antigravity");
+        assert_eq!(identity.identity_kind, "antigravity-account");
+        assert_eq!(identity.principal, "work@example.com");
+        assert_eq!(identity.workspace.as_deref(), Some("my-gcp-project"));
+
+        let api_key_output = b"Using Gemini API key\n";
+        assert!(parse_antigravity_identity(api_key_output).is_err());
+
+        let platform_output = b"Connected to Agent Platform\naccount: dev@example.com\n";
+        let platform_id = parse_antigravity_identity(platform_output).unwrap();
+        assert_eq!(platform_id.identity_kind, "agent-platform");
+        assert_eq!(platform_id.principal, "dev@example.com");
     }
 }
