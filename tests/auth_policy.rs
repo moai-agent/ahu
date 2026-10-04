@@ -5,6 +5,96 @@ use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn antigravity_probe_disables_color_without_weakening_account_checks() {
+    let repo = TestRepo::new();
+    let bin = tempfile::tempdir().unwrap();
+    let script = bin.path().join("agy");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+if [ "$AHU_TEST_AGY_IDENTITY" = missing ]; then exit 1; fi
+if [ "$AHU_TEST_AGY_KIND" = key ]; then printf 'Gemini API key\n'; fi
+if [ "$NO_COLOR" = 1 ]; then
+    printf 'Signed in as %s\n' "$AHU_TEST_AGY_IDENTITY"
+else
+    printf '\033[32m%s\033[0m\n' "$AHU_TEST_AGY_IDENTITY"
+fi
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(std::iter::once(bin.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let run = |args: &[&str], identity: &str, kind: &str, inherited_color: Option<&str>| {
+        let mut command = common::ahu();
+        command
+            .current_dir(repo.path())
+            .args(args)
+            .env("PATH", &path)
+            // The regression must not depend on the test runner already
+            // suppressing color, as an unattended coordinator often does.
+            .env_remove("NO_COLOR")
+            .env("AHU_TEST_AGY_IDENTITY", identity)
+            .env("AHU_TEST_AGY_KIND", kind);
+        if let Some(value) = inherited_color {
+            command.env("NO_COLOR", value);
+        }
+        command.output().unwrap()
+    };
+    let bound = run(
+        &["auth", "bind", "--harness", "antigravity"],
+        "first@example.invalid",
+        "account",
+        None,
+    );
+    assert!(
+        bound.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bound.stderr)
+    );
+    let args = [
+        "auth",
+        "readiness",
+        "--harness",
+        "antigravity",
+        "--output",
+        "json",
+    ];
+    for inherited_color in [None, Some(""), Some("0")] {
+        assert!(
+            run(&args, "first@example.invalid", "account", inherited_color)
+                .status
+                .success()
+        );
+    }
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let binding = repo
+        .path()
+        .join(".ahu/state/repos")
+        .join(discovered.identity())
+        .join("auth-bindings.json");
+    let before = std::fs::read(&binding).unwrap();
+    for (identity, kind, expected, ready) in [
+        ("first@example.invalid", "account", "matched", true),
+        ("second@example.invalid", "account", "mismatch", false),
+        ("first@example.invalid", "key", "unavailable", false),
+        ("missing", "account", "unavailable", false),
+    ] {
+        let output = run(&args, identity, kind, None);
+        assert_eq!(output.status.success(), ready);
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["binding"], expected);
+        assert_eq!(value["ready"], ready);
+        assert_eq!(std::fs::read(&binding).unwrap(), before);
+        for bytes in [&output.stdout, &output.stderr] {
+            assert!(!String::from_utf8_lossy(bytes).contains("example.invalid"));
+        }
+    }
+}
+
+#[test]
 fn auth_mutations_require_operator_before_probing_or_changing_state() {
     let repo = TestRepo::new();
     let bin = tempfile::tempdir().unwrap();

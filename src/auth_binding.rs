@@ -1273,7 +1273,7 @@ mod profile_tests {
     }
 
     #[test]
-    fn extract_email_handles_unadorned_output_and_ignores_ansi() {
+    fn extract_email_accepts_plain_identity_and_rejects_ansi_wrapped_token() {
         assert_eq!(
             extract_email(b"Signed in as personal@example.com").as_deref(),
             Some("personal@example.com")
@@ -1294,6 +1294,13 @@ mod profile_tests {
 
         let api_key_output = b"Using Gemini API key\n";
         assert!(parse_antigravity_identity(api_key_output).is_err());
+        let api_key_with_email = b"Using Gemini API key\ncontact: fixture@example.invalid\n";
+        assert!(
+            parse_antigravity_identity(api_key_with_email)
+                .unwrap_err()
+                .to_string()
+                .contains("API-key authentication")
+        );
 
         let platform_output = b"Connected to Agent Platform\naccount: dev@example.com\n";
         let platform_id = parse_antigravity_identity(platform_output).unwrap();
