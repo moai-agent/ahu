@@ -121,6 +121,42 @@ prove the installed `ahu` was replaced. Report a mismatch or unavailable install
 permission separately from publication state; do not modify native user accounts
 or harness configuration as part of this check.
 
+Before removing release task evidence, produce a release effectiveness report
+from an explicit, auditable set of Ahu task/attempt references. Treat this as a
+release gate and include the report's disposition in the final handoff. Cover:
+
+- Work assigned to each harness and role (implementation, review, evaluation,
+  coordination), with completed, accepted/merged, failed, retried, and blocked
+  counts where the task records support them. Compare observed allocation with
+  the planned harness distribution and explain material deviations. Task counts
+  do not measure code contribution by themselves.
+- Observed input, output, cached, reasoning, and other available token fields by
+  harness, provider, model, execution mode, and role. Include observation
+  denominators and unavailable/partial counts. Keep provider token units
+  separate; tokenizers and cache accounting differ, so do not rank harnesses by
+  a combined raw-token total. Include harness-reported cost only with its source
+  and caveat that it is not invoice-grade.
+- Quality and delivery evidence such as acceptance, regressions found, rework,
+  elapsed time, and MCP/OTel coverage, with the source for each measure. Keep
+  missing measurements unknown, never zero. Distinguish descriptive observations
+  from a controlled comparison; claim improvement only when the comparison
+  supports it.
+- A short retrospective: what helped, what caused friction or rework, what the
+  evidence cannot answer, and concrete improvement candidates for the next
+  milestone. Link or create follow-up work only in the configured tracker and
+  follow its visibility policy. Do not copy private tracker content into public
+  release artifacts. At the next release planning pass, review the prior report
+  and record whether each candidate is accepted, rejected, or deferred.
+
+Use existing task results and OTel where available, and state their boundaries:
+headless token fields are harness-reported observations and may be absent;
+interactive usage is unavailable unless a supported machine-readable source
+provides it. Do not add retries, parent and child totals, or repeated cumulative
+snapshots as if they were independent usage. Preserve task/attempt-level
+observations and document any aggregation. Save detailed reports and traces
+outside repositories; retain only the appropriately scoped summary and its
+coverage limits in the release handoff.
+
 Before handoff, reconcile the ahu tasks used to implement this release. Run
 `ahu tasks --all` from the repository and use provider-side task links, branch
 names, and commits to identify release tasks; do not guess from agent names or
@@ -164,6 +200,9 @@ The final release summary must include:
 - security-scan findings and any reviewed test-only dismissals;
 - publication state and links verified after the tag push;
 - per-harness/mode MCP and OTel evidence, including native refusals and unknowns;
+- release effectiveness report or its private reference, with harness/role
+  allocation, observed token coverage, outcomes, limitations, and next-milestone
+  improvement candidates;
 - installed executable path/version and provenance when installation was authorized;
 - release-related ahu tasks cleaned up, and any preserved tasks with reasons;
 - follow-up work intentionally left outside the release.
