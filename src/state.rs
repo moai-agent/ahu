@@ -318,16 +318,17 @@ pub fn lock_path(repo_identity: &str) -> Result<PathBuf> {
     Ok(repo_dir(repo_identity)?.join("launch.lock"))
 }
 
-/// A crude cross-process lock built on exclusive file creation.
+/// A cross-process lock built on the operating system's advisory file lock.
 ///
 /// Concurrent launches must not create two cmux groups for one repository or
-/// collide on a branch. A stale lock older than `STALE_AFTER` is reclaimed so a
-/// killed launch cannot wedge the repository permanently.
+/// collide on a branch. The lock is held on a persistent file: it is released
+/// when the holder closes the file or exits, so a killed launch can never
+/// wedge the repository, and no lock is ever reclaimed based on its age.
+/// The holder's PID is written for diagnostics only; the lock itself is
+/// authoritative.
 pub struct LaunchLock {
-    path: PathBuf,
+    file: std::fs::File,
 }
-
-const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
 
 pub(crate) fn state_io_error(operation: &str, path: &Path, error: std::io::Error) -> Error {
     let mut message = format!(
@@ -351,6 +352,8 @@ impl LaunchLock {
     }
 
     pub fn acquire_at(path: PathBuf) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
         if let Some(parent) = path.parent() {
             create_private_dir_all(parent)?;
         }
@@ -358,35 +361,42 @@ impl LaunchLock {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             match std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
                 .write(true)
-                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
                 .open(&path)
             {
-                Ok(mut file) => {
+                Ok(file) => {
+                    // SAFETY: file owns a valid descriptor for the duration of
+                    // the call.
+                    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
+                    {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() == Some(libc::EWOULDBLOCK)
+                            || error.raw_os_error() == Some(libc::EAGAIN)
+                        {
+                            if std::time::Instant::now() >= deadline {
+                                bail!(
+                                    "another ahu launch is in progress for this repository ({}).\n\
+                                     Wait for it to finish; the operating system releases the \
+                                     lock when its holder exits.",
+                                    path.display()
+                                );
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            continue;
+                        }
+                        return Err(state_io_error("lock", &path, error));
+                    }
+                    let mut file = file;
+                    file.set_len(0)
+                        .map_err(|e| state_io_error("truncate", &path, e))?;
                     use std::io::Write;
                     let _ = write!(file, "{}", std::process::id());
-                    return Ok(Self { path });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // `symlink_metadata`, so a link planted at the lock name is
-                    // aged and unlinked as itself rather than as its target.
-                    if let Ok(meta) = std::fs::symlink_metadata(&path)
-                        && (meta.file_type().is_symlink()
-                            || meta
-                                .modified()
-                                .is_ok_and(|m| m.elapsed().unwrap_or_default() > STALE_AFTER))
-                    {
-                        let _ = std::fs::remove_file(&path);
-                        continue;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        bail!(
-                            "another ahu launch is in progress for this repository ({}).\n\
-                             Wait for it to finish, or remove the lock if you are sure it died.",
-                            path.display()
-                        );
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    return Ok(Self { file });
                 }
                 Err(e) => return Err(state_io_error("create launch lock", &path, e)),
             }
@@ -396,7 +406,11 @@ impl LaunchLock {
 
 impl Drop for LaunchLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        use std::os::fd::AsRawFd;
+        // SAFETY: this object still owns the descriptor.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -768,22 +782,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launch_lock_reclaims_stale_files_and_releases_on_drop() {
+    fn launch_lock_ignores_unheld_files_and_persists_after_release() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("coordination/launch.lock");
-        let lock = LaunchLock::acquire_at(path.clone()).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            std::process::id().to_string()
-        );
-        drop(lock);
-        assert!(!path.exists());
-
-        let stale = std::fs::File::create(&path).unwrap();
+        // A leftover file -- stale mtime, old PID -- does not block a launch:
+        // only a live flock does.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "99999999").unwrap();
+        let stale = std::fs::File::options().write(true).open(&path).unwrap();
         stale
-            .set_times(std::fs::FileTimes::new().set_modified(
-                std::time::SystemTime::now() - STALE_AFTER - std::time::Duration::from_secs(5),
-            ))
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(600),
+                ),
+            )
             .unwrap();
         drop(stale);
         let lock = LaunchLock::acquire_at(path.clone()).unwrap();
@@ -792,14 +804,25 @@ mod tests {
             std::process::id().to_string()
         );
         drop(lock);
-        assert!(!path.exists());
+        assert!(path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            std::process::id().to_string()
+        );
+        // The lock is released by closing the file, not by removing it, so a
+        // second acquire succeeds while the persistent file remains.
+        let lock = LaunchLock::acquire_at(path.clone()).unwrap();
+        drop(lock);
+        assert!(path.exists());
     }
 
     #[test]
-    fn launch_lock_times_out_without_removing_an_active_lock() {
+    fn launch_lock_times_out_when_another_holder_keeps_the_flock() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("launch.lock");
         let lock = LaunchLock::acquire_at(path.clone()).unwrap();
+        // flock is held per open-file-description, so a second open in the
+        // same process is excluded exactly like another process would be.
         let error = LaunchLock::acquire_at(path.clone())
             .err()
             .unwrap()
@@ -814,7 +837,8 @@ mod tests {
             std::process::id().to_string()
         );
         drop(lock);
-        assert!(!path.exists());
+        assert!(path.exists());
+        assert!(LaunchLock::acquire_at(path.clone()).is_ok());
     }
 
     #[test]
