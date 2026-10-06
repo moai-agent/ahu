@@ -868,12 +868,13 @@ isolation. Tracker access and private-key retention remain the responsibility of
 ### Local OTLP export
 
 OTLP export is off unless the project opts in. When enabled, ahu exports its
-own launch and harness lifecycle traces, metrics, and logs to the
-project-configured local OTLP collector and injects the same endpoint only into
-harness processes started by ahu. It never changes the invoking shell or harness
-sessions started directly. Traces, metrics, and logs all select the `otlp`
-exporter; inherited OTLP headers, signal-specific endpoints, and compression
-settings are cleared for the child. Exporter construction or delivery failure
+own launch and harness lifecycle traces to the project-configured local OTLP
+collector and injects the same endpoint into harness processes started by ahu,
+which then export their own traces, metrics, and logs. It never changes the
+invoking shell or harness sessions started directly. Child traces, metrics,
+and logs all select the `otlp` exporter; inherited OTLP headers,
+signal-specific endpoints, and compression settings are cleared for the
+child. Exporter construction or delivery failure
 does not fail the assignment. Spans are queued asynchronously in a bounded
 128-span buffer and exported in batches of at most 32 every 500 ms. A full
 queue drops telemetry instead of blocking a task; each OTLP/HTTP request has a
