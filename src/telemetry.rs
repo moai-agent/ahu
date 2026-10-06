@@ -325,8 +325,8 @@ pub fn configure_child(
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
         .env("OTEL_EXPORTER_OTLP_TIMEOUT", "500")
         .env("OTEL_TRACES_EXPORTER", "otlp")
-        .env("OTEL_METRICS_EXPORTER", "none")
-        .env("OTEL_LOGS_EXPORTER", "none")
+        .env("OTEL_METRICS_EXPORTER", "otlp")
+        .env("OTEL_LOGS_EXPORTER", "otlp")
         .env("OTEL_SERVICE_NAME", "ahu-agent")
         .env("OTEL_RESOURCE_ATTRIBUTES", attributes);
 }
