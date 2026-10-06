@@ -1,10 +1,6 @@
 schema_version = 1
-digest = "fb0f66063d2a019a8f8e57d20ddfcd370851213aa8693c9e7c43078addacdad8"
-skipped_directories = [
-    ".ahu",
-    ".worktrees",
-    "target",
-]
+digest = "9fbbe216efafa8d92f02974a9fd9ca07fd5382696e639af4f263057c3ac31c91"
+skipped_directories = [".ahu"]
 unscanned_config = []
 symlinks = []
 
@@ -22,8 +18,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/arch-opus.md"
-digest = "8344afb498e84f47690ce27924c65338b63ffe873811e4d182c26dbf3d948321"
-bytes = 5400
+digest = "fc03fc1a3eae3354b3c7067465843a27930d236d7b156e2a7569fa6a2024d90b"
+bytes = 5453
 executable = false
 
 [[entries]]
@@ -46,8 +42,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/defsec-glm.md"
-digest = "b24bd5a24120bab6f98127e26513fedc03792f72ee78b3c97c370f6bf56e75ba"
-bytes = 6430
+digest = "496e00c058507e58d15f96d40fe49b836d53d10a035cdd0f5ef04faaff08f0dd"
+bytes = 6428
 executable = false
 
 [[entries]]
@@ -58,8 +54,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/dev-agy.md"
-digest = "67fd182c509725aad45a8d396e6c8ec437e33d14c97a2415b3a7534c348f3764"
-bytes = 5288
+digest = "7f1bdd60381da751983c0d53f5f5d53497560408dee0bcf7727e2529e2334a76"
+bytes = 5286
 executable = false
 
 [[entries]]
