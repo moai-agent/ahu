@@ -96,9 +96,10 @@ Each task receives a short handle derived from its displayed title, such as
 `@configuration-review`. Use `--name review` to choose one. Task commands accept
 the handle: `ahu task @review`, `ahu focus @review`, or `ahu cancel @review`.
 Names belong to the repository and remain reserved after removal; task IDs still work.
-The development, security, and documentation agents declare `permissions = "auto"`,
-so their launches require the explicit approval-widening flag, even for previews. The flag controls
-the child's requested settings; it grants no extra access to the caller.
+Most registered agents declare `permissions = "auto"` (see each manifest's
+`permissions` field), so their launches require the explicit approval-widening
+flag, even for previews. The flag controls the child's requested settings; it
+grants no extra access to the caller.
 
 For unattended execution, use an initialized project and the same registered agent:
 
@@ -173,8 +174,9 @@ loaded from the repository each time, so this README does not duplicate a
 potentially stale agent catalog. [Manifests](.agents/ahu/agents/) are OKF
 Markdown documents that pair each agent's identity with its instructions.
 Named launches use their manifest's pair independently of automatic project
-selection. This repository's automatic choice is Codex / `gpt-6-astra`; it does
-not select a named agent.
+selection. This repository's automatic choice is Antigravity /
+`gemini-3.1-pro-high` (from `harness_preferences` and `model_rankings` in
+`.agents/ahu/config.toml`); it does not select a named agent.
 
 Automatic selection walks the configured harness order, takes the first harness
 with an available adapter and a nonempty project model ranking, and selects that
