@@ -131,10 +131,13 @@ else: raise AssertionError(method)
                 assert!(!result.status.success());
             }
             assert!(
-                !ahu::state::coordination_dir(&repo)
-                    .unwrap()
-                    .join("launch.lock")
-                    .exists()
+                ahu::state::LaunchLock::acquire_at(
+                    ahu::state::coordination_dir(&repo)
+                        .unwrap()
+                        .join("launch.lock")
+                )
+                .is_ok(),
+                "{shortcut}/{failure}: launch lock still held after the shortcut exited"
             );
             assert!(!fixture.path().join(".worktrees").exists());
         }
