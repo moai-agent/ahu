@@ -867,10 +867,12 @@ isolation. Tracker access and private-key retention remain the responsibility of
 
 ### Local OTLP export
 
-OTLP export is off unless the project opts in. When enabled, ahu exports its
-own launch and harness lifecycle traces to the project-configured local OTLP
-collector and injects the same endpoint into harness processes started by ahu,
-which then export their own traces, metrics, and logs. It never changes the
+OTLP export is off unless the project opts in. Eval runs are the exception: they
+enable telemetry regardless of project settings, pointed at the eval receiver
+endpoint. When enabled, ahu exports its own launch and harness lifecycle traces
+to the project-configured local OTLP collector and injects the same endpoint
+into harness processes started by ahu, which then export their own traces,
+metrics, and logs. It never changes the
 invoking shell or harness sessions started directly. Child traces, metrics,
 and logs all select the `otlp` exporter; inherited OTLP headers,
 signal-specific endpoints, and compression settings are cleared for the
@@ -924,10 +926,12 @@ stable `telemetry_key` dimensions, decision service/model identifiers,
 reported input/output tokens, adapter timing, and fixed error categories. The
 MCP process also emits an `ahu.mcp.session` summary on EOF or handled SIGINT/SIGTERM
 shutdown with
-request, tool-call, and transport-error counts plus SDK exporter initialization
+request, tool-call, decision-call, tool-error, tools-list, and transport-error
+counts plus SDK exporter initialization
 status (not collector receipt). It omits request state,
 instructions, question names, answer values, and error text. ahu-launched
-harnesses pass agent, harness, model, task ID, and attempt as approved
+harnesses pass agent, agent version, harness, harness version, model, ahu
+version, task ID, and attempt as approved
 resource attributes to MCP child processes; optional eval run, case, corpus,
 and stage identifiers can be passed as `ahu.eval.*` resource attributes. These
 fields group calls by harness and join them to task results. MCP spans cover
