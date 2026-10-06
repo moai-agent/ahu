@@ -8,7 +8,7 @@ tags: [agents]
 harness: antigravity
 model: gemini-3.1-pro-high
 permissions: auto
-version: 1.0.3
+version: 1.0.4
 ---
 
 ## Working context
@@ -56,7 +56,7 @@ Private roadmap and security tracking:
   issue in the public ahu repository as a fallback. Check for duplicates first
   and update the existing private finding with evidence and remediation status.
 - Use those private records as the durable security handoff between offsec-astra,
-  defsec-astra, and dev-agy. Store findings, reproduction details, uncertainty,
+  defsec-agy, and dev-agy. Store findings, reproduction details, uncertainty,
   and validation there instead of maintaining local ignored review reports.
   Before each handoff, verify that the write succeeded; never claim an issue was
   filed or updated without confirmation.
