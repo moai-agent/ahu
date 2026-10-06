@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "90faa39e31b4312ece6da0981eae5c2bbd87b87033d0447e715d717432e8808a"
+digest = "fb0f66063d2a019a8f8e57d20ddfcd370851213aa8693c9e7c43078addacdad8"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -130,8 +130,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/config.toml"
-digest = "f31d1ce0a0bc07e16272af56759d2cf58db5020202753f96fe5a636c3fb42cd6"
-bytes = 469
+digest = "0e0c3a25b207f6e3abe4aca52606a7bc8b9b0770b5d45fc737478e885cfc75ec"
+bytes = 507
 executable = false
 
 [[entries]]
@@ -166,8 +166,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-release/SKILL.md"
-digest = "df1a4f18e9a6d6e2101072b2d796d3f930faa75fc4e7d9274cf7d5cded6ccbb6"
-bytes = 10941
+digest = "08e6a238f4ac4a91345e648f80596046d40539b103d6207c3c1cf3f76b49aedf"
+bytes = 13529
 executable = false
 
 [[entries]]
