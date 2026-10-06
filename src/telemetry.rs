@@ -1194,6 +1194,9 @@ mod tests {
             .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
             .collect();
         assert_eq!(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://127.0.0.1:4318");
+        assert_eq!(env["OTEL_TRACES_EXPORTER"], "otlp");
+        assert_eq!(env["OTEL_METRICS_EXPORTER"], "otlp");
+        assert_eq!(env["OTEL_LOGS_EXPORTER"], "otlp");
         assert!(env["OTEL_RESOURCE_ATTRIBUTES"].contains("ahu.harness=codex"));
         assert!(env["OTEL_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=2"));
         assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=2"));
@@ -1207,6 +1210,35 @@ mod tests {
                     .any(|(name, value)| name == key && value.is_none())
             );
         }
+    }
+
+    #[test]
+    fn child_environment_enables_otlp_for_all_signals() {
+        let enabled = TelemetryConfig {
+            enabled: true,
+            ..TelemetryConfig::default()
+        };
+        let mut command = std::process::Command::new("true");
+        command.env("OTEL_METRICS_EXPORTER", "none");
+        command.env("OTEL_LOGS_EXPORTER", "none");
+        configure_child(
+            &mut command,
+            &enabled,
+            "agent",
+            "codex",
+            "model",
+            None,
+            None,
+            None,
+            None,
+        );
+        let env: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect();
+        assert_eq!(env["OTEL_TRACES_EXPORTER"], "otlp");
+        assert_eq!(env["OTEL_METRICS_EXPORTER"], "otlp");
+        assert_eq!(env["OTEL_LOGS_EXPORTER"], "otlp");
     }
 
     #[test]

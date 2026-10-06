@@ -865,19 +865,20 @@ Reads and writes are bounded. ahu does not verify tracker visibility, fetch
 tracker content, inherit child task links, or promise same-user process
 isolation. Tracker access and private-key retention remain the responsibility of the maintainer.
 
-### Local trace export
+### Local OTLP export
 
-Trace export is off unless the project opts in. When enabled, ahu exports its
-own launch and harness lifecycle traces to the project-configured local OTLP
-collector and injects the same endpoint only into harness processes started by
-ahu. It never changes the invoking shell or harness sessions started directly.
-Only traces are enabled in this initial integration; inherited OTLP headers,
-signal-specific endpoints, and log/metric exporters are cleared for the child.
-Exporter construction or delivery failure does not fail the assignment. Spans
-are queued asynchronously in a bounded 128-span buffer and exported in batches
-of at most 32 every 500 ms. A full queue drops telemetry instead of blocking a
-task; each OTLP/HTTP request has a 500 ms timeout. These bounds apply to ahu's
-exporter and do not configure the collector's own queue or downstream exporters.
+OTLP export is off unless the project opts in. When enabled, ahu exports its
+own launch and harness lifecycle traces, metrics, and logs to the
+project-configured local OTLP collector and injects the same endpoint only into
+harness processes started by ahu. It never changes the invoking shell or harness
+sessions started directly. Traces, metrics, and logs all select the `otlp`
+exporter; inherited OTLP headers, signal-specific endpoints, and compression
+settings are cleared for the child. Exporter construction or delivery failure
+does not fail the assignment. Spans are queued asynchronously in a bounded
+128-span buffer and exported in batches of at most 32 every 500 ms. A full
+queue drops telemetry instead of blocking a task; each OTLP/HTTP request has a
+500 ms timeout. These bounds apply to ahu's exporter and do not configure the
+collector's own queue or downstream exporters.
 
 ```toml
 [telemetry]
@@ -902,6 +903,14 @@ receiver endpoint by name, alongside decision-provider configuration; it does no
 copy secret values. The exporter SDK can read ambient OpenTelemetry configuration.
 Keep sensitive data out of that configuration; these settings are not a
 redaction boundary.
+
+Child harness processes receive the same loopback OTLP endpoint and export
+their own metrics and logs. ahu's attribute allowlist and redaction apply only
+to the attributes ahu itself emits; the child harness and its SDK control their
+own log and metric payloads, which may include unredacted metadata such as
+resource attributes the harness copies from its environment. This is why the
+endpoint is restricted to a local collector: the collector, not ahu, becomes
+the redaction and retention boundary for child-emitted telemetry.
 
 The separately launched `ahu mcp serve` process also initializes the same
 project-configured local exporter. It emits a span for every parsed inbound MCP
