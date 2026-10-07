@@ -423,9 +423,7 @@ pub(crate) fn confined(path: &Path, create: bool) -> Result<()> {
         let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !(task::is_canonical_task_uuid(id)
-            || (!id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit())))
-        {
+        if !crate::storage::is_task_entry_name(id) {
             continue;
         }
         let Some(root) = dir.parent().and_then(Path::parent) else {
@@ -436,7 +434,9 @@ pub(crate) fn confined(path: &Path, create: bool) -> Result<()> {
         }
         confined_at(root, dir, false)?;
         let record_path = dir.join("task.json");
-        if state::confine_file(&record_path)?.is_none_or(|m| m.len() > 1024 * 1024) {
+        if state::confine_file(&record_path)?
+            .is_none_or(|m| m.len() > crate::util::MAX_TASK_RECORD_BYTES)
+        {
             continue;
         }
         let record = task::load(dir)?;
@@ -634,9 +634,7 @@ fn discover_stores(repo: &crate::git::Repo, domains: Vec<PathBuf>) -> Result<Vec
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if crate::task::is_canonical_task_uuid(&name)
-                || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_hexdigit()))
-            {
+            if crate::storage::is_task_entry_name(&name) {
                 confined_in(repo, &entry.path(), false)?;
                 if entry.path().join("task.json").exists() {
                     out.push(entry.path());
@@ -652,23 +650,154 @@ pub(crate) fn durable_json(path: &Path, value: &impl serde::Serialize) -> Result
         .parent()
         .ok_or_else(|| Error::new("runtime file needs a parent"))?;
     confined(parent, true)?;
-    state::confine_file(path)?;
-    let mut body = serde_json::to_vec(value).map_err(|e| Error::new(e.to_string()))?;
-    body.push(b'\n');
-    crate::private_io::atomic_write(path, &body, crate::private_io::Durability::Durable)
+    state::write_durable_json_compact(path, value)
 }
 
 pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    serde_json::from_slice(&review::read_bytes(
+        path,
+        Some(crate::util::MAX_TASK_RECORD_BYTES),
+    )?)
+    .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
+}
+
+// Lifecycle result envelopes keep the legacy unbounded API; records stay bounded.
+pub(crate) fn read_json_full<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&review::read_bytes(path, None)?)
-        .map_err(|_| Error::new(format!("invalid metadata at {}", path.display())))
+        .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
+}
+
+const PLACEMENT_INTENT: &str = "placement-intent.json";
+// Secondary guard against PID reuse; the primary signal is recorder liveness.
+const PLACEMENT_INTENT_STALE_SECS: u64 = 3600;
+
+#[derive(Serialize, Deserialize)]
+struct PlacementIntent {
+    schema_version: u32,
+    task_id: String,
+    worktree: PathBuf,
+    branch: String,
+    pid: i32,
+    timestamp: u64,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|e| e.as_secs())
+        .unwrap_or(0)
+}
+
+/// Consume any leftover launch intent before admission, healing worktrees left
+/// by a crashed or killed launch. Every outcome consumes the intent and reports;
+/// the sweep never wedges the launch it guards.
+fn sweep_placement_intent(
+    console: &mut crate::launcher::Console<'_>,
+    repo: &crate::git::Repo,
+    store_dir: &Path,
+) -> Result<()> {
+    let intent_path = store_dir.join(PLACEMENT_INTENT);
+    let Ok(raw) = std::fs::read(&intent_path) else {
+        return Ok(());
+    };
+    let Ok(intent) = serde_json::from_slice::<PlacementIntent>(&raw) else {
+        console.say(&format!(
+            "cannot parse {}; ignoring the stale launch intent\n",
+            intent_path.display()
+        ))?;
+        let _ = std::fs::remove_file(&intent_path);
+        return Ok(());
+    };
+    let recorder_dead = {
+        let rc = unsafe { libc::kill(intent.pid, 0) };
+        rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    };
+    let stale = unix_now().saturating_sub(intent.timestamp) >= PLACEMENT_INTENT_STALE_SECS;
+    let task_record_exists = store_dir.join(&intent.task_id).join("task.json").exists();
+    let expected_worktree = state::worktree_dir(&repo.primary_root()?, &intent.task_id)?;
+    let removable =
+        (recorder_dead || stale) && !task_record_exists && intent.worktree == expected_worktree;
+    if removable {
+        let worktree = intent.worktree.to_string_lossy().to_string();
+        match crate::git::run(
+            &repo.root,
+            &["worktree", "remove", "--force", "--", &worktree],
+        ) {
+            Ok(output) if output.status.success() => {
+                console.say(&format!(
+                    "removed worktree from an interrupted launch: {worktree}\n"
+                ))?;
+            }
+            Ok(output) => {
+                console.say(&format!(
+                    "could not remove worktree from an interrupted launch: {worktree}: {}\n",
+                    String::from_utf8_lossy(&output.stderr)
+                ))?;
+            }
+            Err(error) => {
+                console.say(&format!(
+                    "could not remove worktree from an interrupted launch: {worktree}: {error}\n"
+                ))?;
+            }
+        }
+    } else {
+        let reason = if task_record_exists {
+            "its task record exists"
+        } else if intent.worktree != expected_worktree {
+            "the recorded worktree does not match this repository's layout"
+        } else {
+            "its recording process cannot be confirmed dead"
+        };
+        console.say(&format!(
+            "kept worktree from an interrupted launch: {}: {reason}\n",
+            intent.worktree.display()
+        ))?;
+    }
+    let _ = std::fs::remove_file(&intent_path);
+    Ok(())
 }
 
 fn attempt_dir(dir: &Path, spec: &Spec) -> PathBuf {
     dir.join(format!("attempt-{}", spec.attempt))
 }
+
+/// Count prior assignments for the admission gates in one pass over the
+/// domain. A task whose headless.json cannot be read is excluded from both
+/// counts and reported: one unreadable record must not block all submissions
+/// by failing the launch, nor silently count as active.
+fn admission_counts(
+    console: &mut crate::launcher::Console<'_>,
+    previous: &[PathBuf],
+    root_task: &Option<String>,
+) -> Result<(usize, usize)> {
+    let mut tree_count = 0;
+    let mut active = 0;
+    for dir in previous {
+        let Ok(recorded) = read_json::<Spec>(&dir.join("headless.json")) else {
+            console.say(&format!(
+                "cannot read {}/headless.json: treating as unknown; admission counts may under-count\n",
+                dir.display()
+            ))?;
+            continue;
+        };
+        if recorded.root_task == *root_task {
+            tree_count += 1;
+        }
+        if !attempt_dir(dir, &recorded).join("result.json").exists() {
+            active += 1;
+        }
+    }
+    Ok((tree_count, active))
+}
 fn frozen_digest(dir: &Path) -> Result<String> {
-    let mut bytes = review::read_bytes(&dir.join("task.json"), None)?;
-    bytes.extend(review::read_bytes(&dir.join("headless.json"), None)?);
+    let mut bytes = review::read_bytes(
+        &dir.join("task.json"),
+        Some(crate::util::MAX_TASK_RECORD_BYTES),
+    )?;
+    bytes.extend(review::read_bytes(
+        &dir.join("headless.json"),
+        Some(crate::util::MAX_TASK_RECORD_BYTES),
+    )?);
     Ok(digest_bytes(&bytes))
 }
 
@@ -924,6 +1053,7 @@ pub fn launch(
         confined(&dir, true)?;
         dir.join("launch.lock")
     })?;
+    sweep_placement_intent(console, repo, &store(repo)?)?;
     if let Some(parent) = &spec.parent_task
         && lookup(repo, parent)?.join("cancel.json").exists()
     {
@@ -931,27 +1061,12 @@ pub fn launch(
     }
     validate_parent_attempt(repo, &spec)?;
     let previous = discover_domain(repo, &store(repo)?)?;
-    let mut tree_count = 0;
-    for dir in &previous {
-        let recorded: Spec = read_json(&dir.join("headless.json"))?;
-        if recorded.root_task == spec.root_task {
-            tree_count += 1;
-        }
-    }
+    let (tree_count, active) = admission_counts(console, &previous, &spec.root_task)?;
     if tree_count >= 128 {
         bail!(
             "tree_capacity_exceeded: root delegation grant is limited to 128 assignments; no task was queued"
         );
     }
-    let active = previous
-        .iter()
-        .filter(|dir| {
-            let Ok(spec) = read_json::<Spec>(&dir.join("headless.json")) else {
-                return true;
-            };
-            !attempt_dir(dir, &spec).join("result.json").exists()
-        })
-        .count();
     if active >= 16 {
         bail!(
             "capacity_exceeded: 16 active or interrupted assignments; inspect existing tasks before retrying. No work was queued"
@@ -972,10 +1087,23 @@ pub fn launch(
         "Task {handle} ({})\n",
         crate::task_ref::display(&plan.task_id)
     ))?;
+    let intent_path = store(repo)?.join(PLACEMENT_INTENT);
+    durable_json(
+        &intent_path,
+        &PlacementIntent {
+            schema_version: 1,
+            task_id: plan.task_id.clone(),
+            worktree: plan.worktree.clone(),
+            branch: plan.branch.clone(),
+            pid: unsafe { libc::getpid() },
+            timestamp: unix_now(),
+        },
+    )?;
     crate::git::add_worktree(repo, &plan.worktree, &plan.branch, base)?;
     // Preserve preparation failures for review; never delete reviewable work.
     let materialize = crate::snapshot::materialize(&repo.root, &plan.snapshot, &plan.worktree)?;
     if !materialize.concurrently_modified.is_empty() {
+        let _ = std::fs::remove_file(&intent_path);
         bail!(
             "configuration changed during preparation; worktree preserved at {}",
             plan.worktree.display()
@@ -985,6 +1113,7 @@ pub fn launch(
     let record = crate::launch::prepared_record(repo, &loaded, &plan, prompt, materialize);
     task::save(&plan.task_dir, &record, prompt)?;
     durable_json(&plan.task_dir.join("headless.json"), &spec)?;
+    let _ = std::fs::remove_file(&intent_path);
     crate::task_index::register(
         &repo.identity(),
         &plan.task_id,
@@ -2157,7 +2286,7 @@ fn boundary_after_drain(events: &mut Events, stop: &mut Option<(&'static str, In
 pub fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>> {
     let spec: Spec = read_json(&dir.join("headless.json")).ok()?;
     let result_path = attempt_dir(dir, &spec).join("result.json");
-    let result: Value = read_json(&result_path).ok()?;
+    let result: Value = read_json_full(&result_path).ok()?;
     let paths: Vec<String> = result
         .get("writes_outside_worktree")?
         .as_array()?
@@ -3099,7 +3228,7 @@ fn result(dir: &Path) -> Result<Value> {
 fn result_attempt(dir: &Path, spec: &Spec) -> Result<Value> {
     let path = attempt_dir(dir, spec).join("result.json");
     if path.exists() {
-        let value: Value = read_json(&path)?;
+        let value: Value = read_json_full(&path)?;
         review::validate_result(
             &value,
             &dir.file_name().unwrap_or_default().to_string_lossy(),
@@ -3171,7 +3300,7 @@ fn wait(dir: &Path, json_output: bool) -> Result<i32> {
     loop {
         // Validate public review output without applying the interactive display-size
         // limit to wait's existing full-envelope API.
-        let value = review_attempt(dir, &spec, read_json)?;
+        let value = review_attempt(dir, &spec, read_json_full)?;
         if value["outcome"] != "running" {
             let code = if value["outcome"] == "succeeded" {
                 0
@@ -5206,6 +5335,72 @@ mod filesystem_behavior_tests {
         (root, repo)
     }
 
+    fn recorded_spec(root_task: Option<&str>, attempt: u32) -> Spec {
+        Spec {
+            schema_version: 2,
+            options: Options::default(),
+            harness_version: "test".to_string(),
+            executable_digest: "digest".to_string(),
+            parent_task: Some("parent".to_string()),
+            parent_attempt: None,
+            root_task: root_task.map(str::to_string),
+            broker_request: None,
+            child_grants: Vec::new(),
+            depth: 0,
+            attempt,
+            session: Some("session".to_string()),
+            broker_dir: None,
+            native_profile: None,
+            native_controls: Vec::new(),
+            gaps: Vec::new(),
+        }
+    }
+
+    fn recorded_task(repo: &crate::git::Repo, store: &Path, name: &str, spec: &Spec) -> PathBuf {
+        let dir = store.join(name);
+        confined_in(repo, &dir, true).unwrap();
+        state::write_private_file(
+            &dir.join("headless.json"),
+            serde_json::to_string(spec).unwrap().as_bytes(),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn reaped_pid() -> i32 {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id() as i32;
+        child.wait().unwrap();
+        pid
+    }
+
+    fn admission_counts_with_console(
+        previous: &[PathBuf],
+        root_task: &Option<String>,
+    ) -> (String, (usize, usize)) {
+        let mut input = std::io::empty();
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: false,
+        };
+        let counts = admission_counts(&mut console, previous, root_task).unwrap();
+        (String::from_utf8(output).unwrap(), counts)
+    }
+
+    fn sweep_with_console(repo: &crate::git::Repo, store_dir: &Path) -> String {
+        let mut input = std::io::empty();
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: false,
+        };
+        sweep_placement_intent(&mut console, repo, store_dir).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
     #[test]
     fn confinement_creates_only_private_directories_and_rejects_redirection() {
         let temp = tempfile::tempdir().unwrap();
@@ -5412,5 +5607,237 @@ mod filesystem_behavior_tests {
         drop(owner);
         assert!(!supervisor_owns_attempt(root.path()).unwrap());
         assert!(Lock::try_acquire(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn headless_record_reads_refuse_metadata_beyond_the_inspection_bound() {
+        let (_root, repo) = repository();
+        let store = store(&repo).unwrap();
+        let dir = store.join("abc");
+        confined_in(&repo, &dir, true).unwrap();
+        let record = dir.join("headless.json");
+        std::fs::write(
+            &record,
+            vec![0u8; crate::util::MAX_TASK_RECORD_BYTES as usize + 1],
+        )
+        .unwrap();
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let error = read_json::<serde_json::Value>(&record)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("metadata exceeds the inspection bound"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn admission_counts_pass_valid_records_and_warn_on_unreadable_ones() {
+        let (_root, repo) = repository();
+        let store_dir = store(&repo).unwrap();
+        let (said, counts) = admission_counts_with_console(&[], &None);
+        assert_eq!(counts, (0, 0), "{said}");
+        assert!(said.is_empty(), "{said}");
+
+        let tree = recorded_task(&repo, &store_dir, "tree", &recorded_spec(Some("root"), 0));
+        let other = recorded_task(
+            &repo,
+            &store_dir,
+            "other",
+            &recorded_spec(Some("branch"), 0),
+        );
+        let unreadable = store_dir.join("unreadable");
+        confined_in(&repo, &unreadable, true).unwrap();
+        state::write_private_file(&unreadable.join("headless.json"), b"not json").unwrap();
+        let finished_spec = recorded_spec(Some("root"), 1);
+        let finished = recorded_task(&repo, &store_dir, "finished", &finished_spec);
+        let attempt = attempt_dir(&finished, &finished_spec);
+        confined_in(&repo, &attempt, true).unwrap();
+        state::write_private_file(&attempt.join("result.json"), b"{}").unwrap();
+
+        let previous = [tree, other, unreadable, finished];
+        let (said, counts) = admission_counts_with_console(&previous, &Some("root".to_string()));
+        assert_eq!(counts, (2, 2), "{said}");
+        assert!(said.contains("cannot read"), "{said}");
+        assert!(said.contains("treating as unknown"), "{said}");
+    }
+
+    #[test]
+    fn placement_intent_sweep_ignores_missing_and_unparseable_intents() {
+        let (_root, repo) = repository();
+        let store_dir = store(&repo).unwrap();
+        confined_in(&repo, &store_dir.join("seed"), true).unwrap();
+
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(said.is_empty(), "{said}");
+
+        std::fs::write(store_dir.join(PLACEMENT_INTENT), b"not json").unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(said.contains("cannot parse"), "{said}");
+        assert!(said.contains("ignoring the stale launch intent"), "{said}");
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
+    }
+
+    #[test]
+    fn placement_intent_sweep_removes_orphaned_worktrees() {
+        let (root, repo) = repository();
+        assert!(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "base"
+                ])
+                .current_dir(&repo.root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let store_dir = store(&repo).unwrap();
+        confined_in(&repo, &store_dir.join("seed"), true).unwrap();
+        let task_id = "sweeptask";
+        let worktree = state::worktree_dir(&repo.primary_root().unwrap(), task_id).unwrap();
+        crate::git::add_worktree(&repo, &worktree, &format!("intent-{task_id}"), "HEAD").unwrap();
+        assert!(worktree.exists());
+
+        let intent = PlacementIntent {
+            schema_version: 1,
+            task_id: task_id.to_string(),
+            worktree: worktree.clone(),
+            branch: format!("intent-{task_id}"),
+            pid: reaped_pid(),
+            timestamp: unix_now() - PLACEMENT_INTENT_STALE_SECS * 2,
+        };
+        std::fs::write(
+            store_dir.join(PLACEMENT_INTENT),
+            serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(
+            said.contains("removed worktree from an interrupted launch"),
+            "{said}"
+        );
+        assert!(!worktree.exists());
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
+        drop(root);
+    }
+
+    #[test]
+    fn placement_intent_sweep_keeps_worktrees_for_live_recorders_existing_tasks_and_foreign_layouts()
+     {
+        let (root, repo) = repository();
+        let store_dir = store(&repo).unwrap();
+        confined_in(&repo, &store_dir.join("seed"), true).unwrap();
+
+        let task_id = "livetask";
+        let worktree = state::worktree_dir(&repo.primary_root().unwrap(), task_id).unwrap();
+        let intent = PlacementIntent {
+            schema_version: 1,
+            task_id: task_id.to_string(),
+            worktree: worktree.clone(),
+            branch: format!("intent-{task_id}"),
+            pid: std::process::id() as i32,
+            timestamp: unix_now(),
+        };
+        std::fs::write(
+            store_dir.join(PLACEMENT_INTENT),
+            serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(said.contains("cannot be confirmed dead"), "{said}");
+        assert!(
+            said.contains("kept worktree from an interrupted launch"),
+            "{said}"
+        );
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
+
+        let recorded = store_dir.join("recordedtask");
+        confined_in(&repo, &recorded, true).unwrap();
+        state::write_private_file(&recorded.join("task.json"), b"{}").unwrap();
+        let worktree = state::worktree_dir(&repo.primary_root().unwrap(), "recordedtask").unwrap();
+        let intent = PlacementIntent {
+            schema_version: 1,
+            task_id: "recordedtask".to_string(),
+            worktree: worktree.clone(),
+            branch: "intent-recordedtask".to_string(),
+            pid: reaped_pid(),
+            timestamp: unix_now() - PLACEMENT_INTENT_STALE_SECS * 2,
+        };
+        std::fs::write(
+            store_dir.join(PLACEMENT_INTENT),
+            serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(said.contains("its task record exists"), "{said}");
+        assert!(
+            said.contains("kept worktree from an interrupted launch"),
+            "{said}"
+        );
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
+
+        let foreign = root.path().join("elsewhere");
+        let intent = PlacementIntent {
+            schema_version: 1,
+            task_id: "foreigntask".to_string(),
+            worktree: foreign.clone(),
+            branch: "intent-foreigntask".to_string(),
+            pid: reaped_pid(),
+            timestamp: unix_now() - PLACEMENT_INTENT_STALE_SECS * 2,
+        };
+        std::fs::write(
+            store_dir.join(PLACEMENT_INTENT),
+            serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(
+            said.contains("does not match this repository's layout"),
+            "{said}"
+        );
+        assert!(
+            said.contains("kept worktree from an interrupted launch"),
+            "{said}"
+        );
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
+    }
+
+    #[test]
+    fn placement_intent_sweep_reports_removal_failures_and_still_consumes_the_intent() {
+        let (_root, repo) = repository();
+        let store_dir = store(&repo).unwrap();
+        confined_in(&repo, &store_dir.join("seed"), true).unwrap();
+        let task_id = "faketask";
+        let worktree = state::worktree_dir(&repo.primary_root().unwrap(), task_id).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let intent = PlacementIntent {
+            schema_version: 1,
+            task_id: task_id.to_string(),
+            worktree: worktree.clone(),
+            branch: format!("intent-{task_id}"),
+            pid: reaped_pid(),
+            timestamp: unix_now() - PLACEMENT_INTENT_STALE_SECS * 2,
+        };
+        std::fs::write(
+            store_dir.join(PLACEMENT_INTENT),
+            serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(
+            said.contains("could not remove worktree from an interrupted launch"),
+            "{said}"
+        );
+        assert!(worktree.exists());
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
     }
 }

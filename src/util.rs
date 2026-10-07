@@ -84,6 +84,32 @@ pub(crate) fn require_host_operator(operation: &str) -> Result<()> {
     Ok(())
 }
 
+/// Largest state, configuration, agent, or task-record file ahu will read whole.
+///
+/// Bounds memory and read time for files whose size a repository or a checkout
+/// otherwise controls; the same rationale as [`crate::telemetry::private_store`]'s
+/// `MAX_STORE_BYTES`. Readers that need something other than a plain byte
+/// vector stay on their own streamed, capped paths.
+pub(crate) const MAX_TASK_RECORD_BYTES: u64 = 1024 * 1024;
+
+/// Read a whole file from an already-open handle, refusing files over `limit`.
+///
+/// Reading one byte past `limit` distinguishes an oversized file from one that
+/// is exactly `limit` bytes, so the bound is a refusal, not a truncation that
+/// would let a larger file masquerade as a valid but partial record.
+pub(crate) fn read_limited(file: &mut std::fs::File, limit: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file is larger than {limit} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Build an [`Error`] with `format!` syntax.
 #[macro_export]
 macro_rules! bail {
@@ -775,5 +801,20 @@ mod behavior_tests {
                 .contains("64 MiB")
         );
         assert!(digest_file(Path::new("missing-config")).is_err());
+    }
+
+    #[test]
+    fn read_limited_returns_the_prefix_up_to_the_bound_and_refuses_more() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("record");
+        std::fs::write(&path, "abc").unwrap();
+        let mut file = std::fs::File::open(&path).unwrap();
+        assert_eq!(read_limited(&mut file, 3).unwrap(), b"abc".to_vec());
+        std::fs::write(&path, "abcd").unwrap();
+        let mut file = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            read_limited(&mut file, 3).unwrap_err().to_string(),
+            "file is larger than 3 bytes"
+        );
     }
 }
