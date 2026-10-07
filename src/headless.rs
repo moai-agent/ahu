@@ -1,11 +1,21 @@
 //! Unattended attempts with minimal primary-owned state and an ahu supervisor.
 //! Process and harness outcomes are evidence, never work acceptance.
+mod admission;
+mod journal;
 pub(crate) mod review;
 mod skills;
 
 use crate::harness::{LaunchCommand, LaunchRequest};
 use crate::util::{Error, Result, digest_bytes};
 use crate::{bail, state, task};
+#[cfg(test)]
+use admission::PLACEMENT_INTENT_STALE_SECS;
+use admission::{
+    Lock, PLACEMENT_INTENT, PlacementIntent, admission_counts, attempt_dir, sweep_placement_intent,
+    unix_now, validate_parent_attempt,
+};
+use journal::recover_resume;
+pub(crate) use journal::{durable_json, read_json, read_json_full};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::Read;
@@ -645,150 +655,6 @@ fn discover_stores(repo: &crate::git::Repo, domains: Vec<PathBuf>) -> Result<Vec
     Ok(out)
 }
 
-pub(crate) fn durable_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::new("runtime file needs a parent"))?;
-    confined(parent, true)?;
-    state::write_durable_json_compact(path, value)
-}
-
-pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&review::read_bytes(
-        path,
-        Some(crate::util::MAX_TASK_RECORD_BYTES),
-    )?)
-    .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
-}
-
-// Lifecycle result envelopes keep the legacy unbounded API; records stay bounded.
-pub(crate) fn read_json_full<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&review::read_bytes(path, None)?)
-        .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
-}
-
-const PLACEMENT_INTENT: &str = "placement-intent.json";
-// Secondary guard against PID reuse; the primary signal is recorder liveness.
-const PLACEMENT_INTENT_STALE_SECS: u64 = 3600;
-
-#[derive(Serialize, Deserialize)]
-struct PlacementIntent {
-    schema_version: u32,
-    task_id: String,
-    worktree: PathBuf,
-    branch: String,
-    pid: i32,
-    timestamp: u64,
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|e| e.as_secs())
-        .unwrap_or(0)
-}
-
-/// Consume any leftover launch intent before admission, healing worktrees left
-/// by a crashed or killed launch. Every outcome consumes the intent and reports;
-/// the sweep never wedges the launch it guards.
-fn sweep_placement_intent(
-    console: &mut crate::launcher::Console<'_>,
-    repo: &crate::git::Repo,
-    store_dir: &Path,
-) -> Result<()> {
-    let intent_path = store_dir.join(PLACEMENT_INTENT);
-    let Ok(raw) = std::fs::read(&intent_path) else {
-        return Ok(());
-    };
-    let Ok(intent) = serde_json::from_slice::<PlacementIntent>(&raw) else {
-        console.say(&format!(
-            "cannot parse {}; ignoring the stale launch intent\n",
-            intent_path.display()
-        ))?;
-        let _ = std::fs::remove_file(&intent_path);
-        return Ok(());
-    };
-    let recorder_dead = {
-        let rc = unsafe { libc::kill(intent.pid, 0) };
-        rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-    };
-    let stale = unix_now().saturating_sub(intent.timestamp) >= PLACEMENT_INTENT_STALE_SECS;
-    let task_record_exists = store_dir.join(&intent.task_id).join("task.json").exists();
-    let expected_worktree = state::worktree_dir(&repo.primary_root()?, &intent.task_id)?;
-    let removable =
-        (recorder_dead || stale) && !task_record_exists && intent.worktree == expected_worktree;
-    if removable {
-        let worktree = intent.worktree.to_string_lossy().to_string();
-        match crate::git::run(
-            &repo.root,
-            &["worktree", "remove", "--force", "--", &worktree],
-        ) {
-            Ok(output) if output.status.success() => {
-                console.say(&format!(
-                    "removed worktree from an interrupted launch: {worktree}\n"
-                ))?;
-            }
-            Ok(output) => {
-                console.say(&format!(
-                    "could not remove worktree from an interrupted launch: {worktree}: {}\n",
-                    String::from_utf8_lossy(&output.stderr)
-                ))?;
-            }
-            Err(error) => {
-                console.say(&format!(
-                    "could not remove worktree from an interrupted launch: {worktree}: {error}\n"
-                ))?;
-            }
-        }
-    } else {
-        let reason = if task_record_exists {
-            "its task record exists"
-        } else if intent.worktree != expected_worktree {
-            "the recorded worktree does not match this repository's layout"
-        } else {
-            "its recording process cannot be confirmed dead"
-        };
-        console.say(&format!(
-            "kept worktree from an interrupted launch: {}: {reason}\n",
-            intent.worktree.display()
-        ))?;
-    }
-    let _ = std::fs::remove_file(&intent_path);
-    Ok(())
-}
-
-fn attempt_dir(dir: &Path, spec: &Spec) -> PathBuf {
-    dir.join(format!("attempt-{}", spec.attempt))
-}
-
-/// Count prior assignments for the admission gates in one pass over the
-/// domain. A task whose headless.json cannot be read is excluded from both
-/// counts and reported: one unreadable record must not block all submissions
-/// by failing the launch, nor silently count as active.
-fn admission_counts(
-    console: &mut crate::launcher::Console<'_>,
-    previous: &[PathBuf],
-    root_task: &Option<String>,
-) -> Result<(usize, usize)> {
-    let mut tree_count = 0;
-    let mut active = 0;
-    for dir in previous {
-        let Ok(recorded) = read_json::<Spec>(&dir.join("headless.json")) else {
-            console.say(&format!(
-                "cannot read {}/headless.json: treating as unknown; admission counts may under-count\n",
-                dir.display()
-            ))?;
-            continue;
-        };
-        if recorded.root_task == *root_task {
-            tree_count += 1;
-        }
-        if !attempt_dir(dir, &recorded).join("result.json").exists() {
-            active += 1;
-        }
-    }
-    Ok((tree_count, active))
-}
 fn frozen_digest(dir: &Path) -> Result<String> {
     let mut bytes = review::read_bytes(
         &dir.join("task.json"),
@@ -1282,70 +1148,6 @@ pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
         println!("{}", crate::util::display_safe_block(&text));
     }
     Ok(())
-}
-
-/// OS-owned locks are released on process loss, never stolen based on age.
-struct Lock(std::fs::File);
-impl Lock {
-    fn acquire(path: &Path) -> Result<Self> {
-        Self::try_acquire(path)?.ok_or_else(|| {
-            Error::new(
-                "attempt is already owned by a live supervisor; concurrent execution refused",
-            )
-        })
-    }
-    fn is_owned(path: &Path) -> Result<bool> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::OpenOptionsExt;
-        // Inspection neither creates nor writes the ownership file.
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)?;
-        crate::storage::validate_owned_metadata(&file.metadata()?, true)?;
-        // SAFETY: file owns a valid descriptor; dropping it releases a successful probe.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(false);
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            Ok(true)
-        } else {
-            Err(error.into())
-        }
-    }
-    fn try_acquire(path: &Path) -> Result<Option<Self>> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::OpenOptionsExt;
-        state::confine_file(path)?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(path)?;
-        crate::storage::validate_owned_metadata(&file.metadata()?, true)?;
-        // SAFETY: file owns a valid descriptor for the duration of the call.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                return Ok(None);
-            }
-            return Err(error.into());
-        }
-        Ok(Some(Self(file)))
-    }
-}
-impl Drop for Lock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // SAFETY: this object still owns the descriptor.
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
 }
 
 fn sanitize(command: &mut Command, policy: Option<&crate::cmux::integration::HeadlessPolicy>) {
@@ -2448,40 +2250,6 @@ pub(crate) fn signal_group(pid: u32, signal: i32) {
             libc::kill(-pid, signal);
         }
     }
-}
-
-fn validate_parent_attempt(repo: &crate::git::Repo, spec: &Spec) -> Result<()> {
-    let Some(parent) = &spec.parent_task else {
-        return Ok(());
-    };
-    let dir = lookup(repo, parent)?;
-    let parent_spec: Spec = read_json(&dir.join("headless.json"))?;
-    if spec.parent_attempt != Some(parent_spec.attempt) {
-        bail!("stale parent attempt cannot admit or start a child");
-    }
-    let attempt = attempt_dir(&dir, &parent_spec);
-    if dir.join("cancel.json").exists()
-        || attempt.join("admission-closed.json").exists()
-        || attempt.join("result.json").exists()
-    {
-        bail!("parent attempt ended or closed child admission");
-    }
-    if Lock::try_acquire(&dir.join("owner.lock"))?.is_some() {
-        bail!("parent supervisor is no longer live; child dispatch refused");
-    }
-    let request = spec
-        .broker_request
-        .as_deref()
-        .filter(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| Error::new("child lacks a broker request identity"))?;
-    let claim: Value = read_json(&attempt.join("broker").join(format!("{request}.claim.json")))?;
-    if claim["state"] != "dispatching"
-        || claim["parent_attempt"] != parent_spec.attempt
-        || claim["request_id"] != request
-    {
-        bail!("child dispatch does not match a consumed request in the live parent attempt");
-    }
-    Ok(())
 }
 
 pub fn supervise(dir: &Path) -> Result<i32> {
@@ -3655,33 +3423,6 @@ pub fn control(
         }
         _ => bail!("unsupported headless operation"),
     }
-}
-
-/// Restore only metadata for an attempt that has never acknowledged process start.
-/// This is invoked by explicit resume, never by read-only inspection or a timer.
-fn recover_resume(dir: &Path) -> Result<()> {
-    let journal = dir.join("resume-journal.json");
-    if !journal.exists() {
-        return Ok(());
-    }
-    #[derive(Deserialize)]
-    struct Journal {
-        record: task::TaskRecord,
-        spec: Spec,
-        prompt: String,
-        next_attempt: u32,
-    }
-    let old: Journal = read_json(&journal)?;
-    let next = Spec {
-        attempt: old.next_attempt,
-        ..old.spec.clone()
-    };
-    if !attempt_dir(dir, &next).join("spawn-intent.json").exists() {
-        task::save(dir, &old.record, &old.prompt)?;
-        durable_json(&dir.join("headless.json"), &old.spec)?;
-    }
-    std::fs::remove_file(journal)?;
-    Ok(())
 }
 
 pub fn inspection(dir: &Path) -> Result<Value> {
