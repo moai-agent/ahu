@@ -317,7 +317,6 @@ fn validate_metadata_owner(meta: &std::fs::Metadata, private: bool, uid: u32) ->
 /// Read task records with descriptor checks even during legacy owner discovery,
 /// where recursing through the headless resolver would need this very record.
 pub(crate) fn read_task_metadata(path: &Path) -> Result<Vec<u8>> {
-    use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     crate::state::confine_file(path)?;
     let private = HeadlessStore::containing(
@@ -330,8 +329,7 @@ pub(crate) fn read_task_metadata(path: &Path) -> Result<Vec<u8>> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)?;
     validate_owned_metadata(&file.metadata()?, private)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)?;
     Ok(bytes)
 }
 
@@ -539,5 +537,27 @@ mod ownership_tests {
                 &verified_primary(&primary).unwrap()
             ));
         }
+    }
+
+    #[test]
+    fn task_record_reads_refuse_files_beyond_the_record_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let record = root.path().join(".ahu/state/repos/an-identity/task.json");
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(
+            &record,
+            vec![0u8; crate::util::MAX_TASK_RECORD_BYTES as usize + 1],
+        )
+        .unwrap();
+        let error = read_task_metadata(&record).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!(
+                "file is larger than {} bytes",
+                crate::util::MAX_TASK_RECORD_BYTES
+            )),
+            "{error}"
+        );
+        std::fs::write(&record, b"{}").unwrap();
+        assert_eq!(read_task_metadata(&record).unwrap(), b"{}".to_vec());
     }
 }

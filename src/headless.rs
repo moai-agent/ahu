@@ -434,7 +434,9 @@ pub(crate) fn confined(path: &Path, create: bool) -> Result<()> {
         }
         confined_at(root, dir, false)?;
         let record_path = dir.join("task.json");
-        if state::confine_file(&record_path)?.is_none_or(|m| m.len() > 1024 * 1024) {
+        if state::confine_file(&record_path)?
+            .is_none_or(|m| m.len() > crate::util::MAX_TASK_RECORD_BYTES)
+        {
             continue;
         }
         let record = task::load(dir)?;
@@ -652,6 +654,15 @@ pub(crate) fn durable_json(path: &Path, value: &impl serde::Serialize) -> Result
 }
 
 pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    serde_json::from_slice(&review::read_bytes(
+        path,
+        Some(crate::util::MAX_TASK_RECORD_BYTES),
+    )?)
+    .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
+}
+
+// Lifecycle result envelopes keep the legacy unbounded API; records stay bounded.
+pub(crate) fn read_json_full<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&review::read_bytes(path, None)?)
         .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
 }
@@ -660,8 +671,14 @@ fn attempt_dir(dir: &Path, spec: &Spec) -> PathBuf {
     dir.join(format!("attempt-{}", spec.attempt))
 }
 fn frozen_digest(dir: &Path) -> Result<String> {
-    let mut bytes = review::read_bytes(&dir.join("task.json"), None)?;
-    bytes.extend(review::read_bytes(&dir.join("headless.json"), None)?);
+    let mut bytes = review::read_bytes(
+        &dir.join("task.json"),
+        Some(crate::util::MAX_TASK_RECORD_BYTES),
+    )?;
+    bytes.extend(review::read_bytes(
+        &dir.join("headless.json"),
+        Some(crate::util::MAX_TASK_RECORD_BYTES),
+    )?);
     Ok(digest_bytes(&bytes))
 }
 
@@ -2150,7 +2167,7 @@ fn boundary_after_drain(events: &mut Events, stop: &mut Option<(&'static str, In
 pub fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>> {
     let spec: Spec = read_json(&dir.join("headless.json")).ok()?;
     let result_path = attempt_dir(dir, &spec).join("result.json");
-    let result: Value = read_json(&result_path).ok()?;
+    let result: Value = read_json_full(&result_path).ok()?;
     let paths: Vec<String> = result
         .get("writes_outside_worktree")?
         .as_array()?
@@ -3092,7 +3109,7 @@ fn result(dir: &Path) -> Result<Value> {
 fn result_attempt(dir: &Path, spec: &Spec) -> Result<Value> {
     let path = attempt_dir(dir, spec).join("result.json");
     if path.exists() {
-        let value: Value = read_json(&path)?;
+        let value: Value = read_json_full(&path)?;
         review::validate_result(
             &value,
             &dir.file_name().unwrap_or_default().to_string_lossy(),
@@ -3164,7 +3181,7 @@ fn wait(dir: &Path, json_output: bool) -> Result<i32> {
     loop {
         // Validate public review output without applying the interactive display-size
         // limit to wait's existing full-envelope API.
-        let value = review_attempt(dir, &spec, read_json)?;
+        let value = review_attempt(dir, &spec, read_json_full)?;
         if value["outcome"] != "running" {
             let code = if value["outcome"] == "succeeded" {
                 0
@@ -5405,5 +5422,27 @@ mod filesystem_behavior_tests {
         drop(owner);
         assert!(!supervisor_owns_attempt(root.path()).unwrap());
         assert!(Lock::try_acquire(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn headless_record_reads_refuse_metadata_beyond_the_inspection_bound() {
+        let (_root, repo) = repository();
+        let store = store(&repo).unwrap();
+        let dir = store.join("abc");
+        confined_in(&repo, &dir, true).unwrap();
+        let record = dir.join("headless.json");
+        std::fs::write(
+            &record,
+            vec![0u8; crate::util::MAX_TASK_RECORD_BYTES as usize + 1],
+        )
+        .unwrap();
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let error = read_json::<serde_json::Value>(&record)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("metadata exceeds the inspection bound"),
+            "{error}"
+        );
     }
 }

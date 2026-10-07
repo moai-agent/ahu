@@ -151,9 +151,15 @@ pub fn load(repo_root: &Path) -> Result<Option<LoadedConfig>> {
     else {
         return Ok(None);
     };
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(Error::new(format!("cannot read {}: {e}", path.display())));
+        }
+    };
+    let bytes = match crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES) {
+        Ok(bytes) => bytes,
         Err(e) => {
             return Err(Error::new(format!("cannot read {}: {e}", path.display())));
         }

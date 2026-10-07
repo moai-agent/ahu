@@ -63,8 +63,20 @@ pub fn ensure_checkout_state(checkout: &Path) -> Result<PathBuf> {
             );
         }
         Ok(_) => {
-            let content = std::fs::read_to_string(&ignore)
+            let mut file = std::fs::File::open(&ignore)
                 .map_err(|e| state_io_error("read ignore file", &ignore, e))?;
+            let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
+                .map_err(|e| state_io_error("read ignore file", &ignore, e))?;
+            let content = String::from_utf8(bytes).map_err(|_| {
+                state_io_error(
+                    "read ignore file",
+                    &ignore,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "stream did not contain valid UTF-8",
+                    ),
+                )
+            })?;
             if !ignores_everything(&content) {
                 bail!(
                     "{} must ignore all state files with a bare * and no negations",
@@ -217,8 +229,16 @@ pub fn ensure_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
             root.display()
         ),
         Ok(_) => {
-            let found = std::fs::read_to_string(&ignore)
+            let mut file = std::fs::File::open(&ignore)
                 .map_err(|e| Error::new(format!("cannot read {}: {e}", ignore.display())))?;
+            let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
+                .map_err(|e| Error::new(format!("cannot read {}: {e}", ignore.display())))?;
+            let found = String::from_utf8(bytes).map_err(|_| {
+                Error::new(format!(
+                    "cannot read {}: stream did not contain valid UTF-8",
+                    ignore.display()
+                ))
+            })?;
             if !ignores_everything(&found) {
                 bail!(
                     "{} exists but does not ignore everything under {}.\n\
@@ -426,12 +446,15 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Resul
     if confine_file(path)?.is_none() {
         return Ok(T::default());
     }
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)
-            .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))?),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(e) => Err(state_io_error("read", path, e)),
-    }
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(e) => return Err(state_io_error("read", path, e)),
+    };
+    let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
+        .map_err(|e| state_io_error("read", path, e))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
 }
 
 /// Read a JSON state file that must exist and must be valid.
@@ -447,11 +470,11 @@ pub fn read_json_strict<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T
             std::io::Error::from(std::io::ErrorKind::NotFound),
         )
     })?;
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)
-            .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))?),
-        Err(e) => Err(state_io_error("read", path, e)),
-    }
+    let mut file = std::fs::File::open(path).map_err(|e| state_io_error("read", path, e))?;
+    let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
+        .map_err(|e| state_io_error("read", path, e))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
 }
 
 /// Write a compact JSON state file whose contents must survive a crash.
@@ -567,7 +590,7 @@ fn confine_dir(base: &Path, dir: &Path, create: bool) -> Result<()> {
         current.push(name);
         match std::fs::symlink_metadata(&current) {
             Ok(meta) if meta.file_type().is_symlink() => return Err(symlink_refusal(&current)),
-            Ok(meta) if meta.is_dir() => {}
+            Ok(meta) if meta.is_dir() => ensure_owned_by_current_user(&current, &meta)?,
             Ok(_) => bail!(
                 "refusing ahu state path {}: expected a directory, found a file",
                 current.display()
@@ -595,7 +618,10 @@ fn create_one_dir(path: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             match std::fs::symlink_metadata(path) {
                 Ok(meta) if meta.file_type().is_symlink() => Err(symlink_refusal(path)),
-                Ok(meta) if meta.is_dir() => Ok(()),
+                Ok(meta) if meta.is_dir() => {
+                    ensure_owned_by_current_user(path, &meta)?;
+                    Ok(())
+                }
                 Ok(_) => Err(Error::new(format!(
                     "refusing ahu state path {}: expected a directory, found a file",
                     path.display()
@@ -619,6 +645,37 @@ fn symlink_refusal(path: &Path) -> Error {
          Inspect that path in the checkout before running ahu again.",
         path.display()
     ))
+}
+
+fn owner_refusal(path: &Path) -> Error {
+    Error::new(format!(
+        "refusing ahu state path {}: it is owned by another user.\n\
+         ahu state stays inside the store it was given. State written by a different \
+         account would let that account act as this one, so nothing was created, \
+         written, or changed.\n\
+         Inspect that path in the checkout before running ahu again.",
+        path.display()
+    ))
+}
+
+/// Refuse an entry inside the store that another user owns.
+///
+/// Every entry ahu creates is owned by the invoking account, so a foreign-owned
+/// directory or file under `.ahu/state` did not come from this ahu. Using it
+/// anyway would let that account's ahu read and write this one's records, so
+/// pre-existing entries are refused instead of traversed, read, or written.
+fn ensure_owned_by_current_user(path: &Path, meta: &std::fs::Metadata) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return Err(owner_refusal(path));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, meta);
+    Ok(())
 }
 
 /// Set owner-only permissions on a directory or file ahu already inspected.
@@ -697,7 +754,10 @@ pub fn confine_file(path: &Path) -> Result<Option<std::fs::Metadata>> {
             path.display(),
             describe_file_type(&meta)
         ))),
-        Ok(meta) => Ok(Some(meta)),
+        Ok(meta) => {
+            ensure_owned_by_current_user(path, &meta)?;
+            Ok(Some(meta))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(state_io_error("inspect", path, e)),
     }
@@ -826,7 +886,9 @@ pub fn read_private_file(path: &Path) -> Result<Vec<u8>> {
             std::io::Error::from(std::io::ErrorKind::NotFound),
         )
     })?;
-    std::fs::read(path).map_err(|e| state_io_error("read", path, e))
+    let mut file = std::fs::File::open(path).map_err(|e| state_io_error("read", path, e))?;
+    crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
+        .map_err(|e| state_io_error("read", path, e))
 }
 
 #[cfg(test)]
@@ -1011,6 +1073,16 @@ mod tests {
         let error = confine_file(&file.join("child")).unwrap_err().to_string();
         assert!(error.contains("cannot inspect ahu state"), "{error}");
         assert_eq!(std::fs::read_to_string(file).unwrap(), "preserve");
+    }
+
+    #[test]
+    fn owner_refusal_names_the_path_and_the_risk() {
+        let error = owner_refusal(Path::new("/repo/.ahu/state")).to_string();
+        assert!(
+            error.contains("refusing ahu state path /repo/.ahu/state"),
+            "{error}"
+        );
+        assert!(error.contains("owned by another user"), "{error}");
     }
 
     #[test]
