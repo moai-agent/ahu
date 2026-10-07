@@ -1,68 +1,14 @@
-//! Small shared helpers: the crate error type, shell quoting, and digests.
+//! Small shared helpers: shell quoting, digests, and display safety. The crate
+//! error type and path resolution live in the `error` and `path` submodules
+//! and are re-exported here.
 
-use std::fmt;
-use std::path::{Path, PathBuf};
+mod error;
+mod path;
 
-/// Stable exit categories for command failures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum ErrorKind {
-    Usage = 2,
-    UnknownAgent = 3,
-    Prerequisite = 4,
-    RunFailure = 5,
-}
+pub use error::{Error, ErrorKind, Result};
+pub use path::{resolve_existing_within, resolve_within, symlink_refusal};
 
-#[derive(Debug)]
-/// A failure category and an actionable message for the person running ahu.
-pub struct Error {
-    kind: ErrorKind,
-    message: String,
-}
-
-impl Error {
-    /// Runtime validation, persistence, and subprocess failures default to run failure.
-    /// User input and unavailable prerequisites are classified at their boundaries.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            kind: ErrorKind::RunFailure,
-        }
-    }
-}
-
-impl Error {
-    pub fn with_kind(mut self, kind: ErrorKind) -> Self {
-        self.kind = kind;
-        self
-    }
-
-    pub fn kind(&self) -> ErrorKind {
-        self.kind
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<std::io::Error> for Error {
-    fn from(value: std::io::Error) -> Self {
-        Error::new(value.to_string())
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(value: serde_json::Error) -> Self {
-        Error::new(format!("invalid JSON: {value}"))
-    }
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
+use std::path::Path;
 
 /// Cooperative operator boundary, not isolation from other same-user code.
 /// Presence matters even when a marker is empty or not valid Unicode.
@@ -108,17 +54,6 @@ pub(crate) fn read_limited(file: &mut std::fs::File, limit: u64) -> std::io::Res
         ));
     }
     Ok(bytes)
-}
-
-/// Build an [`Error`] with `format!` syntax.
-#[macro_export]
-macro_rules! bail {
-    (kind: $kind:expr, $($arg:tt)*) => {
-        return Err($crate::util::Error::new(format!($($arg)*)).with_kind($kind))
-    };
-    ($($arg:tt)*) => {
-        return Err($crate::util::Error::new(format!($($arg)*)))
-    };
 }
 
 /// Quote `value` so a POSIX shell passes it through as a single literal word.
@@ -374,136 +309,6 @@ pub fn display_safe_block(value: &str) -> String {
         }
     }
     out
-}
-
-/// Resolve `relative` under `root`, refusing to traverse a symlink.
-///
-/// Every path ahu writes to, deletes, or creates inside a repository goes
-/// through this. A repository can commit a symlink at any path it likes — at
-/// `.agents/ahu/agents`, at `.claude`, at `.worktrees` — and following one lets
-/// the repository choose where ahu's filesystem operations land. Checking only
-/// the final component is not enough: the escape is usually a parent.
-///
-/// `create_missing_dirs` creates intermediate directories as real directories
-/// when they are absent; otherwise a missing component is simply reported back
-/// through the returned path, which the caller may or may not require to exist.
-pub fn resolve_within(root: &Path, relative: &str, create_missing_dirs: bool) -> Result<PathBuf> {
-    let parts: Vec<&str> = relative.split('/').filter(|p| !p.is_empty()).collect();
-    let Some((last, directories)) = parts.split_last() else {
-        return Err(Error::new(format!("empty path under {}", root.display())));
-    };
-    if parts.iter().any(|p| *p == ".." || *p == ".") {
-        return Err(Error::new(format!(
-            "{relative} is not a plain path under {}",
-            root.display()
-        )));
-    }
-    let mut current = root.to_path_buf();
-    for directory in directories {
-        current.push(directory);
-        match std::fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(symlink_refusal(&current, relative));
-            }
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => {
-                return Err(Error::new(format!(
-                    "{} exists and is not a directory.",
-                    current.display()
-                )));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if !create_missing_dirs {
-                    return Err(Error::new(format!("{} does not exist.", current.display())));
-                }
-                std::fs::create_dir(&current)
-                    .map_err(|e| Error::new(format!("cannot create {}: {e}", current.display())))?;
-            }
-            Err(e) => {
-                return Err(Error::new(format!(
-                    "cannot inspect {}: {e}",
-                    current.display()
-                )));
-            }
-        }
-    }
-    current.push(last);
-    if let Ok(meta) = std::fs::symlink_metadata(&current)
-        && meta.file_type().is_symlink()
-    {
-        return Err(symlink_refusal(&current, relative));
-    }
-    Ok(current)
-}
-
-/// Resolve `relative` under `root` for *reading*, refusing to traverse a symlink.
-///
-/// [`resolve_within`] guards every path ahu writes to. Reads need the same
-/// guard for the same reason — a repository can commit a symlink at
-/// `.agents/ahu/config.toml` or `.agents/ahu/agents/x.md`, and reading
-/// through one lets the repository choose which file ahu opens and then quotes
-/// back in a parse error. That is an arbitrary-file read with the contents
-/// disclosed, from nothing more than checking out a repository.
-///
-/// Reads differ from writes in one way: a component that does not exist is the
-/// ordinary "not configured yet" case, not a failure. So absence is reported as
-/// `Ok(None)` and only a symlink, or a non-directory where a directory must be,
-/// is an error.
-///
-/// A symlink swapped in between this call and the open is still possible. The
-/// committed-symlink case — the one a repository controls — is closed here;
-/// winning that race additionally requires write access to the checkout while
-/// ahu is running.
-pub fn resolve_existing_within(root: &Path, relative: &str) -> Result<Option<PathBuf>> {
-    let parts: Vec<&str> = relative.split('/').filter(|p| !p.is_empty()).collect();
-    if parts.is_empty() {
-        return Err(Error::new(format!("empty path under {}", root.display())));
-    }
-    if parts.iter().any(|p| *p == ".." || *p == ".") {
-        return Err(Error::new(format!(
-            "{relative} is not a plain path under {}",
-            root.display()
-        )));
-    }
-    let mut current = root.to_path_buf();
-    for (index, part) in parts.iter().enumerate() {
-        current.push(part);
-        let last = index + 1 == parts.len();
-        match std::fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(symlink_refusal(&current, relative));
-            }
-            Ok(meta) if last || meta.is_dir() => {}
-            Ok(_) => {
-                return Err(Error::new(format!(
-                    "{} exists and is not a directory.",
-                    current.display()
-                )));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(Error::new(format!(
-                    "cannot inspect {}: {e}",
-                    current.display()
-                )));
-            }
-        }
-    }
-    Ok(Some(current))
-}
-
-/// The message shown when ahu refuses to act through a symlink.
-pub fn symlink_refusal(found_at: &Path, relative: &str) -> Error {
-    let points_to = std::fs::read_link(found_at)
-        .map(|t| t.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "an unreadable target".to_string());
-    Error::new(format!(
-        "refusing to act through a symlink.\n\
-         {} is a symlink pointing at {points_to}, and ahu was about to use it for {relative}.\n\
-         Following it would let this repository choose where ahu reads, writes, or deletes, so \
-         nothing was done. Inspect that path in the repository before trying again.",
-        found_at.display()
-    ))
 }
 
 /// Collapse a prompt into a short single-line task title.
