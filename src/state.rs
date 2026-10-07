@@ -73,14 +73,13 @@ pub fn ensure_checkout_state(checkout: &Path) -> Result<PathBuf> {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&ignore)
-                .map_err(|e| state_io_error("create ignore file", &ignore, e))?;
-            file.write_all(b"# Local ahu session state. Never commit.\n*\n")
-                .map_err(|e| state_io_error("write ignore file", &ignore, e))?;
+            // `Ok(false)` means a concurrent ahu created the same fixed
+            // contents first; the next run re-reads and validates them.
+            crate::private_io::atomic_create(
+                &ignore,
+                b"# Local ahu session state. Never commit.\n*\n",
+                crate::private_io::Durability::Atomic,
+            )?;
         }
         Err(e) => return Err(state_io_error("inspect ignore file", &ignore, e)),
     }
@@ -234,8 +233,13 @@ pub fn ensure_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::write(&ignore, WORKTREES_GITIGNORE)
-                .map_err(|e| Error::new(format!("cannot create {}: {e}", ignore.display())))?;
+            // `Ok(false)` means a concurrent ahu created the same fixed
+            // contents first; the next run re-reads and validates them.
+            crate::private_io::atomic_create(
+                &ignore,
+                WORKTREES_GITIGNORE.as_bytes(),
+                crate::private_io::Durability::Atomic,
+            )?;
         }
         Err(e) => bail!("cannot inspect {}: {e}", ignore.display()),
     }
@@ -428,6 +432,39 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Resul
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(state_io_error("read", path, e)),
     }
+}
+
+/// Read a JSON state file that must exist and must be valid.
+///
+/// Unlike [`read_json`], a missing file is an error, not a default: records
+/// such as task state are written before they are relied on, so their absence
+/// is damage worth reporting instead of silently replacing with a default.
+pub fn read_json_strict<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    confine_file(path)?.ok_or_else(|| {
+        state_io_error(
+            "read",
+            path,
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        )
+    })?;
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)
+            .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))?),
+        Err(e) => Err(state_io_error("read", path, e)),
+    }
+}
+
+/// Write a compact JSON state file whose contents must survive a crash.
+///
+/// The parent directory is validated by the caller, not created here: this is
+/// the record path of a running task, whose store already exists. The body and
+/// the directory that holds it are flushed to storage before the call returns.
+pub fn write_durable_json_compact<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+    let mut body = serde_json::to_vec(value)
+        .map_err(|e| Error::new(format!("cannot serialize state: {e}")))?;
+    body.push(b'\n');
+    confine_file(path)?;
+    crate::private_io::atomic_write(path, &body, crate::private_io::Durability::Durable)
 }
 
 /// Create a directory tree that only its owner can enter.
@@ -757,12 +794,27 @@ pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 /// Write a state file that is not JSON, with the same confinement.
+///
+/// Task records must survive the crashes that can happen while they are being
+/// written, so the file and its parent directory are flushed to the storage
+/// that holds them before the call returns; see
+/// [`crate::private_io::Durability`]. Callers with weaker durability
+/// requirements use [`write_private_file_with`].
 pub fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
+    write_private_file_with(path, body, crate::private_io::Durability::Durable)
+}
+
+/// Write a state file with an explicit durability contract.
+pub(crate) fn write_private_file_with(
+    path: &Path,
+    body: &[u8],
+    durability: crate::private_io::Durability,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)?;
     }
     confine_file(path)?;
-    crate::private_io::atomic_write(path, body, crate::private_io::Durability::Atomic)
+    crate::private_io::atomic_write(path, body, durability)
 }
 
 /// Read a state file ahu wrote, refusing a redirected path.
@@ -856,6 +908,37 @@ mod tests {
         assert!(error.contains("cannot serialize state"), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), b"not json");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn state_file_contracts_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let pretty = root.path().join("pretty.json");
+        write_json(&pretty, &vec!["record"]).unwrap();
+        assert_eq!(
+            std::fs::read(&pretty).unwrap(),
+            serde_json::to_vec_pretty(&vec!["record"]).unwrap()
+        );
+        assert_eq!(read_json::<Vec<String>>(&pretty).unwrap(), vec!["record"]);
+
+        let compact = root.path().join("compact.json");
+        write_durable_json_compact(&compact, &vec!["record"]).unwrap();
+        let body = std::fs::read_to_string(&compact).unwrap();
+        assert_eq!(body, "[\"record\"]\n");
+
+        let missing = root.path().join("missing.json");
+        assert!(read_json_strict::<Vec<String>>(&missing).is_err());
+        std::fs::write(&missing, b"not json").unwrap();
+        let error = read_json_strict::<Vec<String>>(&missing)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is not valid ahu state"), "{error}");
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+        assert!(read_json::<Vec<String>>(&missing).is_err());
+
+        let raw = root.path().join("raw.bin");
+        write_private_file(&raw, b"payload").unwrap();
+        assert_eq!(read_private_file(&raw).unwrap(), b"payload");
     }
 
     #[test]

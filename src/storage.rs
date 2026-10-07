@@ -161,6 +161,13 @@ impl HeadlessStore {
     }
 }
 
+/// Whether a directory name can hold a task record: a canonical ahu task id
+/// or a non-empty hexadecimal legacy identifier.
+pub(crate) fn is_task_entry_name(name: &str) -> bool {
+    crate::task::is_canonical_task_uuid(name)
+        || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 // Verification is process-local evidence, not a persisted marker. Cache a
 // positively Git-verified primary and invalidate it when its Git locator or
 // ownership-defining metadata changes. Normal record writes require only fresh

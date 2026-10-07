@@ -423,9 +423,7 @@ pub(crate) fn confined(path: &Path, create: bool) -> Result<()> {
         let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !(task::is_canonical_task_uuid(id)
-            || (!id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit())))
-        {
+        if !crate::storage::is_task_entry_name(id) {
             continue;
         }
         let Some(root) = dir.parent().and_then(Path::parent) else {
@@ -634,9 +632,7 @@ fn discover_stores(repo: &crate::git::Repo, domains: Vec<PathBuf>) -> Result<Vec
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if crate::task::is_canonical_task_uuid(&name)
-                || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_hexdigit()))
-            {
+            if crate::storage::is_task_entry_name(&name) {
                 confined_in(repo, &entry.path(), false)?;
                 if entry.path().join("task.json").exists() {
                     out.push(entry.path());
@@ -652,15 +648,12 @@ pub(crate) fn durable_json(path: &Path, value: &impl serde::Serialize) -> Result
         .parent()
         .ok_or_else(|| Error::new("runtime file needs a parent"))?;
     confined(parent, true)?;
-    state::confine_file(path)?;
-    let mut body = serde_json::to_vec(value).map_err(|e| Error::new(e.to_string()))?;
-    body.push(b'\n');
-    crate::private_io::atomic_write(path, &body, crate::private_io::Durability::Durable)
+    state::write_durable_json_compact(path, value)
 }
 
 pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&review::read_bytes(path, None)?)
-        .map_err(|_| Error::new(format!("invalid metadata at {}", path.display())))
+        .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
 }
 
 fn attempt_dir(dir: &Path, spec: &Spec) -> PathBuf {
