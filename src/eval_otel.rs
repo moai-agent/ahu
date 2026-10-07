@@ -196,7 +196,17 @@ impl Receiver {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
-        let endpoint = format!("http://{address}");
+
+        let mut token_bytes = [0u8; 16];
+        crate::orchestration::os_entropy(&mut token_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let mut token = String::with_capacity(32);
+        for byte in token_bytes {
+            use std::fmt::Write;
+            write!(&mut token, "{:02x}", byte).unwrap();
+        }
+
+        let endpoint = format!("http://{address}/{token}");
         let state = Arc::new(Mutex::new(CaptureState {
             expected_run_id: run_id.map(str::to_owned),
             expected_case_id: case_id.map(str::to_owned),
@@ -232,7 +242,10 @@ impl Receiver {
                             let connection_state = Arc::clone(&thread_state);
                             if let Ok(connection) = thread::Builder::new()
                                 .name("ahu-eval-otlp-client".into())
-                                .spawn(move || handle_connection(stream, &connection_state))
+                                .spawn({
+                                    let token = token.clone();
+                                    move || handle_connection(stream, &connection_state, &token)
+                                })
                             {
                                 connections.push(connection);
                             } else {
@@ -295,7 +308,7 @@ impl Drop for Receiver {
     }
 }
 
-fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<CaptureState>>) {
+fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<CaptureState>>, token: &str) {
     // Some platforms pass the listener's nonblocking mode to accepted sockets.
     // The parser relies on read/write timeouts, so restore blocking mode here.
     if stream.set_nonblocking(false).is_err() {
@@ -313,7 +326,8 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<CaptureState>>) {
         respond(&mut stream, 400, "bad request");
         return;
     };
-    if !headers.starts_with("POST /v1/traces HTTP/1.")
+    let expected_line = format!("POST /{}/v1/traces HTTP/1.", token);
+    if !headers.starts_with(&expected_line)
         || !headers
             .to_ascii_lowercase()
             .contains("content-type: application/x-protobuf")
@@ -1130,7 +1144,8 @@ mod tests {
         let body = request.encode_to_vec();
         let mut stream = TcpStream::connect(("127.0.0.1", endpoint.port().unwrap())).unwrap();
         let mut request_bytes = format!(
-            "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            endpoint.path(),
             body.len()
         )
         .into_bytes();
@@ -1163,10 +1178,11 @@ mod tests {
 
     #[test]
     fn local_receiver_accepts_a_second_export_while_one_client_is_stalled() {
-        fn http_request(task_id: &str, span_id: u8) -> Vec<u8> {
+        fn http_request(task_id: &str, span_id: u8, path: &str) -> Vec<u8> {
             let body = export(task_id, vec![session_span(span_id, 0)]).encode_to_vec();
             let header = format!(
-                "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                path,
                 body.len()
             );
             let mut request = header.into_bytes();
@@ -1184,7 +1200,7 @@ mod tests {
             .unwrap();
         thread::sleep(Duration::from_millis(30));
 
-        let fast_request = http_request("task-fast", 22);
+        let fast_request = http_request("task-fast", 22, endpoint.path());
         let mut fast_stream = TcpStream::connect(address).unwrap();
         fast_stream
             .set_read_timeout(Some(Duration::from_millis(500)))
@@ -1259,20 +1275,39 @@ mod tests {
         let receiver = Receiver::start().unwrap();
         let endpoint = receiver.endpoint().parse::<url::Url>().unwrap();
         let port = endpoint.port().unwrap();
-        let missing_length = b"POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\n\r\n";
-        assert!(exchange(port, missing_length).starts_with("HTTP/1.1 411"));
+        let path = endpoint.path();
+
+        let missing_length = format!(
+            "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\n\r\n",
+            path
+        );
+        assert!(exchange(port, missing_length.as_bytes()).starts_with("HTTP/1.1 411"));
 
         let too_large = format!(
-            "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\n\r\n",
+            "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\n\r\n",
+            path,
             MAX_BODY_BYTES + 1
         );
         assert!(exchange(port, too_large.as_bytes()).starts_with("HTTP/1.1 413"));
 
-        let malformed = b"POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 1\r\n\r\nx";
-        assert!(exchange(port, malformed).starts_with("HTTP/1.1 400"));
+        let malformed = format!(
+            "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 1\r\n\r\nx",
+            path
+        );
+        assert!(exchange(port, malformed.as_bytes()).starts_with("HTTP/1.1 400"));
 
-        let truncated = b"POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 4\r\n\r\nx";
-        assert!(exchange(port, truncated).starts_with("HTTP/1.1 400"));
-        assert_eq!(receiver.receiver_stats().rejected_requests, 4);
+        let truncated = format!(
+            "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 4\r\n\r\nx",
+            path
+        );
+        assert!(exchange(port, truncated.as_bytes()).starts_with("HTTP/1.1 400"));
+
+        let wrong_token = "POST /wrongtoken/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 10\r\n\r\n1234567890";
+        assert!(exchange(port, wrong_token.as_bytes()).starts_with("HTTP/1.1 404"));
+
+        let missing_token = "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 10\r\n\r\n1234567890";
+        assert!(exchange(port, missing_token.as_bytes()).starts_with("HTTP/1.1 404"));
+
+        assert_eq!(receiver.receiver_stats().rejected_requests, 6);
     }
 }
