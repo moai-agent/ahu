@@ -37,6 +37,8 @@ const SPAN_EXPORT_BATCH_SIZE: usize = 32;
 const SPAN_SCHEDULED_DELAY: Duration = Duration::from_millis(500);
 const SPAN_EXPORT_TIMEOUT: Duration = Duration::from_millis(500);
 
+// Expecting the mutex is correct for telemetry because poisoning only occurs
+// after a panic in this process, and halting is the intended fail-stop behavior.
 fn provider_slot() -> &'static Mutex<Option<SdkTracerProvider>> {
     PROVIDER.get_or_init(|| Mutex::new(None))
 }
@@ -55,6 +57,19 @@ fn bounded_span_processor(
         .build()
 }
 
+pub(crate) fn is_valid_local_endpoint(endpoint: &url::Url) -> bool {
+    let local = matches!(
+        endpoint.host_str(),
+        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+    );
+    endpoint.scheme() == "http"
+        && local
+        && endpoint.username().is_empty()
+        && endpoint.password().is_none()
+        && endpoint.query().is_none()
+        && endpoint.fragment().is_none()
+}
+
 pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
     let endpoint = config.endpoint.parse::<url::Url>().map_err(|error| {
         Error::new(format!(
@@ -62,36 +77,15 @@ pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
             path.display()
         ))
     })?;
-    if endpoint.scheme() != "http" {
+    if !crate::telemetry::is_valid_local_endpoint(&endpoint) {
         return Err(Error::new(format!(
-            "{}: telemetry.endpoint must use http:// for the local collector",
-            path.display()
-        )));
-    }
-    let local = matches!(
-        endpoint.host_str(),
-        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
-    );
-    if !local {
-        return Err(Error::new(format!(
-            "{}: telemetry.endpoint must point to localhost, 127.0.0.1, or ::1",
+            "{}: telemetry.endpoint must be a local http origin without credentials, query, or fragment",
             path.display()
         )));
     }
     if endpoint.port_or_known_default() != Some(4318) {
         return Err(Error::new(format!(
             "{}: telemetry.endpoint must use the OTLP/HTTP port 4318",
-            path.display()
-        )));
-    }
-    if !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || !matches!(endpoint.path(), "" | "/")
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-    {
-        return Err(Error::new(format!(
-            "{}: telemetry.endpoint must be a collector origin without credentials, path, query, or fragment",
             path.display()
         )));
     }
@@ -234,16 +228,11 @@ fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
-        if ALLOWED.contains(&key) && safe_resource_value(key, value) && seen.insert(key.to_string())
+        if let Some(&allowed_key) = ALLOWED.iter().find(|&&allowed| allowed == key)
+            && safe_resource_value(allowed_key, value)
+            && seen.insert(allowed_key.to_string())
         {
-            out.push((
-                ALLOWED
-                    .iter()
-                    .copied()
-                    .find(|allowed| *allowed == key)
-                    .unwrap(),
-                value.to_string(),
-            ));
+            out.push((allowed_key, value.to_string()));
         }
     }
     out
@@ -272,6 +261,9 @@ fn safe_eval_identifier(value: &str) -> bool {
 }
 
 /// Apply project telemetry only to a child process ahu is about to start.
+/// Trust boundary: attributes emitted by child processes are redacted only at the
+/// local collector; the child environment is NOT a trust boundary for attribute content.
+/// See docs/reference.md ~:906-914 and docs/knowledge/telemetry-evidence.md ~:74-76.
 #[allow(clippy::too_many_arguments)]
 pub fn configure_child(
     command: &mut std::process::Command,
@@ -284,29 +276,16 @@ pub fn configure_child(
     task_id: Option<&str>,
     attempt: Option<u32>,
 ) {
-    let Some(endpoint) =
-        eval_endpoint_override().or_else(|| config.enabled.then(|| config.endpoint.clone()))
-    else {
-        return;
-    };
-    let attributes = resource_attributes(
-        agent,
-        harness,
-        model,
-        agent_version,
-        harness_version,
-        task_id,
-        attempt,
-        std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
-    );
-    let mcp_attributes = parse_ahu_resource_attributes(&attributes)
-        .into_iter()
-        .map(|(key, value)| format!("{key}={}", escape(&value)))
-        .collect::<Vec<_>>()
-        .join(",");
     command
-        .env("AHU_MCP_RESOURCE_ATTRIBUTES", mcp_attributes)
         .env_remove("AHU_EVAL_LOCAL_METRICS")
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("https_proxy")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
         .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
         .env_remove("OTEL_EXPORTER_OTLP_METRICS_HEADERS")
@@ -320,8 +299,59 @@ pub fn configure_child(
         .env_remove("OTEL_EXPORTER_OTLP_LOGS_COMPRESSION")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-        .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+        .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT");
+
+    let Some(endpoint_str) =
+        eval_endpoint_override().or_else(|| config.enabled.then(|| config.endpoint.clone()))
+    else {
+        return;
+    };
+    let Ok(endpoint_url) = endpoint_str.parse::<url::Url>() else {
+        eprintln!("ahu: invalid telemetry endpoint (not a URL); continuing without export");
+        return;
+    };
+    if !crate::telemetry::is_valid_local_endpoint(&endpoint_url) {
+        eprintln!("ahu: invalid telemetry endpoint; continuing without export");
+        return;
+    }
+
+    let ambient = std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok();
+    let safe_ambient = ambient.as_deref().and_then(|raw| {
+        let parsed = parse_ahu_resource_attributes(raw);
+        if parsed.is_empty() && !raw.trim().is_empty() {
+            eprintln!("ahu: ambient OTEL_RESOURCE_ATTRIBUTES malformed or not allowed, dropping");
+            None
+        } else if parsed.is_empty() {
+            None
+        } else {
+            Some(
+                parsed
+                    .into_iter()
+                    .map(|(k, v)| format!("{k}={}", escape(&v)))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        }
+    });
+
+    let attributes = resource_attributes(
+        agent,
+        harness,
+        model,
+        agent_version,
+        harness_version,
+        task_id,
+        attempt,
+        safe_ambient.as_deref(),
+    );
+    let mcp_attributes = parse_ahu_resource_attributes(&attributes)
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", escape(&value)))
+        .collect::<Vec<_>>()
+        .join(",");
+    command
+        .env("AHU_MCP_RESOURCE_ATTRIBUTES", mcp_attributes)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint_str)
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
         .env("OTEL_EXPORTER_OTLP_TIMEOUT", "500")
         .env("OTEL_TRACES_EXPORTER", "otlp")
@@ -337,23 +367,10 @@ pub fn configure_child(
 pub(crate) fn eval_endpoint_override() -> Option<String> {
     let raw = std::env::var("AHU_EVAL_OTEL_ENDPOINT").ok()?;
     let endpoint = raw.parse::<url::Url>().ok()?;
-    let local = matches!(endpoint.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
-    if endpoint.scheme() != "http"
-        || !local
-        || endpoint.port().is_none()
-        || endpoint.username() != ""
-        || endpoint.password().is_some()
-        || !matches!(endpoint.path(), "" | "/")
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-    {
+    if !crate::telemetry::is_valid_local_endpoint(&endpoint) || endpoint.port().is_none() {
         return None;
     }
-    Some(format!(
-        "http://{}:{}",
-        endpoint.host_str()?,
-        endpoint.port()?
-    ))
+    Some(endpoint.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1105,7 +1122,45 @@ mod tests {
         configure_child(
             &mut child, &config, "agent", "codex", "model", None, None, None, None,
         );
-        assert_eq!(child.get_envs().count(), 0);
+        // Stripping is fail-closed: sensitive and proxy variables are removed
+        // even when telemetry is disabled, and nothing is set.
+        let envs: std::collections::HashMap<_, _> = child.get_envs().collect();
+        for key in [
+            "AHU_EVAL_LOCAL_METRICS",
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+            "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+            "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+            "OTEL_EXPORTER_OTLP_CERTIFICATE",
+            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+            "OTEL_EXPORTER_OTLP_CLIENT_KEY",
+            "OTEL_EXPORTER_OTLP_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_LOGS_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        ] {
+            assert!(
+                envs.get(std::ffi::OsStr::new(key))
+                    .map(|v| v.is_none())
+                    .unwrap_or(false),
+                "{key} should be stripped even when telemetry is disabled"
+            );
+        }
+        assert!(
+            envs.iter().all(|(_, value)| value.is_none()),
+            "no environment variables should be set when telemetry is disabled"
+        );
     }
 
     #[test]
@@ -1114,6 +1169,7 @@ mod tests {
             "http://localhost:4318",
             "http://127.0.0.1:4318/",
             "http://[::1]:4318",
+            "http://127.0.0.1:4318/v1/traces",
         ] {
             let config = TelemetryConfig {
                 endpoint: endpoint.into(),
@@ -1130,7 +1186,6 @@ mod tests {
             "http://synthetic-user:synthetic-password@127.0.0.1:4318",
             "http://synthetic-user@127.0.0.1:4318",
             "http://:synthetic-password@[::1]:4318",
-            "http://127.0.0.1:4318/v1/traces",
             "http://127.0.0.1:4318/?synthetic-query",
             "http://127.0.0.1:4318/#synthetic-fragment",
         ] {
@@ -1142,6 +1197,119 @@ mod tests {
                 .expect_err("only a local collector origin is valid");
             assert!(!error.to_string().contains("synthetic-"));
         }
+    }
+
+    #[test]
+    fn child_environment_proxy_vars_are_absent() {
+        let mut command = std::process::Command::new("true");
+        for key in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ] {
+            command.env(key, "synthetic-proxy");
+        }
+        let enabled = TelemetryConfig {
+            enabled: true,
+            endpoint: "http://127.0.0.1:4318".into(),
+            ..TelemetryConfig::default()
+        };
+        configure_child(
+            &mut command,
+            &enabled,
+            "agent",
+            "codex",
+            "model",
+            None,
+            None,
+            Some("task"),
+            Some(2),
+        );
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        for key in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ] {
+            assert!(
+                envs.get(std::ffi::OsStr::new(key))
+                    .map(|v| v.is_none())
+                    .unwrap_or(true),
+                "{} should be stripped",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn child_environment_invalid_endpoint_no_export() {
+        for endpoint in [
+            "https://127.0.0.1:4318",
+            "http://example.com:4318",
+            "http://user@127.0.0.1:4318",
+            "http://127.0.0.1:4318/?query=1",
+            "http://127.0.0.1:4318/#frag",
+        ] {
+            let mut command = std::process::Command::new("true");
+            let enabled = TelemetryConfig {
+                enabled: true,
+                endpoint: endpoint.into(),
+                ..TelemetryConfig::default()
+            };
+            configure_child(
+                &mut command,
+                &enabled,
+                "agent",
+                "codex",
+                "model",
+                None,
+                None,
+                Some("task"),
+                Some(2),
+            );
+            assert!(
+                command
+                    .get_envs()
+                    .all(|(key, _)| key != "OTEL_EXPORTER_OTLP_ENDPOINT")
+            );
+        }
+        // Test token path endpoint is accepted
+        let mut command = std::process::Command::new("true");
+        let enabled = TelemetryConfig {
+            enabled: true,
+            endpoint: "http://127.0.0.1:4318/token123/v1/traces".into(),
+            ..TelemetryConfig::default()
+        };
+        configure_child(
+            &mut command,
+            &enabled,
+            "agent",
+            "codex",
+            "model",
+            None,
+            None,
+            Some("task"),
+            Some(2),
+        );
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert!(envs.contains_key(std::ffi::OsStr::new("OTEL_EXPORTER_OTLP_ENDPOINT")));
+    }
+
+    #[test]
+    fn parse_ahu_resource_attributes_does_not_panic_on_valid_inputs() {
+        let parsed =
+            super::parse_ahu_resource_attributes("ahu.task.id=123,ahu.version=1.0,unknown=value");
+        assert_eq!(parsed.len(), 2);
     }
 
     #[test]
@@ -1990,7 +2158,6 @@ mod primary_export_tests {
         let trap = listener();
         for endpoint in [
             "http://synthetic-user:synthetic-password@127.0.0.1:4318",
-            "http://127.0.0.1:4318/path",
             "http://127.0.0.1:4318/?query",
             "http://127.0.0.1:4318/#fragment",
             "https://127.0.0.1:4318",
