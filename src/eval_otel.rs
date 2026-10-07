@@ -199,7 +199,7 @@ impl Receiver {
 
         let mut token_bytes = [0u8; 16];
         crate::orchestration::os_entropy(&mut token_bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         let mut token = String::with_capacity(32);
         for byte in token_bytes {
             use std::fmt::Write;

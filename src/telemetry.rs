@@ -228,10 +228,11 @@ fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
-        if let Some(&allowed_key) = ALLOWED.iter().find(|&&allowed| allowed == key) {
-            if safe_resource_value(allowed_key, value) && seen.insert(allowed_key.to_string()) {
-                out.push((allowed_key, value.to_string()));
-            }
+        if let Some(&allowed_key) = ALLOWED.iter().find(|&&allowed| allowed == key)
+            && safe_resource_value(allowed_key, value)
+            && seen.insert(allowed_key.to_string())
+        {
+            out.push((allowed_key, value.to_string()));
         }
     }
     out
