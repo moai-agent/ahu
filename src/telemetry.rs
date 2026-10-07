@@ -37,6 +37,8 @@ const SPAN_EXPORT_BATCH_SIZE: usize = 32;
 const SPAN_SCHEDULED_DELAY: Duration = Duration::from_millis(500);
 const SPAN_EXPORT_TIMEOUT: Duration = Duration::from_millis(500);
 
+// Expecting the mutex is correct for telemetry because poisoning only occurs
+// after a panic in this process, and halting is the intended fail-stop behavior.
 fn provider_slot() -> &'static Mutex<Option<SdkTracerProvider>> {
     PROVIDER.get_or_init(|| Mutex::new(None))
 }
@@ -226,16 +228,10 @@ fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
-        if ALLOWED.contains(&key) && safe_resource_value(key, value) && seen.insert(key.to_string())
-        {
-            out.push((
-                ALLOWED
-                    .iter()
-                    .copied()
-                    .find(|allowed| *allowed == key)
-                    .unwrap(),
-                value.to_string(),
-            ));
+        if let Some(&allowed_key) = ALLOWED.iter().find(|&&allowed| allowed == key) {
+            if safe_resource_value(allowed_key, value) && seen.insert(allowed_key.to_string()) {
+                out.push((allowed_key, value.to_string()));
+            }
         }
     }
     out
@@ -1268,6 +1264,13 @@ mod tests {
         assert!(envs.contains_key(std::ffi::OsStr::new("OTEL_EXPORTER_OTLP_ENDPOINT")));
     }
 
+
+    #[test]
+    fn parse_ahu_resource_attributes_does_not_panic_on_valid_inputs() {
+        let parsed =
+            super::parse_ahu_resource_attributes("ahu.task.id=123,ahu.version=1.0,unknown=value");
+        assert_eq!(parsed.len(), 2);
+    }
 
     #[test]
     fn child_environment_is_only_changed_when_enabled() {

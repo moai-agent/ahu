@@ -38,7 +38,10 @@ const CODEX_MCP_ENV: &[&str] = &[
 ];
 
 fn codex_env_forwarding(existing: &str, parsed: &toml::Value) -> Result<Option<String>> {
-    let server = &parsed["mcp_servers"]["ahu"];
+    let server = parsed
+        .get("mcp_servers")
+        .and_then(|t| t.get("ahu"))
+        .ok_or_else(|| Error::new("ahu MCP server not found in configuration"))?;
     let mut values = match server.get("env_vars") {
         Some(toml::Value::Array(values)) => values.clone(),
         None => Vec::new(),
@@ -76,12 +79,17 @@ fn codex_env_forwarding(existing: &str, parsed: &toml::Value) -> Result<Option<S
     let locations: Locations = toml::from_str(existing).map_err(|_| {
         Error::new("cannot locate ahu MCP configuration for environment forwarding")
     })?;
-    let location = &locations.mcp_servers["ahu"];
+    let location = locations
+        .mcp_servers
+        .get("ahu")
+        .ok_or_else(|| Error::new("ahu MCP server not found in configuration"))?;
     let encoded = wanted.to_string();
     let mut expected = parsed.clone();
-    expected["mcp_servers"]["ahu"]
-        .as_table_mut()
-        .unwrap()
+    expected
+        .get_mut("mcp_servers")
+        .and_then(|t| t.get_mut("ahu"))
+        .and_then(|s| s.as_table_mut())
+        .ok_or_else(|| Error::new("ahu MCP server configuration is not a valid table"))?
         .insert("env_vars".into(), wanted);
     let mut candidates = Vec::new();
     if let Some(value) = &location.env_vars {
@@ -726,6 +734,17 @@ mod tests {
             executable: id.into(),
             version: None,
         }
+    }
+
+    #[test]
+    fn codex_env_forwarding_missing_ahu_table_yields_typed_error() {
+        let existing = "[mcp_servers]\n";
+        let parsed = toml::from_str(existing).unwrap();
+        let error = super::codex_env_forwarding(existing, &parsed).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ahu MCP server not found in configuration"
+        );
     }
 
     #[test]
