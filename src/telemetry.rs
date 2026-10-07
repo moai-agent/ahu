@@ -275,6 +275,31 @@ pub fn configure_child(
     task_id: Option<&str>,
     attempt: Option<u32>,
 ) {
+    command
+        .env_remove("AHU_EVAL_LOCAL_METRICS")
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("https_proxy")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_HEADERS")
+        .env_remove("OTEL_EXPORTER_OTLP_LOGS_HEADERS")
+        .env_remove("OTEL_EXPORTER_OTLP_CERTIFICATE")
+        .env_remove("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE")
+        .env_remove("OTEL_EXPORTER_OTLP_CLIENT_KEY")
+        .env_remove("OTEL_EXPORTER_OTLP_COMPRESSION")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_COMPRESSION")
+        .env_remove("OTEL_EXPORTER_OTLP_LOGS_COMPRESSION")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT");
+
     let Some(endpoint_str) =
         eval_endpoint_override().or_else(|| config.enabled.then(|| config.endpoint.clone()))
     else {
@@ -325,29 +350,6 @@ pub fn configure_child(
         .join(",");
     command
         .env("AHU_MCP_RESOURCE_ATTRIBUTES", mcp_attributes)
-        .env_remove("AHU_EVAL_LOCAL_METRICS")
-        .env_remove("HTTP_PROXY")
-        .env_remove("http_proxy")
-        .env_remove("HTTPS_PROXY")
-        .env_remove("https_proxy")
-        .env_remove("ALL_PROXY")
-        .env_remove("all_proxy")
-        .env_remove("NO_PROXY")
-        .env_remove("no_proxy")
-        .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_HEADERS")
-        .env_remove("OTEL_EXPORTER_OTLP_LOGS_HEADERS")
-        .env_remove("OTEL_EXPORTER_OTLP_CERTIFICATE")
-        .env_remove("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE")
-        .env_remove("OTEL_EXPORTER_OTLP_CLIENT_KEY")
-        .env_remove("OTEL_EXPORTER_OTLP_COMPRESSION")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_COMPRESSION")
-        .env_remove("OTEL_EXPORTER_OTLP_LOGS_COMPRESSION")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint_str)
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
         .env("OTEL_EXPORTER_OTLP_TIMEOUT", "500")
@@ -1263,7 +1265,6 @@ mod tests {
         let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
         assert!(envs.contains_key(std::ffi::OsStr::new("OTEL_EXPORTER_OTLP_ENDPOINT")));
     }
-
 
     #[test]
     fn parse_ahu_resource_attributes_does_not_panic_on_valid_inputs() {
