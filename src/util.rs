@@ -18,6 +18,7 @@ pub enum ErrorKind {
 pub struct Error {
     kind: ErrorKind,
     message: String,
+    cause: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
 impl Error {
@@ -27,6 +28,7 @@ impl Error {
         Self {
             message: message.into(),
             kind: ErrorKind::RunFailure,
+            cause: None,
         }
     }
 }
@@ -48,17 +50,32 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self.cause.as_deref() {
+            Some(cause) => Some(cause),
+            None => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self {
-        Error::new(value.to_string())
+        Self {
+            message: value.to_string(),
+            kind: ErrorKind::RunFailure,
+            cause: Some(Box::new(value)),
+        }
     }
 }
 
 impl From<serde_json::Error> for Error {
     fn from(value: serde_json::Error) -> Self {
-        Error::new(format!("invalid JSON: {value}"))
+        Self {
+            message: format!("invalid JSON: {value}"),
+            kind: ErrorKind::RunFailure,
+            cause: Some(Box::new(value)),
+        }
     }
 }
 
@@ -816,5 +833,40 @@ mod behavior_tests {
             read_limited(&mut file, 3).unwrap_err().to_string(),
             "file is larger than 3 bytes"
         );
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn io_conversions_keep_the_message_and_expose_the_original_error_as_source() {
+        let error: Error = std::io::Error::other("boom").into();
+        assert_eq!(error.to_string(), "boom");
+        assert_eq!(error.kind(), ErrorKind::RunFailure);
+        let source = error.source().expect("io source");
+        assert!(source.downcast_ref::<std::io::Error>().is_some());
+    }
+
+    #[test]
+    fn json_conversions_keep_the_message_and_expose_the_original_error_as_source() {
+        let expected = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let error: Error = serde_json::from_str::<serde_json::Value>("{")
+            .unwrap_err()
+            .into();
+        assert_eq!(error.to_string(), format!("invalid JSON: {expected}"));
+        assert_eq!(error.kind(), ErrorKind::RunFailure);
+        let source = error.source().expect("json source");
+        assert!(source.downcast_ref::<serde_json::Error>().is_some());
+    }
+
+    #[test]
+    fn new_errors_have_no_source() {
+        let error = Error::new("plain failure");
+        assert_eq!(error.to_string(), "plain failure");
+        assert_eq!(error.kind(), ErrorKind::RunFailure);
+        assert!(error.source().is_none());
     }
 }
