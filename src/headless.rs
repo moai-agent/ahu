@@ -8,8 +8,6 @@ mod skills;
 use crate::harness::{LaunchCommand, LaunchRequest};
 use crate::util::{Error, Result, digest_bytes};
 use crate::{bail, state, task};
-#[cfg(test)]
-use admission::PLACEMENT_INTENT_STALE_SECS;
 use admission::{
     Lock, PLACEMENT_INTENT, PlacementIntent, admission_counts, attempt_dir, sweep_placement_intent,
     unix_now, validate_parent_attempt,
@@ -5412,7 +5410,7 @@ mod filesystem_behavior_tests {
         let said = sweep_with_console(&repo, &store_dir);
         assert!(said.is_empty(), "{said}");
 
-        std::fs::write(store_dir.join(PLACEMENT_INTENT), b"not json").unwrap();
+        state::write_private_file(&store_dir.join(PLACEMENT_INTENT), b"not json").unwrap();
         let said = sweep_with_console(&repo, &store_dir);
         assert!(said.contains("cannot parse"), "{said}");
         assert!(said.contains("ignoring the stale launch intent"), "{said}");
@@ -5452,14 +5450,27 @@ mod filesystem_behavior_tests {
             worktree: worktree.clone(),
             branch: format!("intent-{task_id}"),
             pid: reaped_pid(),
-            timestamp: unix_now() - PLACEMENT_INTENT_STALE_SECS * 2,
+            timestamp: unix_now() - 7200,
         };
-        std::fs::write(
-            store_dir.join(PLACEMENT_INTENT),
-            serde_json::to_vec(&intent).unwrap(),
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
         )
         .unwrap();
 
+        std::fs::write(worktree.join("unfinished.txt"), "preserve this work").unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(said.contains("could not remove worktree"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("unfinished.txt")).unwrap(),
+            "preserve this work"
+        );
+        std::fs::remove_file(worktree.join("unfinished.txt")).unwrap();
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
         let said = sweep_with_console(&repo, &store_dir);
         assert!(
             said.contains("removed worktree from an interrupted launch"),
@@ -5468,6 +5479,47 @@ mod filesystem_behavior_tests {
         assert!(!worktree.exists());
         assert!(!store_dir.join(PLACEMENT_INTENT).exists());
         drop(root);
+    }
+
+    #[test]
+    fn placement_intent_sweep_refuses_unsafe_records() {
+        let (_root, repo) = repository();
+        let store_dir = store(&repo).unwrap();
+        confined_in(&repo, &store_dir.join("seed"), true).unwrap();
+        let path = store_dir.join(PLACEMENT_INTENT);
+        state::write_private_file(
+            &path,
+            &vec![b' '; crate::util::MAX_TASK_RECORD_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(sweep_with_console(&repo, &store_dir).contains("cannot safely read"));
+        assert!(path.exists());
+        for (schema_version, task_id, pid) in [
+            (2, "task", 123),
+            (1, "../outside", 123),
+            (1, "/outside", 123),
+            (1, "task", -1),
+        ] {
+            let intent = PlacementIntent {
+                schema_version,
+                task_id: task_id.into(),
+                worktree: repo.root.join(".worktrees").join(task_id),
+                branch: "unused".into(),
+                pid,
+                timestamp: 0,
+            };
+            state::write_private_file(&path, &serde_json::to_vec(&intent).unwrap()).unwrap();
+            assert!(
+                sweep_with_console(&repo, &store_dir).contains("invalid launch intent identity")
+            );
+            assert!(path.exists());
+        }
+        std::fs::remove_file(&path).unwrap();
+        let external = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(external.path(), &path).unwrap();
+        assert!(sweep_with_console(&repo, &store_dir).contains("cannot safely read"));
+        assert!(external.path().exists());
+        assert!(path.is_symlink());
     }
 
     #[test]
@@ -5485,11 +5537,11 @@ mod filesystem_behavior_tests {
             worktree: worktree.clone(),
             branch: format!("intent-{task_id}"),
             pid: std::process::id() as i32,
-            timestamp: unix_now(),
+            timestamp: unix_now() - 7200,
         };
-        std::fs::write(
-            store_dir.join(PLACEMENT_INTENT),
-            serde_json::to_vec(&intent).unwrap(),
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
         )
         .unwrap();
         let said = sweep_with_console(&repo, &store_dir);
@@ -5510,11 +5562,11 @@ mod filesystem_behavior_tests {
             worktree: worktree.clone(),
             branch: "intent-recordedtask".to_string(),
             pid: reaped_pid(),
-            timestamp: unix_now() - PLACEMENT_INTENT_STALE_SECS * 2,
+            timestamp: unix_now() - 7200,
         };
-        std::fs::write(
-            store_dir.join(PLACEMENT_INTENT),
-            serde_json::to_vec(&intent).unwrap(),
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
         )
         .unwrap();
         let said = sweep_with_console(&repo, &store_dir);
@@ -5532,11 +5584,11 @@ mod filesystem_behavior_tests {
             worktree: foreign.clone(),
             branch: "intent-foreigntask".to_string(),
             pid: reaped_pid(),
-            timestamp: unix_now() - PLACEMENT_INTENT_STALE_SECS * 2,
+            timestamp: unix_now() - 7200,
         };
-        std::fs::write(
-            store_dir.join(PLACEMENT_INTENT),
-            serde_json::to_vec(&intent).unwrap(),
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
         )
         .unwrap();
         let said = sweep_with_console(&repo, &store_dir);
@@ -5565,11 +5617,11 @@ mod filesystem_behavior_tests {
             worktree: worktree.clone(),
             branch: format!("intent-{task_id}"),
             pid: reaped_pid(),
-            timestamp: unix_now() - PLACEMENT_INTENT_STALE_SECS * 2,
+            timestamp: unix_now() - 7200,
         };
-        std::fs::write(
-            store_dir.join(PLACEMENT_INTENT),
-            serde_json::to_vec(&intent).unwrap(),
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
         )
         .unwrap();
 

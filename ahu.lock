@@ -1,6 +1,10 @@
 schema_version = 1
-digest = "9fbbe216efafa8d92f02974a9fd9ca07fd5382696e639af4f263057c3ac31c91"
-skipped_directories = [".ahu"]
+digest = "23221c375cb1bb64b2d7804582019505e02a5c672e00a3fa4333fefc11b22585"
+skipped_directories = [
+    ".ahu",
+    ".worktrees",
+    "target",
+]
 unscanned_config = []
 symlinks = []
 
@@ -30,8 +34,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/defsec-agy.md"
-digest = "b36b82bcd989b71ddc1ccd8bc690217cefa9d6dd70d112a50d62ffd4a9cb7f40"
-bytes = 1823
+digest = "eab704102ba283145e69774bd9a148371f931e0caf3c8226da64ea56f405cad6"
+bytes = 2223
 executable = false
 
 [[entries]]
@@ -72,8 +76,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/dev-opus.md"
-digest = "aeb50b0b7090051a1a073d8e5e892e24e14a866a4578305dd269ee9ef78c57f3"
-bytes = 2923
+digest = "8e905d14f141ed7cf5b540820e2ae5fc14224ca7400a4f5f4f4c48f0f5a764b7"
+bytes = 3325
 executable = false
 
 [[entries]]

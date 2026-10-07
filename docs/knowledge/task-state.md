@@ -24,6 +24,9 @@ sources:
   - id: headless
     resource: ../../src/headless.rs
     title: Primary-owned coordination and attempt lifecycle
+  - id: approval
+    resource: ../../src/approval.rs
+    title: Task-scoped approval checkpoints
   - id: commands
     resource: ../../src/commands.rs
     title: Task inspection and coordinator sessions
@@ -54,6 +57,12 @@ not permission to import history; unverified locations remain unknown. New
 headless specs/results use schema 2. Schema-1 attempts remain readable in place,
 but this binary refuses their resume and child dispatch. Use the original runner
 or a new assignment; arbitrary legacy-worker use of a new binary is not supported.[^headless]
+
+Registered headless delegation admits at most 128 assignments per root grant,
+eight child levels, and 16 active or interrupted tasks per repository. These
+limits do not bound arbitrary shell delegation or provider-managed work.
+Task-scoped approval requests expire after 30 minutes without a response;
+expiration does not authorize the requested operation.[^headless][^approval]
 
 During headless execution, recognized write-tool events naming absolute paths
 outside the worktree can trigger cancellation and a `boundary_violation`
@@ -170,6 +179,7 @@ explains what enters a worktree through the launch snapshot.
 [^launch]: Planning, execution and runtime checks in src/launch.rs.
 [^tests]: Automatic placement, discovery, deletion and refusal cases in tests/task_state_lifecycle.rs.
 [^headless]: Primary coordination, attempt inspection, and lifecycle decisions in src/headless.rs.
+[^approval]: Approval checkpoint timeout and response validation in src/approval.rs.
 [^commands]: Inspection output and coordinator flags in src/commands.rs.
 
 [^storage]: Primary-owned paths and bounded legacy lookup configuration in src/storage.rs.

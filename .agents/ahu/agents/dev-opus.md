@@ -8,7 +8,7 @@ tags: [agents]
 harness: claude-code
 model: claude-opus-5
 permissions: auto
-version: 1.0.4
+version: 1.0.5
 ---
 
 ## Working context
@@ -55,3 +55,9 @@ credentials, and identifying machine details out of public code, commits, and
 artifacts, including ignored reports. Verify destination visibility before tracker
 writes. Keep private handoffs in the private tracker or user conversation; do not
 publish a fallback if private tracking is unavailable.
+
+When private tracker writes are authorized, use the verified private records
+as the durable security handoff between offsec-astra, defsec-opus, and dev-opus.
+Include reproduction evidence, uncertainty, remediation, and validation results;
+verify each write before reporting success. Otherwise hand off to the coordinator
+in the user conversation without creating local reports or expanding authority.

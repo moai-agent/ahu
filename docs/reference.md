@@ -14,6 +14,11 @@ that checkout. Without this prefix, ahu uses the current directory. Ambient
 not select storage. See [state and compatibility](#state-and-compatibility) for
 explicit lookup of old stores.
 
+Options such as `--prompt` and `--records` consume the next argument literally,
+even if it begins with `--`. This permits flag-like prompts and filenames; shell quoting groups
+arguments but does not distinguish an option from its value. Supply each value
+before the next option. For example, `--prompt '--color=always'` is prompt text.
+
 ## CLI entry points
 
 Run `ahu --help` for the concise public command list. `ahu doctor` gives a
@@ -881,7 +886,12 @@ does not fail the assignment. Spans are queued asynchronously in a bounded
 128-span buffer and exported in batches of at most 32 every 500 ms. A full
 queue drops telemetry instead of blocking a task; each OTLP/HTTP request has a
 500 ms timeout. These bounds apply to ahu's exporter and do not configure the
-collector's own queue or downstream exporters.
+collector's own queue or downstream exporters. Child SDK batch queues and
+metric intervals remain controlled by the harness and its inherited settings;
+ahu sets their OTLP request timeout
+but does not impose its own span queue limits on them. An earlier panic while
+telemetry holds its internal lock can still terminate the process; the
+delivery-failure guarantee does not cover that case.
 
 ```toml
 [telemetry]
@@ -898,8 +908,10 @@ task, outcome, elapsed milliseconds, and any token usage the
 harness event stream actually reports (`input`, `output`, `cached`,
 `cache_write`, `reasoning`, and `total`). Missing usage remains absent; ahu never
 estimates it. ahu does not add prompts, transcripts, credentials, or private
-issue content to its span attributes. Inherited `OTEL_RESOURCE_ATTRIBUTES` are retained for
-children. MCP correlation also uses `AHU_MCP_RESOURCE_ATTRIBUTES`, containing only
+issue content to its span attributes. When ahu configures child export, inherited
+`OTEL_RESOURCE_ATTRIBUTES` are filtered to bounded, allowlisted `ahu.*` identity
+fields before launch identity is added. Other inherited resource fields are
+dropped. MCP correlation also uses `AHU_MCP_RESOURCE_ATTRIBUTES`, containing only
 bounded, allowlisted ahu identity fields, because a harness may strip `OTEL_*`
 variables from its MCP children. Codex setup forwards that variable and the eval
 receiver endpoint by name, alongside decision-provider configuration; it does not
@@ -1945,6 +1957,12 @@ adapters use, so a coordinator and a registered agent on one harness cannot end
 up naming the model with different flags. Each shortcut prints its whole argument
 list, model included, before starting, so the disclosed line is exactly what was
 launched.
+
+Rankings may include harnesses absent from `harness_preferences`: explicit
+coordinator shortcuts still use those rankings. Only automatic selection walks
+`harness_preferences`. Ranking a moving model alias fixes the requested name,
+not the provider's underlying model revision; see the [OpenCode model
+limitations](#opencode-with-ollama-hosted-models).
 
 A harness with no ranked model launches with **no model option at all**: ahu
 prints a note that the harness default is in use and starts the session on

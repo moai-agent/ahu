@@ -70,8 +70,10 @@ means and show observation counts against group run counts.[^telemetry][^eval]
 The telemetry endpoint is restricted to a local collector. A local collector
 may have its own exporters and retention; ahu cannot establish those policies.
 When OTLP export is enabled, ahu-configured child harnesses also receive the
-loopback endpoint and export their own metrics and logs. ahu's attribute
-allowlist and redaction apply only to attributes ahu itself emits; child
+loopback endpoint and export their own metrics and logs. Inherited resource
+attributes are filtered to bounded, allowlisted ahu identity fields when ahu
+configures child export. That filtering does not inspect child-produced payloads:
+ahu's attribute allowlist and redaction apply to attributes ahu itself emits; child
 harness and SDK log/metric payloads may carry unredacted metadata from the
 child's environment, so the local collector, not ahu, is the redaction and
 retention boundary for child-emitted telemetry.

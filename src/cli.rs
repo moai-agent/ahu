@@ -1509,6 +1509,21 @@ pub fn extract_color(
                     | "--native-helpers"
                     | "--allow-child"
                     | "--allow-child-widened"
+                    | "--harness"
+                    | "--profile"
+                    | "--key"
+                    | "--task"
+                    | "--records"
+                    | "--case"
+                    | "--suite"
+                    | "--agent"
+                    | "--evaluator"
+                    | "--evaluator-repo"
+                    | "--skill-selection"
+                    | "--runs"
+                    | "--max-trajectory-steps"
+                    | "--max-tool-error-rate"
+                    | "--name"
             );
             remaining.push(arg);
             if takes_value && let Some(value) = args.next() {
@@ -2362,6 +2377,23 @@ mod color_tests {
                 assert_eq!(choice, Some(crate::style::ColorChoice::Never));
                 assert_eq!(args, ["@fixture", option, value]);
             }
+        }
+    }
+
+    #[test]
+    fn color_tokens_in_eval_auth_and_telemetry_values_remain_literal() {
+        for original in [
+            vec!["eval", "report", "--records", "--color=always"],
+            vec!["eval", "run", "--case", "--color", "--agent", "fixture"],
+            vec!["auth", "status", "--harness", "--color=always"],
+            vec!["telemetry", "report", "--key", "--color=always"],
+            vec!["telemetry", "link", "--key", "record", "--task", "--color"],
+        ] {
+            let mut input: Vec<String> = original.iter().map(|s| s.to_string()).collect();
+            input.push("--color=never".into());
+            let (args, choice) = extract_color(input).unwrap();
+            assert_eq!(args, original);
+            assert_eq!(choice, Some(crate::style::ColorChoice::Never));
         }
     }
 }

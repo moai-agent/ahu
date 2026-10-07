@@ -10,8 +10,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub(super) const PLACEMENT_INTENT: &str = "placement-intent.json";
-// Secondary guard against PID reuse; the primary signal is recorder liveness.
-pub(super) const PLACEMENT_INTENT_STALE_SECS: u64 = 3600;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct PlacementIntent {
@@ -31,17 +29,25 @@ pub(super) fn unix_now() -> u64 {
 }
 
 /// Consume any leftover launch intent before admission, healing worktrees left
-/// by a crashed or killed launch. Every outcome consumes the intent and reports;
-/// the sweep never wedges the launch it guards.
+/// by a crashed or killed launch. Unverifiable records do not authorize cleanup.
+/// Age alone never proves the recorder is dead, and Git retains dirty worktrees.
 pub(super) fn sweep_placement_intent(
     console: &mut crate::launcher::Console<'_>,
     repo: &crate::git::Repo,
     store_dir: &Path,
 ) -> Result<()> {
     let intent_path = store_dir.join(PLACEMENT_INTENT);
-    let Ok(raw) = std::fs::read(&intent_path) else {
+    if !intent_path.try_exists()? {
         return Ok(());
-    };
+    }
+    let raw =
+        match super::review::read_bytes(&intent_path, Some(crate::util::MAX_TASK_RECORD_BYTES)) {
+            Ok(raw) => raw,
+            Err(_) => {
+                console.say("cannot safely read launch intent; worktree cleanup skipped\n")?;
+                return Ok(());
+            }
+        };
     let Ok(intent) = serde_json::from_slice::<PlacementIntent>(&raw) else {
         console.say(&format!(
             "cannot parse {}; ignoring the stale launch intent\n",
@@ -50,21 +56,27 @@ pub(super) fn sweep_placement_intent(
         let _ = std::fs::remove_file(&intent_path);
         return Ok(());
     };
+    if intent.schema_version != 1
+        || intent.pid <= 0
+        || intent.task_id.is_empty()
+        || !intent
+            .task_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        console.say("invalid launch intent identity; worktree cleanup skipped\n")?;
+        return Ok(());
+    }
     let recorder_dead = {
         let rc = unsafe { libc::kill(intent.pid, 0) };
         rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     };
-    let stale = unix_now().saturating_sub(intent.timestamp) >= PLACEMENT_INTENT_STALE_SECS;
     let task_record_exists = store_dir.join(&intent.task_id).join("task.json").exists();
     let expected_worktree = state::worktree_dir(&repo.primary_root()?, &intent.task_id)?;
-    let removable =
-        (recorder_dead || stale) && !task_record_exists && intent.worktree == expected_worktree;
+    let removable = recorder_dead && !task_record_exists && intent.worktree == expected_worktree;
     if removable {
         let worktree = intent.worktree.to_string_lossy().to_string();
-        match crate::git::run(
-            &repo.root,
-            &["worktree", "remove", "--force", "--", &worktree],
-        ) {
+        match crate::git::run(&repo.root, &["worktree", "remove", "--", &worktree]) {
             Ok(output) if output.status.success() => {
                 console.say(&format!(
                     "removed worktree from an interrupted launch: {worktree}\n"

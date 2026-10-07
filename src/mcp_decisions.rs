@@ -840,13 +840,13 @@ fn call_endpoint(arguments: &Value, url: url::Url) -> Result<Value> {
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
-        .map_err(|error| Error::new(format!("cannot create decision client: {error}")))?;
+        .map_err(|_| Error::new("cannot create decision client"))?;
     let response = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .json(arguments)
         .send()
-        .map_err(|error| Error::new(format!("decision service request failed: {error}")))?;
+        .map_err(|_| Error::new("decision service request failed"))?;
     if !response.status().is_success() {
         return Err(Error::new(format!(
             "decision service returned HTTP {}",
@@ -863,12 +863,12 @@ fn call_endpoint(arguments: &Value, url: url::Url) -> Result<Value> {
     response
         .take((MAX_RESPONSE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(|error| Error::new(format!("cannot read decision response: {error}")))?;
+        .map_err(|_| Error::new("cannot read decision response"))?;
     if bytes.len() > MAX_RESPONSE_BYTES {
         return Err(Error::new("decision service response exceeds 1 MiB"));
     }
     let result: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| Error::new(format!("decision service returned invalid JSON: {error}")))?;
+        .map_err(|_| Error::new("decision service returned invalid JSON"))?;
     validate_response(arguments, result)
 }
 
@@ -2297,6 +2297,37 @@ mod tests {
             } else {
                 assert_eq!(result.unwrap()["answers"]["route"]["value"], "billing");
             }
+        }
+    }
+
+    #[test]
+    fn decision_http_errors_exclude_endpoint_and_response_details() {
+        for (wire, expected) in [
+            (
+                b"HTTP/1.1 200 OK\r\nContent-Length: 80\r\n\r\nprivate-marker".to_vec(),
+                "cannot read decision response",
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nprivate-marker".to_vec(),
+                "decision service returned invalid JSON",
+            ),
+            (
+                b"HTTP/1.1 401 private-marker\r\nContent-Length: 14\r\n\r\nprivate-marker".to_vec(),
+                "decision service returned HTTP 401 Unauthorized",
+            ),
+            (
+                b"invalid HTTP private-marker\r\n\r\n".to_vec(),
+                "decision service request failed",
+            ),
+        ] {
+            let (endpoint, server) = native_http_fixture(wire, std::time::Duration::ZERO);
+            let endpoint = format!("{endpoint}/private-marker");
+            let error = try_endpoint(&typed_request(), &endpoint)
+                .unwrap_err()
+                .to_string();
+            server.join().unwrap();
+            assert_eq!(error, expected);
+            assert!(!error.contains("private-marker"));
         }
     }
 
