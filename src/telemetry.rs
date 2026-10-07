@@ -1122,7 +1122,45 @@ mod tests {
         configure_child(
             &mut child, &config, "agent", "codex", "model", None, None, None, None,
         );
-        assert_eq!(child.get_envs().count(), 0);
+        // Stripping is fail-closed: sensitive and proxy variables are removed
+        // even when telemetry is disabled, and nothing is set.
+        let envs: std::collections::HashMap<_, _> = child.get_envs().collect();
+        for key in [
+            "AHU_EVAL_LOCAL_METRICS",
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+            "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+            "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+            "OTEL_EXPORTER_OTLP_CERTIFICATE",
+            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+            "OTEL_EXPORTER_OTLP_CLIENT_KEY",
+            "OTEL_EXPORTER_OTLP_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_LOGS_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        ] {
+            assert!(
+                envs.get(std::ffi::OsStr::new(key))
+                    .map(|v| v.is_none())
+                    .unwrap_or(false),
+                "{key} should be stripped even when telemetry is disabled"
+            );
+        }
+        assert!(
+            envs.iter().all(|(_, value)| value.is_none()),
+            "no environment variables should be set when telemetry is disabled"
+        );
     }
 
     #[test]
