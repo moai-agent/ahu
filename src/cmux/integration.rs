@@ -1,5 +1,16 @@
-//! Read-only, bounded evidence about native integrations. No hook bodies are
-//! persisted, interpreted, installed, or copied by inspection.
+//! Bounded evidence about native integrations, plus the gated entry points
+//! that act on it. Inspection and status evidence collection is read-only: it
+//! reads at most LIMIT bytes per file, considers at most MAX_ENTRIES entries,
+//! and no hook bodies are persisted, interpreted, installed, or copied by
+//! inspection.
+//!
+//! Mutation is narrow and individually gated: `sanitize` runs only after
+//! admission, removing `CMUX_*` routing variables from a child command and
+//! restoring reviewed disable controls; `execute_install` runs the native
+//! installer only after the installation plan is inspected and verified
+//! (`plan.available` and the exact `["hooks", agent, "install"]` argv check).
+//! The `enforce*` family are pure gate predicates over inspection results:
+//! they read and decide, never mutate.
 //!
 //! Native command generation reviewed against cmux ddd4a01bc:
 //! <https://github.com/manaflow-ai/cmux/blob/ddd4a01bc/CLI/CMUXCLI%2BAgentHookDefinitions.swift>.
