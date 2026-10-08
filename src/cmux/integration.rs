@@ -161,10 +161,14 @@ impl Status {
         {
             self.headless.allowed = false;
             self.headless.reasons.push(error.to_string());
-            self.next_action = format!(
-                "Use a CLI that reports a parseable semantic version. Interactive execution remains available subject to normal prerequisites. {}",
-                self.next_action
-            );
+            if crate::catalog::supports(&self.harness, crate::catalog::Feature::HeadlessLaunch) {
+                self.next_action = format!(
+                    "Use a CLI that reports a parseable semantic version. Interactive execution remains available subject to normal prerequisites. {}",
+                    self.next_action
+                );
+            } else {
+                self.next_action = "Use interactive execution; this harness has no validated ahu headless adapter.".into();
+            }
         }
         self
     }

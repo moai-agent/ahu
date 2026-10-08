@@ -9,6 +9,20 @@ fn shortcut_and_capabilities_are_explicit() {
     assert!(!entry.supports(ahu::catalog::Feature::HeadlessLaunch));
     assert!(!entry.supports(ahu::catalog::Feature::AcceptEditsApprovals));
     assert!(!entry.supports(ahu::catalog::Feature::HookInventory));
+    let repo = tempfile::tempdir().unwrap();
+    let status = ahu::cmux::integration::inspect_in(
+        repo.path(),
+        "kiro",
+        &ahu::cmux::integration::Locations::default(),
+    )
+    .with_version(Some("kiro-cli 2.28.0"));
+    assert!(!status.headless.allowed);
+    assert!(
+        status
+            .next_action
+            .contains("no validated ahu headless adapter")
+    );
+    assert!(!status.next_action.contains("parseable"));
 }
 
 #[test]
