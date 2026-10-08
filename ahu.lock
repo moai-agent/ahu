@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "23221c375cb1bb64b2d7804582019505e02a5c672e00a3fa4333fefc11b22585"
+digest = "eb3f0b7cbdfcecad52c0d698bc6e8d7e8b1a198756c7daab49a4d407b1d2c1d1"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -75,6 +75,12 @@ bytes = 6339
 executable = false
 
 [[entries]]
+path = ".agents/ahu/agents/dev-kiro.md"
+digest = "91fe56131e3cf8ae9bc3b86ff8eb532818c220a65ebb30e5c46af74ff7170d8e"
+bytes = 954
+executable = false
+
+[[entries]]
 path = ".agents/ahu/agents/dev-opus.md"
 digest = "8e905d14f141ed7cf5b540820e2ae5fc14224ca7400a4f5f4f4c48f0f5a764b7"
 bytes = 3325
@@ -130,8 +136,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/config.toml"
-digest = "0e0c3a25b207f6e3abe4aca52606a7bc8b9b0770b5d45fc737478e885cfc75ec"
-bytes = 507
+digest = "5a06620636889464e4efc026921baabf415303b40430a01e7d435902368fc60b"
+bytes = 538
 executable = false
 
 [[entries]]
@@ -148,8 +154,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-architecture/SKILL.md"
-digest = "bc66dfa374f1b48166cbab10816795dcdd61efe0b7ed3fad26e2b7031e4d0b7c"
-bytes = 23714
+digest = "8708be1c00ca9db514f4136675c6ec7d0e7948d343998dbb0ed41e3246421100"
+bytes = 24375
 executable = false
 
 [[entries]]
@@ -186,6 +192,36 @@ executable = false
 path = ".codex/config.toml"
 digest = "375dd7fa25b370d223946f5daf2f0c33165bd022f6a13d23fbe02975ef79d82c"
 bytes = 217
+executable = false
+
+[[entries]]
+path = ".kiro/settings/mcp.json"
+digest = "857ccbb50bfd6fca8fc28a89146bbcaa26fa21240de53ccf0023f1174a6cec87"
+bytes = 141
+executable = false
+
+[[entries]]
+path = ".kiro/skills/ahu-agent-context-critic/SKILL.md"
+digest = "2dea5dec2dc406e9602c5b659706e6f8bb6df5f3df72ae0a5cedfed85e497e29"
+bytes = 5485
+executable = false
+
+[[entries]]
+path = ".kiro/skills/ahu-direct-agents/SKILL.md"
+digest = "e68508ca52ed2b3a0e06b2b99c066f09774beb03fdf909357ef79a6e8e69cd93"
+bytes = 10836
+executable = false
+
+[[entries]]
+path = ".kiro/skills/ahu-typed-decisions/SKILL.md"
+digest = "e9c5c95ef657580acffd0f4e9a87cd4488dcd614eb3158de33f1cc782b77a894"
+bytes = 6268
+executable = false
+
+[[entries]]
+path = ".kiro/skills/discover-requirements/SKILL.md"
+digest = "129931849a0b6dc263b21b2e52f56f19e96d412088cd4c4f3a94aae39ed1f609"
+bytes = 5176
 executable = false
 
 [[entries]]

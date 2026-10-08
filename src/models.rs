@@ -41,12 +41,20 @@ fn live_model_ids(harness: &str) -> Option<Vec<String>> {
     let program = match harness {
         "antigravity" => "agy",
         "opencode" => "opencode",
+        "kiro" => "kiro-cli",
         // These CLIs accept explicit model IDs but do not expose a documented
         // noninteractive list of account-available models.
         "claude-code" | "codex" => return None,
         _ => return None,
     };
     let executable = crate::selection::resolve_executable(program)?;
+    if harness == "kiro" {
+        return crate::harness::kiro::available_models(
+            Path::new(&executable),
+            &std::env::current_dir().ok()?,
+        )
+        .ok();
+    }
     run_model_listing(harness, Path::new(&executable), Duration::from_secs(8))
 }
 

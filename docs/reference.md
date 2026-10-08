@@ -1856,7 +1856,7 @@ compatibility evidence, not an allowlist or a claim that newer versions or
 account entitlements were tested. Where multiple harness installations exist,
 ahu uses the one its own resolution picks; it does not search for a version that
 matches the catalog. An exact project pin can make that choice reproducible.
-Project configuration pins catalog `2026-09-27`; a mismatch is an error.
+Project configuration pins catalog `2026-10-08`; a mismatch is an error.
 
 Persisted task records use schema 4, including the `waiting-for-approval` state,
 and use hyphenated `UUID v7` IDs. Schema 3 records remain readable; schema 2 records
@@ -2131,3 +2131,53 @@ request through `ahu auth budget` and its MCP tool; no launch path calls it.
 Provider quota and entitlement errors are reported by
 the harness during an actual request. Remote hosts, containers, and CI need a
 separately provisioned native login and are outside this local profile guard.
+
+
+## Kiro CLI
+
+Install Kiro CLI using the [official installer](https://kiro.dev/docs/getting-started/installation/),
+then run `kiro-cli login` and complete sign-in in your browser. ahu does not
+install the harness or handle its credentials. Check the installation with
+`kiro-cli --version` and available models with
+`kiro-cli chat --v3 --list-models --format json`.
+
+ahu supports interactive Kiro V3, verified on CLI 2.28.0. `ahu kiro` opens a
+coordinator with `chat --v3 --model <ranked-model> --trust-all-tools`. As with the
+other coordinator shortcuts, this explicitly widens approvals; Kiro also uses
+that flag to approve hook confirmation requests. Kiro may show its own startup
+trust-all confirmation; ahu does not suppress it or change its saved preference.
+With no project ranking it
+uses Kiro's native model default and reports that fact.
+
+Registered agents use `harness: kiro`, an exact catalog model such as
+`claude-sonnet-4.5`, and `permissions: prompt` or `permissions: auto`. Prompt
+mode leaves native approval settings in control; auto adds `--trust-all-tools`.
+Accept-edits is refused because ahu has no validated equivalent. The adapter
+passes instructions and the assignment as one positional argument. It omits
+`--` because Kiro 2.28.0 V3 dropped the initial prompt after that separator in
+live verification; empty or option-shaped composed prompts are refused.
+ahu checks that Kiro lists the exact requested model before launch, with no
+fallback to `auto` or another model. Model listing can initiate login in Kiro,
+so ahu checks native sign-in first and bounds both probes.
+
+`ahu setup` detects `kiro-cli`, adds the ahu MCP server to
+`.kiro/settings/mcp.json`, installs bundled skills under `.kiro/skills/`, and
+creates an inline ahu agent manifest. Native JSON agent definitions are not
+imported by `ahu onboard`; write the ahu manifest's instructions inline instead.
+`.kiro/` and `.kiroignore` are recognized context, included in `ahu.lock` and
+inherited into task worktrees. Global, synchronized, and harness-managed
+configuration remains outside that lock. Native discovery and the actual
+loading of skills, steering, hooks, and MCP remain Kiro's responsibility.
+See [Kiro configuration scopes](https://kiro.dev/docs/configuration/).
+
+`ahu auth readiness --harness kiro` and account bindings support the verified
+GitHub social-login `whoami --format json` interface. Other login types and
+API-key account binding are currently unsupported. Account checks do not prove
+model entitlement or remaining credits.
+
+Kiro's own CLI offers batch execution, but ahu's Kiro adapter currently supports
+interactive sessions only. Headless execution, native resume, bounded helpers,
+native cmux hook installation, and detailed hook inventory have not been
+validated and are not advertised as supported. The preview reports unknown
+hook coverage. Interactive tasks still receive ordinary ahu cmux grouping,
+worktrees, task records, cancellation, and MCP coordination.

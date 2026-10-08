@@ -540,6 +540,14 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
             );
             gaps.push("Antigravity custom hook formats and extension scopes are not verified; native version eligibility is checked separately.".into());
         }
+        "kiro" => {
+            components.push(component(
+                "Kiro native integration is not inspected",
+                repo,
+                "unknown",
+            ));
+            gaps.push("Kiro interactive workspaces use ahu's cmux lifecycle; native Kiro hook integration and headless isolation are unverified.".into());
+        }
         _ => components.push(component("unsupported harness", repo, "unknown")),
     }
     // Native project discovery may walk upward. Bound that search and include

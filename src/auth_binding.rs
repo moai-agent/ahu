@@ -706,6 +706,7 @@ fn task_binding_harness(harness: &str, model: &str) -> Option<&'static str> {
             "codex" => "codex",
             "claude-code" => "claude-code",
             "antigravity" => "antigravity",
+            "kiro" => "kiro",
             _ => return None,
         });
     }
@@ -720,6 +721,7 @@ pub fn probe(harness: &str, cwd: &Path) -> Result<Identity> {
         "codex" => probe_codex(cwd),
         "claude-code" => probe_claude(cwd),
         "antigravity" => probe_antigravity(cwd),
+        "kiro" => probe_kiro(cwd),
         "ollama" => probe_ollama(),
         "opencode" => Err(Error::new(format!(
             "ahu cannot verify the signed-in principal for {harness}; resume is unsafe until that harness exposes a reliable read-only identity check"
@@ -800,6 +802,44 @@ fn probe_ollama() -> Result<Identity> {
         principal: principal.into(),
         organization: None,
         workspace: Some(account_id.into()),
+    })
+}
+
+fn probe_kiro(cwd: &Path) -> Result<Identity> {
+    // whoami's verified social-login shape does not establish the principal
+    // used by an environment API key. Never bind that key to a cached login.
+    if std::env::var_os("KIRO_API_KEY").is_some() {
+        return Err(Error::new(
+            "Kiro API-key account binding is not validated; native social login is required for ahu account checks",
+        ));
+    }
+    let executable = crate::selection::resolve_executable("kiro-cli")
+        .ok_or_else(|| Error::new("Kiro CLI is not available on PATH"))?;
+    let output = bounded_command(&executable, &["whoami", "--format", "json"], cwd)?;
+    kiro_identity(&output)
+}
+
+fn kiro_identity(output: &[u8]) -> Result<Identity> {
+    let value: Value = serde_json::from_slice(output)
+        .map_err(|_| Error::new("Kiro whoami returned invalid JSON; details omitted"))?;
+    let account_type = value
+        .get("accountType")
+        .and_then(Value::as_str)
+        .filter(|s| *s == "SocialGitHub")
+        .ok_or_else(|| {
+            Error::new("Kiro account binding currently supports verified GitHub social login only")
+        })?;
+    let principal = value
+        .get("email")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| Error::new("Kiro whoami did not expose a verifiable account identity"))?;
+    Ok(Identity {
+        harness: "kiro".into(),
+        identity_kind: account_type.into(),
+        principal: principal.into(),
+        organization: None,
+        workspace: None,
     })
 }
 
@@ -1118,6 +1158,27 @@ fn bounded_command(executable: &str, args: &[&str], cwd: &Path) -> Result<Vec<u8
 #[cfg(test)]
 mod profile_tests {
     use super::*;
+
+    #[test]
+    fn kiro_identity_requires_the_verified_provider_and_principal() {
+        let identity =
+            kiro_identity(br#"{"accountType":"SocialGitHub","email":"test@example.invalid"}"#)
+                .unwrap();
+        assert_eq!(identity.harness, "kiro");
+        assert_eq!(identity.principal, "test@example.invalid");
+        for value in [
+            r#"{"accountType":"SocialGitHub"}"#,
+            r#"{"accountType":"unknown","email":"private-marker"}"#,
+            "private-marker",
+        ] {
+            assert!(
+                !kiro_identity(value.as_bytes())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("private-marker")
+            );
+        }
+    }
 
     fn repo_fixture() -> (tempfile::TempDir, Repo) {
         let temp = tempfile::tempdir().unwrap();

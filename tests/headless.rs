@@ -3115,7 +3115,13 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             let observed = if entry.executable == executable {
                 version
             } else {
-                entry.headless_verified_versions[0]
+                entry
+                    .headless_verified_versions
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| {
+                        ahu::catalog::version_token(entry.verified_versions).unwrap()
+                    })
             };
             std::fs::write(&stub, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{observed}'; exit 0; fi\ntouch \"$HOME/worker-started\"\nexit 97\n")).unwrap();
             std::fs::set_permissions(stub, std::fs::Permissions::from_mode(0o755)).unwrap();

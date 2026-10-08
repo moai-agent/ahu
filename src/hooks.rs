@@ -517,6 +517,7 @@ pub fn collect_for(
     // travels into the task worktree either way. Whether a declared server
     // starts depends on the selected harness.
     collect_mcp_servers(repo_root, &mut inventory);
+    collect_mcp_file(repo_root, ".kiro/settings/mcp.json", &mut inventory);
     // Repository OpenCode plugins and configuration travel into the task worktree whatever
     // the harness is, and its plugin entries are modules OpenCode installs and
     // executes at startup.
@@ -816,24 +817,27 @@ fn collect_opencode_user_config(locations: &Locations, inventory: &mut HookInven
 }
 
 fn collect_mcp_servers(repo_root: &Path, inventory: &mut HookInventory) {
-    const SOURCE: &str = ".mcp.json";
-    let path = match crate::util::resolve_existing_within(repo_root, SOURCE) {
+    collect_mcp_file(repo_root, ".mcp.json", inventory);
+}
+
+fn collect_mcp_file(repo_root: &Path, source: &str, inventory: &mut HookInventory) {
+    let path = match crate::util::resolve_existing_within(repo_root, source) {
         Ok(Some(path)) => path,
         Ok(None) => return,
         Err(_) => {
             inventory.unreadable.push(format!(
-                "{SOURCE} (not read: it or one of its parent directories is a symlink, so its \
+                "{source} (not read: it or one of its parent directories is a symlink, so its \
                  MCP servers are not this repository's)"
             ));
             return;
         }
     };
     let Ok(bytes) = std::fs::read(&path) else {
-        inventory.unreadable.push(SOURCE.to_string());
+        inventory.unreadable.push(source.to_string());
         return;
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        inventory.unreadable.push(SOURCE.to_string());
+        inventory.unreadable.push(source.to_string());
         return;
     };
     if value
@@ -842,12 +846,12 @@ fn collect_mcp_servers(repo_root: &Path, inventory: &mut HookInventory) {
         .is_some_and(|servers| !servers.is_object())
     {
         inventory.unreadable.push(format!(
-            "{SOURCE} (its mcpServers key is not a shape ahu understands, so its servers are \
+            "{source} (its mcpServers key is not a shape ahu understands, so its servers are \
              unknown rather than absent)"
         ));
         return;
     }
-    collect_mcp_from_value(&value, SOURCE, inventory);
+    collect_mcp_from_value(&value, source, inventory);
 }
 
 fn collect_mcp_from_value(value: &serde_json::Value, source: &str, inventory: &mut HookInventory) {

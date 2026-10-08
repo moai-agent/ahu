@@ -25,6 +25,15 @@ fn the_snapshot_covers_native_paths_for_every_supported_harness() {
         "antigravity skill\n",
     );
     repo.write(".mcp.json", "{\"mcpServers\":{}}\n");
+    for path in [
+        ".kiro/settings/mcp.json",
+        ".kiro/skills/review/SKILL.md",
+        ".kiro/steering/project.md",
+        ".kiro/hooks/review.kiro.hook",
+        ".kiroignore",
+    ] {
+        repo.write(path, "kiro context\n");
+    }
     repo.write("docs/nested/CLAUDE.md", "nested guidance\n");
     repo.write("src/main.rs", "fn main() {}\n");
 
@@ -41,6 +50,11 @@ fn the_snapshot_covers_native_paths_for_every_supported_harness() {
         ".gemini/antigravity-cli/skills/example/SKILL.md",
         ".mcp.json",
         "docs/nested/CLAUDE.md",
+        ".kiro/settings/mcp.json",
+        ".kiro/skills/review/SKILL.md",
+        ".kiro/steering/project.md",
+        ".kiro/hooks/review.kiro.hook",
+        ".kiroignore",
     ] {
         assert!(paths.contains(&expected), "missing {expected} in {paths:?}");
     }

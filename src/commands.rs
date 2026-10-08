@@ -59,6 +59,11 @@ pub fn claude(repo: &Repo) -> Result<i32> {
     )
 }
 
+/// Open Kiro V3 with the project's ranked model and explicit automatic tool approvals.
+pub fn kiro(repo: &Repo) -> Result<i32> {
+    coordinating_session(repo, "kiro-cli", "Kiro CLI", &["--trust-all-tools"])
+}
+
 /// Open OpenCode on the project's top-ranked OpenCode model with `--auto`, which
 /// auto-approves every permission OpenCode does not explicitly deny.
 ///
@@ -92,6 +97,7 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
     let harness = match program {
         "claude" => "claude-code",
         "agy" => "antigravity",
+        "kiro-cli" => "kiro",
         other => other,
     };
     let loaded = config::load(&repo.root)?;
@@ -105,6 +111,9 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
         Some(ranked) => harness::model_args(harness, ranked)?,
         None => Vec::new(),
     };
+    if harness == "kiro" {
+        args.splice(0..0, ["chat".into(), "--v3".into()]);
+    }
     args.extend(bypass.iter().map(|flag| flag.to_string()));
     let model_note = ranked.is_none().then(|| {
         format!(

@@ -327,6 +327,12 @@ fn run_detected_with_native(
             safe_new_path(&repo.root, &format!(".agents/skills/{name}/SKILL.md"))?,
             content.as_bytes().to_vec(),
         ));
+        if detected.iter().any(|h| h.id == "kiro") {
+            writes.push((
+                safe_new_path(&repo.root, &format!(".kiro/skills/{name}/SKILL.md"))?,
+                content.as_bytes().to_vec(),
+            ));
+        }
         if detected.iter().any(|h| h.id == "claude-code") {
             writes.push((
                 safe_new_path(&repo.root, &format!(".claude/skills/{name}/SKILL.md"))?,
@@ -469,6 +475,13 @@ fn add_client_configurations(
                 writes,
             )?,
             "opencode" => add_json_server(root, "opencode.json", "mcp", "opencode", writes)?,
+            "kiro" => add_json_server(
+                root,
+                ".kiro/settings/mcp.json",
+                "mcpServers",
+                "kiro",
+                writes,
+            )?,
             "codex" => add_codex_server(root, writes)?,
             _ => {}
         }
@@ -619,6 +632,7 @@ fn verify_client_configurations(root: &Path, detected: &[Detected]) -> Result<()
                 verify_json_server(root, ".agents/mcp_config.json", "mcpServers", false)?
             }
             "opencode" => verify_json_server(root, "opencode.json", "mcp", true)?,
+            "kiro" => verify_json_server(root, ".kiro/settings/mcp.json", "mcpServers", false)?,
             _ => {}
         }
     }
@@ -751,6 +765,7 @@ mod tests {
     fn each_supported_harness_gets_its_native_project_mcp_shape() {
         let root = tempfile::tempdir().unwrap();
         let detected = [
+            self::detected("kiro"),
             Detected {
                 id: "claude-code",
                 executable: "claude".into(),
@@ -788,6 +803,7 @@ mod tests {
             ("codex", "gpt-6-astra"),
             ("antigravity", "gemini-3.1-pro-high"),
             ("opencode", "ollama/glm-5.3:cloud"),
+            ("kiro", "claude-sonnet-4.5"),
         ] {
             let text = dev_agent(harness, model);
             let path = Path::new(".agents/ahu/agents/generated.md");

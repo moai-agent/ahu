@@ -155,6 +155,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             let repo = commands::repo_from_cwd()?;
             commands::codex(&repo)
         }
+        Command::Kiro => {
+            let repo = commands::repo_from_cwd()?;
+            commands::kiro(&repo)
+        }
         Command::OpenCode => {
             let repo = commands::repo_from_cwd()?;
             commands::opencode(&repo)
@@ -452,6 +456,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Telemetry { .. }
                 | Command::Claude
                 | Command::Codex
+                | Command::Kiro
                 | Command::OpenCode
                 | Command::Antigravity
                 | Command::Launch { .. }

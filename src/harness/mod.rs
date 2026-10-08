@@ -10,6 +10,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod codex_metadata;
 pub mod isolation;
+pub mod kiro;
 pub mod opencode;
 
 use serde::{Deserialize, Serialize};
@@ -93,7 +94,7 @@ pub fn model_args(harness_id: &str, model: &str) -> Result<Vec<String>> {
     })?;
     let name = entry.display_name;
     let flag = match harness_id {
-        "claude-code" | "antigravity" | "opencode" => "--model",
+        "claude-code" | "antigravity" | "opencode" | "kiro" => "--model",
         "codex" => "-m",
         other => {
             bail!("ahu has no validated model option for harness {other:?}. It will not guess one.")
@@ -196,6 +197,7 @@ pub fn adapter_for(harness_id: &str) -> Result<Box<dyn Adapter>> {
         "codex" => Ok(Box::new(codex::Codex)),
         "antigravity" => Ok(Box::new(antigravity::Antigravity)),
         "opencode" => Ok(Box::new(opencode::OpenCode)),
+        "kiro" => Ok(Box::new(kiro::Kiro)),
         other => bail!(
             "ahu has no validated adapter for harness {other:?}. \
              It will not substitute another harness."

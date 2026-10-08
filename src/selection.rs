@@ -355,6 +355,25 @@ pub(crate) fn check_launch_compatibility_with_policy(
     policy: Option<&crate::cmux::integration::HeadlessPolicy>,
 ) -> Result<()> {
     use crate::agent::Permissions;
+    if harness == "kiro" {
+        crate::harness::model_args(harness, model)?;
+        if !executable.is_absolute() || is_excluded(executable) {
+            bail!("compatibility probe requires a resolved harness outside the repository");
+        }
+        let before = crate::snapshot::collect(cwd)?.digest();
+        let models = crate::harness::kiro::available_models(executable, cwd);
+        if crate::snapshot::collect(cwd)?.digest() != before {
+            bail!(
+                "Kiro inspection changed project agent context; review it and refresh the committed context lock before retrying"
+            );
+        }
+        if !models?.iter().any(|id| id == model) {
+            bail!(
+                "Kiro did not list the exact requested model {model:?}; ahu refuses a possible model fallback. Check `kiro-cli chat --v3 --list-models --format json`."
+            );
+        }
+        return Ok(());
+    }
     let (args, capture) = match harness {
         "codex" if permissions == Permissions::Auto => {
             (crate::harness::codex::auto_mcp_probe_args(), false)
@@ -420,7 +439,7 @@ pub(crate) fn check_launch_compatibility_with_policy(
 /// Bound elapsed time, captured bytes and pipe lifetime. Config diagnostics can
 /// contain secrets, so stderr is never captured and callers never echo stdout.
 /// The Codex check discards stdout too; only the OpenCode model list is read.
-fn bounded_config_probe(
+pub(crate) fn bounded_config_probe(
     command: &mut std::process::Command,
     capture: bool,
     timeout: std::time::Duration,

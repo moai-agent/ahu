@@ -34,6 +34,7 @@ fn coordinator_shortcuts_group_the_caller_before_starting_and_refuse_failed_grou
         ("claude", "claude"),
         ("opencode", "opencode"),
         ("agy", "agy"),
+        ("kiro", "kiro-cli"),
     ] {
         for failure in ["none", "add", "verify", "identify", "conflict"] {
             let fixture = common::TestRepo::new();
