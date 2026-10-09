@@ -97,6 +97,14 @@ measured-run counts, including failed calls. They are not token or billing
 estimates. Native input may include cached input and native output may include
 reasoning; preserve each harness's semantics and keep provider tokens separate.
 
+Kiro V3's native exporter emits OTLP JSON, which this receiver does not project.
+During evals ahu therefore forwards its private eval endpoint to the ahu MCP
+server without enabling Kiro's native exporter. `ahu setup` adds name-only
+metadata interpolation to Kiro's MCP configuration; existing projects need the
+updated configuration committed with their context lock before launching evals.
+This captures ahu MCP observations and available ACP call outcomes, not native
+model telemetry. Ordinary collector configuration is unchanged.
+
 ## Improve instructions, skills and tools
 
 Use the bundled `ahu-agent-context-critic` skill to turn one observed problem into a
@@ -296,7 +304,42 @@ latency, and token counts, with no evidence, credentials, inherited OTel resourc
 attributes, or authentication headers. Coverage `typed_decision_span` means this
 observation arrived; it does not claim MCP session coverage. Candidate MCP tool
 counts are unaffected. Agent telemetry retains `none`, `partial_spans`, or
-`complete_session` coverage.
+`complete_session` coverage. These legacy values remain readable and writable;
+`complete_session` means **an ahu MCP session summary arrived**, not that all
+harness sessions, native tools, or helpers were captured. New trial records name
+this scope as `telemetry_scope: ahu_spans`. A summary reports the totals of the
+MCP server that emitted it; other MCP servers and missing exports remain outside
+that observation.
+
+The report's `evidence` object separates ahu MCP availability, native trajectory
+coverage, and observation counts for each token and cost metric. MCP availability
+is `summary_observed`, `spans_observed`, `none`, or `unknown`. New records carry
+`mcp_spans` so unrelated harness/evaluator spans do not imply MCP evidence.
+Older `partial_spans` records cannot establish which spans arrived and therefore
+have unknown MCP availability. Older records without any telemetry coverage or
+positive MCP flag count as `telemetry_unknown`, not `telemetry_absent`. `none`
+means no observation arrived, not that no work occurred. A numeric zero remains
+a measured value; absent usage/cost measurements never become zero. The token
+metric names preserve candidate versus decision/selection service usage.
+
+`telemetry_receiver` reports receiver interval counters, which can include
+candidate, evaluator, and selection exports. Rejected requests include malformed,
+oversize, and truncated HTTP/protobuf bodies; rejected connections and accept
+errors remain separate. `rejected_spans` counts task-capacity drops. The optional
+`projection` object adds `uncorrelated_spans` (mismatched eval resource or unusable
+task identity), `dedup_capacity_spans`, and `invalid_identity_spans`. Deduplication
+uses the validated 16-byte trace ID plus 8-byte span ID, retaining at most 4096
+pairs per task/attempt. Further identities and invalid identities are projected
+without duplicate protection; counters can overcount retries. Their task-level
+`telemetry_dedup_untracked_spans` prevents inferring zero calls from missing tool
+names or passing absence checks based on matching summary totals.
+
+Old receiver records lack `projection`; this stays unknown. Aggregates give the
+new counters their own `coverage.receiver_projection` observation denominator,
+so a known subtotal is not mistaken for all trials. These bounded diagnostics
+retain no raw spans or payloads. Zero receiver rejections do not prove exporter
+success: work never exported, exports lost before arrival, and exports arriving
+after the observation window cannot be measured here.
 
 ## Observed trajectories and budgets
 

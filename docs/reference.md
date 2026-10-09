@@ -2181,7 +2181,11 @@ The adapter passes `--no-interactive --output-format stream-json
 an attempt; a failed/denied tool, malformed stream, missing result, interruption,
 or nonzero exit cannot become success. MCP startup failures stop the launch.
 Intermediate turn completion does not finish a task. Kiro credits are not USD;
-USD cost, token, detailed trajectory and skill-invocation metrics remain unknown.
+USD cost, token and skill-invocation metrics remain unknown. Eval trajectory
+records bounded ACP tool-call, completion and error counts, deduplicated by
+`toolCallId`. Coverage remains partial: model steps, stable tool identities,
+repetitions, recovery and native-helper attribution are unknown. Tool titles are
+display text, not proof of tool identity or delegation.
 Shared ahu supervision supplies foreground/background execution, timeout,
 cancellation, result records, and resume. Histories remain in Kiro's native home.
 

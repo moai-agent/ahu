@@ -13,6 +13,9 @@ pub(super) fn valid_session(session: &str) -> bool {
 
 impl Events {
     pub(super) fn observe_kiro(&mut self, event: &Value) {
+        // Project only bounded ACP call evidence; payloads remain in native history.
+        self.trajectory.observe("kiro", event);
+
         let kind = event["type"].as_str().unwrap_or("");
         let data = &event["data"];
         if matches!(kind, "sessionUpdate" | "runFinished" | "runError") {

@@ -32,14 +32,60 @@ const MAX_SPAN_IDS_PER_TASK: usize = 4096;
 /// Receiver-side telemetry losses/errors for one eval interval.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReceiverStats {
+    /// Absent in older records; these counters describe only this receiver.
+    #[serde(default)]
+    pub projection: Option<ProjectionStats>,
     pub rejected_spans: u64,
     pub rejected_requests: u64,
     pub rejected_connections: u64,
     pub accept_errors: u64,
 }
 
+/// Bounded accounting for routing losses and duplicate-detection limits.
+/// No raw identifiers or rejected payloads are retained here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectionStats {
+    /// Spans without a matching eval resource or usable task identifier.
+    pub uncorrelated_spans: u64,
+    /// Projected spans whose valid identity could not be retained at capacity.
+    pub dedup_capacity_spans: u64,
+    /// Projected spans without a valid trace/span identity pair.
+    pub invalid_identity_spans: u64,
+}
+
+impl ProjectionStats {
+    fn add(&mut self, other: Self) {
+        self.uncorrelated_spans = self
+            .uncorrelated_spans
+            .saturating_add(other.uncorrelated_spans);
+        self.dedup_capacity_spans = self
+            .dedup_capacity_spans
+            .saturating_add(other.dedup_capacity_spans);
+        self.invalid_identity_spans = self
+            .invalid_identity_spans
+            .saturating_add(other.invalid_identity_spans);
+    }
+
+    fn since(self, earlier: Self) -> Self {
+        Self {
+            uncorrelated_spans: self
+                .uncorrelated_spans
+                .saturating_sub(earlier.uncorrelated_spans),
+            dedup_capacity_spans: self
+                .dedup_capacity_spans
+                .saturating_sub(earlier.dedup_capacity_spans),
+            invalid_identity_spans: self
+                .invalid_identity_spans
+                .saturating_sub(earlier.invalid_identity_spans),
+        }
+    }
+}
+
 impl ReceiverStats {
     pub fn add(&mut self, other: Self) {
+        if let Some(projection) = other.projection {
+            self.projection.get_or_insert_default().add(projection);
+        }
         self.rejected_spans = self.rejected_spans.saturating_add(other.rejected_spans);
         self.rejected_requests = self
             .rejected_requests
@@ -52,6 +98,10 @@ impl ReceiverStats {
 
     pub fn since(self, earlier: Self) -> Self {
         Self {
+            projection: self
+                .projection
+                .zip(earlier.projection)
+                .map(|(now, before)| now.since(before)),
             rejected_spans: self.rejected_spans.saturating_sub(earlier.rejected_spans),
             rejected_requests: self
                 .rejected_requests
@@ -109,6 +159,10 @@ pub struct TaskTelemetry {
     /// Distinguishes "nothing was observed" from "spans arrived but no session
     /// summary did", which are different claims about a run.
     pub spans_recorded: u64,
+    /// Only ahu MCP spans, independently of harness/evaluator observations.
+    pub mcp_spans: u64,
+    /// Projected without duplicate protection; counters may overcount retries.
+    pub dedup_untracked_spans: u64,
     /// `ahu.mcp.session` summary spans seen. More than one is an anomaly worth
     /// seeing rather than hiding behind the boolean above.
     pub session_summaries: u64,
@@ -119,11 +173,11 @@ pub struct TaskTelemetry {
     /// Span identities already projected, so a resent export is not counted
     /// twice. Never serialized: it is bookkeeping, not an observation.
     #[serde(skip)]
-    pub(crate) seen_span_ids: BTreeSet<Vec<u8>>,
+    pub(crate) seen_span_ids: BTreeSet<([u8; 16], [u8; 8])>,
 }
 
 impl TaskTelemetry {
-    /// How much of the session this telemetry actually describes.
+    /// Legacy availability of ahu spans, not full harness/helper coverage.
     pub fn coverage(&self) -> Coverage {
         if self.session_summaries > 0 {
             Coverage::CompleteSession
@@ -137,16 +191,19 @@ impl TaskTelemetry {
     /// Whether every tool call the session summary counted is attributable to a
     /// named tool.
     ///
-    /// Only then can an absence be read as proof that a tool was not called:
+    /// Only within the received summaries can an absence be interpreted:
     /// a call the projection could not name leaves the question open.
+    /// Missing MCP sessions and exports remain outside this claim.
     pub fn tool_calls_fully_named(&self) -> bool {
         self.session_summaries > 0
+            && self.dedup_untracked_spans == 0
             && self.tool_calls_by_name.values().sum::<u64>() == self.tool_calls
     }
 
     /// Whether the session summary attributed every tool error to a named tool.
     pub fn tool_errors_fully_named(&self) -> bool {
         self.session_summaries > 0
+            && self.dedup_untracked_spans == 0
             && self.tool_errors_by_name.values().sum::<u64>() == self.tool_errors
     }
 }
@@ -158,7 +215,8 @@ pub enum Coverage {
     None,
     /// Spans arrived, but no session summary: counts are a floor, not a total.
     PartialSpans,
-    /// The session summary arrived, so its totals are the session's totals.
+    /// An ahu MCP session summary arrived. Other sessions, native tools and
+    /// helper activity may be unobserved; the legacy name is not completeness.
     CompleteSession,
 }
 
@@ -208,6 +266,10 @@ impl Receiver {
 
         let endpoint = format!("http://{address}/{token}");
         let state = Arc::new(Mutex::new(CaptureState {
+            receiver_stats: ReceiverStats {
+                projection: Some(ProjectionStats::default()),
+                ..ReceiverStats::default()
+            },
             expected_run_id: run_id.map(str::to_owned),
             expected_case_id: case_id.map(str::to_owned),
             ..CaptureState::default()
@@ -471,6 +533,12 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
             resource_string_attribute(resource_spans.resource.as_ref(), "ahu.eval.case_id")
                 != Some(expected.as_str())
         }) {
+            let projection = state.receiver_stats.projection.get_or_insert_default();
+            for scope in &resource_spans.scope_spans {
+                projection.uncorrelated_spans = projection
+                    .uncorrelated_spans
+                    .saturating_add(scope.spans.len() as u64);
+            }
             continue;
         }
         let resource_task_id = resource.get("ahu.task.id").cloned();
@@ -488,6 +556,8 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                     .or_else(|| attrs.get("ahu.task.id").cloned())
                     .filter(|id| safe_identifier(id))
                 else {
+                    let projection = state.receiver_stats.projection.get_or_insert_default();
+                    projection.uncorrelated_spans = projection.uncorrelated_spans.saturating_add(1);
                     continue;
                 };
                 let attempt = resource
@@ -501,23 +571,58 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                         state.receiver_stats.rejected_spans.saturating_add(1);
                     continue;
                 }
-                let task = state.tasks.entry(key).or_insert_with(|| TaskTelemetry {
+                let CaptureState {
+                    tasks,
+                    receiver_stats,
+                    ..
+                } = &mut *state;
+                let projection = receiver_stats.projection.get_or_insert_default();
+                let task = tasks.entry(key).or_insert_with(|| TaskTelemetry {
                     task_id,
                     attempt,
                     ..TaskTelemetry::default()
                 });
-                // A resent export repeats span identities. Projecting one twice
-                // would inflate every counter below, so it is counted as a
-                // duplicate instead. A span with no identity cannot be
-                // recognised, so it is projected as it arrives.
-                if !span.span_id.is_empty() {
-                    if task.seen_span_ids.contains(&span.span_id) {
+                // OTLP identity is the trace/span pair, never the span ID alone.
+                // Invalid identities are projected but cannot establish absence.
+                let identity = <[u8; 16]>::try_from(span.trace_id.as_slice())
+                    .ok()
+                    .zip(<[u8; 8]>::try_from(span.span_id.as_slice()).ok())
+                    .filter(|(trace, span)| {
+                        trace.iter().any(|b| *b != 0) && span.iter().any(|b| *b != 0)
+                    });
+                if let Some(identity) = identity {
+                    if task.seen_span_ids.contains(&identity) {
                         task.duplicate_spans = task.duplicate_spans.saturating_add(1);
                         continue;
                     }
                     if task.seen_span_ids.len() < MAX_SPAN_IDS_PER_TASK {
-                        task.seen_span_ids.insert(span.span_id.clone());
+                        task.seen_span_ids.insert(identity);
+                    } else {
+                        projection.dedup_capacity_spans =
+                            projection.dedup_capacity_spans.saturating_add(1);
+                        task.dedup_untracked_spans = task.dedup_untracked_spans.saturating_add(1);
                     }
+                } else {
+                    projection.invalid_identity_spans =
+                        projection.invalid_identity_spans.saturating_add(1);
+                    task.dedup_untracked_spans = task.dedup_untracked_spans.saturating_add(1);
+                }
+                if matches!(
+                    span.name.as_str(),
+                    "ahu.mcp.session"
+                        | "ahu.mcp.tool.call"
+                        | "ahu.mcp.tools.list"
+                        | "ahu.mcp.initialize"
+                        | "ahu.mcp.ping"
+                        | "ahu.mcp.server.discover"
+                        | "ahu.mcp.tasks.operation"
+                        | "ahu.mcp.subscriptions.listen"
+                        | "ahu.mcp.notification"
+                        | "ahu.mcp.invalid_request"
+                        | "ahu.mcp.request"
+                        | "ahu.mcp.transport.error"
+                ) {
+                    task.mcp_spans = task.mcp_spans.saturating_add(1);
                 }
                 task.spans_recorded = task.spans_recorded.saturating_add(1);
                 match span.name.as_str() {
@@ -1014,6 +1119,7 @@ mod tests {
         Span {
             name: "ahu.mcp.session".into(),
             span_id: vec![span_id; 8],
+            trace_id: vec![1; 16],
             attributes: vec![count_attribute("ahu.mcp.tool.calls.count", tool_calls)],
             ..Span::default()
         }
@@ -1023,8 +1129,35 @@ mod tests {
         Span {
             name: "ahu.mcp.tool.call".into(),
             span_id: vec![span_id; 8],
+            trace_id: vec![1; 16],
             attributes: vec![string_attribute("ahu.mcp.tool.name", tool)],
             ..Span::default()
+        }
+    }
+
+    #[test]
+    fn startup_and_transport_spans_establish_partial_mcp_evidence() {
+        for name in [
+            "ahu.mcp.initialize",
+            "ahu.mcp.ping",
+            "ahu.mcp.server.discover",
+            "ahu.mcp.tasks.operation",
+            "ahu.mcp.subscriptions.listen",
+            "ahu.mcp.notification",
+            "ahu.mcp.invalid_request",
+            "ahu.mcp.request",
+            "ahu.mcp.transport.error",
+        ] {
+            let state = Arc::new(Mutex::new(CaptureState::default()));
+            let mut span = session_span(1, 0);
+            span.name = name.into();
+            span.attributes.clear();
+            consume(export("startup", vec![span]), &state);
+            let task = state.lock().unwrap().tasks[&("startup".into(), 1)].clone();
+            assert_eq!(task.mcp_spans, 1, "{name}");
+            assert_eq!(task.coverage(), Coverage::PartialSpans);
+            assert!(!task.mcp_observed);
+            assert!(!task.tool_calls_fully_named());
         }
     }
 
@@ -1117,6 +1250,164 @@ mod tests {
         assert_eq!(task.duplicate_spans, 2);
         assert_eq!(task.spans_recorded, 2);
         assert!(task.tool_calls_fully_named());
+    }
+
+    #[test]
+    fn deduplication_uses_trace_and_span_identity() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let first = tool_call_span(7, "ahu_agents_list");
+        let mut second = first.clone();
+        second.trace_id = vec![2; 16];
+        consume(
+            export("identity", vec![first.clone(), second.clone()]),
+            &state,
+        );
+        consume(export("identity", vec![first, second]), &state);
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("identity".into(), 1)];
+        assert_eq!(task.tool_call_spans, 2);
+        assert_eq!(task.mcp_spans, 2);
+        assert_eq!(task.tool_calls_by_name["ahu_agents_list"], 2);
+        assert_eq!(task.duplicate_spans, 2);
+        assert_eq!(task.seen_span_ids.len(), 2);
+    }
+
+    #[test]
+    fn dedup_limits_and_invalid_identities_are_visible_and_bounded() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let spans = (1..=MAX_SPAN_IDS_PER_TASK as u64)
+            .map(|id| {
+                let mut span = tool_call_span(1, "ahu_agents_list");
+                span.span_id = id.to_be_bytes().to_vec();
+                span
+            })
+            .collect();
+        consume(export("bounded", spans), &state);
+        let mut overflow = session_span(1, MAX_SPAN_IDS_PER_TASK as i64);
+        overflow.span_id = (MAX_SPAN_IDS_PER_TASK as u64 + 1).to_be_bytes().to_vec();
+        consume(export("bounded", vec![overflow.clone(), overflow]), &state);
+        let mut invalid = tool_call_span(3, "ahu_agents_list");
+        invalid.trace_id = vec![0; 16];
+        let mut oversized = invalid.clone();
+        oversized.trace_id = vec![1; 1024];
+        consume(
+            export("bounded", vec![invalid.clone(), invalid, oversized]),
+            &state,
+        );
+        // Known identities still deduplicate after capacity is reached.
+        let mut known = tool_call_span(1, "ahu_agents_list");
+        known.span_id = 1u64.to_be_bytes().to_vec();
+        consume(export("bounded", vec![known]), &state);
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("bounded".into(), 1)];
+        assert_eq!(task.seen_span_ids.len(), MAX_SPAN_IDS_PER_TASK);
+        assert_eq!(task.duplicate_spans, 1);
+        assert_eq!(task.dedup_untracked_spans, 5);
+        assert!(!task.tool_calls_fully_named());
+        assert!(!task.tool_errors_fully_named());
+        let projection = state.receiver_stats.projection.unwrap();
+        assert_eq!(projection.dedup_capacity_spans, 2);
+        assert_eq!(projection.invalid_identity_spans, 3);
+    }
+
+    #[test]
+    fn routing_losses_are_counted_without_retaining_rejected_content() {
+        let state = Arc::new(Mutex::new(CaptureState {
+            expected_run_id: Some("expected-run".into()),
+            ..CaptureState::default()
+        }));
+        consume(
+            export(
+                "wrong-run",
+                vec![session_span(1, 0), tool_call_span(2, "ahu_agents_list")],
+            ),
+            &state,
+        );
+        {
+            let mut state = state.lock().unwrap();
+            state.expected_run_id = None;
+        }
+        consume(export("invalid/task", vec![session_span(1, 0)]), &state);
+        let state = state.lock().unwrap();
+        assert!(state.tasks.is_empty());
+        assert_eq!(
+            state.receiver_stats.projection.unwrap().uncorrelated_spans,
+            3
+        );
+    }
+
+    #[test]
+    fn task_capacity_drops_are_counted_and_existing_tasks_still_accept_spans() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        for index in 0..MAX_TASKS {
+            consume(
+                export(&format!("task-{index}"), vec![session_span(1, 0)]),
+                &state,
+            );
+        }
+        consume(export("overflow", vec![session_span(1, 0)]), &state);
+        consume(
+            export("task-0", vec![tool_call_span(2, "ahu_agents_list")]),
+            &state,
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(state.tasks.len(), MAX_TASKS);
+        assert_eq!(state.receiver_stats.rejected_spans, 1);
+        assert_eq!(state.tasks[&("task-0".into(), 1)].tool_call_spans, 1);
+    }
+
+    #[test]
+    fn projection_counter_deltas_saturate_and_old_records_remain_unknown() {
+        let old: ReceiverStats = serde_json::from_str(r#"{"rejected_spans":0,"rejected_requests":0,"rejected_connections":0,"accept_errors":0}"#).unwrap();
+        assert_eq!(old.projection, None);
+        let mut total = old;
+        let observed = ReceiverStats {
+            projection: Some(ProjectionStats {
+                uncorrelated_spans: 4,
+                dedup_capacity_spans: u64::MAX,
+                invalid_identity_spans: 2,
+            }),
+            ..ReceiverStats::default()
+        };
+        total.add(observed);
+        total.add(observed);
+        total.add(old);
+        assert_eq!(total.projection.unwrap().uncorrelated_spans, 8);
+        assert_eq!(total.projection.unwrap().dedup_capacity_spans, u64::MAX);
+        assert_eq!(
+            total
+                .since(observed)
+                .projection
+                .unwrap()
+                .invalid_identity_spans,
+            2
+        );
+        assert_eq!(
+            observed.since(total).projection.unwrap().uncorrelated_spans,
+            0
+        );
+        assert_eq!(observed.since(old).projection, None);
+    }
+
+    #[test]
+    fn unrelated_spans_do_not_establish_mcp_observation() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        consume(
+            export(
+                "native-only",
+                vec![Span {
+                    name: "ahu.harness.run".into(),
+                    trace_id: vec![1; 16],
+                    span_id: vec![1; 8],
+                    ..Span::default()
+                }],
+            ),
+            &state,
+        );
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("native-only".into(), 1)];
+        assert_eq!(task.coverage(), Coverage::PartialSpans);
+        assert_eq!(task.mcp_spans, 0);
     }
 
     #[test]

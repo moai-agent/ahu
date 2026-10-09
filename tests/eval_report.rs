@@ -893,6 +893,142 @@ fn receiver_drop_counts_are_preserved_and_summarized() {
 }
 
 #[test]
+fn evidence_sources_and_legacy_unknowns_are_independent() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let trajectory = serde_json::to_string(&ahu::eval::trajectory::Observation {
+        source: ahu::eval::trajectory::Source::CodexTurns,
+        coverage: ahu::eval::trajectory::Coverage::Partial,
+        steps: Some(1),
+        stream_incomplete: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let records = write_lines(
+        outside.path(),
+        &[
+            v2_row(&[("telemetry_coverage", "null")]),
+            v2_row(&[("telemetry_coverage", "null"), ("mcp_observed", "true")]),
+            v2_row(&[("telemetry_coverage", "\"partial_spans\"")]),
+            v2_row(&[
+                ("telemetry_coverage", "\"partial_spans\""),
+                ("mcp_spans", "0"),
+            ]),
+            v2_row(&[
+                ("telemetry_coverage", "\"partial_spans\""),
+                ("mcp_spans", "2"),
+            ]),
+            v2_row(&[
+                ("telemetry_coverage", "\"none\""),
+                (
+                    "reported_tokens",
+                    r#"{"input_tokens":0,"output_tokens":{"kind":"unavailable"},"ahu.cost.harness_reported_usd":0}"#,
+                ),
+                ("trajectory", &trajectory),
+            ]),
+        ],
+    );
+    let report = report_json(&repo, &records);
+    let group = &report["groups"][0];
+    assert_eq!(group["coverage"]["telemetry_unknown"], 1);
+    assert_eq!(group["coverage"]["telemetry_absent"], 1);
+    assert_eq!(group["coverage"]["telemetry_complete_session"], 1);
+    assert_eq!(
+        group["evidence"]["mcp"],
+        serde_json::json!({
+            "summary_observed": 1, "spans_observed": 1, "none": 2, "unknown": 2,
+        })
+    );
+    assert_eq!(group["evidence"]["native_trajectory"]["missing_runs"], 5);
+    assert_eq!(
+        group["evidence"]["native_trajectory"]["coverage"]["partial"],
+        1
+    );
+    assert_eq!(
+        group["evidence"]["token_metric_observations"]["input_tokens"],
+        1
+    );
+    assert!(
+        group["evidence"]["token_metric_observations"]
+            .get("output_tokens")
+            .is_none()
+    );
+    assert_eq!(
+        group["evidence"]["cost_metric_observations"]["ahu.cost.harness_reported_usd"],
+        1
+    );
+    assert_eq!(group["observed"]["mean_tokens"]["input_tokens"], 0.0);
+    assert!(
+        report["caveats"]["telemetry_scope"]
+            .as_str()
+            .unwrap()
+            .contains("ahu MCP summary")
+    );
+    let output = run(&repo, &["--records", records.to_str().unwrap()]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("MCP summary 1  partial 3  absent 1  unknown 1"),
+        "{text}"
+    );
+    assert!(text.contains("do not prove exporter delivery"), "{text}");
+}
+
+#[test]
+fn mixed_receiver_versions_keep_projection_observation_denominators() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let old =
+        r#"{"rejected_spans":0,"rejected_requests":0,"rejected_connections":0,"accept_errors":0}"#;
+    let new = r#"{"rejected_spans":0,"rejected_requests":1,"rejected_connections":0,"accept_errors":0,"projection":{"uncorrelated_spans":2,"dedup_capacity_spans":3,"invalid_identity_spans":0}}"#;
+    let records = write_lines(
+        outside.path(),
+        &[
+            v2_row(&[("telemetry_receiver", old)]),
+            v2_row(&[("telemetry_receiver", new)]),
+            v2_row(&[]),
+        ],
+    );
+    let report = report_json(&repo, &records);
+    let group = &report["groups"][0];
+    assert_eq!(group["coverage"]["telemetry_receiver"], 2);
+    assert_eq!(group["coverage"]["receiver_projection"], 1);
+    assert_eq!(
+        group["telemetry_receiver"]["projection"]["uncorrelated_spans"],
+        2
+    );
+    assert_eq!(
+        group["telemetry_receiver"]["projection"]["dedup_capacity_spans"],
+        3
+    );
+    let output = run(&repo, &["--records", records.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("projection observed 1/3 runs"));
+
+    let records = write_lines(outside.path(), &[v2_row(&[("telemetry_receiver", old)])]);
+    let report = report_json(&repo, &records);
+    assert!(report["groups"][0]["telemetry_receiver"]["projection"].is_null());
+    assert_eq!(report["groups"][0]["coverage"]["receiver_projection"], 0);
+}
+
+#[test]
+fn untracked_duplicates_do_not_turn_missing_tool_names_into_zeroes() {
+    let repo = TestRepo::new();
+    let outside = tempfile::TempDir::new().expect("temp dir");
+    let records = write_lines(
+        outside.path(),
+        &[v2_row(&[
+            ("mcp_observed", "true"),
+            ("mcp_tool_call_count", "1"),
+            ("mcp_tools", r#"{"ahu_agents_list":1}"#),
+            ("telemetry_dedup_untracked_spans", "1"),
+        ])],
+    );
+    let report = report_json(&repo, &records);
+    let tools = &report["groups"][0]["observed"]["mcp_tools"];
+    assert_eq!(tools["ahu_agents_list"], 1.0);
+    assert!(tools.get("ahu_typed_decide").is_none());
+}
+
+#[test]
 fn the_report_says_what_it_does_not_claim() {
     let repo = TestRepo::new();
     let outside = tempfile::TempDir::new().expect("temp dir");

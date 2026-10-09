@@ -278,6 +278,8 @@ pub fn configure_child(
 ) {
     command
         .env_remove("AHU_EVAL_LOCAL_METRICS")
+        // Never forward a previous task's parent context or MCP identity.
+        .env_remove("AHU_MCP_RESOURCE_ATTRIBUTES")
         .env_remove("HTTP_PROXY")
         .env_remove("http_proxy")
         .env_remove("HTTPS_PROXY")
@@ -301,8 +303,10 @@ pub fn configure_child(
         .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT");
 
+    let eval_endpoint = eval_endpoint_override();
+    let eval_mode = eval_endpoint.is_some();
     let Some(endpoint_str) =
-        eval_endpoint_override().or_else(|| config.enabled.then(|| config.endpoint.clone()))
+        eval_endpoint.or_else(|| config.enabled.then(|| config.endpoint.clone()))
     else {
         return;
     };
@@ -355,10 +359,28 @@ pub fn configure_child(
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
         .env("OTEL_EXPORTER_OTLP_TIMEOUT", "500")
         .env("OTEL_TRACES_EXPORTER", "otlp")
-        .env("OTEL_METRICS_EXPORTER", "otlp")
-        .env("OTEL_LOGS_EXPORTER", "otlp")
+        // The eval receiver implements only ExportTraceService. Ordinary
+        // collectors retain all supported signals. These settings do not
+        // enable native instrumentation in a harness that does not have it.
+        .env(
+            "OTEL_METRICS_EXPORTER",
+            if eval_mode { "none" } else { "otlp" },
+        )
+        .env(
+            "OTEL_LOGS_EXPORTER",
+            if eval_mode { "none" } else { "otlp" },
+        )
         .env("OTEL_SERVICE_NAME", "ahu-agent")
         .env("OTEL_RESOURCE_ATTRIBUTES", attributes);
+    if eval_mode && harness == "kiro" {
+        // Kiro V3 emits native OTLP JSON traces/metrics even when told to use
+        // protobuf and disable metrics. The eval receiver projects ahu's
+        // protobuf spans only. Keep its endpoint in AHU_EVAL_OTEL_ENDPOINT
+        // for ahu/MCP, without opting Kiro into incompatible native exports.
+        command
+            .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .env("OTEL_TRACES_EXPORTER", "none");
+    }
 }
 
 /// Evaluation capture is an internal, loopback-only override. It lets a
@@ -498,7 +520,130 @@ pub struct SpanGuard {
     started: Instant,
 }
 
+/// A bounded metadata carrier already forwarded by ahu's MCP configuration.
+/// The reserved field is deliberately absent from the resource allowlist: it
+/// is consumed as parent context, never exported as a resource attribute.
+/// Matching task identity prevents accidental cross-task reuse, not forgery by
+/// same-user code. This is correlation metadata, never authorization evidence.
+mod causal_context {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    use opentelemetry::Context;
+    use opentelemetry::propagation::TextMapPropagator;
+    use opentelemetry::trace::{SpanContext, TraceContextExt};
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+
+    const ENV: &str = "AHU_MCP_RESOURCE_ATTRIBUTES";
+    const PARENT: &str = "ahu.internal.traceparent";
+    const MAX_CARRIER_BYTES: usize = 4096;
+
+    fn fields(raw: &str) -> Option<HashMap<&str, &str>> {
+        if raw.len() > MAX_CARRIER_BYTES || !raw.is_ascii() || raw.contains('\\') {
+            return None;
+        }
+        let mut fields = HashMap::new();
+        for pair in raw.split(',') {
+            let (key, value) = pair.split_once('=')?;
+            if (key != PARENT && !super::safe_resource_value(key, value))
+                || fields.insert(key, value).is_some()
+            {
+                return None;
+            }
+        }
+        let task = *fields.get("ahu.task.id")?;
+        if !super::safe_resource_value("ahu.task.id", task) {
+            return None;
+        }
+        let attempt = fields.get("ahu.task.attempt")?;
+        if attempt.parse::<u32>().ok()? == 0 {
+            return None;
+        }
+        Some(fields)
+    }
+
+    pub(super) fn extract(raw: Option<&str>, task: Option<&str>) -> Context {
+        let root = Context::new();
+        let Some(fields) = raw.and_then(fields) else {
+            return root;
+        };
+        if fields.get("ahu.task.id").copied() != task {
+            return root;
+        }
+        let Some(parent) = fields.get(PARENT).copied() else {
+            return root;
+        };
+        // Accept only the exact version-00 form ahu emits, with no extensions,
+        // whitespace, uppercase, extra flags, tracestate, or baggage.
+        if parent.len() != 55
+            || !parent.starts_with("00-")
+            || !matches!(&parent[53..], "00" | "01")
+            || parent.bytes().enumerate().any(|(index, byte)| {
+                if matches!(index, 2 | 35 | 52) {
+                    byte != b'-'
+                } else {
+                    !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte)
+                }
+            })
+        {
+            return root;
+        }
+        let carrier = HashMap::from([("traceparent".to_string(), parent.to_string())]);
+        TraceContextPropagator::new().extract_with_context(&root, &carrier)
+    }
+
+    pub(super) fn from_environment() -> Context {
+        let raw = std::env::var(ENV).ok();
+        let task = std::env::var("AHU_TASK_ID").ok();
+        extract(raw.as_deref(), task.as_deref())
+    }
+
+    pub(super) fn inject(command: &mut Command, span: &SpanContext) {
+        if !span.is_valid() {
+            return;
+        }
+        // Read only configure_child's explicit command env, not inherited env.
+        let Some(raw) = command
+            .get_envs()
+            .find_map(|(key, value)| (key == ENV).then_some(value).flatten())
+            .and_then(|value| value.to_str())
+        else {
+            return;
+        };
+        if fields(raw).is_none() {
+            return;
+        }
+        let mut carrier = HashMap::new();
+        TraceContextPropagator::new().inject_context(
+            &Context::new().with_remote_span_context(span.clone()),
+            &mut carrier,
+        );
+        let Some(parent) = carrier.get("traceparent") else {
+            return;
+        };
+        // Rebuild from the resource allowlist so repeated calls replace the
+        // reserved field and cannot carry arbitrary attributes into MCP.
+        let attributes = super::parse_ahu_resource_attributes(raw)
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let attributes = format!("{attributes},{PARENT}={parent}");
+        if attributes.len() <= MAX_CARRIER_BYTES {
+            command.env(ENV, attributes);
+        }
+    }
+}
+
 impl SpanGuard {
+    /// Propagate this span explicitly after configure_child. No context is
+    /// attached to a thread or held across a future's suspension points.
+    pub(crate) fn configure_child_context(&self, command: &mut std::process::Command) {
+        if let Some(span) = &self.span {
+            causal_context::inject(command, span.span_context());
+        }
+    }
+
     fn set_attribute(&mut self, attribute: KeyValue) {
         if let Some(span) = self.span.as_mut() {
             span.set_attribute(attribute);
@@ -549,7 +694,9 @@ pub fn span(
     attributes: impl IntoIterator<Item = (&'static str, String)>,
 ) -> SpanGuard {
     let tracer = global::tracer("ahu");
-    let mut span = tracer.start(name);
+    // Use only the validated ahu carrier, never arbitrary ambient thread-local
+    // context, TRACEPARENT, tracestate, or baggage from a harness/request.
+    let mut span = tracer.start_with_context(name, &causal_context::from_environment());
     for (key, value) in attributes {
         span.set_attribute(KeyValue::new(key, Value::from(value)));
     }
@@ -1876,6 +2023,194 @@ mod tests {
 }
 
 #[cfg(test)]
+mod causal_context_tests {
+    use super::{SpanGuard, causal_context, configure_child};
+    use crate::config::TelemetryConfig;
+    use opentelemetry::Context;
+    use opentelemetry::trace::{Span, TraceContextExt, Tracer, TracerProvider};
+    use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    const PARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    fn carrier(parent: &str) -> String {
+        format!("ahu.task.id=synthetic-task,ahu.task.attempt=1,ahu.internal.traceparent={parent}")
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct Capture(Arc<Mutex<Vec<SpanData>>>);
+
+    impl SpanExporter for Capture {
+        async fn export(&self, batch: Vec<SpanData>) -> opentelemetry_sdk::error::OTelSdkResult {
+            self.0.lock().unwrap().extend(batch);
+            Ok(())
+        }
+    }
+
+    pub(super) fn parent(provider: &SdkTracerProvider) -> SpanGuard {
+        let tracer = opentelemetry::global::BoxedTracer::new(Box::new(provider.tracer("test")));
+        SpanGuard {
+            span: Some(tracer.start_with_context("synthetic.parent", &Context::new())),
+            started: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn explicit_parent_survives_child_carrier_and_thread_without_attachment() {
+        let capture = Capture::default();
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .with_simple_exporter(capture.clone())
+            .build();
+        let parent = parent(&provider);
+        let expected = parent.span.as_ref().unwrap().span_context().clone();
+        let ambient = Context::current().span().span_context().clone();
+        let mut command = Command::new("synthetic-unused");
+        let config = TelemetryConfig {
+            enabled: true,
+            ..TelemetryConfig::default()
+        };
+        configure_child(
+            &mut command,
+            &config,
+            "agent",
+            "codex",
+            "model",
+            None,
+            None,
+            Some("synthetic-task"),
+            Some(1),
+        );
+        parent.configure_child_context(&mut command);
+        // Idempotent reinjection must not introduce duplicate identity/context.
+        parent.configure_child_context(&mut command);
+        let raw = command
+            .get_envs()
+            .find(|(key, _)| *key == "AHU_MCP_RESOURCE_ATTRIBUTES")
+            .unwrap()
+            .1
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !super::parse_ahu_resource_attributes(raw)
+                .iter()
+                .any(|(key, _)| key.contains("traceparent"))
+        );
+        let context = causal_context::extract(Some(raw), Some("synthetic-task"));
+        assert!(context.span().span_context().is_remote());
+        assert_eq!(
+            context.span().span_context().trace_id(),
+            expected.trace_id()
+        );
+        let tracer = provider.tracer("child");
+        std::thread::spawn(move || {
+            assert!(!Context::current().span().span_context().is_valid());
+            tracer.start_with_context("synthetic.child", &context).end();
+            assert!(!Context::current().span().span_context().is_valid());
+        })
+        .join()
+        .unwrap();
+        drop(parent);
+        assert_eq!(Context::current().span().span_context(), &ambient);
+        provider.shutdown().unwrap();
+        let spans = capture.0.lock().unwrap();
+        let child = spans
+            .iter()
+            .find(|span| span.name == "synthetic.child")
+            .unwrap();
+        assert_eq!(child.span_context.trace_id(), expected.trace_id());
+        assert_eq!(child.parent_span_id, expected.span_id());
+        assert_ne!(child.span_context.span_id(), expected.span_id());
+        assert!(child.parent_span_is_remote);
+    }
+
+    #[test]
+    fn invalid_missing_or_mismatched_carriers_are_roots_even_with_ambient_context() {
+        let valid = carrier(PARENT);
+        let attached = causal_context::extract(Some(&valid), Some("synthetic-task"));
+        let _guard = attached.attach();
+        let mut invalid = vec![
+            String::new(),
+            "x".repeat(4097),
+            carrier(&PARENT.to_uppercase()),
+            carrier(&format!("{PARENT}-extra")),
+            carrier(&format!(" {PARENT}")),
+            carrier(&format!("{PARENT}\n")),
+            carrier(&PARENT.replacen("00-", "01-", 1)),
+            carrier(&format!("{}03", &PARENT[..53])),
+            carrier("00-00000000000000000000000000000000-00f067aa0ba902b7-01"),
+            carrier("00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"),
+            carrier("秘密"),
+            carrier(&"é".repeat(55)),
+            valid.replace("attempt=1", "attempt=0"),
+            valid.replace("attempt=1", "attempt=4294967296"),
+            valid.replace("attempt=1", "attempt=-1"),
+            valid.replace("ahu.task.attempt=1,", ""),
+            valid.replace("ahu.task.id=synthetic-task,", ""),
+            valid.replace("synthetic-task", "synthetic\\-task"),
+            format!("{valid},ahu.task.id=synthetic-task"),
+            format!("{valid},ahu.task.attempt=2"),
+            format!("{valid},ahu.internal.traceparent={PARENT}"),
+        ];
+        invalid.push(valid.replace(&format!(",ahu.internal.traceparent={PARENT}"), ""));
+        for raw in &invalid {
+            assert!(
+                !causal_context::extract(Some(raw), Some("synthetic-task"))
+                    .span()
+                    .span_context()
+                    .is_valid()
+            );
+        }
+        for (raw, task) in [
+            (None, Some("synthetic-task")),
+            (Some(valid.as_str()), None),
+            (Some(valid.as_str()), Some("other-task")),
+        ] {
+            assert!(
+                !causal_context::extract(raw, task)
+                    .span()
+                    .span_context()
+                    .is_valid()
+            );
+        }
+        let unsampled = carrier(&format!("{}00", &PARENT[..53]));
+        let context = causal_context::extract(Some(&unsampled), Some("synthetic-task"));
+        assert!(context.span().span_context().is_valid());
+        assert!(!context.span().span_context().is_sampled());
+    }
+
+    #[test]
+    fn disabled_child_cannot_reuse_inherited_context() {
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .build();
+        let parent = parent(&provider);
+        let mut command = Command::new("synthetic-unused");
+        command.env("AHU_MCP_RESOURCE_ATTRIBUTES", carrier(PARENT));
+        configure_child(
+            &mut command,
+            &TelemetryConfig::default(),
+            "agent",
+            "codex",
+            "model",
+            None,
+            None,
+            Some("synthetic-task"),
+            Some(1),
+        );
+        parent.configure_child_context(&mut command);
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "AHU_MCP_RESOURCE_ATTRIBUTES" && value.is_none())
+        );
+    }
+}
+
+#[cfg(test)]
 mod primary_export_tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
@@ -1892,6 +2227,44 @@ mod primary_export_tests {
         if let Ok(endpoint) = std::env::var("AHU_TEST_CONFIG_ENDPOINT") {
             config.enabled = true;
             config.endpoint = endpoint;
+        }
+        if mode == "child-settings" {
+            let mut command = Command::new("synthetic-unused");
+            super::configure_child(
+                &mut command,
+                &config,
+                "agent",
+                &std::env::var("AHU_TEST_CHILD_HARNESS").unwrap_or_else(|_| "codex".into()),
+                "model",
+                None,
+                None,
+                Some("synthetic-task"),
+                Some(1),
+            );
+            let env: std::collections::BTreeMap<_, _> = command
+                .get_envs()
+                .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+                .collect();
+            let expected = std::env::var("AHU_TEST_EXPECT_SIGNALS").unwrap();
+            if expected == "disabled" {
+                assert!(!env.contains_key("OTEL_TRACES_EXPORTER"));
+                assert!(!env.contains_key("AHU_MCP_RESOURCE_ATTRIBUTES"));
+            } else if expected == "kiro-eval" {
+                assert!(!env.contains_key("OTEL_EXPORTER_OTLP_ENDPOINT"));
+                assert_eq!(env["OTEL_TRACES_EXPORTER"], "none");
+                assert_eq!(env["OTEL_METRICS_EXPORTER"], "none");
+                assert_eq!(env["OTEL_LOGS_EXPORTER"], "none");
+                assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.id=synthetic-task"));
+                assert!(super::eval_endpoint_override().is_some());
+            } else {
+                assert_eq!(env["OTEL_TRACES_EXPORTER"], "otlp");
+                assert_eq!(env["OTEL_METRICS_EXPORTER"], expected);
+                assert_eq!(env["OTEL_LOGS_EXPORTER"], expected);
+                assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.id=synthetic-task"));
+                assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=1"));
+            }
+            println!("synthetic task completed");
+            return;
         }
         if mode == "ahu-mcp" {
             super::initialize_mcp(&config).unwrap();
@@ -2169,6 +2542,129 @@ mod primary_export_tests {
                 run_child(command);
                 assert_unused(&trap);
             }
+        }
+    }
+
+    #[test]
+    fn eval_child_exports_only_traces_and_ordinary_collector_keeps_all_signals() {
+        let trap = listener();
+        for (eval, ordinary, expected) in [
+            (Some("http://127.0.0.1:54321"), false, "none"),
+            (Some("http://127.0.0.1:54321"), true, "none"),
+            (None, true, "otlp"),
+            (Some("https://example.invalid"), true, "otlp"),
+            (Some("https://example.invalid"), false, "disabled"),
+            (None, false, "disabled"),
+        ] {
+            let mut command = child_command("child-settings", &trap);
+            command.env("AHU_TEST_EXPECT_SIGNALS", expected);
+            if let Some(endpoint) = eval {
+                command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint);
+            }
+            if ordinary {
+                command.env("AHU_TEST_CONFIG_ENDPOINT", "http://127.0.0.1:4318");
+            }
+            run_child(command);
+        }
+        for eval in [false, true] {
+            let mut command = child_command("child-settings", &trap);
+            command.env("AHU_TEST_CHILD_HARNESS", "kiro");
+            command.env("AHU_TEST_CONFIG_ENDPOINT", "http://127.0.0.1:4318");
+            command.env(
+                "AHU_TEST_EXPECT_SIGNALS",
+                if eval { "kiro-eval" } else { "otlp" },
+            );
+            if eval {
+                command.env("AHU_EVAL_OTEL_ENDPOINT", "http://127.0.0.1:54321");
+            }
+            run_child(command);
+        }
+        assert_unused(&trap);
+    }
+
+    #[test]
+    fn child_process_exports_real_parent_ids_and_rejects_stale_identity() {
+        use opentelemetry::trace::Span;
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use prost::Message;
+
+        for (service, matches_task) in [
+            ("ahu", true),
+            ("ahu-mcp", true),
+            ("ahu", false),
+            ("ahu-mcp", false),
+        ] {
+            let collector = listener();
+            let trap = listener();
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+                .build();
+            let parent = super::causal_context_tests::parent(&provider);
+            let expected = parent.span.as_ref().unwrap().span_context().clone();
+            let mut command = child_command(service, &trap);
+            let config = crate::config::TelemetryConfig {
+                enabled: true,
+                endpoint: endpoint(&collector),
+                ..Default::default()
+            };
+            super::configure_child(
+                &mut command,
+                &config,
+                "agent",
+                "codex",
+                "model",
+                None,
+                None,
+                Some("synthetic-task"),
+                Some(1),
+            );
+            parent.configure_child_context(&mut command);
+            command
+                .env(
+                    "AHU_TASK_ID",
+                    if matches_task {
+                        "synthetic-task"
+                    } else {
+                        "stale-task"
+                    },
+                )
+                .env("AHU_EVAL_OTEL_ENDPOINT", endpoint(&collector))
+                // Generic inherited context must not repair a rejected ahu carrier.
+                .env(
+                    "TRACEPARENT",
+                    format!("00-{}-{}-01", expected.trace_id(), expected.span_id()),
+                );
+            let capture = capture(
+                collector,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                false,
+            );
+            run_child(command);
+            let (_, body) = capture.join().unwrap().unwrap();
+            let message = ExportTraceServiceRequest::decode(body.as_slice()).unwrap();
+            let span = message
+                .resource_spans
+                .iter()
+                .flat_map(|r| &r.scope_spans)
+                .flat_map(|s| &s.spans)
+                .find(|s| s.name == "ahu.synthetic.transport")
+                .unwrap();
+            if matches_task {
+                assert_eq!(span.trace_id, expected.trace_id().to_bytes());
+                assert_eq!(span.parent_span_id, expected.span_id().to_bytes());
+            } else {
+                assert_ne!(span.trace_id, expected.trace_id().to_bytes());
+                assert!(span.parent_span_id.iter().all(|byte| *byte == 0));
+            }
+            assert!(
+                message
+                    .resource_spans
+                    .iter()
+                    .filter_map(|r| r.resource.as_ref())
+                    .flat_map(|r| &r.attributes)
+                    .all(|attr| attr.key != "ahu.internal.traceparent")
+            );
+            assert_unused(&trap);
         }
     }
 }

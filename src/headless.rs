@@ -2419,6 +2419,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         Some(&record.task_id),
         Some(spec.attempt),
     );
+    telemetry_span.configure_child_context(&mut command);
     command
         .env("AHU_BIN", std::env::current_exe()?)
         .env("AHU_EXECUTION_BACKEND", "headless")

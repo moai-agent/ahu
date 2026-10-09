@@ -214,6 +214,10 @@ struct Record {
     #[serde(default)]
     telemetry_coverage: Option<String>,
     #[serde(default)]
+    mcp_spans: Option<u64>,
+    #[serde(default)]
+    telemetry_dedup_untracked_spans: Option<u64>,
+    #[serde(default)]
     terminal_status: Option<String>,
     #[serde(default)]
     attempts: Option<f64>,
@@ -349,14 +353,19 @@ pub struct Coverage {
     pub telemetry_partial: usize,
     /// Runs for which no telemetry arrived at all.
     pub telemetry_none: usize,
+    /// Older records without a coverage observation.
+    pub telemetry_unknown: usize,
     /// Runs that recorded local OTLP receiver drop/error counters.
     pub telemetry_receiver: usize,
+    pub receiver_projection: usize,
 }
 
 /// One comparable configuration.
 #[derive(Debug, Clone)]
 pub struct Group {
     pub trajectory: trajectory::Summary,
+    /// Evidence availability for ahu MCP only, not native tools or helpers.
+    pub mcp_evidence: BTreeMap<String, usize>,
     pub key: GroupKey,
     pub runs: usize,
     pub passes: usize,
@@ -911,6 +920,7 @@ fn group(records: &[Record]) -> Vec<Group> {
             let mut tool_not_applicable = 0usize;
             let mut terminal_statuses: BTreeMap<String, usize> = BTreeMap::new();
             let mut telemetry_receiver = crate::eval_otel::ReceiverStats::default();
+            let mut mcp_evidence = BTreeMap::new();
             for item in &items {
                 if let Some(value) = item.total_elapsed_ms {
                     total_elapsed.push(value);
@@ -1025,10 +1035,25 @@ fn group(records: &[Record]) -> Vec<Group> {
                         if item.mcp_observed == Some(true) {
                             coverage.telemetry_complete += 1;
                         } else {
-                            coverage.telemetry_none += 1;
+                            coverage.telemetry_unknown += 1;
                         }
                     }
                 }
+                let mcp_status = if item.telemetry_coverage.as_deref() == Some("complete_session")
+                    || item.mcp_observed == Some(true)
+                {
+                    "summary_observed"
+                } else if item.mcp_spans.is_some_and(|count| count > 0) {
+                    "spans_observed"
+                } else if item.mcp_spans == Some(0)
+                    || item.telemetry_coverage.as_deref() == Some("none")
+                {
+                    "none"
+                } else {
+                    // Legacy partial_spans may describe only harness/evaluator spans.
+                    "unknown"
+                };
+                *mcp_evidence.entry(mcp_status.to_owned()).or_default() += 1;
                 for (name, count) in item.mcp_tool_errors_by_name.iter().flatten() {
                     mcp_tool_errors_by_name
                         .entry(name.clone())
@@ -1108,7 +1133,8 @@ fn group(records: &[Record]) -> Vec<Group> {
                         let named_calls: f64 = tools.values().sum();
                         let all_calls_named = item
                             .mcp_tool_call_count
-                            .is_some_and(|total| total == named_calls);
+                            .is_some_and(|total| total == named_calls)
+                            && item.telemetry_dedup_untracked_spans.unwrap_or(0) == 0;
                         for name in crate::mcp::TOOL_NAMES {
                             if let Some(count) = tools.get(name) {
                                 mcp_tools.entry(name.to_owned()).or_default().push(*count);
@@ -1120,6 +1146,7 @@ fn group(records: &[Record]) -> Vec<Group> {
                 }
                 if let Some(stats) = item.telemetry_receiver {
                     coverage.telemetry_receiver += 1;
+                    coverage.receiver_projection += usize::from(stats.projection.is_some());
                     telemetry_receiver.add(stats);
                 }
             }
@@ -1129,6 +1156,7 @@ fn group(records: &[Record]) -> Vec<Group> {
                 .map(|(field, amounts)| (field.clone(), amounts.len()))
                 .collect();
             Group {
+                mcp_evidence,
                 trajectory: trajectory::Summary::collect(items.iter().map(|r| {
                     (
                         r.trajectory.as_ref(),
@@ -1474,10 +1502,15 @@ pub fn render_at(report: &Report, width: usize) -> String {
             measurement(group.mean_judge_score)
         ));
         out.push_str(&format!(
-            "  telemetry  complete {}  partial {}  absent {}\n",
+            "  ahu spans  MCP summary {}  partial {}  absent {}  unknown {}\n",
             group.coverage.telemetry_complete,
             group.coverage.telemetry_partial,
-            group.coverage.telemetry_none
+            group.coverage.telemetry_none,
+            group.coverage.telemetry_unknown
+        ));
+        out.push_str(&format!(
+            "  MCP evidence {} (ahu MCP only; native tools and helpers are separate)\n",
+            serde_json::to_string(&group.mcp_evidence).unwrap_or_default()
         ));
         if let Some(receiver) = group.telemetry_receiver {
             out.push_str(&format!(
@@ -1488,9 +1521,20 @@ pub fn render_at(report: &Report, width: usize) -> String {
                 receiver.rejected_connections,
                 receiver.accept_errors,
             ));
+            if let Some(projection) = receiver.projection {
+                out.push_str(&format!(
+                    "             projection observed {}/{} runs; uncorrelated spans {}; dedup capacity {}; invalid identities {}\n",
+                    group.coverage.receiver_projection, group.runs,
+                    projection.uncorrelated_spans, projection.dedup_capacity_spans,
+                    projection.invalid_identity_spans,
+                ));
+            } else {
+                out.push_str("             projection limits unknown (older records)\n");
+            }
         } else {
             out.push_str("  OTLP recv  none observed\n");
         }
+        out.push_str("             receiver observations do not prove exporter delivery or native/helper coverage\n");
         // The coverage the means below were taken over, and the attempts that
         // produced no answer at all, on the same line as the means they qualify:
         // a mean over the survivors is not a mean over the attempts.
@@ -1832,6 +1876,9 @@ pub fn render_json(report: &Report) -> Result<String> {
         // a single judge's score is one uncalibrated observation, and no
         // inferential interval is offered for the weighted continuous mean.
         "caveats": {
+            "telemetry_scope": "complete_session means an ahu MCP summary arrived; it does not establish full harness, native-tool or helper coverage",
+            "receiver_scope": "local receiver interval counters may include candidate and evaluator exports; missing counters are unknown, and zero rejections do not prove exporter delivery",
+            "evidence_availability": "MCP, native trajectory and each usage/cost metric are independent observations, not proof of complete session accounting",
             "judge_calibration": "single_judge_uncalibrated",
             "judge_repeats": "not_implemented",
             "conditional_efficiency": "latency and token means cover only the attempts that reported them; read them against coverage and attempts_without_answer rather than as the cost of the whole matrix",
@@ -2619,6 +2666,7 @@ pub fn run(
             total_elapsed_ms,
         )?;
         insert_candidate_selection_fields(&mut record, telemetry.as_ref());
+        insert_telemetry_evidence_fields(&mut record, telemetry.as_ref());
         record.retain(|_, value| !value.is_null());
         insert_trajectory_fields(
             &mut record,
@@ -2666,6 +2714,8 @@ pub fn run(
         "planned_launches": launches,
         "trials": outputs,
         "telemetry_receiver": "local_otlp_http",
+        "telemetry_scope": "ahu_spans",
+        "telemetry_caveat": "complete_session means an ahu MCP summary arrived, not full harness/native/helper coverage",
     });
     if request.json_output {
         println!("{}", serde_json::to_string(&result)?);
@@ -2677,6 +2727,7 @@ pub fn run(
         cases.len(),
         candidates.len()
     ))?;
+    console.say("  telemetry: ahu spans; complete_session means an MCP summary arrived, not full harness/native/helper coverage\n")?;
     for row in result["trials"].as_array().into_iter().flatten() {
         console.say(&format!(
             "  trial {}  {} {}  run {}  score {}  answer {}  judge {}  tools {}  telemetry {}  trajectory budget {}  guard {}\n",
@@ -2726,6 +2777,7 @@ fn base_fields(
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
     fields.insert("schema_version".into(), RECORD_SCHEMA_VERSION.into());
+    fields.insert("telemetry_scope".into(), "ahu_spans".into());
     fields.insert("recorded_at".into(), crate::task::now_rfc3339().into());
     fields.insert("run_id".into(), run_id.into());
     fields.insert("stage".into(), stage.into());
@@ -2781,6 +2833,7 @@ fn insert_telemetry_fields(
     telemetry: Option<&crate::eval_otel::TaskTelemetry>,
 ) -> Result<()> {
     insert_candidate_selection_fields(record, telemetry);
+    insert_telemetry_evidence_fields(record, telemetry);
     let coverage = telemetry.map_or(crate::eval_otel::Coverage::None, |item| item.coverage());
     record.insert("telemetry_coverage".into(), coverage.as_str().into());
     record.insert(
@@ -2842,6 +2895,24 @@ fn insert_telemetry_fields(
         }
     }
     Ok(())
+}
+
+/// Separate MCP observations from unrelated ahu spans. Zero means the receiver
+/// observed no MCP spans, never that the harness performed no MCP work.
+fn insert_telemetry_evidence_fields(
+    record: &mut serde_json::Map<String, serde_json::Value>,
+    telemetry: Option<&crate::eval_otel::TaskTelemetry>,
+) {
+    record.insert(
+        "mcp_spans".into(),
+        telemetry.map_or(0, |t| t.mcp_spans).into(),
+    );
+    if let Some(telemetry) = telemetry {
+        record.insert(
+            "telemetry_dedup_untracked_spans".into(),
+            telemetry.dedup_untracked_spans.into(),
+        );
+    }
 }
 
 /// One case of the matrix, with the weight the suite gave it.
@@ -3439,8 +3510,22 @@ fn group_json(group: &Group) -> serde_json::Value {
             "telemetry_complete_session": group.coverage.telemetry_complete,
             "telemetry_partial_spans": group.coverage.telemetry_partial,
             "telemetry_absent": group.coverage.telemetry_none,
+            "telemetry_unknown": group.coverage.telemetry_unknown,
+            "receiver_projection": group.coverage.receiver_projection,
             "telemetry_receiver": group.coverage.telemetry_receiver,
         },
+        "evidence": {
+            "scope": "independent_observations_not_session_completeness",
+            "mcp": group.mcp_evidence,
+            "native_trajectory": {
+                "coverage": group.trajectory.coverage,
+                "missing_runs": group.trajectory.missing_runs,
+            },
+            "token_metric_observations": group.token_field_observations,
+            "cost_metric_observations": group.reported_cost_observations,
+        },
+    }));
+    merge(serde_json::json!({
         "telemetry_receiver": group.telemetry_receiver,
         "observed": {
             "mean_elapsed_ms": group.mean_elapsed_ms,

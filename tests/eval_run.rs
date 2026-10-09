@@ -238,6 +238,10 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     assert_eq!(rows[0]["fingerprint_completeness"], "complete");
     assert_eq!(rows[0]["blinding"], "prompt_only");
     assert_eq!(rows[0]["telemetry_coverage"], "complete_session");
+    assert_eq!(rows[0]["telemetry_scope"], "ahu_spans");
+    assert!(rows[0]["mcp_spans"].as_u64().unwrap() > 0);
+    assert_eq!(rows[0]["telemetry_dedup_untracked_spans"], 0);
+    assert!(rows[0]["telemetry_receiver"]["projection"].is_object());
     assert_eq!(rows[0]["tool_expectation_status"], "not_applicable");
     assert_eq!(rows[0]["terminal_status"], "candidate_scored");
     assert_eq!(rows[0]["attempts"], 1);
@@ -483,6 +487,9 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
             row["telemetry_coverage"].is_string(),
             "{mode} states its telemetry coverage: {row}"
         );
+        assert_eq!(row["telemetry_scope"], "ahu_spans");
+        assert!(row["mcp_spans"].is_u64(), "{row}");
+        assert!(row["telemetry_receiver"]["projection"].is_object(), "{row}");
         if mode == "timed_out" {
             // The harness reported the timeout, and the row says so rather than
             // calling it a generic launch failure.

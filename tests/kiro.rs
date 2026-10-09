@@ -216,3 +216,33 @@ fn kiro_headless_inspection_refuses_unreviewed_sources_without_reading_credentia
         .allowed
     );
 }
+
+#[test]
+fn kiro_events_feed_partial_acp_call_evidence_without_inferred_usage() {
+    use ahu::eval::trajectory::{Coverage, Source};
+    use serde_json::json;
+    let mut events = ahu::headless::Events::default();
+    kiro_event(
+        &mut events,
+        json!({"type":"runStarted","data":{"engine":"v3","payloadSchema":"acp"}}),
+    );
+    kiro_event(
+        &mut events,
+        json!({"type":"sessionUpdate","data":{"sessionId":"sess_fixture","update":{"sessionUpdate":"tool_call","toolCallId":"fixture-call","title":"Read File","status":"pending"}}}),
+    );
+    kiro_event(
+        &mut events,
+        json!({"type":"sessionUpdate","data":{"sessionId":"sess_fixture","update":{"sessionUpdate":"tool_call_update","toolCallId":"fixture-call","status":"completed"}}}),
+    );
+    kiro_event(&mut events, finished());
+    let observation = &events.trajectory.observation;
+    assert_eq!(observation.source, Source::KiroSessionUpdates);
+    assert_eq!(observation.coverage, Coverage::Partial);
+    assert_eq!(observation.tool_calls, Some(1));
+    assert_eq!(observation.completed_tool_calls, Some(1));
+    assert_eq!(observation.tool_errors, Some(0));
+    assert_eq!(observation.steps, None);
+    assert_eq!(observation.repeated_tool_calls, None);
+    assert!(events.usage.input.is_none());
+    assert!(events.cost.usd.is_none());
+}

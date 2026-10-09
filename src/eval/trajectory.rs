@@ -30,6 +30,7 @@ pub enum Source {
     CodexTurns,
     ClaudeAssistantMessages,
     OpencodeSteps,
+    KiroSessionUpdates,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -184,6 +185,10 @@ pub struct Observer {
     ended: bool,
     #[serde(skip)]
     pending: usize,
+    #[serde(skip)]
+    kiro_session: Option<Key>,
+    #[serde(skip)]
+    kiro_calls: BTreeMap<Key, Option<bool>>,
 }
 
 fn increment(value: &mut Option<u64>) {
@@ -213,6 +218,10 @@ impl Observer {
         let o = &mut self.observation;
         o.coverage = if o.source == Source::Unsupported {
             Coverage::None
+        } else if o.source == Source::KiroSessionUpdates {
+            // ACP call outcomes are observable, but model turns and native
+            // helper attribution are not. Never certify whole-stream coverage.
+            Coverage::Partial
         } else if self.started
             && self.ended
             && !o.stream_incomplete
@@ -304,14 +313,133 @@ impl Observer {
             tool.failed = false;
         }
     }
+    fn observe_kiro(&mut self, v: &Value) {
+        if self.observation.source == Source::Unsupported {
+            self.observation.source = Source::KiroSessionUpdates;
+            self.observation.tool_calls = Some(0);
+            self.observation.completed_tool_calls = Some(0);
+            self.observation.tool_errors = Some(0);
+        } else if self.observation.source != Source::KiroSessionUpdates {
+            self.incomplete();
+            return;
+        }
+        let kind = string(v, "/type").unwrap_or("");
+        if kind == "runStarted" {
+            if v.pointer("/data/engine").and_then(Value::as_str) != Some("v3")
+                || v.pointer("/data/payloadSchema").and_then(Value::as_str) != Some("acp")
+                || self.started
+            {
+                self.incomplete();
+            }
+            self.started = true;
+            return;
+        }
+        if matches!(kind, "sessionUpdate" | "runFinished" | "runError") {
+            let session = string(v, "/data/sessionId");
+            let Some(session_key) = session
+                .filter(|s| s.starts_with("sess_"))
+                .and_then(|s| key(Some(s)))
+            else {
+                self.unknown();
+                self.incomplete();
+                return;
+            };
+            if self.kiro_session.is_some_and(|prior| prior != session_key) {
+                self.unknown();
+                self.incomplete();
+                return;
+            }
+            self.kiro_session = Some(session_key);
+        }
+        match kind {
+            "runFinished" => {
+                if self.ended
+                    || !self.started
+                    || v.pointer("/data/status").and_then(Value::as_str) != Some("success")
+                    || v.pointer("/data/stopReason").and_then(Value::as_str) != Some("end_turn")
+                    || !v.pointer("/data/finalText").is_some_and(Value::is_string)
+                    || v.pointer("/data/finalTextTruncated")
+                        .and_then(Value::as_bool)
+                        != Some(false)
+                {
+                    self.incomplete();
+                }
+                self.ended = true;
+            }
+            "sessionUpdate" => {
+                if !self.started || self.ended {
+                    self.incomplete();
+                }
+                let update = &v["data"]["update"];
+                match string(update, "/sessionUpdate").unwrap_or("") {
+                    "tool_call" | "tool_call_update" => {
+                        // ACP updates may omit title/kind; correlate only by the
+                        // required ID. Titles are display text, not tool identity
+                        // or proof that a call delegated work to a native helper.
+                        let Some(id) = key(string(update, "/toolCallId")) else {
+                            self.unknown();
+                            return;
+                        };
+                        if !self.kiro_calls.contains_key(&id) {
+                            if self.kiro_calls.len() == MAX_IDENTITIES {
+                                self.observation.tracking_limited = true;
+                                return;
+                            }
+                            self.kiro_calls.insert(id, None);
+                            increment(&mut self.observation.tool_calls);
+                        }
+                        let outcome = match string(update, "/status") {
+                            Some("completed") => Some(false),
+                            Some("failed") => Some(true),
+                            Some("pending" | "in_progress") => None,
+                            None if update.get("status").is_none() => None,
+                            _ => {
+                                self.unknown();
+                                return;
+                            }
+                        };
+                        if let Some(failed) = outcome {
+                            match self.kiro_calls.get(&id).copied().flatten() {
+                                Some(prior) if prior != failed => self.unknown(),
+                                Some(_) => (),
+                                None => {
+                                    self.kiro_calls.insert(id, Some(failed));
+                                    increment(&mut self.observation.completed_tool_calls);
+                                    if failed {
+                                        increment(&mut self.observation.tool_errors);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "agent_message_chunk"
+                    | "agent_thought_chunk"
+                    | "user_message_chunk"
+                    | "session_info_update"
+                    | "available_commands_update"
+                    | "config_option_update"
+                    | "plan" => (),
+                    _ => self.unknown(),
+                }
+            }
+            "error" | "runError" => self.incomplete(),
+            _ => self.unknown(),
+        }
+    }
     pub fn observe(&mut self, harness: &str, v: &Value) {
         let source = match harness {
             "codex" => Source::CodexTurns,
             "claude-code" => Source::ClaudeAssistantMessages,
             "opencode" => Source::OpencodeSteps,
+            "kiro" => Source::KiroSessionUpdates,
             _ => Source::Unsupported,
         };
         if source == Source::Unsupported {
+            return;
+        }
+        if harness == "kiro" {
+            self.observe_kiro(v);
+            self.refresh();
             return;
         }
         if self.observation.source == Source::Unsupported {
@@ -623,6 +751,122 @@ mod tests {
         for event in events {
             observer.observe(harness, event);
         }
+    }
+
+    fn kiro_start(o: &mut Observer) {
+        o.observe(
+            "kiro",
+            &json!({"type":"runStarted","data":{"engine":"v3","payloadSchema":"acp"}}),
+        );
+    }
+    fn kiro_update(o: &mut Observer, update: Value) {
+        o.observe(
+            "kiro",
+            &json!({"type":"sessionUpdate","data":{"sessionId":"sess_synthetic","update":update}}),
+        );
+    }
+    #[test]
+    fn kiro_counts_acp_ids_without_inventing_turns_or_tool_identity() {
+        let mut o = Observer::default();
+        kiro_start(&mut o);
+        kiro_update(
+            &mut o,
+            json!({"sessionUpdate":"tool_call","toolCallId":"private-id","title":"Reading workflow documentation","status":"pending","rawInput":"private-payload"}),
+        );
+        kiro_update(
+            &mut o,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"private-id","status":"failed"}),
+        );
+        kiro_update(
+            &mut o,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"private-id","status":"failed"}),
+        );
+        kiro_update(
+            &mut o,
+            json!({"sessionUpdate":"tool_call","toolCallId":"second","title":"Reading workflow documentation","status":"completed"}),
+        );
+        o.observe("kiro", &json!({"type":"runFinished","data":{"sessionId":"sess_synthetic","status":"success","stopReason":"end_turn","finalText":"private-answer","finalTextTruncated":false}}));
+        let result = &o.observation;
+        assert_eq!(result.source, Source::KiroSessionUpdates);
+        assert_eq!(result.coverage, Coverage::Partial);
+        assert_eq!(result.tool_calls, Some(2));
+        assert_eq!(result.completed_tool_calls, Some(2));
+        assert_eq!(result.tool_errors, Some(1));
+        assert_eq!(result.tool_error_rate(), Some(0.5));
+        assert_eq!(result.steps, None);
+        assert_eq!(result.repeated_tool_calls, None);
+        assert_eq!(result.repeated_tool_errors, None);
+        assert_eq!(result.tool_recoveries, None);
+        let stored = serde_json::to_string(&o).unwrap();
+        for secret in [
+            "private-id",
+            "private-payload",
+            "private-answer",
+            "sess_synthetic",
+            "Reading workflow",
+        ] {
+            assert!(!stored.contains(secret));
+        }
+    }
+    #[test]
+    fn kiro_missing_ids_invalid_status_and_conflicting_results_are_unknown() {
+        let mut o = Observer::default();
+        kiro_start(&mut o);
+        kiro_update(
+            &mut o,
+            json!({"sessionUpdate":"tool_call","callId":"wrong-field","status":"completed"}),
+        );
+        kiro_update(
+            &mut o,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"a","status":42}),
+        );
+        kiro_update(
+            &mut o,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"b","status":"failed"}),
+        );
+        kiro_update(
+            &mut o,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"b","status":"completed"}),
+        );
+        assert_eq!(o.observation.unclassified_events, 3);
+        assert_eq!(o.observation.tool_calls, Some(2));
+        assert_eq!(o.observation.completed_tool_calls, Some(1));
+        assert_eq!(o.observation.tool_errors, Some(1));
+        assert!(!o.observation.complete());
+    }
+    #[test]
+    fn kiro_invalid_protocol_session_changes_and_errors_never_certify_coverage() {
+        let mut o = Observer::default();
+        o.observe("kiro", &json!({"type":"runStarted","data":{"engine":"v2"}}));
+        kiro_update(
+            &mut o,
+            json!({"sessionUpdate":"tool_call","toolCallId":"a","status":"pending"}),
+        );
+        o.observe("kiro", &json!({"type":"sessionUpdate","data":{"sessionId":"sess_changed","update":{"sessionUpdate":"tool_call_update","toolCallId":"a","status":"completed"}}}));
+        o.observe(
+            "kiro",
+            &json!({"type":"runError","data":{"sessionId":"sess_synthetic"}}),
+        );
+        assert!(o.observation.stream_incomplete);
+        assert_eq!(o.observation.completed_tool_calls, Some(0));
+        assert!(!o.observation.complete());
+        o.malformed();
+        assert_eq!(o.observation.malformed_events, 1);
+    }
+    #[test]
+    fn kiro_tracking_is_bounded_and_cli_step_guards_remain_unknown() {
+        let mut o = Observer::default();
+        kiro_start(&mut o);
+        for index in 0..=MAX_IDENTITIES {
+            kiro_update(
+                &mut o,
+                json!({"sessionUpdate":"tool_call","toolCallId":format!("call-{index}"),"status":"completed"}),
+            );
+        }
+        assert!(o.observation.tracking_limited);
+        assert_eq!(o.observation.tool_calls, Some(MAX_IDENTITIES as u64));
+        assert_eq!(o.observation.steps, None);
+        assert!(!o.observation.complete());
     }
 
     #[test]

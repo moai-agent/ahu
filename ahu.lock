@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "a1cb24a551e0186385f66c8ef6467410cbd04e642d38a747bb5f4fdd371e3344"
+digest = "f587a7d1301ad5b3e19debd8ca780c75651efbc4ff5967a1b4b2b03a062db98b"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -208,8 +208,8 @@ executable = false
 
 [[entries]]
 path = ".kiro/settings/mcp.json"
-digest = "857ccbb50bfd6fca8fc28a89146bbcaa26fa21240de53ccf0023f1174a6cec87"
-bytes = 141
+digest = "aa4beaf44bc0a4487a91985af907d1f8bdc4e014912f8cd13ff746d15c4b957f"
+bytes = 434
 executable = false
 
 [[entries]]
