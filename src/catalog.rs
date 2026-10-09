@@ -12,7 +12,7 @@ use crate::bail;
 use crate::util::Result;
 
 /// The catalog revision shipped with this ahu build.
-pub const CATALOG_VERSION: &str = "2026-10-08";
+pub const CATALOG_VERSION: &str = "2026-10-09";
 
 /// One capability a harness adapter has actually been validated to deliver.
 ///
@@ -166,7 +166,7 @@ pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
             "Absent inspected hook configuration; custom hooks, extensions and configuration overrides are unverified."
         }
         "kiro" => {
-            "Interactive V3 launch is supported. Kiro native hooks, synchronized configuration and helper isolation have not been validated for headless execution."
+            "V3 2.28.0 local configuration inspection requires absent hook/agent/extension/Powers/workflow sources, empty CLI settings and no cloud configuration or custom environment indirection. Native helper isolation remains unverified."
         }
         _ => return None,
     };
@@ -365,14 +365,19 @@ pub const HARNESSES: &[HarnessEntry] = &[
         adapter_available: true,
         executable: "kiro-cli",
         verified_versions: "2.28.0 (V3)",
-        headless_verified_versions: &[],
+        headless_verified_versions: &["2.28.0"],
         enforces_model_for_session: false,
-        features: &[Feature::InteractiveLaunch, Feature::AutoApprovals],
+        features: &[
+            Feature::InteractiveLaunch,
+            Feature::AutoApprovals,
+            Feature::HeadlessLaunch,
+            Feature::HeadlessResume,
+        ],
         enforcement_gaps: &[
             "--model selects the first request's model; Kiro permits in-session model and agent changes",
             "ahu supplies instructions as prompt text, not a native agent identity",
-            "native hooks, permissions, Powers, global and synchronized configuration remain under Kiro's control; hook coverage is unknown",
-            "headless execution, native resume, and bounded native helpers have not been validated by ahu and are refused",
+            "native hooks, permissions, Powers, global and synchronized configuration remain under Kiro's control; headless admission refuses unreviewed executable configuration and does not provide a filesystem sandbox",
+            "headless V3 and --resume-id are verified on 2.28.0; bounded native helpers remain refused, and disabled helpers are prompt-only rather than a native tool restriction; detailed trajectory, skill invocation, token and USD cost accounting remain unverified",
         ],
     },
 ];
@@ -387,8 +392,8 @@ pub const MODELS: &[ModelEntry] = &[
         model: "claude-sonnet-4.5",
         display_name: "Claude Sonnet 4.5",
         quality_rank: 0,
-        evaluation_basis: "listed by Kiro CLI 2.28.0; interactive model selection and prompt receipt verified; not a comparative task evaluation",
-        reviewed_on: "2026-10-08",
+        evaluation_basis: "listed by Kiro CLI 2.28.0; interactive and headless prompt receipt, tool use and native resume verified; not a comparative task evaluation",
+        reviewed_on: "2026-10-09",
         is_moving_alias: false,
     },
     ModelEntry {

@@ -30,7 +30,7 @@ replace it using one of these fresh-file procedures before troubleshooting ahu.
 
 Tasks require Git and the selected harness installed and
 authenticated: Claude Code (`claude`), Codex (`codex`), Antigravity CLI (`agy`),
-OpenCode (`opencode`), or Kiro CLI (`kiro-cli`, interactive V3). An OpenCode agent also needs the model's provider
+OpenCode (`opencode`), or Kiro CLI (`kiro-cli`, V3 interactive and headless). An OpenCode agent also needs the model's provider
 configured in your own OpenCode configuration; see
 [OpenCode with Ollama-hosted models](docs/reference.md#opencode-with-ollama-hosted-models).
 Interactive sessions also require cmux. Headless tasks need no cmux connection.

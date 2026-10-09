@@ -170,6 +170,14 @@ impl Status {
                 self.next_action = "Use interactive execution; this harness has no validated ahu headless adapter.".into();
             }
         }
+        if self.harness == "kiro"
+            && version.and_then(crate::catalog::version_token) != Some("2.28.0")
+        {
+            self.headless.allowed = false;
+            self.headless
+                .reasons
+                .push("Kiro headless configuration inspection requires validated V3 2.28.0".into());
+        }
         self
     }
 }
@@ -283,6 +291,15 @@ impl Locations {
             "XDG_DATA_HOME",
             "GEMINI_CLI_HOME",
             "AGY_CONFIG_DIR",
+            "KIRO_HOME",
+            "CLOUD_CONFIG_ENDPOINT",
+            "KIRO_REMOTE_SESSIONS_ENDPOINT",
+            "KIRO_ACP_RECORD_PATH",
+            "KIRO_CHAT_LOG_FILE",
+            "KIRO_DUMP_CONFIGURATION",
+            "KIRO_DUMP_REQUESTS",
+            "GLOBAL_ENV_FILE",
+            "ASBX_KIRO_MANDATORY_MCPS",
         ];
         Self {
             home: std::env::var_os("HOME").map(PathBuf::from),
@@ -447,6 +464,17 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
             "XDG_DATA_HOME",
         ],
         "antigravity" => &["GEMINI_CLI_HOME", "AGY_CONFIG_DIR"],
+        "kiro" => &[
+            "KIRO_HOME",
+            "CLOUD_CONFIG_ENDPOINT",
+            "KIRO_REMOTE_SESSIONS_ENDPOINT",
+            "KIRO_ACP_RECORD_PATH",
+            "KIRO_CHAT_LOG_FILE",
+            "KIRO_DUMP_CONFIGURATION",
+            "KIRO_DUMP_REQUESTS",
+            "GLOBAL_ENV_FILE",
+            "ASBX_KIRO_MANDATORY_MCPS",
+        ],
         _ => &[],
     };
     for key in relevant {
@@ -545,12 +573,26 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
             gaps.push("Antigravity custom hook formats and extension scopes are not verified; native version eligibility is checked separately.".into());
         }
         "kiro" => {
-            components.push(component(
-                "Kiro native integration is not inspected",
-                repo,
-                "unknown",
-            ));
-            gaps.push("Kiro interactive workspaces use ahu's cmux lifecycle; native Kiro hook integration and headless isolation are unverified.".into());
+            scan_kiro(&home.join(".kiro"), "user", &mut components);
+            scan_kiro(&repo.join(".kiro"), "project", &mut components);
+            for name in [
+                "web-session/config.json",
+                "cloud-cache/user/config/state.json",
+            ] {
+                let mut c = component(
+                    "Kiro cloud configuration",
+                    &home.join(".kiro").join(name),
+                    "user",
+                );
+                file_bytes(&mut c);
+                components.push(c);
+            }
+            scan_kiro(
+                &home.join(".kiro/cloud-cache/user/config"),
+                "cloud cache",
+                &mut components,
+            );
+            gaps.push("Kiro 2.28.0 V3 local hooks, agents, extensions, Powers and workflows must be absent; custom CLI settings, cloud configuration and environment indirection are refused. Native permissions, skills and MCP remain active. This inspection is not a sandbox or proof of native helper isolation.".into());
         }
         _ => components.push(component("unsupported harness", repo, "unknown")),
     }
@@ -564,6 +606,7 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
             break;
         }
         match harness {
+            "kiro" => scan_kiro(&parent.join(".kiro"), "project ancestor", &mut components),
             "codex" => {
                 codex_activation(&parent.join(".codex/config.toml"), &mut components);
                 scan_hooks(
@@ -622,6 +665,37 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
         components.push(c);
     }
     finish(harness, components, gaps)
+}
+
+// Reviewed against the installed 2.28.0 V3 KAS loader: local, global and
+// cloud-cache hooks; native agent hooks; extensions/Powers/workflow sources.
+// No arbitrary executable source is certified by its filename or contents.
+fn scan_kiro(base: &Path, scope: &str, out: &mut Vec<Component>) {
+    for name in ["hooks", "agents", "extensions", "powers", "workflows"] {
+        scan_directory(&base.join(name), scope, false, out);
+    }
+    let mut c = component("Kiro CLI settings", &base.join("settings/cli.json"), scope);
+    if let Some(bytes) = file_bytes(&mut c) {
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Object(settings)) if settings.is_empty() => absent(&mut c),
+            _ => {
+                c.detail =
+                    "custom Kiro CLI settings have not been reviewed for headless isolation".into()
+            }
+        }
+    }
+    out.push(c);
+    let mut c = component("Kiro MCP settings", &base.join("settings/mcp.json"), scope);
+    if let Some(bytes) = file_bytes(&mut c) {
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) if value.is_object() && !json_mentions_cmux(&value) => {
+                absent(&mut c);
+                c.detail = "no cmux reference observed; arbitrary MCP subprocess behavior is outside inspection".into();
+            }
+            _ => c.detail = "Kiro MCP settings contain unresolved integration configuration".into(),
+        }
+    }
+    out.push(c);
 }
 
 fn json_mentions_cmux(value: &Value) -> bool {
@@ -1417,6 +1491,11 @@ pub fn codex_effective_status(
 }
 
 pub fn enforce_headless(repo: &Path, harness: &str, version: &str) -> Result<Status> {
+    if harness == "kiro" && crate::catalog::version_token(version) != Some("2.28.0") {
+        return Err(Error::new(
+            "Kiro headless configuration inspection is validated only on 2.28.0 V3; no fallback selected",
+        ));
+    }
     let status = headless_status(inspect(repo, harness), version);
     if !status.headless.allowed {
         return Err(Error::new(format!(
@@ -1659,7 +1738,7 @@ pub fn execute_install(plan: &InstallationPlan) -> Result<i32> {
 }
 pub fn status_command(repo: &Path, json: bool) -> Result<i32> {
     let cli = NativeCli::discover();
-    let statuses: Vec<_> = ["claude-code", "codex", "opencode", "antigravity"]
+    let statuses: Vec<_> = ["claude-code", "codex", "opencode", "antigravity", "kiro"]
         .into_iter()
         .map(|h| {
             let version = crate::catalog::harness(h)
@@ -1669,6 +1748,7 @@ pub fn status_command(repo: &Path, json: bool) -> Result<i32> {
         .collect();
     let plans = statuses
         .iter()
+        .filter(|s| s.harness != "kiro")
         .map(|s| installation_plan(&s.harness, &cli))
         .collect::<Result<Vec<_>>>()?;
     if json {

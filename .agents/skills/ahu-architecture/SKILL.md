@@ -39,7 +39,7 @@ harness or its shell tools from starting other processes.
 ## What ahu needs
 
 - **cmux**, required for interactive task sessions; headless execution needs no cmux.
-- **A supported harness**, installed and signed in by you: Claude Code, Codex, the Antigravity CLI, OpenCode, or Kiro CLI (interactive V3).
+- **A supported harness**, installed and signed in by you: Claude Code, Codex, the Antigravity CLI, OpenCode, or Kiro CLI (V3).
 - **Git**: every task gets its own branch and worktree.
 
 ahu creates the repository group and the per-task workspace through cmux, and
@@ -424,8 +424,10 @@ normal harness capabilities, not launch problems.
 Kiro CLI uses harness ID `kiro` and executable `kiro-cli`. The adapter selects
 V3 and passes the exact model and composed positional prompt. It supports
 interactive launches with native prompt approvals or explicit trust-all-tools;
-accept-edits and headless execution are refused. `.kiro/` and `.kiroignore`
+headless fresh runs and native resume are supported on 2.28.0. Accept-edits is
+refused. Headless admission requires absent unreviewed executable configuration
+and cloud sources; it preserves native homes, permissions, MCP and skills. `.kiro/` and `.kiroignore`
 participate in snapshots and context locks. Setup installs MCP and skills at
 Kiro's native project paths. Kiro hook inventory and native helper isolation
-remain unknown; global and synchronized configuration stays harness-managed.
+remain unknown; disabled helpers are prompt-only and bounded helpers are refused; global and synchronized configuration stays harness-managed.
 See `docs/reference.md#kiro-cli` for setup and validation limits.

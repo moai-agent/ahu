@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "eb3f0b7cbdfcecad52c0d698bc6e8d7e8b1a198756c7daab49a4d407b1d2c1d1"
+digest = "a1cb24a551e0186385f66c8ef6467410cbd04e642d38a747bb5f4fdd371e3344"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -76,8 +76,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/dev-kiro.md"
-digest = "91fe56131e3cf8ae9bc3b86ff8eb532818c220a65ebb30e5c46af74ff7170d8e"
-bytes = 954
+digest = "b741c2f98b14350567c171cba1474c3aa81c665d3aee7fe586f652f104f9cf4f"
+bytes = 1262
 executable = false
 
 [[entries]]
@@ -123,6 +123,12 @@ bytes = 5897
 executable = false
 
 [[entries]]
+path = ".agents/ahu/agents/review-kiro.md"
+digest = "68aa1bf5efbdea4a450b4af00cc206e4024a1403ee7e0554c7ca973458102786"
+bytes = 1285
+executable = false
+
+[[entries]]
 path = ".agents/ahu/agents/roadmap-architect.md"
 digest = "2fded2e8f1e0e6820bf00f078396954d66d7a9f05d21ecbc9832c1a0c92d3b73"
 bytes = 3344
@@ -135,8 +141,14 @@ bytes = 3453
 executable = false
 
 [[entries]]
+path = ".agents/ahu/agents/test-kiro.md"
+digest = "6027daf2612dd244571ae34276e045ff5d3fe017a01eff058321f55ad2d29aea"
+bytes = 1259
+executable = false
+
+[[entries]]
 path = ".agents/ahu/config.toml"
-digest = "5a06620636889464e4efc026921baabf415303b40430a01e7d435902368fc60b"
+digest = "13988be31fd0240da9ea02623807f89f4033d702f84c77f920fc11a926e56f6c"
 bytes = 538
 executable = false
 
@@ -154,8 +166,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-architecture/SKILL.md"
-digest = "8708be1c00ca9db514f4136675c6ec7d0e7948d343998dbb0ed41e3246421100"
-bytes = 24375
+digest = "8f00f21b7e828d57ad1105bec78f9e551466c113b6311fcac0512cf1f5c784bc"
+bytes = 24614
 executable = false
 
 [[entries]]

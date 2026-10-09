@@ -1856,7 +1856,7 @@ compatibility evidence, not an allowlist or a claim that newer versions or
 account entitlements were tested. Where multiple harness installations exist,
 ahu uses the one its own resolution picks; it does not search for a version that
 matches the catalog. An exact project pin can make that choice reproducible.
-Project configuration pins catalog `2026-10-08`; a mismatch is an error.
+Project configuration pins catalog `2026-10-09`; a mismatch is an error.
 
 Persisted task records use schema 4, including the `waiting-for-approval` state,
 and use hyphenated `UUID v7` IDs. Schema 3 records remain readable; schema 2 records
@@ -2175,9 +2175,38 @@ GitHub social-login `whoami --format json` interface. Other login types and
 API-key account binding are currently unsupported. Account checks do not prove
 model entitlement or remaining credits.
 
-Kiro's own CLI offers batch execution, but ahu's Kiro adapter currently supports
-interactive sessions only. Headless execution, native resume, bounded helpers,
-native cmux hook installation, and detailed hook inventory have not been
-validated and are not advertised as supported. The preview reports unknown
-hook coverage. Interactive tasks still receive ordinary ahu cmux grouping,
-worktrees, task records, cancellation, and MCP coordination.
+Kiro V3 2.28.0 supports ahu headless fresh runs and native `--resume-id`.
+The adapter passes `--no-interactive --output-format stream-json
+--require-mcp-startup`. Only `runFinished` with success and `end_turn` completes
+an attempt; a failed/denied tool, malformed stream, missing result, interruption,
+or nonzero exit cannot become success. MCP startup failures stop the launch.
+Intermediate turn completion does not finish a task. Kiro credits are not USD;
+USD cost, token, detailed trajectory and skill-invocation metrics remain unknown.
+Shared ahu supervision supplies foreground/background execution, timeout,
+cancellation, result records, and resume. Histories remain in Kiro's native home.
+
+Headless admission currently requires default native paths, absent local/global
+hooks, native agents, extensions, Powers and workflows, empty or absent
+`settings/cli.json`, and no cloud configuration or diagnostic-output overrides.
+Project ancestors and cloud-cache sources are inspected too. Unreviewed sources,
+symlinks, malformed settings and versions other than 2.28.0 are refused; ahu does
+not delete or rewrite them. Native permissions, MCP and skills remain active.
+This is bounded configuration inspection, not a sandbox. Native cmux hook
+installation, detailed hook inventory and bounded helpers remain unsupported;
+`--native-helpers disabled` is a prompt instruction, not a native tool restriction.
+
+This repository registers `@dev-kiro` for implementation, `@review-kiro` for
+read-only review, and `@test-kiro` for reproduction and regression tests. All pin
+`claude-sonnet-4.5`. Development and testing use auto approvals; review keeps
+native prompt policy (which is not enforced read-only access). For example:
+
+```sh
+ahu @dev-kiro --headless --allow-widened-approvals --prompt "Implement the agreed change and validate it"
+ahu @review-kiro --headless --prompt "Review the current change for regressions"
+ahu @test-kiro --headless --allow-widened-approvals --prompt "Add regression coverage for the agreed defect"
+```
+
+Add `--background` for asynchronous work, then use `ahu wait <task-id>`,
+`ahu result <task-id>`, or `ahu cancel <task-id>`. Use `ahu resume <task-id>
+--prompt-file /tmp/continuation.txt` to continue its native session.
+A successful harness result is execution evidence, not acceptance of the work.

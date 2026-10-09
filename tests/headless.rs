@@ -3534,3 +3534,91 @@ fn opencode_preflight_refuses_missing_model_before_creating_a_worktree() {
         );
     }
 }
+
+#[test]
+fn kiro_batch_lifecycle_tracks_fresh_resume_failure_and_timeout() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.repo
+        .add_agent_on("worker", "1.0.0", "kiro", "claude-sonnet-4.5");
+    f.repo.commit("synthetic Kiro assignment");
+    let path = f.bin.join("kiro-cli");
+    std::fs::write(&path,r#"#!/usr/bin/env python3
+import sys,os,json,time
+a=sys.argv[1:]
+if '--version' in a: print('kiro-cli 2.28.0');sys.exit(0)
+if 'whoami' in a: print(json.dumps({'accountType':'SocialGitHub','email':'fixture@example.invalid'}));sys.exit(0)
+if '--list-models' in a: print(json.dumps({'models':[{'model_id':'claude-sonnet-4.5'}]}));sys.exit(0)
+assert a[:2]==['chat','--v3']
+assert a[a.index('--model')+1]=='claude-sonnet-4.5'
+assert '--no-interactive' in a and '--require-mcp-startup' in a and '--' not in a
+assert a[a.index('--output-format')+1]=='stream-json'
+assert '--trust-all-tools' not in a
+assert not any(k.startswith('CMUX_') for k in os.environ)
+assert sys.stdin.read()==''
+session=a[a.index('--resume-id')+1] if '--resume-id' in a else 'sess_fixture'
+def emit(t,d): print(json.dumps({'type':t,'data':d}),flush=True)
+emit('runStarted',{'payloadSchema':'acp','engine':'v3'})
+emit('sessionUpdate',{'sessionId':session,'update':{'sessionUpdate':'session_info_update'}})
+scenario=os.environ.get('SCENARIO','success')
+if scenario=='sleep': time.sleep(60)
+if scenario=='missing': sys.exit(0)
+if scenario=='denied': emit('sessionUpdate',{'sessionId':session,'update':{'sessionUpdate':'tool_call_update','status':'failed'}})
+emit('runFinished',{'sessionId':session,'status':'success','stopReason':'end_turn','finalText':'synthetic','finalTextTruncated':False})
+"#).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = f.launch("success", &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value = Fixture::value(&out);
+    assert_eq!(value["outcome"], "succeeded");
+    let id = value["task_id"].as_str().unwrap();
+    let prompt = f.external.path().join("resume.txt");
+    std::fs::write(&prompt, "continue synthetic task").unwrap();
+    let resumed = f
+        .command()
+        .args(["resume", id, "--prompt-file"])
+        .arg(prompt)
+        .args(["--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_eq!(Fixture::value(&resumed)["outcome"], "started");
+    let waited = f
+        .command()
+        .args(["wait", id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(Fixture::value(&waited)["outcome"], "succeeded");
+    for scenario in ["missing", "denied"] {
+        let out = f.launch(scenario, &[]);
+        assert_eq!(Fixture::value(&out)["outcome"], "failed", "{scenario}");
+    }
+    let out = f.launch("sleep", &["--timeout", "1"]);
+    assert_eq!(Fixture::value(&out)["outcome"], "timed_out");
+    let launched = f.launch("sleep", &["--background"]);
+    assert!(launched.status.success());
+    let value = Fixture::value(&launched);
+    let id = value["task_id"].as_str().unwrap();
+    assert!(
+        f.command()
+            .args(["cancel", id, "--output", "json"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let waited = f
+        .command()
+        .args(["wait", id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(Fixture::value(&waited)["outcome"], "cancelled");
+}

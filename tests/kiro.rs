@@ -6,7 +6,7 @@ fn shortcut_and_capabilities_are_explicit() {
     assert!(ahu::cli::parse(["kiro", "--model", "auto"]).is_err());
     let entry = ahu::catalog::harness("kiro").unwrap();
     assert!(entry.supports(ahu::catalog::Feature::InteractiveLaunch));
-    assert!(!entry.supports(ahu::catalog::Feature::HeadlessLaunch));
+    assert!(entry.supports(ahu::catalog::Feature::HeadlessLaunch));
     assert!(!entry.supports(ahu::catalog::Feature::AcceptEditsApprovals));
     assert!(!entry.supports(ahu::catalog::Feature::HookInventory));
     let repo = tempfile::tempdir().unwrap();
@@ -17,12 +17,6 @@ fn shortcut_and_capabilities_are_explicit() {
     )
     .with_version(Some("kiro-cli 2.28.0"));
     assert!(!status.headless.allowed);
-    assert!(
-        status
-            .next_action
-            .contains("no validated ahu headless adapter")
-    );
-    assert!(!status.next_action.contains("parseable"));
 }
 
 #[test]
@@ -91,4 +85,122 @@ exit 7
         }
     }
     assert_eq!(common::git(repo.path(), &["status", "--porcelain"]), "");
+}
+
+fn kiro_event(events: &mut ahu::headless::Events, event: serde_json::Value) {
+    events.observe("kiro", &serde_json::to_vec(&event).unwrap());
+}
+fn finished() -> serde_json::Value {
+    serde_json::json!({"type":"runFinished","data":{"sessionId":"sess_fixture","status":"success","stopReason":"end_turn","finalText":"private response","finalTextTruncated":false}})
+}
+#[test]
+fn kiro_requires_final_run_result_and_preserves_denials_and_identity_failures() {
+    use ahu::headless::Events;
+    use serde_json::json;
+    let mut events = Events::default();
+    kiro_event(
+        &mut events,
+        json!({"type":"sessionUpdate","data":{"sessionId":"sess_fixture","update":{"sessionUpdate":"session_info_update","_meta":{"kiro":{"kind":"turn_end","stopReason":"end_turn"}}}}}),
+    );
+    assert!(!events.terminal);
+    kiro_event(&mut events, finished());
+    assert!(events.terminal && !events.failed);
+    assert_eq!(events.session.as_deref(), Some("sess_fixture"));
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("private response")
+    );
+    assert!(events.cost.usd.is_none());
+    kiro_event(&mut events, finished());
+    assert!(events.failed);
+    for (index, update) in [
+        json!({"sessionUpdate":"tool_call_update","status":"failed","rawOutput":{"message":"private denial"}}),
+        json!({"sessionUpdate":"session_info_update"}),
+    ].into_iter().enumerate() {
+        let mut events = Events::default();
+        kiro_event(
+            &mut events,
+            json!({"type":"sessionUpdate","data":{"sessionId":if index==0 {"sess_fixture"} else {"sess_other"},"update":update}}),
+        );
+        kiro_event(&mut events, finished());
+        assert!(events.failed);
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains("private denial")
+        );
+    }
+    for (field, value) in [
+        ("status", json!("interrupted")),
+        ("stopReason", json!("max_tokens")),
+        ("finalTextTruncated", json!(true)),
+        ("sessionId", json!("--bad")),
+    ] {
+        let mut event = finished();
+        event["data"][field] = value;
+        let mut events = Events::default();
+        kiro_event(&mut events, event);
+        assert!(events.failed, "{field}");
+    }
+    let mut events = Events::default();
+    events.observe("kiro", b"{broken");
+    assert!(events.failed && !events.terminal);
+}
+
+#[test]
+fn kiro_headless_inspection_refuses_unreviewed_sources_without_reading_credentials() {
+    use ahu::cmux::integration::{Locations, inspect_in};
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let locations = Locations {
+        home: Some(home.path().canonicalize().unwrap()),
+        ..Default::default()
+    };
+    assert!(
+        inspect_in(&repo.path().canonicalize().unwrap(), "kiro", &locations)
+            .headless
+            .allowed
+    );
+    for relative in [
+        "hooks/start.json",
+        "agents/custom.json",
+        "extensions/custom.json",
+        "powers/custom.json",
+        "workflows/custom.json",
+        "settings/cli.json",
+        "web-session/config.json",
+        "cloud-cache/user/config/state.json",
+        "cloud-cache/user/config/hooks/test.json",
+    ] {
+        let path = home.path().join(".kiro").join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"private-marker\":true}").unwrap();
+        let status = inspect_in(&repo.path().canonicalize().unwrap(), "kiro", &locations);
+        assert!(!status.headless.allowed, "{relative}");
+        assert!(
+            !serde_json::to_string(&status)
+                .unwrap()
+                .contains("private-marker")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+    assert!(
+        inspect_in(&repo.path().canonicalize().unwrap(), "kiro", &locations)
+            .headless
+            .allowed
+    );
+    let mut override_locations = locations.clone();
+    override_locations
+        .overrides
+        .insert("KIRO_ACP_RECORD_PATH".into(), "private-marker".into());
+    assert!(
+        !inspect_in(
+            &repo.path().canonicalize().unwrap(),
+            "kiro",
+            &override_locations
+        )
+        .headless
+        .allowed
+    );
 }

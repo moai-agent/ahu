@@ -2,6 +2,7 @@
 //! Process and harness outcomes are evidence, never work acceptance.
 mod admission;
 mod journal;
+mod kiro;
 pub(crate) mod review;
 mod skills;
 
@@ -254,6 +255,34 @@ pub fn batch_command(
         // positional argument, streams one JSON event per line on stdout, and
         // exits without a listening port. `-i/--interactive` is the flag that
         // would make it a session, and this path never passes it.
+        "kiro" => {
+            if request.prompt.is_empty() || request.prompt.starts_with('-') {
+                bail!("Kiro requires a nonempty, non-option-shaped prompt");
+            }
+            add(&[
+                "chat",
+                "--v3",
+                "--model",
+                request.model,
+                "--no-interactive",
+                "--output-format",
+                "stream-json",
+                "--require-mcp-startup",
+            ]);
+            match request.permissions {
+                Permissions::Prompt => (),
+                Permissions::Auto => add(&["--trust-all-tools"]),
+                Permissions::AcceptEdits => bail!("Kiro has no validated accept-edits mapping"),
+            }
+            if let Some(session) = &spec.session {
+                if !kiro::valid_session(session) {
+                    bail!("invalid Kiro native session identifier");
+                }
+                add(&["--resume-id", session]);
+            }
+            // Kiro V3 2.28.0 discards the positional prompt after `--`.
+            "kiro-cli"
+        }
         "opencode" => {
             add(&["run", "--format", "json", "--model", request.model]);
             match request.permissions {
@@ -1067,6 +1096,7 @@ fn validate_environment(
         "HOME",
         "CODEX_HOME",
         "CLAUDE_CONFIG_DIR",
+        "KIRO_HOME",
         "XDG_STATE_HOME",
         "XDG_DATA_HOME",
         "XDG_CACHE_HOME",
@@ -1554,6 +1584,10 @@ impl Events {
                 return;
             }
         };
+        if harness == "kiro" {
+            self.observe_kiro(&event);
+            return;
+        }
         self.usage.observe(&event);
         self.trajectory.observe(harness, &event);
         match harness {
@@ -2036,7 +2070,10 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
             return;
         }
     };
-    for candidate in collect_write_paths(&event) {
+    for candidate in collect_write_paths(&event)
+        .into_iter()
+        .chain(kiro::write_paths(&event))
+    {
         if candidate.len() > 4096 {
             events.failed = true;
             continue;
