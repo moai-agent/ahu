@@ -144,6 +144,18 @@ fn kiro_requires_final_run_result_and_preserves_denials_and_identity_failures() 
         assert!(events.failed, "{field}");
     }
     let mut events = Events::default();
+    kiro_event(
+        &mut events,
+        json!({"type":"runError","data":{"sessionId":"sess_fixture","stage":"prompt","message":"private provider error"}}),
+    );
+    assert!(events.failed && !events.terminal);
+    assert_eq!(events.session.as_deref(), Some("sess_fixture"));
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("private provider error")
+    );
+    let mut events = Events::default();
     events.observe("kiro", b"{broken");
     assert!(events.failed && !events.terminal);
 }

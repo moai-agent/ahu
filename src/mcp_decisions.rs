@@ -41,20 +41,27 @@ pub(super) fn tool_definition() -> Value {
     shared["description"] = json!(
         "One rubric applied to every item; telemetry_key is forbidden because per-question keys must be unique."
     );
+    // Kiro's Sonnet provider rejects top-level oneOf/anyOf/allOf tool
+    // schemas. Two required property pairs express the same disjoint forms
+    // without a root union. Runtime normalization remains authoritative.
     definition["inputSchema"] = json!({
         "type":"object",
-        "oneOf":[legacy, {
-            "type":"object",
-            "properties":{
-                "items":{
-                    "type":"object", "minProperties":1, "maxProperties":20,
-                    "description":"Named evidence items. IDs are nonempty, at most 128 UTF-8 bytes, and contain no control characters.",
-                    "additionalProperties":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]}
-                },
-                "question":shared
+        "description":"Supply exactly one pair: state and questions, or items and question. Never mix forms.",
+        "properties":{
+            "state":legacy["properties"]["state"],
+            "questions":legacy["properties"]["questions"],
+            "items":{
+                "type":"object", "minProperties":1, "maxProperties":20,
+                "description":"Named evidence items. IDs are nonempty, at most 128 UTF-8 bytes, and contain no control characters.",
+                "additionalProperties":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]}
             },
-            "required":["items","question"], "additionalProperties":false
-        }]
+            "question":shared
+        },
+        "minProperties":2, "maxProperties":2, "additionalProperties":false,
+        "dependentRequired":{
+            "state":["questions"], "questions":["state"],
+            "items":["question"], "question":["items"]
+        }
     });
     definition
 }
@@ -1127,9 +1134,9 @@ mod tests {
             }
         }
         let schema = super::tool_definition()["inputSchema"].clone();
-        let named = &schema["oneOf"][0]["properties"]["questions"]["additionalProperties"]["properties"]
-            ["levels"];
-        let shared = &schema["oneOf"][1]["properties"]["question"]["properties"]["levels"];
+        let named =
+            &schema["properties"]["questions"]["additionalProperties"]["properties"]["levels"];
+        let shared = &schema["properties"]["question"]["properties"]["levels"];
         assert_eq!(named, shared);
         assert_eq!(named["minItems"], 2);
         assert_eq!(named["maxItems"], 10);
@@ -1652,20 +1659,26 @@ mod tests {
     #[test]
     fn batch_schema_excludes_mixed_forms_and_shared_telemetry_key() {
         let schema = super::tool_definition()["inputSchema"].clone();
-        let forms = schema["oneOf"].as_array().unwrap();
-        assert_eq!(forms.len(), 2);
-        assert_eq!(forms[0]["required"], json!(["state", "questions"]));
-        assert_eq!(forms[1]["required"], json!(["items", "question"]));
-        for form in forms {
-            assert_eq!(form["additionalProperties"], false);
+        for key in ["oneOf", "anyOf", "allOf"] {
+            assert!(schema.get(key).is_none());
         }
+        assert_eq!(schema["minProperties"], 2);
+        assert_eq!(schema["maxProperties"], 2);
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["dependentRequired"],
+            json!({
+                "state":["questions"], "questions":["state"],
+                "items":["question"], "question":["items"]
+            })
+        );
         assert!(
-            forms[1]["properties"]["question"]["properties"]
+            schema["properties"]["question"]["properties"]
                 .get("telemetry_key")
                 .is_none()
         );
         assert_eq!(
-            forms[1]["properties"]["question"]["additionalProperties"],
+            schema["properties"]["question"]["additionalProperties"],
             false
         );
     }

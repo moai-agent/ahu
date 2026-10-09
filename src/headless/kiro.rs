@@ -15,7 +15,7 @@ impl Events {
     pub(super) fn observe_kiro(&mut self, event: &Value) {
         let kind = event["type"].as_str().unwrap_or("");
         let data = &event["data"];
-        if matches!(kind, "sessionUpdate" | "runFinished") {
+        if matches!(kind, "sessionUpdate" | "runFinished" | "runError") {
             match data["sessionId"].as_str().filter(|s| valid_session(s)) {
                 Some(session) if self.session.as_deref().is_none_or(|s| s == session) => {
                     self.session = Some(session.into());
@@ -83,7 +83,7 @@ impl Events {
                     _ => self.unknown_events += 1,
                 }
             }
-            "error" => {
+            "error" | "runError" => {
                 self.failed = true;
                 self.blockers.push("Kiro emitted an error".into());
             }
