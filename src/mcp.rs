@@ -1078,10 +1078,13 @@ mod tests {
         let budget = &reply["result"]["structuredContent"];
         assert_eq!(budget["schema_version"], 2);
         assert_eq!(budget["profile"], serde_json::Value::Null);
+        assert_eq!(budget["signal"], "provider_capacity_signals");
+        assert_eq!(budget["token_counts"], "not_provided");
+        assert_eq!(budget["shared_account_capacity"], true);
         assert_eq!(budget["project"], repo.identity());
         assert_eq!(budget["providers"][0]["status"], "not_configured");
         assert_eq!(budget["providers"][0]["signal_type"], "unknown");
-        assert_eq!(budget["providers"][0]["source"], "identity_bound_provider");
+        assert_eq!(budget["providers"][0]["source"], "none");
         assert!(!budget.to_string().contains("@"));
     }
 

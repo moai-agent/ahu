@@ -138,6 +138,7 @@ fn budget_with_probe(
                     "not_configured"
                 },
                 ProviderCapacity::Unknown,
+                None,
                 &project_identity,
                 observed_at,
             ));
@@ -148,6 +149,7 @@ fn budget_with_probe(
                 harness,
                 "unsupported",
                 ProviderCapacity::Unknown,
+                None,
                 &project_identity,
                 observed_at,
             ));
@@ -163,7 +165,15 @@ fn budget_with_probe(
         let mut windows = Vec::new();
         for (name, key) in [("primary", "primary"), ("secondary", "secondary")] {
             if let Some(values) = rate_limits.get(key).and_then(normalize_rate_window) {
-                windows.push(normalize_window(name, values));
+                let window = normalize_window(name, values);
+                // Validate freshness: reset times must be future, not stale
+                if let Some(reset) = window["resets_at_unix"].as_u64() {
+                    if reset < observed_at {
+                        // Stale reset time; exclude this window
+                        continue;
+                    }
+                }
+                windows.push(window);
             }
         }
         let capacity = if windows.is_empty() {
@@ -176,21 +186,32 @@ fn budget_with_probe(
         } else {
             "available"
         };
+        let source = Some("codex_app_server");
         providers.push(provider_signal(
             harness,
             status,
             capacity,
+            source,
             &project_identity,
             observed_at,
         ));
     }
-    Ok(json!({
+
+    // V1 compatibility aliases for existing callers
+    let v2_structure = json!({
         "schema_version": 2,
-        "profile": if profile.is_some() {Some(active)} else {None::<String>},
+        "profile": if profile.is_some() {Some(active.clone())} else {None::<String>},
         "project": project_identity,
         "observed_at_unix": observed_at,
         "providers": providers
-    }))
+    });
+
+    // Add v1 top-level aliases
+    let mut result = v2_structure.as_object().unwrap().clone();
+    result.insert("signal".into(), json!("provider_capacity_signals"));
+    result.insert("token_counts".into(), json!("not_provided"));
+    result.insert("shared_account_capacity".into(), json!(true));
+    Ok(Value::Object(result))
 }
 
 #[derive(Debug)]
@@ -199,35 +220,48 @@ enum ProviderCapacity {
     RateWindows(Vec<Value>),
 }
 
-/// Build a provider capacity signal with strict source/scope/freshness binding.
+/// Build a provider capacity signal with source label based on actual observation.
+/// Unknown/unbound/unsupported providers do not claim identity-bound sources.
 fn provider_signal(
     harness: &str,
     status: &str,
     capacity: ProviderCapacity,
+    source: Option<&str>,
     project_identity: &str,
     observed_at: u64,
 ) -> Value {
+    let signal_type = match capacity {
+        ProviderCapacity::Unknown => "unknown",
+        ProviderCapacity::RateWindows(_) => "rate_windows",
+    };
+    let actual_source = source.unwrap_or(match status {
+        "not_configured" | "not_bound" | "unsupported" => "none",
+        _ => "unknown",
+    });
+
     let mut signal = json!({
         "harness": harness,
         "status": status,
-        "signal_type": match capacity {
-            ProviderCapacity::Unknown => "unknown",
-            ProviderCapacity::RateWindows(_) => "rate_windows",
-        },
-        "source": "identity_bound_provider",
+        "signal_type": signal_type,
+        "source": actual_source,
         "scope": "shared_account",
         "project_identity": project_identity,
         "observed_at_unix": observed_at,
     });
+
     match capacity {
         ProviderCapacity::Unknown => {
             signal["data"] = Value::Null;
+            // V1 compatibility: empty windows array
+            signal["windows"] = json!([]);
         }
         ProviderCapacity::RateWindows(windows) => {
             signal["data"] = json!({
-                "windows": windows,
+                "windows": windows.clone(),
                 "semantics": "time_scoped_percentage",
             });
+            // V1 compatibility: top-level windows alias
+            signal["windows"] = json!(windows);
         }
     }
     signal
@@ -1460,10 +1494,13 @@ mod profile_tests {
         .unwrap();
         assert_eq!(budget["schema_version"], 2);
         assert_eq!(budget["profile"], "personal");
+        assert_eq!(budget["signal"], "provider_capacity_signals");
+        assert_eq!(budget["token_counts"], "not_provided");
+        assert_eq!(budget["shared_account_capacity"], true);
         assert_eq!(budget["project"], repo.identity());
         assert_eq!(budget["providers"][0]["signal_type"], "rate_windows");
         assert_eq!(budget["providers"][0]["status"], "available");
-        assert_eq!(budget["providers"][0]["source"], "identity_bound_provider");
+        assert_eq!(budget["providers"][0]["source"], "codex_app_server");
         assert_eq!(budget["providers"][0]["scope"], "shared_account");
         assert_eq!(budget["providers"][0]["project_identity"], repo.identity());
         assert_eq!(
@@ -1474,12 +1511,18 @@ mod profile_tests {
             budget["providers"][0]["data"]["semantics"],
             "time_scoped_percentage"
         );
+        // V1 compatibility: windows alias
+        assert_eq!(
+            budget["providers"][0]["windows"][0]["remaining_percent"],
+            75.0
+        );
         assert_eq!(
             budget["providers"][0]["data"]["windows"][1]["window_duration_minutes"],
             10_080
         );
         assert_eq!(budget["providers"][1]["status"], "unsupported");
         assert_eq!(budget["providers"][1]["signal_type"], "unknown");
+        assert_eq!(budget["providers"][1]["source"], "none");
         let serialized = budget.to_string();
         for secret in [
             "private@example.invalid",
@@ -1545,6 +1588,13 @@ mod profile_tests {
         assert_eq!(malformed["providers"][0]["status"], "unknown");
         assert_eq!(malformed["providers"][0]["signal_type"], "unknown");
         assert_eq!(malformed["providers"][0]["data"], Value::Null);
+        // V1 compatibility: empty windows
+        assert!(
+            malformed["providers"][0]["windows"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1610,7 +1660,7 @@ mod profile_tests {
         let budget = budget_with_probe(&repo, |_| {
             Ok((
                 identity.clone(),
-                json!({"rateLimits":{"primary":{"usedPercent":50.0,"windowDurationMins":60}}}),
+                json!({"rateLimits":{"primary":{"usedPercent":50.0,"windowDurationMins":60,"resetsAt":before+3600}}}),
             ))
         })
         .unwrap();
@@ -1624,8 +1674,91 @@ mod profile_tests {
         assert!(observed_at >= before && observed_at <= after);
         assert_eq!(budget["providers"][0]["project_identity"], repo.identity());
         assert_eq!(budget["providers"][0]["observed_at_unix"], observed_at);
-        assert_eq!(budget["providers"][0]["source"], "identity_bound_provider");
+        assert_eq!(budget["providers"][0]["source"], "codex_app_server");
         assert_eq!(budget["providers"][0]["scope"], "shared_account");
+    }
+
+    #[test]
+    fn budget_excludes_stale_reset_times_and_preserves_future_resets() {
+        let (_temp, repo) = repo_fixture();
+        let identity = Identity {
+            harness: "codex".into(),
+            identity_kind: "chatgpt".into(),
+            principal: "test@example.invalid".into(),
+            organization: None,
+            workspace: None,
+        };
+        let path = binding_path(&repo).unwrap();
+        save(
+            &path,
+            &BindingFile {
+                repo_identity: repo.identity(),
+                profiles: BTreeMap::from([(
+                    "default".into(),
+                    BTreeMap::from([(
+                        "codex".into(),
+                        StoredBinding {
+                            fingerprint: identity.fingerprint().unwrap(),
+                            identity_kind: "chatgpt".into(),
+                            profile: None,
+                        },
+                    )]),
+                )]),
+                ..BindingFile::default()
+            },
+        )
+        .unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Stale reset: past timestamp should be excluded
+        let stale = budget_with_probe(&repo, |_| {
+            Ok((
+                identity.clone(),
+                json!({"rateLimits": {
+                    "primary": {"usedPercent": 25.0, "windowDurationMins": 300, "resetsAt": now - 3600},
+                    "secondary": {"usedPercent": 50.0, "windowDurationMins": 60, "resetsAt": now + 3600}
+                }}),
+            ))
+        })
+        .unwrap();
+
+        // Only the future-reset window should be included
+        assert_eq!(stale["providers"][0]["status"], "available");
+        assert_eq!(
+            stale["providers"][0]["data"]["windows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            stale["providers"][0]["data"]["windows"][0]["name"],
+            "secondary"
+        );
+        assert!(
+            stale["providers"][0]["data"]["windows"][0]["resets_at_unix"]
+                .as_u64()
+                .unwrap()
+                > now
+        );
+
+        // All stale: results in unknown signal
+        let all_stale = budget_with_probe(&repo, |_| {
+            Ok((
+                identity.clone(),
+                json!({"rateLimits": {
+                    "primary": {"usedPercent": 25.0, "windowDurationMins": 300, "resetsAt": now - 7200},
+                    "secondary": {"usedPercent": 50.0, "windowDurationMins": 60, "resetsAt": now - 3600}
+                }}),
+            ))
+        })
+        .unwrap();
+        assert_eq!(all_stale["providers"][0]["status"], "unknown");
+        assert_eq!(all_stale["providers"][0]["signal_type"], "unknown");
     }
 
     #[test]
@@ -1658,14 +1791,20 @@ mod profile_tests {
             },
         )
         .unwrap();
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
         let budget = budget_with_probe(&repo, |_| {
             Ok((
                 identity.clone(),
-                json!({"rateLimits":{"primary":{"usedPercent":25.0,"windowDurationMins":300}}}),
+                json!({"rateLimits":{"primary":{"usedPercent":25.0,"windowDurationMins":300,"resetsAt":future}}}),
             ))
         })
         .unwrap();
         assert_eq!(budget["providers"][0]["signal_type"], "rate_windows");
+        assert_eq!(budget["providers"][0]["source"], "codex_app_server");
         assert_eq!(
             budget["providers"][0]["data"]["semantics"],
             "time_scoped_percentage"
@@ -1710,7 +1849,10 @@ mod profile_tests {
             if harness != "codex" {
                 assert_eq!(provider["status"], "unsupported");
                 assert_eq!(provider["signal_type"], "unknown");
+                assert_eq!(provider["source"], "none");
                 assert_eq!(provider["data"], Value::Null);
+                // V1 compat: empty windows
+                assert!(provider["windows"].as_array().unwrap().is_empty());
             }
         }
     }
