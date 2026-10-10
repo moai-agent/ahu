@@ -1211,6 +1211,7 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
         .stderr(Stdio::null());
     sanitize(&mut command, None);
     crate::telemetry::configure_task_identity(&mut command, &task::load(dir)?, Some(spec));
+    crate::telemetry::configure_supervisor_parent(&mut command, spec);
     command
         .env("AHU_EXPECTED_DIGEST", frozen_digest(dir)?)
         .env_remove("AHU_RUNTIME_DIR")
@@ -2426,7 +2427,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         .map(|loaded| loaded.config.telemetry)
         .unwrap_or_default();
     crate::telemetry::initialize_task(&telemetry, &record, Some(spec))?;
-    let mut telemetry_span = crate::telemetry::span(
+    let mut telemetry_span = crate::telemetry::task_span(
         "ahu.harness.run",
         [
             ("ahu.agent.name", record.agent_label()),
@@ -2435,6 +2436,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             ("ahu.version", env!("CARGO_PKG_VERSION").to_string()),
             ("ahu.task.id", record.task_id.clone()),
         ],
+        spec,
     );
     crate::telemetry::task_span_attributes(&mut telemetry_span, &record, Some(spec));
     if let Some(version) = record.identity.agent_version.as_deref() {
@@ -2464,6 +2466,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         .env_remove("AHU_RUNTIME_DIR")
         .env_remove("AHU_TASK_INDEX_DIR");
     let mut broker = crate::broker::Broker::new(&dir.join("requests"), &record, spec)?;
+    broker.set_parent_span(&telemetry_span);
     broker.configure_worker(&mut command);
     if let Some(profile) = &spec.native_profile {
         for key in &profile.env_remove {

@@ -382,3 +382,195 @@ emit('runFinished',{'sessionId':'sess_fixture','status':'success','stopReason':'
     assert!(attribute(attributes, "ahu.cost.harness_reported_usd").is_none());
     assert!(attribute(attributes, "ahu.tokens.total").is_none());
 }
+
+#[test]
+fn broker_root_dispatch_and_causal_tracing_propagation() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent_on("root-worker", "1.0.0", "claude-code", "claude-opus-5");
+    repo.add_agent_on("child-worker", "1.0.0", "claude-code", "claude-opus-5");
+    repo.commit("OTLP broker fixture");
+    let external = tempfile::tempdir().unwrap();
+    let bin = external.path().join("bin");
+    let home = external.path().join("home");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    let script = r#"#!/usr/bin/env python3
+import sys,os,json,subprocess,time
+if '--version' in sys.argv: print('2.1.270'); sys.exit(0)
+assert '--print' in sys.argv
+assert os.environ['AHU_EXECUTION_BACKEND']=='headless'
+
+session=os.environ['AHU_TASK_ID']
+print(json.dumps({'type':'system','subtype':'init','session_id':session}),flush=True)
+
+prompt = sys.argv[-1]
+env = dict(os.environ)
+env.pop('AHU_BROKER_DISPATCH', None)
+if '\nsynthetic root task</ahu-request-' in prompt:
+    for i in range(2):
+        res = subprocess.run([
+            os.environ['AHU_BIN'], '@child-worker', '--headless', '--output', 'json', '--prompt', 'synthetic child'
+        ], capture_output=True, text=True, env=env)
+        assert res.returncode == 0, res.stderr
+# Invoke the actual ahu MCP server for every root/child; only the harness is fake.
+requests = [{'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
+            {'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'ahu_agents_list','arguments':{}}}]
+mcp = subprocess.run([os.environ['AHU_BIN'],'mcp','serve'], input=''.join(json.dumps(r)+'\n' for r in requests), capture_output=True, text=True, env=env)
+assert mcp.returncode == 0, mcp.stderr
+assert 'agents' in mcp.stdout
+
+result={'type':'result','subtype':'success','result':'fixture','session_id':session,'is_error':False,'total_cost_usd':0.125,'usage':{'input_tokens':20,'output_tokens':5,'total_tokens':25}}
+print(json.dumps(result),flush=True)
+"#;
+    let claude = bin.join("claude");
+    std::fs::write(&claude, script).unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let capture = Capture::start();
+    let command = || {
+        let mut command: Command = common::ahu();
+        command
+            .current_dir(repo.path())
+            .env("HOME", home.canonicalize().unwrap())
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin:/opt/homebrew/bin", bin.display()),
+            )
+            .env("XDG_STATE_HOME", repo.state.path().canonicalize().unwrap())
+            .env("AHU_RUNTIME_DIR", external.path().join("runtime"))
+            .env("AHU_EVAL_OTEL_ENDPOINT", &capture.endpoint)
+            .env_remove("AHU_PARENT_TASK")
+            .env_remove("AHU_EXECUTION_BACKEND")
+            .env_remove("AHU_MCP_RESOURCE_ATTRIBUTES")
+            .env_remove("CODEX_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR");
+        command
+    };
+
+    let output = command()
+        .env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "service.name=fixture,ahu.release.id=release-fixture",
+        )
+        .args([
+            "@root-worker",
+            "--allow-child",
+            "@child-worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "synthetic root task",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // It spawned 1 root and 2 children. Wait for 3 runs.
+    capture.wait_for_runs(3);
+
+    let exports = capture.exports.lock().unwrap();
+    let runs: Vec<_> = exports
+        .iter()
+        .flat_map(|export| &export.resource_spans)
+        .flat_map(|resource| {
+            resource
+                .scope_spans
+                .iter()
+                .flat_map(|scope| &scope.spans)
+                .map(move |span| (resource.resource.as_ref().unwrap(), span))
+        })
+        .filter(|(_, span)| span.name == "ahu.harness.run")
+        .collect();
+
+    assert_eq!(runs.len(), 3, "expected 1 root and 2 child runs");
+    let ids: std::collections::BTreeSet<_> = runs
+        .iter()
+        .map(|(resource, _)| string_attribute(&resource.attributes, "ahu.task.id").unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3);
+    let roots: std::collections::BTreeSet<_> = runs
+        .iter()
+        .map(|(resource, _)| string_attribute(&resource.attributes, "ahu.task.root_id").unwrap())
+        .collect();
+    assert_eq!(roots.len(), 1);
+    for (resource, _) in &runs {
+        assert_eq!(
+            string_attribute(&resource.attributes, "ahu.task.attempt").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            string_attribute(&resource.attributes, "ahu.release.id").as_deref(),
+            Some("release-fixture")
+        );
+    }
+
+    let mut root_trace_id = None;
+    let mut child_trace_ids = Vec::new();
+
+    for (_, span) in runs {
+        let tid = span.trace_id.clone();
+        let parent_id = span.parent_span_id.clone();
+
+        if parent_id.is_empty() {
+            root_trace_id = Some(tid.clone());
+        } else {
+            child_trace_ids.push((tid.clone(), parent_id.clone()));
+        }
+    }
+
+    let root_trace_id = root_trace_id.expect("expected one root span");
+    assert_eq!(child_trace_ids.len(), 2, "expected 2 child spans");
+    for (tid, _parent_id) in child_trace_ids {
+        assert_eq!(
+            tid, root_trace_id,
+            "child trace id must match root trace id"
+        );
+    }
+    let spans: Vec<_> = exports
+        .iter()
+        .flat_map(|e| &e.resource_spans)
+        .flat_map(|r| &r.scope_spans)
+        .flat_map(|s| &s.spans)
+        .collect();
+    let root = spans
+        .iter()
+        .find(|s| s.name == "ahu.harness.run" && s.parent_span_id.is_empty())
+        .unwrap();
+    let children: Vec<_> = spans
+        .iter()
+        .filter(|s| s.name == "ahu.harness.run" && !s.parent_span_id.is_empty())
+        .collect();
+    for child in &children {
+        assert_eq!(child.parent_span_id, root.span_id);
+    }
+    let mcp: Vec<_> = spans
+        .iter()
+        .filter(|s| s.name == "ahu.mcp.tool.call")
+        .collect();
+    assert_eq!(mcp.len(), 3);
+    for call in mcp {
+        assert_eq!(call.trace_id, root.trace_id);
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.name == "ahu.harness.run" && s.span_id == call.parent_span_id)
+        );
+    }
+    for span in spans {
+        assert!(span.trace_state.is_empty());
+        assert!(
+            span.attributes
+                .iter()
+                .all(|a| !a.key.contains("baggage") && !a.key.contains("traceparent"))
+        );
+    }
+}

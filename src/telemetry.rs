@@ -442,6 +442,7 @@ pub fn configure_child(
         .env_remove("AHU_EVAL_LOCAL_METRICS")
         // Never forward a previous task's parent context or MCP identity.
         .env_remove("AHU_MCP_RESOURCE_ATTRIBUTES")
+        .env_remove("AHU_BROKER_PARENT_ATTRIBUTES")
         .env_remove("HTTP_PROXY")
         .env_remove("http_proxy")
         .env_remove("HTTPS_PROXY")
@@ -779,12 +780,18 @@ mod causal_context {
         Some(fields)
     }
 
-    pub(super) fn extract(raw: Option<&str>, task: Option<&str>) -> Context {
+    pub(super) fn extract(raw: Option<&str>, task: Option<&str>, attempt: Option<u32>) -> Context {
         let root = Context::new();
         let Some(fields) = raw.and_then(fields) else {
             return root;
         };
-        if fields.get("ahu.task.id").copied() != task {
+        if fields.get("ahu.task.id").copied() != task
+            || fields
+                .get("ahu.task.attempt")
+                .and_then(|s| s.parse::<u32>().ok())
+                != attempt
+            || attempt.is_none_or(|n| n == 0)
+        {
             return root;
         }
         let Some(parent) = fields.get(PARENT).copied() else {
@@ -812,7 +819,13 @@ mod causal_context {
     pub(super) fn from_environment() -> Context {
         let raw = std::env::var(ENV).ok();
         let task = std::env::var("AHU_TASK_ID").ok();
-        extract(raw.as_deref(), task.as_deref())
+        let frozen = std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok();
+        let attempt = frozen.as_deref().and_then(fields).and_then(|f| {
+            (f.get("ahu.task.id").copied() == task.as_deref())
+                .then(|| f.get("ahu.task.attempt").and_then(|s| s.parse().ok()))
+                .flatten()
+        });
+        extract(raw.as_deref(), task.as_deref(), attempt)
     }
 
     pub(super) fn inject(command: &mut Command, span: &SpanContext) {
@@ -853,6 +866,23 @@ mod causal_context {
 }
 
 impl SpanGuard {
+    pub(crate) fn task_parent_carrier(&self, task: &str, attempt: u32) -> Option<String> {
+        if !safe_resource_value("ahu.task.id", task) || attempt == 0 {
+            return None;
+        }
+        let mut command = std::process::Command::new("unused");
+        command.env(
+            "AHU_MCP_RESOURCE_ATTRIBUTES",
+            format!("ahu.task.id={task},ahu.task.attempt={attempt}"),
+        );
+        self.configure_child_context(&mut command);
+        command
+            .get_envs()
+            .find_map(|(k, v)| (k == "AHU_MCP_RESOURCE_ATTRIBUTES").then_some(v).flatten())
+            .and_then(|v| v.to_str())
+            .filter(|s| s.contains("ahu.internal.traceparent="))
+            .map(str::to_owned)
+    }
     /// Propagate this span explicitly after configure_child. No context is
     /// attached to a thread or held across a future's suspension points.
     pub(crate) fn configure_child_context(&self, command: &mut std::process::Command) {
@@ -910,16 +940,67 @@ pub fn span(
     name: &'static str,
     attributes: impl IntoIterator<Item = (&'static str, String)>,
 ) -> SpanGuard {
+    span_with_context(name, attributes, &causal_context::from_environment())
+}
+
+fn span_with_context(
+    name: &'static str,
+    attributes: impl IntoIterator<Item = (&'static str, String)>,
+    context: &opentelemetry::Context,
+) -> SpanGuard {
     let tracer = global::tracer("ahu");
-    // Use only the validated ahu carrier, never arbitrary ambient thread-local
-    // context, TRACEPARENT, tracestate, or baggage from a harness/request.
-    let mut span = tracer.start_with_context(name, &causal_context::from_environment());
+    let mut span = tracer.start_with_context(name, context);
     for (key, value) in attributes {
         span.set_attribute(KeyValue::new(key, Value::from(value)));
     }
     SpanGuard {
         span: Some(span),
         started: Instant::now(),
+    }
+}
+
+/// Child parentage is bound to the frozen supervisor spec, not harness input.
+pub(crate) fn task_span(
+    name: &'static str,
+    attributes: impl IntoIterator<Item = (&'static str, String)>,
+    spec: &crate::headless::Spec,
+) -> SpanGuard {
+    let carrier = std::env::var("AHU_BROKER_PARENT_ATTRIBUTES").ok();
+    let context = causal_context::extract(
+        carrier.as_deref(),
+        spec.parent_task.as_deref(),
+        spec.parent_attempt,
+    );
+    span_with_context(name, attributes, &context)
+}
+
+pub(crate) fn configure_supervisor_parent(
+    command: &mut std::process::Command,
+    spec: &crate::headless::Spec,
+) {
+    use opentelemetry::trace::TraceContextExt;
+    command.env_remove("AHU_BROKER_PARENT_ATTRIBUTES");
+    let carrier = std::env::var("AHU_BROKER_PARENT_ATTRIBUTES").ok();
+    let context = causal_context::extract(
+        carrier.as_deref(),
+        spec.parent_task.as_deref(),
+        spec.parent_attempt,
+    );
+    if context.span().span_context().is_valid() {
+        // Only the minimal broker-owned carrier is propagated; never baggage.
+        let span = context.span();
+        let sc = span.span_context();
+        command.env(
+            "AHU_BROKER_PARENT_ATTRIBUTES",
+            format!(
+                "ahu.task.id={},ahu.task.attempt={},ahu.internal.traceparent=00-{}-{}-{:02x}",
+                spec.parent_task.as_deref().unwrap(),
+                spec.parent_attempt.unwrap(),
+                sc.trace_id(),
+                sc.span_id(),
+                sc.trace_flags().to_u8()
+            ),
+        );
     }
 }
 
@@ -2413,7 +2494,7 @@ mod causal_context_tests {
                 .iter()
                 .any(|(key, _)| key.contains("traceparent"))
         );
-        let context = causal_context::extract(Some(raw), Some("synthetic-task"));
+        let context = causal_context::extract(Some(raw), Some("synthetic-task"), Some(1));
         assert!(context.span().span_context().is_remote());
         assert_eq!(
             context.span().span_context().trace_id(),
@@ -2444,7 +2525,7 @@ mod causal_context_tests {
     #[test]
     fn invalid_missing_or_mismatched_carriers_are_roots_even_with_ambient_context() {
         let valid = carrier(PARENT);
-        let attached = causal_context::extract(Some(&valid), Some("synthetic-task"));
+        let attached = causal_context::extract(Some(&valid), Some("synthetic-task"), Some(1));
         let _guard = attached.attach();
         let mut invalid = vec![
             String::new(),
@@ -2472,7 +2553,7 @@ mod causal_context_tests {
         invalid.push(valid.replace(&format!(",ahu.internal.traceparent={PARENT}"), ""));
         for raw in &invalid {
             assert!(
-                !causal_context::extract(Some(raw), Some("synthetic-task"))
+                !causal_context::extract(Some(raw), Some("synthetic-task"), Some(1))
                     .span()
                     .span_context()
                     .is_valid()
@@ -2484,14 +2565,22 @@ mod causal_context_tests {
             (Some(valid.as_str()), Some("other-task")),
         ] {
             assert!(
-                !causal_context::extract(raw, task)
+                !causal_context::extract(raw, task, Some(1))
+                    .span()
+                    .span_context()
+                    .is_valid()
+            );
+        }
+        for attempt in [None, Some(0), Some(2)] {
+            assert!(
+                !causal_context::extract(Some(&valid), Some("synthetic-task"), attempt)
                     .span()
                     .span_context()
                     .is_valid()
             );
         }
         let unsampled = carrier(&format!("{}00", &PARENT[..53]));
-        let context = causal_context::extract(Some(&unsampled), Some("synthetic-task"));
+        let context = causal_context::extract(Some(&unsampled), Some("synthetic-task"), Some(1));
         assert!(context.span().span_context().is_valid());
         assert!(!context.span().span_context().is_sampled());
     }
