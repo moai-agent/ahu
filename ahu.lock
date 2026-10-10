@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "37158fd59c17dcbf0bcf1bdc3a099e3663a3cdef452bad2aed3bed25301bb36f"
+digest = "427b4ca4d7293e68364049632293333323b253ed3fcd8d255895a20429546013"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -160,8 +160,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-agent-context-critic/SKILL.md"
-digest = "2dea5dec2dc406e9602c5b659706e6f8bb6df5f3df72ae0a5cedfed85e497e29"
-bytes = 5485
+digest = "502b0c4c51acad11ce9e3e2bdcc1c13a815b1e233e419bd5be1768be86bdf3c9"
+bytes = 5684
 executable = false
 
 [[entries]]
@@ -172,8 +172,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-direct-agents/SKILL.md"
-digest = "e68508ca52ed2b3a0e06b2b99c066f09774beb03fdf909357ef79a6e8e69cd93"
-bytes = 10836
+digest = "a60657a3212fd4cd04a3e435baef2267527b81fe813a53b09a1b5088c57a97d5"
+bytes = 10862
 executable = false
 
 [[entries]]
@@ -190,8 +190,8 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-typed-decisions/SKILL.md"
-digest = "e9c5c95ef657580acffd0f4e9a87cd4488dcd614eb3158de33f1cc782b77a894"
-bytes = 6268
+digest = "758e73c90905231b5335eb2d6819feeda017e08ab75e01fde7ba93326fd474e8"
+bytes = 6771
 executable = false
 
 [[entries]]

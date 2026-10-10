@@ -60,14 +60,14 @@ minimal request:
 
 ```json
 {
-  "state": "Deploy summary: all checks passed.",
+  "state": "A bug report says a button label is misspelled.",
   "questions": {
-    "verdict": {
+    "category": {
       "type": "choice",
-      "instructions": "Pick the release verdict from the deploy summary.",
+      "instructions": "Classify the reported defect.",
       "options": {
-        "ship": "Safe to release now",
-        "hold": "Needs investigation first"
+        "text": "Incorrect displayed text",
+        "behavior": "Incorrect application behavior"
       }
     }
   }

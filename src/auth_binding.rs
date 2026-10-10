@@ -163,20 +163,26 @@ fn budget_with_probe(
         }
         let rate_limits = response.get("rateLimits").unwrap_or(&response);
         let mut windows = Vec::new();
+        let mut incomplete = false;
         for (name, key) in [("primary", "primary"), ("secondary", "secondary")] {
-            if let Some(values) = rate_limits.get(key).and_then(normalize_rate_window) {
+            if let Some(raw) = rate_limits.get(key).filter(|v| !v.is_null()) {
+                let Some(values) = normalize_rate_window(raw) else {
+                    incomplete = true;
+                    continue;
+                };
                 let window = normalize_window(name, values);
-                // Validate freshness: reset times must be future, not stale
-                if let Some(reset) = window["resets_at_unix"].as_u64() {
-                    if reset < observed_at {
-                        // Stale reset time; exclude this window
-                        continue;
-                    }
+                if window["resets_at_unix"]
+                    .as_u64()
+                    .is_some_and(|reset| reset <= observed_at)
+                {
+                    incomplete = true;
+                    continue;
                 }
                 windows.push(window);
             }
         }
-        let capacity = if windows.is_empty() {
+        // A valid high-capacity window cannot hide an unknown other window.
+        let capacity = if incomplete || windows.is_empty() {
             ProviderCapacity::Unknown
         } else {
             ProviderCapacity::RateWindows(windows)
@@ -197,21 +203,18 @@ fn budget_with_probe(
         ));
     }
 
-    // V1 compatibility aliases for existing callers
-    let v2_structure = json!({
-        "schema_version": 2,
-        "profile": if profile.is_some() {Some(active.clone())} else {None::<String>},
+    // Signal metadata is additive to the existing version-1 contract.
+    Ok(json!({
+        "schema_version": 1,
+        "capacity_schema_version": 1,
+        "signal": "provider_rate_limit_windows",
+        "token_counts": "not_provided",
+        "shared_account_capacity": true,
+        "profile": if profile.is_some() {Some(active)} else {None::<String>},
         "project": project_identity,
         "observed_at_unix": observed_at,
         "providers": providers
-    });
-
-    // Add v1 top-level aliases
-    let mut result = v2_structure.as_object().unwrap().clone();
-    result.insert("signal".into(), json!("provider_capacity_signals"));
-    result.insert("token_counts".into(), json!("not_provided"));
-    result.insert("shared_account_capacity".into(), json!(true));
-    Ok(Value::Object(result))
+    }))
 }
 
 #[derive(Debug)]
@@ -247,6 +250,7 @@ fn provider_signal(
         "scope": "shared_account",
         "project_identity": project_identity,
         "observed_at_unix": observed_at,
+        "freshness": if signal_type == "rate_windows" { "queried_now; do_not_reuse_for_admission" } else { "unavailable" },
     });
 
     match capacity {
@@ -276,7 +280,10 @@ fn normalize_rate_window(value: &Value) -> Option<(f64, u64, Option<u64>)> {
     if duration == 0 || duration > 525_600 {
         return None;
     }
-    let reset = value.get("resetsAt").and_then(Value::as_u64);
+    let reset = match value.get("resetsAt") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_u64()?),
+    };
     Some((used, duration, reset))
 }
 
@@ -1492,9 +1499,9 @@ mod profile_tests {
             ))
         })
         .unwrap();
-        assert_eq!(budget["schema_version"], 2);
+        assert_eq!(budget["schema_version"], 1);
         assert_eq!(budget["profile"], "personal");
-        assert_eq!(budget["signal"], "provider_capacity_signals");
+        assert_eq!(budget["signal"], "provider_rate_limit_windows");
         assert_eq!(budget["token_counts"], "not_provided");
         assert_eq!(budget["shared_account_capacity"], true);
         assert_eq!(budget["project"], repo.identity());
@@ -1668,7 +1675,7 @@ mod profile_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        assert_eq!(budget["schema_version"], 2);
+        assert_eq!(budget["schema_version"], 1);
         assert_eq!(budget["project"], repo.identity());
         let observed_at = budget["observed_at_unix"].as_u64().unwrap();
         assert!(observed_at >= before && observed_at <= after);
@@ -1726,25 +1733,25 @@ mod profile_tests {
         })
         .unwrap();
 
-        // Only the future-reset window should be included
-        assert_eq!(stale["providers"][0]["status"], "available");
-        assert_eq!(
-            stale["providers"][0]["data"]["windows"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            stale["providers"][0]["data"]["windows"][0]["name"],
-            "secondary"
-        );
-        assert!(
-            stale["providers"][0]["data"]["windows"][0]["resets_at_unix"]
-                .as_u64()
-                .unwrap()
-                > now
-        );
+        // A good window cannot make the other stale/unknown window eligible.
+        assert_eq!(stale["providers"][0]["status"], "unknown");
+        assert!(stale["providers"][0]["data"].is_null());
+        for malformed in [
+            json!({"usedPercent":101.0,"windowDurationMins":60}),
+            json!({"usedPercent":25.0,"windowDurationMins":60,"resetsAt":"invalid"}),
+        ] {
+            let mixed = budget_with_probe(&repo, |_| Ok((identity.clone(), json!({"rateLimits": {
+                "primary": malformed,
+                "secondary": {"usedPercent":10.0,"windowDurationMins":60,"resetsAt":now+3600}
+            }})))).unwrap();
+            assert_eq!(mixed["providers"][0]["status"], "unknown");
+            assert!(
+                mixed["providers"][0]["windows"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
 
         // All stale: results in unknown signal
         let all_stale = budget_with_probe(&repo, |_| {

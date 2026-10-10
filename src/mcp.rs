@@ -1076,9 +1076,9 @@ mod tests {
             false,
         );
         let budget = &reply["result"]["structuredContent"];
-        assert_eq!(budget["schema_version"], 2);
+        assert_eq!(budget["schema_version"], 1);
         assert_eq!(budget["profile"], serde_json::Value::Null);
-        assert_eq!(budget["signal"], "provider_capacity_signals");
+        assert_eq!(budget["signal"], "provider_rate_limit_windows");
         assert_eq!(budget["token_counts"], "not_provided");
         assert_eq!(budget["shared_account_capacity"], true);
         assert_eq!(budget["project"], repo.identity());
