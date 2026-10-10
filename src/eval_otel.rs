@@ -126,6 +126,9 @@ pub struct TaskTelemetry {
     pub tool_errors: u64,
     pub typed_decision_calls: u64,
     pub typed_decision_errors: u64,
+    pub decision_provenance: crate::eval::provenance::Provenance,
+    pub evaluator_provenance: crate::eval::provenance::Provenance,
+    pub harness_provenance: crate::eval::provenance::Provenance,
     pub decision_input_tokens: Option<u64>,
     pub decision_output_tokens: Option<u64>,
     pub decision_duration_ms: Option<f64>,
@@ -627,6 +630,37 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                 task.spans_recorded = task.spans_recorded.saturating_add(1);
                 match span.name.as_str() {
                     "ahu.harness.run" => {
+                        // ahu.model is launch configuration, not a harness report.
+                        // Keep duplicate keys so the projector can flag conflicts.
+                        let mut identity_attributes: Vec<_> = resource_spans
+                            .resource
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|r| &r.attributes)
+                            .filter(|a| a.key == "ahu.model")
+                            .map(|a| {
+                                let mut a = a.clone();
+                                a.key = "ahu.harness.model.requested".into();
+                                a
+                            })
+                            .collect();
+                        identity_attributes.extend(
+                            span.attributes
+                                .iter()
+                                .filter(|a| {
+                                    matches!(
+                                        a.key.as_str(),
+                                        "ahu.harness.backend"
+                                            | "ahu.harness.model.requested"
+                                            | "ahu.harness.provider.reported"
+                                            | "ahu.harness.model.reported"
+                                            | "ahu.harness.model"
+                                    )
+                                })
+                                .cloned(),
+                        );
+                        task.harness_provenance
+                            .observe(&identity_attributes, "ahu.harness");
                         if span.end_time_unix_nano >= span.start_time_unix_nano {
                             task.elapsed_ms = Some(
                                 (span.end_time_unix_nano - span.start_time_unix_nano) / 1_000_000,
@@ -642,6 +676,8 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                         }
                     }
                     "ahu.eval.typed_decision" => {
+                        task.evaluator_provenance
+                            .observe(&span.attributes, "ahu.eval.decision");
                         task.evaluator_decision_observations =
                             task.evaluator_decision_observations.saturating_add(1);
                         if attrs
@@ -731,6 +767,8 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                                 );
                             }
                             if name == "ahu_typed_decide" {
+                                task.decision_provenance
+                                    .observe(&span.attributes, "ahu.mcp.decision");
                                 if let Some(bytes) =
                                     integers.get("ahu.mcp.decision.arguments.bytes")
                                 {
@@ -1135,6 +1173,137 @@ mod tests {
         }
     }
 
+    fn decision_identity_span(id: u8, requested: &str, reported: &str) -> Span {
+        let mut span = tool_call_span(id, "ahu_typed_decide");
+        span.attributes.extend([
+            string_attribute("ahu.mcp.decision.backend", "fixture-provider"),
+            string_attribute("ahu.mcp.decision.model.requested", requested),
+            string_attribute("ahu.mcp.decision.model.reported", reported),
+        ]);
+        span
+    }
+
+    #[test]
+    fn decision_provenance_separates_mixed_missing_conflicting_and_redacted_values() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let first = decision_identity_span(1, "fixture-a", "fixture-b");
+        let mut conflict = decision_identity_span(2, "fixture-a", "fixture-b");
+        conflict.attributes.push(string_attribute(
+            "ahu.mcp.decision.model.reported",
+            "fixture-c",
+        ));
+        let mut invalid = decision_identity_span(3, "fixture-a", "https://example.invalid/secret");
+        invalid.attributes.push(string_attribute(
+            "ahu.mcp.decision.endpoint",
+            "private-marker",
+        ));
+        invalid.attributes.push(string_attribute(
+            "ahu.mcp.decision.payload",
+            "private-marker",
+        ));
+        let mut legacy = tool_call_span(4, "ahu_typed_decide");
+        legacy
+            .attributes
+            .push(string_attribute("ahu.mcp.decision.model", "legacy-model"));
+        let other = decision_identity_span(5, "fixture-a", "fixture-c");
+        consume(
+            export(
+                "identity",
+                vec![first.clone(), first, conflict, invalid, legacy, other],
+            ),
+            &state,
+        );
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("identity".into(), 1)];
+        let provenance = &task.decision_provenance;
+        assert_eq!(provenance.observations, 5);
+        assert_eq!(provenance.model_mismatches, 2);
+        assert_eq!(task.duplicate_spans, 1);
+        assert_eq!(provenance.reported_model.values.len(), 2);
+        assert_eq!(provenance.reported_model.conflicting, 1);
+        assert_eq!(provenance.reported_model.redacted, 1);
+        assert_eq!(provenance.reported_model.missing, 1);
+        assert_eq!(provenance.unattributed_model.values["legacy-model"], 1);
+        assert_eq!(provenance.reported_provider.status(), "absent");
+        assert!(provenance.valid());
+        let json = serde_json::to_string(task).unwrap();
+        for forbidden in [
+            "https://",
+            "secret",
+            "private-marker",
+            "endpoint",
+            "payload",
+        ] {
+            assert!(!json.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
+    fn harness_resource_model_is_requested_never_reported_identity() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let mut requested = export(
+            "harness",
+            vec![Span {
+                name: "ahu.harness.run".into(),
+                trace_id: vec![1; 16],
+                span_id: vec![1; 8],
+                attributes: vec![string_attribute(
+                    "gen_ai.response.model",
+                    "untrusted-native",
+                )],
+                ..Span::default()
+            }],
+        );
+        requested.resource_spans[0]
+            .resource
+            .as_mut()
+            .unwrap()
+            .attributes
+            .push(string_attribute("ahu.model", "fixture-requested"));
+        consume(requested, &state);
+        let state = state.lock().unwrap();
+        let provenance = &state.tasks[&("harness".into(), 1)].harness_provenance;
+        assert_eq!(provenance.requested_model.values["fixture-requested"], 1);
+        assert_eq!(provenance.reported_model.status(), "absent");
+        assert!(
+            !serde_json::to_string(provenance)
+                .unwrap()
+                .contains("untrusted-native")
+        );
+    }
+
+    #[test]
+    fn decision_provenance_caps_values_and_preserves_stage_boundaries() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let mut spans: Vec<_> = (1..=20)
+            .map(|id| decision_identity_span(id, "fixture", &format!("model-{id}")))
+            .collect();
+        let mut evaluator = decision_identity_span(21, "eval-request", "eval-response");
+        evaluator.name = "ahu.eval.typed_decision".into();
+        for attribute in &mut evaluator.attributes {
+            attribute.key = attribute
+                .key
+                .replace("ahu.mcp.decision", "ahu.eval.decision");
+        }
+        spans.push(evaluator);
+        let mut unrelated = decision_identity_span(22, "unrelated", "unrelated");
+        unrelated.name = "native.anything".into();
+        spans.push(unrelated);
+        consume(export("limits", spans), &state);
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("limits".into(), 1)];
+        assert_eq!(task.decision_provenance.observations, 20);
+        assert_eq!(task.decision_provenance.reported_model.values.len(), 16);
+        assert_eq!(task.decision_provenance.reported_model.limited, 4);
+        assert_eq!(task.decision_provenance.reported_model.status(), "limited");
+        assert_eq!(
+            task.evaluator_provenance.reported_model.values["eval-response"],
+            1
+        );
+        assert_eq!(task.harness_provenance.observations, 0);
+        assert!(task.decision_provenance.valid());
+    }
+
     #[test]
     fn startup_and_transport_spans_establish_partial_mcp_evidence() {
         for name in [
@@ -1423,10 +1592,11 @@ mod tests {
                     ..Resource::default()
                 }),
                 scope_spans: vec![ScopeSpans {
-                    spans: vec![Span {
-                        name: "ahu.mcp.session".into(),
-                        ..Span::default()
-                    }],
+                    spans: vec![decision_identity_span(
+                        1,
+                        "fixture-request",
+                        "fixture-reported",
+                    )],
                     ..ScopeSpans::default()
                 }],
                 ..ResourceSpans::default()
@@ -1465,6 +1635,17 @@ mod tests {
                 .tasks
                 .contains_key(&("task-http".into(), 1))
         );
+        let task = receiver.task("task-http", 1).unwrap();
+        assert_eq!(
+            task.decision_provenance.requested_model.values["fixture-request"],
+            1
+        );
+        assert_eq!(
+            task.decision_provenance.reported_model.values["fixture-reported"],
+            1
+        );
+        assert_eq!(task.decision_provenance.observations, 1);
+        assert!(task.decision_provenance.valid());
     }
 
     #[test]

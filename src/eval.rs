@@ -37,8 +37,10 @@ use crate::table;
 use crate::util::{Error, ErrorKind, Result, display_path, display_safe};
 
 pub mod case;
+pub mod comparison;
 pub mod decision;
 pub mod fingerprint;
+pub mod provenance;
 pub mod stats;
 pub mod suite;
 pub mod trajectory;
@@ -79,6 +81,8 @@ struct Record {
     model: String,
     harness: String,
     score: Option<f64>,
+    #[serde(default)]
+    score_policy: Option<String>,
     passed: bool,
     #[serde(default)]
     corpus_version: Option<String>,
@@ -129,6 +133,12 @@ struct Record {
     reported_tokens: Option<BTreeMap<String, serde_json::Value>>,
     #[serde(default)]
     decision_call_count: Option<f64>,
+    #[serde(default)]
+    decision_provenance: Option<provenance::Provenance>,
+    #[serde(default)]
+    evaluator_provenance: Option<provenance::Provenance>,
+    #[serde(default)]
+    harness_provenance: Option<provenance::Provenance>,
     #[serde(default)]
     elapsed_ms: Option<f64>,
     #[serde(default)]
@@ -289,6 +299,7 @@ impl Record {
 /// Ordered as the report prints it, so sorting the map sorts the report.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GroupKey {
+    pub score_policy: String,
     pub case_id: String,
     pub corpus_version: String,
     pub stage: String,
@@ -363,6 +374,9 @@ pub struct Coverage {
 /// One comparable configuration.
 #[derive(Debug, Clone)]
 pub struct Group {
+    pub decision_provenance: provenance::Summary,
+    pub evaluator_provenance: provenance::Summary,
+    pub harness_provenance: provenance::Summary,
     pub trajectory: trajectory::Summary,
     /// Evidence availability for ahu MCP only, not native tools or helpers.
     pub mcp_evidence: BTreeMap<String, usize>,
@@ -461,6 +475,7 @@ pub struct Group {
     pub judge_passes: usize,
     pub mean_judge_score: Option<f64>,
     pub mean_answer_score: Option<f64>,
+    pub answer_score_observations: usize,
     /// Every criterion the judge scored anywhere in the group, with its mean.
     pub judge_criterion_means: BTreeMap<String, f64>,
     /// Every reason code the judge emitted anywhere in the group, with a count.
@@ -488,6 +503,8 @@ impl Group {
 /// The whole comparison, sorted by group key.
 #[derive(Debug, Clone)]
 pub struct Report {
+    /// SHA-256 over exact input bytes, independent of location.
+    pub records_fingerprint: String,
     /// Where the records were read from. Kept for the terminal view only: the
     /// JSON contract carries no local path.
     pub records: PathBuf,
@@ -613,6 +630,7 @@ pub fn report(repo: &crate::git::Repo, records: &Path) -> Result<Report> {
     })?;
     let parsed = parse_records(records, &text)?;
     Ok(Report {
+        records_fingerprint: crate::util::digest_bytes(text.as_bytes()),
         records: records.to_path_buf(),
         record_count: parsed.len(),
         groups: group(&parsed),
@@ -702,6 +720,17 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
                 number,
                 "invalid evaluator observations",
             ));
+        }
+        if [
+            &record.decision_provenance,
+            &record.evaluator_provenance,
+            &record.harness_provenance,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|p| !p.valid())
+        {
+            return Err(malformed_text(path, number, "invalid identity provenance"));
         }
         if record.decision_request_bytes.is_some() != (record.decision_request_observations > 0)
             || record.score.is_some_and(|score| !score.is_finite())
@@ -818,6 +847,7 @@ fn key_for(record: &Record) -> GroupKey {
         value.map_or_else(|| UNSPECIFIED.to_owned(), |value| value.to_string())
     };
     GroupKey {
+        score_policy: or_unspecified(&record.score_policy, UNSPECIFIED),
         case_id: record.case_id.clone(),
         corpus_version: or_unspecified(&record.corpus_version, UNSPECIFIED),
         stage: or_unspecified(&record.stage, DEFAULT_STAGE),
@@ -1161,6 +1191,15 @@ fn group(records: &[Record]) -> Vec<Group> {
                 .map(|(field, amounts)| (field.clone(), amounts.len()))
                 .collect();
             Group {
+                decision_provenance: provenance::Summary::collect(
+                    items.iter().map(|r| r.decision_provenance.as_ref()),
+                ),
+                evaluator_provenance: provenance::Summary::collect(
+                    items.iter().map(|r| r.evaluator_provenance.as_ref()),
+                ),
+                harness_provenance: provenance::Summary::collect(
+                    items.iter().map(|r| r.harness_provenance.as_ref()),
+                ),
                 mcp_evidence,
                 trajectory: trajectory::Summary::collect(items.iter().map(|r| {
                     (
@@ -1263,6 +1302,7 @@ fn group(records: &[Record]) -> Vec<Group> {
                 judge_passes,
                 mean_judge_score: mean(&judge_scores),
                 mean_answer_score: mean(&answer_scores),
+                answer_score_observations: answer_scores.len(),
                 judge_criterion_means: criterion_scores
                     .into_iter()
                     .filter_map(|(name, values)| mean(&values).map(|value| (name, value)))
@@ -1290,6 +1330,15 @@ pub fn render_at(report: &Report, width: usize) -> String {
         display_path(&report.records),
         report.groups.len()
     );
+    let evidence = comparison::evidence(report);
+    out.push_str(&format!(
+        "  comparison {}\n  records    {}\n",
+        evidence["comparison_fingerprint"]
+            .as_str()
+            .unwrap_or("unknown"),
+        report.records_fingerprint
+    ));
+    out.push_str("  identity   requested/reported observations are not model attestation\n");
     if report.groups.is_empty() {
         out.push_str(&style.paint(
             Role::Hint,
@@ -1336,6 +1385,33 @@ pub fn render_at(report: &Report, width: usize) -> String {
             display_safe(&key.ahu_version),
             display_safe(&key.skill_digest)
         ));
+        for (label, summary) in [
+            ("decision identity", &group.decision_provenance),
+            ("evaluator identity", &group.evaluator_provenance),
+            ("harness identity", &group.harness_provenance),
+        ] {
+            let evidence = &summary.evidence;
+            out.push_str(&format!(
+                "  {} {} observations; {} recorded / {} unknown runs; model mismatches {}, provider mismatches {}\n",
+                label, evidence.observations, summary.recorded_runs, summary.unknown_runs,
+                evidence.model_mismatches, evidence.provider_mismatches,
+            ));
+            if evidence.observations > 0 {
+                for (name, identity) in [
+                    ("requested provider", &evidence.requested_provider),
+                    ("requested model", &evidence.requested_model),
+                    ("reported provider", &evidence.reported_provider),
+                    ("reported model", &evidence.reported_model),
+                    ("unattributed model", &evidence.unattributed_model),
+                ] {
+                    out.push_str(&format!(
+                        "             {} {} {}; missing {}, redacted {}, conflicting {}, limited {}\n",
+                        name, identity.status(), display_safe(&serde_json::to_string(&identity.values).unwrap_or_default()),
+                        identity.missing, identity.redacted, identity.conflicting, identity.limited,
+                    ));
+                }
+            }
+        }
         let trajectory = &group.trajectory;
         out.push_str(&format!(
             "  trajectory missing {}/{} runs; coverage {}; sources {}; tracking limited {}\n",
@@ -1898,6 +1974,7 @@ pub fn render_json(report: &Report) -> Result<String> {
     let value = serde_json::json!({
         "schema_version": REPORT_SCHEMA_VERSION,
         "command": "eval report",
+        "comparison": comparison::evidence(report),
         "record_count": report.record_count,
         // Said out loud in the contract rather than left to a reader to infer:
         // a single judge's score is one uncalibrated observation, and no
@@ -2381,6 +2458,7 @@ pub fn run(
         let mut judgement: Option<case::Judgement> = None;
         let mut judge_failure: Option<String> = None;
         let mut evaluator_task = None;
+        let mut evaluator_provenance = None;
         if request.decision_evaluator {
             match decision::judge_with(case, &answer, &mut evaluator_observation, |arguments| {
                 crate::mcp::typed_decide(repo, arguments)
@@ -2409,6 +2487,9 @@ pub fn run(
             {
                 evaluator_observation.telemetry_coverage = "typed_decision_span".into();
             }
+            evaluator_provenance = receiver
+                .task(&observation_id, 1)
+                .map(|t| t.evaluator_provenance);
         }
         if let Some(agent) = evaluator.as_ref() {
             let evaluator_started = std::time::Instant::now();
@@ -2444,6 +2525,10 @@ pub fn run(
                 print.evaluator_repo_head = evaluator_root.head.clone();
                 observe_evaluator_agent(&mut evaluator_observation, envelope, &receiver)?;
                 evaluator_task = evaluator_observation.task_id.clone();
+                evaluator_provenance = evaluator_task
+                    .as_ref()
+                    .and_then(|id| receiver.task(id, evaluator_observation.attempt.unwrap_or(1)))
+                    .map(|t| t.harness_provenance);
             }
             match evaluator_launch.result.and_then(|result| {
                 let worktree = result
@@ -2489,13 +2574,8 @@ pub fn run(
             case::score_tool_expectations(case.tool_expectations.as_ref(), telemetry.as_ref());
         let mcp_observed = telemetry.as_ref().is_some_and(|t| t.mcp_observed);
 
-        // Failed judging has no headline score. Deterministic answer checks
-        // remain available separately, and cannot turn a judge failure into a pass.
-        let (score, passed, score_source) = match &judgement {
-            Some(judged) => (Some(judged.score), judged.passed, "judge"),
-            None if judge_status == "failed" => (None, false, "judge_failed"),
-            None => (Some(answer_score), answer_passed, "deterministic"),
-        };
+        // A judge is independent evidence and cannot replace the answer check.
+        let (score, passed, score_source) = (Some(answer_score), answer_passed, "deterministic");
 
         let mut record = print.record_fields();
         record.extend(base_fields(&run_id, trial, "candidate"));
@@ -2694,6 +2774,12 @@ pub fn run(
         )?;
         insert_candidate_selection_fields(&mut record, telemetry.as_ref());
         insert_telemetry_evidence_fields(&mut record, telemetry.as_ref());
+        if let Some(provenance) = evaluator_provenance {
+            record.insert(
+                "evaluator_provenance".into(),
+                serde_json::to_value(provenance)?,
+            );
+        }
         record.retain(|_, value| !value.is_null());
         insert_trajectory_fields(
             &mut record,
@@ -2935,6 +3021,15 @@ fn insert_telemetry_evidence_fields(
         telemetry.map_or(0, |t| t.mcp_spans).into(),
     );
     if let Some(telemetry) = telemetry {
+        for (name, evidence) in [
+            ("decision_provenance", &telemetry.decision_provenance),
+            ("harness_provenance", &telemetry.harness_provenance),
+        ] {
+            record.insert(
+                name.into(),
+                serde_json::to_value(evidence).expect("bounded provenance"),
+            );
+        }
         record.insert(
             "telemetry_dedup_untracked_spans".into(),
             telemetry.dedup_untracked_spans.into(),
@@ -3445,6 +3540,9 @@ fn group_json(group: &Group) -> serde_json::Value {
         }
     };
     merge(serde_json::json!({
+        "decision_provenance": group.decision_provenance,
+        "evaluator_provenance": group.evaluator_provenance,
+        "harness_provenance": group.harness_provenance,
         "trajectory": group.trajectory,
         "case_id": key.case_id,
         "corpus_version": key.corpus_version,
@@ -3488,6 +3586,7 @@ fn group_json(group: &Group) -> serde_json::Value {
         "input_fingerprint": key.input_fingerprint,
     }));
     merge(serde_json::json!({
+        "score_policy": key.score_policy,
         "runs": group.runs,
         "passed": group.passes,
         "mean_score": group.mean_score,
@@ -3499,6 +3598,7 @@ fn group_json(group: &Group) -> serde_json::Value {
             "pass_rate": group.answer_pass_rate,
             "pass_interval": stats::interval_json(group.answer_pass_interval),
             "mean_score": group.mean_answer_score,
+            "score_observations": group.answer_score_observations,
             // Quality: over the attempts that produced a valid answer. Null
             // rather than zero when nothing was answered.
             "observations": group.answer_observations,
