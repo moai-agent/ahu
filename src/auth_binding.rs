@@ -161,6 +161,11 @@ fn budget_with_probe(
                 "current Codex account does not match the active project auth profile; signal omitted",
             ));
         }
+        // Check reset freshness after the potentially slow provider probe.
+        let observed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let rate_limits = response.get("rateLimits").unwrap_or(&response);
         let mut windows = Vec::new();
         let mut incomplete = false;
