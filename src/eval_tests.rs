@@ -705,11 +705,15 @@ fn an_empty_record_file_reports_nothing_rather_than_failing() {
     assert!(rendered.contains("No run records"), "{rendered}");
 }
 fn fixture_repo(root: &Path) -> crate::git::Repo {
-    crate::git::Repo {
-        root: root.to_path_buf(),
-        common_dir: root.join(".git"),
-        head: None,
-    }
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    crate::git::discover(root).unwrap()
 }
 
 fn fixture_case(path: &Path, id: &str) {
@@ -769,7 +773,7 @@ fn report_rejects_non_files_oversized_files_and_invalid_utf8() {
     let repo = fixture_repo(checkout.path());
     let error = report(&repo, external.path()).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Usage);
-    assert!(error.to_string().contains("not a regular file"));
+    assert!(error.to_string().contains("regular file"));
 
     let path = external.path().join("records.jsonl");
     let file = std::fs::File::create(&path).unwrap();
@@ -804,7 +808,7 @@ fn writable_records_require_an_existing_external_directory_and_regular_file() {
         ),
         (PathBuf::from("/"), "records path must name a file"),
         (checkout.path().join("records.jsonl"), "must live outside"),
-        (external.path().to_path_buf(), "must be a regular file"),
+        (external.path().to_path_buf(), "regular file"),
     ] {
         let error = writable_records_path(&repo, &path).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Usage);
@@ -832,12 +836,12 @@ fn records_symlinks_cannot_bypass_repository_or_append_checks() {
     std::fs::write(&inside, record(&[])).unwrap();
     let link = external.path().join("link.jsonl");
     symlink(&inside, &link).unwrap();
-    let error = records_path_outside_repository(&repo, &link).unwrap_err();
+    let error = storage::results_path(&repo, &link).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Usage);
-    assert!(error.to_string().contains("resolves to"));
+    assert!(error.to_string().contains("symlink"));
     let error = writable_records_path(&repo, &link).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Usage);
-    assert!(error.to_string().contains("not a symlink"));
+    assert!(error.to_string().contains("symlink"));
 }
 
 #[test]
@@ -1056,7 +1060,7 @@ fn safe_artifact_reports_missing_roots_and_requires_regular_files() {
         safe_artifact(&root, "answer.json")
             .unwrap_err()
             .to_string()
-            .contains("must be a regular file")
+            .contains("regular file")
     );
     std::fs::remove_dir(root.join("answer.json")).unwrap();
     std::fs::write(root.join("answer.json"), "{}").unwrap();

@@ -43,12 +43,12 @@ pub(crate) struct Request {
 pub(crate) fn tool_definition() -> Value {
     json!({
         "name":"ahu_agents_recommend",
-        "description":"Read-only advisory comparison of registered agents over explicit external eval JSONL and a fixed case/candidate pool. Quality is the per-case 95% Wilson lower bound on deterministic answer passes over all attempts. Unknown, stale, mixed, unmatched or unsupported cost evidence abstains. Compares only observed harness-reported USD, never provider quota, prices or billing; does not launch or reconfigure agents.",
+        "description":"Read-only advisory comparison of registered agents over explicit bounded eval JSONL and a fixed case/candidate pool. Quality is the per-case 95% Wilson lower bound on deterministic answer passes over all attempts. Unknown, stale, mixed, unmatched or unsupported cost evidence abstains. Compares only observed harness-reported USD, never provider quota, prices or billing; does not launch or reconfigure agents.",
         "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false},
         "inputSchema":{"type":"object","additionalProperties":false,
             "required":["records_path","cases","candidates","minimum_quality","minimum_samples_per_case","maximum_age_seconds"],
             "properties":{
-                "records_path":{"type":"string","minLength":1,"maxLength":4096,"description":"Absolute path to external eval JSONL; at most 8 MiB and 4096 records."},
+                "records_path":{"type":"string","minLength":1,"maxLength":4096,"description":"Absolute path to external eval JSONL or primary ignored, untracked .ahu/evals/ JSONL; at most 8 MiB and 4096 records."},
                 "cases":{"type":"array","minItems":1,"maxItems":16,"items":{
                     "type":"object","additionalProperties":false,"required":["case_id","case_digest"],
                     "properties":{"case_id":{"type":"string","minLength":1,"maxLength":128},"case_digest":{"type":"string","pattern":"^[a-f0-9]{64}$"}}}},
@@ -123,8 +123,8 @@ struct Candidate {
 pub(crate) fn call(repo: &crate::git::Repo, arguments: &Value) -> Result<Value> {
     let request = validate(arguments)?;
     let text = read_records(repo, Path::new(&request.records_path))?;
-    let records = super::parse_records(Path::new("external-eval-input"), &text)
-        .map_err(|_| Error::new("invalid external eval records"))?;
+    let records = super::parse_records(Path::new("eval-input"), &text)
+        .map_err(|_| Error::new("invalid eval records"))?;
     let agents = crate::agent::load_all(&repo.root)?;
     let candidates: Vec<_> = request
         .candidates
@@ -155,8 +155,8 @@ pub(crate) fn call(repo: &crate::git::Repo, arguments: &Value) -> Result<Value> 
 }
 
 fn read_records(repo: &crate::git::Repo, path: &Path) -> Result<String> {
-    let real = super::records_path_outside_repository(repo, path)
-        .map_err(|_| Error::new("eval input must be a readable file outside the repository"))?;
+    let real = super::storage::results_path(repo, path)
+        .map_err(|_| Error::new("eval input must be a readable external file or ignored, untracked primary .ahu/evals/ file"))?;
     let read = || -> std::io::Result<String> {
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
@@ -167,7 +167,9 @@ fn read_records(repo: &crate::git::Repo, path: &Path) -> Result<String> {
             options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
         }
         let file = options.open(&real)?;
-        if !file.metadata()?.is_file() || file.metadata()?.len() > MAX_BYTES {
+        crate::storage::validate_owned_metadata(&file.metadata()?, false)
+            .map_err(std::io::Error::other)?;
+        if file.metadata()?.len() > MAX_BYTES {
             return Err(std::io::Error::other("record limit"));
         }
         let mut text = String::new();
@@ -1003,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn external_file_reader_rejects_repository_symlinks_and_limits() {
+    fn records_reader_accepts_ignored_local_and_external_but_rejects_unsafe_inputs() {
         let dir = tempfile::tempdir().unwrap();
         crate::git::run_ok(dir.path(), &["init", "-q"]).unwrap();
         let repo = crate::git::discover(dir.path()).unwrap();
@@ -1014,6 +1016,16 @@ mod tests {
         let file = external.path().join("records.jsonl");
         std::fs::write(&file, "\n").unwrap();
         assert_eq!(read_records(&repo, &file).unwrap(), "\n");
+        std::fs::write(repo.root.join(".gitignore"), "/.ahu/evals/\n").unwrap();
+        let local = super::super::storage::writable_records(
+            &repo,
+            &repo.root.join(".ahu/evals/runs.jsonl"),
+        )
+        .unwrap();
+        std::fs::write(&local, "\n").unwrap();
+        assert_eq!(read_records(&repo, &local).unwrap(), "\n");
+        crate::git::run_ok(&repo.root, &["add", "-f", ".ahu/evals/runs.jsonl"]).unwrap();
+        assert!(read_records(&repo, &local).is_err());
         #[cfg(unix)]
         {
             let link = external.path().join("link.jsonl");

@@ -1,4 +1,4 @@
-//! Comparison of local evaluation runs from external JSONL records.
+//! Comparison of local evaluation runs from bounded JSONL records.
 //!
 //! `ahu eval report` reads the compact records `scripts/local_eval.py record`
 //! appends and groups them into one row per comparable configuration. It is a
@@ -7,11 +7,8 @@
 //!
 //! Three constraints shape this module.
 //!
-//!   - Run evidence stays outside the checkout. The recorder already refuses to
-//!     write inside the repository, and this command refuses to read from
-//!     inside it, so a record file cannot become repository content by being
-//!     summarised from one. The path is canonicalised first, so a symlink that
-//!     points into the checkout is refused too.
+//!   - Bounded records and derived summaries may live in the primary checkout's
+//!     ignored, untracked `.ahu/evals/`. Raw run artifacts stay external.
 //!   - A missing observation is not a zero. Token, timing, and decision-call
 //!     figures are reported as coverage counts alongside means taken over the
 //!     records that carried them, so a configuration that reported nothing is
@@ -43,6 +40,7 @@ pub mod decision;
 pub mod fingerprint;
 pub mod provenance;
 pub mod stats;
+pub mod storage;
 pub mod suite;
 pub mod trajectory;
 
@@ -572,52 +570,21 @@ fn observed_token(value: &serde_json::Value) -> bool {
     number.is_some_and(|number| number.is_finite() && number >= 0.0)
 }
 
-/// Confirm the record file is outside this repository, and return its real path.
-///
-/// Canonicalisation happens before the comparison, so neither a relative path
-/// nor a symlink outside the checkout that resolves into it gets past this.
-/// Both the invoking checkout and the primary checkout are refused, which also
-/// covers every task worktree, because those live under the primary root.
-pub fn records_path_outside_repository(repo: &crate::git::Repo, records: &Path) -> Result<PathBuf> {
-    let real = records.canonicalize().map_err(|error| {
-        Error::new(format!(
-            "cannot read eval records {}: {error}",
-            display_path(records)
-        ))
-        .with_kind(ErrorKind::Usage)
-    })?;
-    let mut roots = vec![repo.root.clone()];
-    if let Ok(primary) = repo.primary_root() {
-        roots.push(primary);
-    }
-    for root in roots {
-        let Ok(root) = root.canonicalize() else {
-            continue;
-        };
-        if real.starts_with(&root) {
-            return Err(Error::new(format!(
-                "eval records must live outside this repository, and {} resolves to {} inside {}.\n\
-                 Run evidence is kept in a user-owned directory; ahu neither reads nor writes it \
-                 inside the checkout.",
-                display_path(records),
-                display_path(&real),
-                display_path(&root)
-            ))
-            .with_kind(ErrorKind::Usage));
-        }
-    }
-    Ok(real)
-}
-
 /// Read, validate, and group the records at `records`.
 pub fn report(repo: &crate::git::Repo, records: &Path) -> Result<Report> {
-    let real = records_path_outside_repository(repo, records)?;
-    let metadata = std::fs::metadata(&real).map_err(|error| {
-        Error::new(format!(
-            "cannot read eval records {}: {error}",
-            display_path(records)
-        ))
-    })?;
+    let real = storage::results_path(repo, records)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(&real)
+        .map_err(|error| {
+            Error::new(format!(
+                "cannot read eval records {}: {error}",
+                display_path(records)
+            ))
+        })?;
+    let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(Error::new(format!(
             "eval records must be a JSONL file; {} is not a regular file.",
@@ -625,6 +592,7 @@ pub fn report(repo: &crate::git::Repo, records: &Path) -> Result<Report> {
         ))
         .with_kind(ErrorKind::Usage));
     }
+    crate::storage::validate_owned_metadata(&metadata, false)?;
     if metadata.len() > MAX_RECORDS_BYTES {
         return Err(Error::new(format!(
             "eval records {} is {} bytes, beyond the {MAX_RECORDS_BYTES} byte limit for a run record file.",
@@ -633,12 +601,18 @@ pub fn report(repo: &crate::git::Repo, records: &Path) -> Result<Report> {
         ))
         .with_kind(ErrorKind::Usage));
     }
-    let text = std::fs::read_to_string(&real).map_err(|error| {
-        Error::new(format!(
-            "cannot read eval records {}: {error}",
-            display_path(records)
-        ))
-    })?;
+    let mut text = String::new();
+    file.take(MAX_RECORDS_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|error| {
+            Error::new(format!(
+                "cannot read eval records {}: {error}",
+                display_path(records)
+            ))
+        })?;
+    if text.len() as u64 > MAX_RECORDS_BYTES {
+        bail!(kind: ErrorKind::Usage, "eval records exceed the {MAX_RECORDS_BYTES} byte limit");
+    }
     let parsed = parse_records(records, &text)?;
     Ok(Report {
         records_fingerprint: crate::util::digest_bytes(text.as_bytes()),
@@ -2186,8 +2160,7 @@ pub fn run(
     let run_id = make_run_id(&cases[0].case.id);
     let receiver = crate::eval_otel::Receiver::start_for(Some(&run_id), None)
         .map_err(|error| Error::new(format!("cannot start local OTLP receiver: {error}")))?;
-    let artifact_root =
-        create_private_run_dir(records.parent().unwrap_or_else(|| Path::new(".")), &run_id)?;
+    let artifact_root = create_private_run_dir(&storage::artifacts_dir(repo)?, &run_id)?;
     let build = fingerprint::BuildIdentity::detect();
     let mut outputs = Vec::new();
     for trial in &plan {
@@ -2356,7 +2329,10 @@ pub fn run(
                 insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
                 let trajectory_guard_status = record.get("trajectory_guard_status").cloned();
                 let trajectory_budget_status = record.get("trajectory_budget_status").cloned();
-                append_jsonl(&records, &serde_json::Value::Object(record))?;
+                append_jsonl(
+                    &storage::results_path(repo, &records)?,
+                    &serde_json::Value::Object(record),
+                )?;
                 outputs.push(serde_json::json!({
                     "trajectory_budget_status": trajectory_budget_status,
                     "trajectory_guard_status": trajectory_guard_status,
@@ -2448,7 +2424,10 @@ pub fn run(
                 insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
                 let trajectory_guard_status = record.get("trajectory_guard_status").cloned();
                 let trajectory_budget_status = record.get("trajectory_budget_status").cloned();
-                append_jsonl(&records, &serde_json::Value::Object(record))?;
+                append_jsonl(
+                    &storage::results_path(repo, &records)?,
+                    &serde_json::Value::Object(record),
+                )?;
                 outputs.push(serde_json::json!({
                     "trajectory_budget_status": trajectory_budget_status,
                     "trajectory_guard_status": trajectory_guard_status,
@@ -2801,7 +2780,10 @@ pub fn run(
         insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
         let trajectory_guard_status = record.get("trajectory_guard_status").cloned();
         let trajectory_budget_status = record.get("trajectory_budget_status").cloned();
-        append_jsonl(&records, &serde_json::Value::Object(record))?;
+        append_jsonl(
+            &storage::results_path(repo, &records)?,
+            &serde_json::Value::Object(record),
+        )?;
         outputs.push(serde_json::json!({
             "trajectory_budget_status": trajectory_budget_status,
             "trajectory_guard_status": trajectory_guard_status,
@@ -3115,39 +3097,7 @@ fn evaluator_checkout(repo: &crate::git::Repo, path: &Path) -> Result<crate::git
 }
 
 fn writable_records_path(repo: &crate::git::Repo, path: &Path) -> Result<PathBuf> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let parent = parent.canonicalize().map_err(|error| {
-        Error::new(format!(
-            "records directory {} is unavailable: {error}",
-            display_path(parent)
-        ))
-        .with_kind(ErrorKind::Usage)
-    })?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| Error::new("records path must name a file").with_kind(ErrorKind::Usage))?;
-    let target = parent.join(name);
-    let mut roots = vec![repo.root.clone()];
-    if let Ok(primary) = repo.primary_root() {
-        roots.push(primary);
-    }
-    for root in roots {
-        if root
-            .canonicalize()
-            .is_ok_and(|root| target.starts_with(root))
-        {
-            bail!(kind: ErrorKind::Usage, "evaluation records and run artifacts must live outside this repository");
-        }
-    }
-    if let Ok(metadata) = std::fs::symlink_metadata(&target)
-        && (!metadata.file_type().is_file() || metadata.file_type().is_symlink())
-    {
-        bail!(kind: ErrorKind::Usage, "evaluation records path must be a regular file, not a symlink or special file");
-    }
-    Ok(target)
+    storage::writable_records(repo, path)
 }
 
 fn make_run_id(case_id: &str) -> String {
@@ -3212,8 +3162,11 @@ fn append_jsonl(path: &Path, value: &serde_json::Value) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
-    options.mode(0o600);
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
     let mut file = options.open(path)?;
+    crate::storage::validate_owned_metadata(&file.metadata()?, false)?;
     serde_json::to_writer(&mut file, value)?;
     file.write_all(b"\n")?;
     Ok(())

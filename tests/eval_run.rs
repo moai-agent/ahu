@@ -51,7 +51,7 @@ Synthetic routing smoke test.
 }
 
 #[test]
-fn eval_run_launches_candidate_captures_local_otel_and_appends_external_record() {
+fn eval_run_defaults_to_ignored_primary_records_and_keeps_raw_artifacts_external() {
     use std::os::unix::fs::PermissionsExt;
 
     let repo = TestRepo::new();
@@ -59,6 +59,7 @@ fn eval_run_launches_candidate_captures_local_otel_and_appends_external_record()
     repo.add_agent_on("triage", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
     repo.add_agent_on("judge", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
     repo.write(".agents/skills/billing/SKILL.md", "---\nname: billing\ndescription: Resolve duplicate charge disputes\n---\nReview billing facts.\n");
+    repo.write(".gitignore", "/.ahu/evals/\n");
     repo.commit("evaluation agents");
 
     let external = TempDir::new().unwrap();
@@ -105,7 +106,11 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
     let case = external.path().join("case.md");
     fixture_case(&case);
-    let records = external.path().join("runs.jsonl");
+    let records = repo
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(".ahu/evals/runs.jsonl");
     let home = external.path().canonicalize().unwrap().join("home");
     std::fs::create_dir(&home).unwrap();
     let path = format!(
@@ -126,14 +131,13 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
             "lexical",
             "--evaluator",
             "@judge",
-            "--records",
-            records.to_str().unwrap(),
             "--runs",
             "1",
             "--output",
             "json",
         ])
         .env("PATH", path)
+        .env_remove("XDG_STATE_HOME")
         .env("HOME", &home)
         .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
         .env("NO_COLOR", "1")
@@ -258,9 +262,23 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
         rows[0].get("answer").is_none(),
         "record rows omit answer data"
     );
-    let artifact_dir = external
-        .path()
+    let artifact_dir = home
+        .join(".local/state/ahu/eval-artifacts")
+        .join(ahu::git::discover(repo.path()).unwrap().identity())
         .join(format!("ahu-eval-{}", summary["run_id"].as_str().unwrap()));
+    assert!(
+        !external
+            .path()
+            .join(format!("ahu-eval-{}", summary["run_id"].as_str().unwrap()))
+            .exists()
+    );
+    assert_eq!(
+        std::fs::read_dir(records.parent().unwrap())
+            .unwrap()
+            .count(),
+        1,
+        "only bounded records are local"
+    );
     let candidate_prompt =
         std::fs::read_to_string(artifact_dir.join("run-001/candidate/prompt.txt")).unwrap();
     let evaluator_prompt =
@@ -273,14 +291,8 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
 
     let report = common::ahu()
         .current_dir(repo.path())
-        .args([
-            "eval",
-            "report",
-            "--records",
-            records.to_str().unwrap(),
-            "--output",
-            "json",
-        ])
+        .args(["eval", "report", "--output", "json"])
+        .env_remove("XDG_STATE_HOME")
         .env("HOME", &home)
         .env("NO_COLOR", "1")
         .output()
@@ -450,6 +462,7 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
                 "json",
             ])
             .env("PATH", &path)
+            .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
             .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
             .env("AHU_TEST_ANSWER", mode)
@@ -795,6 +808,7 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
+            .env_remove("XDG_STATE_HOME")
             .env("HOME", home)
             .env("AHU_DECISION_URL", endpoint)
             .env("FIXTURE_WRITE_ANSWER", if answer { "yes" } else { "no" })
@@ -980,6 +994,7 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
+            .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
             .env("AHU_DECISION_URL", &endpoint)
             .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
@@ -1134,6 +1149,7 @@ else:
         }
         let output = command
             .env("PATH", &path)
+            .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
             .env("AHU_TEST_TRAJECTORY_MODE", mode)
             .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))

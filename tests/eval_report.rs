@@ -70,7 +70,7 @@ impl Row {
 
 /// Write records to a file outside every repository, as the recorder requires.
 fn records_outside(dir: &Path, rows: &[Row]) -> PathBuf {
-    let path = dir.join("runs.jsonl");
+    let path = dir.canonicalize().unwrap().join("runs.jsonl");
     let body: String = rows.iter().map(|row| format!("{}\n", row.json())).collect();
     std::fs::write(&path, body).expect("write records");
     path
@@ -115,6 +115,33 @@ fn verify_cli_binds_facts_to_current_records_and_refuses_forged_values() {
             .output()
             .unwrap()
     };
+    repo.write(".gitignore", "/.ahu/evals/\n");
+    let local = repo.write(
+        ".ahu/evals/runs.jsonl",
+        &std::fs::read_to_string(&records).unwrap(),
+    );
+    let default_report = run(&repo, &["--output", "json"]);
+    assert!(
+        default_report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&default_report.stderr)
+    );
+    let default_report: Value = serde_json::from_slice(&default_report.stdout).unwrap();
+    assert_eq!(
+        default_report["comparison"]["records_fingerprint"],
+        evidence["records_fingerprint"]
+    );
+    let default_verify = common::ahu()
+        .current_dir(repo.path())
+        .args(["eval", "verify", "--facts", facts.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        default_verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&default_verify.stderr)
+    );
+    assert!(local.exists());
     let verified = verify();
     assert!(
         verified.status.success(),
@@ -129,7 +156,7 @@ fn verify_cli_binds_facts_to_current_records_and_refuses_forged_values() {
     std::fs::write(&facts, "x".repeat(64 * 1024 + 1)).unwrap();
     assert!(!verify().status.success());
     assert!(cli::parse(["eval", "verify", "--records", "x"]).is_err());
-    assert!(cli::parse(["eval", "verify", "--facts", "x"]).is_err());
+    assert!(cli::parse(["eval", "verify", "--facts", "x"]).is_ok());
     assert!(cli::parse(["eval", "verify", "--unknown", "x"]).is_err());
 }
 
@@ -187,11 +214,19 @@ fn summary_table(stdout: &str) -> Vec<&str> {
 }
 
 #[test]
-fn parsing_requires_a_records_path_and_accepts_only_json_output() {
+fn parsing_accepts_optional_records_and_only_json_output() {
+    assert!(matches!(
+        cli::parse(["eval", "report"]).unwrap(),
+        Command::EvalReport { records: None, .. }
+    ));
+    assert!(matches!(
+        cli::parse(["eval", "verify", "--facts", "facts.json"]).unwrap(),
+        Command::EvalVerify { records: None, .. }
+    ));
     assert_eq!(
         cli::parse(["eval", "report", "--records", "/outside/runs.jsonl"]).unwrap(),
         Command::EvalReport {
-            records: PathBuf::from("/outside/runs.jsonl"),
+            records: Some(PathBuf::from("/outside/runs.jsonl")),
             output_json: false,
         }
     );
@@ -206,13 +241,12 @@ fn parsing_requires_a_records_path_and_accepts_only_json_output() {
         ])
         .unwrap(),
         Command::EvalReport {
-            records: PathBuf::from("/outside/runs.jsonl"),
+            records: Some(PathBuf::from("/outside/runs.jsonl")),
             output_json: true,
         }
     );
     for args in [
         vec!["eval"],
-        vec!["eval", "report"],
         vec!["eval", "trend", "--records", "/outside/runs.jsonl"],
         vec!["eval", "report", "--records"],
         vec![
@@ -243,7 +277,7 @@ fn parsing_requires_a_records_path_and_accepts_only_json_output() {
 }
 
 #[test]
-fn eval_run_requires_named_candidate_case_and_external_records_options() {
+fn eval_run_requires_named_candidate_and_case_and_accepts_explicit_records() {
     assert_eq!(
         cli::parse([
             "eval",
@@ -273,7 +307,7 @@ fn eval_run_requires_named_candidate_case_and_external_records_options() {
             decision_evaluator: false,
             skill_selection: ahu::skill_selection::Mode::None,
             trajectory_guardrails: Default::default(),
-            records: PathBuf::from("/outside/runs.jsonl"),
+            records: Some(PathBuf::from("/outside/runs.jsonl")),
             runs: 3,
             timeout_seconds: 120,
             allow_widened_approvals: false,
@@ -309,7 +343,7 @@ fn eval_run_requires_named_candidate_case_and_external_records_options() {
             decision_evaluator: false,
             skill_selection: ahu::skill_selection::Mode::None,
             trajectory_guardrails: Default::default(),
-            records: PathBuf::from("/outside/runs.jsonl"),
+            records: Some(PathBuf::from("/outside/runs.jsonl")),
             runs: 1,
             timeout_seconds: 1800,
             allow_widened_approvals: false,
@@ -420,9 +454,9 @@ fn eval_run_requires_named_candidate_case_and_external_records_options() {
 #[test]
 fn records_inside_the_checkout_are_refused_including_through_a_symlink() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let rows = [Row::candidate("@triage", 1.0, true)];
-    let inside = repo.path().join("evals/runs.jsonl");
+    let inside = repo.path().canonicalize().unwrap().join("evals/runs.jsonl");
     std::fs::create_dir_all(inside.parent().unwrap()).expect("create dir");
     std::fs::write(&inside, format!("{}\n", rows[0].json())).expect("write records");
 
@@ -434,23 +468,19 @@ fn records_inside_the_checkout_are_refused_including_through_a_symlink() {
         "{stderr}"
     );
 
-    // A link that lives outside but resolves inside is the same refusal: the
-    // path is canonicalised before it is compared.
+    // A link that lives outside is refused before reading its referent.
     let link = outside.path().join("link.jsonl");
     std::os::unix::fs::symlink(&inside, &link).expect("symlink");
     let output = run(&repo, &["--records", link.to_str().unwrap()]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(
-        stderr.contains("must live outside this repository"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("symlink"), "{stderr}");
 }
 
 #[test]
 fn a_records_file_outside_the_repository_is_neither_read_nor_written_inside_it() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = records_outside(outside.path(), &[Row::candidate("@triage", 1.0, true)]);
     let before = common::git(repo.path(), &["status", "--porcelain"]);
     let output = run(&repo, &["--records", records.to_str().unwrap()]);
@@ -470,7 +500,7 @@ fn a_records_file_outside_the_repository_is_neither_read_nor_written_inside_it()
 #[test]
 fn candidates_are_grouped_and_coverage_stays_separate_from_measured_zeros() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = records_outside(
         outside.path(),
         &[
@@ -549,7 +579,7 @@ fn candidates_are_grouped_and_coverage_stays_separate_from_measured_zeros() {
 #[test]
 fn a_malformed_record_names_its_line_and_fails_as_a_usage_error() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = outside.path().join("runs.jsonl");
     let good = Row::candidate("@triage", 1.0, true).json();
     std::fs::write(&records, format!("{good}\n\n{good}\nnot json\n")).expect("write records");
@@ -576,7 +606,7 @@ fn a_malformed_record_names_its_line_and_fails_as_a_usage_error() {
 #[test]
 fn a_missing_records_file_is_a_usage_error_naming_the_path() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let missing = outside.path().join("absent.jsonl");
     let output = run(&repo, &["--records", missing.to_str().unwrap()]);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -651,7 +681,7 @@ fn report_json(repo: &TestRepo, records: &Path) -> serde_json::Value {
 }
 
 fn write_lines(dir: &Path, lines: &[String]) -> PathBuf {
-    let path = dir.join("runs.jsonl");
+    let path = dir.canonicalize().unwrap().join("runs.jsonl");
     std::fs::write(&path, lines.join("\n") + "\n").expect("write records");
     path
 }
@@ -659,7 +689,7 @@ fn write_lines(dir: &Path, lines: &[String]) -> PathBuf {
 #[test]
 fn records_must_use_schema_two() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     for (row, expected) in [
         (v2_row(&[("schema_version", "1")]), "expected 2"),
         (v2_row(&[("schema_version", "3")]), "expected 2"),
@@ -680,7 +710,7 @@ fn records_must_use_schema_two() {
 #[test]
 fn any_differing_input_fingerprint_splits_a_group() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     for field in [
         ("case_digest", format!("\"{}\"", "9".repeat(64))),
         ("case_schema_version", "3".to_string()),
@@ -720,7 +750,7 @@ fn any_differing_input_fingerprint_splits_a_group() {
 #[test]
 fn a_partial_fingerprint_is_never_pooled_with_a_complete_one() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     // Identical in every declared field; one simply could not name its build.
     let partial = v2_row(&[
         ("ahu_build_digest", "null"),
@@ -741,7 +771,7 @@ fn a_partial_fingerprint_is_never_pooled_with_a_complete_one() {
 #[test]
 fn binary_pass_rates_carry_wilson_intervals_and_an_empty_sample_carries_none() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
 
     // Four runs, all answers passing, all tool expectations passing.
     let pass = v2_row(&[("tool_expectation_status", "\"pass\"")]);
@@ -817,7 +847,7 @@ fn binary_pass_rates_carry_wilson_intervals_and_an_empty_sample_carries_none() {
 #[test]
 fn judge_detail_survives_into_the_report_and_a_judge_failure_is_not_a_candidate_failure() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let scored = v2_row(&[
         ("judge_status", "\"scored\""),
         ("judge_score", "0.75"),
@@ -860,7 +890,7 @@ fn judge_detail_survives_into_the_report_and_a_judge_failure_is_not_a_candidate_
 #[test]
 fn telemetry_coverage_distinguishes_complete_partial_and_absent_observation() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(
         outside.path(),
         &[
@@ -878,7 +908,7 @@ fn telemetry_coverage_distinguishes_complete_partial_and_absent_observation() {
 #[test]
 fn tool_error_counts_are_retained_by_name_and_separately_from_call_counts() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(
         outside.path(),
         &[v2_row(&[
@@ -915,7 +945,7 @@ fn tool_error_counts_are_retained_by_name_and_separately_from_call_counts() {
 #[test]
 fn unknown_per_tool_counts_remain_absent_even_with_a_session_summary() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(
         outside.path(),
         &[v2_row(&[
@@ -934,7 +964,7 @@ fn unknown_per_tool_counts_remain_absent_even_with_a_session_summary() {
 #[test]
 fn receiver_drop_counts_are_preserved_and_summarized() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(
         outside.path(),
         &[v2_row(&[(
@@ -952,7 +982,7 @@ fn receiver_drop_counts_are_preserved_and_summarized() {
 #[test]
 fn evidence_sources_and_legacy_unknowns_are_independent() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let trajectory = serde_json::to_string(&ahu::eval::trajectory::Observation {
         source: ahu::eval::trajectory::Source::CodexTurns,
         coverage: ahu::eval::trajectory::Coverage::Partial,
@@ -1033,7 +1063,7 @@ fn evidence_sources_and_legacy_unknowns_are_independent() {
 #[test]
 fn mixed_receiver_versions_keep_projection_observation_denominators() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let old =
         r#"{"rejected_spans":0,"rejected_requests":0,"rejected_connections":0,"accept_errors":0}"#;
     let new = r#"{"rejected_spans":0,"rejected_requests":1,"rejected_connections":0,"accept_errors":0,"projection":{"uncorrelated_spans":2,"dedup_capacity_spans":3,"invalid_identity_spans":0}}"#;
@@ -1069,7 +1099,7 @@ fn mixed_receiver_versions_keep_projection_observation_denominators() {
 #[test]
 fn untracked_duplicates_do_not_turn_missing_tool_names_into_zeroes() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(
         outside.path(),
         &[v2_row(&[
@@ -1088,7 +1118,7 @@ fn untracked_duplicates_do_not_turn_missing_tool_names_into_zeroes() {
 #[test]
 fn the_report_says_what_it_does_not_claim() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(outside.path(), &[v2_row(&[])]);
     let report = report_json(&repo, &records);
     assert_eq!(
@@ -1158,7 +1188,7 @@ fn two_candidate_rows() -> Vec<String> {
 #[test]
 fn the_report_opens_with_a_table_that_fits_the_terminal_and_never_wraps() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(outside.path(), &two_candidate_rows());
 
     for width in ["88", "120"] {
@@ -1244,7 +1274,7 @@ fn the_report_opens_with_a_table_that_fits_the_terminal_and_never_wraps() {
 #[test]
 fn the_table_honors_no_color_and_paints_its_roles_when_colour_is_asked_for() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(outside.path(), &two_candidate_rows());
     let args = ["--records", records.to_str().unwrap()];
 
@@ -1294,7 +1324,7 @@ fn the_table_honors_no_color_and_paints_its_roles_when_colour_is_asked_for() {
 #[test]
 fn mean_token_amounts_are_reported_per_field_and_never_derived() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(
         outside.path(),
         &[
@@ -1373,7 +1403,7 @@ fn mean_token_amounts_are_reported_per_field_and_never_derived() {
 #[test]
 fn summary_token_fallback_preserves_missing_fields_and_separates_service_usage() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     for (tokens, expected) in [
         (
             r#"{"ahu.tokens.input":62521,"ahu.tokens.output":207}"#,
@@ -1416,7 +1446,7 @@ fn summary_token_fallback_preserves_missing_fields_and_separates_service_usage()
 #[test]
 fn a_negative_token_amount_is_refused_by_line() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     for tokens in [
         r#"{"ahu.tokens.input":-1}"#,
         r#"{"ahu.tokens.input":{"kind":"observed","value":-1}}"#,
@@ -1459,7 +1489,7 @@ fn no_answer_row(terminal_status: &str, extra: &[(&str, &str)]) -> String {
 #[test]
 fn a_failed_attempt_is_not_a_wrong_answer_and_quality_covers_only_real_answers() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     // Five attempts of one configuration: two right answers, one wrong answer,
     // one launch that never started, one that ran out of time.
     let wrong = v2_row(&[
@@ -1526,7 +1556,7 @@ fn a_failed_attempt_is_not_a_wrong_answer_and_quality_covers_only_real_answers()
 #[test]
 fn a_configuration_that_never_answered_has_no_quality_rate_or_interval() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(
         outside.path(),
         &[
@@ -1562,7 +1592,7 @@ fn a_configuration_that_never_answered_has_no_quality_rate_or_interval() {
 #[test]
 fn an_older_record_without_an_answer_status_is_read_from_its_terminal_status() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     // The same two failures, recorded before `answer_status` existed.
     let records = write_lines(
         outside.path(),
@@ -1592,7 +1622,7 @@ fn an_older_record_without_an_answer_status_is_read_from_its_terminal_status() {
 #[test]
 fn a_failed_attempt_keeps_the_launch_timing_and_usage_it_did_report() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(
         outside.path(),
         &[
@@ -1640,7 +1670,7 @@ fn a_failed_attempt_keeps_the_launch_timing_and_usage_it_did_report() {
 #[test]
 fn a_tool_that_only_ever_errored_is_a_failed_expectation_with_its_errors_named() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     // Every call to the decision tool errored: the run reached for it and
     // delegated nothing, which is a failed expectation, not a pass.
     let records = write_lines(
@@ -1674,7 +1704,7 @@ fn a_tool_that_only_ever_errored_is_a_failed_expectation_with_its_errors_named()
 #[test]
 fn a_record_with_an_unknown_answer_status_is_refused_by_line() {
     let repo = TestRepo::new();
-    let outside = tempfile::TempDir::new().expect("temp dir");
+    let outside = TempDir::new().unwrap();
     let records = write_lines(outside.path(), &[v2_row(&[("answer_status", "\"maybe\"")])]);
     let output = run(&repo, &["--records", records.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(2));

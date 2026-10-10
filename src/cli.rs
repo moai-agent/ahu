@@ -42,13 +42,13 @@ Commands:
                         Check the OKF bundles named in [knowledge] with okf.
                         Reads only; nothing is fetched, indexed, or rewritten
   eval run (--case <path> | --suite <path>) --agent @name [--agent @other]
-           --records <path> [options]
+           [--records <path>] [options]
                         Run candidates (and optionally a blind agent evaluator)
                         over an external evaluation case or suite
-  eval report --records <path> [--output json]
-  eval verify --records <path> --facts <path>
-                        Compare local evaluation runs from an external JSONL
-                        record file. Reads only, and only outside this checkout
+  eval report [--records <path>] [--output json]
+  eval verify [--records <path>] --facts <path>
+                        Compare bounded JSONL evaluation records. Reads only;
+                        defaults to primary ignored .ahu/evals/runs.jsonl
   tasks [--limit N|--all]
                         List recent tasks or the full history
   task <task-id> [--output json]
@@ -148,9 +148,9 @@ knowledge lint options:
                         warnings fail the check. Errors always do.
 
 eval report options:
-  --records <path>      JSONL run records written with schema version 2.
-                        Required, and refused when it resolves inside this
-                        repository: run evidence stays in a user-owned directory
+  --records <path>      Schema 2 JSONL. Default: primary checkout .ahu/evals/runs.jsonl.
+                        Local results must be ignored and untracked. Explicit
+                        external paths are supported; relative paths use cwd
   --output json         Emit a versioned JSON comparison on stdout, the readable
                         report on stderr. Rows are grouped by case and corpus
                         version, stage, agent/version, evaluator/version, model,
@@ -187,8 +187,9 @@ eval run options:
                         recorded as blinding `isolated`. Without it the
                         evaluator is blinded at the prompt level only
                         (`prompt_only`), which is not environment isolation
-  --records <path>      External JSONL destination; prompts and artifacts are
-                        written to a private sibling run directory
+  --records <path>      Default: primary checkout .ahu/evals/runs.jsonl (ignored,
+                        untracked local results). Explicit external paths supported.
+                        Raw artifacts stay in owner-only external ahu host storage
   --max-trajectory-steps <count>
                         CI maximum from 0 to 4294967295 native steps
   --max-tool-error-rate <rate>
@@ -307,7 +308,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
         "eval run" => help_section("eval run options:", "tasks options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
-        "eval verify" => "Usage: ahu eval verify --records FILE --facts FILE\n\nVerify bounded numerical facts against the exact current comparison. Reject stale fingerprints, changed values or coverage, and arbitrary narrative. Outputs JSON; invokes no model. See docs/eval-provenance.md.\n".to_string(),
+        "eval verify" => "Usage: ahu eval verify [--records FILE] --facts FILE\n\nRecords default to the primary checkout's ignored, untracked .ahu/evals/runs.jsonl; explicit paths override it.\n\nVerify bounded numerical facts against the exact current comparison. Reject stale fingerprints, changed values or coverage, and arbitrary narrative. Outputs JSON; invokes no model. See docs/eval-provenance.md.\n".to_string(),
         "@agent" => help_section("agent assignment options:", "Exit codes:"),
         "explain" => help_section("explain options:", "onboard options:"),
         "onboard" => help_section("onboard options:", "knowledge lint options:"),
@@ -444,11 +445,11 @@ pub enum Command {
         output_json: bool,
     },
     EvalReport {
-        records: PathBuf,
+        records: Option<PathBuf>,
         output_json: bool,
     },
     EvalVerify {
-        records: PathBuf,
+        records: Option<PathBuf>,
         facts: PathBuf,
     },
     EvalRun {
@@ -463,7 +464,7 @@ pub enum Command {
         decision_evaluator: bool,
         skill_selection: crate::skill_selection::Mode,
         trajectory_guardrails: crate::eval::trajectory::Guardrails,
-        records: PathBuf,
+        records: Option<PathBuf>,
         runs: u32,
         timeout_seconds: u64,
         allow_widened_approvals: bool,
@@ -1022,14 +1023,12 @@ fn parse_eval(rest: &[String]) -> Result<Command> {
                     "--facts" if facts.is_none() => {
                         facts = Some(PathBuf::from(value_for("--facts", rest, &mut index)?))
                     }
-                    _ => bail!("expected ahu eval verify --records FILE --facts FILE"),
+                    _ => bail!("expected ahu eval verify [--records FILE] --facts FILE"),
                 }
                 index += 1;
             }
             return Ok(Command::EvalVerify {
-                records: records.ok_or_else(|| {
-                    crate::util::Error::new("eval verify requires --records FILE")
-                })?,
+                records,
                 facts: facts
                     .ok_or_else(|| crate::util::Error::new("eval verify requires --facts FILE"))?,
             });
@@ -1058,11 +1057,6 @@ fn parse_eval(rest: &[String]) -> Result<Command> {
         }
         index += 1;
     }
-    let records = records.ok_or_else(|| {
-        crate::util::Error::new(
-            "`ahu eval report` needs --records <path> naming a JSONL run record file outside this repository.",
-        )
-    })?;
     Ok(Command::EvalReport {
         records,
         output_json,
@@ -1209,9 +1203,6 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
     if evaluator_repo.is_some() && evaluator.is_none() {
         bail!("--evaluator-repo needs --evaluator @name: it names where that evaluator runs from.");
     }
-    let records = records.ok_or_else(|| {
-        crate::util::Error::new("`ahu eval run` needs --records <external-jsonl-path>.")
-    })?;
     Ok(Command::EvalRun {
         case,
         suite,
@@ -2123,10 +2114,10 @@ mod parser_tests {
             args.extend(extra);
             assert_usage(&args, diagnostic);
         }
-        assert_usage(
-            &["eval", "run", "--case", "case.md", "--agent", "@fixture"],
-            "needs --records",
-        );
+        assert!(matches!(
+            parse(["eval", "run", "--case", "case.md", "--agent", "@fixture"]).unwrap(),
+            Command::EvalRun { records: None, .. }
+        ));
 
         // The maximum candidate count is accepted, with input order intact.
         let agents: Vec<String> = (0..16).map(|n| format!("@fixture{n}")).collect();
@@ -2155,7 +2146,7 @@ mod parser_tests {
                 decision_evaluator: false,
                 skill_selection: crate::skill_selection::Mode::None,
                 trajectory_guardrails: Default::default(),
-                records: "runs.jsonl".into(),
+                records: Some("runs.jsonl".into()),
                 runs: 100,
                 timeout_seconds: 86400,
                 allow_widened_approvals: true,

@@ -198,11 +198,11 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 commands::knowledge_lint(console, &repo, output_json)
             })
         }
-        // The records are outside the checkout by policy, but the repository
-        // still has to be located: locating it is what makes that check real.
+        // Discover before resolving defaults and validating the eval storage boundary.
         Command::EvalVerify { records, facts } => {
             use std::io::Read;
             let repo = ahu::git::discover(&std::env::current_dir()?)?;
+            let records = ahu::eval::storage::resolve_records(&repo, records.as_deref())?;
             let report = ahu::eval::report(&repo, &records)?;
             let mut text = String::new();
             std::fs::File::open(facts)?
@@ -223,7 +223,12 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         } => {
             let repo = commands::repo_from_cwd()?;
             commands::with_stdio_output(output_json, |console| {
-                commands::eval_report(console, &repo, &records, output_json)
+                commands::eval_report(
+                    console,
+                    &repo,
+                    &ahu::eval::storage::resolve_records(&repo, records.as_deref())?,
+                    output_json,
+                )
             })
         }
         Command::EvalRun {
@@ -242,6 +247,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             output_json,
         } => {
             let repo = commands::repo_from_cwd()?;
+            let records = ahu::eval::storage::resolve_records(&repo, records.as_deref())?;
             let request = ahu::eval::RunRequest {
                 case: case.as_deref(),
                 suite: suite.as_deref(),
