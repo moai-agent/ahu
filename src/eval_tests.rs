@@ -212,6 +212,7 @@ fn the_json_contract_is_versioned_and_carries_no_local_path() {
     )
     .expect("parses");
     let report = Report {
+        records_fingerprint: "f".repeat(64),
         records: PathBuf::from("/home/someone/evals/runs.jsonl"),
         record_count: records.len(),
         groups: group(&records),
@@ -243,6 +244,7 @@ fn the_terminal_view_escapes_record_content_and_names_uncovered_metrics() {
                     \"score\":1,\"passed\":true}";
     let records = parse_records(Path::new("runs.jsonl"), text).expect("parses");
     let rendered = render(&Report {
+        records_fingerprint: "f".repeat(64),
         records: PathBuf::from("runs.jsonl"),
         record_count: records.len(),
         groups: group(&records),
@@ -257,6 +259,7 @@ fn report_of(lines: &[String]) -> Report {
     let text = lines.join("\n") + "\n";
     let records = parse_records(Path::new("runs.jsonl"), &text).expect("parses");
     Report {
+        records_fingerprint: crate::util::digest_bytes(text.as_bytes()),
         records: PathBuf::from("runs.jsonl"),
         record_count: records.len(),
         groups: group(&records),
@@ -694,6 +697,7 @@ fn an_empty_record_file_reports_nothing_rather_than_failing() {
     let records = parse_records(Path::new("runs.jsonl"), "\n\n").expect("parses");
     assert!(records.is_empty());
     let rendered = render(&Report {
+        records_fingerprint: "f".repeat(64),
         records: PathBuf::from("runs.jsonl"),
         record_count: 0,
         groups: Vec::new(),
@@ -1426,6 +1430,7 @@ fn trajectory_records_preserve_missing_zero_and_report_budget_outcomes() {
     assert_eq!(summary.budget_statuses["pass"], 1);
     assert_eq!(group_json(&groups[0])["trajectory"]["means"]["steps"], 1.0);
     let report = Report {
+        records_fingerprint: "f".repeat(64),
         records: PathBuf::from("/tmp/synthetic.jsonl"),
         record_count: 2,
         groups,
@@ -1641,6 +1646,7 @@ fn kiro_metering_report_keeps_partial_credits_out_of_tokens_and_usd() {
     assert!(groups[0].mean_reported_cost_usd.is_empty());
     assert_eq!(groups[0].coverage.tokens, 0);
     let report = Report {
+        records_fingerprint: "f".repeat(64),
         records: PathBuf::from("/tmp/synthetic.jsonl"),
         record_count: 2,
         groups,
@@ -1671,4 +1677,242 @@ fn kiro_metering_records_reject_invalid_units_and_inconsistent_coverage() {
         let text = record(&[("trajectory", &observation.to_string())]);
         assert!(parse_records(Path::new("synthetic.jsonl"), &text).is_err());
     }
+}
+
+#[test]
+fn provenance_records_keep_legacy_unknown_and_validate_bounded_identity() {
+    let mut telemetry = crate::eval_otel::TaskTelemetry::default();
+    telemetry.decision_provenance.observations = 1;
+    telemetry
+        .decision_provenance
+        .requested_model
+        .values
+        .insert("fixture-request".into(), 1);
+    telemetry
+        .decision_provenance
+        .reported_model
+        .values
+        .insert("fixture-reported".into(), 1);
+    let mut fields: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&record(&[])).unwrap();
+    insert_telemetry_fields(&mut fields, Some(&telemetry)).unwrap();
+    let current = serde_json::to_string(&fields).unwrap();
+    let report = report_of(&[record(&[]), current]);
+    let group = &report.groups[0];
+    assert_eq!(group.decision_provenance.recorded_runs, 1);
+    assert_eq!(group.decision_provenance.unknown_runs, 1);
+    let json: serde_json::Value = serde_json::from_str(&render_json(&report).unwrap()).unwrap();
+    assert_eq!(
+        json["groups"][0]["decision_provenance"]["evidence"]["reported_model"]["values"]["fixture-reported"],
+        1
+    );
+    fields["decision_provenance"]["reported_model"]["values"] =
+        serde_json::json!({"https://example.invalid/secret":1});
+    assert!(
+        parse_records(
+            Path::new("synthetic"),
+            &serde_json::to_string(&fields).unwrap()
+        )
+        .is_err()
+    );
+    fields["decision_provenance"]["reported_model"]["values"] = serde_json::json!({"fixture":2});
+    assert!(
+        parse_records(
+            Path::new("synthetic"),
+            &serde_json::to_string(&fields).unwrap()
+        )
+        .is_err()
+    );
+}
+
+fn comparison_claim(report: &Report, metric: &str) -> serde_json::Value {
+    let evidence = comparison::evidence(report);
+    let row = &evidence["table"][0];
+    let cell = &row["metrics"][metric];
+    serde_json::json!({
+        "schema_version":1,
+        "comparison_fingerprint":evidence["comparison_fingerprint"],
+        "records_fingerprint":evidence["records_fingerprint"],
+        "facts":[{
+            "group_fingerprint":row["group_fingerprint"],
+            "input_fingerprint":row["input_fingerprint"],
+            "metric":metric,
+            "value":cell["value"],
+            "observations":cell["observations"],
+            "source":cell["source"],
+            "coverage_source":cell["coverage_source"],
+        }]
+    })
+}
+
+#[test]
+fn comparison_facts_bind_exact_inputs_values_and_coverage() {
+    let old = report_of(&[record(&[("elapsed_ms", "1")])]);
+    let current = report_of(&[record(&[("elapsed_ms", "2")])]);
+    let claim = comparison_claim(&current, "elapsed_ms");
+    assert_eq!(claim["facts"][0]["observations"], 1);
+    assert!(comparison::verify_facts(&current, &claim.to_string()).is_ok());
+    assert!(comparison::verify_facts(&old, &claim.to_string()).is_err());
+    for (field, bad) in [
+        ("value", serde_json::json!(1)),
+        ("observations", serde_json::json!(99)),
+        (
+            "source",
+            serde_json::json!("/groups/9/observed/mean_elapsed_ms"),
+        ),
+        ("coverage_source", serde_json::json!("/groups/0/runs")),
+        ("input_fingerprint", serde_json::json!("old")),
+        ("group_fingerprint", serde_json::json!("old")),
+    ] {
+        let mut altered = claim.clone();
+        altered["facts"][0][field] = bad;
+        assert!(
+            comparison::verify_facts(&current, &altered.to_string()).is_err(),
+            "{field}"
+        );
+    }
+    let mut rebound = comparison_claim(&old, "elapsed_ms");
+    rebound["comparison_fingerprint"] = claim["comparison_fingerprint"].clone();
+    rebound["records_fingerprint"] = claim["records_fingerprint"].clone();
+    assert!(comparison::verify_facts(&current, &rebound.to_string()).is_err());
+    let mut relocated = current.clone();
+    relocated.records = PathBuf::from("/different/external/location");
+    assert_eq!(
+        comparison::evidence(&current),
+        comparison::evidence(&relocated)
+    );
+    relocated.records_fingerprint = "0".repeat(64);
+    assert_ne!(
+        comparison::evidence(&current),
+        comparison::evidence(&relocated)
+    );
+}
+
+#[test]
+fn comparison_cannot_promote_missing_evidence_or_causal_judge_claims() {
+    let report = report_of(&[record(&[])]);
+    let claim = comparison_claim(&report, "trajectory_steps");
+    assert!(claim["facts"][0]["value"].is_null());
+    assert!(comparison::verify_facts(&report, &claim.to_string()).is_ok());
+    for (field, value) in [
+        ("value", serde_json::json!(0)),
+        ("observations", serde_json::json!(1)),
+        ("metric", serde_json::json!("model_caused_improvement")),
+        (
+            "narrative",
+            serde_json::json!("The model caused the improvement"),
+        ),
+        ("score_override", serde_json::json!(1)),
+    ] {
+        let mut malicious = claim.clone();
+        malicious["facts"][0][field] = value;
+        assert!(comparison::verify_facts(&report, &malicious.to_string()).is_err());
+    }
+    let mut oversized = claim.clone();
+    oversized["facts"] = serde_json::json!(vec![claim["facts"][0].clone(); 129]);
+    assert!(comparison::verify_facts(&report, &oversized.to_string()).is_err());
+    assert!(comparison::verify_facts(&report, &" ".repeat(65537)).is_err());
+}
+
+#[test]
+fn comparison_deterministic_answers_survive_opposing_judge_scores() {
+    let report = report_of(&[record(&[
+        ("answer_score", "0"),
+        ("answer_passed", "false"),
+        ("judge_score", "1"),
+        ("judge_passed", "true"),
+        ("judge_status", "\"scored\""),
+    ])]);
+    let claim = comparison_claim(&report, "answer_mean");
+    assert_eq!(claim["facts"][0]["value"], 0.0);
+    assert_eq!(
+        comparison_claim(&report, "judge_mean")["facts"][0]["value"],
+        1.0
+    );
+    assert!(comparison::verify_facts(&report, &claim.to_string()).is_ok());
+    let mut malicious = claim;
+    malicious["facts"][0]["value"] = serde_json::json!(1);
+    assert!(comparison::verify_facts(&report, &malicious.to_string()).is_err());
+    let split = report_of(&[
+        record(&[]),
+        record(&[("score_policy", "\"deterministic_answer_v1\"")]),
+    ]);
+    assert_eq!(split.groups.len(), 2);
+}
+
+#[test]
+fn comparison_sources_resolve_and_mean_coverage_counts_only_scored_values() {
+    let report = report_of(&[
+        record(&[]),
+        record(&[("answer_score", "0.25"), ("elapsed_ms", "10")]),
+    ]);
+    let document: serde_json::Value = serde_json::from_str(&render_json(&report).unwrap()).unwrap();
+    for row in document["comparison"]["table"].as_array().unwrap() {
+        for cell in row["metrics"].as_object().unwrap().values() {
+            for (reference, value) in [("source", "value"), ("coverage_source", "observations")] {
+                if let Some(pointer) = cell[reference].as_str() {
+                    assert_eq!(document.pointer(pointer), Some(&cell[value]), "{pointer}");
+                } else {
+                    assert!(cell[value].is_null());
+                }
+            }
+        }
+    }
+    assert_eq!(document["groups"][0]["answer"]["observations"], 2);
+    let claim = comparison_claim(&report, "answer_mean");
+    assert_eq!(claim["facts"][0]["value"], 0.25);
+    assert_eq!(claim["facts"][0]["observations"], 1);
+    assert!(comparison::verify_facts(&report, &claim.to_string()).is_ok());
+}
+
+#[test]
+fn comparison_fingerprints_bind_identity_and_preserve_missing_model_evidence() {
+    let old = report_of(&[record(&[])]);
+    let mut provenance = provenance::Provenance {
+        observations: 1,
+        ..Default::default()
+    };
+    provenance
+        .reported_model
+        .values
+        .insert("fixture-reported".into(), 1);
+    let current = report_of(&[record(&[(
+        "decision_provenance",
+        &serde_json::to_string(&provenance).unwrap(),
+    )])]);
+    assert_ne!(
+        comparison::evidence(&old)["comparison_fingerprint"],
+        comparison::evidence(&current)["comparison_fingerprint"]
+    );
+    assert_eq!(old.groups[0].decision_provenance.unknown_runs, 1);
+    assert_eq!(
+        current.groups[0]
+            .decision_provenance
+            .evidence
+            .reported_model
+            .status(),
+        "single"
+    );
+    let mut mixed = comparison_claim(&old, "answer_pass_rate");
+    let new = comparison_claim(&current, "answer_pass_rate");
+    mixed["comparison_fingerprint"] = new["comparison_fingerprint"].clone();
+    mixed["records_fingerprint"] = new["records_fingerprint"].clone();
+    assert!(comparison::verify_facts(&current, &mixed.to_string()).is_err());
+    for index in 0..17 {
+        provenance
+            .reported_model
+            .values
+            .insert(format!("fixture-{index}"), 1);
+    }
+    provenance.observations = 20;
+    assert!(
+        parse_records(
+            Path::new("synthetic"),
+            &record(&[(
+                "decision_provenance",
+                &serde_json::to_string(&provenance).unwrap()
+            )])
+        )
+        .is_err()
+    );
 }

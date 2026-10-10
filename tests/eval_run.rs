@@ -78,7 +78,7 @@ if sys.argv[1:] == ['models', 'ollama']:
 prompt = sys.argv[-1]
 if 'Score this candidate output' in prompt:
     with open('score.json', 'w', encoding='utf-8') as score:
-        json.dump({'schema_version':1,'criterion_scores':{'route':1.0},'reason_codes':['routed_to_billing']}, score)
+        json.dump({'schema_version':1,'criterion_scores':{'route':0.0},'reason_codes':['routed_to_billing']}, score)
 else:
     with open('answer.json', 'w', encoding='utf-8') as answer:
         json.dump({'route':'billing'}, answer)
@@ -152,7 +152,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     let trial = &summary["trials"][0];
     assert_eq!(trial["score"], 1.0);
     assert_eq!(trial["passed"], true);
-    assert_eq!(trial["score_source"], "judge");
+    assert_eq!(trial["score_source"], "deterministic");
     assert_eq!(trial["answer_passed"], true);
     assert_eq!(trial["judge_status"], "scored");
     assert_eq!(trial["telemetry_coverage"], "complete_session");
@@ -185,11 +185,13 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     assert_eq!(rows[0]["deterministic_score"], 1.0);
     assert_eq!(rows[0]["answer_score"], 1.0);
     assert_eq!(rows[0]["answer_passed"], true);
-    assert_eq!(rows[0]["score_source"], "judge");
+    assert_eq!(rows[0]["score_source"], "deterministic");
     // The judge's own evidence is retained, not collapsed into its number.
     assert_eq!(rows[0]["judge_status"], "scored");
-    assert_eq!(rows[0]["judge_score"], 1.0);
-    assert_eq!(rows[0]["judge_criterion_scores"]["route"], 1.0);
+    assert_eq!(rows[0]["judge_score"], 0.0);
+    assert_eq!(rows[0]["judge_passed"], false);
+    assert_eq!(rows[0]["score_policy"], "deterministic_answer_v1");
+    assert_eq!(rows[0]["judge_criterion_scores"]["route"], 0.0);
     assert_eq!(
         rows[0]["judge_reason_codes"],
         serde_json::json!(["routed_to_billing"])
@@ -290,6 +292,18 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     );
     let comparison: Value = serde_json::from_slice(&report.stdout).unwrap();
     assert_eq!(comparison["schema_version"], 2);
+    assert_eq!(
+        comparison["comparison"]["records_fingerprint"],
+        ahu::util::digest_bytes(&std::fs::read(&records).unwrap())
+    );
+    assert_eq!(
+        comparison["groups"][0]["decision_provenance"]["recorded_runs"],
+        1
+    );
+    assert_eq!(
+        comparison["groups"][0]["decision_provenance"]["evidence"]["observations"],
+        0
+    );
     assert_eq!(comparison["groups"][0]["case_schema_version"], "2");
     assert_eq!(
         comparison["groups"][0]["fingerprint_completeness"],
@@ -303,7 +317,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     assert_eq!(comparison["groups"][0]["judge"]["scored"], 1);
     assert_eq!(
         comparison["groups"][0]["judge"]["criterion_means"]["route"],
-        1.0
+        0.0
     );
     assert_eq!(comparison["groups"][0]["coverage"]["mcp_observations"], 1);
     assert_eq!(
@@ -1015,8 +1029,9 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
         true
     );
     assert_eq!(rows[1]["judge_status"], "failed");
-    assert_eq!(rows[1]["score"], Value::Null);
-    assert_eq!(rows[1]["passed"], false);
+    assert_eq!(rows[1]["score"], 1.0);
+    assert_eq!(rows[1]["passed"], true);
+    assert_eq!(rows[1]["score_source"], "deterministic");
     assert_eq!(rows[1]["evaluator_metrics"]["service"], Value::Null);
     assert_eq!(
         rows[1]["evaluator_metrics"]["provider_input_complete"],
