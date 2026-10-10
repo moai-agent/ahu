@@ -2033,7 +2033,7 @@ pub fn run(
     {
         bail!(kind: ErrorKind::Usage, "--decision-evaluator conflicts with --evaluator and --evaluator-repo");
     }
-    let records = writable_records_path(repo, request.records)?;
+    let records = storage::results_path(repo, request.records)?;
 
     // ---- preflight: everything that can be refused is refused before a launch.
     let (suite_identity, cases) = load_cases(request)?;
@@ -2156,6 +2156,9 @@ pub fn run(
             "the evaluation matrix is {} case(s) x {} agent(s) x {} run(s) = {} trial(s) and {launches} launch(es), beyond the {MAX_TRIALS} trial and {MAX_LAUNCHES} launch caps. Split the suite or lower --runs.",
             cases.len(), candidates.len(), request.runs, plan.len());
     }
+
+    // Create missing local result directories only after request validation.
+    let records = writable_records_path(repo, &records)?;
 
     // ---- execution: sequential, in the planned order, one fresh task per trial.
     let run_id = make_run_id(&cases[0].case.id);

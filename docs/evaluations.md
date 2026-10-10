@@ -33,10 +33,10 @@ Raw per-run artifacts are stored separately under
 unset. This store and its run directories are owner-only, must be outside every
 checkout, and reject links within the artifact store. Trusted external parent
 aliases are resolved before checking the repository boundary. Existing directories
-are never recursively chmodded.
+retain their existing permissions.
 Reports remain read-only and print summaries to stdout; save a bounded summary
-in ignored `.ahu/evals/` or external storage when needed. There is no automatic
-migration of existing evidence.
+in ignored `.ahu/evals/` or external storage when needed. Existing evidence
+must be migrated explicitly.
 
 ## Start a comparison
 

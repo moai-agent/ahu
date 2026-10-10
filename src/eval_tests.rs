@@ -1374,6 +1374,7 @@ fn decision_evaluator_preflights_later_suite_cases_before_agent_lookup_or_artifa
     let checkout = tempfile::tempdir().unwrap();
     let external = tempfile::tempdir().unwrap();
     let repo = fixture_repo(checkout.path());
+    std::fs::write(checkout.path().join(".gitignore"), "/.ahu/\n").unwrap();
     let first = external.path().join("first.md");
     let second = external.path().join("second.md");
     fixture_case(&first, "first");
@@ -1397,13 +1398,23 @@ fn decision_evaluator_preflights_later_suite_cases_before_agent_lookup_or_artifa
         output: &mut output,
         interactive: false,
     };
-    let error = run(&mut console, &repo, &request).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Usage);
-    assert!(error.to_string().contains("requires a rubric"), "{error}");
+    let local_records = storage::resolve_records(&repo, None).unwrap();
+    for destination in [&records, &local_records] {
+        request.records = destination;
+        let error = run(&mut console, &repo, &request).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Usage);
+        assert!(error.to_string().contains("requires a rubric"), "{error}");
+        assert!(!destination.exists());
+    }
     assert!(output.is_empty());
     assert!(!records.exists());
     assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 3);
-    assert_eq!(std::fs::read_dir(checkout.path()).unwrap().count(), 0);
+    let mut entries = std::fs::read_dir(checkout.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    entries.sort();
+    assert_eq!(entries, [".git", ".gitignore"]);
 }
 
 #[test]
