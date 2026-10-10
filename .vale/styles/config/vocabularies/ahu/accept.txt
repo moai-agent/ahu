@@ -8,6 +8,7 @@ cmux('s)?
 OpenCode
 Codex
 Antigravity
+Kiro('s)?
 Ollama('s)?
 Clippy
 rustfmt
@@ -45,7 +46,13 @@ unstyled
 untrusted
 unvalidated
 canonicalize[ds]?
-deduplicat(e|ed|ing)
+[Dd]eduplicat(e|ed|ing|ion)
+unreviewed
+unredacted
+unsampled
+overcount
+temporality
+[Bb]ackends?
 reachability
 rescanned
 snapshotted

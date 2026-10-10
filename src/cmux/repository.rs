@@ -447,6 +447,7 @@ mod coordinator_environment_tests {
         for endpoint in ["http://127.0.0.1:54321", "https://example.invalid"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .env_clear()
+                .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
                 .env("AHU_TEST_COORDINATOR_EVAL", "1")
                 .env("AHU_EVAL_OTEL_ENDPOINT", endpoint)
                 .args([

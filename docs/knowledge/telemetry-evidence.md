@@ -58,7 +58,7 @@ reference describes the current source and scope for each harness.[^headless]
 
 Use the existing OTLP pipeline to group execution evidence by release. Set a
 public-safe, opaque `ahu.release.id` in `OTEL_RESOURCE_ATTRIBUTES` when creating
-tasks. ahu freezes it in the existing task identity; a resume keeps that label
+tasks. ahu freezes it in the existing task identity; resuming a task keeps that label
 and a broker child inherits its parent's label. The release label is not a
 private tracker reference. It does not create another mapping or accounting
 store. Older tasks without a label remain unassigned.[^telemetry]
