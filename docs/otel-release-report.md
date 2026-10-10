@@ -9,6 +9,12 @@ Set `OTEL_RESOURCE_ATTRIBUTES=ahu.release.id=candidate-a` before launching work.
 Use an opaque public release label, without private tracker references. Task
 identity and release attribution are frozen when a task starts. Existing tasks
 do not acquire a new label from a later shell environment.
+Launch previews expose the frozen `release_id`. For release work, inspect
+`--dry-run --output json` under the same environment used for submission and
+require the expected label before launching. An explicitly invalid or repeated
+release label fails launch preflight; ordinary unlabeled tasks remain supported.
+Verify the collector's actual task/attempt attribution and MCP service version
+after launch. A correct preview does not prove export or the MCP executable.
 
 Keep captures, the selection file, and reports outside every repository. A
 selection is an explicit array of task attempts to inspect, including attempts

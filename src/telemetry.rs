@@ -202,12 +202,29 @@ fn identity_resource(
         .build()
 }
 
-/// Optional operator-supplied opaque grouping label, never a tracker lookup.
-/// Invalid values are dropped without diagnostics containing their contents.
-pub(crate) fn release_id_from_environment() -> Option<String> {
-    ahu_resource_attributes()
+/// Freeze the operator's release label before launching a task. An explicitly
+/// supplied invalid or ambiguous label must not silently lose attribution.
+pub(crate) fn release_id_for_launch() -> Result<Option<String>> {
+    match std::env::var("OTEL_RESOURCE_ATTRIBUTES") {
+        Ok(raw) => release_id_from_attributes(&raw),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Error::new(
+            "OTEL_RESOURCE_ATTRIBUTES must be UTF-8 for task launch",
+        )),
+    }
+}
+
+fn release_id_from_attributes(raw: &str) -> Result<Option<String>> {
+    let (attributes, release_keys) = parse_attributes_with_release_count(raw);
+    let release = attributes
         .into_iter()
-        .find_map(|(key, value)| (key == "ahu.release.id").then_some(value))
+        .find_map(|(key, value)| (key == "ahu.release.id").then_some(value));
+    if release_keys > 0 && release.is_none() {
+        return Err(Error::new(
+            "invalid or repeated ahu.release.id in OTEL_RESOURCE_ATTRIBUTES; supply one opaque release label of 1-64 ASCII letters, digits, dots, underscores or hyphens before launching",
+        ));
+    }
+    Ok(release)
 }
 
 pub(crate) fn deserialize_release_id<'de, D: serde::Deserializer<'de>>(
@@ -333,6 +350,10 @@ fn ahu_resource_attributes() -> Vec<(&'static str, String)> {
 }
 
 fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
+    parse_attributes_with_release_count(raw).0
+}
+
+fn parse_attributes_with_release_count(raw: &str) -> (Vec<(&'static str, String)>, usize) {
     const ALLOWED: &[&str] = &[
         "ahu.agent.name",
         "ahu.agent.version",
@@ -375,6 +396,9 @@ fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
     pairs.push(pair);
     for pair in pairs {
         let Some((key, value)) = pair.split_once('=') else {
+            if pair.trim() == "ahu.release.id" {
+                release_keys += 1;
+            }
             continue;
         };
         // Match the SDK's surrounding-whitespace handling for standard
@@ -394,7 +418,7 @@ fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
     if release_keys > 1 {
         out.retain(|(key, _)| *key != "ahu.release.id");
     }
-    out
+    (out, release_keys)
 }
 
 fn safe_resource_value(key: &str, value: &str) -> bool {
@@ -2198,6 +2222,32 @@ mod tests {
         assert_eq!(
             string_attr(&invalid, "ahu.mcp.error.category"),
             Some("invalid_arguments".into())
+        );
+    }
+
+    #[test]
+    fn launch_rejects_explicit_invalid_release_attribution_without_echoing_it() {
+        assert_eq!(super::release_id_from_attributes("").unwrap(), None);
+        assert_eq!(
+            super::release_id_from_attributes("service.name=fixture,ahu.release.id=0.10.0")
+                .unwrap()
+                .as_deref(),
+            Some("0.10.0")
+        );
+        for raw in [
+            "ahu.release.id",
+            "ahu.release.id=",
+            "ahu.release.id=private-marker/invalid",
+            "ahu.release.id=a, ahu.release.id=b",
+            "ahu.release.id=a, ahu.release.id=a",
+        ] {
+            let error = super::release_id_from_attributes(raw).unwrap_err();
+            assert!(!error.to_string().contains("private-marker"));
+        }
+        assert_eq!(
+            super::release_id_from_attributes(r"unknown=escaped\,ahu.release.id=not-a-key")
+                .unwrap(),
+            None
         );
     }
 

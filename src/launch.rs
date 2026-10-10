@@ -42,6 +42,8 @@ pub struct DisplayMetadata {
 /// What a launch is going to do, shown before anything is created.
 #[derive(Debug, Clone)]
 pub struct LaunchPlan {
+    /// Frozen at preflight; exposed in previews and retained by every attempt.
+    pub release_id: Option<String>,
     pub mode: LaunchMode,
     pub agent: Option<ResolvedAgent>,
     pub pair: ResolvedPair,
@@ -161,6 +163,7 @@ pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
     }
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "schema_version": 1,
+        "release_id": plan.release_id,
         "agent": agent,
         "title": plan.title,
         "task_handle_candidate": format!("@{}", plan.task_name.clone().unwrap_or_else(|| crate::task_handles::generated_name(&plan.title))),
@@ -204,6 +207,7 @@ pub fn plan_with_state_home(
     prompt: &str,
     state_home: Option<&std::path::Path>,
 ) -> Result<LaunchPlan> {
+    let release_id = crate::telemetry::release_id_for_launch()?;
     if prompt.trim().is_empty() {
         bail!(kind: crate::util::ErrorKind::Usage, "the task prompt is empty; nothing was launched.");
     }
@@ -383,6 +387,7 @@ pub fn plan_with_state_home(
     let cmux_integration = crate::cmux::integration::inspect(&repo.root, &pair.harness)
         .with_version(enforcement.harness_version.as_deref());
     Ok(LaunchPlan {
+        release_id,
         mode: if agent.is_some() {
             LaunchMode::Named
         } else {
@@ -430,7 +435,7 @@ pub(crate) fn prepared_record(
         worktree: plan.worktree.clone(),
         base_commit: plan.base_commit.clone(),
         identity: LaunchIdentity {
-            release_id: crate::telemetry::release_id_from_environment(),
+            release_id: plan.release_id.clone(),
             mode: plan.mode.clone(),
             agent: plan
                 .agent

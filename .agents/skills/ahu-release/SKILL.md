@@ -18,7 +18,15 @@ whether release work items are required and how they link to ahu task IDs. If no
 tracker is configured, keep coordination in the release workflow and ahu task
 records; do not create an assumed GitHub or private-roadmap workflow.
 Give each launch a meaningful task name, for example
-`ahu @reviewer --name release-security-review --prompt-file /absolute/path/to/review.txt`.
+`OTEL_RESOURCE_ATTRIBUTES=ahu.release.id=candidate-a ahu @reviewer --name release-security-review --prompt-file /absolute/path/to/review.txt`.
+Choose one opaque release label before assigning work. Use the same explicit
+environment for every assignment and eval launch. First run each assignment
+with `--dry-run --output json` and require its `release_id` to equal that label;
+an absent or different label fails release preflight. Ordinary unlabeled ahu
+tasks remain supported. After submission, verify the frozen task identity and
+the collector's task/attempt/release attributes. A label in a preview does not
+prove export. Confirm the actual MCP service build before accepting a live
+compatibility result; the launcher's version does not establish the MCP version.
 Use the bundled `ahu-direct-agents` skill for task IDs, provider-side links, and
 tracker lifecycle rules; this release skill adds release-specific local task
 cleanup without changing the provider's records.

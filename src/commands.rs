@@ -2531,7 +2531,7 @@ fn submit(
     _span.set_string("ahu.task.root_id", &plan.task_id);
     _span.set_u64("ahu.task.attempt", 1);
     _span.set_string("ahu.execution.mode", "interactive");
-    if let Some(release_id) = crate::telemetry::release_id_from_environment() {
+    if let Some(release_id) = plan.release_id.as_deref() {
         _span.set_string("ahu.release.id", release_id);
     }
     if let Some(version) = plan
@@ -2669,6 +2669,10 @@ pub fn render_launch_preview(
         ),
     );
     out.push_str(&format!(
+        "  release    {}\n",
+        plan.release_id.as_deref().unwrap_or("unlabeled")
+    ));
+    out.push_str(&format!(
         "  prompt     {} line(s)\n",
         prompt.lines().count()
     ));
@@ -2789,6 +2793,10 @@ pub fn render_preview(
     let mut out = String::new();
     out.push_str(&style.paint(Role::Heading, "\nAbout to submit\n===============\n"));
     out.push_str(&style.paint(Role::Heading, "\nIdentity and runtime\n"));
+    out.push_str(&format!(
+        "  release    {}\n",
+        plan.release_id.as_deref().unwrap_or("unlabeled")
+    ));
     out.push_str(
         "  delegation All assigned agents must launch through ahu in separate cmux sessions.\n",
     );

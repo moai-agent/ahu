@@ -930,6 +930,7 @@ pub fn launch(
     }
     crate::commands::preflight(console, repo, &loaded, &plan)?;
     let mut preview = json!({"schema_version":1,"backend":"headless","task_id":plan.task_id,"worktree":plan.worktree,
+        "release_id":parent_release.as_ref().unwrap_or(&plan.release_id),
         "task_handle_candidate":format!("@{}",plan.task_name.clone().unwrap_or_else(||crate::task_handles::generated_name(&plan.title))), "task_handle_reserved":false,
         "branch":plan.branch,"command":plan.command.redacted(),"executable":plan.harness_executable,"capabilities":spec,
         "runtime":plan.task_dir,"identity": {"agent":plan.agent_label(),"harness":plan.pair.harness,"model":plan.pair.model},
