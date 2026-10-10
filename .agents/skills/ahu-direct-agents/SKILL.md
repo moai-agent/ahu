@@ -41,8 +41,10 @@ keep final answers in native harness stores rather than a copied `result.md`.
 For an interactive task, inspect its recorded terminal surface only when that
 surface is available. cmux uses `cmux read-screen --workspace <id> --scrollback`;
 headless tasks have no workspace to read. Do not make a terminal transcript the
-durable task record. Keep prompts, reports, and execution traces outside
-repositories.
+durable task record. Keep prompts, task reports, and execution traces outside
+repositories. Store bounded eval records and derived eval summaries in the
+primary checkout's ignored `.ahu/evals/` by default; external record paths remain
+supported. Never publish these local results or include private tracker content.
 
 Children inherit the parent's current HEAD, not uncommitted source edits. For a
 review of local changes, name the source checkout and exact revision or diff in

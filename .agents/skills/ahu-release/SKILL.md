@@ -71,7 +71,10 @@ Make CI prove the release boundary without paid services:
   Give each build a separate `CARGO_TARGET_DIR` outside every repository and
   coordinate suite ownership across agents. Separate target directories avoid
   build locks, but do not prevent CPU contention from invalidating timed runs.
-  Keep prompts, logs, reports, coverage exports, and traces outside repositories.
+  Keep prompts, logs, coverage exports, traces, and release-review reports outside
+  repositories. Structured eval records and derived eval summaries belong in the
+  primary checkout's ignored `.ahu/evals/` by default; explicit external record
+  paths remain supported. Never publish those local results.
 - Use hermetic stubs for harness executables when tests only need executable discovery
   or version output. Stubs must not contain credentials, contact providers, or
   invoke models.

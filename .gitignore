@@ -1,4 +1,5 @@
 /target/
+/.ahu/
 /.worktrees/
 /security-reviews/
 /fixes/
