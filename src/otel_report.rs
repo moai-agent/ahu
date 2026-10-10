@@ -191,7 +191,13 @@ mod tests {
         );
         let mut r = Report::new(vec![selected("codex", "headless")], "other").unwrap();
         r.consume(&event).unwrap();
-        assert_eq!(r.finish()["attempts"][0]["spans"], 0);
+        let out = r.finish();
+        assert_eq!(out["attempts"][0]["spans"], 0);
+        assert_eq!(out["attempts"][0]["unmatched_release_resources"], 1);
+        assert_eq!(
+            out["attempts"][0]["coverage"],
+            "release_attribution_missing_or_mismatched"
+        );
         let mut r = Report::new(vec![selected("codex", "headless")], "candidate").unwrap();
         assert!(r.consume(&json!({})).is_err());
         let mut bad = export("codex", "ahu.harness.run", vec![]);
@@ -277,6 +283,7 @@ fn label(value: &str) -> bool {
 #[derive(Default)]
 struct Observation {
     spans: usize,
+    unmatched_release_resources: usize,
     tool_calls: usize,
     terminals: usize,
     conflict: bool,
@@ -452,9 +459,6 @@ impl Report {
         let resources = export["resourceSpans"].as_array().ok_or_else(invalid)?;
         for resource in resources {
             let a = attrs(&resource["resource"]["attributes"])?;
-            if string(&a, "ahu.release.id") != Some(&self.release) {
-                continue;
-            }
             let task = string(&a, "ahu.task.id");
             let attempt = a
                 .get("ahu.task.attempt")
@@ -464,6 +468,10 @@ impl Report {
             }) else {
                 continue;
             };
+            if string(&a, "ahu.release.id") != Some(&self.release) {
+                self.rows[index].unmatched_release_resources += 1;
+                continue;
+            }
             let s = &self.selected[index];
             if let (Some(name), Some(version)) =
                 (string(&a, "service.name"), string(&a, "service.version"))
@@ -579,6 +587,8 @@ impl Report {
                 "conflicting_observations"
             } else if s.telemetry_enabled == Some(false) {
                 "telemetry_disabled"
+            } else if r.spans == 0 && r.unmatched_release_resources > 0 {
+                "release_attribution_missing_or_mismatched"
             } else if r.spans == 0 {
                 "missing_telemetry"
             } else if s.mode == "interactive" {
@@ -590,7 +600,7 @@ impl Report {
             } else {
                 "partial_accounting"
             };
-            attempts.push(json!({"selection":s,"coverage":gap,"spans":r.spans,"mcp_tool_calls":r.tool_calls,
+            attempts.push(json!({"selection":s,"coverage":gap,"spans":r.spans,"unmatched_release_resources":r.unmatched_release_resources,"mcp_tool_calls":r.tool_calls,
                 "outcome":if r.conflict {None} else {r.outcome.as_deref()},"event_coverage":r.coverage,
                 "cost_source":if r.conflict {None} else {r.cost_source.as_deref()},
                 "metrics":METRICS.iter().map(|m| ((*m).to_string(), if r.conflict || s.mode == "interactive" || s.telemetry_enabled == Some(false) {Value::Null} else {r.metrics.get(*m).cloned().unwrap_or(Value::Null)})).collect::<BTreeMap<_,_>>(),
