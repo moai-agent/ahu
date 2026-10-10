@@ -1222,8 +1222,9 @@ fn run_verified_task(
         task_dir,
     )?;
 
-    let mut child = {
+    let child = {
         use std::os::unix::process::CommandExt;
+        let pin = crate::executable_pin::ExecutablePin::create()?;
         let mut command = std::process::Command::new(&executable);
         command
             .args(&rebuilt.args)
@@ -1232,6 +1233,7 @@ fn run_verified_task(
             .env("AHU_TASK_ID", &record.task_id)
             .env("AHU_TASK_DIR", task_dir)
             .current_dir(&record.worktree);
+        pin.configure_command(&mut command);
         crate::telemetry::configure_child(
             &mut command,
             &telemetry,
@@ -1245,7 +1247,7 @@ fn run_verified_task(
         );
         crate::telemetry::configure_task_identity(&mut command, &record, None);
         _span.configure_child_context(&mut command);
-        command
+        let child = command
             // The run-task parent owns the harness's fresh process group, so
             // cancellation can terminate the whole tree without signalling
             // this parent or the pane it lives in.
@@ -1258,8 +1260,11 @@ fn run_verified_task(
                     record.worktree.display(),
                     task_dir.display()
                 ))
-            })?
+            })?;
+        // Keep pin alive until child completes
+        (child, pin)
     };
+    let (mut child, _pin) = child;
     *started = true;
 
     // The TUI harness needs the terminal's foreground or its first stdin read

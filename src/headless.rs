@@ -2422,6 +2422,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         }
     }
     let measurement_started = Instant::now();
+    let pin = crate::executable_pin::ExecutablePin::create()?;
     let mut command = Command::new(&real);
     command
         .args(&rebuilt.args)
@@ -2430,6 +2431,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    pin.configure_command(&mut command);
     sanitize(&mut command, Some(&cmux_integration.headless));
     let telemetry = crate::config::load(&record.worktree)?
         .map(|loaded| loaded.config.telemetry)

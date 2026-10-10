@@ -29,6 +29,7 @@ pub mod context_lock;
 pub mod drift;
 pub mod eval;
 pub mod eval_otel;
+mod executable_pin;
 pub mod explain;
 pub mod git;
 pub mod harness;
