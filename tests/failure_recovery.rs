@@ -223,6 +223,7 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
         worktree: record_source.clone(),
         base_commit: Some("0".repeat(40)),
         identity: ahu::task::LaunchIdentity {
+            release_id: None,
             mode: ahu::task::LaunchMode::Automatic,
             agent: "auto".to_string(),
             agent_version: None,
@@ -557,6 +558,7 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
         worktree: discovered.root.clone(),
         base_commit: discovered.head.clone(),
         identity: ahu::task::LaunchIdentity {
+            release_id: None,
             mode: ahu::task::LaunchMode::Named,
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),
@@ -670,6 +672,7 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
         worktree: discovered.root.clone(),
         base_commit: discovered.head.clone(),
         identity: ahu::task::LaunchIdentity {
+            release_id: None,
             mode: ahu::task::LaunchMode::Named,
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),

@@ -244,6 +244,7 @@ impl Broker {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            crate::telemetry::configure_task_identity(&mut command, &self.owner, Some(&self.spec));
             command.args(["--native-helpers", &grant.native_helpers]);
             command
                 .env(

@@ -93,6 +93,7 @@ fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskReco
         worktree: worktree.to_path_buf(),
         base_commit: discovered.head.clone(),
         identity: task::LaunchIdentity {
+            release_id: None,
             mode: task::LaunchMode::Named,
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),

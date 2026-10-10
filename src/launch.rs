@@ -430,6 +430,7 @@ pub(crate) fn prepared_record(
         worktree: plan.worktree.clone(),
         base_commit: plan.base_commit.clone(),
         identity: LaunchIdentity {
+            release_id: crate::telemetry::release_id_from_environment(),
             mode: plan.mode.clone(),
             agent: plan
                 .agent
@@ -1150,7 +1151,7 @@ fn run_verified_task(
     let telemetry = config
         .map(|config| config.telemetry.clone())
         .unwrap_or_default();
-    crate::telemetry::initialize(&telemetry)?;
+    crate::telemetry::initialize_task(&telemetry, &record, None)?;
     let mut _span = crate::telemetry::span(
         "ahu.harness.run",
         [
@@ -1161,6 +1162,8 @@ fn run_verified_task(
             ("ahu.task.id", record.task_id.clone()),
         ],
     );
+    crate::telemetry::task_span_attributes(&mut _span, &record, None);
+    _span.set_string("ahu.accounting.coverage", "unavailable");
     if let Some(version) = record.identity.agent_version.as_deref() {
         _span.set_string("ahu.agent.version", version);
     }
@@ -1240,6 +1243,8 @@ fn run_verified_task(
             Some(&record.task_id),
             None,
         );
+        crate::telemetry::configure_task_identity(&mut command, &record, None);
+        _span.configure_child_context(&mut command);
         command
             // The run-task parent owns the harness's fresh process group, so
             // cancellation can terminate the whole tree without signalling

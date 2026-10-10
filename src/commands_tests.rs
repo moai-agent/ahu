@@ -90,6 +90,7 @@ fn saved(repo: &Repo, id: &str) -> (PathBuf, task::TaskRecord) {
         worktree: repo.root.clone(),
         base_commit: repo.head.clone(),
         identity: crate::task::LaunchIdentity {
+            release_id: None,
             mode: crate::task::LaunchMode::Automatic,
             agent: "auto".to_string(),
             agent_version: None,
@@ -988,5 +989,31 @@ fn inbox_refuses_empty_numeric_names_and_sequence_overflow_without_writes() {
             std::fs::read_to_string(existing).unwrap(),
             "preserve this message"
         );
+    }
+}
+
+#[test]
+fn frozen_release_identity_roundtrips_without_backfilling_legacy_records() {
+    let (_root, repo) = repository();
+    let (_, record) = saved(&repo, "synthetic-task");
+    let legacy = serde_json::to_value(&record.identity).unwrap();
+    assert!(legacy.get("release_id").is_none());
+    let loaded: crate::task::LaunchIdentity = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(loaded.release_id.is_none());
+    for (value, expected) in [
+        (
+            "release-synthetic._2".to_string(),
+            Some("release-synthetic._2"),
+        ),
+        (String::new(), None),
+        ("x".repeat(65), None),
+        ("https://example.invalid/private".to_string(), None),
+        ("synthetic\nprivate".to_string(), None),
+        ("synthetic,private=value".to_string(), None),
+    ] {
+        let mut json = legacy.clone();
+        json["release_id"] = serde_json::Value::String(value);
+        let loaded: crate::task::LaunchIdentity = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.release_id.as_deref(), expected);
     }
 }

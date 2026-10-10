@@ -775,6 +775,7 @@ fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::
         worktree: discovered.root.clone(),
         base_commit: discovered.head.clone(),
         identity: ahu::task::LaunchIdentity {
+            release_id: None,
             mode: ahu::task::LaunchMode::Named,
             agent: "sable".to_string(),
             agent_version: Some("1.0.0".to_string()),

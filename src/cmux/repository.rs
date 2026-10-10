@@ -224,10 +224,19 @@ impl<'a> RepositoryManager<'a> {
                                 .any(|member| member == &workspace)
                     });
             if belongs_to_other_group {
-                let startup = std::iter::once(shell_single_quote(executable))
-                    .chain(args.iter().map(|arg| shell_single_quote(arg)))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let telemetry = crate::config::load(&self.repo.root)?
+                    .map(|loaded| loaded.config.telemetry)
+                    .unwrap_or_default();
+                let mut command = std::process::Command::new(executable);
+                command.args(args).env("AHU_BIN", std::env::current_exe()?);
+                crate::telemetry::configure_coordinator(
+                    &mut command,
+                    &telemetry,
+                    harness,
+                    model,
+                    crate::selection::probe_version(executable).as_deref(),
+                );
+                let startup = coordinator_startup(&command);
                 let created = self.client.create_coordinator_workspace(
                     &group.id,
                     Some(&window),
@@ -398,4 +407,123 @@ fn restore_anchor(client: &Cmux, repo: &Repo, group: &Group) -> Result<String> {
     let anchor = client.create_anchor_workspace(&group.id, &repo.display_name(), &repo.root)?;
     client.set_anchor(&group.id, &anchor)?;
     Ok(anchor)
+}
+
+/// Serialize only the explicit settings configured on this fresh command.
+/// Neither cmux's server environment nor arbitrary caller variables are copied.
+fn coordinator_startup(command: &std::process::Command) -> String {
+    let mut words = vec!["/usr/bin/env".to_string()];
+    // env options must precede assignments on both BSD and GNU env.
+    for (key, value) in command.get_envs() {
+        if value.is_none() {
+            words.push("-u".to_string());
+            words.push(shell_single_quote(&key.to_string_lossy()));
+        }
+    }
+    for (key, value) in command.get_envs() {
+        if let Some(value) = value {
+            words.push(shell_single_quote(&format!(
+                "{}={}",
+                key.to_string_lossy(),
+                value.to_string_lossy()
+            )));
+        }
+    }
+    words.push(shell_single_quote(&command.get_program().to_string_lossy()));
+    words.extend(
+        command
+            .get_args()
+            .map(|arg| shell_single_quote(&arg.to_string_lossy())),
+    );
+    words.join(" ")
+}
+
+#[cfg(test)]
+mod coordinator_environment_tests {
+    use super::*;
+
+    #[test]
+    fn relocated_coordinator_preserves_only_a_valid_eval_receiver() {
+        for endpoint in ["http://127.0.0.1:54321", "https://example.invalid"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .env_clear()
+                .env("AHU_TEST_COORDINATOR_EVAL", "1")
+                .env("AHU_EVAL_OTEL_ENDPOINT", endpoint)
+                .args([
+                    "--exact",
+                    "cmux::repository::coordinator_environment_tests::coordinator_eval_environment_child",
+                    "--nocapture",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("coordinator eval checked"));
+        }
+    }
+
+    #[test]
+    fn coordinator_eval_environment_child() {
+        if std::env::var("AHU_TEST_COORDINATOR_EVAL").as_deref() != Ok("1") {
+            return;
+        }
+        let expected = crate::telemetry::eval_endpoint_override().unwrap_or_default();
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "printf '%s' \"${AHU_EVAL_OTEL_ENDPOINT-}\""]);
+        crate::telemetry::configure_coordinator(
+            &mut command,
+            &Default::default(),
+            "codex",
+            "fixture",
+            None,
+        );
+        let output = std::process::Command::new("/bin/sh")
+            .env_clear()
+            .env("AHU_EVAL_OTEL_ENDPOINT", "http://127.0.0.1:9")
+            .args(["-c", &coordinator_startup(&command)])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+        println!("coordinator eval checked");
+    }
+
+    #[test]
+    fn relocated_coordinator_shell_applies_export_configuration_and_removals() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", r#"test -z "${OTEL_EXPORTER_OTLP_HEADERS+x}" && test -z "${HTTP_PROXY+x}" && printf '%s\n' "$OTEL_EXPORTER_OTLP_ENDPOINT" "$OTEL_SERVICE_NAME" "$AHU_MCP_RESOURCE_ATTRIBUTES" "$1" "${UNRELATED_PRIVATE+x}""#, "fixture", "literal ' $(false)"]);
+        crate::telemetry::configure_coordinator(
+            &mut command,
+            &crate::config::TelemetryConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            "codex",
+            "synthetic-model",
+            Some("1.2.3"),
+        );
+        let output = std::process::Command::new("/bin/sh")
+            .env_clear()
+            .env("OTEL_EXPORTER_OTLP_HEADERS", "synthetic-secret")
+            .env("HTTP_PROXY", "http://synthetic.invalid")
+            .args(["-c", &coordinator_startup(&command)])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("http://127.0.0.1:4318"));
+        assert!(text.contains("ahu-agent"));
+        assert!(text.contains("ahu.agent.name=director"));
+        assert!(text.contains("ahu.execution.mode=interactive"));
+        assert!(text.contains("literal ' $(false)"));
+        assert!(!text.contains("synthetic-secret"));
+    }
 }

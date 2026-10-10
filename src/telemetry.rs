@@ -94,15 +94,19 @@ pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
 
 /// Enable ahu's own spans when project telemetry is enabled.
 pub fn initialize(config: &TelemetryConfig) -> Result<()> {
-    initialize_named(config, "ahu")
+    initialize_named(config, "ahu", None)
 }
 
 /// Initialize the independently launched stdio MCP server as its own service.
 pub(crate) fn initialize_mcp(config: &TelemetryConfig) -> Result<()> {
-    initialize_named(config, "ahu-mcp")
+    initialize_named(config, "ahu-mcp", None)
 }
 
-fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Result<()> {
+fn initialize_named(
+    config: &TelemetryConfig,
+    service_name: &'static str,
+    identity: Option<Vec<(&'static str, String)>>,
+) -> Result<()> {
     let eval_endpoint = eval_endpoint_override();
     let enabled = config.enabled || eval_endpoint.is_some();
     if !enabled
@@ -149,23 +153,20 @@ fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Res
             return Ok(());
         }
     };
-    let mut resource = Resource::builder()
-        .with_service_name(service_name)
-        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")));
-    // Some harnesses remove OTEL_* from MCP child environments. Carry only
-    // ahu's bounded identity fields through a separate, non-secret channel.
-    let attributes = if service_name == "ahu-mcp" {
-        std::env::var("AHU_MCP_RESOURCE_ATTRIBUTES")
-            .ok()
-            .map(|raw| parse_ahu_resource_attributes(&raw))
-            .unwrap_or_else(ahu_resource_attributes)
-    } else {
-        ahu_resource_attributes()
-    };
-    for (key, value) in attributes {
-        resource = resource.with_attribute(KeyValue::new(key, value));
-    }
-    let resource = resource.build();
+    // SDK detectors retain non-ahu resource configuration. Rebuild ahu identity
+    // from one bounded source so an absent frozen field cannot fall through to
+    // an ambient value (including on independently launched MCP servers).
+    let attributes = identity.unwrap_or_else(|| {
+        if service_name == "ahu-mcp" {
+            std::env::var("AHU_MCP_RESOURCE_ATTRIBUTES")
+                .ok()
+                .map(|raw| parse_ahu_resource_attributes(&raw))
+                .unwrap_or_else(ahu_resource_attributes)
+        } else {
+            ahu_resource_attributes()
+        }
+    });
+    let resource = identity_resource(service_name, attributes);
     // Keep export asynchronous and bounded, and override OTEL_BSP_* values so
     // an inherited environment cannot turn a local ahu process into an
     // unbounded queue or stall task execution. Full queues drop telemetry.
@@ -177,6 +178,149 @@ fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Res
     global::set_tracer_provider(provider.clone());
     *provider_slot().lock().expect("telemetry mutex poisoned") = Some(provider);
     Ok(())
+}
+
+fn identity_resource(
+    service_name: &'static str,
+    attributes: Vec<(&'static str, String)>,
+) -> Resource {
+    let inherited = Resource::builder().build();
+    Resource::builder_empty()
+        .with_attributes(
+            inherited
+                .iter()
+                .filter(|(key, _)| !key.as_str().starts_with("ahu."))
+                .map(|(key, value)| KeyValue::new(key.clone(), value.clone())),
+        )
+        .with_service_name(service_name)
+        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+        .with_attributes(
+            attributes
+                .into_iter()
+                .map(|(key, value)| KeyValue::new(key, value)),
+        )
+        .build()
+}
+
+/// Optional operator-supplied opaque grouping label, never a tracker lookup.
+/// Invalid values are dropped without diagnostics containing their contents.
+pub(crate) fn release_id_from_environment() -> Option<String> {
+    ahu_resource_attributes()
+        .into_iter()
+        .find_map(|(key, value)| (key == "ahu.release.id").then_some(value))
+}
+
+pub(crate) fn deserialize_release_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<String>::deserialize(deserializer)?
+        .filter(|value| safe_resource_value("ahu.release.id", value)))
+}
+
+fn task_resource_attributes(
+    record: &crate::task::TaskRecord,
+    spec: Option<&crate::headless::Spec>,
+    ambient: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut attributes = ambient
+        .map(parse_ahu_resource_attributes)
+        .unwrap_or_default();
+    // Only eval correlation survives from the ambient environment. All task
+    // identity, including absence of release/parent on old tasks, is frozen.
+    attributes.retain(|(key, _)| key.starts_with("ahu.eval."));
+    attributes.extend(parse_ahu_resource_attributes(&resource_attributes(
+        &record.identity.agent,
+        &record.identity.harness,
+        &record.identity.model,
+        record.identity.agent_version.as_deref(),
+        spec.map(|spec| spec.harness_version.as_str())
+            .or(record.enforcement.harness_version.as_deref()),
+        Some(&record.task_id),
+        Some(spec.map_or(1, |spec| spec.attempt)),
+        None,
+    )));
+    for (key, value) in [
+        ("ahu.release.id", record.identity.release_id.as_deref()),
+        (
+            "ahu.task.root_id",
+            spec.and_then(|spec| spec.root_task.as_deref()).or_else(|| {
+                // Legacy children without a root record have unknown root identity.
+                spec.filter(|spec| spec.parent_task.is_some())
+                    .is_none()
+                    .then_some(record.task_id.as_str())
+            }),
+        ),
+        (
+            "ahu.task.parent_id",
+            spec.and_then(|spec| spec.parent_task.as_deref()),
+        ),
+        (
+            "ahu.execution.mode",
+            Some(if spec.is_some() {
+                "headless"
+            } else {
+                "interactive"
+            }),
+        ),
+    ] {
+        if let Some(value) = value.filter(|value| safe_resource_value(key, value)) {
+            attributes.push((key, value.to_string()));
+        }
+    }
+    attributes
+}
+
+pub(crate) fn initialize_task(
+    config: &TelemetryConfig,
+    record: &crate::task::TaskRecord,
+    spec: Option<&crate::headless::Spec>,
+) -> Result<()> {
+    initialize_named(
+        config,
+        "ahu",
+        Some(task_resource_attributes(
+            record,
+            spec,
+            std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
+        )),
+    )
+}
+
+/// Explicitly carry recorded identity across process boundaries, even when
+/// export is off. This does not opt a harness into native instrumentation.
+pub(crate) fn configure_task_identity(
+    command: &mut std::process::Command,
+    record: &crate::task::TaskRecord,
+    spec: Option<&crate::headless::Spec>,
+) {
+    let attributes = task_resource_attributes(
+        record,
+        spec,
+        std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
+    );
+    let encoded = attributes
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    command
+        .env("OTEL_RESOURCE_ATTRIBUTES", &encoded)
+        .env("AHU_MCP_RESOURCE_ATTRIBUTES", encoded);
+}
+
+pub(crate) fn task_span_attributes(
+    span: &mut SpanGuard,
+    record: &crate::task::TaskRecord,
+    spec: Option<&crate::headless::Spec>,
+) {
+    for (key, value) in task_resource_attributes(record, spec, None) {
+        if key == "ahu.task.attempt" {
+            span.set_u64(key, u64::from(spec.map_or(1, |spec| spec.attempt)));
+        } else {
+            span.set_string(key, value);
+        }
+    }
 }
 
 /// Read only ahu's bounded identity attributes from the launch environment.
@@ -200,11 +344,16 @@ fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
         "ahu.harness.version",
         "ahu.model",
         "ahu.task.id",
+        "ahu.task.root_id",
+        "ahu.task.parent_id",
+        "ahu.execution.mode",
+        "ahu.release.id",
         "ahu.task.attempt",
         "ahu.version",
     ];
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let mut release_keys = 0;
     let mut pair = String::new();
     let mut escaped = false;
     let mut pairs = Vec::new();
@@ -228,12 +377,22 @@ fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
+        // Match the SDK's surrounding-whitespace handling for standard
+        // OTEL_RESOURCE_ATTRIBUTES, including duplicate release detection.
+        let key = key.trim();
+        let value = value.trim();
+        if key == "ahu.release.id" {
+            release_keys += 1;
+        }
         if let Some(&allowed_key) = ALLOWED.iter().find(|&&allowed| allowed == key)
             && safe_resource_value(allowed_key, value)
             && seen.insert(allowed_key.to_string())
         {
             out.push((allowed_key, value.to_string()));
         }
+    }
+    if release_keys > 1 {
+        out.retain(|(key, _)| *key != "ahu.release.id");
     }
     out
 }
@@ -245,7 +404,10 @@ fn safe_resource_value(key: &str, value: &str) -> bool {
     if key == "ahu.task.attempt" {
         return value.bytes().all(|byte| byte.is_ascii_digit());
     }
-    if key.starts_with("ahu.eval.") {
+    if key == "ahu.execution.mode" {
+        return matches!(value, "headless" | "interactive");
+    }
+    if key == "ahu.release.id" || key.starts_with("ahu.eval.") {
         return safe_eval_identifier(value);
     }
     value
@@ -321,7 +483,8 @@ pub fn configure_child(
 
     let ambient = std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok();
     let safe_ambient = ambient.as_deref().and_then(|raw| {
-        let parsed = parse_ahu_resource_attributes(raw);
+        let mut parsed = parse_ahu_resource_attributes(raw);
+        parsed.retain(|(key, _)| key.starts_with("ahu.eval.") || *key == "ahu.release.id");
         if parsed.is_empty() && !raw.trim().is_empty() {
             eprintln!("ahu: ambient OTEL_RESOURCE_ATTRIBUTES malformed or not allowed, dropping");
             None
@@ -381,6 +544,60 @@ pub fn configure_child(
             .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
             .env("OTEL_TRACES_EXPORTER", "none");
     }
+}
+
+/// A director has no frozen task record. Carry its bounded release label for
+/// future task creation and apply the same export policy on either cmux path.
+pub(crate) fn configure_coordinator(
+    command: &mut std::process::Command,
+    config: &TelemetryConfig,
+    harness: &str,
+    model: &str,
+    harness_version: Option<&str>,
+) {
+    configure_child(
+        command,
+        config,
+        "director",
+        harness,
+        model,
+        None,
+        harness_version,
+        None,
+        None,
+    );
+    if let Some(endpoint) = eval_endpoint_override() {
+        command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint);
+    } else {
+        // A relocated workspace must not pick up a stale cmux-server receiver.
+        command.env_remove("AHU_EVAL_OTEL_ENDPOINT");
+    }
+    let mut inherited = ahu_resource_attributes();
+    inherited.retain(|(key, _)| key.starts_with("ahu.eval.") || *key == "ahu.release.id");
+    let inherited = inherited
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut identity = parse_ahu_resource_attributes(&resource_attributes(
+        "director",
+        harness,
+        model,
+        None,
+        harness_version,
+        None,
+        None,
+        Some(&inherited),
+    ));
+    identity.push(("ahu.execution.mode", "interactive".to_string()));
+    let encoded = identity
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    command
+        .env("OTEL_RESOURCE_ATTRIBUTES", &encoded)
+        .env("AHU_MCP_RESOURCE_ATTRIBUTES", encoded);
 }
 
 /// Evaluation capture is an internal, loopback-only override. It lets a
@@ -1844,6 +2061,43 @@ mod tests {
     }
 
     #[test]
+    fn release_resource_values_are_bounded_and_ambiguous_labels_are_dropped() {
+        assert_eq!(
+            parse_ahu_resource_attributes("service.name=fixture, ahu.release.id = candidate-a "),
+            vec![("ahu.release.id", "candidate-a".to_string())]
+        );
+        assert!(parse_ahu_resource_attributes("ahu.release.id=a, ahu.release.id = b ").is_empty());
+        for value in ["release-01", "r_2.0", &"a".repeat(64)] {
+            assert_eq!(
+                parse_ahu_resource_attributes(&format!("ahu.release.id={value}")),
+                vec![("ahu.release.id", value.to_string())]
+            );
+        }
+        for value in [
+            "",
+            "two words",
+            "synthetic\nprivate",
+            "https://example.invalid/path",
+            "id=private",
+            "rélease",
+            &"a".repeat(65),
+        ] {
+            assert!(parse_ahu_resource_attributes(&format!("ahu.release.id={value}")).is_empty());
+        }
+        for raw in [
+            "ahu.release.id=r1,ahu.release.id=r2",
+            "ahu.release.id=bad/value,ahu.release.id=r2",
+        ] {
+            assert!(parse_ahu_resource_attributes(raw).is_empty());
+        }
+        let attrs = parse_ahu_resource_attributes(
+            "ahu.execution.mode=headless,ahu.task.root_id=root,ahu.task.parent_id=parent",
+        );
+        assert_eq!(attrs.len(), 3);
+        assert!(parse_ahu_resource_attributes("ahu.execution.mode=private-payload").is_empty());
+    }
+
+    #[test]
     fn mcp_tool_names_are_bounded_and_resource_identity_is_allowlisted() {
         let unknown = mcp_tool_attributes(
             "attacker-supplied-private-tool-name",
@@ -2475,6 +2729,54 @@ mod primary_export_tests {
                 service,
                 "x-synthetic: ambient-header",
             );
+            assert_unused(&trap);
+        }
+    }
+
+    #[test]
+    fn mcp_otlp_resource_uses_carrier_identity_including_absent_release() {
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::any_value;
+        use prost::Message;
+        for release in [None, Some("release-frozen")] {
+            let collector = listener();
+            let trap = listener();
+            let mut command = child_command("ahu-mcp", &trap);
+            let mut carrier = "ahu.task.id=frozen-task,ahu.task.root_id=frozen-root,ahu.task.attempt=2,ahu.execution.mode=headless".to_string();
+            if let Some(release) = release {
+                carrier.push_str(&format!(",ahu.release.id={release}"));
+            }
+            command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint(&collector))
+                .env("OTEL_RESOURCE_ATTRIBUTES", "ahu.release.id=ambient-release,ahu.task.id=ambient-task,ahu.task.parent_id=ambient-parent,ahu.private=private-value")
+                .env("AHU_MCP_RESOURCE_ATTRIBUTES", carrier);
+            let capture = capture(
+                collector,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                false,
+            );
+            run_child(command);
+            let (_, bytes) = capture.join().unwrap().expect("MCP export");
+            let decoded = ExportTraceServiceRequest::decode(bytes.as_slice()).unwrap();
+            let attrs = &decoded.resource_spans[0]
+                .resource
+                .as_ref()
+                .unwrap()
+                .attributes;
+            let get = |key: &str| {
+                attrs.iter().find(|attr| attr.key == key).and_then(|attr| {
+                    match attr.value.as_ref()?.value.as_ref()? {
+                        any_value::Value::StringValue(value) => Some(value.as_str()),
+                        _ => None,
+                    }
+                })
+            };
+            assert_eq!(get("ahu.release.id"), release);
+            assert_eq!(get("ahu.task.id"), Some("frozen-task"));
+            assert_eq!(get("ahu.task.root_id"), Some("frozen-root"));
+            assert_eq!(get("ahu.task.attempt"), Some("2"));
+            assert_eq!(get("ahu.execution.mode"), Some("headless"));
+            assert_eq!(get("ahu.task.parent_id"), None);
+            assert_eq!(get("ahu.private"), None);
             assert_unused(&trap);
         }
     }

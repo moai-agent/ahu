@@ -100,6 +100,7 @@ fn record(repo: &TestRepo, id: &str) -> std::path::PathBuf {
         worktree: record_source.clone(),
         base_commit: discovered.head.clone(),
         identity: ahu::task::LaunchIdentity {
+            release_id: None,
             mode: ahu::task::LaunchMode::Automatic,
             agent: "auto".to_string(),
             agent_version: None,

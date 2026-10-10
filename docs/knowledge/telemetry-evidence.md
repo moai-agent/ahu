@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: Telemetry evidence and privacy boundaries
-description: What headless usage and cost observations mean, where they are stored, and what the private association API does not do.
+description: Release attribution through OpenTelemetry, usage and cost semantics, and collection coverage.
 tags: [telemetry, privacy, evals, cost]
 status: draft
 generated: { by: docs-astra/1.1.2, at: 2026-10-03T00:00:00Z }
@@ -34,6 +34,8 @@ flowchart LR
     Harness["Headless harness event stream"] --> Normalize["Bounded event normalizer"]
     Normalize --> Result["Task attempt result"]
     Normalize --> Span["Opt-in ahu OTLP span"]
+    Span --> Collector["Local OpenTelemetry Collector"]
+    Collector --> Backend["Telemetry backend: release queries and coverage"]
     Result --> Eval["Eval report aggregation"]
     Result --> Local["Opt-in local numeric metrics"]
     Host["Owner-only host mapping store"] --> Private["Private grouped report"]
@@ -47,7 +49,45 @@ result `total_cost_usd` and OpenCode's observed step costs are recorded as
 events are deduplicated by part ID. The cost field does not claim final billing,
 and ahu does not derive cost from token counts or catalog prices. Codex and
 Antigravity currently provide no documented per-run USD field to this adapter.
-The user reference describes the current source and scope for each harness.[^headless]
+Claude cumulative result amounts use the maximum valid observation, so repeating
+a result cannot add the same amount twice. Kiro's accepted prompt-completion
+credits are exported separately from USD, with partial coverage. The user
+reference describes the current source and scope for each harness.[^headless]
+
+## Release measurement through OTel
+
+Use the existing OTLP pipeline to group execution evidence by release. Set a
+public-safe, opaque `ahu.release.id` in `OTEL_RESOURCE_ATTRIBUTES` when creating
+tasks. ahu freezes it in the existing task identity; a resume keeps that label
+and a broker child inherits its parent's label. The release label is not a
+private tracker reference. It does not create another mapping or accounting
+store. Older tasks without a label remain unassigned.[^telemetry]
+
+The backend should query `ahu.harness.run` spans by release, task, attempt,
+harness, model, execution mode and outcome. Task root and parent attributes
+describe the execution hierarchy. Deduplicate retransmitted spans by trace and
+span ID before counting observations. Do not sum token maxima, cumulative
+session costs, and child costs into a release total: resumed and nested usage
+may overlap. The exported aggregation, scope and coverage attributes identify
+what each observation supports. Missing numbers remain missing; observed zero
+is a number. Complete native event capture does not establish complete cost
+coverage.[^headless][^telemetry]
+
+Collection must be enabled before the work starts and verified at the backend.
+A configured exporter or reachable port alone does not prove delivery. Monitor
+collector refusals, exporter failures, queue exhaustion and retention; retain
+the accounting evidence without sampling if it is used for totals. ahu's
+bounded asynchronous export can lose observations on overload or abrupt exit.
+Report unavailable harnesses and interactive usage explicitly. A release label
+provides attribution, not a guarantee that all release work was observed.
+
+Use native per-request usage metrics when their documented units and temporality
+support aggregation, and keep them separate from ahu's attempt-level observations
+unless overlap has been resolved. ahu does not relabel per-field maxima as
+standard GenAI per-request token metrics or convert Kiro credits into USD.
+Until providers expose sufficient disjoint measurements and collection coverage
+is verified, a backend report must call its result observed usage or cost,
+rather than total release spend.
 
 `local_metrics` is opt-in and does not require an OTLP collector. Schema version
 2 contains the normalized token fields, elapsed process duration, and an

@@ -1,5 +1,6 @@
 //! Unattended attempts with minimal primary-owned state and an ahu supervisor.
 //! Process and harness outcomes are evidence, never work acceptance.
+mod accounting;
 mod admission;
 mod journal;
 mod kiro;
@@ -779,11 +780,13 @@ pub fn launch(
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
     crate::catalog::check_headless_version(&plan.pair.harness, &version)?;
     let parent_task = std::env::var("AHU_PARENT_TASK").ok();
+    let mut parent_release = None;
     let depth = if let Some(parent) = &parent_task {
         let parent_dir = lookup(repo, parent)?;
         let parent_spec: Spec = read_json(&parent_dir.join("headless.json"))?;
         let parent_record = task::load(&parent_dir)?;
         validate_frozen_configuration(&parent_record)?;
+        parent_release = Some(parent_record.identity.release_id.clone());
         if parent_record.worktree.canonicalize()? != repo.root.canonicalize()? {
             bail!("child must launch from its owning task worktree");
         }
@@ -1003,7 +1006,10 @@ pub fn launch(
         );
     }
     confined(&plan.task_dir, true)?;
-    let record = crate::launch::prepared_record(repo, &loaded, &plan, prompt, materialize);
+    let mut record = crate::launch::prepared_record(repo, &loaded, &plan, prompt, materialize);
+    if let Some(release_id) = parent_release {
+        record.identity.release_id = release_id;
+    }
     task::save(&plan.task_dir, &record, prompt)?;
     durable_json(&plan.task_dir.join("headless.json"), &spec)?;
     let _ = std::fs::remove_file(&intent_path);
@@ -1204,6 +1210,7 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     sanitize(&mut command, None);
+    crate::telemetry::configure_task_identity(&mut command, &task::load(dir)?, Some(spec));
     command
         .env("AHU_EXPECTED_DIGEST", frozen_digest(dir)?)
         .env_remove("AHU_RUNTIME_DIR")
@@ -1268,6 +1275,9 @@ pub struct SkillCatalogEntry {
     pub digest: String,
 }
 
+/// Independent maximum observations per field in this attempt's native stream.
+/// Fields may come from different events; these are not additive call totals or
+/// a coherent snapshot, and resumed/child streams may contain overlapping usage.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input: Option<u64>,
@@ -1372,13 +1382,20 @@ impl ReportedCost {
         if event.get("type").and_then(Value::as_str) != Some("result") {
             return;
         }
-        self.observe(event.get("total_cost_usd"), "claude_code_result_total");
+        let Some(value) = Self::valid_amount(event.get("total_cost_usd")) else {
+            return;
+        };
+        // Result totals are cumulative observations, including on resume. A
+        // duplicate or older snapshot must not increase the reported amount.
+        self.usd = Some(self.usd.map_or(value, |prior| prior.max(value)));
+        self.source = Some("claude_code_result_total".into());
     }
 
     fn observe_opencode_step(
         &mut self,
         event: &Value,
         seen: &mut std::collections::BTreeSet<String>,
+        tracking_limited: &mut bool,
     ) {
         if event.get("type").and_then(Value::as_str) != Some("step_finish") {
             return;
@@ -1390,25 +1407,35 @@ impl ReportedCost {
         let Some(id) = part.get("id").and_then(Value::as_str) else {
             return;
         };
-        if !seen.insert(id.to_owned()) {
+        if id.is_empty() || id.len() > 1024 {
+            *tracking_limited = true;
             return;
         }
-        self.observe(part.get("cost"), "opencode_step_finish_sum");
-    }
-
-    fn observe(&mut self, value: Option<&Value>, source: &str) {
-        let Some(value) = value.and_then(Value::as_f64) else {
+        if seen.contains(id) {
+            return;
+        }
+        if seen.len() >= 4096 {
+            *tracking_limited = true;
+            return;
+        }
+        let Some(value) = Self::valid_amount(part.get("cost")) else {
             return;
         };
-        if !value.is_finite() || value < 0.0 {
-            return;
-        }
         let total = self.usd.unwrap_or(0.0) + value;
         if !total.is_finite() {
+            *tracking_limited = true;
             return;
         }
+        // Missing/invalid observations must not consume the part's identity.
+        seen.insert(id.to_owned());
         self.usd = Some(total);
-        self.source = Some(source.to_owned());
+        self.source = Some("opencode_step_finish_sum".into());
+    }
+
+    fn valid_amount(value: Option<&Value>) -> Option<f64> {
+        value
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
     }
 }
 
@@ -1512,6 +1539,8 @@ pub struct Events {
     native_event_count: usize,
     #[serde(skip)]
     cost_step_ids: std::collections::BTreeSet<String>,
+    #[serde(skip)]
+    cost_tracking_limited: bool,
 }
 impl Events {
     fn observe_stderr(&mut self, line: &[u8]) {
@@ -1594,9 +1623,11 @@ impl Events {
         self.trajectory.observe(harness, &event);
         match harness {
             "claude-code" => self.cost.observe_claude_result(&event),
-            "opencode" => self
-                .cost
-                .observe_opencode_step(&event, &mut self.cost_step_ids),
+            "opencode" => self.cost.observe_opencode_step(
+                &event,
+                &mut self.cost_step_ids,
+                &mut self.cost_tracking_limited,
+            ),
             _ => (),
         }
         self.observe_skill(harness, &event);
@@ -2394,7 +2425,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     let telemetry = crate::config::load(&record.worktree)?
         .map(|loaded| loaded.config.telemetry)
         .unwrap_or_default();
-    crate::telemetry::initialize(&telemetry)?;
+    crate::telemetry::initialize_task(&telemetry, &record, Some(spec))?;
     let mut telemetry_span = crate::telemetry::span(
         "ahu.harness.run",
         [
@@ -2405,7 +2436,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             ("ahu.task.id", record.task_id.clone()),
         ],
     );
-    telemetry_span.set_u64("ahu.task.attempt", u64::from(spec.attempt));
+    crate::telemetry::task_span_attributes(&mut telemetry_span, &record, Some(spec));
     if let Some(version) = record.identity.agent_version.as_deref() {
         telemetry_span.set_string("ahu.agent.version", version);
     }
@@ -2421,6 +2452,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         Some(&record.task_id),
         Some(spec.attempt),
     );
+    crate::telemetry::configure_task_identity(&mut command, &record, Some(spec));
     telemetry_span.configure_child_context(&mut command);
     command
         .env("AHU_BIN", std::env::current_exe()?)
@@ -2769,16 +2801,9 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         telemetry_span.set_string("ahu.model.resolved", model);
     }
     telemetry_span.set_string("ahu.status", outcome);
-    for (key, value) in events.usage.normalized_fields() {
-        if let Some(value) = value {
-            telemetry_span.set_u64(key, value);
-        }
-    }
-    if let Some(cost_usd) = events.cost.usd {
-        telemetry_span.set_f64("ahu.cost.harness_reported_usd", cost_usd);
-        if let Some(source) = events.cost.source.as_deref() {
-            telemetry_span.set_string("ahu.cost.source", source);
-        }
+    accounting::Projection::from_events(&events).export(&mut telemetry_span);
+    if let Some(completeness) = &native_completeness {
+        telemetry_span.set_bool("ahu.events.native_helpers_complete", completeness.complete);
     }
     telemetry_span.set_u64("ahu.skills.available", skill_catalog.len() as u64);
     telemetry_span.set_string("ahu.skills.observation", events.skill_observation.as_str());

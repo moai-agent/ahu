@@ -919,6 +919,60 @@ copy secret values. The exporter SDK can read ambient OpenTelemetry configuratio
 Keep sensitive data out of that configuration; these settings are not a
 redaction boundary.
 
+#### Release attribution and accounting queries
+
+For new assignments, supply an opaque release label through standard OTel
+resource configuration:
+
+```sh
+OTEL_RESOURCE_ATTRIBUTES='ahu.release.id=release-candidate-a' \
+  ahu @dev-astra --prompt-file /tmp/release-task.txt
+```
+
+This example assumes that agent is registered and the assignment file exists.
+Release labels accept 1–64 ASCII letters, digits, dots, underscores or hyphens.
+Use a public-safe label, never a private tracker key, URL or title. The label is
+frozen in the existing task identity. Resumes keep it; broker children inherit
+their parent's frozen value, including absence. A later shell variable cannot
+assign an old task to a release. No separate release mapping is required.
+
+Task run spans and their ahu-owned resources carry `ahu.release.id` when set,
+`ahu.task.id`, `ahu.task.attempt`, and `ahu.execution.mode`, plus known
+`ahu.task.root_id` and `ahu.task.parent_id`. MCP children receive matching
+identity. Harnesses control whether their native exporters honor these fields;
+native Kiro exports do not currently establish this task/attempt correlation.
+
+Headless `ahu.harness.run` spans describe observed usage with explicit semantics:
+
+| Fields | Meaning |
+| --- | --- |
+| `ahu.tokens.*`, `ahu.tokens.aggregation` | Maximum reported value per token field; not additive call usage |
+| `ahu.cost.harness_reported_usd`, `ahu.cost.source`, `ahu.cost.aggregation` | Claude's maximum valid result total or OpenCode's sum of first valid costs per distinct part ID |
+| `ahu.kiro.credits.observed`, `ahu.kiro.credits.unit` | Accepted, deduplicated Kiro prompt-completion observations in credits |
+| `ahu.kiro.elapsed.observed_ms`, `ahu.kiro.context.*_percent` | Reported completion elapsed time and context-window usage; neither is billed tokens |
+| `ahu.tokens.coverage`, `ahu.cost.coverage`, `ahu.kiro.credits.coverage` | `partial` when measured, `unavailable` otherwise; an observed zero remains present |
+| `ahu.events.coverage` | Completeness of recognized native event evidence, independent of accounting coverage |
+| `ahu.accounting.cross_attempt_additivity`, `ahu.accounting.parent_child_additivity` | `not_established`; resumed totals or nested usage may overlap |
+
+Query the telemetry backend for `ahu.harness.run` spans grouped by release,
+harness, model, mode and outcome. Deduplicate OTLP retransmissions by trace/span
+identity. Include failed and cancelled attempts when examining release effort;
+successful process exit does not establish acceptance or full cost coverage.
+Show the number of received attempts alongside observed and unavailable values.
+Do not add cumulative attempt observations, native per-request metrics and
+parent/child observations together without establishing their disjoint scope.
+Kiro credits remain separate from USD. These attempt observations are custom
+`ahu.*` attributes because they do not satisfy per-request GenAI token metric
+semantics.
+
+Enable collection before starting release work and verify receipt in the
+backend. A listening collector port is not delivery evidence. Collector queues,
+export failures, sampling and retention affect coverage; keep the evidence used
+for accounting unsampled and monitor loss. ahu's bounded exporter can drop spans,
+and an abrupt process exit can leave no completed run span. Interactive usage,
+unobserved tasks and provider billing remain separate coverage gaps. The release
+label supports backend attribution; it does not certify a total release cost.
+
 Child harness processes receive the same loopback OTLP endpoint and export
 their own metrics and logs. ahu's attribute allowlist and redaction apply only
 to the attributes ahu itself emits; the child harness and its SDK control their

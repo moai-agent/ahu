@@ -32,6 +32,19 @@ assert os.environ['AHU_EXECUTION_BACKEND']=='headless'
 assert not any(k.startswith('CMUX_') for k in os.environ)
 assert 'ahu delegation contract (v3, headless)' in a[-1]
 assert sys.stdin.read()==''
+if 'EXPECT_RELEASE' in os.environ:
+ attrs=dict(pair.split('=',1) for pair in os.environ['OTEL_RESOURCE_ATTRIBUTES'].split(','))
+ mcp=dict(pair.split('=',1) for pair in os.environ['AHU_MCP_RESOURCE_ATTRIBUTES'].split(','))
+ for key in ('ahu.release.id','ahu.task.id','ahu.task.root_id','ahu.task.parent_id','ahu.task.attempt','ahu.execution.mode'):
+  assert attrs.get(key)==mcp.get(key), (key,attrs,mcp)
+ assert attrs.get('ahu.release.id','')==os.environ['EXPECT_RELEASE'], attrs
+ assert attrs['ahu.execution.mode']=='headless',attrs
+ assert attrs['ahu.task.id']==os.environ['AHU_TASK_ID'],attrs
+ spec=json.load(open(os.path.join(os.environ['AHU_TASK_DIR'],'headless.json')))
+ assert attrs.get('ahu.task.root_id')==spec['root_task'],attrs
+ assert attrs.get('ahu.task.parent_id')==spec['parent_task'],attrs
+ assert attrs['ahu.task.attempt']==str(spec['attempt']),attrs
+ if 'EXPECT_ATTEMPT' in os.environ: assert attrs['ahu.task.attempt']==os.environ['EXPECT_ATTEMPT'],attrs
 scenario=os.environ.get('SCENARIO','success')
 if scenario in ('child','mailbox') and '\ndelegate synthetic task</ahu-request-' not in a[-1]: scenario='success'
 session=a[a.index('--resume')+1] if '--resume' in a else os.environ['AHU_PARENT_TASK']
@@ -52,6 +65,7 @@ if scenario in ('child','mailbox'):
   time.sleep(0.3)
  child=os.environ['CHILD_PROMPT']
  env=dict(os.environ,SCENARIO='success')
+ if 'REQUEST_RELEASE' in os.environ: env['OTEL_RESOURCE_ATTRIBUTES']='ahu.release.id='+os.environ['REQUEST_RELEASE']
  extra=['--name',os.environ['CHILD_TASK_NAME']] if 'CHILD_TASK_NAME' in os.environ else []
  r=subprocess.run([os.environ['AHU_BIN'],'@worker','--headless','--background','--output','json','--prompt-file',child]+extra,env=env,capture_output=True,text=True)
  assert r.returncode==0, r.stderr
@@ -3687,4 +3701,136 @@ if scenario=='signal_exit': os.kill(os.getpid(),15)
         .output()
         .unwrap();
     assert_eq!(Fixture::value(&waited)["outcome"], "cancelled");
+}
+
+#[test]
+fn release_identity_is_frozen_across_resume_and_legacy_absence() {
+    for release in [None, Some("release-synthetic")] {
+        let f = Fixture::new();
+        let out = f
+            .command()
+            .env(
+                "OTEL_RESOURCE_ATTRIBUTES",
+                release
+                    .map(|value| format!("ahu.release.id={value}"))
+                    .unwrap_or_default(),
+            )
+            .env("EXPECT_RELEASE", release.unwrap_or_default())
+            .env("EXPECT_ATTEMPT", "1")
+            .args([
+                "@worker",
+                "--headless",
+                "--output",
+                "json",
+                "--prompt",
+                "synthetic task",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let first = Fixture::value(&out);
+        assert_eq!(first["outcome"], "succeeded");
+        let id = first["task_id"].as_str().unwrap();
+        let result = PathBuf::from(first["review"]["result_path"].as_str().unwrap());
+        let dir = result.parent().unwrap().parent().unwrap();
+        let record: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("task.json")).unwrap()).unwrap();
+        assert_eq!(record["identity"]["release_id"].as_str(), release);
+        // None is omitted, exercising the shape of a record written by an old runner.
+        if release.is_none() {
+            assert!(record["identity"].get("release_id").is_none());
+        }
+        let prompt = f.external.path().join("followup.txt");
+        std::fs::write(&prompt, "continue synthetic task").unwrap();
+        let resumed = f
+            .command()
+            .env(
+                "OTEL_RESOURCE_ATTRIBUTES",
+                "ahu.release.id=other-release,ahu.task.parent_id=wrong-parent,ahu.task.attempt=99",
+            )
+            .env("AHU_MCP_RESOURCE_ATTRIBUTES", "ahu.release.id=wrong-mcp")
+            .env("EXPECT_RELEASE", release.unwrap_or_default())
+            .env("EXPECT_ATTEMPT", "2")
+            .args(["resume", id, "--prompt-file"])
+            .arg(&prompt)
+            .args(["--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        let waited = f
+            .command()
+            .args(["wait", id, "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            waited.status.success(),
+            "{}",
+            String::from_utf8_lossy(&waited.stderr)
+        );
+        assert_eq!(Fixture::value(&waited)["outcome"], "succeeded");
+        assert_eq!(
+            ahu::task::load(dir).unwrap().identity.release_id.as_deref(),
+            release
+        );
+    }
+}
+
+#[test]
+fn broker_child_inherits_parent_release_including_absence_despite_request_drift() {
+    for release in [None, Some("release-synthetic")] {
+        let f = Fixture::new();
+        let prompt = f.external.path().join("child.txt");
+        std::fs::write(&prompt, "perform synthetic task").unwrap();
+        let out = f
+            .command()
+            .env(
+                "OTEL_RESOURCE_ATTRIBUTES",
+                release
+                    .map(|value| format!("ahu.release.id={value}"))
+                    .unwrap_or_default(),
+            )
+            .env("EXPECT_RELEASE", release.unwrap_or_default())
+            .env("REQUEST_RELEASE", "request-conflict")
+            .env("CHILD_PROMPT", &prompt)
+            .env("SCENARIO", "child")
+            .args([
+                "@worker",
+                "--headless",
+                "--output",
+                "json",
+                "--prompt",
+                "delegate synthetic task",
+                "--allow-child",
+                "@worker",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value = Fixture::value(&out);
+        assert_eq!(value["outcome"], "succeeded");
+        let child = value["ahu_children"][0]["task_id"].as_str().unwrap();
+        let child_result = f
+            .command()
+            .args(["result", child, "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(child_result.status.success());
+        let child_value = Fixture::value(&child_result);
+        let result_path = PathBuf::from(child_value["review"]["result_path"].as_str().unwrap());
+        let child_dir = result_path.parent().unwrap().parent().unwrap();
+        let record = ahu::task::load(child_dir).unwrap();
+        assert_eq!(record.identity.release_id.as_deref(), release);
+    }
 }

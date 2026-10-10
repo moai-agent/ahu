@@ -155,19 +155,16 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
     eprintln!("{label} coordinator: {}", display_safe(&args.join(" ")));
     let mut command = std::process::Command::new(executable);
     command.args(&args).env("AHU_BIN", std::env::current_exe()?);
-    if let Some(loaded) = &loaded {
-        crate::telemetry::configure_child(
-            &mut command,
-            &loaded.config.telemetry,
-            "director",
-            harness,
-            &model,
-            None,
-            selection::installed_version(program).as_deref(),
-            None,
-            None,
-        );
-    }
+    crate::telemetry::configure_coordinator(
+        &mut command,
+        &loaded
+            .as_ref()
+            .map(|loaded| loaded.config.telemetry.clone())
+            .unwrap_or_default(),
+        harness,
+        &model,
+        selection::installed_version(program).as_deref(),
+    );
     // Inherit the terminal and cwd. Replacing ahu gives the harness terminal signals
     // directly and preserves its exit status, including signal termination.
     #[cfg(unix)]
@@ -2319,7 +2316,7 @@ pub fn approval_cmd(repo: &Repo, id: &str, approve: bool, json_output: bool) -> 
 pub fn run_task(task_dir: &Path) -> Result<i32> {
     let record = crate::task::load(task_dir)?;
     if let Some(loaded) = crate::config::load(&record.worktree)? {
-        crate::telemetry::initialize(&loaded.config.telemetry)?;
+        crate::telemetry::initialize_task(&loaded.config.telemetry, &record, None)?;
     }
     match launch::run_task(task_dir)? {
         launch::HarnessOutcome::Exited(status) if status.success() => Ok(0),
@@ -2530,6 +2527,13 @@ fn submit(
             ("ahu.version", env!("CARGO_PKG_VERSION").to_string()),
         ],
     );
+    _span.set_string("ahu.task.id", &plan.task_id);
+    _span.set_string("ahu.task.root_id", &plan.task_id);
+    _span.set_u64("ahu.task.attempt", 1);
+    _span.set_string("ahu.execution.mode", "interactive");
+    if let Some(release_id) = crate::telemetry::release_id_from_environment() {
+        _span.set_string("ahu.release.id", release_id);
+    }
     if let Some(version) = plan
         .agent
         .as_ref()
