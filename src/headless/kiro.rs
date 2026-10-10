@@ -45,6 +45,9 @@ impl Events {
     }
 
     pub(super) fn observe_kiro(&mut self, event: &Value) {
+        // Kiro config updates describe selection, not inference identity. Keep
+        // reported model coverage unknown rather than promoting that selection.
+        self.model_evidence.observe(std::iter::empty());
         // Forward every event, including replay and failures, to the eval observer.
         self.trajectory.observe("kiro", event);
         let kind = event["type"].as_str().unwrap_or("");

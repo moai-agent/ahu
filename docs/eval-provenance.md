@@ -7,6 +7,21 @@ provenance. Missing, conflicting, redacted, and capacity-limited identities are
 explicit. A configured model is not evidence of a reported model, and neither
 field is backend attestation.
 
+Native harness model observations retain conflicts, rejected values, and partial
+coverage instead of treating the first model name as the whole session's identity.
+Missing model fields or incomplete event capture keep coverage partial. Kiro model
+configuration updates describe selection and do not establish a reported inference
+model. Older records without the partial-coverage counter remain readable.
+
+For harness provenance, the legacy `requested_provider` field identifies the
+requested harness backend, not an inference provider. Reported provider evidence
+is separate and is never inferred from that backend or the configured model.
+The current native adapters do not emit explicit reported-provider observations;
+live `ahu_agents_recommend` results therefore remain unknown. Synthetic or external
+explicit observations can exercise the recommendation gates, but do not establish
+supported live coverage. Advice compares quality floors using unrounded Wilson
+bounds; ordinary comparison reports retain their rounded display values.
+
 The comparison evidence contains a hash of the exact input bytes, a comparison
 fingerprint, group fingerprints, and deterministic metric cells. Each cell names
 its value, observation denominator, and JSON-pointer sources. Missing trajectory

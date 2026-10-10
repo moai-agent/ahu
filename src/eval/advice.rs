@@ -219,7 +219,6 @@ fn model_matches(record: &Record, candidate: &Candidate) -> bool {
             && p.requested_model.values.contains_key(&candidate.model)
             && complete_identity(&p.requested_provider, p.observations)
             && p.requested_provider.values.contains_key(&candidate.harness)
-            && p.requested_provider.values == p.reported_provider.values
             && p.unattributed_model.conflicting == 0
             && p.unattributed_model.redacted == 0
             && p.unattributed_model.limited == 0
@@ -445,7 +444,7 @@ fn recommend(
             if providers.len() > 1 {
                 reasons.insert("mixed_reported_providers");
             }
-            let interval = stats::Interval::wilson(passes, quality);
+            let interval = stats::Interval::wilson_unrounded(passes, quality);
             let qualifies = interval.is_some_and(|i| i.lower >= request.minimum_quality);
             quality_below |= quality == n && n > 0 && !qualifies;
             let cost = mean(&costs);
@@ -608,6 +607,74 @@ mod tests {
             .unwrap()
             .iter()
             .any(|c| c["reasons"].as_array().unwrap().contains(&json!(reason)))
+    }
+
+    #[test]
+    fn advice_uses_unrounded_quality_bounds() {
+        let (mut request, mut records, candidates) = fixture();
+        drop(records.drain(2..4));
+        request.minimum_samples_per_case = 2;
+        request.minimum_quality = 0.3424;
+        let result = recommend(&request, &records, &candidates, 1030);
+        assert_eq!(result["candidates"][0]["status"], "below_quality");
+        assert!(result["recommended"].as_array().unwrap().is_empty());
+        let lower = result["candidates"][0]["cases"][0]["quality"]["interval"]["lower"]
+            .as_f64()
+            .unwrap();
+        assert!((lower - 0.342380227506653).abs() < 1e-14);
+        request.minimum_quality = 0.34238;
+        assert_eq!(
+            recommend(&request, &records, &candidates, 1030)["recommended"],
+            json!(["@careful"])
+        );
+    }
+
+    #[test]
+    fn native_model_coverage_and_missing_provider_block_advice() {
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+        for (model, provider, expected) in [
+            (Some("fixture-model"), false, "unknown"),
+            (None, true, "unknown"),
+            (Some("other-model"), true, "unknown"),
+            (Some("fixture-model"), true, "recommended"),
+        ] {
+            let (_, mut records, _) = fixture();
+            let mut events = crate::headless::Events::default();
+            events.observe(
+                "opencode",
+                &serde_json::to_vec(
+                    &json!({"type":"step_start", "model":"fixture-model", "part":{"id":"start"}}),
+                )
+                .unwrap(),
+            );
+            let mut end = json!({"type":"step_finish", "part":{"id":"end", "reason":"stop"}});
+            if let Some(model) = model {
+                end["model"] = model.into();
+            }
+            events.observe("opencode", &serde_json::to_vec(&end).unwrap());
+            let mut fields =
+                crate::headless::identity::requested_attributes("opencode", "fixture-model")
+                    .to_vec();
+            fields.extend(events.reported_model_attributes());
+            if provider {
+                fields.push(("ahu.harness.provider.reported", "fixture-provider".into()));
+            }
+            let attributes: Vec<_> = fields
+                .into_iter()
+                .map(|(key, value)| KeyValue {
+                    key: key.into(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue(value)),
+                    }),
+                })
+                .collect();
+            let mut p = provenance::Provenance::default();
+            p.observe(&attributes, "ahu.harness");
+            for r in &mut records {
+                r.harness_provenance = Some(p.clone());
+            }
+            assert_eq!(evaluate(&records)["status"], expected);
+        }
     }
 
     #[test]

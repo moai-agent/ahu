@@ -35,6 +35,9 @@ pub struct Identity {
     pub redacted: u64,
     pub conflicting: u64,
     pub limited: u64,
+    /// Observations with incomplete native coverage, independent of value counts.
+    #[serde(default)]
+    pub partial: u64,
 }
 
 impl Identity {
@@ -43,6 +46,19 @@ impl Identity {
         let mut first: Option<&str> = None;
         let mut conflict = false;
         let mut redacted = false;
+        let mut partial = false;
+        // Producer coverage is a fixed label, never an arbitrary identity value.
+        let coverage_key = format!("{key}.coverage");
+        for attribute in attributes.iter().filter(|a| a.key == coverage_key) {
+            match attribute.value.as_ref().and_then(|v| v.value.as_ref()) {
+                Some(Value::StringValue(value)) if value == "conflicting" => conflict = true,
+                Some(Value::StringValue(value)) if value == "redacted" => redacted = true,
+                Some(Value::StringValue(value)) if value == "partial" => partial = true,
+                Some(Value::StringValue(value)) if value == "complete" => (),
+                _ => redacted = true,
+            }
+        }
+        self.partial = self.partial.saturating_add(u64::from(partial));
         for attribute in attributes.iter().filter(|a| a.key == key) {
             found = true;
             let Some(Value::StringValue(value)) =
@@ -68,7 +84,7 @@ impl Identity {
         } else if let Some(value) = first {
             self.add_value(value, 1);
         }
-        if !found {
+        if !found && !conflict && !redacted {
             self.missing = self.missing.saturating_add(1);
         }
         if conflict || redacted { None } else { first }
@@ -91,6 +107,7 @@ impl Identity {
         self.redacted = self.redacted.saturating_add(other.redacted);
         self.conflicting = self.conflicting.saturating_add(other.conflicting);
         self.limited = self.limited.saturating_add(other.limited);
+        self.partial = self.partial.saturating_add(other.partial);
     }
 
     pub fn status(&self) -> &'static str {
@@ -104,7 +121,7 @@ impl Identity {
             "multiple"
         } else if self.values.is_empty() {
             "absent"
-        } else if self.missing > 0 {
+        } else if self.missing > 0 || self.partial > 0 {
             "partial"
         } else {
             "single"
@@ -113,6 +130,7 @@ impl Identity {
 
     fn valid(&self, observations: u64) -> bool {
         self.values.len() <= MAX_VALUES
+            && self.partial <= observations
             && self.values.iter().all(|(v, n)| safe_identity(v) && *n > 0)
             && self
                 .values
@@ -165,9 +183,11 @@ impl Provenance {
         {
             self.model_mismatches = self.model_mismatches.saturating_add(1);
         }
-        if requested_provider
-            .zip(reported_provider)
-            .is_some_and(|(a, b)| a != b)
+        // A harness backend (e.g. opencode) is not an inference provider.
+        if prefix != "ahu.harness"
+            && requested_provider
+                .zip(reported_provider)
+                .is_some_and(|(a, b)| a != b)
         {
             self.provider_mismatches = self.provider_mismatches.saturating_add(1);
         }
@@ -226,6 +246,25 @@ impl Summary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_identity_defaults_partial_and_partial_counts_are_bounded_and_merged() {
+        let legacy = serde_json::json!({"values":{"fixture":1}, "missing":0,
+            "redacted":0, "conflicting":0, "limited":0});
+        let mut identity: Identity = serde_json::from_value(legacy).unwrap();
+        assert_eq!(identity.partial, 0);
+        assert_eq!(identity.status(), "single");
+        identity.partial = 1;
+        assert!(identity.valid(1));
+        assert_eq!(identity.status(), "partial");
+        let mut merged = Identity::default();
+        merged.merge(&identity);
+        assert_eq!(merged.partial, 1);
+        assert_eq!(merged.status(), "partial");
+        assert!(merged.valid(1));
+        merged.partial = 2;
+        assert!(!merged.valid(1));
+    }
 
     #[test]
     fn identities_reject_endpoints_payloads_paths_and_overlong_values() {
