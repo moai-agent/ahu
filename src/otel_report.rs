@@ -151,6 +151,25 @@ mod tests {
         assert_eq!(out["attempts"][0]["mcp_tool_calls"], 1);
     }
     #[test]
+    fn mcp_invocation_and_success_are_distinct_observations() {
+        for (outcome, field) in [
+            ("success", "success"),
+            ("error", "error"),
+            ("no_response", "unknown"),
+        ] {
+            let mut r = Report::new(vec![selected("codex", "interactive")], "candidate").unwrap();
+            r.consume(&export(
+                "codex",
+                "ahu.mcp.tool.call",
+                vec![attribute("ahu.mcp.outcome", json!(outcome))],
+            ))
+            .unwrap();
+            let out = r.finish();
+            assert_eq!(out["attempts"][0]["mcp_tool_calls"], 1);
+            assert_eq!(out["attempts"][0]["mcp_tool_outcomes"][field], 1);
+        }
+    }
+    #[test]
     fn cost_is_source_bound_and_never_converted_or_summed() {
         for (harness, source, expected) in [
             ("opencode", "opencode_step_finish_sum", true),
@@ -285,6 +304,8 @@ struct Observation {
     spans: usize,
     unmatched_release_resources: usize,
     tool_calls: usize,
+    tool_successes: usize,
+    tool_errors: usize,
     terminals: usize,
     conflict: bool,
     outcome: Option<String>,
@@ -314,6 +335,7 @@ fn attrs(value: &Value) -> Result<BTreeMap<String, Value>> {
                 | "ahu.model"
                 | "ahu.execution.mode"
                 | "ahu.status"
+                | "ahu.mcp.outcome"
                 | "ahu.events.coverage"
                 | "ahu.cost.source"
                 | "ahu.cost.unit"
@@ -530,6 +552,12 @@ impl Report {
         row.traces.insert(key.0);
         if span["name"] == "ahu.mcp.tool.call" {
             row.tool_calls += 1;
+            let a = attrs(&span["attributes"])?;
+            match string(&a, "ahu.mcp.outcome") {
+                Some("success") => row.tool_successes += 1,
+                Some("error") => row.tool_errors += 1,
+                _ => (),
+            }
         }
         if span["name"] != "ahu.harness.run" {
             return Ok(());
@@ -600,7 +628,7 @@ impl Report {
             } else {
                 "partial_accounting"
             };
-            attempts.push(json!({"selection":s,"coverage":gap,"spans":r.spans,"unmatched_release_resources":r.unmatched_release_resources,"mcp_tool_calls":r.tool_calls,
+            attempts.push(json!({"selection":s,"coverage":gap,"spans":r.spans,"unmatched_release_resources":r.unmatched_release_resources,"mcp_tool_calls":r.tool_calls,"mcp_tool_outcomes":{"success":r.tool_successes,"error":r.tool_errors,"unknown":r.tool_calls-r.tool_successes-r.tool_errors},
                 "outcome":if r.conflict {None} else {r.outcome.as_deref()},"event_coverage":r.coverage,
                 "cost_source":if r.conflict {None} else {r.cost_source.as_deref()},
                 "metrics":METRICS.iter().map(|m| ((*m).to_string(), if r.conflict || s.mode == "interactive" || s.telemetry_enabled == Some(false) {Value::Null} else {r.metrics.get(*m).cloned().unwrap_or(Value::Null)})).collect::<BTreeMap<_,_>>(),
