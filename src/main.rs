@@ -298,22 +298,20 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                         let status = provider["status"].as_str().unwrap_or("unknown");
                         let signal_type = provider["signal_type"].as_str().unwrap_or("unknown");
                         println!("  {harness:16} {status:14} signal={signal_type}");
-                        if let Some(data) = provider.get("data").filter(|v| !v.is_null()) {
-                            if let Some(windows) = data["windows"].as_array() {
-                                for window in windows {
-                                    let name = window["name"].as_str().unwrap_or("window");
-                                    let remaining = window["remaining_percent"]
-                                        .as_f64()
-                                        .map(|r| format!("{r:.1}%"))
-                                        .unwrap_or_else(|| "unknown".into());
-                                    let duration = window["window_duration_minutes"]
-                                        .as_u64()
-                                        .map(|d| format!("{d} min"))
-                                        .unwrap_or_else(|| "unknown".into());
-                                    println!(
-                                        "      {name:10} {remaining:>6} remaining ({duration})"
-                                    );
-                                }
+                        if let Some(data) = provider.get("data").filter(|v| !v.is_null())
+                            && let Some(windows) = data["windows"].as_array()
+                        {
+                            for window in windows {
+                                let name = window["name"].as_str().unwrap_or("window");
+                                let remaining = window["remaining_percent"]
+                                    .as_f64()
+                                    .map(|r| format!("{r:.1}%"))
+                                    .unwrap_or_else(|| "unknown".into());
+                                let duration = window["window_duration_minutes"]
+                                    .as_u64()
+                                    .map(|d| format!("{d} min"))
+                                    .unwrap_or_else(|| "unknown".into());
+                                println!("      {name:10} {remaining:>6} remaining ({duration})");
                             }
                         }
                     }

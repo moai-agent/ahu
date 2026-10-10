@@ -1044,7 +1044,7 @@ separate signals and must not be substituted for one another. Source references:
 [Codex app-server account rate-limit RPC](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/common.rs),
 [Codex rate-limit response schema](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/v2/account.rs),
 [Antigravity headless stream](https://www.antigravity.google/docs/cli/headless/),
-[Antigravity statusLine](https://www.antigravity.google/docs/cli/statusline/),
+[Antigravity status line](https://www.antigravity.google/docs/cli/statusline/),
 [Antigravity credits](https://www.antigravity.google/docs/cli/credits/), and
 [Antigravity usage command](https://antigravity.google/docs/cli/commands/usage).
 

@@ -666,6 +666,7 @@ mod tests {
                     value: Some(AnyValue {
                         value: Some(any_value::Value::StringValue(value)),
                     }),
+                    ..Default::default()
                 })
                 .collect();
             let mut p = provenance::Provenance::default();

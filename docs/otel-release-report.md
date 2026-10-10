@@ -2,7 +2,7 @@
 
 `ahu telemetry report` can read standard OTLP JSONL files written by a local
 OpenTelemetry Collector. This mode reads files and prints a report. It does not
-create a database, link tracker records, contact billing APIs, or enable the
+create a database, link tracker records, contact billing services, or enable the
 optional local metrics store.
 
 Set `OTEL_RESOURCE_ATTRIBUTES=ahu.release.id=candidate-a` before launching work.
