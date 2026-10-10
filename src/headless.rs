@@ -2797,8 +2797,13 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     } else {
         "succeeded"
     };
-    if let Some(model) = events.model.as_deref() {
+    if let Some(model) = events
+        .model
+        .as_deref()
+        .filter(|value| crate::eval::provenance::safe_identity(value))
+    {
         telemetry_span.set_string("ahu.model.resolved", model);
+        telemetry_span.set_string("ahu.harness.model.reported", model);
     }
     telemetry_span.set_string("ahu.status", outcome);
     accounting::Projection::from_events(&events).export(&mut telemetry_span);

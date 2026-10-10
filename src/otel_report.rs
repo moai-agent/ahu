@@ -499,6 +499,7 @@ impl Report {
                         | "timed_out"
                         | "supervisor_error"
                         | "capture_failed"
+                        | "boundary_violation"
                 )
             })
             .map(str::to_owned);

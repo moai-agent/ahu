@@ -1321,17 +1321,18 @@ fn mcp_result_attributes(method: &str, name: &str, response: &serde_json::Value)
     else {
         return attributes;
     };
-    for (input, output) in [
-        ("backend", "ahu.mcp.decision.backend"),
-        ("model", "ahu.mcp.decision.model"),
-    ] {
+    for (input, output) in [("model", "ahu.mcp.decision.model")] {
         if let Some(value) = service.get(input).and_then(serde_json::Value::as_str)
-            && !value.is_empty()
-            && value.len() <= 128
-            && safe_resource_value(output, value)
+            && crate::eval::provenance::safe_identity(value)
         {
             attributes.push(KeyValue::new(output, value.to_string()));
         }
+    }
+    for (suffix, value) in decision_identity_fields(service) {
+        attributes.push(KeyValue::new(
+            format!("ahu.mcp.decision.{suffix}"),
+            value.to_owned(),
+        ));
     }
     for (input, output) in [
         ("prompt_tokens", "ahu.mcp.decision.tokens.input"),
@@ -1354,6 +1355,32 @@ fn mcp_result_attributes(method: &str, name: &str, response: &serde_json::Value)
         }
     }
     attributes
+}
+
+fn decision_identity_fields(
+    service: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<(&'static str, &str)> {
+    let mut fields = Vec::new();
+    for (input, suffix) in [
+        ("backend", "backend"),
+        ("requested_model", "model.requested"),
+    ] {
+        if let Some(value) = service.get(input).and_then(serde_json::Value::as_str)
+            && crate::eval::provenance::safe_identity(value)
+        {
+            fields.push((suffix, value));
+        }
+    }
+    if service
+        .get("model_reported")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && let Some(value) = service.get("model").and_then(serde_json::Value::as_str)
+        && crate::eval::provenance::safe_identity(value)
+    {
+        fields.push(("model.reported", value));
+    }
+    fields
 }
 
 fn mcp_error_category(method: &str, name: &str, response: &serde_json::Value) -> &'static str {
@@ -1828,6 +1855,39 @@ mod tests {
             &serde_json::json!({"operation":"private-operation","summary":"secret"}),
         );
         assert_eq!(string_attr(&invalid, "ahu.mcp.approval.operation"), None);
+    }
+
+    #[test]
+    fn decision_identity_export_distinguishes_requested_from_reported_and_rejects_payloads() {
+        for reported in [None, Some(false), Some(true)] {
+            let mut service = serde_json::json!({"backend":"ollama","requested_model":"fixture","model":"actual"});
+            if let Some(reported) = reported {
+                service["model_reported"] = reported.into();
+            }
+            let response = serde_json::json!({"result":{"structuredContent":{"service":service}}});
+            let attrs = mcp_result_attributes("tools/call", "ahu_typed_decide", &response);
+            assert_eq!(
+                string_attr(&attrs, "ahu.mcp.decision.model.requested"),
+                Some("fixture".into())
+            );
+            assert_eq!(
+                string_attr(&attrs, "ahu.mcp.decision.model.reported"),
+                if reported == Some(true) {
+                    Some("actual".into())
+                } else {
+                    None
+                }
+            );
+            assert_eq!(
+                attrs
+                    .iter()
+                    .filter(|a| a.key.as_str() == "ahu.mcp.decision.backend")
+                    .count(),
+                1
+            );
+        }
+        let service = serde_json::json!({"backend":"https://private.invalid","requested_model":"/private/model","model":"sk-secret","model_reported":true});
+        assert!(super::decision_identity_fields(service.as_object().unwrap()).is_empty());
     }
 
     #[test]
@@ -3366,6 +3426,11 @@ pub(crate) fn export_eval_decision(
         ),
     ];
     if let Some(service) = &observation.service {
+        if let Some(service) = service.as_object() {
+            for (suffix, value) in decision_identity_fields(service) {
+                attributes.push(string(&format!("ahu.eval.decision.{suffix}"), value));
+            }
+        }
         for (field, key) in [
             ("prompt_tokens", "ahu.eval.decision.tokens.input"),
             ("generated_tokens", "ahu.eval.decision.tokens.output"),
