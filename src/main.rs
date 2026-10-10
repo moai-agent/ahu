@@ -274,28 +274,32 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 } else {
                     let profile = budget["profile"].as_str().unwrap_or("not configured");
                     println!(
-                        "Provider rate-limit view · profile {profile} · percentages, not token counts"
+                        "Identity-bound provider capacity signals · profile {profile} · semantics vary by provider"
                     );
                     for provider in budget["providers"].as_array().into_iter().flatten() {
                         let harness = provider["harness"].as_str().unwrap_or("unknown");
                         let status = provider["status"].as_str().unwrap_or("unknown");
-                        let windows = provider["windows"].as_array().into_iter().flatten();
-                        let details: Vec<String> = windows
-                            .map(|window| {
-                                let name = window["name"].as_str().unwrap_or("window");
-                                let remaining = window["remaining_percent"].as_f64().unwrap_or(0.0);
-                                let duration =
-                                    window["window_duration_minutes"].as_u64().unwrap_or(0);
-                                format!("{name}: {remaining:.0}% remaining ({duration} min)")
-                            })
-                            .collect();
-                        if details.is_empty() {
-                            println!("  {harness:<12} {status}");
-                        } else {
-                            println!("  {harness:<12} {}", details.join("; "));
+                        let signal_type = provider["signal_type"].as_str().unwrap_or("unknown");
+                        println!("  {harness:16} {status:14} signal={signal_type}");
+                        if let Some(data) = provider.get("data").filter(|v| !v.is_null()) {
+                            if let Some(windows) = data["windows"].as_array() {
+                                for window in windows {
+                                    let name = window["name"].as_str().unwrap_or("window");
+                                    let remaining = window["remaining_percent"]
+                                        .as_f64()
+                                        .map(|r| format!("{r:.1}%"))
+                                        .unwrap_or_else(|| "unknown".into());
+                                    let duration = window["window_duration_minutes"]
+                                        .as_u64()
+                                        .map(|d| format!("{d} min"))
+                                        .unwrap_or_else(|| "unknown".into());
+                                    println!(
+                                        "      {name:10} {remaining:>6} remaining ({duration})"
+                                    );
+                                }
+                            }
                         }
                     }
-                    println!("Agents on the same provider account share its capacity.");
                 }
                 return Ok(0);
             }

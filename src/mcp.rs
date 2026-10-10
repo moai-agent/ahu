@@ -472,8 +472,8 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name":"ahu_auth_budget",
-            "description":"Read current verified provider rate-limit windows for this repository's active auth profile and identify registered agent/model candidates meeting an optional minimum remaining quota. Reports percentages and reset periods, not token counts or costs. Unsupported provider budgets remain unknown and are never treated as available. Agents using the same account share its capacity; this tool does not allocate or reserve budget.",
-            "inputSchema":{"type":"object","properties":{"minimum_remaining_percent":{"type":"number","minimum":0,"maximum":100,"description":"Only mark candidates eligible when every reported provider window has at least this much capacity remaining. Defaults to 0."}},"additionalProperties":false}
+            "description":"Read identity-bound provider capacity signals for this repository's active auth profile and identify registered agent/model candidates meeting an optional minimum remaining quota. Signal types vary: rate windows (time-scoped percentages) for Codex; subscription providers without per-call metering stay unknown. Reports current capacity semantics with strict source/scope/freshness binding; never estimated. Unsupported provider signals remain unknown. Agents using the same account share its capacity; this tool does not allocate or reserve budget.",
+            "inputSchema":{"type":"object","properties":{"minimum_remaining_percent":{"type":"number","minimum":0,"maximum":100,"description":"Only mark candidates eligible when every reported rate window has at least this much capacity remaining. Defaults to 0. Only applies to rate window signals."}},"additionalProperties":false}
         }),
         json!({
             "name":"ahu_tasks_list",
@@ -731,10 +731,10 @@ fn agents(repo: &Repo) -> Result<Value> {
     Ok(json!({"schema_version":1,"repository":repo.identity(),"agents":rows}))
 }
 
-/// Add a conservative agent-routing view to the raw account budget snapshot.
+/// Add a conservative agent-routing view to the identity-bound capacity signals.
 /// Eligibility means only that every currently reported rate window meets the
 /// requested threshold. It is not a cost estimate, model availability check,
-/// or reservation of shared account capacity.
+/// or reservation of shared account capacity. Non-rate-window signals remain unknown.
 fn auth_budget(repo: &Repo, arguments: &Value) -> Result<Value> {
     let mut snapshot = crate::auth_binding::budget(repo)?;
     let minimum = arguments["minimum_remaining_percent"]
@@ -755,31 +755,44 @@ fn auth_budget(repo: &Repo, arguments: &Value) -> Result<Value> {
         .map(|agent| {
             let harness = agent.manifest.harness;
             let provider = providers.get(&harness).copied();
-            let windows = provider
-                .and_then(|value| value["windows"].as_array())
-                .cloned()
-                .unwrap_or_default();
             let provider_status = provider
                 .and_then(|value| value["status"].as_str())
                 .unwrap_or("unknown");
-            let routing_status = candidate_routing_status(provider_status, &windows, minimum);
-            json!({
+            let signal_type = provider
+                .and_then(|value| value["signal_type"].as_str())
+                .unwrap_or("unknown");
+            let windows = if signal_type == "rate_windows" {
+                provider
+                    .and_then(|value| value["data"]["windows"].as_array())
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let routing_status =
+                candidate_routing_status(provider_status, signal_type, &windows, minimum);
+            let mut candidate = json!({
                 "name": format!("@{}", agent.manifest.name),
                 "harness": harness,
                 "model": agent.manifest.model,
                 "provider_status": provider_status,
+                "signal_type": signal_type,
                 "routing_status": routing_status,
-                "windows": windows,
-            })
+            });
+            if !windows.is_empty() {
+                candidate["windows"] = json!(windows);
+            }
+            candidate
         })
         .collect::<Vec<_>>();
     snapshot["routing"] = json!({
         "minimum_remaining_percent": minimum,
-        "eligibility_basis": "all_reported_windows_meet_threshold",
+        "eligibility_basis": "all_reported_rate_windows_meet_threshold",
         "candidates": candidates,
         "limitations": [
+            "Eligibility applies only to rate window signals; other signal types remain unknown for routing.",
             "Eligibility does not estimate token or dollar cost, verify model availability, or reserve capacity.",
-            "Unknown provider budgets are not eligible; verify them independently before delegating.",
+            "Unknown provider signals are not eligible; verify them independently before delegating.",
             "Capacity is shared with all agents using the same provider account."
         ]
     });
@@ -788,9 +801,13 @@ fn auth_budget(repo: &Repo, arguments: &Value) -> Result<Value> {
 
 fn candidate_routing_status(
     provider_status: &str,
+    signal_type: &str,
     windows: &[Value],
     minimum: f64,
 ) -> &'static str {
+    if signal_type != "rate_windows" {
+        return "unknown";
+    }
     if provider_status != "available" || windows.is_empty() {
         return "unknown";
     }
@@ -1007,23 +1024,42 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            super::candidate_routing_status("available", &windows(&[80.0, 35.0]), 25.0),
+            super::candidate_routing_status(
+                "available",
+                "rate_windows",
+                &windows(&[80.0, 35.0]),
+                25.0
+            ),
             "eligible"
         );
         assert_eq!(
-            super::candidate_routing_status("available", &windows(&[80.0, 20.0]), 25.0),
+            super::candidate_routing_status(
+                "available",
+                "rate_windows",
+                &windows(&[80.0, 20.0]),
+                25.0
+            ),
             "below_threshold"
         );
         assert_eq!(
-            super::candidate_routing_status("available", &windows(&[80.0, 0.0]), 0.0),
+            super::candidate_routing_status(
+                "available",
+                "rate_windows",
+                &windows(&[80.0, 0.0]),
+                0.0
+            ),
             "below_threshold"
         );
         assert_eq!(
-            super::candidate_routing_status("unsupported", &windows(&[80.0]), 0.0),
+            super::candidate_routing_status("unsupported", "rate_windows", &windows(&[80.0]), 0.0),
             "unknown"
         );
         assert_eq!(
-            super::candidate_routing_status("available", &[], 0.0),
+            super::candidate_routing_status("available", "rate_windows", &[], 0.0),
+            "unknown"
+        );
+        assert_eq!(
+            super::candidate_routing_status("available", "unknown", &windows(&[100.0]), 0.0),
             "unknown"
         );
     }
@@ -1040,9 +1076,12 @@ mod tests {
             false,
         );
         let budget = &reply["result"]["structuredContent"];
+        assert_eq!(budget["schema_version"], 2);
         assert_eq!(budget["profile"], serde_json::Value::Null);
-        assert_eq!(budget["signal"], "provider_rate_limit_windows");
+        assert_eq!(budget["project"], repo.identity());
         assert_eq!(budget["providers"][0]["status"], "not_configured");
+        assert_eq!(budget["providers"][0]["signal_type"], "unknown");
+        assert_eq!(budget["providers"][0]["source"], "identity_bound_provider");
         assert!(!budget.to_string().contains("@"));
     }
 
