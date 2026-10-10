@@ -76,6 +76,63 @@ fn records_outside(dir: &Path, rows: &[Row]) -> PathBuf {
     path
 }
 
+#[test]
+fn verify_cli_binds_facts_to_current_records_and_refuses_forged_values() {
+    let repo = TestRepo::new();
+    let dir = TempDir::new().unwrap();
+    let records = records_outside(dir.path(), &[Row::candidate("fixture", 1.0, true)]);
+    let report = run(
+        &repo,
+        &["--records", records.to_str().unwrap(), "--output", "json"],
+    );
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let report: Value = serde_json::from_slice(&report.stdout).unwrap();
+    let evidence = &report["comparison"];
+    let row = &evidence["table"][0];
+    let cell = &row["metrics"]["answer_pass_rate"];
+    let mut claims = serde_json::json!({"schema_version":1,"comparison_fingerprint":evidence["comparison_fingerprint"],"records_fingerprint":evidence["records_fingerprint"],"facts":[{
+        "group_fingerprint":row["group_fingerprint"],"input_fingerprint":row["input_fingerprint"],"metric":"answer_pass_rate",
+        "value":cell["value"],"observations":cell["observations"],"source":cell["source"],"coverage_source":cell["coverage_source"]
+    }]});
+    let facts = dir.path().join("facts.json");
+    std::fs::write(&facts, claims.to_string()).unwrap();
+    let args = [
+        "eval",
+        "verify",
+        "--records",
+        records.to_str().unwrap(),
+        "--facts",
+        facts.to_str().unwrap(),
+    ];
+    let verify = || {
+        common::ahu()
+            .current_dir(repo.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let verified = verify();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    let value: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    assert_eq!(value["verified_facts"].as_array().unwrap().len(), 1);
+    claims["facts"][0]["value"] = serde_json::json!(0.25);
+    std::fs::write(&facts, claims.to_string()).unwrap();
+    assert!(!verify().status.success());
+    std::fs::write(&facts, "x".repeat(64 * 1024 + 1)).unwrap();
+    assert!(!verify().status.success());
+    assert!(cli::parse(["eval", "verify", "--records", "x"]).is_err());
+    assert!(cli::parse(["eval", "verify", "--facts", "x"]).is_err());
+    assert!(cli::parse(["eval", "verify", "--unknown", "x"]).is_err());
+}
+
 /// Run `ahu eval report` from `repo` with a clean, harness-free environment.
 fn run(repo: &TestRepo, args: &[&str]) -> std::process::Output {
     run_at(repo, args, Some("80"), true)

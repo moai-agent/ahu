@@ -200,6 +200,23 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         }
         // The records are outside the checkout by policy, but the repository
         // still has to be located: locating it is what makes that check real.
+        Command::EvalVerify { records, facts } => {
+            use std::io::Read;
+            let repo = ahu::git::discover(&std::env::current_dir()?)?;
+            let report = ahu::eval::report(&repo, &records)?;
+            let mut text = String::new();
+            std::fs::File::open(facts)?
+                .take(64 * 1024 + 1)
+                .read_to_string(&mut text)?;
+            let verified = ahu::eval::comparison::verify_facts(&report, &text)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"schema_version":1,"verified_facts":verified})
+                )?
+            );
+            Ok(0)
+        }
         Command::EvalReport {
             records,
             output_json,
@@ -472,6 +489,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Launch { .. }
                 | Command::KnowledgeLint { .. }
                 | Command::EvalReport { .. }
+                | Command::EvalVerify { .. }
                 | Command::EvalRun { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })

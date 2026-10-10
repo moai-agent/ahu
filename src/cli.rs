@@ -46,6 +46,7 @@ Commands:
                         Run candidates (and optionally a blind agent evaluator)
                         over an external evaluation case or suite
   eval report --records <path> [--output json]
+  eval verify --records <path> --facts <path>
                         Compare local evaluation runs from an external JSONL
                         record file. Reads only, and only outside this checkout
   tasks [--limit N|--all]
@@ -306,6 +307,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
         "eval run" => help_section("eval run options:", "tasks options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
+        "eval verify" => "Usage: ahu eval verify --records FILE --facts FILE\n\nVerify bounded numerical facts against the exact current comparison. Reject stale fingerprints, changed values or coverage, and arbitrary narrative. Outputs JSON; invokes no model. See docs/eval-provenance.md.\n".to_string(),
         "@agent" => help_section("agent assignment options:", "Exit codes:"),
         "explain" => help_section("explain options:", "onboard options:"),
         "onboard" => help_section("onboard options:", "knowledge lint options:"),
@@ -355,7 +357,7 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "tasks" => "ahu tasks — list recent tasks",
         "doctor" => "ahu doctor — check project readiness",
         "lock" => "ahu lock — check committed agent context",
-        "eval" => "ahu eval — run or compare evaluations",
+        "eval" => "ahu eval — run, compare or verify evaluations",
         "knowledge" => "ahu knowledge lint — validate configured knowledge bundles",
         "cmux" => "ahu cmux — inspect or install cmux integration",
         "mcp" => "ahu mcp serve — start the MCP server",
@@ -444,6 +446,10 @@ pub enum Command {
     EvalReport {
         records: PathBuf,
         output_json: bool,
+    },
+    EvalVerify {
+        records: PathBuf,
+        facts: PathBuf,
     },
     EvalRun {
         /// A single case. Exactly one of `case` and `suite` is set.
@@ -1004,6 +1010,30 @@ fn parse_eval(rest: &[String]) -> Result<Command> {
     match rest.first().map(String::as_str) {
         None => bail!("`ahu eval` needs a subcommand: `run` or `report`."),
         Some("run") => return parse_eval_run(&rest[1..]),
+        Some("verify") => {
+            let mut records = None;
+            let mut facts = None;
+            let mut index = 1;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--records" if records.is_none() => {
+                        records = Some(PathBuf::from(value_for("--records", rest, &mut index)?))
+                    }
+                    "--facts" if facts.is_none() => {
+                        facts = Some(PathBuf::from(value_for("--facts", rest, &mut index)?))
+                    }
+                    _ => bail!("expected ahu eval verify --records FILE --facts FILE"),
+                }
+                index += 1;
+            }
+            return Ok(Command::EvalVerify {
+                records: records.ok_or_else(|| {
+                    crate::util::Error::new("eval verify requires --records FILE")
+                })?,
+                facts: facts
+                    .ok_or_else(|| crate::util::Error::new("eval verify requires --facts FILE"))?,
+            });
+        }
         Some("report") => {}
         Some(other) => {
             bail!("unknown subcommand {other:?} for `ahu eval`; expected `run` or `report`.")
@@ -1525,6 +1555,10 @@ pub fn extract_color(
                     | "--profile"
                     | "--key"
                     | "--task"
+                    | "--facts"
+                    | "--selection"
+                    | "--otlp"
+                    | "--release"
                     | "--records"
                     | "--case"
                     | "--suite"
