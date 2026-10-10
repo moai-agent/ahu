@@ -17,6 +17,8 @@ one work item maps to exactly one pull request. Follow repository policy for
 whether release work items are required and how they link to ahu task IDs. If no
 tracker is configured, keep coordination in the release workflow and ahu task
 records; do not create an assumed GitHub or private-roadmap workflow.
+Give each launch a meaningful task name, for example
+`ahu @reviewer --name release-security-review --prompt-file /absolute/path/to/review.txt`.
 Use the bundled `ahu-direct-agents` skill for task IDs, provider-side links, and
 tracker lifecycle rules; this release skill adds release-specific local task
 cleanup without changing the provider's records.

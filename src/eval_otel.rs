@@ -876,6 +876,8 @@ fn string_attributes(
             "ahu.mcp.tool.name" => matches!(
                 value.as_str(),
                 "ahu_agents_list"
+                    | "ahu_agents_recommend"
+                    | "ahu_auth_budget"
                     | "ahu_tasks_list"
                     | "ahu_task_get"
                     | "ahu_typed_decide"

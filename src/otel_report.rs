@@ -211,6 +211,20 @@ mod tests {
                 .is_err()
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn special_inputs_are_rejected_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("capture");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the NUL-terminated path lives through the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(open_regular(&fifo).is_err());
+        assert!(open_regular(dir.path()).is_err());
+        assert!(open_regular(&dir.path().join("absent")).is_err());
+    }
+
     #[test]
     fn local_file_report_writes_no_state_and_rejects_invalid_json() {
         let dir = tempfile::tempdir().unwrap();
@@ -324,9 +338,24 @@ fn string<'a>(a: &'a BTreeMap<String, Value>, key: &str) -> Option<&'a str> {
     a.get(key).and_then(Value::as_str)
 }
 
+fn open_regular(path: &Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|_| invalid())?;
+    if !file.metadata().map_err(|_| invalid())?.is_file() {
+        return Err(invalid());
+    }
+    Ok(file)
+}
+
 /// No repository, task store, billing API or writable database is accessed.
 pub fn report(paths: &[std::path::PathBuf], selection: &Path, release: &str) -> Result<Value> {
-    let file = std::fs::File::open(selection).map_err(|_| invalid())?;
+    let file = open_regular(selection)?;
     let mut bytes = Vec::new();
     file.take(1024 * 1024 + 1)
         .read_to_end(&mut bytes)
@@ -340,12 +369,13 @@ pub fn report(paths: &[std::path::PathBuf], selection: &Path, release: &str) -> 
         return Err(invalid());
     }
     for path in paths {
-        let file = std::fs::File::open(path).map_err(|_| invalid())?;
+        let file = open_regular(path)?;
         let metadata = file.metadata().map_err(|_| invalid())?;
         if !metadata.is_file() || metadata.len() > 128 * 1024 * 1024 {
             return Err(invalid());
         }
         let mut input = BufReader::new(file);
+        let mut total = 0u64;
         loop {
             let mut line = Vec::new();
             let count = (&mut input)
@@ -355,7 +385,8 @@ pub fn report(paths: &[std::path::PathBuf], selection: &Path, release: &str) -> 
             if count == 0 {
                 break;
             }
-            if count as u64 > MAX_LINE {
+            total += count as u64;
+            if count as u64 > MAX_LINE || total > 128 * 1024 * 1024 {
                 return Err(invalid());
             }
             let value: Value = serde_json::from_slice(&line).map_err(|_| invalid())?;
