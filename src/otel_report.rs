@@ -151,6 +151,40 @@ mod tests {
         assert_eq!(out["attempts"][0]["mcp_tool_calls"], 1);
     }
     #[test]
+    fn conflicting_mcp_duplicates_are_unknown_in_both_orders() {
+        let success = export(
+            "codex",
+            "ahu.mcp.tool.call",
+            vec![attribute("ahu.mcp.outcome", json!("success"))],
+        );
+        let error = export(
+            "codex",
+            "ahu.mcp.tool.call",
+            vec![attribute("ahu.mcp.outcome", json!("error"))],
+        );
+        let mut results = Vec::new();
+        for events in [[&success, &error], [&error, &success]] {
+            let mut r = Report::new(vec![selected("codex", "interactive")], "candidate").unwrap();
+            for event in events {
+                r.consume(event).unwrap();
+            }
+            let out = r.finish();
+            assert_eq!(out["attempts"][0]["coverage"], "conflicting_observations");
+            assert!(out["attempts"][0]["mcp_tool_calls"].is_null());
+            for field in ["success", "error", "unknown"] {
+                assert!(out["attempts"][0]["mcp_tool_outcomes"][field].is_null());
+            }
+            assert_eq!(out["groups"][0]["attempts_with_mcp_calls"], 0);
+            assert_eq!(
+                out["groups"][0]["attempts_with_conflicting_mcp_coverage"],
+                1
+            );
+            results.push(out);
+        }
+        assert_eq!(results[0], results[1]);
+    }
+
+    #[test]
     fn mcp_invocation_and_success_are_distinct_observations() {
         for (outcome, field) in [
             ("success", "success"),
@@ -628,8 +662,8 @@ impl Report {
             } else {
                 "partial_accounting"
             };
-            attempts.push(json!({"selection":s,"coverage":gap,"spans":r.spans,"unmatched_release_resources":r.unmatched_release_resources,"mcp_tool_calls":r.tool_calls,"mcp_tool_outcomes":{"success":r.tool_successes,"error":r.tool_errors,"unknown":r.tool_calls-r.tool_successes-r.tool_errors},
-                "outcome":if r.conflict {None} else {r.outcome.as_deref()},"event_coverage":r.coverage,
+            attempts.push(json!({"selection":s,"coverage":gap,"spans":r.spans,"unmatched_release_resources":r.unmatched_release_resources,"mcp_tool_calls":(!r.conflict).then_some(r.tool_calls),"mcp_tool_outcomes":{"success":(!r.conflict).then_some(r.tool_successes),"error":(!r.conflict).then_some(r.tool_errors),"unknown":(!r.conflict).then_some(r.tool_calls-r.tool_successes-r.tool_errors)},
+                "outcome":if r.conflict {None} else {r.outcome.as_deref()},"event_coverage":if r.conflict {None} else {r.coverage.as_deref()},
                 "cost_source":if r.conflict {None} else {r.cost_source.as_deref()},
                 "metrics":METRICS.iter().map(|m| ((*m).to_string(), if r.conflict || s.mode == "interactive" || s.telemetry_enabled == Some(false) {Value::Null} else {r.metrics.get(*m).cloned().unwrap_or(Value::Null)})).collect::<BTreeMap<_,_>>(),
                 "trace_count":r.traces.len(),"observed_service_versions":r.services}));
@@ -640,7 +674,7 @@ impl Report {
                 ((*metric).to_string(), json!({"observed_attempts":values.len(),"unknown_attempts":ids.len()-values.len(),
                     "maximum_observed":values.iter().copied().reduce(f64::max),"sum":null}))
             }).collect();
-            json!({"dimensions":serde_json::from_str::<Value>(&key).expect("serialized dimensions"),"included_attempts":ids.len(),"attempts_with_mcp_calls":ids.iter().filter(|i|self.rows[**i].tool_calls>0).count(),"metrics":metrics})
+            json!({"dimensions":serde_json::from_str::<Value>(&key).expect("serialized dimensions"),"included_attempts":ids.len(),"attempts_with_mcp_calls":ids.iter().filter(|i|!self.rows[**i].conflict && self.rows[**i].tool_calls>0).count(),"attempts_with_conflicting_mcp_coverage":ids.iter().filter(|i|self.rows[**i].conflict).count(),"metrics":metrics})
         }).collect();
         json!({"schema_version":1,"release_id":self.release,"source":"local_collector_otlp_jsonl",
             "selection_semantics":"explicit_operator_selection; provider and role are declared, not attested",
