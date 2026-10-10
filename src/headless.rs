@@ -2437,13 +2437,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     crate::telemetry::initialize_task(&telemetry, &record, Some(spec))?;
     let mut telemetry_span = crate::telemetry::task_span(
         "ahu.harness.run",
-        [
-            ("ahu.agent.name", record.agent_label()),
-            ("ahu.harness", record.identity.harness.clone()),
-            ("ahu.model.requested", record.identity.model.clone()),
-            ("ahu.version", env!("CARGO_PKG_VERSION").to_string()),
-            ("ahu.task.id", record.task_id.clone()),
-        ],
+        [("ahu.model.requested", record.identity.model.clone())],
         spec,
     );
     crate::telemetry::task_span_attributes(&mut telemetry_span, &record, Some(spec));
@@ -2452,10 +2446,6 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     {
         telemetry_span.set_string(key, &value);
     }
-    if let Some(version) = record.identity.agent_version.as_deref() {
-        telemetry_span.set_string("ahu.agent.version", version);
-    }
-    telemetry_span.set_string("ahu.harness.version", &spec.harness_version);
     crate::telemetry::configure_child(
         &mut command,
         &telemetry,

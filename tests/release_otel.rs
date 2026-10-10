@@ -566,6 +566,13 @@ print(json.dumps(result),flush=True)
         );
     }
     for span in spans {
+        let keys: std::collections::BTreeSet<_> = span.attributes.iter().map(|a| &a.key).collect();
+        assert_eq!(
+            keys.len(),
+            span.attributes.len(),
+            "duplicate span attributes: {}",
+            span.name
+        );
         assert!(span.trace_state.is_empty());
         assert!(
             span.attributes
