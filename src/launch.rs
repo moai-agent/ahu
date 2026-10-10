@@ -1238,7 +1238,6 @@ fn run_verified_task(
             .env("AHU_TASK_ID", &record.task_id)
             .env("AHU_TASK_DIR", task_dir)
             .current_dir(&record.worktree);
-        pin.configure_command(&mut command);
         crate::telemetry::configure_child(
             &mut command,
             &telemetry,
@@ -1252,6 +1251,7 @@ fn run_verified_task(
         );
         crate::telemetry::configure_task_identity(&mut command, &record, None);
         _span.configure_child_context(&mut command);
+        pin.configure_command(&mut command)?;
         let child = command
             // The run-task parent owns the harness's fresh process group, so
             // cancellation can terminate the whole tree without signalling
