@@ -2,6 +2,7 @@
 //! Process and harness outcomes are evidence, never work acceptance.
 mod accounting;
 mod admission;
+pub(crate) mod identity;
 mod journal;
 mod kiro;
 pub(crate) mod review;
@@ -1519,6 +1520,8 @@ pub struct Events {
     pub cost: ReportedCost,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(skip)]
+    model_evidence: identity::ModelEvidence,
     #[serde(default)]
     pub skills: Vec<SkillInvocation>,
     #[serde(default)]
@@ -1620,6 +1623,11 @@ impl Events {
             self.observe_kiro(&event);
             return;
         }
+        self.model_evidence.observe(
+            ["/model", "/model_name", "/part/model", "/message/model"]
+                .into_iter()
+                .filter_map(|pointer| event.pointer(pointer)),
+        );
         self.usage.observe(&event);
         self.trajectory.observe(harness, &event);
         match harness {
@@ -2439,6 +2447,11 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         spec,
     );
     crate::telemetry::task_span_attributes(&mut telemetry_span, &record, Some(spec));
+    for (key, value) in
+        identity::requested_attributes(&record.identity.harness, &record.identity.model)
+    {
+        telemetry_span.set_string(key, &value);
+    }
     if let Some(version) = record.identity.agent_version.as_deref() {
         telemetry_span.set_string("ahu.agent.version", version);
     }
@@ -2806,7 +2819,9 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         .filter(|value| crate::eval::provenance::safe_identity(value))
     {
         telemetry_span.set_string("ahu.model.resolved", model);
-        telemetry_span.set_string("ahu.harness.model.reported", model);
+    }
+    for (key, value) in events.reported_model_attributes() {
+        telemetry_span.set_string(key, &value);
     }
     telemetry_span.set_string("ahu.status", outcome);
     accounting::Projection::from_events(&events).export(&mut telemetry_span);

@@ -637,10 +637,15 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                             .as_ref()
                             .into_iter()
                             .flat_map(|r| &r.attributes)
-                            .filter(|a| a.key == "ahu.model")
+                            .filter(|a| matches!(a.key.as_str(), "ahu.model" | "ahu.harness"))
                             .map(|a| {
                                 let mut a = a.clone();
-                                a.key = "ahu.harness.model.requested".into();
+                                a.key = if a.key == "ahu.model" {
+                                    "ahu.harness.model.requested"
+                                } else {
+                                    "ahu.harness.backend"
+                                }
+                                .into();
                                 a
                             })
                             .collect();
@@ -654,6 +659,7 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                                             | "ahu.harness.model.requested"
                                             | "ahu.harness.provider.reported"
                                             | "ahu.harness.model.reported"
+                                            | "ahu.harness.model.reported.coverage"
                                             | "ahu.harness.model"
                                     )
                                 })
@@ -1241,6 +1247,72 @@ mod tests {
     }
 
     #[test]
+    fn native_model_producer_projects_conflicts_gaps_and_explicit_provider_only() {
+        use serde_json::json;
+        for (model, expected) in [
+            (json!("fixture-model"), "single"),
+            (json!("other-model"), "conflicting"),
+            (serde_json::Value::Null, "partial"),
+            (json!("https://private.invalid/secret"), "redacted"),
+        ] {
+            let mut events = crate::headless::Events::default();
+            events.observe(
+                "claude-code",
+                &serde_json::to_vec(&json!({
+                    "type":"system", "subtype":"init", "model":"fixture-model"
+                }))
+                .unwrap(),
+            );
+            let mut last =
+                json!({"type":"result", "subtype":"success", "is_error":false, "result":"ok"});
+            if !model.is_null() {
+                last["model"] = model;
+            }
+            events.observe("claude-code", &serde_json::to_vec(&last).unwrap());
+            let mut attributes: Vec<_> =
+                crate::headless::identity::requested_attributes("claude-code", "fixture-model")
+                    .into_iter()
+                    .chain(events.reported_model_attributes())
+                    .map(|(key, value)| string_attribute(key, &value))
+                    .collect();
+            let state = Arc::new(Mutex::new(CaptureState::default()));
+            let span = |attributes| Span {
+                name: "ahu.harness.run".into(),
+                trace_id: vec![1; 16],
+                span_id: vec![1; 8],
+                attributes,
+                ..Span::default()
+            };
+            consume(export("native", vec![span(attributes.clone())]), &state);
+            let p = state.lock().unwrap().tasks[&("native".into(), 1)]
+                .harness_provenance
+                .clone();
+            assert_eq!(p.requested_provider.values["claude-code"], 1);
+            assert_eq!(p.reported_model.status(), expected);
+            assert_eq!(p.reported_provider.status(), "absent");
+            assert!(p.valid());
+            assert!(
+                !serde_json::to_string(&p)
+                    .unwrap()
+                    .contains("private.invalid")
+            );
+            // Only an explicit reported provider survives, and is not compared
+            // as though the requested harness were an inference provider.
+            attributes.push(string_attribute(
+                "ahu.harness.provider.reported",
+                "fixture-provider",
+            ));
+            let state = Arc::new(Mutex::new(CaptureState::default()));
+            consume(export("native", vec![span(attributes)]), &state);
+            let p = state.lock().unwrap().tasks[&("native".into(), 1)]
+                .harness_provenance
+                .clone();
+            assert_eq!(p.reported_provider.values["fixture-provider"], 1);
+            assert_eq!(p.provider_mismatches, 0);
+        }
+    }
+
+    #[test]
     fn harness_resource_model_is_requested_never_reported_identity() {
         let state = Arc::new(Mutex::new(CaptureState::default()));
         let mut requested = export(
@@ -1262,10 +1334,18 @@ mod tests {
             .unwrap()
             .attributes
             .push(string_attribute("ahu.model", "fixture-requested"));
+        requested.resource_spans[0]
+            .resource
+            .as_mut()
+            .unwrap()
+            .attributes
+            .push(string_attribute("ahu.harness", "opencode"));
         consume(requested, &state);
         let state = state.lock().unwrap();
         let provenance = &state.tasks[&("harness".into(), 1)].harness_provenance;
         assert_eq!(provenance.requested_model.values["fixture-requested"], 1);
+        assert_eq!(provenance.requested_provider.values["opencode"], 1);
+        assert_eq!(provenance.reported_provider.status(), "absent");
         assert_eq!(provenance.reported_model.status(), "absent");
         assert!(
             !serde_json::to_string(provenance)

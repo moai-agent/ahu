@@ -1416,9 +1416,9 @@ pub fn render_at(report: &Report, width: usize) -> String {
                     ("unattributed model", &evidence.unattributed_model),
                 ] {
                     out.push_str(&format!(
-                        "             {} {} {}; missing {}, redacted {}, conflicting {}, limited {}\n",
+                        "             {} {} {}; missing {}, redacted {}, conflicting {}, limited {}, partial {}\n",
                         name, identity.status(), display_safe(&serde_json::to_string(&identity.values).unwrap_or_default()),
-                        identity.missing, identity.redacted, identity.conflicting, identity.limited,
+                        identity.missing, identity.redacted, identity.conflicting, identity.limited, identity.partial,
                     ));
                 }
             }
