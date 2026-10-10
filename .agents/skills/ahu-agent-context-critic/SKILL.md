@@ -80,6 +80,9 @@ changes and commits them; never commit or push as part of this workflow.
   unrelated tasks.
 - Use `ahu eval report` to compare fingerprints, not to infer causation from a
   score alone. Change one context component per experiment where possible.
+- Cite the exact comparison fingerprints and case/run coverage behind any
+  reported comparison, preserve deterministic values unchanged, and reject
+  unsupported causal or model-attestation claims.
 - OTel is process evidence. A missing observation is unknown coverage, not proof
   that an agent did not use a tool. A tool call is not proof the task succeeded.
 

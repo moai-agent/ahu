@@ -17,7 +17,7 @@ Discover identities with `ahu agents`. Put the complete assignment in a UTF-8
 file outside every repository, then launch it with:
 
 ```sh
-ahu @agent-name --prompt-file /absolute/path/to/task.txt
+ahu @agent-name --name meaningful-example --prompt-file /absolute/path/to/task.txt
 ```
 
 Use `--headless --background --output json` for unattended work. Approval
