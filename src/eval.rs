@@ -36,6 +36,7 @@ use crate::bail;
 use crate::table;
 use crate::util::{Error, ErrorKind, Result, display_path, display_safe};
 
+pub mod advice;
 pub mod case;
 pub mod comparison;
 pub mod decision;
@@ -76,6 +77,16 @@ const DEFAULT_STAGE: &str = "candidate";
 /// only has to keep meaning the same thing for the ones it reads.
 #[derive(Debug, Clone, Deserialize)]
 struct Record {
+    #[serde(default)]
+    observed_at_unix_seconds: Option<u64>,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    attempt: Option<u32>,
+    #[serde(default)]
+    reported_cost_source: Option<String>,
     schema_version: u64,
     case_id: String,
     model: String,
@@ -2892,6 +2903,9 @@ fn base_fields(
     fields.insert("schema_version".into(), RECORD_SCHEMA_VERSION.into());
     fields.insert("telemetry_scope".into(), "ahu_spans".into());
     fields.insert("recorded_at".into(), crate::task::now_rfc3339().into());
+    if let Ok(age) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        fields.insert("observed_at_unix_seconds".into(), age.as_secs().into());
+    }
     fields.insert("run_id".into(), run_id.into());
     fields.insert("stage".into(), stage.into());
     fields.insert("trial_index".into(), trial.index.into());
@@ -3415,6 +3429,14 @@ fn insert_trajectory_fields(
     budgets: Option<&trajectory::Budgets>,
     guards: &trajectory::Guardrails,
 ) -> Result<()> {
+    // Preserve the native amount's bounded source label, never prices or quota.
+    if let Some(source) = envelope
+        .and_then(|value| value.pointer("/harness/cost/source"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|source| advice::supported_cost_source(source))
+    {
+        record.insert("reported_cost_source".into(), source.into());
+    }
     // Typed projection: never copy unrecognized payload fields into eval records.
     let observation = envelope
         .and_then(|value| value.pointer("/harness/trajectory"))
