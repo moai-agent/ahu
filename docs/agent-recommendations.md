@@ -1,6 +1,7 @@
 # Evidence-based agent recommendations
 
-`ahu_agents_recommend` is a read-only MCP tool over an external eval JSONL file.
+`ahu_agents_recommend` is a read-only MCP tool over a bounded eval JSONL file in external storage or the primary checkout’s
+ignored, untracked `.ahu/evals/` directory.
 Supply an absolute `records_path`, explicit `cases` with `case_id` and SHA-256
 `case_digest`, registered `candidates` such as `@worker`, `minimum_quality`,
 `minimum_samples_per_case`, and `maximum_age_seconds`. Discover the complete
@@ -32,7 +33,9 @@ an input fingerprint. The tool does not write records, launch work, change auth
 profiles, or enforce admission. Use `ahu_auth_budget` separately for current
 identity-bound rate-limit evidence.
 
-Keep eval records, prompts and telemetry outside repositories. Do not publish
-local observations as part of release artifacts. A synthetic regression proves
+Keep bounded eval records and derived summaries in ignored, untracked primary
+`.ahu/evals/` or external storage. Keep raw prompts, transcripts, tool payloads,
+telemetry captures and private tracker content out of these local results. Do not
+commit or publish local observations as part of release artifacts. A synthetic regression proves
 ranking rules; live comparisons must use a fixed task/candidate pool and report
 missing measurements and failed attempts without claiming unsupported gains.

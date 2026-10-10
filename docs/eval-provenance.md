@@ -32,7 +32,9 @@ To verify selected facts, provide a JSON object containing `schema_version: 1`,
 the exact `comparison_fingerprint` and `records_fingerprint`, and a `facts` array.
 Each fact carries the table's `group_fingerprint` and `input_fingerprint`, the
 `metric` name, and an exact copy of that cell's `value`, `observations`, `source`,
-and `coverage_source`. Keep this file outside repositories.
+and `coverage_source`. Keep this bounded derived file in ignored, untracked
+primary `.ahu/evals/` or external storage. `eval verify` defaults its records input
+to primary `.ahu/evals/runs.jsonl`; `--records` explicitly overrides that path.
 
 ```sh
 ahu eval verify --records /external/runs.jsonl --facts /external/facts.json

@@ -7,8 +7,36 @@ questions, then writes `answer.json`. Expected answers, scoring weights, tool
 expectations and judge rubrics stay out of its prompt.
 
 Keep cases outside the candidate checkout if the candidate should not read their
-answers. Prompt omission is not filesystem isolation. Run artifacts and records
-must stay outside repositories.
+answers. Prompt omission is not filesystem isolation. Bounded structured records
+and derived summaries default to the primary checkout's ignored, untracked
+`.ahu/evals/`; raw transcripts, prompts, tool payloads and OTel captures must
+remain outside every repository. Never put private tracker content in eval
+results or commit/upload these local results.
+
+`eval run`, `eval report` and `eval verify` default `--records` to
+`<primary-checkout>/.ahu/evals/runs.jsonl`, including from linked worktrees.
+An explicit `--records` overrides this default; relative overrides use the process
+working directory, not the primary checkout. Other repository paths, tracked
+files, non-ignored destinations, traversal and hard links are refused.
+Existing external parent directories are canonicalized, including macOS `/tmp`
+and `/var` aliases. Record-file symlinks, redirected repository `.ahu` components,
+raw-artifact store links, and external parent links into any checkout are refused.
+Alias chains are checked at each hop; traversal components in paths or link
+targets are refused. Existing owner-safe `0644` JSONL files remain readable;
+new records use `0600`. Configure a Git ignore rule for `.ahu/evals/` before using local storage;
+ahu does not change ignore rules. An explicit external records directory must
+already exist.
+
+Raw per-run artifacts are stored separately under
+`$XDG_STATE_HOME/ahu/eval-artifacts/<repository-id>/`, or
+`$HOME/.local/state/ahu/eval-artifacts/<repository-id>/` when XDG_STATE_HOME is
+unset. This store and its run directories are owner-only, must be outside every
+checkout, and reject links within the artifact store. Trusted external parent
+aliases are resolved before checking the repository boundary. Existing directories
+are never recursively chmodded.
+Reports remain read-only and print summaries to stdout; save a bounded summary
+in ignored `.ahu/evals/` or external storage when needed. There is no automatic
+migration of existing evidence.
 
 ## Start a comparison
 

@@ -245,8 +245,8 @@ require explicit user permission.
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
 | `ahu kiro` | Open a coordinating Kiro V3 session in the current terminal |
 | `ahu mcp serve` | Serve repository-scoped agent, task, and typed-decision tools over stdio MCP |
-| `ahu eval run --suite PATH --agent @name --records PATH` | Run the named cases against a registered agent and save evidence outside the repository |
-| `ahu eval report --records PATH` | Compare answer quality, tool behavior, failures, time, and observed usage |
+| `ahu eval run --suite PATH --agent @name [--records PATH]` | Run cases and save bounded records in primary ignored `.ahu/evals/` by default; raw artifacts stay external |
+| `ahu eval report [--records PATH]` | Compare answer quality, tool behavior, failures, time, and observed usage |
 
 Use the bundled `ahu-agent-context-critic` skill with `ahu eval run` and
 `ahu eval report` to investigate context changes against measured outcomes.
