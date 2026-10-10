@@ -170,13 +170,12 @@ impl Status {
                 self.next_action = "Use interactive execution; this harness has no validated ahu headless adapter.".into();
             }
         }
-        if self.harness == "kiro"
-            && version.and_then(crate::catalog::version_token) != Some("2.28.0")
-        {
+        if self.harness == "kiro" && !kiro_inspected_version(version.unwrap_or("")) {
             self.headless.allowed = false;
-            self.headless
-                .reasons
-                .push("Kiro headless configuration inspection requires validated V3 2.28.0".into());
+            self.headless.reasons.push(
+                "Kiro headless configuration inspection requires inspected V3 2.28.0 or 2.29.0"
+                    .into(),
+            );
         }
         self
     }
@@ -292,6 +291,8 @@ impl Locations {
             "GEMINI_CLI_HOME",
             "AGY_CONFIG_DIR",
             "KIRO_HOME",
+            "KAS_BUNDLE_PATH",
+            "KIRO_TEST_WORKSPACE_SETTINGS_PATH",
             "CLOUD_CONFIG_ENDPOINT",
             "KIRO_REMOTE_SESSIONS_ENDPOINT",
             "KIRO_ACP_RECORD_PATH",
@@ -466,6 +467,8 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
         "antigravity" => &["GEMINI_CLI_HOME", "AGY_CONFIG_DIR"],
         "kiro" => &[
             "KIRO_HOME",
+            "KAS_BUNDLE_PATH",
+            "KIRO_TEST_WORKSPACE_SETTINGS_PATH",
             "CLOUD_CONFIG_ENDPOINT",
             "KIRO_REMOTE_SESSIONS_ENDPOINT",
             "KIRO_ACP_RECORD_PATH",
@@ -592,7 +595,7 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
                 "cloud cache",
                 &mut components,
             );
-            gaps.push("Kiro 2.28.0 V3 local hooks, agents, extensions, Powers and workflows must be absent; custom CLI settings, cloud configuration and environment indirection are refused. Native permissions, skills and MCP remain active. This inspection is not a sandbox or proof of native helper isolation.".into());
+            gaps.push("Kiro V3 2.28.0/2.29.0 admission inspects a bounded subset of JSON and Markdown native agents and CLI settings. Nonempty hooks, extensions, Powers, workflows, unknown fields/formats, cloud configuration and environment indirection are refused. Native permissions, skills and MCP remain active; arbitrary MCP subprocess behavior is not inspected. Agent availability is not proof of selection or loading. This is not a sandbox or proof of native helper isolation.".into());
         }
         _ => components.push(component("unsupported harness", repo, "unknown")),
     }
@@ -667,21 +670,24 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
     finish(harness, components, gaps)
 }
 
-// Reviewed against the installed 2.28.0 V3 KAS loader: local, global and
-// cloud-cache hooks; native agent hooks; extensions/Powers/workflow sources.
+// Reviewed against the installed 2.28.0 and 2.29.0 V3 KAS profile loaders.
+// Only the explicitly inspected declarative subset is admitted.
 // No arbitrary executable source is certified by its filename or contents.
 fn scan_kiro(base: &Path, scope: &str, out: &mut Vec<Component>) {
-    for name in ["hooks", "agents", "extensions", "powers", "workflows"] {
+    let mut agent_entries = 0;
+    scan_kiro_agents(&base.join("agents"), scope, out, &mut agent_entries, 0);
+    for name in ["hooks", "extensions", "powers", "workflows"] {
         scan_directory(&base.join(name), scope, false, out);
     }
     let mut c = component("Kiro CLI settings", &base.join("settings/cli.json"), scope);
     if let Some(bytes) = file_bytes(&mut c) {
         match serde_json::from_slice::<Value>(&bytes) {
-            Ok(Value::Object(settings)) if settings.is_empty() => absent(&mut c),
-            _ => {
-                c.detail =
-                    "custom Kiro CLI settings have not been reviewed for headless isolation".into()
+            Ok(value) if kiro_cli_settings(&value) => {
+                absent(&mut c);
+                c.conformance = Conformance::SourceInspected;
+                c.detail = "only inspected native CLI preferences; effective selection and approval remain native".into();
             }
+            _ => c.detail = "Kiro CLI settings contain malformed values or unreviewed keys".into(),
         }
     }
     out.push(c);
@@ -696,6 +702,201 @@ fn scan_kiro(base: &Path, scope: &str, out: &mut Vec<Component>) {
         }
     }
     out.push(c);
+}
+
+fn kiro_inspected_version(version: &str) -> bool {
+    matches!(
+        crate::catalog::version_token(version),
+        Some("2.28.0" | "2.29.0")
+    )
+}
+
+fn kiro_cli_settings(value: &Value) -> bool {
+    value.as_object().is_some_and(|settings| {
+        settings.iter().all(|(key, value)| match key.as_str() {
+            "chat.defaultAgent" | "chat.defaultModel" => value.is_string(),
+            "chat.greeting.enabled"
+            | "chat.disableWrap"
+            | "chat.preserveScrollback"
+            | "chat.startFullscreen" => value.is_boolean(),
+            _ => false,
+        })
+    })
+}
+
+fn string_array(value: &Value) -> bool {
+    value
+        .as_array()
+        .is_some_and(|items| items.iter().all(Value::is_string))
+}
+
+fn kiro_permissions(value: &Value) -> bool {
+    value.as_object().is_some_and(|fields| {
+        fields.contains_key("rules")
+            && fields.iter().all(|(key, value)| match key.as_str() {
+                "rules" => value.as_array().is_some_and(|rules| {
+                    rules.iter().all(|rule| {
+                        rule.as_object().is_some_and(|fields| {
+                            fields.get("capability").is_some_and(Value::is_string)
+                                && fields
+                                    .get("effect")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|s| matches!(s, "allow" | "deny" | "ask"))
+                                && fields.iter().all(|(key, value)| match key.as_str() {
+                                    "capability" | "effect" => value.is_string(),
+                                    "match" | "exclude" => string_array(value),
+                                    _ => false,
+                                })
+                        })
+                    })
+                }),
+                "policies" => string_array(value),
+                _ => false,
+            })
+    })
+}
+
+fn kiro_mcp_servers(value: &Value) -> bool {
+    !json_mentions_cmux(value)
+        && value.as_object().is_some_and(|servers| {
+            servers.values().all(|server| {
+                server.as_object().is_some_and(|fields| {
+                    fields.iter().all(|(key, value)| match key.as_str() {
+                        "command" | "cwd" | "url" | "type" | "versionNegotiation" => {
+                            value.is_string()
+                        }
+                        "args" | "disabledTools" | "autoApprove" | "oauthScopes" => {
+                            string_array(value)
+                        }
+                        "disabled" | "waitForReady" => value.is_boolean(),
+                        "timeout" => value.is_number(),
+                        "env" | "headers" => value
+                            .as_object()
+                            .is_some_and(|fields| fields.values().all(Value::is_string)),
+                        "oauth" => value.as_object().is_some_and(|fields| {
+                            fields.iter().all(|(key, value)| {
+                                matches!(
+                                    key.as_str(),
+                                    "clientId" | "redirectUri" | "clientMetadataUrl"
+                                ) && value.is_string()
+                            })
+                        }),
+                        _ => false,
+                    })
+                })
+            })
+        })
+}
+
+// Deliberately narrower than the native schema: no executable hooks, knowledge
+// indexing, Powers activation, or unknown control fields. Permissions and MCP
+// are native policy, not a claim that subprocesses are isolated.
+fn kiro_agent_fields(value: &Value, markdown: bool) -> bool {
+    value.as_object().is_some_and(|fields| {
+        !fields.is_empty()
+            && fields.iter().all(|(key, value)| match key.as_str() {
+                "name" => value.as_str().is_some_and(|s| !s.is_empty()),
+                "description" | "model" | "welcomeMessage" => {
+                    value.is_string() || (!markdown && value.is_null())
+                }
+                "prompt" => !markdown && (value.is_string() || value.is_null()),
+                "effortLevel" => value.is_string(),
+                "tools" => {
+                    string_array(value) || value.as_str().is_some_and(|s| markdown || s == "*")
+                }
+                "excludedTools" => string_array(value),
+                "includeMcpJson" => value.is_boolean(),
+                "includePowers" => value == &Value::Bool(false),
+                "dispatchKind" => value
+                    .as_str()
+                    .is_some_and(|s| matches!(s, "sub-agent" | "custom-agent" | "spec")),
+                "resources" => value.as_array().is_some_and(|items| {
+                    items.iter().all(|item| {
+                        item.as_str()
+                            .is_some_and(|s| s.starts_with("file://") || s.starts_with("skill://"))
+                    })
+                }),
+                "permissions" => kiro_permissions(value),
+                "mcpServers" => kiro_mcp_servers(value),
+                "hooks" => {
+                    value.as_array().is_some_and(Vec::is_empty)
+                        || value.as_object().is_some_and(serde_json::Map::is_empty)
+                }
+                // V3 skips legacy JSON profiles without a permissions block. With
+                // one, these legacy fields are ignored by the inspected V3 loader.
+                "allowedTools" => fields.contains_key("permissions") && string_array(value),
+                "toolsSettings" => {
+                    fields.contains_key("permissions")
+                        && value.as_object().is_some_and(serde_json::Map::is_empty)
+                }
+                _ => false,
+            })
+    })
+}
+
+fn kiro_agent_document(bytes: &[u8], markdown: bool) -> Option<Value> {
+    if !markdown {
+        // Native JSONC extensions remain unknown instead of using a permissive
+        // parser whose interpretation could differ from Kiro's loader.
+        return serde_json::from_slice(bytes).ok();
+    }
+    let text = std::str::from_utf8(bytes).ok()?.replace("\r\n", "\n");
+    let rest = text.strip_prefix("---\n")?;
+    let end = rest
+        .find("\n---\n")
+        .or_else(|| rest.strip_suffix("\n---").map(str::len))?;
+    yaml_serde::from_str(&rest[..end]).ok()
+}
+
+fn scan_kiro_agents(
+    path: &Path,
+    scope: &str,
+    out: &mut Vec<Component>,
+    count: &mut usize,
+    depth: usize,
+) {
+    if depth > 16 || *count > MAX_ENTRIES {
+        let mut c = component("Kiro native agents", path, scope);
+        c.detail = "native agent inspection limit exceeded".into();
+        out.push(c);
+        return;
+    }
+    // Native discovery is recursive. Every entry consumes the same budget;
+    // symlinked directories and files fail closed through check_path/read.
+    for path in source_directory(path, "Kiro native agents", out) {
+        *count += 1;
+        let mut c = component("Kiro native agent", &path, scope);
+        if *count > MAX_ENTRIES {
+            c.detail = "native agent inspection limit exceeded".into();
+            out.push(c);
+            break;
+        }
+        if let Err(reason) = check_path(&path) {
+            c.detail = reason;
+            out.push(c);
+            continue;
+        }
+        if path.is_dir() {
+            scan_kiro_agents(&path, scope, out, count, depth + 1);
+            continue;
+        }
+        if let Some(bytes) = file_bytes(&mut c) {
+            let extension = path.extension().and_then(|s| s.to_str());
+            let markdown = extension == Some("md");
+            if matches!(extension, Some("json" | "md"))
+                && kiro_agent_document(&bytes, markdown)
+                    .is_some_and(|value| kiro_agent_fields(&value, markdown))
+            {
+                c.registration = Registration::Installed;
+                c.isolation = Isolation::Absent;
+                c.conformance = Conformance::SourceInspected;
+                c.detail = "inspected native agent fields contain no executable hooks or unreviewed controls; availability does not establish selection, context loading or subprocess isolation".into();
+            } else {
+                c.detail = "native agent contains nonempty hooks, unreviewed fields/format, or malformed values".into();
+            }
+        }
+        out.push(c);
+    }
 }
 
 fn json_mentions_cmux(value: &Value) -> bool {
@@ -1491,9 +1692,9 @@ pub fn codex_effective_status(
 }
 
 pub fn enforce_headless(repo: &Path, harness: &str, version: &str) -> Result<Status> {
-    if harness == "kiro" && crate::catalog::version_token(version) != Some("2.28.0") {
+    if harness == "kiro" && !kiro_inspected_version(version) {
         return Err(Error::new(
-            "Kiro headless configuration inspection is validated only on 2.28.0 V3; no fallback selected",
+            "Kiro headless configuration inspection is inspected only on 2.28.0 and 2.29.0 V3; no fallback selected",
         ));
     }
     let status = headless_status(inspect(repo, harness), version);

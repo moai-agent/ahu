@@ -766,6 +766,11 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
             // A reported token amount is a count. A non-numeric value stays
             // tolerated -- it is simply not an amount -- but a number that is
             // not a count is bad input rather than a metric to average.
+            || record.trajectory.as_ref().is_some_and(|o| {
+                o.kiro_metering.as_ref().is_some_and(|m| {
+                    o.source != trajectory::Source::KiroSessionUpdates || !m.valid()
+                })
+            })
             || record.reported_tokens.as_ref().is_some_and(|tokens| {
                 tokens.values().any(|value| {
                     value.as_f64().is_some_and(|amount| !amount.is_finite() || amount < 0.0)
@@ -1356,6 +1361,28 @@ pub fn render_at(report: &Report, width: usize) -> String {
                 trajectory.observations.get(name).copied().unwrap_or(0),
                 group.runs
             ));
+        }
+        if trajectory.sources.contains_key("kiro_session_updates") {
+            out.push_str("             Kiro metering is partial: prompt completions are not model steps; context is a window snapshot; credits are not USD\n");
+            for name in [
+                "kiro_context_usage_percent",
+                "kiro_peak_context_usage_percent",
+                "kiro_prompt_completions",
+                "kiro_observed_credits",
+                "kiro_credit_observations",
+                "kiro_observed_elapsed_ms",
+                "kiro_elapsed_observations",
+                "kiro_duplicate_completions",
+                "kiro_rejected_updates",
+                "kiro_unattributed_completions",
+            ] {
+                out.push_str(&format!(
+                    "             {name} mean {} ({}/{} observations)\n",
+                    measurement(trajectory.means.get(name).copied()),
+                    trajectory.observations.get(name).copied().unwrap_or(0),
+                    group.runs,
+                ));
+            }
         }
         out.push_str(&format!(
             "             budgets {}; guards {}; tool error rate coverage {}\n",

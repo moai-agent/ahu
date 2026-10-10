@@ -1497,6 +1497,8 @@ pub struct Events {
     pub skill_unknown_events: u64,
     #[serde(skip)]
     skill_calls: Vec<skills::Call>,
+    #[serde(skip)]
+    kiro: kiro::State,
     #[serde(default = "crate::telemetry::SkillEvidence::unverified")]
     pub skill_observation: crate::telemetry::SkillEvidence,
     #[serde(skip_serializing)]

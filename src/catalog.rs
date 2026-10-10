@@ -166,7 +166,7 @@ pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
             "Absent inspected hook configuration; custom hooks, extensions and configuration overrides are unverified."
         }
         "kiro" => {
-            "V3 2.28.0 local configuration inspection requires absent hook/agent/extension/Powers/workflow sources, empty CLI settings and no cloud configuration or custom environment indirection. Native helper isolation remains unverified."
+            "V3 2.28.0/2.29.0 local configuration inspection admits a bounded declarative subset of native JSON/Markdown agents and CLI preferences. Nonempty hooks, extensions, Powers, workflows, unknown fields/formats, cloud configuration and environment indirection are refused. Native helper isolation and arbitrary MCP subprocess behavior remain unverified."
         }
         _ => return None,
     };
@@ -364,8 +364,8 @@ pub const HARNESSES: &[HarnessEntry] = &[
         display_name: "Kiro CLI",
         adapter_available: true,
         executable: "kiro-cli",
-        verified_versions: "2.28.0 (V3)",
-        headless_verified_versions: &["2.28.0"],
+        verified_versions: "2.28.0 (V3); 2.29.0 (V3 headless and native configuration)",
+        headless_verified_versions: &["2.28.0", "2.29.0"],
         enforces_model_for_session: false,
         features: &[
             Feature::InteractiveLaunch,
@@ -377,7 +377,7 @@ pub const HARNESSES: &[HarnessEntry] = &[
             "--model selects the first request's model; Kiro permits in-session model and agent changes",
             "ahu supplies instructions as prompt text, not a native agent identity",
             "native hooks, permissions, Powers, global and synchronized configuration remain under Kiro's control; headless admission refuses unreviewed executable configuration and does not provide a filesystem sandbox",
-            "headless V3 and --resume-id are verified on 2.28.0; bounded native helpers remain refused, and disabled helpers are prompt-only rather than a native tool restriction; detailed trajectory, skill invocation, token and USD cost accounting remain unverified",
+            "headless V3 and --resume-id were exercised on 2.28.0 and 2.29.0; bounded native helpers remain refused, and disabled helpers are prompt-only rather than a native tool restriction; detailed trajectory, skill invocation, token and USD cost accounting remain unverified",
         ],
     },
 ];

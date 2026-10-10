@@ -1594,3 +1594,81 @@ fn trajectory_run_records_keep_guards_separate_and_gate_every_terminal_path() {
     assert_eq!(summary.observations["tool_error_rate"], 2);
     assert_eq!(summary.means["tool_error_rate"], 0.375);
 }
+
+#[test]
+fn kiro_metering_report_keeps_partial_credits_out_of_tokens_and_usd() {
+    let mut observer = trajectory::Observer::default();
+    let events = [
+        serde_json::json!({"type":"runStarted", "data":{"engine":"v3","payloadSchema":"acp"}}),
+        serde_json::json!({"kind":"user_message_id_assigned","userMessageId":"synthetic-prompt"}),
+        serde_json::json!({"kind":"turn_start","messageId":"synthetic-turn"}),
+        serde_json::json!({"kind":"context_usage","usagePercentage":0}),
+        serde_json::json!({"kind":"turn_completion","status":"success","elapsedTime":0,
+            "promptTurnSummaries":[{"unit":"credit","usage":0}]}),
+    ];
+    observer.observe("kiro", &events[0]);
+    for meta in &events[1..] {
+        observer.observe("kiro", &serde_json::json!({"type":"sessionUpdate", "data":{
+            "sessionId":"sess_synthetic", "update":{"sessionUpdate":"session_info_update", "_meta":{"kiro":meta}}
+        }}));
+    }
+    let envelope = serde_json::json!({"harness":{"trajectory":observer}});
+    let mut projected = serde_json::Map::new();
+    insert_trajectory_fields(&mut projected, Some(&envelope), None, &Default::default()).unwrap();
+    assert!(reported_tokens(Some(&envelope), None).is_none());
+    let measured = serde_json::to_string(&projected["trajectory"]).unwrap();
+    let legacy = serde_json::to_string(&trajectory::Observation {
+        source: trajectory::Source::KiroSessionUpdates,
+        coverage: trajectory::Coverage::Partial,
+        ..Default::default()
+    })
+    .unwrap();
+    let text = format!(
+        "{}\n{}",
+        record(&[("trajectory", &legacy)]),
+        record(&[("trajectory", &measured)])
+    );
+    let records = parse_records(Path::new("synthetic.jsonl"), &text).unwrap();
+    let groups = group(&records);
+    assert_eq!(
+        groups[0].trajectory.observations["kiro_observed_credits"],
+        1
+    );
+    assert_eq!(groups[0].trajectory.means["kiro_observed_credits"], 0.0);
+    assert_eq!(groups[0].trajectory.means["kiro_prompt_completions"], 1.0);
+    assert!(!groups[0].trajectory.means.contains_key("steps"));
+    assert!(groups[0].mean_tokens.is_empty());
+    assert!(groups[0].mean_reported_cost_usd.is_empty());
+    assert_eq!(groups[0].coverage.tokens, 0);
+    let report = Report {
+        records: PathBuf::from("/tmp/synthetic.jsonl"),
+        record_count: 2,
+        groups,
+    };
+    let text = render_at(&report, 120);
+    assert!(text.contains("Kiro metering is partial"));
+    assert!(text.contains("kiro_observed_credits mean 0 (1/2 observations)"));
+}
+
+#[test]
+fn kiro_metering_records_reject_invalid_units_and_inconsistent_coverage() {
+    for metering in [
+        serde_json::json!({"context_usage_percent":101,"peak_context_usage_percent":101}),
+        serde_json::json!({"context_usage_percent":5,"peak_context_usage_percent":4}),
+        serde_json::json!({"observed_credits":-1,"credit_observations":1,"prompt_completions":1}),
+        serde_json::json!({"observed_credits":0,"credit_observations":0}),
+        serde_json::json!({"observed_credits":0,"credit_observations":2,"prompt_completions":1}),
+        serde_json::json!({"observed_elapsed_ms":-1,"elapsed_observations":1,"prompt_completions":1}),
+        serde_json::json!({"usd":1}),
+    ] {
+        let mut observation = serde_json::to_value(trajectory::Observation {
+            source: trajectory::Source::KiroSessionUpdates,
+            coverage: trajectory::Coverage::Partial,
+            ..Default::default()
+        })
+        .unwrap();
+        observation["kiro_metering"] = metering;
+        let text = record(&[("trajectory", &observation.to_string())]);
+        assert!(parse_records(Path::new("synthetic.jsonl"), &text).is_err());
+    }
+}

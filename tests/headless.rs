@@ -3546,7 +3546,7 @@ fn kiro_batch_lifecycle_tracks_fresh_resume_failure_and_timeout() {
     std::fs::write(&path,r#"#!/usr/bin/env python3
 import sys,os,json,time
 a=sys.argv[1:]
-if '--version' in a: print('kiro-cli 2.28.0');sys.exit(0)
+if '--version' in a: print('kiro-cli 2.29.0');sys.exit(0)
 if 'whoami' in a: print(json.dumps({'accountType':'SocialGitHub','email':'fixture@example.invalid'}));sys.exit(0)
 if '--list-models' in a: print(json.dumps({'models':[{'model_id':'claude-sonnet-4.5'}]}));sys.exit(0)
 assert a[:2]==['chat','--v3']
@@ -3556,15 +3556,41 @@ assert a[a.index('--output-format')+1]=='stream-json'
 assert '--trust-all-tools' not in a
 assert not any(k.startswith('CMUX_') for k in os.environ)
 assert sys.stdin.read()==''
-session=a[a.index('--resume-id')+1] if '--resume-id' in a else 'sess_fixture'
-def emit(t,d): print(json.dumps({'type':t,'data':d}),flush=True)
-emit('runStarted',{'payloadSchema':'acp','engine':'v3'})
-emit('sessionUpdate',{'sessionId':session,'update':{'sessionUpdate':'session_info_update'}})
 scenario=os.environ.get('SCENARIO','success')
+session=a[a.index('--resume-id')+1] if '--resume-id' in a else 'sess_fixture'
+if scenario=='resume_mismatch': session='sess_wrong'
+def emit(t,d): print(json.dumps({'type':t,'data':d}),flush=True)
+emit('runStarted',{'payloadSchema':'acp','engine':'v3','acpProtocolVersion':1})
+emit('sessionUpdate',{'sessionId':session,'update':{'sessionUpdate':'session_info_update'}})
+def update(u): emit('sessionUpdate',{'sessionId':session,'update':u})
+if '--resume-id' in a:
+ update({'sessionUpdate':'tool_call_update','toolCallId':'old','status':'failed','rawOutput':'Tool use was not permitted.','_meta':{'kiro':{'replay':True}}})
 if scenario=='sleep': time.sleep(60)
 if scenario=='missing': sys.exit(0)
-if scenario=='denied': emit('sessionUpdate',{'sessionId':session,'update':{'sessionUpdate':'tool_call_update','status':'failed'}})
-emit('runFinished',{'sessionId':session,'status':'success','stopReason':'end_turn','finalText':'synthetic','finalTextTruncated':False})
+if scenario=='malformed': print('{broken',flush=True)
+if scenario in ('denied','allowed'):
+ update({'sessionUpdate':'session_info_update','_meta':{'kiro':{'kind':'pending_interaction','toolCallId':'a','interactionType':'tool_approval','options':[{'optionId':'accept','kind':'allow_once'},{'optionId':'reject','kind':'reject_once'}]}}})
+ update({'sessionUpdate':'session_info_update','_meta':{'kiro':{'kind':'interaction_resolved','toolCallId':'a','outcome':'cancelled' if scenario=='denied' else 'selected','selectedOption':'accept' if scenario=='allowed' else None}}})
+ update({'sessionUpdate':'tool_call_update','toolCallId':'a','status':'failed' if scenario=='denied' else 'completed'})
+if scenario=='recovered':
+ update({'sessionUpdate':'tool_call','toolCallId':'a','kind':'read','status':'in_progress'})
+ update({'sessionUpdate':'tool_call_update','toolCallId':'a','status':'failed','rawOutput':{'message':'synthetic missing input'}})
+ update({'sessionUpdate':'tool_call','toolCallId':'b','kind':'read','status':'completed'})
+if scenario=='unresolved': update({'sessionUpdate':'tool_call','toolCallId':'a','status':'in_progress'})
+if scenario in ('run_error','error_then_success'):
+ emit('runError',{'sessionId':session,'stage':'prompt','message':'private synthetic error'})
+ if scenario=='run_error': sys.exit(0)
+end={'sessionId':session,'status':'success','stopReason':'end_turn','finalText':'synthetic','finalTextTruncated':False}
+if scenario=='interrupted': end.update(status='interrupted',stopReason='cancelled')
+if scenario=='session_changed': end['sessionId']='sess_changed'
+if scenario=='truncated': end['finalTextTruncated']=True
+if scenario=='missing_final_text': del end['finalText']
+emit('runFinished',end)
+if scenario in ('duplicate','conflicting'):
+ if scenario=='conflicting': end['status']='failed'
+ emit('runFinished',end)
+if scenario=='nonzero': sys.exit(7)
+if scenario=='signal_exit': os.kill(os.getpid(),15)
 "#).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     let out = f.launch("success", &[]);
@@ -3581,7 +3607,7 @@ emit('runFinished',{'sessionId':session,'status':'success','stopReason':'end_tur
     let resumed = f
         .command()
         .args(["resume", id, "--prompt-file"])
-        .arg(prompt)
+        .arg(&prompt)
         .args(["--output", "json"])
         .output()
         .unwrap();
@@ -3597,7 +3623,47 @@ emit('runFinished',{'sessionId':session,'status':'success','stopReason':'end_tur
         .output()
         .unwrap();
     assert_eq!(Fixture::value(&waited)["outcome"], "succeeded");
-    for scenario in ["missing", "denied"] {
+    // The fixture emits replayed denial history on every resume. It must not
+    // fail the new attempt. A different native session must still fail.
+    let resumed = f
+        .command()
+        .env("SCENARIO", "resume_mismatch")
+        .args(["resume", id, "--prompt-file"])
+        .arg(&prompt)
+        .args(["--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let waited = f
+        .command()
+        .args(["wait", id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(Fixture::value(&waited)["outcome"], "failed");
+    for scenario in ["recovered", "allowed"] {
+        let out = f.launch(scenario, &[]);
+        assert_eq!(Fixture::value(&out)["outcome"], "succeeded", "{scenario}");
+    }
+    for scenario in [
+        "missing",
+        "denied",
+        "malformed",
+        "unresolved",
+        "run_error",
+        "error_then_success",
+        "interrupted",
+        "session_changed",
+        "truncated",
+        "missing_final_text",
+        "duplicate",
+        "conflicting",
+        "nonzero",
+        "signal_exit",
+    ] {
         let out = f.launch(scenario, &[]);
         assert_eq!(Fixture::value(&out)["outcome"], "failed", "{scenario}");
     }

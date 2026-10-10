@@ -2175,26 +2175,48 @@ GitHub social-login `whoami --format json` interface. Other login types and
 API-key account binding are currently unsupported. Account checks do not prove
 model entitlement or remaining credits.
 
-Kiro V3 2.28.0 supports ahu headless fresh runs and native `--resume-id`.
+Kiro V3 2.28.0 and 2.29.0 are admitted for ahu headless fresh runs and native `--resume-id`.
 The adapter passes `--no-interactive --output-format stream-json
 --require-mcp-startup`. Only `runFinished` with success and `end_turn` completes
-an attempt; a failed/denied tool, malformed stream, missing result, interruption,
-or nonzero exit cannot become success. MCP startup failures stop the launch.
+an attempt. An ordinary failed tool can be followed by a successful result;
+permission denials, unresolved calls/approvals, task errors, malformed streams,
+missing results, interruption and nonzero exit cannot become success. Replayed
+history does not determine the current attempt's outcome. MCP startup failures stop the launch.
 Intermediate turn completion does not finish a task. Kiro credits are not USD;
 USD cost, token and skill-invocation metrics remain unknown. Eval trajectory
 records bounded ACP tool-call, completion and error counts, deduplicated by
 `toolCallId`. Coverage remains partial: model steps, stable tool identities,
 repetitions, recovery and native-helper attribution are unknown. Tool titles are
 display text, not proof of tool identity or delegation.
+
+Session-info events also supply partial metering under `trajectory.kiro_metering`:
+latest/peak context-window percentage, observed prompt completions, reported
+credits and elapsed milliseconds, plus observation, duplicate and rejection
+counts. A prompt completion may include multiple model requests; it is not a
+model step. Context snapshots are not billable token counts, and credits are not
+USD. Live prompt and turn markers gate completion attribution, and replayed
+history does not contribute to current-attempt totals. Missing amounts remain
+unknown; accepted observations never certify complete session or helper usage.
+Native Kiro OTLP export remains separate from ahu/MCP eval capture because the
+observed native resource does not carry ahu task-and-attempt attribution.
 Shared ahu supervision supplies foreground/background execution, timeout,
 cancellation, result records, and resume. Histories remain in Kiro's native home.
 
-Headless admission currently requires default native paths, absent local/global
-hooks, native agents, extensions, Powers and workflows, empty or absent
-`settings/cli.json`, and no cloud configuration or diagnostic-output overrides.
-Project ancestors and cloud-cache sources are inspected too. Unreviewed sources,
-symlinks, malformed settings and versions other than 2.28.0 are refused; ahu does
-not delete or rewrite them. Native permissions, MCP and skills remain active.
+Headless admission inspects native JSON and Markdown agent profiles in project,
+user and ancestor scopes. Ordinary prompts, tools, models, file/skill resources,
+permissions and inspected MCP fields are accepted without rewriting the profiles.
+Markdown requires YAML frontmatter; JSONC, unknown fields, nonempty hooks,
+Powers activation and knowledge-base resource objects remain unreviewed.
+Available profiles remain native: ahu does not select them with `--agent` or
+claim they were loaded.
+
+The inspected CLI preferences are `chat.defaultAgent`, `chat.defaultModel`,
+`chat.greeting.enabled`, `chat.disableWrap`, `chat.preserveScrollback`, and
+`chat.startFullscreen`. Other custom settings, local/global hooks, extensions,
+Powers, workflows, cloud configuration, custom native paths and diagnostic-output
+overrides remain refused. Project ancestors and cloud-cache sources are inspected
+as well. Symlinks, malformed/oversized configuration, scan limits and versions
+other than 2.28.0 or 2.29.0 produce a refusal; ahu does not delete or rewrite them. Native permissions, MCP and skills remain active.
 This is bounded configuration inspection, not a sandbox. Native cmux hook
 installation, detailed hook inventory and bounded helpers remain unsupported;
 `--native-helpers disabled` is a prompt instruction, not a native tool restriction.
@@ -2214,3 +2236,25 @@ Add `--background` for asynchronous work, then use `ahu wait <task-id>`,
 `ahu result <task-id>`, or `ahu cancel <task-id>`. Use `ahu resume <task-id>
 --prompt-file /tmp/continuation.txt` to continue its native session.
 A successful harness result is execution evidence, not acceptance of the work.
+
+
+### Live Kiro compatibility checks
+
+Run the opt-in matrix after building ahu and signing into Kiro:
+
+```sh
+python3 scripts/check-kiro-compatibility.py \
+  --ahu /absolute/path/to/ahu --allow-widened-approvals
+```
+
+This consumes model credits and authorizes automatic tool approvals only for
+fixture agents that request them. The script creates an external repository
+under `/tmp`, exercises fresh execution with a real MCP call and observed export,
+resume, tool-error recovery, permission denial, timeout and cancellation, and
+writes its report outside the source checkout. It retains the fixture for
+inspection and attempts to stop its owned running tasks. A native profile in
+the fixture checks configuration admission; that row does not certify native
+helper invocation or isolation. Global native configuration and provider state
+still apply, so a refusal or unavailable provider is a failed compatibility row,
+not evidence that the adapter passed. The report identifies the binary digest,
+source revision, source dirtiness, Kiro version, exact model and headless mode.

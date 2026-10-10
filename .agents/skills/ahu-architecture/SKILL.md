@@ -424,10 +424,15 @@ normal harness capabilities, not launch problems.
 Kiro CLI uses harness ID `kiro` and executable `kiro-cli`. The adapter selects
 V3 and passes the exact model and composed positional prompt. It supports
 interactive launches with native prompt approvals or explicit trust-all-tools;
-headless fresh runs and native resume are supported on 2.28.0. Accept-edits is
+headless fresh runs and native resume are supported on 2.28.0 and 2.29.0. Accept-edits is
 refused. Headless admission requires absent unreviewed executable configuration
-and cloud sources; it preserves native homes, permissions, MCP and skills. `.kiro/` and `.kiroignore`
+and cloud sources. It admits an inspected subset of native JSON/Markdown agent
+profiles and CLI preferences without rewriting them; profile availability does
+not establish selection or loading. It preserves native homes, permissions, MCP and skills. `.kiro/` and `.kiroignore`
 participate in snapshots and context locks. Setup installs MCP and skills at
 Kiro's native project paths. Kiro hook inventory and native helper isolation
 remain unknown; disabled helpers are prompt-only and bounded helpers are refused; global and synchronized configuration stays harness-managed.
+Eval trajectory can include partial prompt-completion credits, elapsed time and
+context-window percentages from Kiro session events. These are not model-step,
+billable-token or USD totals; replay is excluded from current-attempt accounting.
 See `docs/reference.md#kiro-cli` for setup and validation limits.
