@@ -315,7 +315,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
         "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
         "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth budget [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics. `auth budget` reports verified provider rate-limit windows for the active profile. These are percentages and reset periods, not literal token counts; agents sharing one account share its capacity. Unsupported providers remain unknown.\n\nIdentity probes: codex, claude-code, antigravity, kiro (GitHub social login), and ollama. Use --harness ollama to check the loopback daemon selected by OLLAMA_HOST (default 127.0.0.1:11434). OpenCode readiness requires --model with an Ollama cloud model; other OpenCode providers remain unsupported. Readiness checks account identity and project binding only: it does not verify OpenCode's configured provider endpoint, model availability, or inference access.\n".to_string(),
-        "telemetry" => "Usage: ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
+        "telemetry" => "Usage: ahu telemetry report --otlp FILE --selection FILE --release ID [--output json]\n       ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nThe OTLP report reads local collector JSONL and an explicit task/attempt selection, writes no state, and reports unknown usage as null. Repeat --otlp for rotated files. See docs/otel-release-report.md.\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
         "task" => "Usage: ahu task ID [--output json]\n\nInspect a task's state, branch, worktree, and launch evidence.\n".to_string(),
         "wait" => "Usage: ahu wait TASK [--output json]\n\nWait for a headless task to reach a terminal state.\n".to_string(),
@@ -501,6 +501,11 @@ pub enum Command {
         record_key: String,
         task_ref: Option<String>,
         output_json: bool,
+    },
+    OtelReport {
+        paths: Vec<PathBuf>,
+        selection: PathBuf,
+        release: String,
     },
     Doctor {
         verbose: bool,
@@ -1542,6 +1547,41 @@ pub fn extract_color(
 }
 
 fn parse_telemetry(args: &[String]) -> Result<Command> {
+    if args.first().is_some_and(|a| a == "report") && args.iter().any(|a| a == "--otlp") {
+        let mut paths = Vec::new();
+        let mut selection = None;
+        let mut release = None;
+        let mut index = 1;
+        let mut output = false;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--otlp" => paths.push(PathBuf::from(value_for("--otlp", args, &mut index)?)),
+                "--selection" if selection.is_none() => {
+                    selection = Some(PathBuf::from(value_for("--selection", args, &mut index)?))
+                }
+                "--release" if release.is_none() => {
+                    release = Some(value_for("--release", args, &mut index)?)
+                }
+                "--output" if !output => {
+                    if value_for("--output", args, &mut index)? != "json" {
+                        bail!("expected json");
+                    }
+                    output = true;
+                }
+                _ => bail!(
+                    "expected telemetry report --otlp FILE --selection FILE --release ID [--output json]"
+                ),
+            }
+            index += 1;
+        }
+        return Ok(Command::OtelReport {
+            paths,
+            selection: selection
+                .ok_or_else(|| crate::util::Error::new("OTLP report requires --selection FILE"))?,
+            release: release
+                .ok_or_else(|| crate::util::Error::new("OTLP report requires --release ID"))?,
+        });
+    }
     let action = args.first().map(String::as_str).unwrap_or("");
     if !matches!(action, "link" | "unlink" | "report") {
         bail!("expected `ahu telemetry link|unlink|report`");
@@ -2462,6 +2502,45 @@ mod focused_help_tests {
             vec!["telemetry", "link", "--key", "r-1"],
             vec!["telemetry", "report", "--key", "r-1", "--task", "abc"],
             vec!["telemetry", "unlink", "--key", "r-1", "--output", "json"],
+        ] {
+            assert!(parse_args(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn collector_reports_require_explicit_release_selection_without_private_store_keys() {
+        assert!(matches!(
+            parse_args(&["telemetry", "report", "--otlp", "a.jsonl", "--otlp", "b.jsonl", "--selection", "tasks.json", "--release", "candidate", "--output", "json"]).unwrap(),
+            Command::OtelReport { paths, .. } if paths.len() == 2
+        ));
+        for args in [
+            vec!["telemetry", "report", "--otlp", "a"],
+            vec!["telemetry", "report", "--otlp", "a", "--selection", "s"],
+            vec!["telemetry", "report", "--otlp", "a", "--release", "r"],
+            vec![
+                "telemetry",
+                "report",
+                "--otlp",
+                "a",
+                "--selection",
+                "s",
+                "--release",
+                "r",
+                "--key",
+                "private",
+            ],
+            vec![
+                "telemetry",
+                "report",
+                "--otlp",
+                "a",
+                "--selection",
+                "s",
+                "--release",
+                "r",
+                "--output",
+                "text",
+            ],
         ] {
             assert!(parse_args(&args).is_err(), "{args:?}");
         }

@@ -10,6 +10,7 @@ def is_eval(path: str) -> bool:
     return (
         path.endswith("/src/eval.rs")
         or path.endswith("/src/eval_otel.rs")
+        or path.endswith("/src/otel_report.rs")
         or path.endswith("/src/telemetry.rs")
         or "/src/eval/" in path
     )

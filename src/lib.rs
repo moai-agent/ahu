@@ -39,6 +39,7 @@ pub mod launcher;
 mod native_mcp;
 pub mod onboard;
 pub mod orchestration;
+pub mod otel_report;
 pub(crate) mod private_context_lock;
 mod private_io;
 pub mod selection;

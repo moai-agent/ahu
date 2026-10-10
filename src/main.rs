@@ -339,6 +339,15 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             println!("{}", ahu::util::display_safe_block(&message));
             Ok(0)
         }
+        Command::OtelReport {
+            paths,
+            selection,
+            release,
+        } => {
+            let report = ahu::otel_report::report(&paths, &selection, &release)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
         Command::Telemetry {
             action,
             record_key,
@@ -454,6 +463,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::McpServe
                 | Command::Auth { .. }
                 | Command::Telemetry { .. }
+                | Command::OtelReport { .. }
                 | Command::Claude
                 | Command::Codex
                 | Command::Kiro
