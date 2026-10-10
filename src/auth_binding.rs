@@ -1058,6 +1058,9 @@ fn probe_antigravity(cwd: &Path) -> Result<Identity> {
 }
 
 fn parse_antigravity_identity(output: &[u8]) -> Result<Identity> {
+    if antigravity_needs_folder_trust(output) {
+        return Err(antigravity_folder_trust_error());
+    }
     let principal = extract_email(output).ok_or_else(|| {
         Error::new("Antigravity startup did not expose a signed-in account email")
     })?;
@@ -1078,6 +1081,18 @@ fn parse_antigravity_identity(output: &[u8]) -> Result<Identity> {
         organization: None,
         workspace: extract_labeled_value(&visible, "GCP Project:"),
     })
+}
+
+fn antigravity_needs_folder_trust(output: &[u8]) -> bool {
+    let visible = String::from_utf8_lossy(output);
+    visible.contains("Do you trust the contents of this project?")
+        || visible.contains("Do you trust this folder?")
+}
+
+fn antigravity_folder_trust_error() -> Error {
+    Error::new(
+        "Antigravity is waiting for native folder trust in this checkout; open agy there interactively and review that prompt before retrying. ahu does not approve native folder trust automatically",
+    )
 }
 
 fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
@@ -1144,6 +1159,9 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut buffer = [0u8; 4096];
     let outcome = loop {
+        if antigravity_needs_folder_trust(&output) {
+            break Err(antigravity_folder_trust_error());
+        }
         if extract_email(&output).is_some() {
             break Ok(output);
         }
@@ -1991,6 +2009,21 @@ mod profile_tests {
         // The fallback extraction fails on raw ANSI since it breaks token boundaries,
         // demonstrating why NO_COLOR=1 presentation override is used.
         assert_eq!(extract_email(b"\x1b[32mpersonal@example.com\x1b[0m"), None);
+    }
+
+    #[test]
+    fn antigravity_folder_trust_is_not_account_identity_or_a_generic_timeout() {
+        for prompt in [
+            "Do you trust the contents of this project?",
+            "Do you trust this folder?",
+        ] {
+            let output = format!("contact: fixture@example.invalid\n{prompt}\n/private-marker");
+            let error = parse_antigravity_identity(output.as_bytes()).unwrap_err();
+            assert!(error.to_string().contains("native folder trust"));
+            assert!(!error.to_string().contains("private-marker"));
+            assert!(!error.to_string().contains("fixture@example.invalid"));
+        }
+        assert!(!antigravity_needs_folder_trust(b"Waiting for startup"));
     }
 
     #[test]

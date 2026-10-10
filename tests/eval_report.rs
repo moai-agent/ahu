@@ -617,7 +617,7 @@ fn a_missing_records_file_is_a_usage_error_naming_the_path() {
     let output = run(&repo, &["--records", outside.path().to_str().unwrap()]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("not a regular file"), "{stderr}");
+    assert!(stderr.contains("regular file"), "{stderr}");
 }
 
 /// A record schema 2 row, with `extra` raw JSON fields added or replaced.

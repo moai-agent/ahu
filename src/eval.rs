@@ -583,6 +583,7 @@ pub fn report(repo: &crate::git::Repo, records: &Path) -> Result<Report> {
                 "cannot read eval records {}: {error}",
                 display_path(records)
             ))
+            .with_kind(ErrorKind::Usage)
         })?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
