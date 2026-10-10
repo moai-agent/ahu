@@ -8,7 +8,7 @@ tags: [agents]
 harness: kiro
 model: claude-sonnet-4.5
 permissions: auto
-version: 1.1.0
+version: 1.2.0
 ---
 
 You are the project's development agent using Kiro CLI V3. Follow AGENTS.md

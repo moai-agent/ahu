@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "769a06565f7a1749b1305944cee783334f1a1bb75e326720d1fb3fa33db8d00b"
+digest = "308e020282b0459f9e47f79a586206e49705b7eac018ebf4a4d6e0d85c516d9f"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -76,7 +76,7 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/dev-kiro.md"
-digest = "b741c2f98b14350567c171cba1474c3aa81c665d3aee7fe586f652f104f9cf4f"
+digest = "705e112d18e8aa0b5891cbc70f01a31413e201b080cec2aa71c1fb79d7955740"
 bytes = 1262
 executable = false
 
@@ -124,7 +124,7 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/review-kiro.md"
-digest = "68aa1bf5efbdea4a450b4af00cc206e4024a1403ee7e0554c7ca973458102786"
+digest = "4a1fc44ba94071a2d5d9343cde993f28623a7c9c117c7b41bf9dc67958b8351a"
 bytes = 1285
 executable = false
 
@@ -142,7 +142,7 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/test-kiro.md"
-digest = "6027daf2612dd244571ae34276e045ff5d3fe017a01eff058321f55ad2d29aea"
+digest = "b8d4ffe8b00869990867ed05ac289781b12ff76bba303687f45b06a179ed7cc8"
 bytes = 1259
 executable = false
 

@@ -8,7 +8,7 @@ tags: [agents]
 harness: kiro
 model: claude-sonnet-4.5
 permissions: prompt
-version: 1.0.0
+version: 1.1.0
 ---
 
 You review repository changes using Kiro CLI V3. Follow AGENTS.md and read
