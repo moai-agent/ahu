@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
+import os
+import stat
 import statistics
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,10 +139,120 @@ def score(case: dict, answer: dict, result: dict, decision_calls: int | None, el
     }
 
 
+MAX_RECORDS_BYTES = 64 * 1024 * 1024  # Same file bound as ahu eval report.
+
+
+def _git(*args: str, repo: Path | None = None) -> subprocess.CompletedProcess:
+    # Never let an alternate index or checkout authorize publishing local state.
+    if any(name in os.environ for name in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")):
+        raise ValueError("unset Git repository/index overrides before recording eval results")
+    return subprocess.run(["git", "-C", str(repo if repo is not None else REPO), *args], capture_output=True)
+
+
+def _in_repository(path: Path, roots: tuple[Path, Path]) -> bool:
+    return any(path.is_relative_to(root) for root in roots) or any(
+        os.path.lexists(parent / ".git") for parent in (path, *path.parents)
+    )
+
+
+def _resolve_output(path: Path, roots: tuple[Path, Path], *, directory=False, links=40) -> Path:
+    """Resolve external parent aliases, inspecting each hop; never follow a leaf link."""
+    path = path.expanduser().absolute()
+    if ".." in path.parts:
+        raise ValueError("eval output must not contain traversal components")
+    current = Path(path.anchor)
+    for index, part in enumerate(path.parts[1:], start=1):
+        current /= part
+        leaf = index == len(path.parts) - 1
+        if current.is_symlink():
+            if (leaf and not directory) or ".ahu" in current.parts or _in_repository(current, roots) or links == 0:
+                raise ValueError("eval output contains a leaf, repository or unsafe symlink")
+            target = current.readlink()
+            target = target if target.is_absolute() else current.parent / target
+            current = _resolve_output(target, roots, directory=True, links=links - 1)
+            if not current.is_dir() or _in_repository(current, roots):
+                raise ValueError("eval output parent alias must resolve outside every repository")
+        elif not leaf and current.exists() and not current.is_dir():
+            raise ValueError("eval output parent must be a directory")
+    return current
+
+
+def _safe_record_file(metadata: os.stat_result) -> None:
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1 or metadata.st_mode & 0o7022):
+        raise ValueError("eval output must be a singly linked, owner-safe regular file")
+
+
+def record_output(path: Path) -> Path:
+    """Only ignored/untracked primary .ahu/evals or explicit external output is allowed."""
+    listing = _git("worktree", "list", "--porcelain", "-z")
+    first = listing.stdout.split(b"\0", 1)[0]
+    if listing.returncode or not first.startswith(b"worktree "):
+        raise ValueError("cannot discover the primary checkout for eval output")
+    primary = Path(os.fsdecode(first[len(b"worktree "):])).resolve(strict=True)
+    roots = (REPO.resolve(strict=True), primary)
+    output = _resolve_output(path, roots)
+    local = primary / ".ahu/evals"
+    if output != local and output.is_relative_to(local):
+        for parent in output.parents:
+            if parent == primary:
+                break
+            if os.path.lexists(parent / ".git"):
+                raise ValueError("eval output cannot belong to a nested checkout")
+            if parent.exists():
+                meta = parent.stat()
+                if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.geteuid() or meta.st_mode & 0o7022:
+                    raise ValueError("local eval directories must be owner-safe")
+        relative = output.relative_to(primary)
+        # Inspect the PRIMARY index, even when this script is in a linked worktree.
+        tracked = _git("--literal-pathspecs", "ls-files", "-z", "--", ".ahu", repo=primary)
+        if tracked.returncode:
+            raise ValueError("cannot verify eval output against the primary Git index")
+        for entry in filter(None, tracked.stdout.split(b"\0")):
+            indexed = Path(os.fsdecode(entry))
+            if relative.is_relative_to(indexed) or indexed.is_relative_to(relative):
+                raise ValueError("eval output or its ancestor is tracked by Git")
+        ignored = _git("check-ignore", "--quiet", "--no-index", "--", str(relative), repo=primary)
+        if ignored.returncode:
+            raise ValueError("local eval output must be ignored by Git")
+    elif _in_repository(output, roots):
+        raise ValueError("eval output must be external or in ignored primary .ahu/evals")
+    if output.exists():
+        _safe_record_file(output.lstat())
+    return output
+
+
+def append_record(path: Path, row: dict) -> None:
+    body = (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+    if len(body) > MAX_RECORDS_BYTES:
+        raise ValueError("eval record exceeds the records file size limit")
+    output = record_output(path)
+    missing = []
+    parent = output.parent
+    while not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
+    for parent in reversed(missing):
+        parent.mkdir(mode=0o700, exist_ok=True)
+    output = record_output(output)  # Recheck after directory creation, before opening.
+    # Like Rust state confinement, this is not isolation from same-user races.
+    # Pin the parent and inspect the descriptor before appending. No chmod of
+    # existing external files/directories; owner-safe 0644 records remain usable.
+    parent_fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(output.name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+    with os.fdopen(fd, "ab") as stream:
+        _safe_record_file(os.fstat(stream.fileno()))
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        if os.fstat(stream.fileno()).st_size + len(body) > MAX_RECORDS_BYTES:
+            raise ValueError("eval records exceed the records file size limit")
+        stream.write(body)
+
+
 def record(args) -> int:
-    output = args.output.expanduser().resolve()
-    if output == REPO or REPO in output.parents:
-        raise ValueError("run records must be stored outside the repository")
+    output = record_output(args.output)
     case = read_case(args.case)
     case_digest = hashlib.sha256(args.case.read_bytes()).hexdigest()
     answer = read_json(args.answer)
@@ -173,9 +287,7 @@ def record(args) -> int:
     ).hexdigest()
     if args.trace_id:
         row["trace_id"] = args.trace_id
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(row, sort_keys=True) + "\n")
+    append_record(output, row)
     print(json.dumps({key: row[key] for key in ("case_id", "task_id", "score", "passed", "outcome")}))
     return 0
 
@@ -297,7 +409,7 @@ def trend(args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    add = commands.add_parser("record", help="score one ahu result and append a compact external record")
+    add = commands.add_parser("record", help="score one ahu result and append a bounded local record")
     add.add_argument("--case", type=Path, default=REPO / "evals/cases/decision-routing.md")
     add.add_argument("--answer", type=Path, required=True, help="synthetic answer artifact produced by the agent")
     add.add_argument("--result", type=Path, required=True, help="JSON from ahu result --output json")
@@ -317,7 +429,7 @@ def main() -> int:
     add.add_argument("--trace-id", help="OTel trace ID for this task/attempt")
     add.add_argument("--decision-calls", type=int, help="aggregate count from a verified tool-call observation")
     add.add_argument("--elapsed-ms", type=int, help="elapsed time read from the matching OTel span")
-    add.add_argument("--output", type=Path, required=True, help="JSONL path outside this repository")
+    add.add_argument("--output", type=Path, required=True, help="explicit JSONL path: ignored, untracked primary .ahu/evals/ or external storage")
     add.set_defaults(run=record)
     show = commands.add_parser("trend", help="summarize score and coverage by case, model, and harness")
     show.add_argument("--records", type=Path, required=True)
