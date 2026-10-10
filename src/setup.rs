@@ -196,7 +196,7 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         .collect();
     if detected.is_empty() {
         return Err(Error::new(
-            "no supported ahu harness was found on PATH. Install Claude Code, Codex, Antigravity CLI, or OpenCode, then run `ahu setup` again.",
+            "no supported ahu harness was found on PATH. Install Claude Code, Codex, Antigravity CLI, OpenCode, or Kiro CLI, then run `ahu setup` again.",
         )
         .with_kind(crate::util::ErrorKind::Prerequisite));
     }
