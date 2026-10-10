@@ -40,6 +40,7 @@ fn actual_launch_uses_a_short_preview_while_dry_run_keeps_audit_details() {
     assert!(text.contains("claude-code / claude-sonnet-5"), "{text}");
     assert!(text.contains("approvals harness defaults"), "{text}");
     assert!(text.contains("worktree   .worktrees/"), "{text}");
+    assert!(text.contains("release    unlabeled"), "{text}");
     assert!(!text.contains('\u{1b}'), "{text}");
     for hidden in [
         "file digest",
@@ -51,7 +52,8 @@ fn actual_launch_uses_a_short_preview_while_dry_run_keeps_audit_details() {
     ] {
         assert!(!text.contains(hidden), "{hidden}: {text}");
     }
-    assert!(text.lines().count() <= 12, "{text}");
+    // Release attribution adds one auditable line to the compact preview.
+    assert!(text.lines().count() <= 13, "{text}");
     let detailed = launch(&repo, "@sable", true);
     assert!(detailed.status.success());
     let text = String::from_utf8_lossy(&detailed.stdout);
