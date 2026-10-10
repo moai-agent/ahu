@@ -288,7 +288,7 @@ fn stdio_server_negotiates_and_lists_repository_agents_and_tasks() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(rows[0]["result"]["serverInfo"]["name"], "ahu");
-    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 8);
     assert_eq!(
         rows[2]["result"]["structuredContent"]["agents"][0]["name"],
         "@reviewer"
@@ -1027,7 +1027,7 @@ fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
         if method == "tools/list" {
             assert!(result.get("ttlMs").is_none());
             assert!(result.get("cacheScope").is_none());
-            assert_eq!(result["tools"].as_array().unwrap().len(), 7);
+            assert_eq!(result["tools"].as_array().unwrap().len(), 8);
         }
     }
     assert_eq!(
@@ -1160,7 +1160,7 @@ fn conformance_failed_probes_allow_legacy_and_adapter_requires_both_opt_ins() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["id"], 0);
     assert_eq!(rows[0]["result"]["resultType"], "complete");
-    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 8);
     assert_eq!(rows[1]["id"], -1);
     assert_eq!(rows[1]["error"]["code"], -32602);
     assert_eq!(rows[2]["id"], "");
@@ -1523,4 +1523,74 @@ fn native_ollama_configuration_errors_precede_credentials_and_network() {
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+}
+
+#[test]
+fn agent_recommendations_use_external_inputs_without_payload_telemetry() {
+    let repo = common::TestRepo::new();
+    let receiver = ahu::eval_otel::Receiver::start().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let records = external.path().join("private-path-marker.jsonl");
+    let payload = serde_json::json!({"schema_version":2,"case_id":"fixture","agent":"fixture",
+        "harness":"opencode","model":"fixture-model","score":1,"passed":true,
+        "ignored_payload":"private-payload-marker"})
+    .to_string();
+    std::fs::write(&records, &payload).unwrap();
+    let mut child = common::ahu()
+        .current_dir(repo.path())
+        .args(["mcp", "serve"])
+        .env("AHU_EVAL_OTEL_ENDPOINT", receiver.endpoint())
+        .env(
+            "AHU_MCP_RESOURCE_ATTRIBUTES",
+            "ahu.task.id=advice-fixture,ahu.task.attempt=1",
+        )
+        .env_remove("OTEL_RESOURCE_ATTRIBUTES")
+        .env_remove("TYPESAFE_API_KEY")
+        .env("AHU_DECISION_URL", "http://127.0.0.1:1/never-called")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let arguments = serde_json::json!({"records_path":records,
+        "cases":[{"case_id":"fixture","case_digest":"a".repeat(64)}],
+        "candidates":["@fixture"],"minimum_quality":0.5,"minimum_samples_per_case":4,"maximum_age_seconds":60});
+    let mut invalid = arguments.clone();
+    invalid["private-argument-marker"] = serde_json::json!(true);
+    let mut input = child.stdin.take().unwrap();
+    for request in [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ahu_agents_recommend","arguments":arguments}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ahu_agents_recommend","arguments":invalid}}),
+    ] {
+        writeln!(input, "{request}").unwrap();
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[1]["result"]["structuredContent"]["status"], "unknown");
+    assert_eq!(rows[2]["error"]["code"], -32602);
+    let observed = receiver.task("advice-fixture", 1).unwrap();
+    assert_eq!(observed.tool_calls_by_name["ahu_agents_recommend"], 2);
+    assert_eq!(observed.typed_decision_calls, 0);
+    let recorded = serde_json::to_string(&observed).unwrap();
+    let responses = serde_json::to_string(&rows).unwrap();
+    for marker in [
+        "private-path-marker",
+        "private-payload-marker",
+        "private-argument-marker",
+    ] {
+        assert!(!recorded.contains(marker));
+        assert!(!responses.contains(marker));
+    }
+    assert_eq!(std::fs::read_to_string(&records).unwrap(), payload);
 }
