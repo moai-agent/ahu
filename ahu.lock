@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "308e020282b0459f9e47f79a586206e49705b7eac018ebf4a4d6e0d85c516d9f"
+digest = "37158fd59c17dcbf0bcf1bdc3a099e3663a3cdef452bad2aed3bed25301bb36f"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -148,8 +148,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/config.toml"
-digest = "13988be31fd0240da9ea02623807f89f4033d702f84c77f920fc11a926e56f6c"
-bytes = 538
+digest = "172c05511eae48127da4bf2886b35c3d01134dd9a1169eb576e2fc76e68eb07f"
+bytes = 623
 executable = false
 
 [[entries]]
@@ -244,8 +244,8 @@ executable = false
 
 [[entries]]
 path = "AGENTS.md"
-digest = "1a94fad2a7eb0162dfcc562eaebd5f51dda8571e40191a012516fe21ec524678"
-bytes = 4110
+digest = "b434005a06defa7f8b4eabb18520c4e1f9929801167a96b3259c3fc1379fca05"
+bytes = 4325
 executable = false
 
 [[entries]]

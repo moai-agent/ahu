@@ -54,6 +54,9 @@ state which associated issues were closed and which remain open, with reasons.
 ## Repository privacy boundary
 
 Do not store execution traces anywhere in this repository, including ignored paths.
+Keep captured OpenTelemetry traces, metrics, and logs in local storage outside
+the repository. Never publish these captures to GitHub, including commits,
+issues, pull requests, release assets, or Actions artifacts.
 Do not put private tracker-derived content in public files without user confirmation
 of the exact material and destination. This includes tracker locations, IDs,
 references, issue titles and bodies, and private project metadata. The issue-type
