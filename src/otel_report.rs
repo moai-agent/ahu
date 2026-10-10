@@ -200,9 +200,18 @@ mod tests {
         assert!(
             attrs(&json!([
                 attribute("ahu.status", json!("ok")),
-                attribute("ahu.status", json!("ok"))
+                attribute("ahu.status", json!("failed"))
             ]))
             .is_err()
+        );
+        assert_eq!(
+            attrs(&json!([
+                attribute("ahu.harness", json!("kiro")),
+                attribute("ahu.harness", json!("kiro"))
+            ]))
+            .unwrap()
+            .len(),
+            1
         );
         assert!(attrs(&json!([attribute("ahu.status", json!("\u{1b}secret"))])).is_err());
         r.scanned = MAX_SPANS;
@@ -327,7 +336,10 @@ fn attrs(value: &Value) -> Result<BTreeMap<String, Value>> {
         } else {
             return Err(invalid());
         };
-        if out.insert(key.to_owned(), scalar).is_some() {
+        if out
+            .insert(key.to_owned(), scalar.clone())
+            .is_some_and(|old| old != scalar)
+        {
             return Err(invalid());
         }
     }
