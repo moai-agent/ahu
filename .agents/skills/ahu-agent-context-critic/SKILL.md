@@ -20,8 +20,10 @@ changes and commits them; never commit or push as part of this workflow.
 - A skill or instruction being present does not prove the harness loaded it.
   Telemetry can show MCP tool discovery and calls, errors, and typed decisions;
   it does not show all native skill or prompt loading.
-- Eval records and run artifacts belong outside the repository. Do not copy
-  prompts, traces, transcripts, or private run artifacts into repository files.
+- Bounded eval records and derived summaries belong in the primary checkout's
+  ignored `.ahu/evals/` by default; explicit external paths remain supported.
+  Keep raw prompts, traces, transcripts, and run artifacts outside repositories.
+  Never commit or upload local results or include private tracker content.
 
 ## Workflow
 
@@ -58,7 +60,7 @@ changes and commits them; never commit or push as part of this workflow.
    ahu will refuse candidate launches while either context or lock is uncommitted
    or the lock is stale. This makes every evaluated context variant reproducible
    by its Git revision.
-8. **Compare and decide.** Append candidate runs to the same external JSONL and
+8. **Compare and decide.** Append candidate runs to the same local JSONL and
    run `ahu eval report`. Compare per-case outcome and tool-use results, repeated
    trial variability, token/timing coverage, and regressions. Keep the change
    only when the evidence supports the intended improvement without unacceptable
