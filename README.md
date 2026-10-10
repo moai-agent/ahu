@@ -382,6 +382,5 @@ voice, such as required contractions and passive-voice warnings, along with the
 Oxford comma rules, which flag two-item conjunctions. The reasons are recorded
 beside each entry in `.vale.ini`.
 
-See the [0.9.0 release notes](docs/releases/0.9.0.md) for provider rate-limit
-budgets, capacity-aware delegation candidates, and headless completion and
-recovery reporting. Earlier notes are in [docs/releases/](docs/releases/).
+See the [0.10.0 release notes](docs/releases/0.10.0.md) for Kiro CLI support,
+headless Kiro agents, and improved evaluation and local telemetry evidence. Earlier notes are in [docs/releases/](docs/releases/).
