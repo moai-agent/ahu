@@ -1676,8 +1676,8 @@ The `ahu-host-api` package owns the V1 types and error contract. Existing
 `interactive::v1` and default-build `cmux` Rust paths remain compatibility
 exports. Task fields (`cmux_*`) and the repository mapping (`cmux.json`) retain
 their format; existing records still route exclusively to cmux. The V1 interface
-models the current group/window/workspace topology. It provides no dynamic ABI,
-external executable plugin protocol, or runtime version negotiation.
+models the current group/window/workspace topology. The compiled adapter has no dynamic ABI. Local executable packages use the separate
+[Host protocol V1](executable-hosts.md), with explicit negotiation and activation.
 
 Build or install from the complete source workspace, with its root `Cargo.lock`:
 
@@ -1689,14 +1689,15 @@ cargo build --locked --no-default-features
 ```
 
 The default Cargo feature includes cmux for existing users. `ahu plugins`
-(or `--output json`) reports package presence, Host API version, and selection
+(or `--output json`) reports compiled and explicitly supplied local packages,
+declared Host API version, and selection
 without executing plugin code, probing cmux, reading repository configuration,
 or changing activation. `compiled` and `selected` do not establish reachability
 or capability support. The workspace crates are not published to a registry;
 individual `.crate` archives are package-boundary inspection artifacts, not a
 standalone installation channel. Source installation includes local dependencies.
 
-Set `AHU_INTERACTIVE_PLUGIN=cmux` to explicitly select the package for a process,
+Set `AHU_INTERACTIVE_PLUGIN=cmux` to explicitly select the compiled package for a process,
 or `AHU_INTERACTIVE_PLUGIN=none` to disable session hosting. Unset uses the build
 default. Empty, unknown, and non-Unicode values refuse selection. This is process
 configuration, not persisted project policy or an installation side effect.
@@ -1721,7 +1722,99 @@ core and active independently of session hosting. `ahu cmux install` still
 explicitly delegates native harness hook installation; it does not install or
 activate this session package.
 
-This is a compiled optional-plugin increment, not complete dynamic plugin
+### Local session package discovery and selection
+
+`AHU_PLUGIN_PATH` is an explicit colon-separated list of absolute package
+directories. Each directory must contain `ahu-plugin.md`. There is no default
+search directory, recursive scan, installation, network lookup, Cargo invocation,
+or execution of package code. Unset the variable to inspect only compiled packages;
+an empty value or empty path entry is an error. Discovery never selects a local
+package, even when cmux was omitted at build time.
+
+A package manifest is OKF 0.2 Markdown with YAML frontmatter on the first line,
+closed by a standalone `---` line. LF and CRLF line endings are supported. The
+optional Markdown body is documentation only: it is never configuration or code.
+There is no fallback to the old TOML plugin manifest filename. The required
+frontmatter fields are shown below; an optional `executable` mapping enables the
+separate executable protocol described below.
+
+```markdown
+---
+okf_version: "0.2"
+type: ahu:plugin
+title: Example session host
+description: Example local session package
+tags: [session, example]
+schema_version: 1
+id: example-host
+package: example-session-host
+host_api: 1
+cargo_manifest: Cargo.toml
+---
+
+# Example session host
+
+Local package metadata for discovery.
+```
+
+The `id` is the selection identity. IDs must be unique across the inventory;
+`cmux` and `none` are reserved. Both `id` and `package` use 1–64 lowercase ASCII
+letters, digits, hyphens or underscores and start with a letter. Only OKF 0.2,
+`type: ahu:plugin`, schema 1, and Host API 1 are admitted. Missing, duplicate,
+or incorrectly typed ahu execution fields are errors. Standard and extension OKF
+metadata is retained in the inventory's `metadata` object and remains inert; it
+never grants host capabilities. The named `Cargo.toml` is still parsed as TOML with
+`[package].name` equal to `package`. This checks declared metadata only: it does
+not validate the full Cargo package, resolve dependencies, compile it, or prove
+that it implements Host V1.
+
+`cargo_manifest` is relative to the directory containing `ahu-plugin.md`,
+ends in `Cargo.toml`, and has at most 32 normal path components. Absolute paths,
+empty components, `.`/`..`, and backslashes are refused. Reads use pinned
+directory descriptors and refuse symlinks in every component, including package
+roots, ancestors, and both manifest files; even links within a package are
+refused. Supply physical absolute paths (for example, from `pwd -P`). Root paths
+must be UTF-8, have at most 64 components, and contain no `.` or `..` components.
+Both metadata files must be regular UTF-8 files of at most 64 KiB each; the
+Markdown limit includes both frontmatter and body. At most
+32 package directories and 64 KiB of search-path text are accepted. Invalid
+entries fail the entire inventory, even with selection set to `none`.
+
+The cmux source package includes an inspection manifest with ID `cmux-local`.
+From the physical ahu checkout root:
+
+```sh
+AHU_PLUGIN_PATH="$(pwd -P)/plugins/cmux" ahu plugins --output json
+AHU_PLUGIN_PATH="$(pwd -P)/plugins/cmux" AHU_INTERACTIVE_PLUGIN=cmux-local ahu plugins
+```
+
+The second command explicitly selects the local package for inspection. It does
+not enable it. JSON schema 1 retains the existing fields and adds `origin`,
+`manifest`, `cargo_manifest`, `executable`, and `activation_blocker`. The compiled cmux entry
+comes first, followed by local packages sorted by ID. Local entries always have
+`compiled: false`; source-only entries have an activation blocker. `selected: true`
+records intent, not a running host. Selection remains per-process environment
+configuration; it is not written to tasks, worktrees, or harness settings.
+
+Packages with an `executable` frontmatter mapping can be activated explicitly with
+`ahu plugins --probe [--output json]` or through `interactive::discover()`. The
+[executable host protocol](executable-hosts.md) specifies process resolution,
+framing bounds, version and capability negotiation, deadlines, cancellation,
+path protections, and partial-start outcomes. Ordinary discovery never executes
+the package. Compiled cmux remains the default, and headless execution does not
+consult this inventory.
+
+**Durable external sessions remain blocked.** Existing `cmux_*` task fields and
+`cmux.json` mappings do not pin an external package identity or executable. Ahu
+refuses external task launch, coordinator placement, and operations on those
+records before querying the external host. This preserves existing ownership and
+liveness interpretation. The supplied `cmux-local` package is still source-only:
+there is no executable cmux server, and its native process environment requirements
+have not been converted. Use `cmux` for existing session hosting or `none` to
+disable it. The protocol fixture proves executable activation and Host V1 calls;
+it does not launch real terminal sessions.
+
+This is an executable protocol increment, not complete runtime plugin lifecycle
 support. Plugins run as same-user executable code, without a manifest sandbox.
 Core ownership checks do not protect against a hostile plugin or concurrent
 same-user mutation. Runtime installation/updates, durable references for multiple
@@ -2252,14 +2345,17 @@ standalone account-status command, but its startup TUI displays the signed-in
 email before the prompt. ahu captures that startup display in a bounded
 pseudo-terminal and terminates it without submitting a prompt. The probe sets
 `NO_COLOR=1` for that capture only, because terminal color escape sequences
-split the email apart and defeat extraction. The capture waits a bounded 12
-seconds for a recognizable account line. This check is
-version-sensitive to the visible banner; if the account email is absent, the
-startup format changes, or no account line arrives in that window, ahu reports
-readiness as unavailable and refuses to bind or resume. A startup that reports an
-API key rather than a signed-in account is refused as well: an API key exposes no
-user principal to bind. Turning color off does not establish that every
-Antigravity version prints a banner ahu can read; verify the pair with
+split the email apart and defeat extraction. After the email appears, ahu keeps
+capturing until a recognized auth-mode marker arrives or the output has been
+quiet for 500 ms; the overall probe remains bounded to 12 seconds. This avoids
+classifying a fragmented later `Agent Platform` or API-key marker from only the
+first PTY write. This check is version-sensitive to the visible banner; if the
+account email is absent, the startup format changes, or no account line arrives
+within 12 seconds, ahu reports readiness as unavailable and refuses to bind or
+resume. A startup that reports an API key rather than a signed-in account is
+refused as well: an API key exposes no user principal to bind. Turning color
+off does not establish that every Antigravity version prints a banner ahu can
+read; verify the pair with
 `ahu auth readiness --harness antigravity` rather than assuming it binds.
 This is best-effort identity checking at launch and resume, not an atomic
 credential lock. ahu does not monitor sign-in changes during an active session,

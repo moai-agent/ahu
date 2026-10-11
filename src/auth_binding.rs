@@ -1048,8 +1048,9 @@ fn codex_identity(account: &Value) -> Result<Identity> {
 /// Antigravity has no standalone account-status command, but its startup TUI
 /// renders the signed-in account before a prompt can be entered. Run it in a
 /// bounded pseudo-terminal, capture only that startup text, and terminate it
-/// as soon as an account email appears. No prompt is sent and no model request
-/// is made. If the UI stops exposing a recognizable identity, fail closed.
+/// after an account email and a short quiet interval so fragmented auth-mode
+/// markers can arrive. No prompt is sent and no model request is made. If the
+/// UI stops exposing a recognizable identity, fail closed.
 fn probe_antigravity(cwd: &Path) -> Result<Identity> {
     let executable = crate::selection::resolve_executable("agy")
         .ok_or_else(|| Error::new("Antigravity CLI is not available on PATH"))?;
@@ -1156,13 +1157,25 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
         return Err(Error::new("cannot bound Antigravity startup reads"));
     }
     let deadline = Instant::now() + Duration::from_secs(12);
+    // The startup TUI can emit the account email and auth-mode banner in
+    // separate PTY writes. Keep a short quiet window after the email so a
+    // delayed "Agent Platform" or API-key marker is not mistaken for a
+    // normal account. This does not extend the overall probe deadline.
+    let identity_settle = Duration::from_millis(500);
     let mut output = Vec::new();
+    let mut last_output_at: Option<Instant> = None;
     let mut buffer = [0u8; 4096];
     let outcome = loop {
         if antigravity_needs_folder_trust(&output) {
             break Err(antigravity_folder_trust_error());
         }
-        if extract_email(&output).is_some() {
+        let visible = String::from_utf8_lossy(&output);
+        let auth_mode_visible =
+            visible.contains("Agent Platform") || visible.contains("Gemini API key");
+        if extract_email(&output).is_some()
+            && (auth_mode_visible
+                || last_output_at.is_some_and(|last| last.elapsed() >= identity_settle))
+        {
             break Ok(output);
         }
         if output.len() >= 64 * 1024 {
@@ -1189,7 +1202,10 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
         if ready > 0 {
             match master.read(&mut buffer) {
                 Ok(0) => break Err(Error::new("Antigravity closed its startup terminal")),
-                Ok(count) => output.extend_from_slice(&buffer[..count]),
+                Ok(count) => {
+                    output.extend_from_slice(&buffer[..count]);
+                    last_output_at = Some(Instant::now());
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => (),
                 Err(_) => break Err(Error::new("cannot read Antigravity startup identity")),
@@ -2049,5 +2065,59 @@ mod profile_tests {
         let platform_id = parse_antigravity_identity(platform_output).unwrap();
         assert_eq!(platform_id.identity_kind, "agent-platform");
         assert_eq!(platform_id.principal, "dev@example.com");
+    }
+
+    #[test]
+    fn antigravity_startup_collects_delayed_auth_mode_after_email() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let fixtures = [
+            (
+                "agy-platform",
+                "printf 'Signed in as work@example.invalid\\n'\n/bin/sleep 0.2\nprintf 'Connected to Agent Platform\\n'\n/bin/sleep 2\n",
+                Some("agent-platform"),
+            ),
+            (
+                "agy-api-key",
+                "printf 'Signed in as work@example.invalid\\n'\n/bin/sleep 0.2\nprintf 'Using Gemini API key\\n'\n/bin/sleep 2\n",
+                None,
+            ),
+        ];
+
+        for (name, body, expected_kind) in fixtures {
+            let executable = temp.path().join(name);
+            std::fs::write(&executable, format!("#!/bin/sh\n{body}")).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+            let output = antigravity_startup(executable.to_str().unwrap(), temp.path()).unwrap();
+            match expected_kind {
+                Some(kind) => {
+                    let identity = parse_antigravity_identity(&output).unwrap();
+                    assert_eq!(identity.identity_kind, kind);
+                }
+                None => assert!(
+                    parse_antigravity_identity(&output)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("API-key authentication")
+                ),
+            }
+        }
+
+        let account = temp.path().join("agy-account");
+        std::fs::write(
+            &account,
+            "#!/bin/sh\nprintf 'Signed in as work@example.invalid\\n'\n/bin/sleep 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let start = std::time::Instant::now();
+        let output = antigravity_startup(account.to_str().unwrap(), temp.path()).unwrap();
+        assert_eq!(
+            parse_antigravity_identity(&output).unwrap().identity_kind,
+            "antigravity-account"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 }

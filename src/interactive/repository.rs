@@ -57,6 +57,7 @@ impl<'a> RepositoryManager<'a> {
     }
 
     pub fn ensure_group(&self, notes: &mut Vec<String>) -> Result<Group> {
+        self.client.check_persistence()?;
         ensure_group(self.client, self.repo, notes)
     }
 
@@ -104,6 +105,7 @@ impl<'a> RepositoryManager<'a> {
     /// Missing and ambiguous relationships fail closed instead of operating on
     /// a similarly named or newly reused surface.
     fn recorded_workspace(&self, record: &TaskRecord) -> Result<Option<String>> {
+        self.client.check_persistence()?;
         let Some(workspace_id) = record.cmux_workspace_id.as_deref() else {
             return Ok(None);
         };
@@ -197,6 +199,7 @@ impl<'a> RepositoryManager<'a> {
         model: &str,
         args: &[String],
     ) -> Result<CoordinatorPlacement> {
+        self.client.check_persistence()?;
         let Some(workspace) = self.client.inherited_workspace() else {
             return Ok(CoordinatorPlacement {
                 notes: Vec::new(),

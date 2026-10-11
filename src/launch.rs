@@ -602,8 +602,8 @@ pub fn execute(
 
     // cmux must be reachable before a worktree is created, so an unavailable
     // cmux never leaves a worktree behind.
-    let session_host =
-        interactive::discover().map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
+    let session_host = interactive::discover_for_tasks()
+        .map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
     session_host.check_capabilities()?;
 
     if git::branch_exists(repo, &plan.branch)? {
@@ -715,7 +715,7 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
 /// user what exists needs to know about the ones it could not.
 pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
     let mut tasks = task::list(repo)?;
-    let Ok(client) = interactive::discover() else {
+    let Ok(client) = interactive::discover_for_tasks() else {
         return Ok(tasks);
     };
     let Ok(live) = client.workspaces() else {
@@ -1231,7 +1231,10 @@ fn run_verified_task(
     // Nested commands discover the checkout the session edits.
     state::ensure_checkout_state(&record.worktree)?;
     task::set_state(task_dir, TaskState::Running)?;
-    if let (Ok(client), Ok(repo)) = (interactive::discover(), git::discover(&record.worktree)) {
+    if let (Ok(client), Ok(repo)) = (
+        interactive::discover_for_tasks(),
+        git::discover(&record.worktree),
+    ) {
         let _ = interactive::repository::RepositoryManager::new(client.as_ref(), &repo)
             .set_task_status(
                 &record,

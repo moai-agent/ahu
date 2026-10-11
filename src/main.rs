@@ -45,8 +45,12 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             println!("{}", cli::help_for(topic.as_deref())?);
             Ok(0)
         }
-        Command::Plugins { output_json } => {
-            ahu::interactive::plugins::list(output_json)?;
+        Command::Plugins { output_json, probe } => {
+            if probe {
+                ahu::interactive::plugins::probe(output_json)?;
+            } else {
+                ahu::interactive::plugins::list(output_json)?;
+            }
             Ok(0)
         }
         Command::Version => {

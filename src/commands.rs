@@ -820,7 +820,7 @@ pub fn doctor_with_verbosity(
         }
     }
 
-    match interactive::discover() {
+    match interactive::discover_for_tasks() {
         Ok(client) => {
             console.say("cmux         reachable\n")?;
             match client.check_capabilities() {
@@ -935,7 +935,7 @@ fn cmux_liveness_needed(dir: &Path, record: &task::TaskRecord) -> bool {
 /// all when no row can use it. An unreachable cmux is `None`, so liveness degrades to
 /// `unknown` rather than failing the listing.
 fn cmux_workspaces() -> Option<BTreeMap<String, interactive::v1::WorkspaceInfo>> {
-    interactive::discover().ok()?.workspaces().ok()
+    interactive::discover_for_tasks().ok()?.workspaces().ok()
 }
 
 /// Read the cmux workspace list once, if the records being listed need it.
@@ -1913,7 +1913,7 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
     if record.cmux_workspace_id.is_none() {
         bail!("task {} has no recorded cmux session.", record.task_id);
     }
-    let client = interactive::discover()?;
+    let client = interactive::discover_for_tasks()?;
     interactive::repository::RepositoryManager::new(client.as_ref(), repo)
         .select_task_workspace(&record)?;
     console.say(&format!(
@@ -2026,7 +2026,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
         None
     };
     let cmux_status = if record.cmux_workspace_id.is_some() {
-        let client = interactive::discover().map_err(|error| {
+        let client = interactive::discover_for_tasks().map_err(|error| {
             Error::new(format!(
                 "cannot safely remove task {} while its recorded cmux workspace cannot be checked: {error}",
                 display_safe(task_id)
@@ -2236,7 +2236,7 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
     let workspace = match record.cmux_workspace_id.as_deref() {
         None => "absent",
         Some(_workspace_id) if cancellation == "confirmed" => {
-            interactive::discover()
+            interactive::discover_for_tasks()
                 .and_then(|client| {
                     interactive::repository::RepositoryManager::new(client.as_ref(), repo)
                         .close_task_workspace(&record)

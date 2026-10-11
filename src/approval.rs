@@ -403,7 +403,7 @@ fn notify_cmux(repo: &crate::git::Repo, record: &crate::task::TaskRecord, status
     if record.cmux_workspace_id.is_none() {
         return;
     }
-    if let Ok(client) = crate::interactive::discover()
+    if let Ok(client) = crate::interactive::discover_for_tasks()
         && let manager =
             crate::interactive::repository::RepositoryManager::new(client.as_ref(), repo)
     {

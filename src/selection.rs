@@ -184,7 +184,10 @@ pub fn is_excluded(candidate: &Path) -> bool {
 /// `run-task` exec, and the `--version` probes alike. It refuses relative `PATH`
 /// entries and any candidate inside a repository ahu has opened.
 pub fn resolve_executable(executable: &str) -> Option<String> {
-    which(executable, Some).map(|path| path.to_string_lossy().into_owned())
+    which(executable, |candidate| {
+        (!is_excluded(&candidate)).then_some(candidate)
+    })
+    .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Bootstrap utilities without Git, including candidates in unopened worktrees.

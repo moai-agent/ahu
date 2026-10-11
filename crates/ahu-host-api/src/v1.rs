@@ -85,6 +85,12 @@ pub struct WorkspaceRequest<'a> {
 /// Implement V1 explicitly; later incompatible contracts belong in a new module.
 /// This trait is object safe so lifecycle code can use a synthetic host in tests.
 pub trait Host {
+    /// Core must refuse unbound backends before reading or mutating durable
+    /// task/group associations. Existing records belong exclusively to cmux.
+    fn check_persistence(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Workspace inherited by the invoking process, without a host query.
     fn inherited_workspace(&self) -> Option<String>;
     /// Refuse missing launch prerequisites before ahu creates a worktree.

@@ -1,9 +1,10 @@
 //! Interactive session hosting, independent of harness execution.
 //!
-//! V1 is an in-process Rust boundary, not a dynamic plugin ABI or wire protocol.
+//! Host V1 has compiled adapters and a versioned executable wire protocol.
 //! The optional compiled cmux package supplies session mechanics; inventory is
 //! side-effect-free and activation is separate from executable discovery.
 
+pub mod external;
 pub mod plugins;
 pub mod repository;
 pub mod v1;
@@ -14,6 +15,10 @@ use std::path::Path;
 /// Activate the selected host, preserving the historical connection API.
 /// Side-effect-free plugin discovery uses `plugins::status`, not this function.
 pub fn discover() -> Result<Box<dyn v1::Host>> {
+    let status = plugins::status()?;
+    if status.selected && status.origin == "local-manifest" {
+        return Ok(Box::new(external::ExternalHost::connect(&status)?));
+    }
     plugins::require_cmux()?;
     #[cfg(feature = "cmux-plugin")]
     {
@@ -23,12 +28,27 @@ pub fn discover() -> Result<Box<dyn v1::Host>> {
     unreachable!("require_cmux refuses a build without the plugin")
 }
 
+/// Existing durable records have no external host binding. Never let a
+/// selected executable interpret cmux identifiers or liveness evidence.
+pub fn discover_for_tasks() -> Result<Box<dyn v1::Host>> {
+    let status = plugins::status()?;
+    if status.selected && status.origin == "local-manifest" {
+        return Err(crate::util::Error::new(external::PERSISTENCE_BLOCKER)
+            .with_kind(crate::util::ErrorKind::Prerequisite));
+    }
+    discover()
+}
+
 /// A coordinator outside a cmux workspace still runs in its invoking terminal.
 /// Keep this selection at the adapter boundary, before probing any host.
 pub fn discover_for_coordinator() -> Result<Option<Box<dyn v1::Host>>> {
     let status = plugins::status()?;
     if !status.selected {
         return Ok(None);
+    }
+    if status.origin == "local-manifest" {
+        return Err(crate::util::Error::new(external::PERSISTENCE_BLOCKER)
+            .with_kind(crate::util::ErrorKind::Prerequisite));
     }
     plugins::require_cmux()?;
     if std::env::var("CMUX_WORKSPACE_ID")

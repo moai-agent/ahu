@@ -4,6 +4,8 @@
 //! the invoking checkout. The only mutating Git operation it performs is
 //! creating and removing its own task worktrees and deleting their branches.
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -26,11 +28,12 @@ pub struct Repo {
 impl Repo {
     /// Every checkout sharing this repository's Git common directory.
     fn worktree_roots(&self) -> Result<Vec<PathBuf>> {
-        let listing = run_ok(&self.root, &["worktree", "list", "--porcelain", "-z"])?;
+        let listing = run_ok_bytes(&self.root, &["worktree", "list", "--porcelain", "-z"])?;
         let roots = listing
-            .split('\0')
-            .filter_map(|field| field.strip_prefix("worktree "))
-            .map(PathBuf::from)
+            .split(|byte| *byte == 0)
+            .filter_map(|field| field.strip_prefix(b"worktree "))
+            .filter(|path| !path.is_empty())
+            .map(|path| PathBuf::from(OsStr::from_bytes(path)))
             .collect::<Vec<_>>();
         if roots.is_empty() {
             return Err(Error::new("Git did not report any repository worktrees"));
@@ -90,6 +93,12 @@ pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
 }
 
 pub(crate) fn run_ok(dir: &Path, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8_lossy(&run_ok_bytes(dir, args)?)
+        .trim()
+        .to_string())
+}
+
+fn run_ok_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let out = run(dir, args)?;
     if !out.status.success() {
         bail!(
@@ -98,7 +107,7 @@ pub(crate) fn run_ok(dir: &Path, args: &[&str]) -> Result<String> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(out.stdout)
 }
 
 /// Find the repository containing `start`.
