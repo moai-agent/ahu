@@ -390,3 +390,39 @@ fn remove_clears_a_record_left_in_the_checkout_store() {
     assert!(text.contains("  record    removed\n"), "{text}");
     assert!(!dir.exists(), "the record outlived removal");
 }
+
+#[test]
+fn unavailable_plugin_preserves_legacy_cmux_records_and_owned_resources() {
+    let repo = fixture();
+    let id = "006aa50000000000plugin";
+    let dir = prepare_task(&repo, id);
+    let worktree = worktree_of(&repo, id);
+    let mut record = task::load(&dir).unwrap();
+    record.cmux_workspace_id = Some("legacy-workspace".into());
+    record.cmux_group_id = Some("legacy-group".into());
+    record.cmux_window_id = Some("legacy-window".into());
+    task::save(&dir, &record, "current work").unwrap();
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    for command in ["focus", "remove"] {
+        let output = common::ahu()
+            .current_dir(repo.path())
+            .args([command, id])
+            .env("AHU_INTERACTIVE_PLUGIN", "none")
+            .output()
+            .unwrap();
+        let text = text_of(&output);
+        assert!(!output.status.success(), "{text}");
+        assert!(text.contains("cmux session plugin"), "{text}");
+        assert!(
+            text.contains(if cfg!(feature = "cmux-plugin") {
+                "AHU_INTERACTIVE_PLUGIN=cmux"
+            } else {
+                "--features cmux-plugin"
+            }),
+            "{text}"
+        );
+        assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+        assert!(worktree.is_dir());
+        assert!(git::branch_exists(&git::discover(repo.path()).unwrap(), &branch_of(id)).unwrap());
+    }
+}

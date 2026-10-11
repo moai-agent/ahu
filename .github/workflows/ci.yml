@@ -49,11 +49,16 @@ jobs:
           python3 scripts/check-skills.py
           python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Build
         run: cargo build --locked
       - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Check optional session plugin absence
+        run: |
+          cargo clippy --no-default-features --all-targets --locked -- -D warnings
+          cargo test --no-default-features --locked --test plugins --test cmux_facade --test task_remove --test utility_resolution
+          cargo test --no-default-features --locked --test headless foreground_keeps_primary_coordination_and_identity_without_native_copies
       - name: Install synthetic harness executables
         run: |
           set -euo pipefail
@@ -76,7 +81,7 @@ jobs:
       - name: Test and report code coverage
         run: |
           unset AHU_TEST_CMUX XDG_CONFIG_HOME OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT
-          cargo llvm-cov --all-targets --locked --summary-only -- --test-threads="$TEST_THREADS"
+          cargo llvm-cov --workspace --all-targets --locked --summary-only -- --test-threads="$TEST_THREADS"
           cargo llvm-cov report --json --summary-only | python3 -B scripts/check-eval-mcp-coverage.py
       # Configured knowledge validation remains a separate maintainer check:
       # install OKF 0.5.0 outside the checkout, then run
@@ -129,8 +134,11 @@ jobs:
       - name: Validate the release package
         run: |
           set -euo pipefail
-          cargo package --locked --no-verify
-          if cargo package --locked --no-verify --list | grep -Eiq '(^|/)(\.ahu|\.env|.*\.(pem|key|log|trace|dump|sqlite|db)|credentials|secrets)(/|$)'; then
+          # These private workspace crates are built/installed from the locked
+          # source workspace, not a registry. Archives inspect each package's
+          # file boundary; generating registry lockfiles requires publication.
+          cargo package --workspace --locked --no-verify --exclude-lockfile
+          if cargo package --workspace --locked --no-verify --exclude-lockfile --list | grep -Eiq '(^|/)(\.ahu|\.env|.*\.(pem|key|log|trace|dump|sqlite|db)|credentials|secrets)(/|$)'; then
             echo 'Release package contains a private-state or credential-like path' >&2
             exit 1
           fi

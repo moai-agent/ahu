@@ -23,6 +23,8 @@
 //! is that test binary, so the workspace runs a harmless no-op instead of a
 //! coding agent. The only harness subprocesses are `--version` probes.
 
+#![cfg(feature = "cmux-plugin")]
+
 mod common;
 
 use std::path::{Path, PathBuf};

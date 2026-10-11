@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use crate::agent::ResolvedAgent;
 use crate::bail;
 #[cfg(test)]
-use crate::cmux::{self, Cmux};
+use crate::cmux;
+#[cfg(all(test, feature = "cmux-plugin"))]
+use crate::cmux::Cmux;
 use crate::config::LoadedConfig;
 use crate::git::{self, Repo};
 use crate::harness::{self, EnforcementReport, LaunchCommand, LaunchRequest};
@@ -662,7 +664,7 @@ pub fn execute(
 }
 
 /// Compatibility wrapper for launch-local tests; policy lives in the shared manager.
-#[cfg(test)]
+#[cfg(all(test, feature = "cmux-plugin"))]
 fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<cmux::Group> {
     cmux::repository::RepositoryManager::new(client, repo).ensure_group(notes)
 }

@@ -840,6 +840,7 @@ fn verification_resolves_workspace_path_without_executing_or_trusting_record_pat
     }
 }
 
+#[cfg(feature = "cmux-plugin")]
 #[test]
 fn group_mapping_recovers_stale_groups_and_restores_promoted_anchors() {
     use std::os::unix::fs::PermissionsExt;

@@ -1671,23 +1671,62 @@ group/window ownership again before task mutations. Launch admission, native
 credentials and approvals, `run-task` supervision, cancellation confirmation,
 and worktree cleanup remain in their existing core paths.
 
-This is a first extraction, not an installable plugin protocol. Discovery still
-selects cmux; interactive task launches still require it. Existing `cmux` Rust
-paths are compatibility re-exports, and task fields (`cmux_*`) and the repository
-mapping (`cmux.json`) retain their format. The V1 interface models the current
-group/window/workspace topology and is versioned by its Rust module; it offers
-no runtime negotiation or stable binary ABI.
+The adapter is now the optional `ahu-cmux-plugin` Rust package in `plugins/cmux`.
+The `ahu-host-api` package owns the V1 types and error contract. Existing
+`interactive::v1` and default-build `cmux` Rust paths remain compatibility
+exports. Task fields (`cmux_*`) and the repository mapping (`cmux.json`) retain
+their format; existing records still route exclusively to cmux. The V1 interface
+models the current group/window/workspace topology. It provides no dynamic ABI,
+external executable plugin protocol, or runtime version negotiation.
 
-Headless execution still needs no interactive host. Native cmux hook inspection,
-wrapper refusal, environment cleanup, and headless isolation checks remain
-active independently of session hosting. Removing the session adapter must not
-remove those checks.
+Build or install from the complete source workspace, with its root `Cargo.lock`:
 
-A complete optional package still needs decisions on explicit backend selection
-and missing-backend behavior, packaging and host trust, protocol/version and
-capability negotiation, durable backend-tagged session references and legacy
-record routing, and whether hosts without cmux-style groups are supported.
-No alternate host or automatic fallback is selected by this interface.
+```sh
+cargo build --locked --features cmux-plugin
+cargo install --path . --locked --features cmux-plugin
+# A separate build that omits cmux session mechanics:
+cargo build --locked --no-default-features
+```
+
+The default Cargo feature includes cmux for existing users. `ahu plugins`
+(or `--output json`) reports package presence, Host API version, and selection
+without executing plugin code, probing cmux, reading repository configuration,
+or changing activation. `compiled` and `selected` do not establish reachability
+or capability support. The workspace crates are not published to a registry;
+individual `.crate` archives are package-boundary inspection artifacts, not a
+standalone installation channel. Source installation includes local dependencies.
+
+Set `AHU_INTERACTIVE_PLUGIN=cmux` to explicitly select the package for a process,
+or `AHU_INTERACTIVE_PLUGIN=none` to disable session hosting. Unset uses the build
+default. Empty, unknown, and non-Unicode values refuse selection. This is process
+configuration, not persisted project policy or an installation side effect.
+Actual cmux activation resolves the executable with the existing core checks,
+then the package pings cmux. Task launch checks capabilities before creating a
+worktree. No harness, model, or backend substitution occurs.
+
+Without the package, or with `none`, headless tasks and local inspection remain
+available. Coordinators (`ahu codex`, etc.) stay in the current terminal, even
+inside cmux, without grouping or sidebar updates. Explicit selection of an absent
+cmux package refuses coordinator startup. Task launches, focus, Markdown opening,
+and removal requiring a recorded cmux workspace return an actionable error.
+Unavailable inventory remains unknown; records are not marked stale or deleted
+on that evidence. Re-enable/rebuild the plugin to inspect or clean up recorded
+cmux resources. Disabling it does not close existing sessions. Cancellation still
+uses core supervision; workspace close remains best effort after confirmed
+termination and can be retried with the plugin available.
+
+Headless execution never needs the session package. Native cmux hook inspection,
+wrapper refusal, environment cleanup, and headless isolation checks remain in
+core and active independently of session hosting. `ahu cmux install` still
+explicitly delegates native harness hook installation; it does not install or
+activate this session package.
+
+This is a compiled optional-plugin increment, not complete dynamic plugin
+support. Plugins run as same-user executable code, without a manifest sandbox.
+Core ownership checks do not protect against a hostile plugin or concurrent
+same-user mutation. Runtime installation/updates, durable references for multiple
+backends, non-cmux topologies, and dynamic compatibility negotiation remain future
+integration decisions. GitKB behavior is not defined or implemented here.
 
 ## cmux native integration
 
