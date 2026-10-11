@@ -372,8 +372,24 @@ fn validate_request(request: &Value, session: &mut task_protocol::Session) -> Op
 fn write_response(output: &mut impl Write, value: &Value) -> Result<()> {
     let encoded = serde_json::to_vec(value)?;
     if encoded.len().saturating_add(1) > MAX_FRAME_BYTES {
+        let Some(response_id) = value.get("id") else {
+            // Oversized notifications have no request to correlate an error to.
+            // Suppress them instead of emitting an invalid unsolicited error.
+            return Ok(());
+        };
+        let id = if response_id
+            .as_str()
+            .is_some_and(|value| value.len() <= MAX_REQUEST_ID_BYTES)
+            || response_id.is_i64()
+            || response_id.is_u64()
+            || response_id.is_null()
+        {
+            response_id.clone()
+        } else {
+            Value::Null
+        };
         let fallback = rpc_error(
-            &Value::Null,
+            &id,
             -32603,
             format!("MCP response exceeds {MAX_FRAME_BYTES} bytes"),
         );
@@ -965,15 +981,36 @@ mod tests {
 
         let oversized = serde_json::json!({
             "jsonrpc":"2.0",
-            "id":"x".repeat(MAX_FRAME_BYTES),
-            "result":{}
+            "id":77,
+            "result":{"text":"x".repeat(MAX_FRAME_BYTES)}
         });
         let mut encoded = Vec::new();
         write_response(&mut encoded, &oversized).unwrap();
         assert!(encoded.len() <= MAX_FRAME_BYTES);
         let fallback: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(fallback["id"], 77);
+        assert_eq!(fallback["error"]["code"], -32603);
+
+        let oversized_id = serde_json::json!({
+            "jsonrpc":"2.0",
+            "id":"x".repeat(MAX_FRAME_BYTES),
+            "result":{}
+        });
+        let mut encoded = Vec::new();
+        write_response(&mut encoded, &oversized_id).unwrap();
+        assert!(encoded.len() <= MAX_FRAME_BYTES);
+        let fallback: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(fallback["id"], Value::Null);
         assert_eq!(fallback["error"]["code"], -32603);
+
+        let oversized_notification = serde_json::json!({
+            "jsonrpc":"2.0",
+            "method":"notifications/tasks/list_changed",
+            "params":{"text":"x".repeat(MAX_FRAME_BYTES)}
+        });
+        let mut encoded = Vec::new();
+        write_response(&mut encoded, &oversized_notification).unwrap();
+        assert!(encoded.is_empty());
     }
 
     #[test]

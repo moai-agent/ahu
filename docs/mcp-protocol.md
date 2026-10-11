@@ -58,9 +58,15 @@ legacy handshake when the probe is not understood. Malformed JSON receives
 `-32700`; invalid envelopes (including batches, missing/wrong `jsonrpc`, missing
 or non-string methods, response-shaped messages, and invalid IDs) receive
 `-32600` with a null ID. Request IDs must be strings or integers, not null,
-true/false values, arrays, objects, or fractional numbers. This server sends no requests
-to clients and does not accept response envelopes. Method parameters, when
-present, must be objects (`-32602` otherwise).
+true/false values, arrays, objects, or fractional numbers. String IDs are limited
+to 256 UTF-8 bytes; longer IDs receive `-32600` with a null ID. The server also
+limits each serialized response frame, including its newline, to 1 MiB. If a
+response would exceed that bound, it sends a small `-32603` error with the
+original bounded ID when available, or a null ID when it cannot safely echo one.
+Oversize outbound notifications are suppressed because they have no request ID
+to correlate an error with. This server sends no requests to clients and does
+not accept response envelopes.
+Method parameters, when present, must be objects (`-32602` otherwise).
 
 An envelope with no ID is a notification, regardless of its method name. Valid
 notification envelopes receive no response, even with unknown methods, invalid
