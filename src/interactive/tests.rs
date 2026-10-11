@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 struct SyntheticHost {
     groups: Vec<Group>,
+    groups_for_window: Option<Vec<Group>>,
     window: String,
     workspaces: BTreeMap<String, WorkspaceInfo>,
     inventory_error: bool,
@@ -30,6 +31,7 @@ impl SyntheticHost {
                 member_workspace_ids: vec!["task-workspace".into()],
                 is_collapsed: false,
             }],
+            groups_for_window: None,
             window: "window".into(),
             workspaces: BTreeMap::from([(
                 "task-workspace".into(),
@@ -61,9 +63,14 @@ impl Host for SyntheticHost {
     fn check_capabilities(&self) -> Result<Vec<String>> {
         panic!("unexpected capability probe")
     }
-    fn list_groups(&self, _: Option<&str>) -> Result<Vec<Group>> {
+    fn list_groups(&self, window: Option<&str>) -> Result<Vec<Group>> {
         if self.groups_error {
             bail!("synthetic group query failed");
+        }
+        if window == Some(self.window.as_str())
+            && let Some(groups) = &self.groups_for_window
+        {
+            return Ok(groups.clone());
         }
         Ok(self.groups.clone())
     }
@@ -143,6 +150,30 @@ impl Host for SyntheticHost {
     fn set_agent_metadata(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
         panic!("unexpected metadata")
     }
+}
+
+#[test]
+fn task_ownership_uses_the_recorded_window_when_resolving_its_group() {
+    let (_temp, repo, loaded, plan) = fixture();
+    let mut record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+    record.cmux_workspace_id = Some("task-workspace".into());
+    record.cmux_group_id = Some("group".into());
+    record.cmux_window_id = Some("window".into());
+
+    let mut host = SyntheticHost::new(&repo);
+    let window_group = host.groups[0].clone();
+    host.groups.push(Group {
+        id: "other-window-group".into(),
+        name: "other window".into(),
+        anchor_workspace_id: "other-anchor".into(),
+        member_workspace_ids: vec!["task-workspace".into()],
+        is_collapsed: false,
+    });
+    host.groups_for_window = Some(vec![window_group]);
+
+    let manager = RepositoryManager::new(&host, &repo);
+    manager.select_task_workspace(&record).unwrap();
+    assert_eq!(*host.mutations.borrow(), ["focus:task-workspace"]);
 }
 
 #[test]

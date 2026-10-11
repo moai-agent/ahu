@@ -112,7 +112,7 @@ impl<'a> RepositoryManager<'a> {
         if !self.client.workspaces()?.contains_key(workspace_id) {
             return Ok(None);
         }
-        let groups = self.client.list_groups(None)?;
+        let groups = self.client.list_groups(record.cmux_window_id.as_deref())?;
         let owners: Vec<_> = groups
             .iter()
             .filter(|group| {

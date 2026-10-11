@@ -556,6 +556,30 @@ fn workspace_creation_failed(
     }
 }
 
+/// Record the created workspace without reverting task metadata written by
+/// `run-task` after the workspace shell started. The child uses the same lock
+/// for task-state transitions, so whichever write acquires it second reloads
+/// and preserves the first write.
+fn record_created_workspace(
+    task_dir: &Path,
+    record: &mut TaskRecord,
+    group_id: &str,
+    workspace_id: &str,
+    window_id: &str,
+) -> Result<()> {
+    let _lock = task::lock_state(task_dir)?;
+    let mut latest = task::load(task_dir)?;
+    latest.cmux_group_id = Some(group_id.to_owned());
+    latest.cmux_workspace_id = Some(workspace_id.to_owned());
+    latest.cmux_window_id = Some(window_id.to_owned());
+    state::write_json(
+        &crate::storage::TaskStorage::new(task_dir).record(),
+        &latest,
+    )?;
+    *record = latest;
+    Ok(())
+}
+
 /// Remove a task directory a failed launch created, but never through a path
 /// ahu would refuse to write to.
 ///
@@ -674,12 +698,15 @@ pub fn execute(
     };
     let group = placement.group;
     let created = placement.workspace;
-    record.cmux_group_id = Some(group.id.clone());
-    record.cmux_workspace_id = Some(created.workspace_id.clone());
-    record.cmux_window_id = Some(created.window_id.clone());
     // Past this point the workspace exists and its shell may already be running
     // the harness, so nothing is torn down automatically; problems are reported.
-    if let Err(e) = task::save(&plan.task_dir, &record, prompt) {
+    if let Err(e) = record_created_workspace(
+        &plan.task_dir,
+        &mut record,
+        &group.id,
+        &created.workspace_id,
+        &created.window_id,
+    ) {
         notes.push(format!(
             "the cmux session started but its task record could not be updated: {e}"
         ));
