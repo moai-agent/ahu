@@ -16,7 +16,7 @@ use admission::{
     unix_now, validate_parent_attempt,
 };
 use journal::recover_resume;
-pub(crate) use journal::{durable_json, read_json, read_json_full};
+pub(crate) use journal::{durable_json, read_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::Read;
@@ -2222,7 +2222,7 @@ fn boundary_after_drain(events: &mut Events, stop: &mut Option<(&'static str, In
 pub fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>> {
     let spec: Spec = read_json(&dir.join("headless.json")).ok()?;
     let result_path = attempt_dir(dir, &spec).join("result.json");
-    let result: Value = read_json_full(&result_path).ok()?;
+    let result = review::read_result(&result_path, None).ok()?;
     let paths: Vec<String> = result
         .get("writes_outside_worktree")?
         .as_array()?
@@ -3021,7 +3021,7 @@ pub(crate) fn private_attempt_metrics(
             bail!("private report exceeds its observation bound");
         }
         let bytes = review::read_bytes(&path, Some(1024 * 1024))?;
-        let value: Value = serde_json::from_slice(&bytes)
+        let value = crate::structured::parse_json(&bytes)
             .map_err(|_| Error::new("invalid headless result metadata"))?;
         review::validate_result(&value, &id, number)?;
         let metrics = match value.get("metrics") {
@@ -3157,7 +3157,7 @@ fn result(dir: &Path) -> Result<Value> {
 fn result_attempt(dir: &Path, spec: &Spec) -> Result<Value> {
     let path = attempt_dir(dir, spec).join("result.json");
     if path.exists() {
-        let value: Value = read_json_full(&path)?;
+        let value = review::read_result(&path, None)?;
         review::validate_result(
             &value,
             &dir.file_name().unwrap_or_default().to_string_lossy(),
@@ -3229,7 +3229,7 @@ fn wait(dir: &Path, json_output: bool) -> Result<i32> {
     loop {
         // Validate public review output without applying the interactive display-size
         // limit to wait's existing full-envelope API.
-        let value = review_attempt(dir, &spec, read_json_full)?;
+        let value = review_attempt(dir, &spec, |path| review::read_result(path, None))?;
         if value["outcome"] != "running" {
             let code = if value["outcome"] == "succeeded" {
                 0
@@ -3313,7 +3313,12 @@ pub fn control(
     match action {
         "result" => {
             let spec: Spec = review::read(&dir.join("headless.json"))?;
-            emit(&review_attempt(&dir, &spec, review::read)?, json_output)?;
+            emit(
+                &review_attempt(&dir, &spec, |path| {
+                    review::read_result(path, Some(1024 * 1024))
+                })?,
+                json_output,
+            )?;
             Ok(0)
         }
         "wait" => wait(&dir, json_output),
@@ -3601,7 +3606,9 @@ pub fn inspection(dir: &Path) -> Result<Value> {
             ));
         }
     };
-    match review_attempt(dir, &spec, review::read) {
+    match review_attempt(dir, &spec, |path| {
+        review::read_result(path, Some(1024 * 1024))
+    }) {
         Ok(value) => Ok(value["review"].clone()),
         Err(_) => Ok(review::projection(
             dir,

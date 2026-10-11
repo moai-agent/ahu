@@ -260,6 +260,64 @@ fn structured_contract_completes_and_persists_a_validated_result() {
 }
 
 #[test]
+fn structured_large_artifact_remains_readable_from_persisted_result() {
+    let f = Fixture::new();
+    let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        original.replacen(
+            "---\n",
+            "---\noutput_schema:\n  type: array\n  maxItems: 4095\n  items: {const: 0}\n",
+            1,
+        ),
+    )
+    .unwrap();
+    f.repo.commit("declare large structured result contract");
+    let payload = format!("[{}]", vec!["0"; 4095].join(","));
+    let out = f
+        .command()
+        .env("SCENARIO", "success")
+        .env("AHU_STRUCTURED_RESULT_JSON", &payload)
+        .args([
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "persist a bounded large result",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let launch = Fixture::value(&out);
+    let task_id = launch["task_id"].as_str().unwrap();
+    let readback = f
+        .command()
+        .args(["result", task_id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        readback.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&readback.stdout),
+        String::from_utf8_lossy(&readback.stderr)
+    );
+    assert_eq!(
+        Fixture::value(&readback)["structured_output"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4095
+    );
+}
+
+#[test]
 fn structured_reserved_marker_artifacts_cannot_change_after_result_persistence() {
     let f = Fixture::new();
     let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");

@@ -9,15 +9,46 @@ pub const MAX_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_DEPTH: usize = 32;
 pub(crate) const MAX_NODES: usize = 4096;
 const MAX_STEPS: usize = 100_000;
+const MAX_RESULT_DEPTH: usize = 128;
+const MAX_RESULT_NODES: usize = 131_072;
 const DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
+}
+
+impl<'de> Deserialize<'de> for Contract {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            #[serde(default)]
+            input: Option<Box<serde_json::value::RawValue>>,
+            #[serde(default)]
+            output: Option<Box<serde_json::value::RawValue>>,
+        }
+        let fields = Fields::deserialize(d)?;
+        let parse_schema = |raw: Option<Box<serde_json::value::RawValue>>| {
+            raw.map(|raw| parse(raw.get().as_bytes()).map_err(serde::de::Error::custom))
+                .transpose()
+        };
+        let contract = Self {
+            input: parse_schema(fields.input)?,
+            output: parse_schema(fields.output)?,
+        };
+        if let Some(schema) = &contract.input {
+            check_schema(schema).map_err(serde::de::Error::custom)?;
+        }
+        if let Some(schema) = &contract.output {
+            check_schema(schema).map_err(serde::de::Error::custom)?;
+        }
+        Ok(contract)
+    }
 }
 
 impl Contract {
@@ -117,18 +148,29 @@ pub fn parse(bytes: &[u8]) -> Result<Value> {
     if bytes.len() > MAX_BYTES {
         return Err(Error::new("JSON artifact exceeds 65536 bytes"));
     }
+    parse_with_limits(bytes, MAX_DEPTH, MAX_NODES)
+}
+
+/// Parse a bounded JSON value while preserving object member names across
+/// serde_json's internal number/raw-value representation. Used for durable
+/// result envelopes, which have their own file-size policy.
+pub(crate) fn parse_json(bytes: &[u8]) -> Result<Value> {
+    parse_with_limits(bytes, MAX_RESULT_DEPTH, MAX_RESULT_NODES)
+}
+
+fn parse_with_limits(bytes: &[u8], max_depth: usize, max_nodes: usize) -> Result<Value> {
     // Bound recursion with serde_json's shared parser before recursively checking raw
     // subvalues. Each raw-value parser otherwise starts a fresh recursion budget.
     let preliminary: Value = serde_json::from_slice(bytes)
         .map_err(|_| Error::new("artifact must contain one valid JSON value"))?;
-    bounded(&preliminary, 0, &mut 0)?;
+    bounded_with_limits(&preliminary, 0, &mut 0, max_depth, max_nodes)?;
     // Reject duplicate object keys rather than silently selecting the final constraint/value.
     let value = serde_json::from_slice::<UniqueValue>(bytes)
         .map_err(|_| {
             Error::new("artifact must contain one valid JSON value without duplicate keys")
         })?
         .0;
-    bounded(&value, 0, &mut 0)?;
+    bounded_with_limits(&value, 0, &mut 0, max_depth, max_nodes)?;
     reject_private_marker_keys(&value)?;
     Ok(value)
 }
@@ -185,19 +227,29 @@ impl<'de> Deserialize<'de> for UniqueValue {
 }
 
 fn bounded(v: &Value, depth: usize, nodes: &mut usize) -> Result<()> {
+    bounded_with_limits(v, depth, nodes, MAX_DEPTH, MAX_NODES)
+}
+
+fn bounded_with_limits(
+    v: &Value,
+    depth: usize,
+    nodes: &mut usize,
+    max_depth: usize,
+    max_nodes: usize,
+) -> Result<()> {
     *nodes += 1;
-    if depth > MAX_DEPTH || *nodes > MAX_NODES {
-        return Err(Error::new("JSON exceeds depth 32 or node limit 4096"));
+    if depth > max_depth || *nodes > max_nodes {
+        return Err(Error::new("JSON exceeds its depth or node limit"));
     }
     match v {
         Value::Object(m) => {
             for v in m.values() {
-                bounded(v, depth + 1, nodes)?;
+                bounded_with_limits(v, depth + 1, nodes, max_depth, max_nodes)?;
             }
         }
         Value::Array(a) => {
             for v in a {
-                bounded(v, depth + 1, nodes)?;
+                bounded_with_limits(v, depth + 1, nodes, max_depth, max_nodes)?;
             }
         }
         Value::Number(n) if number(n).is_none() => {
@@ -686,6 +738,13 @@ mod tests {
         ] {
             assert!(check_schema(&schema).is_err());
         }
+        for frozen in [
+            br#"{"output":{"const":{"$serde_json::private::Number":"123"}}}"#.as_slice(),
+            br#"{"input":{"properties":{"x":{"enum":[{"$serde_json::private::RawValue":"{}"}]}}}}"#
+                .as_slice(),
+        ] {
+            assert!(serde_json::from_slice::<Contract>(frozen).is_err());
+        }
 
         let schema = json!({"const":{"approved":"yes"}});
         let contract = Contract {
@@ -695,6 +754,21 @@ mod tests {
         let persisted = serde_json::to_vec(&contract).unwrap();
         let restored: Contract = serde_json::from_slice(&persisted).unwrap();
         assert_eq!(restored.output, Some(schema));
+    }
+
+    #[test]
+    fn structured_durable_results_allow_artifact_sized_values() {
+        let artifact = format!("[{}]", vec!["0"; 4095].join(","));
+        assert!(parse(artifact.as_bytes()).is_ok());
+        let envelope = format!("{{\"structured_output\":{artifact}}}");
+        assert!(parse_json(envelope.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn structured_contract_deserialization_bounds_raw_schema_before_recursion() {
+        let nested = format!("{}0{}", "[".repeat(8192), "]".repeat(8192));
+        let contract = format!("{{\"output\":{{\"const\":{nested}}}}}");
+        assert!(serde_json::from_str::<Contract>(&contract).is_err());
     }
 
     #[test]
