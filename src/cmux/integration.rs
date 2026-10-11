@@ -1220,7 +1220,10 @@ fn codex_indirection(value: &toml::Value) -> bool {
         return true;
     };
     for (key, entry) in table {
-        if ["notify", "include", "imports", "profile"].contains(&key.as_str())
+        // An explicit empty argv defines no notification command. Keep every
+        // nonempty or malformed value unresolved, including in native profiles.
+        if (key == "notify" && entry.as_array().is_none_or(|args| !args.is_empty()))
+            || ["include", "imports", "profile"].contains(&key.as_str())
             || (["plugins", "marketplaces"].contains(&key.as_str())
                 && entry.as_table().is_none_or(|t| !t.is_empty()))
             || (key == "cli_auth_credentials_store" && entry.as_str() != Some("file"))

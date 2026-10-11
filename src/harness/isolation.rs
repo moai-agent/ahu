@@ -27,9 +27,9 @@ const CODEX_ARGS: &[&str] = &[
 ];
 
 pub fn profile(harness: &str, version: &str) -> Option<Profile> {
-    let version = version
-        .split_whitespace()
-        .find(|v| crate::util::is_semver(v))?;
+    // Admission and invocation must interpret version decoration identically:
+    // a catalog-accepted `v` prefix must not skip mandatory native controls.
+    let version = crate::catalog::version_token(version)?;
     match (harness, version) {
         ("claude-code", "2.1.283") => Some(Profile {
             id: "claude-2.1.283-nonmanaged-hooks-disabled-v1",

@@ -452,7 +452,7 @@ mod tests {
             );
             std::fs::write(&executable, script).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-            for version in ["0.157.1", "0.160.0"] {
+            for version in ["0.157.1", "0.160.0", "codex-cli v0.160.0"] {
                 let result = inspect(&executable, &cwd, version);
                 assert_eq!(result.is_ok(), requirements.is_null());
             }
