@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::v1::{CreatedWorkspace, Group, Host, WorkspaceRequest};
+use super::v1::{
+    CreatedWorkspace, Group, Host, WorkspaceCreationError, WorkspaceCreationResult,
+    WorkspaceRequest,
+};
 use crate::bail;
 use crate::git::{self, Repo};
 use crate::state::{self, LaunchLock};
@@ -66,9 +69,13 @@ impl<'a> RepositoryManager<'a> {
         startup_command: &str,
         focus: bool,
         notes: &mut Vec<String>,
-    ) -> Result<ManagedTaskWorkspace> {
-        let group = self.ensure_group(notes)?;
-        let mapping: GroupMapping = state::read_json(&mapping_path(self.repo)?)?;
+    ) -> WorkspaceCreationResult<ManagedTaskWorkspace> {
+        let group = self
+            .ensure_group(notes)
+            .map_err(WorkspaceCreationError::NotCreated)?;
+        let path = mapping_path(self.repo).map_err(WorkspaceCreationError::NotCreated)?;
+        let mapping: GroupMapping =
+            state::read_json(&path).map_err(WorkspaceCreationError::NotCreated)?;
         let workspace = self.client.create_task_workspace(&WorkspaceRequest {
             group_id: &group.id,
             window_id: mapping.window_id.as_deref(),
@@ -84,13 +91,11 @@ impl<'a> RepositoryManager<'a> {
                 .as_deref()
                 .is_some_and(|window| window != workspace.window_id)
         {
-            // The workspace id is returned by CMUX itself, so cleanup targets
-            // only this newly created workspace if CMUX reports inconsistent
-            // ownership. Never guess which existing workspace should be moved.
-            let _ = self.client.close_workspace(&workspace.workspace_id);
-            bail!(
-                "cmux created a task workspace with an unexpected group or window; the new workspace was closed and no task was started"
-            );
+            // Inconsistent ownership is not permission to close a resource,
+            // nor evidence that the startup command never ran.
+            return Err(WorkspaceCreationError::OutcomeUnknown(Error::new(
+                "cmux reported a task workspace with an unexpected group or window; startup is unconfirmed and no workspace was closed",
+            )));
         }
         Ok(ManagedTaskWorkspace { group, workspace })
     }

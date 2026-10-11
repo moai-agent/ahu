@@ -1,6 +1,8 @@
 //! Compatibility wrapper delegating the V1 contract to the optional package.
 use super::Cmux;
-use crate::interactive::v1::{CreatedWorkspace, Group, Host, WorkspaceInfo, WorkspaceRequest};
+use crate::interactive::v1::{
+    CreatedWorkspace, Group, Host, WorkspaceCreationResult, WorkspaceInfo, WorkspaceRequest,
+};
 use crate::util::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -59,7 +61,10 @@ impl Host for Cmux {
         self.0.expand_group(group_id)
     }
 
-    fn create_task_workspace(&self, request: &WorkspaceRequest<'_>) -> Result<CreatedWorkspace> {
+    fn create_task_workspace(
+        &self,
+        request: &WorkspaceRequest<'_>,
+    ) -> WorkspaceCreationResult<CreatedWorkspace> {
         self.0.create_task_workspace(
             request.group_id,
             request.window_id,

@@ -51,7 +51,7 @@ if args[0] == 'ping': print('PONG'); sys.exit(0)
 if args[0] == 'capabilities':
  print(json.dumps({'capabilities':['workspace.groups.v1','workspace.group_create.v1','workspace.create_in_group.v1']})); sys.exit(0)
 if args[0] == 'new-workspace':
- (base/'new-workspace').touch(); print('workspace:coordinator'); sys.exit(0)
+ (base/'new-workspace').write_text(args[args.index('--cwd')+1]); print('workspace:coordinator'); sys.exit(0)
 if args[0] == 'set-status':
  assert args[1] == 'ahu.agent'
  assert args[2] == 'director · ' + ('antigravity' if os.environ.get('AHU_TEST_PROGRAM') == 'agy' else ('claude-code' if os.environ.get('AHU_TEST_PROGRAM') == 'claude' else os.environ.get('AHU_TEST_PROGRAM'))) + ' · unconfigured'
@@ -70,7 +70,8 @@ elif method == 'workspace.group.list':
  if failure == 'conflict' and params['window_id'] == 'target-window':
   groups.append({'id':'other-group','name':'other repository','anchor_workspace_id':'caller','member_workspace_ids':['caller']})
  print(json.dumps({'groups':groups}))
-elif method == 'workspace.list': print(json.dumps({'workspaces':[]}))
+elif method == 'workspace.list':
+ print(json.dumps({'workspaces':[{'id':'coordinator','current_directory':(base/'new-workspace').read_text()}] if (base/'new-workspace').exists() else []}))
 elif method == 'workspace.move_to_window':
  assert params == {'workspace_id':'caller','window_id':'target-window'}
  (base/'moved').touch(); print('{}')

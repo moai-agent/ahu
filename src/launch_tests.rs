@@ -987,6 +987,179 @@ fi
     }
 }
 
+#[cfg(feature = "cmux-plugin")]
+#[test]
+fn execute_rolls_back_only_proven_non_creation_and_retains_uncertain_tasks() {
+    use std::os::unix::fs::PermissionsExt;
+    const CASE: &str = "AHU_TEST_CREATION_OUTCOME";
+    let Ok(case) = std::env::var(CASE) else {
+        for case in [
+            "preflight-failure",
+            "spawn-failure",
+            "discovery-timeout",
+            "post-group-failure",
+            "post-lookup-failure",
+            "command-failure",
+            "command-signal",
+            "running-before-error",
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let executable = scratch.path().join("cmux");
+            std::fs::write(&executable, r#"#!/usr/bin/env python3
+import json, os, shlex, signal, sys
+from pathlib import Path
+root = Path(os.environ['AHU_TEST_CREATION_SCRATCH'])
+mode = os.environ['AHU_TEST_CREATION_OUTCOME']
+marker = root/'created'
+args = sys.argv[1:]
+if args[0] == 'ping': print('PONG'); sys.exit(0)
+if args[0] == 'capabilities':
+ print(json.dumps({'capabilities':['workspace.groups.v1','workspace.group_create.v1','workspace.create_in_group.v1']})); sys.exit(0)
+if args[0] == 'new-workspace':
+ marker.touch()
+ if mode == 'running-before-error':
+  record_path = Path(shlex.split(args[args.index('--command')+1])[-1])/'task.json'
+  record = json.loads(record_path.read_text())
+  record['state'] = 'running'
+  record_path.write_text(json.dumps(record))
+ if mode == 'command-failure': sys.exit(7)
+ if mode == 'command-signal': os.kill(os.getpid(), signal.SIGTERM)
+ sys.exit(0)
+method = args[1]
+if method == 'workspace.current': print(json.dumps({'window_id':'window'}))
+elif method == 'workspace.group.list':
+ counter = root/'group-queries'
+ count = int(counter.read_text())+1 if counter.exists() else 1
+ counter.write_text(str(count))
+ if mode == 'spawn-failure' and count == 3: Path(sys.argv[0]).unlink()
+ if mode == 'preflight-failure' or (marker.exists() and mode == 'post-group-failure'): sys.exit(8)
+ print(json.dumps({'groups':[{'id':'group','anchor_workspace_id':'anchor','member_workspace_ids':['anchor']+(['other'] if marker.exists() else [])}]}))
+elif method == 'workspace.list':
+ if marker.exists() and mode == 'discovery-timeout':
+  print(json.dumps({'workspaces':[{'id':'other','current_directory':str(root/'unrelated')}]})); sys.exit(0)
+ if marker.exists(): sys.exit(9)
+ print(json.dumps({'workspaces':[]}))
+else:
+ (root/'unexpected-mutation').touch()
+ raise AssertionError(method)
+"#).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "launch::launch_contract_tests::execute_rolls_back_only_proven_non_creation_and_retains_uncertain_tasks", "--nocapture"])
+                .env_clear()
+                .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("HOME", scratch.path())
+                .env("AHU_CMUX_BIN", &executable)
+                .env("AHU_TEST_CREATION_SCRATCH", scratch.path())
+                .env(CASE, case)
+                .current_dir(scratch.path())
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                !scratch.path().join("unexpected-mutation").exists(),
+                "{case}"
+            );
+            assert_eq!(
+                scratch.path().join("created").exists(),
+                !matches!(case, "preflight-failure" | "spawn-failure"),
+                "{case}"
+            );
+        }
+        return;
+    };
+    let (_temp, repo, loaded, mut plan) = fixture();
+    git::run_ok(
+        &repo.root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+    )
+    .unwrap();
+    plan.base_commit = Some(
+        git::run_ok(&repo.root, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .into(),
+    );
+    state::write_json(
+        &mapping_path(&repo).unwrap(),
+        &GroupMapping {
+            group_id: Some("group".into()),
+            window_id: Some("window".into()),
+            anchor_workspace_id: Some("anchor".into()),
+        },
+    )
+    .unwrap();
+    let error = execute(&repo, &loaded, &plan, PROMPT, false)
+        .unwrap_err()
+        .to_string();
+    if matches!(case.as_str(), "preflight-failure" | "spawn-failure") {
+        assert!(!plan.worktree.exists(), "{error}");
+        assert!(!plan.task_dir.exists(), "{error}");
+        assert!(!git::branch_exists(&repo, &plan.branch).unwrap(), "{error}");
+        assert!(
+            crate::task_index::lookup_in(&repo, &plan.task_id)
+                .unwrap()
+                .is_none()
+        );
+    } else {
+        assert!(plan.worktree.is_dir(), "{error}");
+        assert!(git::branch_exists(&repo, &plan.branch).unwrap(), "{error}");
+        assert!(
+            crate::task_index::lookup_in(&repo, &plan.task_id)
+                .unwrap()
+                .is_some()
+        );
+        let record = task::load(&plan.task_dir).unwrap();
+        assert_eq!(
+            record.state,
+            if case == "running-before-error" {
+                TaskState::Running
+            } else {
+                TaskState::Starting
+            }
+        );
+        assert!(record.cmux_workspace_id.is_none());
+        assert_eq!(
+            std::fs::read_to_string(plan.task_dir.join("prompt.txt")).unwrap(),
+            PROMPT
+        );
+        let listing = task::list(&repo).unwrap();
+        assert!(
+            listing
+                .records
+                .iter()
+                .any(|(_, record)| record.task_id == plan.task_id)
+        );
+        for expected in [
+            &plan.task_id,
+            plan.worktree.to_str().unwrap(),
+            &plan.branch,
+            "may have started",
+            "ahu task",
+            "ahu cancel",
+            "git worktree remove",
+        ] {
+            assert!(error.contains(expected), "missing {expected}: {error}");
+        }
+    }
+}
+
 #[test]
 fn rollback_reports_retained_checkout_and_preserves_original_error_kind() {
     let (_temp, repo, _, plan) = fixture();

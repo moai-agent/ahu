@@ -14,9 +14,10 @@
 mod host;
 pub use ahu_host_api::v1::{CreatedWorkspace, Group, WorkspaceInfo};
 
+use ahu_host_api::v1::{WorkspaceCreationError, WorkspaceCreationResult};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 macro_rules! bail {
     ($($arg:tt)*) => { return Err(Error::new(format!($($arg)*))) };
@@ -305,8 +306,9 @@ impl Cmux {
     ///
     /// The CLI does not return JSON in this build, so the new workspace is
     /// identified by diffing group membership and confirming the working
-    /// directory. Callers hold ahu's per-repository launch lock, and the task
-    /// worktree path is unique, so the match is unambiguous.
+    /// directory. Callers hold ahu's per-repository launch lock, but external
+    /// clients can add members concurrently. Only a unique exact directory
+    /// match is accepted; uncertain discovery never closes a workspace.
     ///
     /// `startup_command` is shell-interpreted. Callers must pass a command built
     /// by core’s `interactive::startup_command`, which contains only ahu-owned, shell-quoted
@@ -321,14 +323,16 @@ impl Cmux {
         cwd: &Path,
         startup_command: &str,
         focus: bool,
-    ) -> Result<CreatedWorkspace> {
+    ) -> WorkspaceCreationResult<CreatedWorkspace> {
         let before: std::collections::BTreeSet<String> = self
-            .find_group(group_id, window_id)?
+            .find_group(group_id, window_id)
+            .map_err(WorkspaceCreationError::NotCreated)?
             .ok_or_else(|| {
                 Error::new(format!(
                     "cmux group {group_id} disappeared before the task was created"
                 ))
-            })?
+            })
+            .map_err(WorkspaceCreationError::NotCreated)?
             .member_workspace_ids
             .into_iter()
             .collect();
@@ -358,69 +362,87 @@ impl Cmux {
         if let Some(socket) = &self.socket_path {
             command.env("CMUX_SOCKET_PATH", socket);
         }
-        let output = command
-            .output()
-            .map_err(|e| Error::new(format!("cannot run cmux new-workspace: {e}")))?;
+        // Separate spawn from wait: an output/read/wait error after spawn is not
+        // proof that cmux never delivered the request to its server.
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                WorkspaceCreationError::NotCreated(Error::new(format!(
+                    "cannot run cmux new-workspace: {e}"
+                )))
+            })?;
+        let output = child.wait_with_output().map_err(|e| {
+            WorkspaceCreationError::OutcomeUnknown(Error::new(format!(
+                "cannot collect cmux new-workspace outcome: {e}"
+            )))
+        })?;
         if !output.status.success() {
-            bail!(
-                "cmux new-workspace failed: {}",
+            return Err(WorkspaceCreationError::OutcomeUnknown(Error::new(format!(
+                "cmux new-workspace failed ({}): {}",
+                output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
-            );
+            ))));
         }
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        self.discover_task_workspace(
+            &before,
+            group_id,
+            window_id,
+            cwd,
+            std::time::Duration::from_secs(10),
+        )
+        .map_err(WorkspaceCreationError::OutcomeUnknown)
+    }
+
+    fn discover_task_workspace(
+        &self,
+        before: &std::collections::BTreeSet<String>,
+        group_id: &str,
+        window_id: Option<&str>,
+        cwd: &Path,
+        timeout: std::time::Duration,
+    ) -> Result<CreatedWorkspace> {
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             let group = self.find_group(group_id, window_id)?.ok_or_else(|| {
                 Error::new(format!(
                     "cmux group {group_id} disappeared while the task was starting"
                 ))
             })?;
-            let added: Vec<String> = group
+            let added: std::collections::BTreeSet<_> = group
                 .member_workspace_ids
                 .iter()
                 .filter(|id| !before.contains(*id))
-                .cloned()
                 .collect();
-            match added.len() {
-                0 => {}
-                1 => {
+            if !added.is_empty() {
+                // A sole new member can belong to a concurrent external launch.
+                // Never infer ownership from cardinality, title, or CLI output.
+                let listed = self.workspaces_in_window(window_id)?;
+                let mine: Vec<_> = added
+                    .into_iter()
+                    .filter(|id| {
+                        listed
+                            .get(*id)
+                            .is_some_and(|info| Path::new(&info.directory) == cwd)
+                    })
+                    .collect();
+                if mine.len() == 1 {
                     return Ok(CreatedWorkspace {
-                        workspace_id: added[0].clone(),
+                        workspace_id: mine[0].clone(),
                         window_id: window_id.unwrap_or_default().to_string(),
                         group_id: Some(group_id.to_string()),
                     });
                 }
-                _ => {
-                    // Someone else added a workspace to this group at the same
-                    // moment. Pick the one sitting in this task's worktree.
-                    let listed = self.workspaces_in_window(window_id)?;
-                    let mine: Vec<String> = added
-                        .into_iter()
-                        .filter(|id| {
-                            listed
-                                .get(id)
-                                .map(|info| Path::new(&info.directory) == cwd)
-                                .unwrap_or(false)
-                        })
-                        .collect();
-                    if mine.len() == 1 {
-                        return Ok(CreatedWorkspace {
-                            workspace_id: mine[0].clone(),
-                            window_id: window_id.unwrap_or_default().to_string(),
-                            group_id: Some(group_id.to_string()),
-                        });
-                    }
-                    bail!(
-                        "cmux created the task workspace, but ahu could not identify it among {} \
-                         new members of group {group_id}. The session is running; find it in the \
-                         sidebar under this repository.",
-                        mine.len().max(2)
-                    );
-                }
             }
             if std::time::Instant::now() >= deadline {
                 bail!(
-                    "cmux accepted the task workspace but it did not appear in group {group_id}."
+                    "cmux accepted the create request, but ahu could not uniquely identify a new \
+                     workspace in group {group_id} with directory {}. Startup is unconfirmed; \
+                     no workspace was closed.",
+                    cwd.display()
                 );
             }
             std::thread::sleep(std::time::Duration::from_millis(150));
@@ -438,7 +460,7 @@ impl Cmux {
         summary: &str,
         cwd: &Path,
         startup_command: &str,
-    ) -> Result<CreatedWorkspace> {
+    ) -> WorkspaceCreationResult<CreatedWorkspace> {
         self.create_task_workspace(
             group_id,
             window_id,
@@ -725,6 +747,137 @@ mod presentation_tests {
     }
 
     #[cfg(unix)]
+    fn creation_fixture(root: &Path, mode: &str) -> Cmux {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = root.join("cmux");
+        std::fs::write(&executable, format!(r#"#!/usr/bin/env python3
+import json, os, signal, sys
+from pathlib import Path
+root = Path({root})
+mode = {mode}
+marker = root/'created'
+if sys.argv[1] == 'new-workspace':
+ marker.touch()
+ if mode == 'command-failure': sys.exit(7)
+ if mode == 'command-signal': os.kill(os.getpid(), signal.SIGTERM)
+ sys.exit(0)
+method = sys.argv[2]
+if method == 'workspace.group.list':
+ if mode == 'preflight-failure' or (marker.exists() and mode == 'group-failure'): sys.exit(8)
+ if mode == 'spawn-failure': Path(sys.argv[0]).unlink()
+ count_file = root/'polls'
+ count = int(count_file.read_text())+1 if count_file.exists() else 1
+ count_file.write_text(str(count))
+ added = []
+ if marker.exists():
+  if mode != 'no-candidate': added = ['other']
+  if mode in ['matching', 'duplicate-match'] or (mode == 'delayed-match' and count > 1): added += ['mine']
+ print(json.dumps({{'groups':[{{'id':'group','anchor_workspace_id':'anchor','member_workspace_ids':['anchor']+added}}]}}))
+elif method == 'workspace.list':
+ if mode == 'lookup-failure': sys.exit(9)
+ if mode == 'malformed-lookup': print('not-json'); sys.exit(0)
+ other = str(root) if mode == 'duplicate-match' else str(root/'unrelated')
+ rows = [{{'id':'other','current_directory':other}},{{'id':'mine','current_directory':str(root)}}]
+ if mode == 'missing-directory': rows = [{{'id':'other'}}]
+ print(json.dumps({{'workspaces':rows}}))
+else:
+ (root/'unexpected-mutation').touch()
+ raise AssertionError(method)
+"#, root=serde_json::to_string(root).unwrap(), mode=serde_json::to_string(mode).unwrap())).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        Cmux {
+            executable,
+            socket_path: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_never_accepts_or_closes_unrelated_or_uncertain_candidates() {
+        for mode in [
+            "unrelated",
+            "no-candidate",
+            "missing-directory",
+            "duplicate-match",
+            "lookup-failure",
+            "malformed-lookup",
+            "group-failure",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let client = creation_fixture(temp.path(), mode);
+            std::fs::write(temp.path().join("created"), "").unwrap();
+            let result = client.discover_task_workspace(
+                &["anchor".to_string()].into(),
+                "group",
+                Some("window"),
+                temp.path(),
+                std::time::Duration::ZERO,
+            );
+            assert!(result.is_err(), "{mode}: {result:?}");
+            assert!(!temp.path().join("unexpected-mutation").exists(), "{mode}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_waits_past_a_sole_unrelated_candidate_for_the_matching_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let client = creation_fixture(temp.path(), "delayed-match");
+        std::fs::write(temp.path().join("created"), "").unwrap();
+        let created = client
+            .discover_task_workspace(
+                &["anchor".to_string()].into(),
+                "group",
+                Some("window"),
+                temp.path(),
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(created.workspace_id, "mine");
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("polls")).unwrap(),
+            "2"
+        );
+        assert!(!temp.path().join("unexpected-mutation").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creation_distinguishes_pre_start_failure_from_ambiguous_command_and_lookup_outcomes() {
+        for mode in [
+            "preflight-failure",
+            "spawn-failure",
+            "command-failure",
+            "command-signal",
+            "group-failure",
+            "lookup-failure",
+            "malformed-lookup",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let client = creation_fixture(temp.path(), mode);
+            let error = client
+                .create_task_workspace(
+                    "group",
+                    Some("window"),
+                    "title",
+                    "",
+                    temp.path(),
+                    "true",
+                    false,
+                )
+                .unwrap_err();
+            let not_created = matches!(mode, "preflight-failure" | "spawn-failure");
+            assert_eq!(
+                matches!(error, WorkspaceCreationError::NotCreated(_)),
+                not_created,
+                "{mode}: {error}"
+            );
+            assert_eq!(temp.path().join("created").exists(), !not_created, "{mode}");
+            assert!(!temp.path().join("unexpected-mutation").exists(), "{mode}");
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn concurrent_task_creation_identifies_the_workspace_in_the_target_window() {
         use std::os::unix::fs::PermissionsExt;
@@ -778,6 +931,7 @@ else: raise AssertionError(method)
         std::fs::write(&executable, format!(r#"#!/bin/sh
 case "$1" in
 rpc)
+  if [ "$2" = workspace.list ]; then printf '%s\n' {inventory}; exit 0; fi
   if [ -f {marker} ]; then members='["anchor","task"]'; else members='["anchor"]'; fi
   printf '{{"groups":[{{"id":"group","anchor_workspace_id":"anchor","member_workspace_ids":%s}}]}}\n' "$members"
   ;;
@@ -789,7 +943,7 @@ set-status)
   printf '%s\n' "$@" >> {log}
   ;;
 esac
-"#, marker = shell_single_quote(&marker.to_string_lossy()), log = shell_single_quote(&log.to_string_lossy()))).unwrap();
+"#, marker = shell_single_quote(&marker.to_string_lossy()), log = shell_single_quote(&log.to_string_lossy()), inventory = shell_single_quote(&serde_json::json!({"workspaces":[{"id":"task","current_directory":temp.path()}]}).to_string()))).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let client = Cmux {
             executable,
