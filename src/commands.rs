@@ -2515,6 +2515,12 @@ fn submit(
     output_json: bool,
     display: &launch::DisplayMetadata,
 ) -> Result<i32> {
+    if resolved
+        .as_ref()
+        .is_some_and(|agent| !agent.contract.is_empty())
+    {
+        bail!("structured agent contracts require --headless");
+    }
     crate::telemetry::initialize(&loaded.config.telemetry)?;
     let mut plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
     let mut _span = crate::telemetry::span(

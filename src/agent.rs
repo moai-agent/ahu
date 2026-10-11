@@ -7,6 +7,8 @@
 //! a rewrite. Native agent files found elsewhere are onboarding candidates,
 //! never implicit registrations.
 
+mod schema_frontmatter;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -198,6 +200,8 @@ pub struct AgentManifest {
     /// own default applies; the two declared values are `disabled` and
     /// `bounded`.
     pub native_helpers: Option<String>,
+    pub input_schema: Option<serde_json::Value>,
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// Parse an ahu agent manifest: OKF frontmatter plus a Markdown body.
@@ -208,6 +212,9 @@ pub struct AgentManifest {
 /// fields are ignored so a manifest stays an OKF document first and an ahu
 /// manifest second.
 pub fn parse_manifest(text: &str, path: &Path) -> Result<(AgentManifest, String)> {
+    if text.len() as u64 > crate::util::MAX_TASK_RECORD_BYTES {
+        bail!("agent manifest exceeds the byte limit");
+    }
     let Some(rest) = text
         .strip_prefix("---\n")
         .or_else(|| text.strip_prefix("---\r\n"))
@@ -239,26 +246,41 @@ pub fn parse_manifest(text: &str, path: &Path) -> Result<(AgentManifest, String)
     let mut source_format = String::new();
     let mut source_path = String::new();
     let mut native_helpers = String::new();
-
-    for line in front.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
+    let (fields, input_schema, output_schema) = if schema_frontmatter::declares_schema(front) {
+        let parsed = schema_frontmatter::parse(front)?;
+        (
+            parsed.fields.into_iter().collect::<Vec<_>>(),
+            parsed.input,
+            parsed.output,
+        )
+    } else {
+        // Keep accepted prompt-only manifests and their scalar interpretation unchanged.
+        let mut fields = Vec::new();
+        for line in front.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = trimmed.split_once(':') else {
+                bail!(
+                    "{}: frontmatter line {:?} is not a `key: value` pair.",
+                    path.display(),
+                    trimmed
+                );
+            };
+            fields.push((
+                key.trim().to_string(),
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            ));
         }
-        let Some((key, value)) = trimmed.split_once(':') else {
-            bail!(
-                "{}: frontmatter line {:?} is not a `key: value` pair.",
-                path.display(),
-                trimmed
-            );
-        };
-        let key = key.trim();
-        let value = value
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
-        match key {
+        (fields, None, None)
+    };
+    for (key, value) in fields {
+        match key.as_str() {
             "okf_version" => okf_version = value,
             "type" => kind = value,
             "title" => name = value,
@@ -370,6 +392,8 @@ pub fn parse_manifest(text: &str, path: &Path) -> Result<(AgentManifest, String)
             source,
             status,
             native_helpers,
+            input_schema,
+            output_schema,
         },
         body,
     ))
@@ -379,6 +403,7 @@ pub fn parse_manifest(text: &str, path: &Path) -> Result<(AgentManifest, String)
 #[derive(Debug, Clone)]
 pub struct ResolvedAgent {
     pub manifest: AgentManifest,
+    pub contract: crate::structured::Contract,
     pub manifest_path: PathBuf,
     pub manifest_digest: String,
     /// Absolute path to the file the instructions are read from: the native
@@ -443,7 +468,7 @@ impl ResolvedAgent {
     /// the model, and drift should not depend on that implication holding if the
     /// parse ever changes. A change to either is drift.
     pub fn identity_digest(&self) -> String {
-        digest_bytes(
+        let legacy = digest_bytes(
             format!(
                 "{}\n{}\n{}\n{}\n{}\n{}",
                 self.manifest.name,
@@ -454,7 +479,18 @@ impl ResolvedAgent {
                 self.instructions_digest
             )
             .as_bytes(),
-        )
+        );
+        if self.contract.is_empty() {
+            legacy
+        } else {
+            digest_bytes(
+                format!(
+                    "{legacy}\n{}",
+                    serde_json::to_string(&self.contract).expect("JSON contract")
+                )
+                .as_bytes(),
+            )
+        }
     }
 }
 
@@ -712,7 +748,12 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
         );
     }
 
+    let contract = crate::structured::Contract {
+        input: manifest.input_schema.clone(),
+        output: manifest.output_schema.clone(),
+    };
     Ok(ResolvedAgent {
+        contract,
         manifest,
         manifest_path: path.to_path_buf(),
         manifest_digest,
@@ -857,6 +898,175 @@ mod tests {
 
     fn parse_err(text: &str) -> String {
         parse(text).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn structured_schema_support_preserves_legacy_scalar_interpretation() {
+        // Legacy frontmatter accepted a plain description containing a colon.
+        // Parsing schema-aware YAML must not change a prompt-only agent's fields.
+        let text = manifest_text("", "Build.")
+            .replace("description: builds", "description: builds: carefully");
+        let (manifest, body) = parse(&text).unwrap();
+        assert_eq!(manifest.description, "builds: carefully");
+        assert!(manifest.input_schema.is_none());
+        assert!(manifest.output_schema.is_none());
+        assert_eq!(body, "Build.");
+    }
+
+    #[test]
+    fn structured_inline_yaml_schema_preserves_nested_objects_and_lists() {
+        let declaration = r#"input_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  required:
+    - files
+  properties:
+    files:
+      type: array
+      items:
+        type: object
+        required: [path]
+        properties:
+          path: {type: string, minLength: 1}
+          model: {enum: [tiny, large]}
+        additionalProperties: false
+  additionalProperties: false
+output_schema:
+  type: object
+  required: [ok, notes]
+  properties:
+    ok: {type: boolean}
+    notes:
+      type: array
+      items: {type: string}
+  additionalProperties: false
+"#;
+        let (manifest, body) = parse(&manifest_text(declaration, "Build.\n")).unwrap();
+        assert_eq!(manifest.model, "claude-sonnet-5");
+        assert_eq!(manifest.name, "builder");
+        assert_eq!(body, "Build.\n");
+        let input = manifest.input_schema.as_ref().unwrap();
+        assert_eq!(input["required"], serde_json::json!(["files"]));
+        assert_eq!(
+            input["properties"]["files"]["items"]["properties"]["model"]["enum"],
+            serde_json::json!(["tiny", "large"])
+        );
+        crate::structured::validate(input, &serde_json::json!({"files":[{"path":"src/lib.rs"}]}))
+            .unwrap();
+        assert!(
+            crate::structured::validate(input, &serde_json::json!({"files":[{"path":3}]})).is_err()
+        );
+        crate::structured::validate(
+            manifest.output_schema.as_ref().unwrap(),
+            &serde_json::json!({"ok":true,"notes":[]}),
+        )
+        .unwrap();
+        let crlf = manifest_text(declaration, "Build.").replace('\n', "\r\n");
+        assert!(parse(&crlf).is_ok());
+        for declaration in [
+            "input_schema: {}\noutput_schema: false\n",
+            "\"input\\u005fschema\": {type: string}\n",
+        ] {
+            let (manifest, _) = parse(&manifest_text(declaration, "Build.")).unwrap();
+            assert!(manifest.input_schema.is_some());
+        }
+    }
+
+    #[test]
+    fn structured_yaml_schema_errors_are_refused_at_manifest_load_without_leaks() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".agents/ahu/agents");
+        std::fs::create_dir_all(&dir).unwrap();
+        for declaration in [
+            "input_schema: /private/secret-schema.json\n",
+            "input_schema: null\n",
+            "input_schema: []\n",
+            "input_schema: {type: [}\n",
+            "\"input\\u005fschema\": {type: [}\n",
+            "input_schema: {type: string, type: object}\n",
+            "input_schema: true\ninput_schema: false\n",
+            "input_schema: {$ref: 'https://example.invalid/private-secret'}\n",
+            "input_schema: {$schema: 'draft-07'}\n",
+            "input_schema: {properties: {a: {unknown-secret: true}}}\n",
+            "input_schema: {properties: {a: null}}\n",
+            "input_schema: {properties: {1: {type: string}}}\n",
+            "input_schema: !unsupported {type: string}\n",
+            "input_schema: {const: .nan}\n",
+            "input_schema: {const: 1.0000000000000000001}\n",
+            "input_schema: &loop {not: *loop}\n",
+            "input_schema: {<<: {type: string}}\n",
+        ] {
+            let path = dir.join("builder.md");
+            std::fs::write(&path, manifest_text(declaration, "Build.")).unwrap();
+            let error = load_one(temp.path(), &path).unwrap_err().to_string();
+            assert!(error.contains("schema"), "{error}");
+            assert!(!error.contains("secret"), "{error}");
+            assert!(!error.contains("/private/"), "{error}");
+        }
+    }
+
+    #[test]
+    fn structured_inline_schema_bounds_apply_during_yaml_expansion() {
+        let nested = format!(
+            "input_schema: {}true{}\n",
+            "{not: ".repeat(33),
+            "}".repeat(33)
+        );
+        let nodes = format!(
+            "input_schema: {{enum: [{}]}}\n",
+            vec!["null"; 4096].join(",")
+        );
+        let bytes = format!(
+            "input_schema: {{description: '{}'}}\n",
+            "a".repeat(crate::structured::MAX_BYTES)
+        );
+        let aliases = "input_schema:\n  default:\n    - &a [0, 0, 0, 0, 0, 0, 0, 0]\n    - &b [*a, *a, *a, *a, *a, *a, *a, *a]\n    - &c [*b, *b, *b, *b, *b, *b, *b, *b]\n    - [*c, *c, *c, *c, *c, *c, *c, *c]\n";
+        for declaration in [nested.as_str(), nodes.as_str(), bytes.as_str(), aliases] {
+            assert!(parse(&manifest_text(declaration, "Build.")).is_err());
+        }
+        let (manifest, _) = parse(&manifest_text(
+            "input_schema: {const: 184467440737095516160}\n",
+            "Build.",
+        ))
+        .unwrap();
+        assert_eq!(
+            manifest.input_schema.unwrap()["const"].to_string(),
+            "184467440737095516160"
+        );
+    }
+
+    #[test]
+    fn structured_manifest_contract_is_opt_in_and_frozen_in_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".agents/ahu/agents");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join("builder.md");
+        std::fs::write(&manifest, manifest_text("", "Build.")).unwrap();
+        let legacy = load_one(temp.path(), &manifest).unwrap();
+        assert!(legacy.contract.is_empty());
+        let legacy_digest = legacy.identity_digest();
+        std::fs::write(
+            &manifest,
+            manifest_text("input_schema:\n  type: string\n", "Build."),
+        )
+        .unwrap();
+        let first = load_one(temp.path(), &manifest).unwrap();
+        assert_ne!(legacy_digest, first.identity_digest());
+        std::fs::write(
+            &manifest,
+            manifest_text("input_schema:\n  type: boolean\n", "Build."),
+        )
+        .unwrap();
+        let second = load_one(temp.path(), &manifest).unwrap();
+        assert_ne!(first.identity_digest(), second.identity_digest());
+        assert_eq!(first.contract.input.unwrap()["type"], "string");
+        for declaration in [
+            "input_schema:\n",
+            "input_schema: a\ninput_schema: b\n",
+            "output_schema:\n",
+        ] {
+            assert!(parse(&manifest_text(declaration, "Build.")).is_err());
+        }
     }
 
     #[test]

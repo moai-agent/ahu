@@ -50,6 +50,7 @@ pub mod skill_selection;
 pub mod snapshot;
 pub mod state;
 pub mod storage;
+pub mod structured;
 pub mod style;
 pub mod table;
 pub mod task;

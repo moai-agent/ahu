@@ -178,6 +178,36 @@ if scenario=='nonzero': sys.exit(7)
 }
 
 #[test]
+fn structured_input_refusal_precedes_worktree_creation_and_harness_probe() {
+    let f = Fixture::new();
+    let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        original.replacen(
+            "---\n",
+            "---\ninput_schema:\n  type: object\n  required: [ok]\n",
+            1,
+        ),
+    )
+    .unwrap();
+    // Even a broken harness probe cannot supersede the input diagnostic.
+    std::fs::write(f.bin.join("claude"), "#!/bin/sh\nexit 97\n").unwrap();
+    let input = f.external.path().join("input.json");
+    for raw in ["{}", "{", "null"] {
+        std::fs::write(&input, raw).unwrap();
+        let result = f.launch("success", &["--input-file", input.to_str().unwrap()]);
+        assert!(!result.status.success());
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            error.contains("schema keyword") || error.contains("valid JSON"),
+            "{error}"
+        );
+        assert!(!f.repo.path().join(".worktrees").exists());
+    }
+}
+
+#[test]
 fn foreground_keeps_primary_coordination_and_identity_without_native_copies() {
     let f = Fixture::new();
     let out = f.launch("success", &[]);
@@ -1960,6 +1990,7 @@ fn the_opencode_batch_profile_pins_the_model_and_ends_the_option_list() {
         root_task: None,
         broker_request: None,
         child_grants: Vec::new(),
+        contract: Default::default(),
         depth: 0,
         attempt: 1,
         session: session.map(str::to_owned),
@@ -2594,7 +2625,9 @@ fn composed_batch_launch_and_continuation_freeze_identity_session_and_grants() {
             parent_attempt: None,
             root_task: Some("fixture-root".into()),
             broker_request: None,
+            contract: Default::default(),
             child_grants: vec![ahu::broker::ChildGrant {
+                contract: Default::default(),
                 agent: "reader".into(),
                 identity_digest: "1".repeat(64),
                 permissions: Permissions::Prompt,

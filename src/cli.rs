@@ -224,6 +224,7 @@ agent assignment options:
                         Explicit sources take precedence over unread stdin.
   --output json        Emit a versioned plan or headless launch/result envelope.
                         JSON goes to stdout, diagnostics to stderr.
+  --input-file <path>   Bounded JSON input for an agent input_schema; requires --headless
   --headless            Run without cmux; descendants inherit this backend
   --allow-child @name   Grant this exact registered child identity (repeatable)
   --allow-child-widened @name
@@ -935,6 +936,7 @@ fn help_request(args: &[String]) -> Result<Option<Command>> {
             flag.as_str(),
             "--prompt"
                 | "--prompt-file"
+                | "--input-file"
                 | "--records"
                 | "--case"
                 | "--suite"
@@ -1293,7 +1295,7 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
         let flag = rest[i].as_str();
         if matches!(
             flag,
-            "--headless" | "--background" | "--timeout" | "--native-helpers"
+            "--headless" | "--background" | "--timeout" | "--native-helpers" | "--input-file"
         ) && !batch_flags.insert(flag)
         {
             bail!("repeated batch option {flag}");
@@ -1304,6 +1306,9 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
         match flag {
             "--headless" => headless = true,
             "--background" => options.background = true,
+            "--input-file" if options.input_file.is_none() => {
+                options.input_file = Some(PathBuf::from(value_for("--input-file", rest, &mut i)?));
+            }
             "--timeout" => {
                 options.timeout_seconds = value_for("--timeout", rest, &mut i)?
                     .parse()
@@ -1531,6 +1536,7 @@ pub fn extract_color(
                     | "--title"
                     | "--summary"
                     | "--prompt-file"
+                    | "--input-file"
                     | "--output"
                     | "--limit"
                     | "--register"
@@ -2313,6 +2319,54 @@ mod parser_tests {
     }
 
     #[test]
+    fn structured_input_file_is_a_headless_option_and_preserves_prompt_literals() {
+        let args = [
+            "@worker",
+            "--headless",
+            "--input-file",
+            "/tmp/input.json",
+            "--prompt",
+            "--input-file",
+        ];
+        let parsed = parse_launch_backend(&args.map(str::to_owned), false).unwrap();
+        let Command::HeadlessLaunch { options, launch } = parsed else {
+            panic!("headless expected")
+        };
+        assert_eq!(options.input_file, Some(PathBuf::from("/tmp/input.json")));
+        let Command::Launch { prompt, .. } = *launch else {
+            panic!("launch expected")
+        };
+        assert_eq!(prompt, PromptSource::Inline("--input-file".into()));
+        for args in [
+            vec![
+                "@worker",
+                "--input-file",
+                "/tmp/input.json",
+                "--prompt",
+                "go",
+            ],
+            vec![
+                "@worker",
+                "--headless",
+                "--input-file",
+                "a",
+                "--input-file",
+                "b",
+                "--prompt",
+                "go",
+            ],
+        ] {
+            assert!(
+                parse_launch_backend(
+                    &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                    false
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn headless_launch_keeps_options_separate_from_literal_prompt_values() {
         for policy in ["disabled", "bounded"] {
             let Command::HeadlessLaunch { launch, options } = parse([
@@ -2340,6 +2394,7 @@ mod parser_tests {
             assert_eq!(
                 options,
                 crate::headless::Options {
+                    input_file: None,
                     background: true,
                     timeout_seconds: 1,
                     native_helpers: policy.into(),

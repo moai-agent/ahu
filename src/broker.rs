@@ -16,6 +16,8 @@ pub struct ChildGrant {
     pub permissions: crate::agent::Permissions,
     pub hooks_digest: String,
     pub native_helpers: String,
+    #[serde(default, skip_serializing_if = "crate::structured::Contract::is_empty")]
+    pub contract: crate::structured::Contract,
 }
 
 pub fn freeze_grants(
@@ -53,6 +55,7 @@ pub fn freeze_grants(
         let mut hooks = crate::hooks::collect(&repo.root, &agent.manifest.harness)?;
         hooks.wrapper_injected = false;
         grants.push(ChildGrant {
+            contract: agent.contract.clone(),
             agent: name.clone(),
             identity_digest: agent.identity_digest(),
             permissions: agent.manifest.permissions,
@@ -71,6 +74,8 @@ struct Request {
     parent_task: String,
     agent: String,
     prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    structured_input: Option<String>,
     title: Option<String>,
     summary: Option<String>,
     name: Option<String>,
@@ -213,6 +218,14 @@ impl Broker {
                 continue;
             }
             let grant = granted.ok_or_else(|| Error::new("missing child grant"))?;
+            if let Err(error) = grant
+                .contract
+                .validate_input(request.structured_input.as_deref())
+            {
+                headless::durable_json(&claim, &json!({"state":"refused"}))?;
+                headless::durable_json(&response, &json!({"ok":false,"error":error.to_string()}))?;
+                continue;
+            }
             // Persist before dispatch; a lost supervisor never replays a claim.
             headless::durable_json(
                 &claim,
@@ -249,6 +262,11 @@ impl Broker {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if let Some(input) = &request.structured_input {
+                let artifact = self.private_dir.join(format!("{stem}.input.json"));
+                crate::state::write_private_file(&artifact, input.as_bytes())?;
+                command.arg("--input-file").arg(artifact);
+            }
             crate::telemetry::configure_task_identity(&mut command, &self.owner, Some(&self.spec));
             command.env_remove("AHU_BROKER_PARENT_ATTRIBUTES");
             if let Some(carrier) = &self.parent_context {
@@ -355,6 +373,11 @@ pub fn request(
         parent_task: parent,
         agent: agent.into(),
         prompt: prompt.into(),
+        structured_input: options
+            .input_file
+            .as_ref()
+            .map(|p| crate::structured::read_artifact(p).map(|v| v.to_string()))
+            .transpose()?,
         title: display.title.clone(),
         summary: display.summary.clone(),
         name: display.name.clone(),
@@ -621,6 +644,7 @@ mod tests {
             root_task: None,
             broker_request: None,
             child_grants: grants,
+            contract: Default::default(),
             depth: 0,
             attempt: 1,
             session: None,
@@ -633,6 +657,7 @@ mod tests {
 
     fn grant(agent: &str, permissions: crate::agent::Permissions, helpers: &str) -> ChildGrant {
         ChildGrant {
+            contract: Default::default(),
             agent: agent.into(),
             identity_digest: "a".repeat(64),
             permissions,
@@ -659,6 +684,7 @@ mod tests {
             parent_task: TASK.into(),
             agent: agent.into(),
             prompt: "review the diff".into(),
+            structured_input: None,
             title: None,
             summary: None,
             name: None,
@@ -688,6 +714,104 @@ mod tests {
             .map(|_| ())
             .expect_err("the request is refused")
             .to_string()
+    }
+
+    #[test]
+    fn structured_valid_input_is_frozen_for_dispatch() {
+        let (_dir, repo) = repo();
+        let record = owner(&repo);
+        let mut child = grant("reviewer", crate::agent::Permissions::Prompt, "disabled");
+        child.contract.input = Some(json!({"type":"null"}));
+        let spec = spec(2, vec![child]);
+        let dir = mailbox(&repo);
+        let mut broker = Broker::new(&dir, &record, &spec).unwrap();
+        let private = broker.private_dir.clone();
+        // Stop at the dispatch boundary; never launch a provider or create a worktree.
+        headless::durable_json(&private.with_file_name("admission-closed.json"), &json!({}))
+            .unwrap();
+        let id = "abcdef0000000000";
+        let mut request = submitted(&broker.token, "reviewer");
+        request.structured_input = Some("null".into());
+        submit(&dir, id, &serde_json::to_vec(&request).unwrap());
+        broker.poll().unwrap();
+        broker.finish().unwrap();
+        assert_eq!(
+            std::fs::read(private.join(format!("{id}.input.json"))).unwrap(),
+            b"null"
+        );
+        let claim: Value = headless::read_json(&private.join(format!("{id}.claim.json"))).unwrap();
+        assert_eq!(claim["state"], "dispatching");
+        assert_eq!(
+            std::fs::read(private.join(format!("{id}.prompt.txt"))).unwrap(),
+            request.prompt.as_bytes()
+        );
+        assert!(!repo.root.join(".worktrees").exists());
+    }
+
+    #[test]
+    fn structured_invalid_input_is_refused_before_dispatch() {
+        let (_dir, repo) = repo();
+        let record = owner(&repo);
+        let mut child = grant("reviewer", crate::agent::Permissions::Prompt, "disabled");
+        child.contract.input = Some(
+            json!({"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}},"additionalProperties":false}),
+        );
+        let spec = spec(2, vec![child]);
+        let dir = mailbox(&repo);
+        let mut broker = Broker::new(&dir, &record, &spec).unwrap();
+        for (i, input) in [
+            None,
+            Some("{}"),
+            Some("{bad private-capability"),
+            Some(r#"{"ok":"no"}"#),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let id = format!("{i:016x}");
+            let mut request = submitted(&broker.token, "reviewer");
+            request.structured_input = input.map(str::to_owned);
+            submit(&dir, &id, &serde_json::to_vec(&request).unwrap());
+            broker.poll().unwrap();
+            let response = refusal(&broker.private_dir, &id);
+            assert!(!response.contains(&broker.token));
+            assert!(!response.contains("private-capability"));
+            assert!(!response.contains(&broker.private_dir.to_string_lossy().to_string()));
+            assert!(!broker.private_dir.join(format!("{id}.prompt.txt")).exists());
+        }
+        broker.finish().unwrap();
+        assert!(!repo.root.join(".worktrees").exists());
+    }
+
+    #[test]
+    fn structured_grants_freeze_and_legacy_grants_deserialize() {
+        let legacy: ChildGrant = serde_json::from_value(json!({"agent":"reader","identity_digest":"a","permissions":"prompt","hooks_digest":"b","native_helpers":"disabled"})).unwrap();
+        assert!(legacy.contract.is_empty());
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("contract")
+                .is_none()
+        );
+        let (_dir, repo) = repo();
+        write_config(&repo.root);
+        write_agent(&repo.root, "reviewer", "prompt", None);
+        let path = repo.root.join(".agents/ahu/agents/reviewer.md");
+        let text = std::fs::read_to_string(&path).unwrap().replacen(
+            "---\n",
+            "---\ninput_schema:\n  type: string\n",
+            1,
+        );
+        std::fs::write(&path, text).unwrap();
+
+        let first = freeze_grants(&repo, &["reviewer".into()], &[]).unwrap();
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("  type: string", "  type: boolean");
+        std::fs::write(&path, text).unwrap();
+        let second = freeze_grants(&repo, &["reviewer".into()], &[]).unwrap();
+        assert_eq!(first[0].contract.input, Some(json!({"type":"string"})));
+        assert_ne!(first[0].identity_digest, second[0].identity_digest);
     }
 
     #[test]
@@ -1187,6 +1311,7 @@ mod tests {
             parent_task: TASK.into(),
             agent: "reviewer".into(),
             prompt: "review".into(),
+            structured_input: None,
             title: None,
             summary: None,
             name: None,

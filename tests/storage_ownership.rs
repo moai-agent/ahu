@@ -30,7 +30,10 @@ fn cached_primary_rechecks_created_and_changed_worktree_configuration() {
                 alternate.path().to_str().unwrap(),
             ],
         );
-        assert_ne!(ahu::git::discover(root.path()).unwrap().root, repo.root);
+        // Git cannot enumerate a repository after this per-worktree override
+        // points at an unrelated directory. Ahu must refuse the inventory
+        // rather than trust a partial or stale primary-checkout result.
+        assert!(ahu::git::discover(root.path()).is_err());
         assert!(HeadlessStore::containing(&store.directory).is_err());
     }
 }

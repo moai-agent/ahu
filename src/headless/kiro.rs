@@ -725,6 +725,7 @@ mod tests {
             root_task: None,
             broker_request: None,
             child_grants: vec![],
+            contract: Default::default(),
             depth: 0,
             attempt: 1,
             session: Some("sess_fixture".into()),

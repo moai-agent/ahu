@@ -28,6 +28,8 @@ const EVAL_OTEL_CHILD_DRAIN: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Options {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_file: Option<PathBuf>,
     pub background: bool,
     pub timeout_seconds: u64,
     pub native_helpers: String,
@@ -41,6 +43,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            input_file: None,
             background: false,
             timeout_seconds: 1800,
             native_helpers: "disabled".into(),
@@ -67,6 +70,8 @@ pub struct Spec {
     pub broker_request: Option<String>,
     #[serde(default)]
     pub child_grants: Vec<crate::broker::ChildGrant>,
+    #[serde(default, skip_serializing_if = "crate::structured::Contract::is_empty")]
+    pub contract: crate::structured::Contract,
     pub depth: u32,
     pub attempt: u32,
     pub session: Option<String>,
@@ -76,6 +81,29 @@ pub struct Spec {
     pub native_profile: Option<crate::native::Profile>,
     pub native_controls: Vec<String>,
     pub gaps: Vec<String>,
+}
+
+fn structured_result_path(dir: &Path, attempt: u32) -> PathBuf {
+    dir.join("requests")
+        .join(format!("structured-result-{attempt}.json"))
+}
+
+fn validate_structured_completion(dir: &Path, spec: &Spec, events: &mut Events) -> Option<Value> {
+    spec.contract.output.as_ref()?;
+    let validation = confined(&dir.join("requests"), false)
+        .map_err(|_| Error::new("structured result: artifact directory is invalid"))
+        .and_then(|()| {
+            spec.contract
+                .validate_result(&structured_result_path(dir, spec.attempt))
+        });
+    match validation {
+        Ok(value) => value,
+        Err(error) => {
+            events.failed = true;
+            events.blockers.push(error.to_string());
+            None
+        }
+    }
 }
 
 fn read_spec_version<'de, D: serde::Deserializer<'de>>(
@@ -717,6 +745,18 @@ pub fn launch(
     let loaded = crate::config::load(&repo.root)?
         .ok_or_else(|| Error::new("project configuration is missing; run ahu setup"))?;
     let (agent, pair) = crate::commands::resolve_identity(repo, &loaded, Some(agent))?;
+    let contract = agent
+        .as_ref()
+        .map(|a| a.contract.clone())
+        .unwrap_or_default();
+    let structured_input = options
+        .input_file
+        .take()
+        .map(|path| crate::structured::read_artifact(&path).map(|v| v.to_string()))
+        .transpose()?;
+    contract.validate_input(structured_input.as_deref())?;
+    let contracted_prompt = contract.prompt(prompt, structured_input.as_deref());
+    let prompt = contracted_prompt.as_str();
     if !options.native_helpers_explicit {
         match agent
             .as_ref()
@@ -740,6 +780,19 @@ pub fn launch(
                 }
             }
         }
+    }
+    if contract.output.is_some()
+        && pair.harness == "codex"
+        && agent
+            .as_ref()
+            .is_some_and(|a| a.manifest.permissions == crate::agent::Permissions::Prompt)
+    {
+        bail!(
+            "structured output is unavailable with Codex read-only permissions; choose a registered agent already authorized to write results"
+        );
+    }
+    if contract.output.is_some() && options.native_helpers == "bounded" {
+        bail!("structured output requires write tools; bounded native helpers are read-only");
     }
     let permissions = agent
         .as_ref()
@@ -843,6 +896,7 @@ pub fn launch(
         parent_attempt: std::env::var("AHU_PARENT_ATTEMPT").ok().and_then(|v| v.parse().ok()),
         broker_request: std::env::var("AHU_BROKER_DISPATCH").ok(),
         child_grants,
+        contract,
         parent_task, depth, attempt: 1, session: None,
         broker_dir: Some(store(repo)?.join(&plan.task_id).join("requests")),
         native_profile: None,
@@ -1500,6 +1554,8 @@ fn attribute_skill_provenance(skills: &mut [SkillInvocation], catalog: &[SkillCa
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Events {
+    #[serde(skip)]
+    structured_result_target: Option<PathBuf>,
     pub session: Option<String>,
     pub terminal: bool,
     pub failed: bool,
@@ -2132,7 +2188,7 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
                 continue;
             }
         };
-        if !real.starts_with(&worktree) {
+        if !real.starts_with(&worktree) && events.structured_result_target.as_ref() != Some(&real) {
             let path = real.to_string_lossy().into_owned();
             if !events.writes_outside_worktree.contains(&path) {
                 if events.writes_outside_worktree.len() >= 128 {
@@ -2473,6 +2529,13 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     let mut broker = crate::broker::Broker::new(&dir.join("requests"), &record, spec)?;
     broker.set_parent_span(&telemetry_span);
     broker.configure_worker(&mut command);
+    command.env_remove("AHU_STRUCTURED_RESULT");
+    if spec.contract.output.is_some() {
+        command.env(
+            "AHU_STRUCTURED_RESULT",
+            structured_result_path(dir, spec.attempt),
+        );
+    }
     if let Some(profile) = &spec.native_profile {
         for key in &profile.env_remove {
             command.env_remove(key);
@@ -2514,7 +2577,18 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     }
     let mut guard = Guard(pid);
     *phase = "stream_evaluation_and_lifecycle";
-    let stdout_events = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+    let structured_result_target = if spec.contract.output.is_some() {
+        Some(
+            real_path(&dir.join("requests"))?
+                .join(format!("structured-result-{}.json", spec.attempt)),
+        )
+    } else {
+        None
+    };
+    let stdout_events = std::sync::Arc::new(std::sync::Mutex::new(Events {
+        structured_result_target,
+        ..Default::default()
+    }));
     let stderr_events = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
     let (out_tx, out_rx) = std::sync::mpsc::channel();
     let (err_tx, err_rx) = std::sync::mpsc::channel();
@@ -2797,6 +2871,11 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
                 .into(),
         );
     }
+    let structured_output = if stop.is_none() && status.success() && !events.failed {
+        validate_structured_completion(dir, spec, &mut events)
+    } else {
+        None
+    };
     let skill_catalog = skill_catalog(&record.worktree);
     attribute_skill_provenance(&mut events.skills, &skill_catalog);
     let outcome = if let Some((reason, _)) = stop {
@@ -2886,6 +2965,9 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         "writes_outside_worktree":events.writes_outside_worktree,"write_evidence":"reported tool targets; not proof of writes",
         "descendant_cancellation":cancellation_results,"root_completion":{"outcome":outcome,"terminal_event_observed":events.terminal,"process_exit_code":status.code()},"native_completeness":native_completeness,"ahu_children":ahu_children,
         "native_cleanup":"unknown for external/provider-managed processes"});
+    if let Some(value) = structured_output {
+        result["structured_output"] = value;
+    }
     let elapsed_ms = Some(
         measurement_started
             .elapsed()
@@ -3423,6 +3505,7 @@ pub fn control(
                 prompt.ok_or_else(|| Error::new("prompt required"))?.into(),
             )
             .read(&mut std::io::empty(), false)?;
+            let prompt = spec.contract.prompt(&prompt, None);
             spec.session = Some(session.into());
             spec.attempt += 1;
             while attempt_dir(&dir, &spec).exists() {
@@ -3612,6 +3695,7 @@ mod telemetry_usage_tests {
             root_task: None,
             broker_request: None,
             child_grants: Vec::new(),
+            contract: Default::default(),
             depth: 0,
             attempt: 3,
             session: None,
@@ -3794,6 +3878,38 @@ mod ownership_tests {
 #[cfg(test)]
 mod write_tracking_tests {
     use super::*;
+
+    #[test]
+    fn structured_result_write_exemption_is_exact_and_not_serialized() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let worktree = root.join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        let target = root.join("structured-result-1.json");
+        let mut events = Events {
+            structured_result_target: Some(target.clone()),
+            ..Default::default()
+        };
+        let event = |path: &Path| {
+            serde_json::to_vec(&json!({"tool":"Write","input":{"path":path}})).unwrap()
+        };
+        observe_writes(&mut events, &event(&target), &worktree);
+        assert!(events.writes_outside_worktree.is_empty());
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains("structured-result-1.json")
+        );
+        observe_writes(
+            &mut events,
+            &event(&root.join("structured-result-2.json")),
+            &worktree,
+        );
+        assert_eq!(events.writes_outside_worktree.len(), 1);
+        std::os::unix::fs::symlink(root.join("elsewhere"), &target).unwrap();
+        observe_writes(&mut events, &event(&target), &worktree);
+        assert_eq!(events.writes_outside_worktree.len(), 2);
+    }
 
     #[test]
     fn write_path_discovery_handles_normalized_keys_nested_tools_and_embedded_json() {
@@ -4122,6 +4238,53 @@ mod write_tracking_tests {
 #[cfg(test)]
 mod profile_and_metadata_tests {
     use super::*;
+
+    #[test]
+    fn structured_completion_checks_current_attempt_and_blocks_success() {
+        let (_temp, repo) = super::filesystem_behavior_tests::repository();
+        let dir = store(&repo)
+            .unwrap()
+            .join("00000000-0000-7000-8000-000000000001");
+        confined(&dir.join("requests"), true).unwrap();
+        let mut spec = sample_spec();
+        spec.contract.output =
+            Some(json!({"type":"object","required":["ok"],"properties":{"ok":{"const":true}}}));
+        for bytes in [
+            None,
+            Some(b"{".as_slice()),
+            Some(b"{}".as_slice()),
+            Some(br#"{"ok":false}"#.as_slice()),
+        ] {
+            if let Some(bytes) = bytes {
+                std::fs::write(structured_result_path(&dir, spec.attempt), bytes).unwrap();
+            }
+            let mut events = Events::default();
+            validate_structured_completion(&dir, &spec, &mut events);
+            assert!(events.failed);
+            assert_eq!(events.blockers.len(), 1);
+        }
+        std::fs::write(
+            structured_result_path(&dir, spec.attempt),
+            br#"{"ok":true}"#,
+        )
+        .unwrap();
+        let mut events = Events::default();
+        assert_eq!(
+            validate_structured_completion(&dir, &spec, &mut events),
+            Some(json!({"ok":true}))
+        );
+        assert!(!events.failed);
+        spec.attempt += 1;
+        validate_structured_completion(&dir, &spec, &mut events);
+        assert!(
+            events.failed,
+            "a previous attempt cannot supply a fresh result"
+        );
+        spec.contract = Default::default();
+        let mut events = Events::default();
+        validate_structured_completion(Path::new("/absent"), &spec, &mut events);
+        assert!(!events.failed, "legacy success needs no artifact");
+    }
 
     #[test]
     fn schema_reader_accepts_only_supported_headless_spec_versions() {
@@ -5125,6 +5288,7 @@ mod profile_and_metadata_tests {
             root_task: None,
             broker_request: None,
             child_grants: Vec::new(),
+            contract: Default::default(),
             depth: 0,
             attempt: 1,
             session: None,
@@ -5166,6 +5330,7 @@ mod filesystem_behavior_tests {
             root_task: root_task.map(str::to_string),
             broker_request: None,
             child_grants: Vec::new(),
+            contract: Default::default(),
             depth: 0,
             attempt,
             session: Some("session".to_string()),

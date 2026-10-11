@@ -31,6 +31,46 @@ and timed suites across agents on a shared host; separate build directories do
 not isolate CPU load. Use a distinct external `CARGO_TARGET_DIR` for each build
 and require reports to name the tested commit, commands, results, and skips.
 
+## Structured child contracts
+
+A headless agent can declare nested JSON Schema objects directly in its existing
+OKF YAML frontmatter. For example:
+
+```yaml
+input_schema:
+  type: object
+  required: [file]
+  properties:
+    file: {type: string}
+  additionalProperties: false
+output_schema:
+  type: object
+  required: [ok]
+  properties:
+    ok: {type: boolean}
+  additionalProperties: false
+```
+
+With `{"file":"src/lib.rs"}` in an external input artifact, assign a granted
+child using:
+
+```sh
+ahu @reviewer --headless --prompt 'Review the supplied file.' --input-file /absolute/path/outside/repositories/input.json
+```
+
+Schemas are checked at manifest load and frozen in the child identity. Input is
+checked before dispatch or worktree creation. The child writes a result such as
+`{"ok":true}` to `AHU_STRUCTURED_RESULT`; invalid or missing output blocks
+success. `ahu result TASK --output json` retains validated `structured_output`.
+Prompt-only manifests remain compatible. Contracts require headless execution;
+output contracts refuse read-only Codex and bounded-helper profiles.
+
+The supported Draft 2020-12 subset, bounds, and YAML restrictions are documented
+in `docs/structured-contracts.md`. Unknown keywords, references, path-string
+schema declarations, and floating-point YAML schema scalars are refused rather
+than weakened. No schema references are fetched. Commit the manifest and update
+the context lock as usual. Schema validity still requires independent review.
+
 ## Inspect and accept
 
 Use `ahu tasks`, `ahu task <id>`, `ahu wait <id>`, and `ahu result <id>` to track

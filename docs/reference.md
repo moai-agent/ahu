@@ -1128,6 +1128,10 @@ found elsewhere are onboarding candidates, never implicit
 registrations—a skill is not an agent, and `AGENTS.md` is not an agent
 registry.
 
+Headless agents can declare nested `input_schema` and `output_schema` objects
+in that YAML frontmatter. See [structured agent contracts](structured-contracts.md)
+for a complete example, the supported Draft 2020-12 subset, and input/result bounds.
+
 `onboard` offers registration for Claude Code and OpenCode Markdown
 definitions—`.claude/agents/<name>.md` and `.opencode/agent/<name>.md`, each
 one file per agent with YAML frontmatter. A declared `model` is checked against
