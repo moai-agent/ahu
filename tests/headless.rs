@@ -46,7 +46,7 @@ if 'EXPECT_RELEASE' in os.environ:
  assert attrs['ahu.task.attempt']==str(spec['attempt']),attrs
  if 'EXPECT_ATTEMPT' in os.environ: assert attrs['ahu.task.attempt']==os.environ['EXPECT_ATTEMPT'],attrs
 scenario=os.environ.get('SCENARIO','success')
-if scenario in ('child','mailbox') and '\ndelegate synthetic task</ahu-request-' not in a[-1]: scenario='success'
+if scenario in ('child','mailbox') and '\ndelegate synthetic task' not in a[-1]: scenario='success'
 session=a[a.index('--resume')+1] if '--resume' in a else os.environ['AHU_PARENT_TASK']
 print(json.dumps({'type':'system','subtype':'init','session_id':session}),flush=True)
 if scenario=='sleep': time.sleep(60)
@@ -257,6 +257,71 @@ fn structured_contract_completes_and_persists_a_validated_result() {
         result["structured_output"],
         serde_json::json!({"answer":42})
     );
+}
+
+#[test]
+fn structured_registered_child_result_is_validated_and_reconciled_by_parent() {
+    let f = Fixture::new();
+    let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        original.replacen(
+            "---\n",
+            "---\noutput_schema:\n  type: object\n  required: [answer]\n  properties:\n    answer: {type: integer}\n  additionalProperties: false\n",
+            1,
+        ),
+    )
+    .unwrap();
+    f.repo.commit("declare structured child result contract");
+    let child_prompt = f.external.path().join("child.txt");
+    std::fs::write(&child_prompt, "perform a typed synthetic child task").unwrap();
+    let out = f
+        .command()
+        .env("SCENARIO", "child")
+        .env("CHILD_PROMPT", &child_prompt)
+        .args([
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "delegate synthetic task",
+            "--allow-child",
+            "@worker",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parent = Fixture::value(&out);
+    assert_eq!(parent["outcome"], "succeeded");
+    assert_eq!(
+        parent["structured_output"],
+        serde_json::json!({"answer":42})
+    );
+    assert_eq!(parent["ahu_children"].as_array().unwrap().len(), 1);
+    let child_id = parent["ahu_children"][0]["task_id"].as_str().unwrap();
+    assert_eq!(parent["ahu_children"][0]["outcome"], "succeeded");
+
+    let child_result = f
+        .command()
+        .args(["result", child_id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        child_result.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&child_result.stdout),
+        String::from_utf8_lossy(&child_result.stderr)
+    );
+    let child = Fixture::value(&child_result);
+    assert_eq!(child["outcome"], "succeeded");
+    assert_eq!(child["structured_output"], serde_json::json!({"answer":42}));
 }
 
 #[test]
