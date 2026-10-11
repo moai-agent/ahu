@@ -12,17 +12,18 @@
 //! reserved for repository context and never used for an agent task — otherwise
 //! that task would have no visible row of its own.
 
+mod host;
 pub mod integration;
-pub mod repository;
+pub use crate::interactive::repository;
+pub use crate::interactive::v1::{CreatedWorkspace, Group, WorkspaceInfo};
+pub use crate::interactive::{startup_command, workspace_identity, workspace_title};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
-
 use crate::bail;
-use crate::util::{Error, Result, shell_single_quote};
+use crate::util::{Error, Result};
 
 /// Capabilities ahu needs before it will create anything.
 const REQUIRED_CAPABILITIES: &[&str] = &[
@@ -30,31 +31,6 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "workspace.group_create.v1",
     "workspace.create_in_group.v1",
 ];
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Group {
-    pub id: String,
-    pub name: String,
-    pub anchor_workspace_id: String,
-    pub member_workspace_ids: Vec<String>,
-    pub is_collapsed: bool,
-}
-
-/// What `workspace.list` reports about one workspace.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceInfo {
-    pub directory: String,
-    pub title: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CreatedWorkspace {
-    pub workspace_id: String,
-    pub window_id: String,
-    pub group_id: Option<String>,
-}
 
 /// A cmux instance reachable over its socket.
 pub struct Cmux {
@@ -690,37 +666,18 @@ fn parse_group(value: &serde_json::Value) -> Result<Group> {
     })
 }
 
-/// Build the shell-interpreted startup command for a task workspace.
-///
-/// This is the single place where anything is interpolated into shell input.
-/// It contains exactly two values, both owned by ahu and both single-quoted:
-/// the ahu executable and the task directory. The prompt is not here — the
-/// launched `ahu run-task` reads it from a file — so a prompt containing
-/// backticks, `$(...)`, `&&`, or newlines cannot become shell code.
-pub fn startup_command(ahu_executable: &Path, task_dir: &Path) -> String {
-    format!(
-        "{} run-task --task-dir {}",
-        shell_single_quote(&ahu_executable.to_string_lossy()),
-        shell_single_quote(&task_dir.to_string_lossy())
-    )
-}
-
-/// Task text gets the entire title budget; identity lives in its own pill.
-pub fn workspace_title(_agent_label: &str, task_title: &str) -> String {
-    crate::util::task_title_from_prompt(task_title)
-}
-
-pub fn workspace_identity(agent: &str, model: &str) -> String {
-    format!(
-        "{} · {}",
-        crate::util::sidebar_text(agent, 32),
-        crate::util::sidebar_text(model, 48)
-    )
+/// The invoking cmux workspace, without contacting cmux.
+pub(crate) fn inherited_workspace() -> Option<String> {
+    std::env::var("CMUX_WORKSPACE_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
 }
 
 #[cfg(test)]
 mod presentation_tests {
     use super::*;
+    use crate::interactive::v1::{Host, WorkspaceRequest};
+    use crate::util::shell_single_quote;
 
     #[cfg(unix)]
     fn fake_cmux(root: &Path, script: &str) -> Cmux {
@@ -851,16 +808,17 @@ else: raise AssertionError(method)
             executable,
             socket_path: None,
         };
-        let created = client
-            .create_task_workspace(
-                "group-b",
-                Some("window-b"),
-                "Task",
-                "",
-                temp.path(),
-                "true",
-                false,
-            )
+        let host: &dyn Host = &client;
+        let created = host
+            .create_task_workspace(&WorkspaceRequest {
+                group_id: "group-b",
+                window_id: Some("window-b"),
+                title: "Task",
+                summary: "",
+                cwd: temp.path(),
+                startup_command: "true",
+                focus: false,
+            })
             .unwrap();
         assert_eq!(created.workspace_id, "mine");
         assert_eq!(created.window_id, "window-b");
@@ -908,23 +866,23 @@ esac
             socket_path: None,
         };
         let summary = "Useful text; $(false) 'quoted' --color=always";
-        let created = client
-            .create_task_workspace(
-                "group",
-                Some("window"),
-                "Fix parser",
+        let host: &dyn Host = &client;
+        let created = host
+            .create_task_workspace(&WorkspaceRequest {
+                group_id: "group",
+                window_id: Some("window"),
+                title: "Fix parser",
                 summary,
-                temp.path(),
-                "true",
-                false,
-            )
+                cwd: temp.path(),
+                startup_command: "true",
+                focus: false,
+            })
             .unwrap();
-        client
-            .set_status(
-                &created.workspace_id,
-                &workspace_identity("sable", "model-a"),
-            )
-            .unwrap();
+        host.set_status(
+            &created.workspace_id,
+            &workspace_identity("sable", "model-a"),
+        )
+        .unwrap();
         let text = std::fs::read_to_string(log).unwrap();
         let args: Vec<_> = text.lines().collect();
         assert!(args.windows(2).any(|args| args == ["--name", "Fix parser"]));

@@ -24,16 +24,27 @@ pub struct Repo {
 }
 
 impl Repo {
+    /// Every checkout sharing this repository's Git common directory.
+    fn worktree_roots(&self) -> Result<Vec<PathBuf>> {
+        let listing = run_ok(&self.root, &["worktree", "list", "--porcelain", "-z"])?;
+        let roots = listing
+            .split('\0')
+            .filter_map(|field| field.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        if roots.is_empty() {
+            return Err(Error::new("Git did not report any repository worktrees"));
+        }
+        Ok(roots)
+    }
+
     /// All ahu task checkouts are siblings under the primary checkout, even
     /// when the launch originates in a linked worktree.
     pub fn primary_root(&self) -> Result<PathBuf> {
-        let listing = run_ok(&self.root, &["worktree", "list", "--porcelain", "-z"])?;
-        let path = listing
-            .split('\0')
+        self.worktree_roots()?
+            .into_iter()
             .next()
-            .and_then(|line| line.strip_prefix("worktree "))
-            .ok_or_else(|| Error::new("Git did not report a primary checkout"))?;
-        Ok(PathBuf::from(path))
+            .ok_or_else(|| Error::new("Git did not report a primary checkout"))
     }
 
     /// A stable per-repository identifier shared by all of its worktrees.
@@ -120,12 +131,17 @@ pub fn discover(start: &Path) -> Result<Repo> {
     // refuse a binary that comes from a repository ahu has opened. The probes
     // have no repository to check against at their call site, so the exclusion
     // is registered here, at the one place a repository enters the process.
-    crate::selection::exclude_root(&root);
-    Ok(Repo {
+    let repo = Repo {
         root,
         common_dir,
         head,
-    })
+    };
+    // Harnesses must never resolve from any checkout that shares this Git
+    // repository, not just the one from which this process was invoked.
+    for worktree in repo.worktree_roots()? {
+        crate::selection::exclude_root(&worktree);
+    }
+    Ok(repo)
 }
 
 /// `true` when the working tree or index has any change at all.
@@ -381,6 +397,29 @@ mod tests {
         delete_task_branch(root.path(), "ahu/test-task").unwrap();
         assert!(!branch_exists(&repo, "ahu/test-task").unwrap());
         assert!(branches_matching(&repo, "ahu/*task").unwrap().is_empty());
+    }
+
+    #[test]
+    fn discovery_excludes_harnesses_from_every_linked_worktree() {
+        let root = committed_repo();
+        let linked = root.path().join(".worktrees/linked-checkout");
+        git(
+            root.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let primary_harness = root.path().join("claude");
+        let linked_harness = linked.join("codex");
+        std::fs::write(&primary_harness, "").unwrap();
+        std::fs::write(&linked_harness, "").unwrap();
+        let _repo = discover(&linked).unwrap();
+        assert!(crate::selection::is_excluded(&primary_harness));
+        assert!(crate::selection::is_excluded(&linked_harness));
     }
 
     #[test]

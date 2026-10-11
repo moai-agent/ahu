@@ -1,4 +1,4 @@
-//! Repository-owned CMUX topology and task-to-workspace associations.
+//! Repository-owned interactive topology and task-to-workspace associations.
 //!
 //! Harness adapters never choose groups or surfaces. Interactive work enters
 //! through this manager after harness resolution; every task records the exact
@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::v1::{CreatedWorkspace, Group, Host, WorkspaceRequest};
 use crate::bail;
-use crate::cmux::{self, Cmux, Group};
 use crate::git::{self, Repo};
 use crate::state::{self, LaunchLock};
 use crate::task::TaskRecord;
@@ -32,7 +32,7 @@ pub fn mapping_path(repo: &Repo) -> Result<PathBuf> {
 #[derive(Debug, Clone)]
 pub struct ManagedTaskWorkspace {
     pub group: Group,
-    pub workspace: cmux::CreatedWorkspace,
+    pub workspace: CreatedWorkspace,
 }
 
 pub struct CoordinatorPlacement {
@@ -41,15 +41,15 @@ pub struct CoordinatorPlacement {
 }
 
 /// The single owner of interactive repository grouping and task workspace
-/// associations. The CMUX client remains the transport; this manager owns the
+/// associations. The versioned host supplies the transport; this manager owns the
 /// repository and lifecycle invariants layered on top of it.
 pub struct RepositoryManager<'a> {
-    client: &'a Cmux,
+    client: &'a dyn Host,
     repo: &'a Repo,
 }
 
 impl<'a> RepositoryManager<'a> {
-    pub fn new(client: &'a Cmux, repo: &'a Repo) -> Self {
+    pub fn new(client: &'a dyn Host, repo: &'a Repo) -> Self {
         Self { client, repo }
     }
 
@@ -69,15 +69,15 @@ impl<'a> RepositoryManager<'a> {
     ) -> Result<ManagedTaskWorkspace> {
         let group = self.ensure_group(notes)?;
         let mapping: GroupMapping = state::read_json(&mapping_path(self.repo)?)?;
-        let workspace = self.client.create_task_workspace(
-            &group.id,
-            mapping.window_id.as_deref(),
+        let workspace = self.client.create_task_workspace(&WorkspaceRequest {
+            group_id: &group.id,
+            window_id: mapping.window_id.as_deref(),
             title,
             summary,
             cwd,
             startup_command,
             focus,
-        )?;
+        })?;
         if workspace.group_id.as_deref() != Some(group.id.as_str())
             || mapping
                 .window_id
@@ -192,10 +192,7 @@ impl<'a> RepositoryManager<'a> {
         model: &str,
         args: &[String],
     ) -> Result<CoordinatorPlacement> {
-        let Some(workspace) = std::env::var("CMUX_WORKSPACE_ID")
-            .ok()
-            .filter(|id| !id.is_empty())
-        else {
+        let Some(workspace) = self.client.inherited_workspace() else {
             return Ok(CoordinatorPlacement {
                 notes: Vec::new(),
                 opened_workspace: false,
@@ -237,14 +234,15 @@ impl<'a> RepositoryManager<'a> {
                     crate::selection::probe_version(executable).as_deref(),
                 );
                 let startup = coordinator_startup(&command);
-                let created = self.client.create_coordinator_workspace(
-                    &group.id,
-                    Some(&window),
-                    &format!("{label} coordinator"),
-                    &format!("{label} coordinator for {}", self.repo.display_name()),
-                    &self.repo.root,
-                    &startup,
-                )?;
+                let created = self.client.create_task_workspace(&WorkspaceRequest {
+                    group_id: &group.id,
+                    window_id: Some(&window),
+                    title: &format!("{label} coordinator"),
+                    summary: &format!("{label} coordinator for {}", self.repo.display_name()),
+                    cwd: &self.repo.root,
+                    startup_command: &startup,
+                    focus: true,
+                })?;
                 if let Err(error) = self.client.set_agent_metadata(
                     &created.workspace_id,
                     "director",
@@ -291,21 +289,17 @@ pub fn group_coordinator(
     model: &str,
     args: &[String],
 ) -> Result<CoordinatorPlacement> {
-    if std::env::var("CMUX_WORKSPACE_ID")
-        .ok()
-        .filter(|id| !id.is_empty())
-        .is_none()
-    {
+    let Some(client) = super::discover_for_coordinator()? else {
         return Ok(CoordinatorPlacement {
             notes: Vec::new(),
             opened_workspace: false,
         });
-    }
-    let client = Cmux::discover()?;
-    RepositoryManager::new(&client, repo).group_coordinator(executable, label, harness, model, args)
+    };
+    RepositoryManager::new(client.as_ref(), repo)
+        .group_coordinator(executable, label, harness, model, args)
 }
 
-fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<Group> {
+fn ensure_group(client: &dyn Host, repo: &Repo, notes: &mut Vec<String>) -> Result<Group> {
     let path = mapping_path(repo)?;
     let mut mapping: GroupMapping = state::read_json(&path)?;
     let current_window = client.current_window().ok().flatten();
@@ -403,7 +397,7 @@ pub(crate) fn recover_group<'a>(
     }
 }
 
-fn restore_anchor(client: &Cmux, repo: &Repo, group: &Group) -> Result<String> {
+fn restore_anchor(client: &dyn Host, repo: &Repo, group: &Group) -> Result<String> {
     let anchor = client.create_anchor_workspace(&group.id, &repo.display_name(), &repo.root)?;
     client.set_anchor(&group.id, &anchor)?;
     Ok(anchor)
@@ -452,7 +446,7 @@ mod coordinator_environment_tests {
                 .env("AHU_EVAL_OTEL_ENDPOINT", endpoint)
                 .args([
                     "--exact",
-                    "cmux::repository::coordinator_environment_tests::coordinator_eval_environment_child",
+                    "interactive::repository::coordinator_environment_tests::coordinator_eval_environment_child",
                     "--nocapture",
                 ])
                 .output()

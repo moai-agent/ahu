@@ -9,11 +9,13 @@ use std::time::{Duration, Instant};
 
 use crate::agent::ResolvedAgent;
 use crate::bail;
+#[cfg(test)]
 use crate::cmux::{self, Cmux};
 use crate::config::LoadedConfig;
 use crate::git::{self, Repo};
 use crate::harness::{self, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::hooks::{self, HookInventory};
+use crate::interactive;
 use crate::selection::ResolvedPair;
 use crate::snapshot::{self, ConfigSnapshot};
 use crate::state::{self, LaunchLock};
@@ -28,8 +30,8 @@ pub const DELIVERY_IS_NOT_ENFORCEMENT: &str = "ahu delivers the agent's instruct
      it, and the model may follow the task prompt instead. ahu does not use harness \
      agent-selection or system-prompt flags, so no harness enforces this agent's identity.";
 
-pub use crate::cmux::repository::{CoordinatorPlacement, group_coordinator};
-pub use crate::cmux::repository::{GroupMapping, mapping_path};
+pub use crate::interactive::repository::{CoordinatorPlacement, group_coordinator};
+pub use crate::interactive::repository::{GroupMapping, mapping_path};
 
 /// Optional sidebar text, independent of the assignment delivered to the harness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -559,9 +561,9 @@ pub fn execute(
 
     // cmux must be reachable before a worktree is created, so an unavailable
     // cmux never leaves a worktree behind.
-    let cmux_client =
-        Cmux::discover().map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
-    cmux_client.check_capabilities()?;
+    let session_host =
+        interactive::discover().map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
+    session_host.check_capabilities()?;
 
     if git::branch_exists(repo, &plan.branch)? {
         bail!(
@@ -615,9 +617,9 @@ pub fn execute(
 
     let executable = std::env::current_exe()
         .map_err(|e| Error::new(format!("cannot locate the ahu executable: {e}")))?;
-    let startup = cmux::startup_command(&executable, &plan.task_dir);
-    let title = cmux::workspace_title(&plan.agent_label(), &plan.title);
-    let manager = cmux::repository::RepositoryManager::new(&cmux_client, repo);
+    let startup = interactive::startup_command(&executable, &plan.task_dir);
+    let title = interactive::workspace_title(&plan.agent_label(), &plan.title);
+    let manager = interactive::repository::RepositoryManager::new(session_host.as_ref(), repo);
     let placement = match manager.create_task_workspace(
         &title,
         &plan.summary,
@@ -644,7 +646,7 @@ pub fn execute(
     }
     if let Err(e) = manager.set_task_status(
         &record,
-        &cmux::workspace_identity(&record.identity.agent, &record.identity.model),
+        &interactive::workspace_identity(&record.identity.agent, &record.identity.model),
     ) {
         notes.push(format!("could not set the sidebar status: {e}"));
     }
@@ -673,7 +675,7 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
 /// user what exists needs to know about the ones it could not.
 pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
     let mut tasks = task::list(repo)?;
-    let Ok(client) = Cmux::discover() else {
+    let Ok(client) = interactive::discover() else {
         return Ok(tasks);
     };
     let Ok(live) = client.workspaces() else {
@@ -1189,11 +1191,12 @@ fn run_verified_task(
     // Nested commands discover the checkout the session edits.
     state::ensure_checkout_state(&record.worktree)?;
     task::set_state(task_dir, TaskState::Running)?;
-    if let (Ok(client), Ok(repo)) = (Cmux::discover(), git::discover(&record.worktree)) {
-        let _ = cmux::repository::RepositoryManager::new(&client, &repo).set_task_status(
-            &record,
-            &cmux::workspace_identity(&record.identity.agent, &record.identity.model),
-        );
+    if let (Ok(client), Ok(repo)) = (interactive::discover(), git::discover(&record.worktree)) {
+        let _ = interactive::repository::RepositoryManager::new(client.as_ref(), &repo)
+            .set_task_status(
+                &record,
+                &interactive::workspace_identity(&record.identity.agent, &record.identity.model),
+            );
     }
 
     // A cancellation that arrived before the harness started must not be

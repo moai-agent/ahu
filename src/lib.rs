@@ -34,6 +34,7 @@ pub mod explain;
 pub mod git;
 pub mod harness;
 pub mod hooks;
+pub mod interactive;
 pub mod knowledge;
 pub mod launch;
 pub mod launcher;

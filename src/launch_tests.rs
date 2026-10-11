@@ -1037,3 +1037,6 @@ fn cleanup_removes_owned_state_but_refuses_symlinked_ancestors() {
         "keep me"
     );
 }
+
+#[path = "interactive/tests.rs"]
+mod interactive_host_tests;

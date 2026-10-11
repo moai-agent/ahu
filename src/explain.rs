@@ -190,7 +190,7 @@ pub fn write_document() -> Result<PathBuf> {
 }
 
 pub fn open_in_cmux(path: &Path, focus: bool) -> Result<String> {
-    let client = crate::cmux::Cmux::discover()?;
+    let client = crate::interactive::discover()?;
     client.open_markdown(path, focus)
 }
 

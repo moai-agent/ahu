@@ -8,13 +8,14 @@ use std::time::{Duration, Instant};
 use crate::agent::{self, ResolvedAgent};
 use crate::bail;
 use crate::catalog;
-use crate::cmux::{self, Cmux};
+use crate::cmux;
 use crate::config::{self, LoadedConfig};
 use crate::context_lock;
 use crate::drift;
 use crate::git::{self, Repo};
 use crate::harness;
 use crate::hooks;
+use crate::interactive;
 use crate::knowledge;
 use crate::launch;
 use crate::launcher::{self, Console};
@@ -819,7 +820,7 @@ pub fn doctor_with_verbosity(
         }
     }
 
-    match Cmux::discover() {
+    match interactive::discover() {
         Ok(client) => {
             console.say("cmux         reachable\n")?;
             match client.check_capabilities() {
@@ -933,14 +934,14 @@ fn cmux_liveness_needed(dir: &Path, record: &task::TaskRecord) -> bool {
 /// Each window is fetched once per listing instead of once per row, and not at
 /// all when no row can use it. An unreachable cmux is `None`, so liveness degrades to
 /// `unknown` rather than failing the listing.
-fn cmux_workspaces() -> Option<BTreeMap<String, cmux::WorkspaceInfo>> {
-    Cmux::discover().ok()?.workspaces().ok()
+fn cmux_workspaces() -> Option<BTreeMap<String, interactive::v1::WorkspaceInfo>> {
+    interactive::discover().ok()?.workspaces().ok()
 }
 
 /// Read the cmux workspace list once, if the records being listed need it.
 pub fn liveness_workspaces(
     records: &[(PathBuf, task::TaskRecord)],
-) -> Option<BTreeMap<String, cmux::WorkspaceInfo>> {
+) -> Option<BTreeMap<String, interactive::v1::WorkspaceInfo>> {
     if records
         .iter()
         .any(|(dir, record)| cmux_liveness_needed(dir, record))
@@ -959,7 +960,7 @@ pub fn liveness_workspaces(
 fn session_owner(
     dir: &Path,
     record: &task::TaskRecord,
-    workspaces: Option<&BTreeMap<String, cmux::WorkspaceInfo>>,
+    workspaces: Option<&BTreeMap<String, interactive::v1::WorkspaceInfo>>,
 ) -> Option<bool> {
     if dir.join("headless.json").exists() {
         return crate::headless::supervisor_owns_attempt(dir).ok();
@@ -1508,7 +1509,7 @@ pub(crate) fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::Task
 pub fn task_summary(
     dir: &Path,
     record: &task::TaskRecord,
-    workspaces: Option<&BTreeMap<String, cmux::WorkspaceInfo>>,
+    workspaces: Option<&BTreeMap<String, interactive::v1::WorkspaceInfo>>,
 ) -> Result<serde_json::Value> {
     let mut value = serde_json::json!({
         "schema_version": 1,
@@ -1912,8 +1913,9 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
     if record.cmux_workspace_id.is_none() {
         bail!("task {} has no recorded cmux session.", record.task_id);
     }
-    let client = Cmux::discover()?;
-    cmux::repository::RepositoryManager::new(&client, repo).select_task_workspace(&record)?;
+    let client = interactive::discover()?;
+    interactive::repository::RepositoryManager::new(client.as_ref(), repo)
+        .select_task_workspace(&record)?;
     console.say(&format!(
         "Focused {} — {}\n  worktree {}\n",
         style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
@@ -2024,13 +2026,15 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
         None
     };
     let cmux_status = if record.cmux_workspace_id.is_some() {
-        let client = Cmux::discover().map_err(|error| {
+        let client = interactive::discover().map_err(|error| {
             Error::new(format!(
                 "cannot safely remove task {} while its recorded cmux workspace cannot be checked: {error}",
                 display_safe(task_id)
             ))
         })?;
-        if cmux::repository::RepositoryManager::new(&client, gate).close_task_workspace(&record)? {
+        if interactive::repository::RepositoryManager::new(client.as_ref(), gate)
+            .close_task_workspace(&record)?
+        {
             "closed"
         } else {
             "already absent"
@@ -2232,9 +2236,9 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
     let workspace = match record.cmux_workspace_id.as_deref() {
         None => "absent",
         Some(_workspace_id) if cancellation == "confirmed" => {
-            Cmux::discover()
+            interactive::discover()
                 .and_then(|client| {
-                    cmux::repository::RepositoryManager::new(&client, repo)
+                    interactive::repository::RepositoryManager::new(client.as_ref(), repo)
                         .close_task_workspace(&record)
                         .map(|_| ())
                 })

@@ -1652,6 +1652,34 @@ contributed by plugins. Both are reported as gaps rather than omitted. A setting
 file that exists but cannot be parsed is reported as *unknown* hooks, never as
 *no* hooks.
 
+## Interactive host boundary
+
+Interactive session operations use the in-process Rust interface
+`interactive::v1::Host`. The built-in cmux adapter supplies capability checks,
+workspace and group queries, creation, focus, close, sidebar updates, and
+Markdown opening. The repository manager remains in ahu and revalidates recorded
+group/window ownership before task mutations. Launch admission, native
+credentials and approvals, `run-task` supervision, cancellation confirmation,
+and worktree cleanup remain in their existing core paths.
+
+This is a first extraction, not an installable plugin protocol. Discovery still
+selects cmux; interactive task launches still require it. Existing `cmux` Rust
+paths are compatibility re-exports, and task fields (`cmux_*`) and the repository
+mapping (`cmux.json`) retain their format. The V1 interface models the current
+group/window/workspace topology and is versioned by its Rust module; it offers
+no runtime negotiation or stable binary ABI.
+
+Headless execution still needs no interactive host. Native cmux hook inspection,
+wrapper refusal, environment sanitization, and headless isolation checks remain
+active independently of session hosting. Removing the session adapter must not
+remove those checks.
+
+A complete optional package still needs decisions on explicit backend selection
+and missing-backend behavior, packaging and host trust, protocol/version and
+capability negotiation, durable backend-tagged session references and legacy
+record routing, and whether hosts without cmux-style groups are supported.
+No alternate host or automatic fallback is selected by this interface.
+
 ## cmux native integration
 
 `ahu cmux status [--output json]` inspects bounded local configuration and native
