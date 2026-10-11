@@ -48,6 +48,7 @@ fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
         })
         .unwrap();
     let plan = LaunchPlan {
+        release_id: None,
         mode: LaunchMode::Automatic,
         agent: None,
         pair: ResolvedPair {
@@ -195,8 +196,13 @@ fn json_preview_redacts_prompt_and_discloses_each_inventory_gap() {
 
 #[test]
 fn prepared_record_freezes_identity_and_redacts_assignment() {
-    let (_temp, repo, loaded, plan) = fixture();
+    let (_temp, repo, loaded, mut plan) = fixture();
+    plan.release_id = Some("candidate-a".into());
     let record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+    assert_eq!(record.identity.release_id.as_deref(), Some("candidate-a"));
+    let preview: serde_json::Value =
+        serde_json::from_str(&render_json(&plan, PROMPT).unwrap()).unwrap();
+    assert_eq!(preview["release_id"], "candidate-a");
     assert_eq!(record.state, TaskState::Starting);
     assert_eq!(record.identity.mode, LaunchMode::Automatic);
     assert_eq!(

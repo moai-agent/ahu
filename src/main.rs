@@ -155,6 +155,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             let repo = commands::repo_from_cwd()?;
             commands::codex(&repo)
         }
+        Command::Kiro => {
+            let repo = commands::repo_from_cwd()?;
+            commands::kiro(&repo)
+        }
         Command::OpenCode => {
             let repo = commands::repo_from_cwd()?;
             commands::opencode(&repo)
@@ -194,15 +198,37 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 commands::knowledge_lint(console, &repo, output_json)
             })
         }
-        // The records are outside the checkout by policy, but the repository
-        // still has to be located: locating it is what makes that check real.
+        // Discover before resolving defaults and validating the eval storage boundary.
+        Command::EvalVerify { records, facts } => {
+            use std::io::Read;
+            let repo = ahu::git::discover(&std::env::current_dir()?)?;
+            let records = ahu::eval::storage::resolve_records(&repo, records.as_deref())?;
+            let report = ahu::eval::report(&repo, &records)?;
+            let mut text = String::new();
+            std::fs::File::open(facts)?
+                .take(64 * 1024 + 1)
+                .read_to_string(&mut text)?;
+            let verified = ahu::eval::comparison::verify_facts(&report, &text)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"schema_version":1,"verified_facts":verified})
+                )?
+            );
+            Ok(0)
+        }
         Command::EvalReport {
             records,
             output_json,
         } => {
             let repo = commands::repo_from_cwd()?;
             commands::with_stdio_output(output_json, |console| {
-                commands::eval_report(console, &repo, &records, output_json)
+                commands::eval_report(
+                    console,
+                    &repo,
+                    &ahu::eval::storage::resolve_records(&repo, records.as_deref())?,
+                    output_json,
+                )
             })
         }
         Command::EvalRun {
@@ -221,6 +247,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             output_json,
         } => {
             let repo = commands::repo_from_cwd()?;
+            let records = ahu::eval::storage::resolve_records(&repo, records.as_deref())?;
             let request = ahu::eval::RunRequest {
                 case: case.as_deref(),
                 suite: suite.as_deref(),
@@ -270,28 +297,30 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 } else {
                     let profile = budget["profile"].as_str().unwrap_or("not configured");
                     println!(
-                        "Provider rate-limit view · profile {profile} · percentages, not token counts"
+                        "Identity-bound provider capacity signals · profile {profile} · semantics vary by provider"
                     );
                     for provider in budget["providers"].as_array().into_iter().flatten() {
                         let harness = provider["harness"].as_str().unwrap_or("unknown");
                         let status = provider["status"].as_str().unwrap_or("unknown");
-                        let windows = provider["windows"].as_array().into_iter().flatten();
-                        let details: Vec<String> = windows
-                            .map(|window| {
+                        let signal_type = provider["signal_type"].as_str().unwrap_or("unknown");
+                        println!("  {harness:16} {status:14} signal={signal_type}");
+                        if let Some(data) = provider.get("data").filter(|v| !v.is_null())
+                            && let Some(windows) = data["windows"].as_array()
+                        {
+                            for window in windows {
                                 let name = window["name"].as_str().unwrap_or("window");
-                                let remaining = window["remaining_percent"].as_f64().unwrap_or(0.0);
-                                let duration =
-                                    window["window_duration_minutes"].as_u64().unwrap_or(0);
-                                format!("{name}: {remaining:.0}% remaining ({duration} min)")
-                            })
-                            .collect();
-                        if details.is_empty() {
-                            println!("  {harness:<12} {status}");
-                        } else {
-                            println!("  {harness:<12} {}", details.join("; "));
+                                let remaining = window["remaining_percent"]
+                                    .as_f64()
+                                    .map(|r| format!("{r:.1}%"))
+                                    .unwrap_or_else(|| "unknown".into());
+                                let duration = window["window_duration_minutes"]
+                                    .as_u64()
+                                    .map(|d| format!("{d} min"))
+                                    .unwrap_or_else(|| "unknown".into());
+                                println!("      {name:10} {remaining:>6} remaining ({duration})");
+                            }
                         }
                     }
-                    println!("Agents on the same provider account share its capacity.");
                 }
                 return Ok(0);
             }
@@ -333,6 +362,15 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 _ => unreachable!("auth action is validated by the parser"),
             };
             println!("{}", ahu::util::display_safe_block(&message));
+            Ok(0)
+        }
+        Command::OtelReport {
+            paths,
+            selection,
+            release,
+        } => {
+            let report = ahu::otel_report::report(&paths, &selection, &release)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }
         Command::Telemetry {
@@ -450,13 +488,16 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::McpServe
                 | Command::Auth { .. }
                 | Command::Telemetry { .. }
+                | Command::OtelReport { .. }
                 | Command::Claude
                 | Command::Codex
+                | Command::Kiro
                 | Command::OpenCode
                 | Command::Antigravity
                 | Command::Launch { .. }
                 | Command::KnowledgeLint { .. }
                 | Command::EvalReport { .. }
+                | Command::EvalVerify { .. }
                 | Command::EvalRun { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })

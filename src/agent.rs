@@ -554,7 +554,9 @@ pub fn find(repo_root: &Path, name: &str) -> Result<ResolvedAgent> {
 }
 
 fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
-    let bytes = std::fs::read(path)
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
+    let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
         .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
     let manifest_digest = digest_bytes(&bytes);
     let text = String::from_utf8(bytes)
@@ -645,13 +647,22 @@ fn load_one(repo_root: &Path, path: &Path) -> Result<ResolvedAgent> {
     {
         Some(source) => {
             let source_path = resolve_source_path(repo_root, &source.path, path)?;
-            let source_bytes = std::fs::read(&source_path).map_err(|e| {
+            let mut source_file = std::fs::File::open(&source_path).map_err(|e| {
                 Error::new(format!(
                     "{}: cannot read the agent's source {}: {e}",
                     path.display(),
                     source_path.display()
                 ))
             })?;
+            let source_bytes =
+                crate::util::read_limited(&mut source_file, crate::util::MAX_TASK_RECORD_BYTES)
+                    .map_err(|e| {
+                        Error::new(format!(
+                            "{}: cannot read the agent's source {}: {e}",
+                            path.display(),
+                            source_path.display()
+                        ))
+                    })?;
             let source_digest = digest_bytes(&source_bytes);
             let source_text = String::from_utf8(source_bytes).map_err(|_| {
                 Error::new(format!(
@@ -1614,5 +1625,21 @@ mod tests {
         // Comments and non-pair lines are not settings.
         assert!(!settings.contains_key("# comment"));
         assert_eq!(settings.len(), 3);
+    }
+
+    #[test]
+    fn agent_manifests_beyond_the_record_bound_are_refused() {
+        let root = registry();
+        let big = write(
+            root.path(),
+            &format!("{AGENTS_RELATIVE_DIR}/big.md"),
+            &"\0".repeat(crate::util::MAX_TASK_RECORD_BYTES as usize + 1),
+        );
+        let error = load_err(root.path());
+        assert!(
+            error.contains(&format!("cannot read {}", big.display())),
+            "{error}"
+        );
+        assert!(error.contains("file is larger than"), "{error}");
     }
 }

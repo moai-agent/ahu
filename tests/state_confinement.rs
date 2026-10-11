@@ -285,6 +285,37 @@ fn a_state_file_is_created_owner_only() {
     );
 }
 
+/// Pre-existing directories below the store are confined, not refused.
+#[test]
+fn state_writes_confine_pre_existing_directories_without_refusing_them() {
+    let repo = repo_with_state();
+    let record = repo
+        .path()
+        .join(".ahu/state/repos/created/nested/task.json");
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    ahu::state::write_json(&record, &serde_json::json!({"written": true})).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&record).unwrap())
+            .unwrap(),
+        serde_json::json!({"written": true})
+    );
+    let store = repo.path().join(".ahu/state/repos");
+    for dir in [
+        store.clone(),
+        store.join("created"),
+        record.parent().unwrap().to_path_buf(),
+    ] {
+        assert_eq!(
+            std::fs::symlink_metadata(&dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+}
+
 /// A nested marker cannot reset the checkout confinement boundary.
 #[test]
 fn a_nested_state_marker_does_not_move_the_confinement_boundary() {

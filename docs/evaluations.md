@@ -7,8 +7,36 @@ questions, then writes `answer.json`. Expected answers, scoring weights, tool
 expectations and judge rubrics stay out of its prompt.
 
 Keep cases outside the candidate checkout if the candidate should not read their
-answers. Prompt omission is not filesystem isolation. Run artifacts and records
-must stay outside repositories.
+answers. Prompt omission is not filesystem isolation. Bounded structured records
+and derived summaries default to the primary checkout's ignored, untracked
+`.ahu/evals/`; raw transcripts, prompts, tool payloads and OTel captures must
+remain outside every repository. Never put private tracker content in eval
+results or commit/upload these local results.
+
+`eval run`, `eval report` and `eval verify` default `--records` to
+`<primary-checkout>/.ahu/evals/runs.jsonl`, including from linked worktrees.
+An explicit `--records` overrides this default; relative overrides use the process
+working directory, not the primary checkout. Other repository paths, tracked
+files, non-ignored destinations, traversal and hard links are refused.
+Existing external parent directories are canonicalized, including macOS `/tmp`
+and `/var` aliases. Record-file symlinks, redirected repository `.ahu` components,
+raw-artifact store links, and external parent links into any checkout are refused.
+Alias chains are checked at each hop; traversal components in paths or link
+targets are refused. Existing owner-safe `0644` JSONL files remain readable;
+new records use `0600`. Configure a Git ignore rule for `.ahu/evals/` before using local storage;
+ahu does not change ignore rules. An explicit external records directory must
+already exist.
+
+Raw per-run artifacts are stored separately under
+`$XDG_STATE_HOME/ahu/eval-artifacts/<repository-id>/`, or
+`$HOME/.local/state/ahu/eval-artifacts/<repository-id>/` when XDG_STATE_HOME is
+unset. This store and its run directories are owner-only, must be outside every
+checkout, and reject links within the artifact store. Trusted external parent
+aliases are resolved before checking the repository boundary. Existing directories
+retain their existing permissions.
+Reports remain read-only and print summaries to stdout; save a bounded summary
+in ignored `.ahu/evals/` or external storage when needed. Existing evidence
+must be migrated explicitly.
 
 ## Start a comparison
 
@@ -96,6 +124,14 @@ item text or returned decisions. Request-byte sums carry measured-call and
 measured-run counts, including failed calls. They are not token or billing
 estimates. Native input may include cached input and native output may include
 reasoning; preserve each harness's semantics and keep provider tokens separate.
+
+Kiro V3's native exporter emits OTLP JSON, which this receiver does not project.
+During evals ahu therefore forwards its private eval endpoint to the ahu MCP
+server without enabling Kiro's native exporter. `ahu setup` adds name-only
+metadata interpolation to Kiro's MCP configuration; existing projects need the
+updated configuration committed with their context lock before launching evals.
+This captures ahu MCP observations and available ACP call outcomes, not native
+model telemetry. Ordinary collector configuration is unchanged.
 
 ## Improve instructions, skills and tools
 
@@ -296,7 +332,42 @@ latency, and token counts, with no evidence, credentials, inherited OTel resourc
 attributes, or authentication headers. Coverage `typed_decision_span` means this
 observation arrived; it does not claim MCP session coverage. Candidate MCP tool
 counts are unaffected. Agent telemetry retains `none`, `partial_spans`, or
-`complete_session` coverage.
+`complete_session` coverage. These legacy values remain readable and writable;
+`complete_session` means **an ahu MCP session summary arrived**, not that all
+harness sessions, native tools, or helpers were captured. New trial records name
+this scope as `telemetry_scope: ahu_spans`. A summary reports the totals of the
+MCP server that emitted it; other MCP servers and missing exports remain outside
+that observation.
+
+The report's `evidence` object separates ahu MCP availability, native trajectory
+coverage, and observation counts for each token and cost metric. MCP availability
+is `summary_observed`, `spans_observed`, `none`, or `unknown`. New records carry
+`mcp_spans` so unrelated harness/evaluator spans do not imply MCP evidence.
+Older `partial_spans` records cannot establish which spans arrived and therefore
+have unknown MCP availability. Older records without any telemetry coverage or
+positive MCP flag count as `telemetry_unknown`, not `telemetry_absent`. `none`
+means no observation arrived, not that no work occurred. A numeric zero remains
+a measured value; absent usage/cost measurements never become zero. The token
+metric names preserve candidate versus decision/selection service usage.
+
+`telemetry_receiver` reports receiver interval counters, which can include
+candidate, evaluator, and selection exports. Rejected requests include malformed,
+oversize, and truncated HTTP/protobuf bodies; rejected connections and accept
+errors remain separate. `rejected_spans` counts task-capacity drops. The optional
+`projection` object adds `uncorrelated_spans` (mismatched eval resource or unusable
+task identity), `dedup_capacity_spans`, and `invalid_identity_spans`. Deduplication
+uses the validated 16-byte trace ID plus 8-byte span ID, retaining at most 4096
+pairs per task/attempt. Further identities and invalid identities are projected
+without duplicate protection; counters can overcount retries. Their task-level
+`telemetry_dedup_untracked_spans` prevents inferring zero calls from missing tool
+names or passing absence checks based on matching summary totals.
+
+Old receiver records lack `projection`; this stays unknown. Aggregates give the
+new counters their own `coverage.receiver_projection` observation denominator,
+so a known subtotal is not mistaken for all trials. These bounded diagnostics
+retain no raw spans or payloads. Zero receiver rejections do not prove exporter
+success: work never exported, exports lost before arrival, and exports arriving
+after the observation window cannot be measured here.
 
 ## Observed trajectories and budgets
 

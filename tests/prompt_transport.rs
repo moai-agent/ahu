@@ -439,6 +439,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
         worktree: worktree.to_path_buf(),
         base_commit: Some("0".repeat(40)),
         identity: LaunchIdentity {
+            release_id: None,
             mode: LaunchMode::Named,
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),

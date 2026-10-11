@@ -88,6 +88,7 @@ pub struct Broker {
     pending: Vec<std::thread::JoinHandle<()>>,
     consumed: std::collections::BTreeSet<String>,
     scan: Option<std::fs::ReadDir>,
+    parent_context: Option<String>,
     scanned: usize,
 }
 impl Broker {
@@ -112,8 +113,12 @@ impl Broker {
             pending: Vec::new(),
             consumed: std::collections::BTreeSet::new(),
             scan: None,
+            parent_context: None,
             scanned: 0,
         })
+    }
+    pub(crate) fn set_parent_span(&mut self, span: &crate::telemetry::SpanGuard) {
+        self.parent_context = span.task_parent_carrier(&self.owner.task_id, self.spec.attempt);
     }
     pub fn configure_worker(&self, command: &mut Command) {
         command
@@ -244,6 +249,11 @@ impl Broker {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            crate::telemetry::configure_task_identity(&mut command, &self.owner, Some(&self.spec));
+            command.env_remove("AHU_BROKER_PARENT_ATTRIBUTES");
+            if let Some(carrier) = &self.parent_context {
+                command.env("AHU_BROKER_PARENT_ATTRIBUTES", carrier);
+            }
             command.args(["--native-helpers", &grant.native_helpers]);
             command
                 .env(

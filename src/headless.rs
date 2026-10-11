@@ -1,11 +1,22 @@
 //! Unattended attempts with minimal primary-owned state and an ahu supervisor.
 //! Process and harness outcomes are evidence, never work acceptance.
+mod accounting;
+mod admission;
+pub(crate) mod identity;
+mod journal;
+mod kiro;
 pub(crate) mod review;
 mod skills;
 
 use crate::harness::{LaunchCommand, LaunchRequest};
 use crate::util::{Error, Result, digest_bytes};
 use crate::{bail, state, task};
+use admission::{
+    Lock, PLACEMENT_INTENT, PlacementIntent, admission_counts, attempt_dir, sweep_placement_intent,
+    unix_now, validate_parent_attempt,
+};
+use journal::recover_resume;
+pub(crate) use journal::{durable_json, read_json, read_json_full};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::Read;
@@ -246,6 +257,34 @@ pub fn batch_command(
         // positional argument, streams one JSON event per line on stdout, and
         // exits without a listening port. `-i/--interactive` is the flag that
         // would make it a session, and this path never passes it.
+        "kiro" => {
+            if request.prompt.is_empty() || request.prompt.starts_with('-') {
+                bail!("Kiro requires a nonempty, non-option-shaped prompt");
+            }
+            add(&[
+                "chat",
+                "--v3",
+                "--model",
+                request.model,
+                "--no-interactive",
+                "--output-format",
+                "stream-json",
+                "--require-mcp-startup",
+            ]);
+            match request.permissions {
+                Permissions::Prompt => (),
+                Permissions::Auto => add(&["--trust-all-tools"]),
+                Permissions::AcceptEdits => bail!("Kiro has no validated accept-edits mapping"),
+            }
+            if let Some(session) = &spec.session {
+                if !kiro::valid_session(session) {
+                    bail!("invalid Kiro native session identifier");
+                }
+                add(&["--resume-id", session]);
+            }
+            // Kiro V3 2.28.0 discards the positional prompt after `--`.
+            "kiro-cli"
+        }
         "opencode" => {
             add(&["run", "--format", "json", "--model", request.model]);
             match request.permissions {
@@ -423,9 +462,7 @@ pub(crate) fn confined(path: &Path, create: bool) -> Result<()> {
         let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !(task::is_canonical_task_uuid(id)
-            || (!id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit())))
-        {
+        if !crate::storage::is_task_entry_name(id) {
             continue;
         }
         let Some(root) = dir.parent().and_then(Path::parent) else {
@@ -436,7 +473,9 @@ pub(crate) fn confined(path: &Path, create: bool) -> Result<()> {
         }
         confined_at(root, dir, false)?;
         let record_path = dir.join("task.json");
-        if state::confine_file(&record_path)?.is_none_or(|m| m.len() > 1024 * 1024) {
+        if state::confine_file(&record_path)?
+            .is_none_or(|m| m.len() > crate::util::MAX_TASK_RECORD_BYTES)
+        {
             continue;
         }
         let record = task::load(dir)?;
@@ -634,9 +673,7 @@ fn discover_stores(repo: &crate::git::Repo, domains: Vec<PathBuf>) -> Result<Vec
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if crate::task::is_canonical_task_uuid(&name)
-                || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_hexdigit()))
-            {
+            if crate::storage::is_task_entry_name(&name) {
                 confined_in(repo, &entry.path(), false)?;
                 if entry.path().join("task.json").exists() {
                     out.push(entry.path());
@@ -647,28 +684,15 @@ fn discover_stores(repo: &crate::git::Repo, domains: Vec<PathBuf>) -> Result<Vec
     Ok(out)
 }
 
-pub(crate) fn durable_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::new("runtime file needs a parent"))?;
-    confined(parent, true)?;
-    state::confine_file(path)?;
-    let mut body = serde_json::to_vec(value).map_err(|e| Error::new(e.to_string()))?;
-    body.push(b'\n');
-    crate::private_io::atomic_write(path, &body, crate::private_io::Durability::Durable)
-}
-
-pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&review::read_bytes(path, None)?)
-        .map_err(|_| Error::new(format!("invalid metadata at {}", path.display())))
-}
-
-fn attempt_dir(dir: &Path, spec: &Spec) -> PathBuf {
-    dir.join(format!("attempt-{}", spec.attempt))
-}
 fn frozen_digest(dir: &Path) -> Result<String> {
-    let mut bytes = review::read_bytes(&dir.join("task.json"), None)?;
-    bytes.extend(review::read_bytes(&dir.join("headless.json"), None)?);
+    let mut bytes = review::read_bytes(
+        &dir.join("task.json"),
+        Some(crate::util::MAX_TASK_RECORD_BYTES),
+    )?;
+    bytes.extend(review::read_bytes(
+        &dir.join("headless.json"),
+        Some(crate::util::MAX_TASK_RECORD_BYTES),
+    )?);
     Ok(digest_bytes(&bytes))
 }
 
@@ -757,11 +781,13 @@ pub fn launch(
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
     crate::catalog::check_headless_version(&plan.pair.harness, &version)?;
     let parent_task = std::env::var("AHU_PARENT_TASK").ok();
+    let mut parent_release = None;
     let depth = if let Some(parent) = &parent_task {
         let parent_dir = lookup(repo, parent)?;
         let parent_spec: Spec = read_json(&parent_dir.join("headless.json"))?;
         let parent_record = task::load(&parent_dir)?;
         validate_frozen_configuration(&parent_record)?;
+        parent_release = Some(parent_record.identity.release_id.clone());
         if parent_record.worktree.canonicalize()? != repo.root.canonicalize()? {
             bail!("child must launch from its owning task worktree");
         }
@@ -904,6 +930,7 @@ pub fn launch(
     }
     crate::commands::preflight(console, repo, &loaded, &plan)?;
     let mut preview = json!({"schema_version":1,"backend":"headless","task_id":plan.task_id,"worktree":plan.worktree,
+        "release_id":parent_release.as_ref().unwrap_or(&plan.release_id),
         "task_handle_candidate":format!("@{}",plan.task_name.clone().unwrap_or_else(||crate::task_handles::generated_name(&plan.title))), "task_handle_reserved":false,
         "branch":plan.branch,"command":plan.command.redacted(),"executable":plan.harness_executable,"capabilities":spec,
         "runtime":plan.task_dir,"identity": {"agent":plan.agent_label(),"harness":plan.pair.harness,"model":plan.pair.model},
@@ -924,6 +951,7 @@ pub fn launch(
         confined(&dir, true)?;
         dir.join("launch.lock")
     })?;
+    sweep_placement_intent(console, repo, &store(repo)?)?;
     if let Some(parent) = &spec.parent_task
         && lookup(repo, parent)?.join("cancel.json").exists()
     {
@@ -931,27 +959,12 @@ pub fn launch(
     }
     validate_parent_attempt(repo, &spec)?;
     let previous = discover_domain(repo, &store(repo)?)?;
-    let mut tree_count = 0;
-    for dir in &previous {
-        let recorded: Spec = read_json(&dir.join("headless.json"))?;
-        if recorded.root_task == spec.root_task {
-            tree_count += 1;
-        }
-    }
+    let (tree_count, active) = admission_counts(console, &previous, &spec.root_task)?;
     if tree_count >= 128 {
         bail!(
             "tree_capacity_exceeded: root delegation grant is limited to 128 assignments; no task was queued"
         );
     }
-    let active = previous
-        .iter()
-        .filter(|dir| {
-            let Ok(spec) = read_json::<Spec>(&dir.join("headless.json")) else {
-                return true;
-            };
-            !attempt_dir(dir, &spec).join("result.json").exists()
-        })
-        .count();
     if active >= 16 {
         bail!(
             "capacity_exceeded: 16 active or interrupted assignments; inspect existing tasks before retrying. No work was queued"
@@ -972,19 +985,36 @@ pub fn launch(
         "Task {handle} ({})\n",
         crate::task_ref::display(&plan.task_id)
     ))?;
+    let intent_path = store(repo)?.join(PLACEMENT_INTENT);
+    durable_json(
+        &intent_path,
+        &PlacementIntent {
+            schema_version: 1,
+            task_id: plan.task_id.clone(),
+            worktree: plan.worktree.clone(),
+            branch: plan.branch.clone(),
+            pid: unsafe { libc::getpid() },
+            timestamp: unix_now(),
+        },
+    )?;
     crate::git::add_worktree(repo, &plan.worktree, &plan.branch, base)?;
     // Preserve preparation failures for review; never delete reviewable work.
     let materialize = crate::snapshot::materialize(&repo.root, &plan.snapshot, &plan.worktree)?;
     if !materialize.concurrently_modified.is_empty() {
+        let _ = std::fs::remove_file(&intent_path);
         bail!(
             "configuration changed during preparation; worktree preserved at {}",
             plan.worktree.display()
         );
     }
     confined(&plan.task_dir, true)?;
-    let record = crate::launch::prepared_record(repo, &loaded, &plan, prompt, materialize);
+    let mut record = crate::launch::prepared_record(repo, &loaded, &plan, prompt, materialize);
+    if let Some(release_id) = parent_release {
+        record.identity.release_id = release_id;
+    }
     task::save(&plan.task_dir, &record, prompt)?;
     durable_json(&plan.task_dir.join("headless.json"), &spec)?;
+    let _ = std::fs::remove_file(&intent_path);
     crate::task_index::register(
         &repo.identity(),
         &plan.task_id,
@@ -1074,6 +1104,7 @@ fn validate_environment(
         "HOME",
         "CODEX_HOME",
         "CLAUDE_CONFIG_DIR",
+        "KIRO_HOME",
         "XDG_STATE_HOME",
         "XDG_DATA_HOME",
         "XDG_CACHE_HOME",
@@ -1155,70 +1186,6 @@ pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-/// OS-owned locks are released on process loss, never stolen based on age.
-struct Lock(std::fs::File);
-impl Lock {
-    fn acquire(path: &Path) -> Result<Self> {
-        Self::try_acquire(path)?.ok_or_else(|| {
-            Error::new(
-                "attempt is already owned by a live supervisor; concurrent execution refused",
-            )
-        })
-    }
-    fn is_owned(path: &Path) -> Result<bool> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::OpenOptionsExt;
-        // Inspection neither creates nor writes the ownership file.
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)?;
-        crate::storage::validate_owned_metadata(&file.metadata()?, true)?;
-        // SAFETY: file owns a valid descriptor; dropping it releases a successful probe.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(false);
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            Ok(true)
-        } else {
-            Err(error.into())
-        }
-    }
-    fn try_acquire(path: &Path) -> Result<Option<Self>> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::OpenOptionsExt;
-        state::confine_file(path)?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(path)?;
-        crate::storage::validate_owned_metadata(&file.metadata()?, true)?;
-        // SAFETY: file owns a valid descriptor for the duration of the call.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                return Ok(None);
-            }
-            return Err(error.into());
-        }
-        Ok(Some(Self(file)))
-    }
-}
-impl Drop for Lock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // SAFETY: this object still owns the descriptor.
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-}
-
 fn sanitize(command: &mut Command, policy: Option<&crate::cmux::integration::HeadlessPolicy>) {
     crate::cmux::integration::sanitize(command, policy);
     if let Some(path) = std::env::var_os("PATH") {
@@ -1245,6 +1212,8 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     sanitize(&mut command, None);
+    crate::telemetry::configure_task_identity(&mut command, &task::load(dir)?, Some(spec));
+    crate::telemetry::configure_supervisor_parent(&mut command, spec);
     command
         .env("AHU_EXPECTED_DIGEST", frozen_digest(dir)?)
         .env_remove("AHU_RUNTIME_DIR")
@@ -1309,6 +1278,9 @@ pub struct SkillCatalogEntry {
     pub digest: String,
 }
 
+/// Independent maximum observations per field in this attempt's native stream.
+/// Fields may come from different events; these are not additive call totals or
+/// a coherent snapshot, and resumed/child streams may contain overlapping usage.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input: Option<u64>,
@@ -1413,13 +1385,20 @@ impl ReportedCost {
         if event.get("type").and_then(Value::as_str) != Some("result") {
             return;
         }
-        self.observe(event.get("total_cost_usd"), "claude_code_result_total");
+        let Some(value) = Self::valid_amount(event.get("total_cost_usd")) else {
+            return;
+        };
+        // Result totals are cumulative observations, including on resume. A
+        // duplicate or older snapshot must not increase the reported amount.
+        self.usd = Some(self.usd.map_or(value, |prior| prior.max(value)));
+        self.source = Some("claude_code_result_total".into());
     }
 
     fn observe_opencode_step(
         &mut self,
         event: &Value,
         seen: &mut std::collections::BTreeSet<String>,
+        tracking_limited: &mut bool,
     ) {
         if event.get("type").and_then(Value::as_str) != Some("step_finish") {
             return;
@@ -1431,25 +1410,35 @@ impl ReportedCost {
         let Some(id) = part.get("id").and_then(Value::as_str) else {
             return;
         };
-        if !seen.insert(id.to_owned()) {
+        if id.is_empty() || id.len() > 1024 {
+            *tracking_limited = true;
             return;
         }
-        self.observe(part.get("cost"), "opencode_step_finish_sum");
-    }
-
-    fn observe(&mut self, value: Option<&Value>, source: &str) {
-        let Some(value) = value.and_then(Value::as_f64) else {
+        if seen.contains(id) {
+            return;
+        }
+        if seen.len() >= 4096 {
+            *tracking_limited = true;
+            return;
+        }
+        let Some(value) = Self::valid_amount(part.get("cost")) else {
             return;
         };
-        if !value.is_finite() || value < 0.0 {
-            return;
-        }
         let total = self.usd.unwrap_or(0.0) + value;
         if !total.is_finite() {
+            *tracking_limited = true;
             return;
         }
+        // Missing/invalid observations must not consume the part's identity.
+        seen.insert(id.to_owned());
         self.usd = Some(total);
-        self.source = Some(source.to_owned());
+        self.source = Some("opencode_step_finish_sum".into());
+    }
+
+    fn valid_amount(value: Option<&Value>) -> Option<f64> {
+        value
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
     }
 }
 
@@ -1532,12 +1521,16 @@ pub struct Events {
     pub cost: ReportedCost,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(skip)]
+    model_evidence: identity::ModelEvidence,
     #[serde(default)]
     pub skills: Vec<SkillInvocation>,
     #[serde(default)]
     pub skill_unknown_events: u64,
     #[serde(skip)]
     skill_calls: Vec<skills::Call>,
+    #[serde(skip)]
+    kiro: kiro::State,
     #[serde(default = "crate::telemetry::SkillEvidence::unverified")]
     pub skill_observation: crate::telemetry::SkillEvidence,
     #[serde(skip_serializing)]
@@ -1551,6 +1544,8 @@ pub struct Events {
     native_event_count: usize,
     #[serde(skip)]
     cost_step_ids: std::collections::BTreeSet<String>,
+    #[serde(skip)]
+    cost_tracking_limited: bool,
 }
 impl Events {
     fn observe_stderr(&mut self, line: &[u8]) {
@@ -1625,13 +1620,24 @@ impl Events {
                 return;
             }
         };
+        if harness == "kiro" {
+            self.observe_kiro(&event);
+            return;
+        }
+        self.model_evidence.observe(
+            ["/model", "/model_name", "/part/model", "/message/model"]
+                .into_iter()
+                .filter_map(|pointer| event.pointer(pointer)),
+        );
         self.usage.observe(&event);
         self.trajectory.observe(harness, &event);
         match harness {
             "claude-code" => self.cost.observe_claude_result(&event),
-            "opencode" => self
-                .cost
-                .observe_opencode_step(&event, &mut self.cost_step_ids),
+            "opencode" => self.cost.observe_opencode_step(
+                &event,
+                &mut self.cost_step_ids,
+                &mut self.cost_tracking_limited,
+            ),
             _ => (),
         }
         self.observe_skill(harness, &event);
@@ -2107,7 +2113,10 @@ fn observe_writes(events: &mut Events, line: &[u8], worktree: &Path) {
             return;
         }
     };
-    for candidate in collect_write_paths(&event) {
+    for candidate in collect_write_paths(&event)
+        .into_iter()
+        .chain(kiro::write_paths(&event))
+    {
         if candidate.len() > 4096 {
             events.failed = true;
             continue;
@@ -2157,7 +2166,7 @@ fn boundary_after_drain(events: &mut Events, stop: &mut Option<(&'static str, In
 pub fn recorded_writes_outside_worktree(dir: &Path) -> Option<Vec<String>> {
     let spec: Spec = read_json(&dir.join("headless.json")).ok()?;
     let result_path = attempt_dir(dir, &spec).join("result.json");
-    let result: Value = read_json(&result_path).ok()?;
+    let result: Value = read_json_full(&result_path).ok()?;
     let paths: Vec<String> = result
         .get("writes_outside_worktree")?
         .as_array()?
@@ -2321,40 +2330,6 @@ pub(crate) fn signal_group(pid: u32, signal: i32) {
     }
 }
 
-fn validate_parent_attempt(repo: &crate::git::Repo, spec: &Spec) -> Result<()> {
-    let Some(parent) = &spec.parent_task else {
-        return Ok(());
-    };
-    let dir = lookup(repo, parent)?;
-    let parent_spec: Spec = read_json(&dir.join("headless.json"))?;
-    if spec.parent_attempt != Some(parent_spec.attempt) {
-        bail!("stale parent attempt cannot admit or start a child");
-    }
-    let attempt = attempt_dir(&dir, &parent_spec);
-    if dir.join("cancel.json").exists()
-        || attempt.join("admission-closed.json").exists()
-        || attempt.join("result.json").exists()
-    {
-        bail!("parent attempt ended or closed child admission");
-    }
-    if Lock::try_acquire(&dir.join("owner.lock"))?.is_some() {
-        bail!("parent supervisor is no longer live; child dispatch refused");
-    }
-    let request = spec
-        .broker_request
-        .as_deref()
-        .filter(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| Error::new("child lacks a broker request identity"))?;
-    let claim: Value = read_json(&attempt.join("broker").join(format!("{request}.claim.json")))?;
-    if claim["state"] != "dispatching"
-        || claim["parent_attempt"] != parent_spec.attempt
-        || claim["request_id"] != request
-    {
-        bail!("child dispatch does not match a consumed request in the live parent attempt");
-    }
-    Ok(())
-}
-
 pub fn supervise(dir: &Path) -> Result<i32> {
     confined(dir, false)?;
     let expected = std::env::var("AHU_EXPECTED_DIGEST")
@@ -2448,6 +2423,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         }
     }
     let measurement_started = Instant::now();
+    let pin = crate::executable_pin::ExecutablePin::create()?;
     let mut command = Command::new(&real);
     command
         .args(&rebuilt.args)
@@ -2460,22 +2436,18 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     let telemetry = crate::config::load(&record.worktree)?
         .map(|loaded| loaded.config.telemetry)
         .unwrap_or_default();
-    crate::telemetry::initialize(&telemetry)?;
-    let mut telemetry_span = crate::telemetry::span(
+    crate::telemetry::initialize_task(&telemetry, &record, Some(spec))?;
+    let mut telemetry_span = crate::telemetry::task_span(
         "ahu.harness.run",
-        [
-            ("ahu.agent.name", record.agent_label()),
-            ("ahu.harness", record.identity.harness.clone()),
-            ("ahu.model.requested", record.identity.model.clone()),
-            ("ahu.version", env!("CARGO_PKG_VERSION").to_string()),
-            ("ahu.task.id", record.task_id.clone()),
-        ],
+        [("ahu.model.requested", record.identity.model.clone())],
+        spec,
     );
-    telemetry_span.set_u64("ahu.task.attempt", u64::from(spec.attempt));
-    if let Some(version) = record.identity.agent_version.as_deref() {
-        telemetry_span.set_string("ahu.agent.version", version);
+    crate::telemetry::task_span_attributes(&mut telemetry_span, &record, Some(spec));
+    for (key, value) in
+        identity::requested_attributes(&record.identity.harness, &record.identity.model)
+    {
+        telemetry_span.set_string(key, &value);
     }
-    telemetry_span.set_string("ahu.harness.version", &spec.harness_version);
     crate::telemetry::configure_child(
         &mut command,
         &telemetry,
@@ -2487,6 +2459,8 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         Some(&record.task_id),
         Some(spec.attempt),
     );
+    crate::telemetry::configure_task_identity(&mut command, &record, Some(spec));
+    telemetry_span.configure_child_context(&mut command);
     command
         .env("AHU_BIN", std::env::current_exe()?)
         .env("AHU_EXECUTION_BACKEND", "headless")
@@ -2497,6 +2471,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         .env_remove("AHU_RUNTIME_DIR")
         .env_remove("AHU_TASK_INDEX_DIR");
     let mut broker = crate::broker::Broker::new(&dir.join("requests"), &record, spec)?;
+    broker.set_parent_span(&telemetry_span);
     broker.configure_worker(&mut command);
     if let Some(profile) = &spec.native_profile {
         for key in &profile.env_remove {
@@ -2506,6 +2481,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             command.env(key, value);
         }
     }
+    pin.configure_command(&mut command)?;
     // Serialize the final parent/cancellation check with admission and explicit cancellation.
     let spawn_admission = Lock::acquire(&store(&repo)?.join("launch.lock"))?;
     validate_parent_attempt(&repo, spec)?;
@@ -2830,20 +2806,20 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     } else {
         "succeeded"
     };
-    if let Some(model) = events.model.as_deref() {
+    if let Some(model) = events
+        .model
+        .as_deref()
+        .filter(|value| crate::eval::provenance::safe_identity(value))
+    {
         telemetry_span.set_string("ahu.model.resolved", model);
     }
-    telemetry_span.set_string("ahu.status", outcome);
-    for (key, value) in events.usage.normalized_fields() {
-        if let Some(value) = value {
-            telemetry_span.set_u64(key, value);
-        }
+    for (key, value) in events.reported_model_attributes() {
+        telemetry_span.set_string(key, &value);
     }
-    if let Some(cost_usd) = events.cost.usd {
-        telemetry_span.set_f64("ahu.cost.harness_reported_usd", cost_usd);
-        if let Some(source) = events.cost.source.as_deref() {
-            telemetry_span.set_string("ahu.cost.source", source);
-        }
+    telemetry_span.set_string("ahu.status", outcome);
+    accounting::Projection::from_events(&events).export(&mut telemetry_span);
+    if let Some(completeness) = &native_completeness {
+        telemetry_span.set_bool("ahu.events.native_helpers_complete", completeness.complete);
     }
     telemetry_span.set_u64("ahu.skills.available", skill_catalog.len() as u64);
     telemetry_span.set_string("ahu.skills.observation", events.skill_observation.as_str());
@@ -3099,7 +3075,7 @@ fn result(dir: &Path) -> Result<Value> {
 fn result_attempt(dir: &Path, spec: &Spec) -> Result<Value> {
     let path = attempt_dir(dir, spec).join("result.json");
     if path.exists() {
-        let value: Value = read_json(&path)?;
+        let value: Value = read_json_full(&path)?;
         review::validate_result(
             &value,
             &dir.file_name().unwrap_or_default().to_string_lossy(),
@@ -3171,7 +3147,7 @@ fn wait(dir: &Path, json_output: bool) -> Result<i32> {
     loop {
         // Validate public review output without applying the interactive display-size
         // limit to wait's existing full-envelope API.
-        let value = review_attempt(dir, &spec, read_json)?;
+        let value = review_attempt(dir, &spec, read_json_full)?;
         if value["outcome"] != "running" {
             let code = if value["outcome"] == "succeeded" {
                 0
@@ -3526,33 +3502,6 @@ pub fn control(
         }
         _ => bail!("unsupported headless operation"),
     }
-}
-
-/// Restore only metadata for an attempt that has never acknowledged process start.
-/// This is invoked by explicit resume, never by read-only inspection or a timer.
-fn recover_resume(dir: &Path) -> Result<()> {
-    let journal = dir.join("resume-journal.json");
-    if !journal.exists() {
-        return Ok(());
-    }
-    #[derive(Deserialize)]
-    struct Journal {
-        record: task::TaskRecord,
-        spec: Spec,
-        prompt: String,
-        next_attempt: u32,
-    }
-    let old: Journal = read_json(&journal)?;
-    let next = Spec {
-        attempt: old.next_attempt,
-        ..old.spec.clone()
-    };
-    if !attempt_dir(dir, &next).join("spawn-intent.json").exists() {
-        task::save(dir, &old.record, &old.prompt)?;
-        durable_json(&dir.join("headless.json"), &old.spec)?;
-    }
-    std::fs::remove_file(journal)?;
-    Ok(())
 }
 
 pub fn inspection(dir: &Path) -> Result<Value> {
@@ -5206,6 +5155,72 @@ mod filesystem_behavior_tests {
         (root, repo)
     }
 
+    fn recorded_spec(root_task: Option<&str>, attempt: u32) -> Spec {
+        Spec {
+            schema_version: 2,
+            options: Options::default(),
+            harness_version: "test".to_string(),
+            executable_digest: "digest".to_string(),
+            parent_task: Some("parent".to_string()),
+            parent_attempt: None,
+            root_task: root_task.map(str::to_string),
+            broker_request: None,
+            child_grants: Vec::new(),
+            depth: 0,
+            attempt,
+            session: Some("session".to_string()),
+            broker_dir: None,
+            native_profile: None,
+            native_controls: Vec::new(),
+            gaps: Vec::new(),
+        }
+    }
+
+    fn recorded_task(repo: &crate::git::Repo, store: &Path, name: &str, spec: &Spec) -> PathBuf {
+        let dir = store.join(name);
+        confined_in(repo, &dir, true).unwrap();
+        state::write_private_file(
+            &dir.join("headless.json"),
+            serde_json::to_string(spec).unwrap().as_bytes(),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn reaped_pid() -> i32 {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id() as i32;
+        child.wait().unwrap();
+        pid
+    }
+
+    fn admission_counts_with_console(
+        previous: &[PathBuf],
+        root_task: &Option<String>,
+    ) -> (String, (usize, usize)) {
+        let mut input = std::io::empty();
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: false,
+        };
+        let counts = admission_counts(&mut console, previous, root_task).unwrap();
+        (String::from_utf8(output).unwrap(), counts)
+    }
+
+    fn sweep_with_console(repo: &crate::git::Repo, store_dir: &Path) -> String {
+        let mut input = std::io::empty();
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: false,
+        };
+        sweep_placement_intent(&mut console, repo, store_dir).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
     #[test]
     fn confinement_creates_only_private_directories_and_rejects_redirection() {
         let temp = tempfile::tempdir().unwrap();
@@ -5412,5 +5427,291 @@ mod filesystem_behavior_tests {
         drop(owner);
         assert!(!supervisor_owns_attempt(root.path()).unwrap());
         assert!(Lock::try_acquire(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn headless_record_reads_refuse_metadata_beyond_the_inspection_bound() {
+        let (_root, repo) = repository();
+        let store = store(&repo).unwrap();
+        let dir = store.join("abc");
+        confined_in(&repo, &dir, true).unwrap();
+        let record = dir.join("headless.json");
+        std::fs::write(
+            &record,
+            vec![0u8; crate::util::MAX_TASK_RECORD_BYTES as usize + 1],
+        )
+        .unwrap();
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let error = read_json::<serde_json::Value>(&record)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("metadata exceeds the inspection bound"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn admission_counts_pass_valid_records_and_warn_on_unreadable_ones() {
+        let (_root, repo) = repository();
+        let store_dir = store(&repo).unwrap();
+        let (said, counts) = admission_counts_with_console(&[], &None);
+        assert_eq!(counts, (0, 0), "{said}");
+        assert!(said.is_empty(), "{said}");
+
+        let tree = recorded_task(&repo, &store_dir, "tree", &recorded_spec(Some("root"), 0));
+        let other = recorded_task(
+            &repo,
+            &store_dir,
+            "other",
+            &recorded_spec(Some("branch"), 0),
+        );
+        let unreadable = store_dir.join("unreadable");
+        confined_in(&repo, &unreadable, true).unwrap();
+        state::write_private_file(&unreadable.join("headless.json"), b"not json").unwrap();
+        let finished_spec = recorded_spec(Some("root"), 1);
+        let finished = recorded_task(&repo, &store_dir, "finished", &finished_spec);
+        let attempt = attempt_dir(&finished, &finished_spec);
+        confined_in(&repo, &attempt, true).unwrap();
+        state::write_private_file(&attempt.join("result.json"), b"{}").unwrap();
+
+        let previous = [tree, other, unreadable, finished];
+        let (said, counts) = admission_counts_with_console(&previous, &Some("root".to_string()));
+        assert_eq!(counts, (2, 2), "{said}");
+        assert!(said.contains("cannot read"), "{said}");
+        assert!(said.contains("treating as unknown"), "{said}");
+    }
+
+    #[test]
+    fn placement_intent_sweep_ignores_missing_and_unparseable_intents() {
+        let (_root, repo) = repository();
+        let store_dir = store(&repo).unwrap();
+        confined_in(&repo, &store_dir.join("seed"), true).unwrap();
+
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(said.is_empty(), "{said}");
+
+        state::write_private_file(&store_dir.join(PLACEMENT_INTENT), b"not json").unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(said.contains("cannot parse"), "{said}");
+        assert!(said.contains("ignoring the stale launch intent"), "{said}");
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
+    }
+
+    #[test]
+    fn placement_intent_sweep_removes_orphaned_worktrees() {
+        let (root, repo) = repository();
+        assert!(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "base"
+                ])
+                .current_dir(&repo.root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let store_dir = store(&repo).unwrap();
+        confined_in(&repo, &store_dir.join("seed"), true).unwrap();
+        let task_id = "sweeptask";
+        let worktree = state::worktree_dir(&repo.primary_root().unwrap(), task_id).unwrap();
+        crate::git::add_worktree(&repo, &worktree, &format!("intent-{task_id}"), "HEAD").unwrap();
+        assert!(worktree.exists());
+
+        let intent = PlacementIntent {
+            schema_version: 1,
+            task_id: task_id.to_string(),
+            worktree: worktree.clone(),
+            branch: format!("intent-{task_id}"),
+            pid: reaped_pid(),
+            timestamp: unix_now() - 7200,
+        };
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+
+        std::fs::write(worktree.join("unfinished.txt"), "preserve this work").unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(said.contains("could not remove worktree"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("unfinished.txt")).unwrap(),
+            "preserve this work"
+        );
+        std::fs::remove_file(worktree.join("unfinished.txt")).unwrap();
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(
+            said.contains("removed worktree from an interrupted launch"),
+            "{said}"
+        );
+        assert!(!worktree.exists());
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
+        drop(root);
+    }
+
+    #[test]
+    fn placement_intent_sweep_refuses_unsafe_records() {
+        let (_root, repo) = repository();
+        let store_dir = store(&repo).unwrap();
+        confined_in(&repo, &store_dir.join("seed"), true).unwrap();
+        let path = store_dir.join(PLACEMENT_INTENT);
+        state::write_private_file(
+            &path,
+            &vec![b' '; crate::util::MAX_TASK_RECORD_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(sweep_with_console(&repo, &store_dir).contains("cannot safely read"));
+        assert!(path.exists());
+        for (schema_version, task_id, pid) in [
+            (2, "task", 123),
+            (1, "../outside", 123),
+            (1, "/outside", 123),
+            (1, "task", -1),
+        ] {
+            let intent = PlacementIntent {
+                schema_version,
+                task_id: task_id.into(),
+                worktree: repo.root.join(".worktrees").join(task_id),
+                branch: "unused".into(),
+                pid,
+                timestamp: 0,
+            };
+            state::write_private_file(&path, &serde_json::to_vec(&intent).unwrap()).unwrap();
+            assert!(
+                sweep_with_console(&repo, &store_dir).contains("invalid launch intent identity")
+            );
+            assert!(path.exists());
+        }
+        std::fs::remove_file(&path).unwrap();
+        let external = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(external.path(), &path).unwrap();
+        assert!(sweep_with_console(&repo, &store_dir).contains("cannot safely read"));
+        assert!(external.path().exists());
+        assert!(path.is_symlink());
+    }
+
+    #[test]
+    fn placement_intent_sweep_keeps_worktrees_for_live_recorders_existing_tasks_and_foreign_layouts()
+     {
+        let (root, repo) = repository();
+        let store_dir = store(&repo).unwrap();
+        confined_in(&repo, &store_dir.join("seed"), true).unwrap();
+
+        let task_id = "livetask";
+        let worktree = state::worktree_dir(&repo.primary_root().unwrap(), task_id).unwrap();
+        let intent = PlacementIntent {
+            schema_version: 1,
+            task_id: task_id.to_string(),
+            worktree: worktree.clone(),
+            branch: format!("intent-{task_id}"),
+            pid: std::process::id() as i32,
+            timestamp: unix_now() - 7200,
+        };
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(said.contains("cannot be confirmed dead"), "{said}");
+        assert!(
+            said.contains("kept worktree from an interrupted launch"),
+            "{said}"
+        );
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
+
+        let recorded = store_dir.join("recordedtask");
+        confined_in(&repo, &recorded, true).unwrap();
+        state::write_private_file(&recorded.join("task.json"), b"{}").unwrap();
+        let worktree = state::worktree_dir(&repo.primary_root().unwrap(), "recordedtask").unwrap();
+        let intent = PlacementIntent {
+            schema_version: 1,
+            task_id: "recordedtask".to_string(),
+            worktree: worktree.clone(),
+            branch: "intent-recordedtask".to_string(),
+            pid: reaped_pid(),
+            timestamp: unix_now() - 7200,
+        };
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(said.contains("its task record exists"), "{said}");
+        assert!(
+            said.contains("kept worktree from an interrupted launch"),
+            "{said}"
+        );
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
+
+        let foreign = root.path().join("elsewhere");
+        let intent = PlacementIntent {
+            schema_version: 1,
+            task_id: "foreigntask".to_string(),
+            worktree: foreign.clone(),
+            branch: "intent-foreigntask".to_string(),
+            pid: reaped_pid(),
+            timestamp: unix_now() - 7200,
+        };
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(
+            said.contains("does not match this repository's layout"),
+            "{said}"
+        );
+        assert!(
+            said.contains("kept worktree from an interrupted launch"),
+            "{said}"
+        );
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
+    }
+
+    #[test]
+    fn placement_intent_sweep_reports_removal_failures_and_still_consumes_the_intent() {
+        let (_root, repo) = repository();
+        let store_dir = store(&repo).unwrap();
+        confined_in(&repo, &store_dir.join("seed"), true).unwrap();
+        let task_id = "faketask";
+        let worktree = state::worktree_dir(&repo.primary_root().unwrap(), task_id).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let intent = PlacementIntent {
+            schema_version: 1,
+            task_id: task_id.to_string(),
+            worktree: worktree.clone(),
+            branch: format!("intent-{task_id}"),
+            pid: reaped_pid(),
+            timestamp: unix_now() - 7200,
+        };
+        state::write_private_file(
+            &store_dir.join(PLACEMENT_INTENT),
+            &serde_json::to_vec(&intent).unwrap(),
+        )
+        .unwrap();
+
+        let said = sweep_with_console(&repo, &store_dir);
+        assert!(
+            said.contains("could not remove worktree from an interrupted launch"),
+            "{said}"
+        );
+        assert!(worktree.exists());
+        assert!(!store_dir.join(PLACEMENT_INTENT).exists());
     }
 }

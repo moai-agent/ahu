@@ -23,6 +23,7 @@ const CONFIG_DIR_NAMES: &[&str] = &[
     ".agent",
     ".opencode",
     ".gemini",
+    ".kiro",
 ];
 
 /// File names that are agent configuration wherever they appear.
@@ -33,6 +34,7 @@ const CONFIG_FILE_NAMES: &[&str] = &[
     "GEMINI.local.md",
     "AGENTS.md",
     "AGENTS.override.md",
+    ".kiroignore",
     ".mcp.json",
     // OpenCode project configuration. It may name `plugin` modules OpenCode
     // installs and runs at startup, so it is executable configuration under the

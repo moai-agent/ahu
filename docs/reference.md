@@ -14,6 +14,11 @@ that checkout. Without this prefix, ahu uses the current directory. Ambient
 not select storage. See [state and compatibility](#state-and-compatibility) for
 explicit lookup of old stores.
 
+Options such as `--prompt` and `--records` consume the next argument literally,
+even if it begins with `--`. This permits flag-like prompts and filenames; shell quoting groups
+arguments but does not distinguish an option from its value. Supply each value
+before the next option. For example, `--prompt '--color=always'` is prompt text.
+
 ## CLI entry points
 
 Run `ahu --help` for the concise public command list. `ahu doctor` gives a
@@ -865,19 +870,28 @@ Reads and writes are bounded. ahu does not verify tracker visibility, fetch
 tracker content, inherit child task links, or promise same-user process
 isolation. Tracker access and private-key retention remain the responsibility of the maintainer.
 
-### Local trace export
+### Local OTLP export
 
-Trace export is off unless the project opts in. When enabled, ahu exports its
-own launch and harness lifecycle traces to the project-configured local OTLP
-collector and injects the same endpoint only into harness processes started by
-ahu. It never changes the invoking shell or harness sessions started directly.
-Only traces are enabled in this initial integration; inherited OTLP headers,
-signal-specific endpoints, and log/metric exporters are cleared for the child.
-Exporter construction or delivery failure does not fail the assignment. Spans
-are queued asynchronously in a bounded 128-span buffer and exported in batches
-of at most 32 every 500 ms. A full queue drops telemetry instead of blocking a
-task; each OTLP/HTTP request has a 500 ms timeout. These bounds apply to ahu's
-exporter and do not configure the collector's own queue or downstream exporters.
+OTLP export is off unless the project opts in. Eval runs are the exception: they
+enable telemetry regardless of project settings, pointed at the eval receiver
+endpoint. When enabled, ahu exports its own launch and harness lifecycle traces
+to the project-configured local OTLP collector and injects the same endpoint
+into harness processes started by ahu, which then export their own traces,
+metrics, and logs. It never changes the
+invoking shell or harness sessions started directly. Child traces, metrics,
+and logs all select the `otlp` exporter; inherited OTLP headers,
+signal-specific endpoints, and compression settings are cleared for the
+child. Exporter construction or delivery failure
+does not fail the assignment. Spans are queued asynchronously in a bounded
+128-span buffer and exported in batches of at most 32 every 500 ms. A full
+queue drops telemetry instead of blocking a task; each OTLP/HTTP request has a
+500 ms timeout. These bounds apply to ahu's exporter and do not configure the
+collector's own queue or downstream exporters. Child SDK batch queues and
+metric intervals remain controlled by the harness and its inherited settings;
+ahu sets their OTLP request timeout
+but does not impose its own span queue limits on them. An earlier panic while
+telemetry holds its internal lock can still terminate the process; the
+delivery-failure guarantee does not cover that case.
 
 ```toml
 [telemetry]
@@ -894,14 +908,78 @@ task, outcome, elapsed milliseconds, and any token usage the
 harness event stream actually reports (`input`, `output`, `cached`,
 `cache_write`, `reasoning`, and `total`). Missing usage remains absent; ahu never
 estimates it. ahu does not add prompts, transcripts, credentials, or private
-issue content to its span attributes. Inherited `OTEL_RESOURCE_ATTRIBUTES` are retained for
-children. MCP correlation also uses `AHU_MCP_RESOURCE_ATTRIBUTES`, containing only
+issue content to its span attributes. When ahu configures child export, inherited
+`OTEL_RESOURCE_ATTRIBUTES` are filtered to bounded, allowlisted `ahu.*` identity
+fields before launch identity is added. Other inherited resource fields are
+dropped. MCP correlation also uses `AHU_MCP_RESOURCE_ATTRIBUTES`, containing only
 bounded, allowlisted ahu identity fields, because a harness may strip `OTEL_*`
 variables from its MCP children. Codex setup forwards that variable and the eval
 receiver endpoint by name, alongside decision-provider configuration; it does not
 copy secret values. The exporter SDK can read ambient OpenTelemetry configuration.
 Keep sensitive data out of that configuration; these settings are not a
 redaction boundary.
+
+#### Release attribution and accounting queries
+
+For new assignments, supply an opaque release label through standard OTel
+resource configuration:
+
+```sh
+OTEL_RESOURCE_ATTRIBUTES='ahu.release.id=release-candidate-a' \
+  ahu @dev-astra --prompt-file /tmp/release-task.txt
+```
+
+This example assumes that agent is registered and the assignment file exists.
+Release labels accept 1–64 ASCII letters, digits, dots, underscores or hyphens.
+Use a public-safe label, never a private tracker key, URL or title. The label is
+frozen in the existing task identity. Resumes keep it; broker children inherit
+their parent's frozen value, including absence. A later shell variable cannot
+assign an old task to a release. No separate release mapping is required.
+
+Task run spans and their ahu-owned resources carry `ahu.release.id` when set,
+`ahu.task.id`, `ahu.task.attempt`, and `ahu.execution.mode`, plus known
+`ahu.task.root_id` and `ahu.task.parent_id`. MCP children receive matching
+identity. Harnesses control whether their native exporters honor these fields;
+native Kiro exports do not currently establish this task/attempt correlation.
+
+Headless `ahu.harness.run` spans describe observed usage with explicit semantics:
+
+| Fields | Meaning |
+| --- | --- |
+| `ahu.tokens.*`, `ahu.tokens.aggregation` | Maximum reported value per token field; not additive call usage |
+| `ahu.cost.harness_reported_usd`, `ahu.cost.source`, `ahu.cost.aggregation` | Claude's maximum valid result total or OpenCode's sum of first valid costs per distinct part ID |
+| `ahu.kiro.credits.observed`, `ahu.kiro.credits.unit` | Accepted, deduplicated Kiro prompt-completion observations in credits |
+| `ahu.kiro.elapsed.observed_ms`, `ahu.kiro.context.*_percent` | Reported completion elapsed time and context-window usage; neither is billed tokens |
+| `ahu.tokens.coverage`, `ahu.cost.coverage`, `ahu.kiro.credits.coverage` | `partial` when measured, `unavailable` otherwise; an observed zero remains present |
+| `ahu.events.coverage` | Completeness of recognized native event evidence, independent of accounting coverage |
+| `ahu.accounting.cross_attempt_additivity`, `ahu.accounting.parent_child_additivity` | `not_established`; resumed totals or nested usage may overlap |
+
+Query the telemetry backend for `ahu.harness.run` spans grouped by release,
+harness, model, mode and outcome. Deduplicate OTLP retransmissions by trace/span
+identity. Include failed and cancelled attempts when examining release effort;
+successful process exit does not establish acceptance or full cost coverage.
+Show the number of received attempts alongside observed and unavailable values.
+Do not add cumulative attempt observations, native per-request metrics and
+parent/child observations together without establishing their disjoint scope.
+Kiro credits remain separate from USD. These attempt observations are custom
+`ahu.*` attributes because they do not satisfy per-request GenAI token metric
+semantics.
+
+Enable collection before starting release work and verify receipt in the
+backend. A listening collector port is not delivery evidence. Collector queues,
+export failures, sampling and retention affect coverage; keep the evidence used
+for accounting unsampled and monitor loss. ahu's bounded exporter can drop spans,
+and an abrupt process exit can leave no completed run span. Interactive usage,
+unobserved tasks and provider billing remain separate coverage gaps. The release
+label supports backend attribution; it does not certify a total release cost.
+
+Child harness processes receive the same loopback OTLP endpoint and export
+their own metrics and logs. ahu's attribute allowlist and redaction apply only
+to the attributes ahu itself emits; the child harness and its SDK control their
+own log and metric payloads, which may include unredacted metadata such as
+resource attributes the harness copies from its environment. This is why the
+endpoint is restricted to a local collector: the collector, not ahu, becomes
+the redaction and retention boundary for child-emitted telemetry.
 
 The separately launched `ahu mcp serve` process also initializes the same
 project-configured local exporter. It emits a span for every parsed inbound MCP
@@ -914,10 +992,12 @@ stable `telemetry_key` dimensions, decision service/model identifiers,
 reported input/output tokens, adapter timing, and fixed error categories. The
 MCP process also emits an `ahu.mcp.session` summary on EOF or handled SIGINT/SIGTERM
 shutdown with
-request, tool-call, and transport-error counts plus SDK exporter initialization
+request, tool-call, decision-call, tool-error, tools-list, and transport-error
+counts plus SDK exporter initialization
 status (not collector receipt). It omits request state,
 instructions, question names, answer values, and error text. ahu-launched
-harnesses pass agent, harness, model, task ID, and attempt as approved
+harnesses pass agent, agent version, harness, harness version, model, ahu
+version, task ID, and attempt as approved
 resource attributes to MCP child processes; optional eval run, case, corpus,
 and stage identifiers can be passed as `ahu.eval.*` resource attributes. These
 fields group calls by harness and join them to task results. MCP spans cover
@@ -952,7 +1032,7 @@ amount can be incomplete. See the [Claude Code usage and limits guide](https://s
 | --- | --- | --- | --- | --- |
 | Codex | `turn.completed` token usage, per completed turn. No USD field. | Headless `codex exec --json` event stream; observed at turn completion. | Documented machine-readable event schema; adapter covered by protocol fixtures. | Cost is unknown. The separate account rate-limit RPC reports used percentage, window duration and reset time, not token counts; ahu reads it only through `ahu auth budget` for a matching active project profile. |
 | Claude Code | Result token usage and `total_cost_usd` for the headless invocation; API-request events have request scope. | Headless `--output-format stream-json`; result is fresh at invocation completion, request usage when its event arrives. | Documented result/usage and monitoring interfaces; adapter covered by protocol fixtures. | USD is harness-reported and may differ from account billing. Subscription/account quota is unknown to ahu; interactive `/usage` is not ingested. |
-| Antigravity CLI | `step_update` usage is per event; terminal `result.usage` is invocation-scoped. Cost is unavailable. | Headless `--output-format stream-json`; observed as steps arrive and, when present, at the terminal result. | Documented NDJSON schema; adapter covered by protocol fixtures. | Cost and quota are unknown to ahu. Interactive `/usage` and `/credits` are not ingested. A missing terminal result leaves task completion evidence incomplete even when step usage was observed. |
+| Antigravity CLI | `step_update` usage is per event; terminal `result.usage` is invocation-scoped. Cost is unavailable. | Headless `--output-format stream-json`; observed as steps arrive and, when present, at the terminal result. | Documented NDJSON schema; adapter covered by protocol fixtures. | Cost and quota are unknown to ahu. Interactive `/usage` and `/credits` are not ingested. A missing terminal result leaves task completion evidence incomplete even when step usage was observed. The documented interactive `statusLine` callback provides quota fractions and reset fields, alongside email, workspace and transcript metadata. ahu has no reviewed opt-in bridge binding those callbacks to the active account, project and observation lifetime. Raw callback payloads must not be retained or exported, and existing callbacks must not be overwritten. Antigravity quota remains unsupported; this does not establish that a safe future bridge is impossible. |
 | OpenCode | `step_finish` token usage and `cost`, per model step. | Headless `opencode run --format json`; fresh when each step event arrives. | Documented JSON run events; adapter covered by protocol fixtures. | Cost is an engine/provider-model amount, not billing proof; a missing final event can make the sum incomplete. Quota is unknown; `opencode stats` may include other sessions and is not ingested. |
 
 This matrix describes documented, machine-readable information that ahu can
@@ -964,6 +1044,7 @@ separate signals and must not be substituted for one another. Source references:
 [Codex app-server account rate-limit RPC](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/common.rs),
 [Codex rate-limit response schema](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/v2/account.rs),
 [Antigravity headless stream](https://www.antigravity.google/docs/cli/headless/),
+[Antigravity status line](https://www.antigravity.google/docs/cli/statusline/),
 [Antigravity credits](https://www.antigravity.google/docs/cli/credits/), and
 [Antigravity usage command](https://antigravity.google/docs/cli/commands/usage).
 
@@ -1830,7 +1911,7 @@ compatibility evidence, not an allowlist or a claim that newer versions or
 account entitlements were tested. Where multiple harness installations exist,
 ahu uses the one its own resolution picks; it does not search for a version that
 matches the catalog. An exact project pin can make that choice reproducible.
-Project configuration pins catalog `2026-09-27`; a mismatch is an error.
+Project configuration pins catalog `2026-10-09`; a mismatch is an error.
 
 Persisted task records use schema 4, including the `waiting-for-approval` state,
 and use hyphenated `UUID v7` IDs. Schema 3 records remain readable; schema 2 records
@@ -1931,6 +2012,12 @@ adapters use, so a coordinator and a registered agent on one harness cannot end
 up naming the model with different flags. Each shortcut prints its whole argument
 list, model included, before starting, so the disclosed line is exactly what was
 launched.
+
+Rankings may include harnesses absent from `harness_preferences`: explicit
+coordinator shortcuts still use those rankings. Only automatic selection walks
+`harness_preferences`. Ranking a moving model alias fixes the requested name,
+not the provider's underlying model revision; see the [OpenCode model
+limitations](#opencode-with-ollama-hosted-models).
 
 A harness with no ranked model launches with **no model option at all**: ahu
 prints a note that the harness default is in use and starts the session on
@@ -2099,3 +2186,130 @@ request through `ahu auth budget` and its MCP tool; no launch path calls it.
 Provider quota and entitlement errors are reported by
 the harness during an actual request. Remote hosts, containers, and CI need a
 separately provisioned native login and are outside this local profile guard.
+
+
+## Kiro CLI
+
+Install Kiro CLI using the [official installer](https://kiro.dev/docs/getting-started/installation/),
+then run `kiro-cli login` and complete sign-in in your browser. ahu does not
+install the harness or handle its credentials. Check the installation with
+`kiro-cli --version` and available models with
+`kiro-cli chat --v3 --list-models --format json`.
+
+ahu supports interactive Kiro V3, verified on CLI 2.28.0. `ahu kiro` opens a
+coordinator with `chat --v3 --model <ranked-model> --trust-all-tools`. As with the
+other coordinator shortcuts, this explicitly widens approvals; Kiro also uses
+that flag to approve hook confirmation requests. Kiro may show its own startup
+trust-all confirmation; ahu does not suppress it or change its saved preference.
+With no project ranking it
+uses Kiro's native model default and reports that fact.
+
+Registered agents use `harness: kiro`, an exact catalog model such as
+`claude-sonnet-4.5`, and `permissions: prompt` or `permissions: auto`. Prompt
+mode leaves native approval settings in control; auto adds `--trust-all-tools`.
+Accept-edits is refused because ahu has no validated equivalent. The adapter
+passes instructions and the assignment as one positional argument. It omits
+`--` because Kiro 2.28.0 V3 dropped the initial prompt after that separator in
+live verification; empty or option-shaped composed prompts are refused.
+ahu checks that Kiro lists the exact requested model before launch, with no
+fallback to `auto` or another model. Model listing can initiate login in Kiro,
+so ahu checks native sign-in first and bounds both probes.
+
+`ahu setup` detects `kiro-cli`, adds the ahu MCP server to
+`.kiro/settings/mcp.json`, installs bundled skills under `.kiro/skills/`, and
+creates an inline ahu agent manifest. Native JSON agent definitions are not
+imported by `ahu onboard`; write the ahu manifest's instructions inline instead.
+`.kiro/` and `.kiroignore` are recognized context, included in `ahu.lock` and
+inherited into task worktrees. Global, synchronized, and harness-managed
+configuration remains outside that lock. Native discovery and the actual
+loading of skills, steering, hooks, and MCP remain Kiro's responsibility.
+See [Kiro configuration scopes](https://kiro.dev/docs/configuration/).
+
+`ahu auth readiness --harness kiro` and account bindings support the verified
+GitHub social-login `whoami --format json` interface. Other login types and
+API-key account binding are currently unsupported. Account checks do not prove
+model entitlement or remaining credits.
+
+Kiro V3 2.28.0 and 2.29.0 are admitted for ahu headless fresh runs and native `--resume-id`.
+The adapter passes `--no-interactive --output-format stream-json
+--require-mcp-startup`. Only `runFinished` with success and `end_turn` completes
+an attempt. An ordinary failed tool can be followed by a successful result;
+permission denials, unresolved calls/approvals, task errors, malformed streams,
+missing results, interruption and nonzero exit cannot become success. Replayed
+history does not determine the current attempt's outcome. MCP startup failures stop the launch.
+Intermediate turn completion does not finish a task. Kiro credits are not USD;
+USD cost, token and skill-invocation metrics remain unknown. Eval trajectory
+records bounded ACP tool-call, completion and error counts, deduplicated by
+`toolCallId`. Coverage remains partial: model steps, stable tool identities,
+repetitions, recovery and native-helper attribution are unknown. Tool titles are
+display text, not proof of tool identity or delegation.
+
+Session-info events also supply partial metering under `trajectory.kiro_metering`:
+latest/peak context-window percentage, observed prompt completions, reported
+credits and elapsed milliseconds, plus observation, duplicate and rejection
+counts. A prompt completion may include multiple model requests; it is not a
+model step. Context snapshots are not billable token counts, and credits are not
+USD. Live prompt and turn markers gate completion attribution, and replayed
+history does not contribute to current-attempt totals. Missing amounts remain
+unknown; accepted observations never certify complete session or helper usage.
+Native Kiro OTLP export remains separate from ahu/MCP eval capture because the
+observed native resource does not carry ahu task-and-attempt attribution.
+Shared ahu supervision supplies foreground/background execution, timeout,
+cancellation, result records, and resume. Histories remain in Kiro's native home.
+
+Headless admission inspects native JSON and Markdown agent profiles in project,
+user and ancestor scopes. Ordinary prompts, tools, models, file/skill resources,
+permissions and inspected MCP fields are accepted without rewriting the profiles.
+Markdown requires YAML frontmatter; JSONC, unknown fields, nonempty hooks,
+Powers activation and knowledge-base resource objects remain unreviewed.
+Available profiles remain native: ahu does not select them with `--agent` or
+claim they were loaded.
+
+The inspected CLI preferences are `chat.defaultAgent`, `chat.defaultModel`,
+`chat.greeting.enabled`, `chat.disableWrap`, `chat.preserveScrollback`, and
+`chat.startFullscreen`. Other custom settings, local/global hooks, extensions,
+Powers, workflows, cloud configuration, custom native paths and diagnostic-output
+overrides remain refused. Project ancestors and cloud-cache sources are inspected
+as well. Symlinks, malformed/oversized configuration, scan limits and versions
+other than 2.28.0 or 2.29.0 produce a refusal; ahu does not delete or rewrite them. Native permissions, MCP and skills remain active.
+This is bounded configuration inspection, not a sandbox. Native cmux hook
+installation, detailed hook inventory and bounded helpers remain unsupported;
+`--native-helpers disabled` is a prompt instruction, not a native tool restriction.
+
+This repository registers `@dev-kiro` for implementation, `@review-kiro` for
+read-only review, and `@test-kiro` for reproduction and regression tests. All pin
+`claude-sonnet-4.5`. Development and testing use auto approvals; review keeps
+native prompt policy (which is not enforced read-only access). For example:
+
+```sh
+ahu @dev-kiro --headless --allow-widened-approvals --prompt "Implement the agreed change and validate it"
+ahu @review-kiro --headless --prompt "Review the current change for regressions"
+ahu @test-kiro --headless --allow-widened-approvals --prompt "Add regression coverage for the agreed defect"
+```
+
+Add `--background` for asynchronous work, then use `ahu wait <task-id>`,
+`ahu result <task-id>`, or `ahu cancel <task-id>`. Use `ahu resume <task-id>
+--prompt-file /tmp/continuation.txt` to continue its native session.
+A successful harness result is execution evidence, not acceptance of the work.
+
+
+### Live Kiro compatibility checks
+
+Run the opt-in matrix after building ahu and signing into Kiro:
+
+```sh
+python3 scripts/check-kiro-compatibility.py \
+  --ahu /absolute/path/to/ahu --allow-widened-approvals
+```
+
+This consumes model credits and authorizes automatic tool approvals only for
+fixture agents that request them. The script creates an external repository
+under `/tmp`, exercises fresh execution with a real MCP call and observed export,
+resume, tool-error recovery, permission denial, timeout and cancellation, and
+writes its report outside the source checkout. It retains the fixture for
+inspection and attempts to stop its owned running tasks. A native profile in
+the fixture checks configuration admission; that row does not certify native
+helper invocation or isolation. Global native configuration and provider state
+still apply, so a refusal or unavailable provider is a failed compatibility row,
+not evidence that the adapter passed. The report identifies the binary digest,
+source revision, source dirtiness, Kiro version, exact model and headless mode.

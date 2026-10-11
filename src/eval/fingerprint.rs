@@ -23,6 +23,27 @@
 
 use crate::agent::ResolvedAgent;
 
+/// Domain-separated digest of canonical JSON content, never a path or timestamp.
+/// Object order is canonicalized explicitly, independent of serde map features.
+pub fn content_fingerprint(domain: &str, value: &serde_json::Value) -> String {
+    fn canonical(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let sorted: std::collections::BTreeMap<_, _> = fields
+                    .iter()
+                    .map(|(key, value)| (key.clone(), canonical(value)))
+                    .collect();
+                serde_json::to_value(sorted).expect("JSON object")
+            }
+            serde_json::Value::Array(values) => values.iter().map(canonical).collect(),
+            _ => value.clone(),
+        }
+    }
+    crate::util::digest_bytes(
+        &serde_json::to_vec(&(domain, canonical(value))).expect("JSON content"),
+    )
+}
+
 /// How much of the evaluator's environment was separated from the candidate's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Blinding {
@@ -252,6 +273,7 @@ impl InputFingerprint {
             "prompt_profile": self.prompt_profile.as_str(),
             "prompt_version": self.prompt_version,
             "scoring_version": self.scoring_version,
+            "score_policy": "deterministic_answer_v1",
             "suite": self.suite.as_ref().map(|suite| serde_json::json!({
                 "id": suite.id,
                 "suite_version": suite.suite_version,
@@ -300,6 +322,7 @@ impl InputFingerprint {
         put("prompt_profile", self.prompt_profile.as_str().into());
         put("prompt_version", self.prompt_version.into());
         put("scoring_version", self.scoring_version.into());
+        put("score_policy", "deterministic_answer_v1".into());
         put(
             "suite_id",
             self.suite
@@ -474,6 +497,27 @@ impl InputFingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_fingerprints_are_canonical_and_domain_separated() {
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"b":{"y":2,"x":1},"a":[1,2]}"#).unwrap();
+        let b: serde_json::Value =
+            serde_json::from_str(r#"{"a":[1,2],"b":{"x":1,"y":2}}"#).unwrap();
+        assert_eq!(
+            content_fingerprint("comparison", &a),
+            content_fingerprint("comparison", &b)
+        );
+        assert_ne!(
+            content_fingerprint("group", &a),
+            content_fingerprint("comparison", &a)
+        );
+        let changed = serde_json::json!({"a":[2,1],"b":{"x":1,"y":2}});
+        assert_ne!(
+            content_fingerprint("comparison", &a),
+            content_fingerprint("comparison", &changed)
+        );
+    }
 
     fn agent(name: &str) -> AgentFingerprint {
         AgentFingerprint {

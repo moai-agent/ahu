@@ -465,6 +465,7 @@ pub fn typed_decide(repo: &Repo, arguments: &Value) -> Result<Value> {
 
 fn tools() -> Vec<Value> {
     vec![
+        crate::eval::advice::tool_definition(),
         json!({
             "name":"ahu_agents_list",
             "description":"List launchable ahu agents registered in this repository.",
@@ -472,8 +473,8 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name":"ahu_auth_budget",
-            "description":"Read current verified provider rate-limit windows for this repository's active auth profile and identify registered agent/model candidates meeting an optional minimum remaining quota. Reports percentages and reset periods, not token counts or costs. Unsupported provider budgets remain unknown and are never treated as available. Agents using the same account share its capacity; this tool does not allocate or reserve budget.",
-            "inputSchema":{"type":"object","properties":{"minimum_remaining_percent":{"type":"number","minimum":0,"maximum":100,"description":"Only mark candidates eligible when every reported provider window has at least this much capacity remaining. Defaults to 0."}},"additionalProperties":false}
+            "description":"Read identity-bound provider capacity signals for this repository's active auth profile and identify registered agent/model candidates meeting an optional minimum remaining quota. Signal types vary: rate windows (time-scoped percentages) for Codex; subscription providers without per-call metering stay unknown. Reports current capacity semantics with strict source/scope/freshness binding; never estimated. Unsupported provider signals remain unknown. Agents using the same account share its capacity; this tool does not allocate or reserve budget.",
+            "inputSchema":{"type":"object","properties":{"minimum_remaining_percent":{"type":"number","minimum":0,"maximum":100,"description":"Only mark candidates eligible when every reported rate window has at least this much capacity remaining. Defaults to 0. Only applies to rate window signals."}},"additionalProperties":false}
         }),
         json!({
             "name":"ahu_tasks_list",
@@ -511,7 +512,8 @@ fn tools() -> Vec<Value> {
 ///
 /// Evaluation case tool expectations and evaluation record validation are both
 /// bounded by this list, so neither can name a tool that does not exist.
-pub const TOOL_NAMES: [&str; 7] = [
+pub const TOOL_NAMES: [&str; 8] = [
+    "ahu_agents_recommend",
     "ahu_agents_list",
     "ahu_auth_budget",
     "ahu_tasks_list",
@@ -536,6 +538,7 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
         .ok_or_else(|| Error::new("tools/call requires a string params.name"))?;
     let selector = match name {
         "ahu_agents_list"
+        | "ahu_agents_recommend"
         | "ahu_auth_budget"
         | "ahu_tasks_list"
         | "ahu_typed_decide"
@@ -547,6 +550,9 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
     };
     let empty = json!({});
     let arguments = params.get("arguments").unwrap_or(&empty);
+    if name == "ahu_agents_recommend" {
+        return crate::eval::advice::validate(arguments).map(|_| ());
+    }
     if name == "ahu_auth_budget" {
         let Some(object) = arguments.as_object() else {
             return Err(Error::new("ahu_auth_budget arguments must be an object"));
@@ -665,6 +671,7 @@ pub(super) fn call_response_with_cancellation(
         .unwrap_or_else(|| json!({}));
     let result = match name {
         "ahu_agents_list" => agents(repo),
+        "ahu_agents_recommend" => crate::eval::advice::call(repo, &arguments),
         "ahu_auth_budget" => auth_budget(repo, &arguments),
         "ahu_tasks_list" => tasks(repo),
         "ahu_task_get" => task_get(repo, &arguments),
@@ -731,10 +738,10 @@ fn agents(repo: &Repo) -> Result<Value> {
     Ok(json!({"schema_version":1,"repository":repo.identity(),"agents":rows}))
 }
 
-/// Add a conservative agent-routing view to the raw account budget snapshot.
+/// Add a conservative agent-routing view to the identity-bound capacity signals.
 /// Eligibility means only that every currently reported rate window meets the
 /// requested threshold. It is not a cost estimate, model availability check,
-/// or reservation of shared account capacity.
+/// or reservation of shared account capacity. Non-rate-window signals remain unknown.
 fn auth_budget(repo: &Repo, arguments: &Value) -> Result<Value> {
     let mut snapshot = crate::auth_binding::budget(repo)?;
     let minimum = arguments["minimum_remaining_percent"]
@@ -755,31 +762,44 @@ fn auth_budget(repo: &Repo, arguments: &Value) -> Result<Value> {
         .map(|agent| {
             let harness = agent.manifest.harness;
             let provider = providers.get(&harness).copied();
-            let windows = provider
-                .and_then(|value| value["windows"].as_array())
-                .cloned()
-                .unwrap_or_default();
             let provider_status = provider
                 .and_then(|value| value["status"].as_str())
                 .unwrap_or("unknown");
-            let routing_status = candidate_routing_status(provider_status, &windows, minimum);
-            json!({
+            let signal_type = provider
+                .and_then(|value| value["signal_type"].as_str())
+                .unwrap_or("unknown");
+            let windows = if signal_type == "rate_windows" {
+                provider
+                    .and_then(|value| value["data"]["windows"].as_array())
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let routing_status =
+                candidate_routing_status(provider_status, signal_type, &windows, minimum);
+            let mut candidate = json!({
                 "name": format!("@{}", agent.manifest.name),
                 "harness": harness,
                 "model": agent.manifest.model,
                 "provider_status": provider_status,
+                "signal_type": signal_type,
                 "routing_status": routing_status,
-                "windows": windows,
-            })
+            });
+            if !windows.is_empty() {
+                candidate["windows"] = json!(windows);
+            }
+            candidate
         })
         .collect::<Vec<_>>();
     snapshot["routing"] = json!({
         "minimum_remaining_percent": minimum,
-        "eligibility_basis": "all_reported_windows_meet_threshold",
+        "eligibility_basis": "all_reported_rate_windows_meet_threshold",
         "candidates": candidates,
         "limitations": [
+            "Eligibility applies only to rate window signals; other signal types remain unknown for routing.",
             "Eligibility does not estimate token or dollar cost, verify model availability, or reserve capacity.",
-            "Unknown provider budgets are not eligible; verify them independently before delegating.",
+            "Unknown provider signals are not eligible; verify them independently before delegating.",
             "Capacity is shared with all agents using the same provider account."
         ]
     });
@@ -788,9 +808,13 @@ fn auth_budget(repo: &Repo, arguments: &Value) -> Result<Value> {
 
 fn candidate_routing_status(
     provider_status: &str,
+    signal_type: &str,
     windows: &[Value],
     minimum: f64,
 ) -> &'static str {
+    if signal_type != "rate_windows" {
+        return "unknown";
+    }
     if provider_status != "available" || windows.is_empty() {
         return "unknown";
     }
@@ -946,6 +970,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "ahu_agents_recommend",
                 "ahu_agents_list",
                 "ahu_auth_budget",
                 "ahu_tasks_list",
@@ -1007,25 +1032,99 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            super::candidate_routing_status("available", &windows(&[80.0, 35.0]), 25.0),
+            super::candidate_routing_status(
+                "available",
+                "rate_windows",
+                &windows(&[80.0, 35.0]),
+                25.0
+            ),
             "eligible"
         );
         assert_eq!(
-            super::candidate_routing_status("available", &windows(&[80.0, 20.0]), 25.0),
+            super::candidate_routing_status(
+                "available",
+                "rate_windows",
+                &windows(&[80.0, 20.0]),
+                25.0
+            ),
             "below_threshold"
         );
         assert_eq!(
-            super::candidate_routing_status("available", &windows(&[80.0, 0.0]), 0.0),
+            super::candidate_routing_status(
+                "available",
+                "rate_windows",
+                &windows(&[80.0, 0.0]),
+                0.0
+            ),
             "below_threshold"
         );
         assert_eq!(
-            super::candidate_routing_status("unsupported", &windows(&[80.0]), 0.0),
+            super::candidate_routing_status("unsupported", "rate_windows", &windows(&[80.0]), 0.0),
             "unknown"
         );
         assert_eq!(
-            super::candidate_routing_status("available", &[], 0.0),
+            super::candidate_routing_status("available", "rate_windows", &[], 0.0),
             "unknown"
         );
+        assert_eq!(
+            super::candidate_routing_status("available", "unknown", &windows(&[100.0]), 0.0),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn agent_recommendation_dispatch_is_read_only_and_strict() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::git::run_ok(temp.path(), &["init", "-q"]).unwrap();
+        let repo = crate::git::discover(temp.path()).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let records = external.path().join("private-marker.jsonl");
+        std::fs::write(&records, "").unwrap();
+        let arguments = serde_json::json!({
+            "records_path":records,"cases":[{"case_id":"fixture","case_digest":"a".repeat(64)}],
+            "candidates":["@fixture"],"minimum_quality":0.5,
+            "minimum_samples_per_case":4,"maximum_age_seconds":60
+        });
+        let reply = super::call_response(
+            &repo,
+            &serde_json::json!(1),
+            &serde_json::json!({"name":"ahu_agents_recommend","arguments":arguments}),
+            false,
+        );
+        let result = &reply["result"]["structuredContent"];
+        assert_eq!(result["status"], "unknown");
+        assert_eq!(result["quota"], "not_consulted");
+        assert_eq!(
+            result["candidates"][0]["reasons"],
+            serde_json::json!(["unregistered_candidate"])
+        );
+        assert!(!reply.to_string().contains("private-marker"));
+        assert!(!temp.path().join(".ahu").exists());
+        assert_eq!(std::fs::read_to_string(&records).unwrap(), "");
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"records_path":"/private-marker"}),
+        ] {
+            let reply = super::call_response(
+                &repo,
+                &serde_json::json!(1),
+                &serde_json::json!({"name":"ahu_agents_recommend","arguments":value}),
+                false,
+            );
+            assert_eq!(reply["error"]["code"], -32602);
+            assert!(!reply.to_string().contains("private-marker"));
+        }
+        std::fs::write(&records, "private-payload-invalid-json").unwrap();
+        let reply = super::call_response(
+            &repo,
+            &serde_json::json!(1),
+            &serde_json::json!({"name":"ahu_agents_recommend","arguments":arguments}),
+            false,
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(!reply.to_string().contains("private-payload"));
+        assert!(!reply.to_string().contains("private-marker"));
     }
 
     #[test]
@@ -1040,9 +1139,15 @@ mod tests {
             false,
         );
         let budget = &reply["result"]["structuredContent"];
+        assert_eq!(budget["schema_version"], 1);
         assert_eq!(budget["profile"], serde_json::Value::Null);
         assert_eq!(budget["signal"], "provider_rate_limit_windows");
+        assert_eq!(budget["token_counts"], "not_provided");
+        assert_eq!(budget["shared_account_capacity"], true);
+        assert_eq!(budget["project"], repo.identity());
         assert_eq!(budget["providers"][0]["status"], "not_configured");
+        assert_eq!(budget["providers"][0]["signal_type"], "unknown");
+        assert_eq!(budget["providers"][0]["source"], "none");
         assert!(!budget.to_string().contains("@"));
     }
 

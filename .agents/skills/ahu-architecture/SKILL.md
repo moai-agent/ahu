@@ -8,7 +8,7 @@ ahu is cross-harness configuration management for agent sessions. It launches
 agents that a repository defines into separate Git worktrees
 and runs interactive sessions in cmux or unattended headless attempts.
 
-ahu is not an agent harness. Claude Code, Codex, the Antigravity CLI and OpenCode
+ahu is not an agent harness. Claude Code, Codex, the Antigravity CLI, OpenCode and Kiro CLI
 run the agent loop and own the conversation. ahu chooses the configured harness, model, instructions and
 worktree, and reports visible context sources and coverage gaps. Its MCP server
 provides agent/task inspection and typed decision tools. Its eval runner launches
@@ -39,7 +39,7 @@ harness or its shell tools from starting other processes.
 ## What ahu needs
 
 - **cmux**, required for interactive task sessions; headless execution needs no cmux.
-- **A supported harness**, installed and signed in by you: Claude Code, Codex, the Antigravity CLI, or OpenCode.
+- **A supported harness**, installed and signed in by you: Claude Code, Codex, the Antigravity CLI, OpenCode, or Kiro CLI (V3).
 - **Git**: every task gets its own branch and worktree.
 
 ahu creates the repository group and the per-task workspace through cmux, and
@@ -417,3 +417,22 @@ normal harness capabilities, not launch problems.
 >
 > They can block tool calls and put text into the model's context, and they are
 > not part of the configuration every ahu user in this project shares.
+
+
+## Kiro support
+
+Kiro CLI uses harness ID `kiro` and executable `kiro-cli`. The adapter selects
+V3 and passes the exact model and composed positional prompt. It supports
+interactive launches with native prompt approvals or explicit trust-all-tools;
+headless fresh runs and native resume are supported on 2.28.0 and 2.29.0. Accept-edits is
+refused. Headless admission requires absent unreviewed executable configuration
+and cloud sources. It admits an inspected subset of native JSON/Markdown agent
+profiles and CLI preferences without rewriting them; profile availability does
+not establish selection or loading. It preserves native homes, permissions, MCP and skills. `.kiro/` and `.kiroignore`
+participate in snapshots and context locks. Setup installs MCP and skills at
+Kiro's native project paths. Kiro hook inventory and native helper isolation
+remain unknown; disabled helpers are prompt-only and bounded helpers are refused; global and synchronized configuration stays harness-managed.
+Eval trajectory can include partial prompt-completion credits, elapsed time and
+context-window percentages from Kiro session events. These are not model-step,
+billable-token or USD totals; replay is excluded from current-attempt accounting.
+See `docs/reference.md#kiro-cli` for setup and validation limits.

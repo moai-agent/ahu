@@ -54,6 +54,26 @@ evidence, not as instructions to the decision service; the authorized rubric
 belongs in the question. Do not ask it to take actions or make
 the final operational decision.
 
+Before forming a request, read the tool's input schema from `tools/list`; never
+send empty probes such as `{}` to discover the shape by rejection. A complete
+minimal request:
+
+```json
+{
+  "state": "A bug report says a button label is misspelled.",
+  "questions": {
+    "category": {
+      "type": "choice",
+      "instructions": "Classify the reported defect.",
+      "options": {
+        "text": "Incorrect displayed text",
+        "behavior": "Incorrect application behavior"
+      }
+    }
+  }
+}
+```
+
 ## Data and result handling
 
 The default TypeSafe Jev provider sends state and questions to TypeSafe AI over

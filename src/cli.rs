@@ -42,12 +42,13 @@ Commands:
                         Check the OKF bundles named in [knowledge] with okf.
                         Reads only; nothing is fetched, indexed, or rewritten
   eval run (--case <path> | --suite <path>) --agent @name [--agent @other]
-           --records <path> [options]
+           [--records <path>] [options]
                         Run candidates (and optionally a blind agent evaluator)
                         over an external evaluation case or suite
-  eval report --records <path> [--output json]
-                        Compare local evaluation runs from an external JSONL
-                        record file. Reads only, and only outside this checkout
+  eval report [--records <path>] [--output json]
+  eval verify [--records <path>] --facts <path>
+                        Compare bounded JSONL evaluation records. Reads only;
+                        defaults to primary ignored .ahu/evals/runs.jsonl
   tasks [--limit N|--all]
                         List recent tasks or the full history
   task <task-id> [--output json]
@@ -105,6 +106,7 @@ Commands:
   opencode              Open OpenCode here on this project's top-ranked OpenCode
                         model, auto-approving every permission it does not deny
                         (--auto; ahu passes no --pure)
+  kiro                  Open Kiro V3 here with the ranked model and --trust-all-tools
   run-task              Internal: run a prepared task (used by cmux)
   supervise --task-dir PATH
                         Internal: supervise a detached headless task
@@ -146,9 +148,9 @@ knowledge lint options:
                         warnings fail the check. Errors always do.
 
 eval report options:
-  --records <path>      JSONL run records written with schema version 2.
-                        Required, and refused when it resolves inside this
-                        repository: run evidence stays in a user-owned directory
+  --records <path>      Schema 2 JSONL. Default: primary checkout .ahu/evals/runs.jsonl.
+                        Local results must be ignored and untracked. Explicit
+                        external paths are supported; relative paths use cwd
   --output json         Emit a versioned JSON comparison on stdout, the readable
                         report on stderr. Rows are grouped by case and corpus
                         version, stage, agent/version, evaluator/version, model,
@@ -185,8 +187,9 @@ eval run options:
                         recorded as blinding `isolated`. Without it the
                         evaluator is blinded at the prompt level only
                         (`prompt_only`), which is not environment isolation
-  --records <path>      External JSONL destination; prompts and artifacts are
-                        written to a private sibling run directory
+  --records <path>      Default: primary checkout .ahu/evals/runs.jsonl (ignored,
+                        untracked local results). Explicit external paths supported.
+                        Raw artifacts stay in owner-only external ahu host storage
   --max-trajectory-steps <count>
                         CI maximum from 0 to 4294967295 native steps
   --max-tool-error-rate <rate>
@@ -278,7 +281,7 @@ Commands:
   mcp serve             Serve repository tools over stdio MCP
   explain               Show the architecture overview
   @agent [PROMPT]       Assign work to a registered agent
-  agy|claude|codex|opencode
+  agy|claude|codex|opencode|kiro
                         Open a coordinating harness session
 
 Use `ahu help COMMAND` or `ahu COMMAND --help` for focused help.
@@ -305,6 +308,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
         "eval run" => help_section("eval run options:", "tasks options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
+        "eval verify" => "Usage: ahu eval verify [--records FILE] --facts FILE\n\nRecords default to the primary checkout's ignored, untracked .ahu/evals/runs.jsonl; explicit paths override it.\n\nVerify bounded numerical facts against the exact current comparison. Reject stale fingerprints, changed values or coverage, and arbitrary narrative. Outputs JSON; invokes no model. See docs/eval-provenance.md.\n".to_string(),
         "@agent" => help_section("agent assignment options:", "Exit codes:"),
         "explain" => help_section("explain options:", "onboard options:"),
         "onboard" => help_section("onboard options:", "knowledge lint options:"),
@@ -313,8 +317,8 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes ahu.lock and accepts local context in owner-only host state; review and commit ahu.lock only when shared context changed.\n".to_string(),
         "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
         "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
-        "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth budget [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics. `auth budget` reports verified provider rate-limit windows for the active profile. These are percentages and reset periods, not literal token counts; agents sharing one account share its capacity. Unsupported providers remain unknown.\n\nIdentity probes: codex, claude-code, antigravity, and ollama. Use --harness ollama to check the loopback daemon selected by OLLAMA_HOST (default 127.0.0.1:11434). OpenCode readiness requires --model with an Ollama cloud model; other OpenCode providers remain unsupported. Readiness checks account identity and project binding only: it does not verify OpenCode's configured provider endpoint, model availability, or inference access.\n".to_string(),
-        "telemetry" => "Usage: ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
+        "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth budget [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics. `auth budget` reports verified provider rate-limit windows for the active profile. These are percentages and reset periods, not literal token counts; agents sharing one account share its capacity. Unsupported providers remain unknown.\n\nIdentity probes: codex, claude-code, antigravity, kiro (GitHub social login), and ollama. Use --harness ollama to check the loopback daemon selected by OLLAMA_HOST (default 127.0.0.1:11434). OpenCode readiness requires --model with an Ollama cloud model; other OpenCode providers remain unsupported. Readiness checks account identity and project binding only: it does not verify OpenCode's configured provider endpoint, model availability, or inference access.\n".to_string(),
+        "telemetry" => "Usage: ahu telemetry report --otlp FILE --selection FILE --release ID [--output json]\n       ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nThe OTLP report reads local collector JSONL and an explicit task/attempt selection, writes no state, and reports unknown usage as null. Repeat --otlp for rotated files. See docs/otel-release-report.md.\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
         "task" => "Usage: ahu task ID [--output json]\n\nInspect a task's state, branch, worktree, and launch evidence.\n".to_string(),
         "wait" => "Usage: ahu wait TASK [--output json]\n\nWait for a headless task to reach a terminal state.\n".to_string(),
@@ -328,7 +332,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
         "run-task" => "Usage: ahu run-task --task-dir PATH\n\nInternal worker command started by ahu's task supervisor.\n".to_string(),
         "supervise" => "Usage: ahu supervise --task-dir PATH\n\nInternal supervisor command for detached headless tasks.\n".to_string(),
-        "agents" | "eval" | "knowledge" | "cmux" | "mcp" | "agy" | "claude" | "codex" | "opencode" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
+        "agents" | "eval" | "knowledge" | "cmux" | "mcp" | "agy" | "claude" | "codex" | "opencode" | "kiro" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
         other => return Err(crate::util::Error::new(format!("unknown help topic {other:?}; run `ahu help` for commands."))),
     };
     Ok(help)
@@ -354,7 +358,7 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "tasks" => "ahu tasks — list recent tasks",
         "doctor" => "ahu doctor — check project readiness",
         "lock" => "ahu lock — check committed agent context",
-        "eval" => "ahu eval — run or compare evaluations",
+        "eval" => "ahu eval — run, compare or verify evaluations",
         "knowledge" => "ahu knowledge lint — validate configured knowledge bundles",
         "cmux" => "ahu cmux — inspect or install cmux integration",
         "mcp" => "ahu mcp serve — start the MCP server",
@@ -366,6 +370,7 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "claude" => "ahu claude — open Claude Code",
         "codex" => "ahu codex — open Codex",
         "opencode" => "ahu opencode — open OpenCode",
+        "kiro" => "ahu kiro — open Kiro CLI V3 (--trust-all-tools)",
         "@agent" => "ahu @agent — assign work to a registered agent",
         "help" => "ahu help — show command help",
         "run-task" => "ahu run-task — internal task worker",
@@ -440,8 +445,12 @@ pub enum Command {
         output_json: bool,
     },
     EvalReport {
-        records: PathBuf,
+        records: Option<PathBuf>,
         output_json: bool,
+    },
+    EvalVerify {
+        records: Option<PathBuf>,
+        facts: PathBuf,
     },
     EvalRun {
         /// A single case. Exactly one of `case` and `suite` is set.
@@ -455,7 +464,7 @@ pub enum Command {
         decision_evaluator: bool,
         skill_selection: crate::skill_selection::Mode,
         trajectory_guardrails: crate::eval::trajectory::Guardrails,
-        records: PathBuf,
+        records: Option<PathBuf>,
         runs: u32,
         timeout_seconds: u64,
         allow_widened_approvals: bool,
@@ -500,12 +509,18 @@ pub enum Command {
         task_ref: Option<String>,
         output_json: bool,
     },
+    OtelReport {
+        paths: Vec<PathBuf>,
+        selection: PathBuf,
+        release: String,
+    },
     Doctor {
         verbose: bool,
     },
     Codex,
     Claude,
     OpenCode,
+    Kiro,
     Antigravity,
     RunTask {
         task_dir: PathBuf,
@@ -760,10 +775,10 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                     .ok_or_else(|| crate::util::Error::new("auth command requires --harness ID"))?;
                 if !matches!(
                     harness.as_str(),
-                    "codex" | "claude-code" | "antigravity" | "opencode" | "ollama"
+                    "codex" | "claude-code" | "antigravity" | "opencode" | "kiro" | "ollama"
                 ) {
                     bail!(
-                        "unsupported harness {harness:?}; use codex, claude-code, antigravity, opencode, or ollama"
+                        "unsupported harness {harness:?}; use codex, claude-code, antigravity, opencode, kiro, or ollama"
                     );
                 }
                 harness
@@ -803,6 +818,10 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
         "opencode" => {
             expect_no_more(&args[1..])?;
             Ok(Command::OpenCode)
+        }
+        "kiro" => {
+            expect_no_more(&args[1..])?;
+            Ok(Command::Kiro)
         }
         "agy" => {
             expect_no_more(&args[1..])?;
@@ -992,6 +1011,28 @@ fn parse_eval(rest: &[String]) -> Result<Command> {
     match rest.first().map(String::as_str) {
         None => bail!("`ahu eval` needs a subcommand: `run` or `report`."),
         Some("run") => return parse_eval_run(&rest[1..]),
+        Some("verify") => {
+            let mut records = None;
+            let mut facts = None;
+            let mut index = 1;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--records" if records.is_none() => {
+                        records = Some(PathBuf::from(value_for("--records", rest, &mut index)?))
+                    }
+                    "--facts" if facts.is_none() => {
+                        facts = Some(PathBuf::from(value_for("--facts", rest, &mut index)?))
+                    }
+                    _ => bail!("expected ahu eval verify [--records FILE] --facts FILE"),
+                }
+                index += 1;
+            }
+            return Ok(Command::EvalVerify {
+                records,
+                facts: facts
+                    .ok_or_else(|| crate::util::Error::new("eval verify requires --facts FILE"))?,
+            });
+        }
         Some("report") => {}
         Some(other) => {
             bail!("unknown subcommand {other:?} for `ahu eval`; expected `run` or `report`.")
@@ -1016,11 +1057,6 @@ fn parse_eval(rest: &[String]) -> Result<Command> {
         }
         index += 1;
     }
-    let records = records.ok_or_else(|| {
-        crate::util::Error::new(
-            "`ahu eval report` needs --records <path> naming a JSONL run record file outside this repository.",
-        )
-    })?;
     Ok(Command::EvalReport {
         records,
         output_json,
@@ -1167,9 +1203,6 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
     if evaluator_repo.is_some() && evaluator.is_none() {
         bail!("--evaluator-repo needs --evaluator @name: it names where that evaluator runs from.");
     }
-    let records = records.ok_or_else(|| {
-        crate::util::Error::new("`ahu eval run` needs --records <external-jsonl-path>.")
-    })?;
     Ok(Command::EvalRun {
         case,
         suite,
@@ -1509,6 +1542,25 @@ pub fn extract_color(
                     | "--native-helpers"
                     | "--allow-child"
                     | "--allow-child-widened"
+                    | "--harness"
+                    | "--profile"
+                    | "--key"
+                    | "--task"
+                    | "--facts"
+                    | "--selection"
+                    | "--otlp"
+                    | "--release"
+                    | "--records"
+                    | "--case"
+                    | "--suite"
+                    | "--agent"
+                    | "--evaluator"
+                    | "--evaluator-repo"
+                    | "--skill-selection"
+                    | "--runs"
+                    | "--max-trajectory-steps"
+                    | "--max-tool-error-rate"
+                    | "--name"
             );
             remaining.push(arg);
             if takes_value && let Some(value) = args.next() {
@@ -1520,6 +1572,41 @@ pub fn extract_color(
 }
 
 fn parse_telemetry(args: &[String]) -> Result<Command> {
+    if args.first().is_some_and(|a| a == "report") && args.iter().any(|a| a == "--otlp") {
+        let mut paths = Vec::new();
+        let mut selection = None;
+        let mut release = None;
+        let mut index = 1;
+        let mut output = false;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--otlp" => paths.push(PathBuf::from(value_for("--otlp", args, &mut index)?)),
+                "--selection" if selection.is_none() => {
+                    selection = Some(PathBuf::from(value_for("--selection", args, &mut index)?))
+                }
+                "--release" if release.is_none() => {
+                    release = Some(value_for("--release", args, &mut index)?)
+                }
+                "--output" if !output => {
+                    if value_for("--output", args, &mut index)? != "json" {
+                        bail!("expected json");
+                    }
+                    output = true;
+                }
+                _ => bail!(
+                    "expected telemetry report --otlp FILE --selection FILE --release ID [--output json]"
+                ),
+            }
+            index += 1;
+        }
+        return Ok(Command::OtelReport {
+            paths,
+            selection: selection
+                .ok_or_else(|| crate::util::Error::new("OTLP report requires --selection FILE"))?,
+            release: release
+                .ok_or_else(|| crate::util::Error::new("OTLP report requires --release ID"))?,
+        });
+    }
     let action = args.first().map(String::as_str).unwrap_or("");
     if !matches!(action, "link" | "unlink" | "report") {
         bail!("expected `ahu telemetry link|unlink|report`");
@@ -2027,10 +2114,10 @@ mod parser_tests {
             args.extend(extra);
             assert_usage(&args, diagnostic);
         }
-        assert_usage(
-            &["eval", "run", "--case", "case.md", "--agent", "@fixture"],
-            "needs --records",
-        );
+        assert!(matches!(
+            parse(["eval", "run", "--case", "case.md", "--agent", "@fixture"]).unwrap(),
+            Command::EvalRun { records: None, .. }
+        ));
 
         // The maximum candidate count is accepted, with input order intact.
         let agents: Vec<String> = (0..16).map(|n| format!("@fixture{n}")).collect();
@@ -2059,7 +2146,7 @@ mod parser_tests {
                 decision_evaluator: false,
                 skill_selection: crate::skill_selection::Mode::None,
                 trajectory_guardrails: Default::default(),
-                records: "runs.jsonl".into(),
+                records: Some("runs.jsonl".into()),
                 runs: 100,
                 timeout_seconds: 86400,
                 allow_widened_approvals: true,
@@ -2364,6 +2451,23 @@ mod color_tests {
             }
         }
     }
+
+    #[test]
+    fn color_tokens_in_eval_auth_and_telemetry_values_remain_literal() {
+        for original in [
+            vec!["eval", "report", "--records", "--color=always"],
+            vec!["eval", "run", "--case", "--color", "--agent", "fixture"],
+            vec!["auth", "status", "--harness", "--color=always"],
+            vec!["telemetry", "report", "--key", "--color=always"],
+            vec!["telemetry", "link", "--key", "record", "--task", "--color"],
+        ] {
+            let mut input: Vec<String> = original.iter().map(|s| s.to_string()).collect();
+            input.push("--color=never".into());
+            let (args, choice) = extract_color(input).unwrap();
+            assert_eq!(args, original);
+            assert_eq!(choice, Some(crate::style::ColorChoice::Never));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2423,6 +2527,45 @@ mod focused_help_tests {
             vec!["telemetry", "link", "--key", "r-1"],
             vec!["telemetry", "report", "--key", "r-1", "--task", "abc"],
             vec!["telemetry", "unlink", "--key", "r-1", "--output", "json"],
+        ] {
+            assert!(parse_args(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn collector_reports_require_explicit_release_selection_without_private_store_keys() {
+        assert!(matches!(
+            parse_args(&["telemetry", "report", "--otlp", "a.jsonl", "--otlp", "b.jsonl", "--selection", "tasks.json", "--release", "candidate", "--output", "json"]).unwrap(),
+            Command::OtelReport { paths, .. } if paths.len() == 2
+        ));
+        for args in [
+            vec!["telemetry", "report", "--otlp", "a"],
+            vec!["telemetry", "report", "--otlp", "a", "--selection", "s"],
+            vec!["telemetry", "report", "--otlp", "a", "--release", "r"],
+            vec![
+                "telemetry",
+                "report",
+                "--otlp",
+                "a",
+                "--selection",
+                "s",
+                "--release",
+                "r",
+                "--key",
+                "private",
+            ],
+            vec![
+                "telemetry",
+                "report",
+                "--otlp",
+                "a",
+                "--selection",
+                "s",
+                "--release",
+                "r",
+                "--output",
+                "text",
+            ],
         ] {
             assert!(parse_args(&args).is_err(), "{args:?}");
         }

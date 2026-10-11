@@ -34,6 +34,7 @@ fn coordinator_shortcuts_group_the_caller_before_starting_and_refuse_failed_grou
         ("claude", "claude"),
         ("opencode", "opencode"),
         ("agy", "agy"),
+        ("kiro", "kiro-cli"),
     ] {
         for failure in ["none", "add", "verify", "identify", "conflict"] {
             let fixture = common::TestRepo::new();
@@ -131,10 +132,13 @@ else: raise AssertionError(method)
                 assert!(!result.status.success());
             }
             assert!(
-                !ahu::state::coordination_dir(&repo)
-                    .unwrap()
-                    .join("launch.lock")
-                    .exists()
+                ahu::state::LaunchLock::acquire_at(
+                    ahu::state::coordination_dir(&repo)
+                        .unwrap()
+                        .join("launch.lock")
+                )
+                .is_ok(),
+                "{shortcut}/{failure}: launch lock still held after the shortcut exited"
             );
             assert!(!fixture.path().join(".worktrees").exists());
         }

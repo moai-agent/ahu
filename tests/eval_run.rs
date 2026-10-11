@@ -51,7 +51,7 @@ Synthetic routing smoke test.
 }
 
 #[test]
-fn eval_run_launches_candidate_captures_local_otel_and_appends_external_record() {
+fn eval_run_defaults_to_ignored_primary_records_and_keeps_raw_artifacts_external() {
     use std::os::unix::fs::PermissionsExt;
 
     let repo = TestRepo::new();
@@ -59,6 +59,7 @@ fn eval_run_launches_candidate_captures_local_otel_and_appends_external_record()
     repo.add_agent_on("triage", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
     repo.add_agent_on("judge", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
     repo.write(".agents/skills/billing/SKILL.md", "---\nname: billing\ndescription: Resolve duplicate charge disputes\n---\nReview billing facts.\n");
+    repo.write(".gitignore", "/.ahu/evals/\n");
     repo.commit("evaluation agents");
 
     let external = TempDir::new().unwrap();
@@ -78,7 +79,7 @@ if sys.argv[1:] == ['models', 'ollama']:
 prompt = sys.argv[-1]
 if 'Score this candidate output' in prompt:
     with open('score.json', 'w', encoding='utf-8') as score:
-        json.dump({'schema_version':1,'criterion_scores':{'route':1.0},'reason_codes':['routed_to_billing']}, score)
+        json.dump({'schema_version':1,'criterion_scores':{'route':0.0},'reason_codes':['routed_to_billing']}, score)
 else:
     with open('answer.json', 'w', encoding='utf-8') as answer:
         json.dump({'route':'billing'}, answer)
@@ -105,7 +106,11 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
     let case = external.path().join("case.md");
     fixture_case(&case);
-    let records = external.path().join("runs.jsonl");
+    let records = repo
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(".ahu/evals/runs.jsonl");
     let home = external.path().canonicalize().unwrap().join("home");
     std::fs::create_dir(&home).unwrap();
     let path = format!(
@@ -126,14 +131,13 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
             "lexical",
             "--evaluator",
             "@judge",
-            "--records",
-            records.to_str().unwrap(),
             "--runs",
             "1",
             "--output",
             "json",
         ])
         .env("PATH", path)
+        .env_remove("XDG_STATE_HOME")
         .env("HOME", &home)
         .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
         .env("NO_COLOR", "1")
@@ -152,7 +156,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     let trial = &summary["trials"][0];
     assert_eq!(trial["score"], 1.0);
     assert_eq!(trial["passed"], true);
-    assert_eq!(trial["score_source"], "judge");
+    assert_eq!(trial["score_source"], "deterministic");
     assert_eq!(trial["answer_passed"], true);
     assert_eq!(trial["judge_status"], "scored");
     assert_eq!(trial["telemetry_coverage"], "complete_session");
@@ -185,11 +189,13 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     assert_eq!(rows[0]["deterministic_score"], 1.0);
     assert_eq!(rows[0]["answer_score"], 1.0);
     assert_eq!(rows[0]["answer_passed"], true);
-    assert_eq!(rows[0]["score_source"], "judge");
+    assert_eq!(rows[0]["score_source"], "deterministic");
     // The judge's own evidence is retained, not collapsed into its number.
     assert_eq!(rows[0]["judge_status"], "scored");
-    assert_eq!(rows[0]["judge_score"], 1.0);
-    assert_eq!(rows[0]["judge_criterion_scores"]["route"], 1.0);
+    assert_eq!(rows[0]["judge_score"], 0.0);
+    assert_eq!(rows[0]["judge_passed"], false);
+    assert_eq!(rows[0]["score_policy"], "deterministic_answer_v1");
+    assert_eq!(rows[0]["judge_criterion_scores"]["route"], 0.0);
     assert_eq!(
         rows[0]["judge_reason_codes"],
         serde_json::json!(["routed_to_billing"])
@@ -238,6 +244,10 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     assert_eq!(rows[0]["fingerprint_completeness"], "complete");
     assert_eq!(rows[0]["blinding"], "prompt_only");
     assert_eq!(rows[0]["telemetry_coverage"], "complete_session");
+    assert_eq!(rows[0]["telemetry_scope"], "ahu_spans");
+    assert!(rows[0]["mcp_spans"].as_u64().unwrap() > 0);
+    assert_eq!(rows[0]["telemetry_dedup_untracked_spans"], 0);
+    assert!(rows[0]["telemetry_receiver"]["projection"].is_object());
     assert_eq!(rows[0]["tool_expectation_status"], "not_applicable");
     assert_eq!(rows[0]["terminal_status"], "candidate_scored");
     assert_eq!(rows[0]["attempts"], 1);
@@ -252,9 +262,23 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
         rows[0].get("answer").is_none(),
         "record rows omit answer data"
     );
-    let artifact_dir = external
-        .path()
+    let artifact_dir = home
+        .join(".local/state/ahu/eval-artifacts")
+        .join(ahu::git::discover(repo.path()).unwrap().identity())
         .join(format!("ahu-eval-{}", summary["run_id"].as_str().unwrap()));
+    assert!(
+        !external
+            .path()
+            .join(format!("ahu-eval-{}", summary["run_id"].as_str().unwrap()))
+            .exists()
+    );
+    assert_eq!(
+        std::fs::read_dir(records.parent().unwrap())
+            .unwrap()
+            .count(),
+        1,
+        "only bounded records are local"
+    );
     let candidate_prompt =
         std::fs::read_to_string(artifact_dir.join("run-001/candidate/prompt.txt")).unwrap();
     let evaluator_prompt =
@@ -267,14 +291,8 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
 
     let report = common::ahu()
         .current_dir(repo.path())
-        .args([
-            "eval",
-            "report",
-            "--records",
-            records.to_str().unwrap(),
-            "--output",
-            "json",
-        ])
+        .args(["eval", "report", "--output", "json"])
+        .env_remove("XDG_STATE_HOME")
         .env("HOME", &home)
         .env("NO_COLOR", "1")
         .output()
@@ -286,6 +304,18 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     );
     let comparison: Value = serde_json::from_slice(&report.stdout).unwrap();
     assert_eq!(comparison["schema_version"], 2);
+    assert_eq!(
+        comparison["comparison"]["records_fingerprint"],
+        ahu::util::digest_bytes(&std::fs::read(&records).unwrap())
+    );
+    assert_eq!(
+        comparison["groups"][0]["decision_provenance"]["recorded_runs"],
+        1
+    );
+    assert_eq!(
+        comparison["groups"][0]["decision_provenance"]["evidence"]["observations"],
+        0
+    );
     assert_eq!(comparison["groups"][0]["case_schema_version"], "2");
     assert_eq!(
         comparison["groups"][0]["fingerprint_completeness"],
@@ -299,7 +329,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     assert_eq!(comparison["groups"][0]["judge"]["scored"], 1);
     assert_eq!(
         comparison["groups"][0]["judge"]["criterion_means"]["route"],
-        1.0
+        0.0
     );
     assert_eq!(comparison["groups"][0]["coverage"]["mcp_observations"], 1);
     assert_eq!(
@@ -432,6 +462,7 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
                 "json",
             ])
             .env("PATH", &path)
+            .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
             .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
             .env("AHU_TEST_ANSWER", mode)
@@ -483,6 +514,9 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
             row["telemetry_coverage"].is_string(),
             "{mode} states its telemetry coverage: {row}"
         );
+        assert_eq!(row["telemetry_scope"], "ahu_spans");
+        assert!(row["mcp_spans"].is_u64(), "{row}");
+        assert!(row["telemetry_receiver"]["projection"].is_object(), "{row}");
         if mode == "timed_out" {
             // The harness reported the timeout, and the row says so rather than
             // calling it a generic launch failure.
@@ -774,6 +808,7 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
+            .env_remove("XDG_STATE_HOME")
             .env("HOME", home)
             .env("AHU_DECISION_URL", endpoint)
             .env("FIXTURE_WRITE_ANSWER", if answer { "yes" } else { "no" })
@@ -959,6 +994,7 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
+            .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
             .env("AHU_DECISION_URL", &endpoint)
             .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
@@ -1008,8 +1044,9 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
         true
     );
     assert_eq!(rows[1]["judge_status"], "failed");
-    assert_eq!(rows[1]["score"], Value::Null);
-    assert_eq!(rows[1]["passed"], false);
+    assert_eq!(rows[1]["score"], 1.0);
+    assert_eq!(rows[1]["passed"], true);
+    assert_eq!(rows[1]["score_source"], "deterministic");
     assert_eq!(rows[1]["evaluator_metrics"]["service"], Value::Null);
     assert_eq!(
         rows[1]["evaluator_metrics"]["provider_input_complete"],
@@ -1112,6 +1149,7 @@ else:
         }
         let output = command
             .env("PATH", &path)
+            .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
             .env("AHU_TEST_TRAJECTORY_MODE", mode)
             .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))

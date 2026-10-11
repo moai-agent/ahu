@@ -1,4 +1,5 @@
 /target/
+/.ahu/
 /.worktrees/
 /security-reviews/
 /fixes/
@@ -12,4 +13,3 @@
 .env
 .env.*
 !.env.example
-!.env.template

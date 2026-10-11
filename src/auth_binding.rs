@@ -90,10 +90,11 @@ impl Identity {
     }
 }
 
-/// Return a privacy-safe view of current provider rate-limit windows for the
-/// active project auth profile. Only Codex currently has a reviewed,
-/// machine-readable read-only limit interface; other bound providers remain
-/// explicitly unsupported rather than being estimated from historical usage.
+/// Return a privacy-safe view of current provider capacity signals for the
+/// active project auth profile. Signal types vary by provider: Codex exposes
+/// rate-limit windows (time-scoped percentages); subscription-based providers
+/// with no per-call metering stay unknown. Identity-bound signals only; never
+/// estimated from usage history or untrusted sources.
 pub fn budget(repo: &Repo) -> Result<Value> {
     budget_with_probe(repo, |cwd| {
         let executable = crate::selection::resolve_executable("codex")
@@ -121,49 +122,158 @@ fn budget_with_probe(
     };
     let active = bindings.active_profile.clone();
     let profile = bindings.profiles.get(&active);
+    let observed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let project_identity = repo.identity();
     let mut providers = Vec::new();
-    for harness in ["codex", "claude-code", "antigravity", "ollama"] {
+    for harness in ["codex", "claude-code", "antigravity", "kiro", "ollama"] {
         let Some(binding) = profile.and_then(|items| items.get(harness)) else {
-            providers.push(json!({"harness":harness,"status":if profile.is_some() {"not_bound"} else {"not_configured"},"windows":[]}));
+            providers.push(provider_signal(
+                harness,
+                if profile.is_some() {
+                    "not_bound"
+                } else {
+                    "not_configured"
+                },
+                ProviderCapacity::Unknown,
+                None,
+                &project_identity,
+                observed_at,
+            ));
             continue;
         };
         if harness != "codex" {
-            providers.push(json!({"harness":harness,"status":"unsupported","windows":[]}));
+            providers.push(provider_signal(
+                harness,
+                "unsupported",
+                ProviderCapacity::Unknown,
+                None,
+                &project_identity,
+                observed_at,
+            ));
             continue;
         }
         let (identity, response) = probe_codex(&repo.root)?;
         if identity.fingerprint()? != binding.fingerprint {
             return Err(Error::new(
-                "current Codex account does not match the active project auth profile; budget omitted",
+                "current Codex account does not match the active project auth profile; signal omitted",
             ));
         }
+        // Check reset freshness after the potentially slow provider probe.
+        let observed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let rate_limits = response.get("rateLimits").unwrap_or(&response);
         let mut windows = Vec::new();
+        let mut incomplete = false;
         for (name, key) in [("primary", "primary"), ("secondary", "secondary")] {
-            if let Some(values) = rate_limits.get(key).and_then(normalize_rate_window) {
-                windows.push(normalize_window(name, values));
+            if let Some(raw) = rate_limits.get(key).filter(|v| !v.is_null()) {
+                let Some(values) = normalize_rate_window(raw) else {
+                    incomplete = true;
+                    continue;
+                };
+                let window = normalize_window(name, values);
+                if window["resets_at_unix"]
+                    .as_u64()
+                    .is_some_and(|reset| reset <= observed_at)
+                {
+                    incomplete = true;
+                    continue;
+                }
+                windows.push(window);
             }
         }
-        let status = if windows.is_empty() {
+        // A valid high-capacity window cannot hide an unknown other window.
+        let capacity = if incomplete || windows.is_empty() {
+            ProviderCapacity::Unknown
+        } else {
+            ProviderCapacity::RateWindows(windows)
+        };
+        let status = if matches!(capacity, ProviderCapacity::Unknown) {
             "unknown"
         } else {
             "available"
         };
-        providers.push(json!({"harness":"codex","status":status,"windows":windows}));
+        let source = Some("codex_app_server");
+        providers.push(provider_signal(
+            harness,
+            status,
+            capacity,
+            source,
+            &project_identity,
+            observed_at,
+        ));
     }
-    let observed_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+
+    // Signal metadata is additive to the existing version-1 contract.
     Ok(json!({
         "schema_version": 1,
-        "profile": if profile.is_some() {Some(active)} else {None::<String>},
+        "capacity_schema_version": 1,
         "signal": "provider_rate_limit_windows",
         "token_counts": "not_provided",
-        "observed_at_unix": observed_at,
         "shared_account_capacity": true,
+        "profile": if profile.is_some() {Some(active)} else {None::<String>},
+        "project": project_identity,
+        "observed_at_unix": observed_at,
         "providers": providers
     }))
+}
+
+#[derive(Debug)]
+enum ProviderCapacity {
+    Unknown,
+    RateWindows(Vec<Value>),
+}
+
+/// Build a provider capacity signal with source label based on actual observation.
+/// Unknown/unbound/unsupported providers do not claim identity-bound sources.
+fn provider_signal(
+    harness: &str,
+    status: &str,
+    capacity: ProviderCapacity,
+    source: Option<&str>,
+    project_identity: &str,
+    observed_at: u64,
+) -> Value {
+    let signal_type = match capacity {
+        ProviderCapacity::Unknown => "unknown",
+        ProviderCapacity::RateWindows(_) => "rate_windows",
+    };
+    let actual_source = source.unwrap_or(match status {
+        "not_configured" | "not_bound" | "unsupported" => "none",
+        _ => "unknown",
+    });
+
+    let mut signal = json!({
+        "harness": harness,
+        "status": status,
+        "signal_type": signal_type,
+        "source": actual_source,
+        "scope": "shared_account",
+        "project_identity": project_identity,
+        "observed_at_unix": observed_at,
+        "freshness": if signal_type == "rate_windows" { "queried_now; do_not_reuse_for_admission" } else { "unavailable" },
+    });
+
+    match capacity {
+        ProviderCapacity::Unknown => {
+            signal["data"] = Value::Null;
+            // V1 compatibility: empty windows array
+            signal["windows"] = json!([]);
+        }
+        ProviderCapacity::RateWindows(windows) => {
+            signal["data"] = json!({
+                "windows": windows.clone(),
+                "semantics": "time_scoped_percentage",
+            });
+            // V1 compatibility: top-level windows alias
+            signal["windows"] = json!(windows);
+        }
+    }
+    signal
 }
 
 fn normalize_rate_window(value: &Value) -> Option<(f64, u64, Option<u64>)> {
@@ -175,7 +285,10 @@ fn normalize_rate_window(value: &Value) -> Option<(f64, u64, Option<u64>)> {
     if duration == 0 || duration > 525_600 {
         return None;
     }
-    let reset = value.get("resetsAt").and_then(Value::as_u64);
+    let reset = match value.get("resetsAt") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_u64()?),
+    };
     Some((used, duration, reset))
 }
 
@@ -706,6 +819,7 @@ fn task_binding_harness(harness: &str, model: &str) -> Option<&'static str> {
             "codex" => "codex",
             "claude-code" => "claude-code",
             "antigravity" => "antigravity",
+            "kiro" => "kiro",
             _ => return None,
         });
     }
@@ -720,6 +834,7 @@ pub fn probe(harness: &str, cwd: &Path) -> Result<Identity> {
         "codex" => probe_codex(cwd),
         "claude-code" => probe_claude(cwd),
         "antigravity" => probe_antigravity(cwd),
+        "kiro" => probe_kiro(cwd),
         "ollama" => probe_ollama(),
         "opencode" => Err(Error::new(format!(
             "ahu cannot verify the signed-in principal for {harness}; resume is unsafe until that harness exposes a reliable read-only identity check"
@@ -800,6 +915,44 @@ fn probe_ollama() -> Result<Identity> {
         principal: principal.into(),
         organization: None,
         workspace: Some(account_id.into()),
+    })
+}
+
+fn probe_kiro(cwd: &Path) -> Result<Identity> {
+    // whoami's verified social-login shape does not establish the principal
+    // used by an environment API key. Never bind that key to a cached login.
+    if std::env::var_os("KIRO_API_KEY").is_some() {
+        return Err(Error::new(
+            "Kiro API-key account binding is not validated; native social login is required for ahu account checks",
+        ));
+    }
+    let executable = crate::selection::resolve_executable("kiro-cli")
+        .ok_or_else(|| Error::new("Kiro CLI is not available on PATH"))?;
+    let output = bounded_command(&executable, &["whoami", "--format", "json"], cwd)?;
+    kiro_identity(&output)
+}
+
+fn kiro_identity(output: &[u8]) -> Result<Identity> {
+    let value: Value = serde_json::from_slice(output)
+        .map_err(|_| Error::new("Kiro whoami returned invalid JSON; details omitted"))?;
+    let account_type = value
+        .get("accountType")
+        .and_then(Value::as_str)
+        .filter(|s| *s == "SocialGitHub")
+        .ok_or_else(|| {
+            Error::new("Kiro account binding currently supports verified GitHub social login only")
+        })?;
+    let principal = value
+        .get("email")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| Error::new("Kiro whoami did not expose a verifiable account identity"))?;
+    Ok(Identity {
+        harness: "kiro".into(),
+        identity_kind: account_type.into(),
+        principal: principal.into(),
+        organization: None,
+        workspace: None,
     })
 }
 
@@ -905,6 +1058,9 @@ fn probe_antigravity(cwd: &Path) -> Result<Identity> {
 }
 
 fn parse_antigravity_identity(output: &[u8]) -> Result<Identity> {
+    if antigravity_needs_folder_trust(output) {
+        return Err(antigravity_folder_trust_error());
+    }
     let principal = extract_email(output).ok_or_else(|| {
         Error::new("Antigravity startup did not expose a signed-in account email")
     })?;
@@ -925,6 +1081,18 @@ fn parse_antigravity_identity(output: &[u8]) -> Result<Identity> {
         organization: None,
         workspace: extract_labeled_value(&visible, "GCP Project:"),
     })
+}
+
+fn antigravity_needs_folder_trust(output: &[u8]) -> bool {
+    let visible = String::from_utf8_lossy(output);
+    visible.contains("Do you trust the contents of this project?")
+        || visible.contains("Do you trust this folder?")
+}
+
+fn antigravity_folder_trust_error() -> Error {
+    Error::new(
+        "Antigravity is waiting for native folder trust in this checkout; open agy there interactively and review that prompt before retrying. ahu does not approve native folder trust automatically",
+    )
 }
 
 fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
@@ -991,6 +1159,9 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut buffer = [0u8; 4096];
     let outcome = loop {
+        if antigravity_needs_folder_trust(&output) {
+            break Err(antigravity_folder_trust_error());
+        }
         if extract_email(&output).is_some() {
             break Ok(output);
         }
@@ -1119,6 +1290,27 @@ fn bounded_command(executable: &str, args: &[&str], cwd: &Path) -> Result<Vec<u8
 mod profile_tests {
     use super::*;
 
+    #[test]
+    fn kiro_identity_requires_the_verified_provider_and_principal() {
+        let identity =
+            kiro_identity(br#"{"accountType":"SocialGitHub","email":"test@example.invalid"}"#)
+                .unwrap();
+        assert_eq!(identity.harness, "kiro");
+        assert_eq!(identity.principal, "test@example.invalid");
+        for value in [
+            r#"{"accountType":"SocialGitHub"}"#,
+            r#"{"accountType":"unknown","email":"private-marker"}"#,
+            "private-marker",
+        ] {
+            assert!(
+                !kiro_identity(value.as_bytes())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("private-marker")
+            );
+        }
+    }
+
     fn repo_fixture() -> (tempfile::TempDir, Repo) {
         let temp = tempfile::tempdir().unwrap();
         crate::git::run_ok(temp.path(), &["init", "-q"]).unwrap();
@@ -1153,6 +1345,24 @@ mod profile_tests {
 
     #[test]
     fn profile_changes_require_auth_cli_to_refresh_the_digest() {
+        // select_profile refuses hosted sessions by design; the assertions
+        // below need a host operator context.
+        if [
+            "AHU_WORKER_SESSION",
+            "AHU_TASK_ID",
+            "AHU_TASK_DIR",
+            "AHU_PARENT_TASK",
+            "AHU_BROKER_TOKEN",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+        {
+            eprintln!(
+                "skipping profile digest refresh test: ahu worker environment present; \
+                 select_profile requires a host operator context"
+            );
+            return;
+        }
         let (_temp, repo) = repo_fixture();
         let path = binding_path(&repo).unwrap();
         let state = BindingFile {
@@ -1312,19 +1522,37 @@ mod profile_tests {
             ))
         })
         .unwrap();
+        assert_eq!(budget["schema_version"], 1);
         assert_eq!(budget["profile"], "personal");
         assert_eq!(budget["signal"], "provider_rate_limit_windows");
         assert_eq!(budget["token_counts"], "not_provided");
+        assert_eq!(budget["shared_account_capacity"], true);
+        assert_eq!(budget["project"], repo.identity());
+        assert_eq!(budget["providers"][0]["signal_type"], "rate_windows");
         assert_eq!(budget["providers"][0]["status"], "available");
+        assert_eq!(budget["providers"][0]["source"], "codex_app_server");
+        assert_eq!(budget["providers"][0]["scope"], "shared_account");
+        assert_eq!(budget["providers"][0]["project_identity"], repo.identity());
+        assert_eq!(
+            budget["providers"][0]["data"]["windows"][0]["remaining_percent"],
+            75.0
+        );
+        assert_eq!(
+            budget["providers"][0]["data"]["semantics"],
+            "time_scoped_percentage"
+        );
+        // V1 compatibility: windows alias
         assert_eq!(
             budget["providers"][0]["windows"][0]["remaining_percent"],
             75.0
         );
         assert_eq!(
-            budget["providers"][0]["windows"][1]["window_duration_minutes"],
+            budget["providers"][0]["data"]["windows"][1]["window_duration_minutes"],
             10_080
         );
         assert_eq!(budget["providers"][1]["status"], "unsupported");
+        assert_eq!(budget["providers"][1]["signal_type"], "unknown");
+        assert_eq!(budget["providers"][1]["source"], "none");
         let serialized = budget.to_string();
         for secret in [
             "private@example.invalid",
@@ -1388,6 +1616,9 @@ mod profile_tests {
         })
         .unwrap();
         assert_eq!(malformed["providers"][0]["status"], "unknown");
+        assert_eq!(malformed["providers"][0]["signal_type"], "unknown");
+        assert_eq!(malformed["providers"][0]["data"], Value::Null);
+        // V1 compatibility: empty windows
         assert!(
             malformed["providers"][0]["windows"]
                 .as_array()
@@ -1403,6 +1634,7 @@ mod profile_tests {
             budget_with_probe(&repo, |_| panic!("must not probe without a bound profile")).unwrap();
         assert_eq!(absent["profile"], Value::Null);
         assert_eq!(absent["providers"][0]["status"], "not_configured");
+        assert_eq!(absent["providers"][0]["signal_type"], "unknown");
         assert!(!repo.root.join(".ahu").exists());
 
         let path = binding_path(&repo).unwrap();
@@ -1418,6 +1650,241 @@ mod profile_tests {
             budget_with_probe(&repo, |_| panic!("must not probe an unbound provider")).unwrap();
         assert_eq!(unbound["profile"], "default");
         assert_eq!(unbound["providers"][0]["status"], "not_bound");
+        assert_eq!(unbound["providers"][0]["signal_type"], "unknown");
+    }
+
+    #[test]
+    fn budget_signal_binds_project_identity_and_observation_time() {
+        let (_temp, repo) = repo_fixture();
+        let identity = Identity {
+            harness: "codex".into(),
+            identity_kind: "chatgpt".into(),
+            principal: "test@example.invalid".into(),
+            organization: None,
+            workspace: None,
+        };
+        let path = binding_path(&repo).unwrap();
+        save(
+            &path,
+            &BindingFile {
+                repo_identity: repo.identity(),
+                profiles: BTreeMap::from([(
+                    "default".into(),
+                    BTreeMap::from([(
+                        "codex".into(),
+                        StoredBinding {
+                            fingerprint: identity.fingerprint().unwrap(),
+                            identity_kind: "chatgpt".into(),
+                            profile: None,
+                        },
+                    )]),
+                )]),
+                ..BindingFile::default()
+            },
+        )
+        .unwrap();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let budget = budget_with_probe(&repo, |_| {
+            Ok((
+                identity.clone(),
+                json!({"rateLimits":{"primary":{"usedPercent":50.0,"windowDurationMins":60,"resetsAt":before+3600}}}),
+            ))
+        })
+        .unwrap();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(budget["schema_version"], 1);
+        assert_eq!(budget["project"], repo.identity());
+        let observed_at = budget["observed_at_unix"].as_u64().unwrap();
+        assert!(observed_at >= before && observed_at <= after);
+        assert_eq!(budget["providers"][0]["project_identity"], repo.identity());
+        assert_eq!(budget["providers"][0]["observed_at_unix"], observed_at);
+        assert_eq!(budget["providers"][0]["source"], "codex_app_server");
+        assert_eq!(budget["providers"][0]["scope"], "shared_account");
+    }
+
+    #[test]
+    fn budget_excludes_stale_reset_times_and_preserves_future_resets() {
+        let (_temp, repo) = repo_fixture();
+        let identity = Identity {
+            harness: "codex".into(),
+            identity_kind: "chatgpt".into(),
+            principal: "test@example.invalid".into(),
+            organization: None,
+            workspace: None,
+        };
+        let path = binding_path(&repo).unwrap();
+        save(
+            &path,
+            &BindingFile {
+                repo_identity: repo.identity(),
+                profiles: BTreeMap::from([(
+                    "default".into(),
+                    BTreeMap::from([(
+                        "codex".into(),
+                        StoredBinding {
+                            fingerprint: identity.fingerprint().unwrap(),
+                            identity_kind: "chatgpt".into(),
+                            profile: None,
+                        },
+                    )]),
+                )]),
+                ..BindingFile::default()
+            },
+        )
+        .unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Stale reset: past timestamp should be excluded
+        let stale = budget_with_probe(&repo, |_| {
+            Ok((
+                identity.clone(),
+                json!({"rateLimits": {
+                    "primary": {"usedPercent": 25.0, "windowDurationMins": 300, "resetsAt": now - 3600},
+                    "secondary": {"usedPercent": 50.0, "windowDurationMins": 60, "resetsAt": now + 3600}
+                }}),
+            ))
+        })
+        .unwrap();
+
+        // A good window cannot make the other stale/unknown window eligible.
+        assert_eq!(stale["providers"][0]["status"], "unknown");
+        assert!(stale["providers"][0]["data"].is_null());
+        for malformed in [
+            json!({"usedPercent":101.0,"windowDurationMins":60}),
+            json!({"usedPercent":25.0,"windowDurationMins":60,"resetsAt":"invalid"}),
+        ] {
+            let mixed = budget_with_probe(&repo, |_| Ok((identity.clone(), json!({"rateLimits": {
+                "primary": malformed,
+                "secondary": {"usedPercent":10.0,"windowDurationMins":60,"resetsAt":now+3600}
+            }})))).unwrap();
+            assert_eq!(mixed["providers"][0]["status"], "unknown");
+            assert!(
+                mixed["providers"][0]["windows"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        // All stale: results in unknown signal
+        let all_stale = budget_with_probe(&repo, |_| {
+            Ok((
+                identity.clone(),
+                json!({"rateLimits": {
+                    "primary": {"usedPercent": 25.0, "windowDurationMins": 300, "resetsAt": now - 7200},
+                    "secondary": {"usedPercent": 50.0, "windowDurationMins": 60, "resetsAt": now - 3600}
+                }}),
+            ))
+        })
+        .unwrap();
+        assert_eq!(all_stale["providers"][0]["status"], "unknown");
+        assert_eq!(all_stale["providers"][0]["signal_type"], "unknown");
+    }
+
+    #[test]
+    fn budget_rate_windows_semantics_are_explicit() {
+        let (_temp, repo) = repo_fixture();
+        let identity = Identity {
+            harness: "codex".into(),
+            identity_kind: "chatgpt".into(),
+            principal: "test@example.invalid".into(),
+            organization: None,
+            workspace: None,
+        };
+        let path = binding_path(&repo).unwrap();
+        save(
+            &path,
+            &BindingFile {
+                repo_identity: repo.identity(),
+                profiles: BTreeMap::from([(
+                    "default".into(),
+                    BTreeMap::from([(
+                        "codex".into(),
+                        StoredBinding {
+                            fingerprint: identity.fingerprint().unwrap(),
+                            identity_kind: "chatgpt".into(),
+                            profile: None,
+                        },
+                    )]),
+                )]),
+                ..BindingFile::default()
+            },
+        )
+        .unwrap();
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let budget = budget_with_probe(&repo, |_| {
+            Ok((
+                identity.clone(),
+                json!({"rateLimits":{"primary":{"usedPercent":25.0,"windowDurationMins":300,"resetsAt":future}}}),
+            ))
+        })
+        .unwrap();
+        assert_eq!(budget["providers"][0]["signal_type"], "rate_windows");
+        assert_eq!(budget["providers"][0]["source"], "codex_app_server");
+        assert_eq!(
+            budget["providers"][0]["data"]["semantics"],
+            "time_scoped_percentage"
+        );
+        assert_eq!(
+            budget["providers"][0]["data"]["windows"][0]["used_percent"],
+            25.0
+        );
+        assert_eq!(
+            budget["providers"][0]["data"]["windows"][0]["remaining_percent"],
+            75.0
+        );
+        assert_eq!(
+            budget["providers"][0]["data"]["windows"][0]["window_duration_minutes"],
+            300
+        );
+    }
+
+    #[test]
+    fn unsupported_providers_explicitly_report_unknown_signals() {
+        let (_temp, repo) = repo_fixture();
+        let path = binding_path(&repo).unwrap();
+        let mut bindings = BindingFile {
+            profiles: BTreeMap::from([("default".into(), BTreeMap::new())]),
+            ..BindingFile::default()
+        };
+        for harness in ["claude-code", "antigravity", "kiro", "ollama"] {
+            bindings.profiles.get_mut("default").unwrap().insert(
+                harness.to_owned(),
+                StoredBinding {
+                    fingerprint: "synthetic".into(),
+                    identity_kind: "fixture".into(),
+                    profile: None,
+                },
+            );
+        }
+        save(&path, &bindings).unwrap();
+        let budget =
+            budget_with_probe(&repo, |_| panic!("must not probe unsupported providers")).unwrap();
+        for provider in budget["providers"].as_array().unwrap() {
+            let harness = provider["harness"].as_str().unwrap();
+            if harness != "codex" {
+                assert_eq!(provider["status"], "unsupported");
+                assert_eq!(provider["signal_type"], "unknown");
+                assert_eq!(provider["source"], "none");
+                assert_eq!(provider["data"], Value::Null);
+                // V1 compat: empty windows
+                assert!(provider["windows"].as_array().unwrap().is_empty());
+            }
+        }
     }
 
     #[test]
@@ -1542,6 +2009,21 @@ mod profile_tests {
         // The fallback extraction fails on raw ANSI since it breaks token boundaries,
         // demonstrating why NO_COLOR=1 presentation override is used.
         assert_eq!(extract_email(b"\x1b[32mpersonal@example.com\x1b[0m"), None);
+    }
+
+    #[test]
+    fn antigravity_folder_trust_is_not_account_identity_or_a_generic_timeout() {
+        for prompt in [
+            "Do you trust the contents of this project?",
+            "Do you trust this folder?",
+        ] {
+            let output = format!("contact: fixture@example.invalid\n{prompt}\n/private-marker");
+            let error = parse_antigravity_identity(output.as_bytes()).unwrap_err();
+            assert!(error.to_string().contains("native folder trust"));
+            assert!(!error.to_string().contains("private-marker"));
+            assert!(!error.to_string().contains("fixture@example.invalid"));
+        }
+        assert!(!antigravity_needs_folder_trust(b"Waiting for startup"));
     }
 
     #[test]

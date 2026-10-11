@@ -1,5 +1,5 @@
 schema_version = 1
-digest = "90faa39e31b4312ece6da0981eae5c2bbd87b87033d0447e715d717432e8808a"
+digest = "ba08aca00e6d95067c0a0fae1bb941cebe71b18f52fba6205755d561a34962be"
 skipped_directories = [
     ".ahu",
     ".worktrees",
@@ -22,8 +22,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/arch-opus.md"
-digest = "8344afb498e84f47690ce27924c65338b63ffe873811e4d182c26dbf3d948321"
-bytes = 5400
+digest = "fc03fc1a3eae3354b3c7067465843a27930d236d7b156e2a7569fa6a2024d90b"
+bytes = 5453
 executable = false
 
 [[entries]]
@@ -34,8 +34,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/defsec-agy.md"
-digest = "b36b82bcd989b71ddc1ccd8bc690217cefa9d6dd70d112a50d62ffd4a9cb7f40"
-bytes = 1823
+digest = "eab704102ba283145e69774bd9a148371f931e0caf3c8226da64ea56f405cad6"
+bytes = 2223
 executable = false
 
 [[entries]]
@@ -46,8 +46,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/defsec-glm.md"
-digest = "b24bd5a24120bab6f98127e26513fedc03792f72ee78b3c97c370f6bf56e75ba"
-bytes = 6430
+digest = "496e00c058507e58d15f96d40fe49b836d53d10a035cdd0f5ef04faaff08f0dd"
+bytes = 6428
 executable = false
 
 [[entries]]
@@ -58,8 +58,8 @@ executable = false
 
 [[entries]]
 path = ".agents/ahu/agents/dev-agy.md"
-digest = "67fd182c509725aad45a8d396e6c8ec437e33d14c97a2415b3a7534c348f3764"
-bytes = 5288
+digest = "7f1bdd60381da751983c0d53f5f5d53497560408dee0bcf7727e2529e2334a76"
+bytes = 5286
 executable = false
 
 [[entries]]
@@ -75,9 +75,15 @@ bytes = 6339
 executable = false
 
 [[entries]]
+path = ".agents/ahu/agents/dev-kiro.md"
+digest = "705e112d18e8aa0b5891cbc70f01a31413e201b080cec2aa71c1fb79d7955740"
+bytes = 1262
+executable = false
+
+[[entries]]
 path = ".agents/ahu/agents/dev-opus.md"
-digest = "aeb50b0b7090051a1a073d8e5e892e24e14a866a4578305dd269ee9ef78c57f3"
-bytes = 2923
+digest = "8e905d14f141ed7cf5b540820e2ae5fc14224ca7400a4f5f4f4c48f0f5a764b7"
+bytes = 3325
 executable = false
 
 [[entries]]
@@ -117,6 +123,12 @@ bytes = 5897
 executable = false
 
 [[entries]]
+path = ".agents/ahu/agents/review-kiro.md"
+digest = "4a1fc44ba94071a2d5d9343cde993f28623a7c9c117c7b41bf9dc67958b8351a"
+bytes = 1285
+executable = false
+
+[[entries]]
 path = ".agents/ahu/agents/roadmap-architect.md"
 digest = "2fded2e8f1e0e6820bf00f078396954d66d7a9f05d21ecbc9832c1a0c92d3b73"
 bytes = 3344
@@ -129,9 +141,15 @@ bytes = 3453
 executable = false
 
 [[entries]]
+path = ".agents/ahu/agents/test-kiro.md"
+digest = "b8d4ffe8b00869990867ed05ac289781b12ff76bba303687f45b06a179ed7cc8"
+bytes = 1259
+executable = false
+
+[[entries]]
 path = ".agents/ahu/config.toml"
-digest = "f31d1ce0a0bc07e16272af56759d2cf58db5020202753f96fe5a636c3fb42cd6"
-bytes = 469
+digest = "172c05511eae48127da4bf2886b35c3d01134dd9a1169eb576e2fc76e68eb07f"
+bytes = 623
 executable = false
 
 [[entries]]
@@ -142,20 +160,20 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-agent-context-critic/SKILL.md"
-digest = "2dea5dec2dc406e9602c5b659706e6f8bb6df5f3df72ae0a5cedfed85e497e29"
-bytes = 5485
+digest = "47d2e063a5c0a26a20cc175b77f14a765d08db5e802d95e15193ef4d024d74cb"
+bytes = 5837
 executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-architecture/SKILL.md"
-digest = "bc66dfa374f1b48166cbab10816795dcdd61efe0b7ed3fad26e2b7031e4d0b7c"
-bytes = 23714
+digest = "abb6f7755235b3263b2e6e478cc775b060966eec854972daf1e61368ac9b381a"
+bytes = 25041
 executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-direct-agents/SKILL.md"
-digest = "e68508ca52ed2b3a0e06b2b99c066f09774beb03fdf909357ef79a6e8e69cd93"
-bytes = 10836
+digest = "c391cb04f71387a81b7b7793949fd1a38401601080887941c3604e7b1d4a35c8"
+bytes = 11091
 executable = false
 
 [[entries]]
@@ -166,14 +184,14 @@ executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-release/SKILL.md"
-digest = "df1a4f18e9a6d6e2101072b2d796d3f930faa75fc4e7d9274cf7d5cded6ccbb6"
-bytes = 10941
+digest = "02dfe29c4da94e5103b1f42e4f4eefd6c23e5d88bea872b98a226a1cd011e8fd"
+bytes = 14572
 executable = false
 
 [[entries]]
 path = ".agents/skills/ahu-typed-decisions/SKILL.md"
-digest = "e9c5c95ef657580acffd0f4e9a87cd4488dcd614eb3158de33f1cc782b77a894"
-bytes = 6268
+digest = "758e73c90905231b5335eb2d6819feeda017e08ab75e01fde7ba93326fd474e8"
+bytes = 6771
 executable = false
 
 [[entries]]
@@ -189,6 +207,36 @@ bytes = 217
 executable = false
 
 [[entries]]
+path = ".kiro/settings/mcp.json"
+digest = "aa4beaf44bc0a4487a91985af907d1f8bdc4e014912f8cd13ff746d15c4b957f"
+bytes = 434
+executable = false
+
+[[entries]]
+path = ".kiro/skills/ahu-agent-context-critic/SKILL.md"
+digest = "2dea5dec2dc406e9602c5b659706e6f8bb6df5f3df72ae0a5cedfed85e497e29"
+bytes = 5485
+executable = false
+
+[[entries]]
+path = ".kiro/skills/ahu-direct-agents/SKILL.md"
+digest = "e68508ca52ed2b3a0e06b2b99c066f09774beb03fdf909357ef79a6e8e69cd93"
+bytes = 10836
+executable = false
+
+[[entries]]
+path = ".kiro/skills/ahu-typed-decisions/SKILL.md"
+digest = "e9c5c95ef657580acffd0f4e9a87cd4488dcd614eb3158de33f1cc782b77a894"
+bytes = 6268
+executable = false
+
+[[entries]]
+path = ".kiro/skills/discover-requirements/SKILL.md"
+digest = "129931849a0b6dc263b21b2e52f56f19e96d412088cd4c4f3a94aae39ed1f609"
+bytes = 5176
+executable = false
+
+[[entries]]
 path = ".mcp.json"
 digest = "40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06"
 bytes = 117
@@ -196,8 +244,8 @@ executable = false
 
 [[entries]]
 path = "AGENTS.md"
-digest = "1a94fad2a7eb0162dfcc562eaebd5f51dda8571e40191a012516fe21ec524678"
-bytes = 4110
+digest = "a5c64efee054e8d85ca9636b4496ffbfb8351814bc8bb36235649140cf41dd40"
+bytes = 4712
 executable = false
 
 [[entries]]

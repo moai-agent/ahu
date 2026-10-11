@@ -37,8 +37,61 @@ const CODEX_MCP_ENV: &[&str] = &[
     "AHU_OLLAMA_URL",
 ];
 
+// Kiro filters stdio MCP environments too. Expand these names at runtime;
+// setup must not read or persist their values, or add credential forwarding.
+const KIRO_MCP_ENV: &[&str] = &[
+    "AHU_TASK_ID",
+    "AHU_TASK_DIR",
+    "AHU_EVAL_OTEL_ENDPOINT",
+    "AHU_MCP_RESOURCE_ATTRIBUTES",
+    "OTEL_RESOURCE_ATTRIBUTES",
+];
+
+fn kiro_env_forwarding(existing: &serde_json::Value, relative: &str) -> Result<serde_json::Value> {
+    if existing.get("command").and_then(serde_json::Value::as_str) != Some("ahu")
+        || existing.get("args") != Some(&serde_json::json!(["mcp", "serve"]))
+        || existing.get("url").is_some()
+        || existing
+            .get("type")
+            .is_some_and(|v| v.as_str() != Some("stdio"))
+        || existing
+            .get("disabled")
+            .is_some_and(|v| v.as_bool() != Some(false))
+    {
+        return Err(Error::new(format!(
+            "{relative} already defines a different MCP server named `ahu`; setup will not replace it"
+        )));
+    }
+    let mut server = existing.clone();
+    let env = server
+        .as_object_mut()
+        .ok_or_else(|| Error::new(format!("{relative}: ahu MCP server must be an object")))?
+        .entry("env")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| Error::new(format!("{relative}: ahu MCP env must be an object")))?;
+    for name in KIRO_MCP_ENV {
+        let wanted = serde_json::Value::String(format!("${{{name}}}"));
+        match env.get(*name) {
+            Some(value) if *value != wanted => {
+                return Err(Error::new(format!(
+                    "{relative}: ahu MCP env.{name} conflicts with required runtime forwarding; setup will not replace it"
+                )));
+            }
+            Some(_) => {}
+            None => {
+                env.insert((*name).into(), wanted);
+            }
+        }
+    }
+    Ok(server)
+}
+
 fn codex_env_forwarding(existing: &str, parsed: &toml::Value) -> Result<Option<String>> {
-    let server = &parsed["mcp_servers"]["ahu"];
+    let server = parsed
+        .get("mcp_servers")
+        .and_then(|t| t.get("ahu"))
+        .ok_or_else(|| Error::new("ahu MCP server not found in configuration"))?;
     let mut values = match server.get("env_vars") {
         Some(toml::Value::Array(values)) => values.clone(),
         None => Vec::new(),
@@ -76,12 +129,17 @@ fn codex_env_forwarding(existing: &str, parsed: &toml::Value) -> Result<Option<S
     let locations: Locations = toml::from_str(existing).map_err(|_| {
         Error::new("cannot locate ahu MCP configuration for environment forwarding")
     })?;
-    let location = &locations.mcp_servers["ahu"];
+    let location = locations
+        .mcp_servers
+        .get("ahu")
+        .ok_or_else(|| Error::new("ahu MCP server not found in configuration"))?;
     let encoded = wanted.to_string();
     let mut expected = parsed.clone();
-    expected["mcp_servers"]["ahu"]
-        .as_table_mut()
-        .unwrap()
+    expected
+        .get_mut("mcp_servers")
+        .and_then(|t| t.get_mut("ahu"))
+        .and_then(|s| s.as_table_mut())
+        .ok_or_else(|| Error::new("ahu MCP server configuration is not a valid table"))?
         .insert("env_vars".into(), wanted);
     let mut candidates = Vec::new();
     if let Some(value) = &location.env_vars {
@@ -138,7 +196,7 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         .collect();
     if detected.is_empty() {
         return Err(Error::new(
-            "no supported ahu harness was found on PATH. Install Claude Code, Codex, Antigravity CLI, or OpenCode, then run `ahu setup` again.",
+            "no supported ahu harness was found on PATH. Install Claude Code, Codex, Antigravity CLI, OpenCode, or Kiro CLI, then run `ahu setup` again.",
         )
         .with_kind(crate::util::ErrorKind::Prerequisite));
     }
@@ -319,6 +377,12 @@ fn run_detected_with_native(
             safe_new_path(&repo.root, &format!(".agents/skills/{name}/SKILL.md"))?,
             content.as_bytes().to_vec(),
         ));
+        if detected.iter().any(|h| h.id == "kiro") {
+            writes.push((
+                safe_new_path(&repo.root, &format!(".kiro/skills/{name}/SKILL.md"))?,
+                content.as_bytes().to_vec(),
+            ));
+        }
         if detected.iter().any(|h| h.id == "claude-code") {
             writes.push((
                 safe_new_path(&repo.root, &format!(".claude/skills/{name}/SKILL.md"))?,
@@ -332,7 +396,7 @@ fn run_detected_with_native(
         crate::agent::parse_manifest(&agent, &path)?;
         writes.push((path, agent.into_bytes()));
     }
-    add_client_configurations(&repo.root, detected, &mut writes)?;
+    let kiro_updates = add_client_configurations(&repo.root, detected, &mut writes)?;
 
     let existing_agents = crate::agent::load_all(&repo.root)?;
     for (harness, _) in &chosen_models {
@@ -346,30 +410,12 @@ fn run_detected_with_native(
         }
     }
 
-    // Conflict-check the complete plan before changing anything.
-    for (path, bytes) in &writes {
-        match std::fs::read(path) {
-            Ok(existing) if existing == *bytes => {}
-            Ok(_) => {
-                return Err(Error::new(format!(
-                    "setup will not overwrite existing project file {}; review or move it, then rerun setup. Nothing was changed.",
-                    path.display()
-                )));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(Error::new(format!(
-                    "cannot inspect {}: {e}",
-                    path.display()
-                )));
-            }
-        }
-    }
+    validate_plan(&writes, &kiro_updates)?;
 
     if native_mcp.is_some() {
         console.say("Antigravity: registering the cwd-sensitive ahu server in native user MCP configuration for interactive sessions; project configuration remains available for print mode. Other native servers are preserved.\n")?;
     }
-    apply_plan(console, &writes)?;
+    apply_plan_with_kiro_updates(console, &writes, &kiro_updates)?;
     if let Some(plan) = native_mcp {
         plan.apply()?;
     }
@@ -389,42 +435,172 @@ fn run_detected_with_native(
     Ok(0)
 }
 
-fn apply_plan(console: &mut Console<'_>, writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
-    let mut created = Vec::new();
+// Only the Kiro JSON merge planner can authorize replacement. Keep the exact
+// bytes it validated, rather than accepting a later read as the original.
+#[derive(Debug)]
+struct KiroUpdate {
+    path: PathBuf,
+    before: Vec<u8>,
+    after: Vec<u8>,
+}
+
+impl KiroUpdate {
+    fn check(&self) -> Result<()> {
+        check_update_input(&self.path, &self.before)
+            .map(|_| ())
+            .map_err(Error::from)
+    }
+
+    fn apply(&self) -> Result<()> {
+        replace_kiro_config(&self.path, &self.before, &self.after)
+    }
+
+    fn rollback(&self) -> Result<()> {
+        // An atomic-write failure can occur before publication or after rename
+        // (directory sync). Restore only our output, never a concurrent edit.
+        if check_update_input(&self.path, &self.before).is_ok() {
+            return Ok(());
+        }
+        replace_kiro_config(&self.path, &self.after, &self.before)
+    }
+}
+
+fn check_update_input(path: &Path, expected: &[u8]) -> std::io::Result<std::fs::Permissions> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file() || std::fs::read(path)? != expected {
+        return Err(std::io::Error::other(format!(
+            "Kiro MCP configuration changed since planning: {}",
+            path.display()
+        )));
+    }
+    Ok(metadata.permissions())
+}
+
+fn replace_kiro_config(path: &Path, before: &[u8], after: &[u8]) -> Result<()> {
+    let permissions = check_update_input(path, before)?;
+    crate::private_io::atomic_write_with(path, crate::private_io::Durability::Durable, |file| {
+        file.write_all(after)?;
+        file.set_permissions(permissions)?;
+        // Recheck immediately before publication. This detects observed edits;
+        // it is not a compare-and-swap against uncooperative concurrent writers.
+        check_update_input(path, before)?;
+        Ok(())
+    })
+}
+
+fn validate_plan(writes: &[(PathBuf, Vec<u8>)], updates: &[KiroUpdate]) -> Result<()> {
+    // Conflict-check the complete plan before changing anything.
     for (path, bytes) in writes {
-        if path.exists() {
+        if let Some(update) = updates
+            .iter()
+            .find(|u| u.path == *path && u.after == *bytes)
+        {
+            update.check()?;
             continue;
         }
-        if let Some(parent) = path.parent()
-            && let Err(error) = std::fs::create_dir_all(parent)
-        {
-            rollback(&created);
+        match std::fs::read(path) {
+            Ok(existing) if existing == *bytes => {}
+            Ok(_) => {
+                return Err(Error::new(format!(
+                    "setup will not overwrite existing project file {}; review or move it, then rerun setup. Nothing was changed.",
+                    path.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Error::new(format!(
+                    "cannot inspect {}: {e}",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn apply_plan(console: &mut Console<'_>, writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    apply_plan_with_kiro_updates(console, writes, &[])
+}
+
+fn apply_plan_with_kiro_updates(
+    console: &mut Console<'_>,
+    writes: &[(PathBuf, Vec<u8>)],
+    updates: &[KiroUpdate],
+) -> Result<()> {
+    validate_plan(writes, updates)?;
+    let mut created = Vec::new();
+    let mut replaced: Vec<&KiroUpdate> = Vec::new();
+    let result = (|| -> Result<()> {
+        for (path, bytes) in writes {
+            if let Some(update) = updates
+                .iter()
+                .find(|u| u.path == *path && u.after == *bytes)
+            {
+                update.check()?;
+                replaced.push(update);
+                update.apply()?;
+                console.say(&format!("updated {}\n", display_path(path)))?;
+                continue;
+            }
+            if path.exists() {
+                // Preserve no-overwrite policy even when a file changes after the
+                // complete preflight check.
+                if std::fs::read(path)? != *bytes {
+                    return Err(Error::new(format!(
+                        "setup will not overwrite existing project file {}",
+                        path.display()
+                    )));
+                }
+                continue;
+            }
+            if let Some(parent) = path.parent()
+                && let Err(error) = std::fs::create_dir_all(parent)
+            {
+                return Err(Error::new(format!(
+                    "cannot create {}: {error}",
+                    parent.display()
+                )));
+            }
+            let result = (|| -> std::io::Result<()> {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)?;
+                file.write_all(bytes)?;
+                file.sync_all()
+            })();
+            if let Err(error) = result {
+                return Err(Error::new(format!(
+                    "cannot create {}: {error}",
+                    path.display()
+                )));
+            }
+            created.push(path.clone());
+            console.say(&format!(
+                "{} {}\n",
+                style::stdout().paint(Role::Success, "created"),
+                display_path(path)
+            ))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        rollback(&created);
+        let mut failures = Vec::new();
+        for update in replaced.into_iter().rev() {
+            if let Err(error) = update.rollback() {
+                failures.push(error.to_string());
+            }
+        }
+        if !failures.is_empty() {
             return Err(Error::new(format!(
-                "cannot create {}: {error}",
-                parent.display()
+                "{error}; Kiro rollback incomplete: {}",
+                failures.join("; ")
             )));
         }
-        let result = (|| -> std::io::Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?;
-            file.write_all(bytes)?;
-            file.sync_all()
-        })();
-        if let Err(error) = result {
-            rollback(&created);
-            return Err(Error::new(format!(
-                "cannot create {}: {error}",
-                path.display()
-            )));
-        }
-        created.push(path.clone());
-        console.say(&format!(
-            "{} {}\n",
-            style::stdout().paint(Role::Success, "created"),
-            display_path(path)
-        ))?;
+        return Err(error);
     }
     Ok(())
 }
@@ -437,7 +613,7 @@ fn rollback(paths: &[PathBuf]) {
 
 fn dev_agent(harness: &str, model: &str) -> String {
     format!(
-        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: dev-{harness}\nversion: 1.0.0\ndescription: Development agent for {harness}\nharness: {harness}\nmodel: {model}\npermissions: prompt\nstatus: stable\n---\n\nYou are the project's development agent for the {harness} harness. Follow the committed repository instructions and skills that your harness exposes. Use the ahu MCP tools when available: ahu_agents_list, ahu_auth_budget, ahu_tasks_list, ahu_task_get, ahu_typed_decide, and ahu_request_approval for an explicit operator checkpoint before a consequential operation. Use ahu_auth_budget before delegating costly work when useful; optionally pass minimum_remaining_percent to find registered agent/model candidates whose every reported provider window meets that threshold. It reports rate-limit percentages, not token counts or costs, and agents on one account share capacity. Unknown or unsupported windows are never eligible. Eligibility does not reserve capacity or confirm model availability. The approval tool only pauses and records bounded request details; it never performs the requested operation. Do not claim a skill was loaded merely because its file exists. Ask for approval when an action crosses the permissions available to you."
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: dev-{harness}\nversion: 1.0.0\ndescription: Development agent for {harness}\nharness: {harness}\nmodel: {model}\npermissions: prompt\nstatus: stable\n---\n\nYou are the project's development agent for the {harness} harness. Follow the committed repository instructions and skills that your harness exposes. Use the ahu MCP tools when available: ahu_agents_list, ahu_auth_budget, ahu_tasks_list, ahu_task_get, ahu_typed_decide, ahu_skills_suggest, and ahu_request_approval for an explicit operator checkpoint before a consequential operation. Use ahu_auth_budget before delegating costly work when useful; optionally pass minimum_remaining_percent to find registered agent/model candidates whose every reported provider window meets that threshold. It reports rate-limit percentages, not token counts or costs, and agents on one account share capacity. Unknown or unsupported windows are never eligible. Eligibility does not reserve capacity or confirm model availability. The approval tool only pauses and records bounded request details; it never performs the requested operation. Do not claim a skill was loaded merely because its file exists. Ask for approval when an action crosses the permissions available to you."
     )
 }
 
@@ -449,9 +625,10 @@ fn add_client_configurations(
     root: &Path,
     detected: &[Detected],
     writes: &mut Vec<(PathBuf, Vec<u8>)>,
-) -> Result<()> {
+) -> Result<Vec<KiroUpdate>> {
+    let mut updates = Vec::new();
     for harness in detected {
-        match harness.id {
+        let update = match harness.id {
             "claude-code" => add_json_server(root, ".mcp.json", "mcpServers", "claude", writes)?,
             "antigravity" => add_json_server(
                 root,
@@ -461,11 +638,24 @@ fn add_client_configurations(
                 writes,
             )?,
             "opencode" => add_json_server(root, "opencode.json", "mcp", "opencode", writes)?,
-            "codex" => add_codex_server(root, writes)?,
-            _ => {}
+            "kiro" => add_json_server(
+                root,
+                ".kiro/settings/mcp.json",
+                "mcpServers",
+                "kiro",
+                writes,
+            )?,
+            "codex" => {
+                add_codex_server(root, writes)?;
+                None
+            }
+            _ => None,
+        };
+        if let Some(update) = update {
+            updates.push(update);
         }
     }
-    Ok(())
+    Ok(updates)
 }
 
 fn add_json_server(
@@ -474,21 +664,25 @@ fn add_json_server(
     key: &str,
     shape: &str,
     writes: &mut Vec<(PathBuf, Vec<u8>)>,
-) -> Result<()> {
+) -> Result<Option<KiroUpdate>> {
     let path = safe_new_path(root, relative)?;
     if shape == "opencode" && root.join("opencode.jsonc").exists() {
         return Err(Error::new(
             "opencode.jsonc exists; setup will not create a competing opencode.json or discard JSONC comments. Add the ahu MCP entry to opencode.jsonc, then rerun setup.",
         ));
     }
-    let mut value = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| {
+    let before = match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(Error::new(format!("cannot read {relative}: {e}"))),
+    };
+    let mut value = match &before {
+        Some(bytes) => serde_json::from_slice::<serde_json::Value>(bytes).map_err(|e| {
             Error::new(format!(
                 "cannot safely update {relative}: invalid JSON ({e}); setup made no changes"
             ))
         })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(e) => return Err(Error::new(format!("cannot read {relative}: {e}"))),
+        None => serde_json::json!({}),
     };
     let root_obj = value
         .as_object_mut()
@@ -497,27 +691,38 @@ fn add_json_server(
     let servers = servers
         .as_object_mut()
         .ok_or_else(|| Error::new(format!("{relative}: {key} must be an object")))?;
-    let server = if shape == "opencode" {
+    let mut server = if shape == "opencode" {
         serde_json::json!({"type":"local","command":["ahu","mcp","serve"],"enabled":true})
     } else {
         serde_json::json!({"command":"ahu","args":["mcp","serve"],"env":{}})
     };
+    if shape == "kiro" {
+        server = kiro_env_forwarding(servers.get("ahu").unwrap_or(&server), relative)?;
+    }
     match servers.get("ahu") {
-        Some(existing) if *existing == server => return Ok(()),
-        Some(_) => {
+        Some(existing) if *existing == server => return Ok(None),
+        Some(_) if shape != "kiro" => {
             return Err(Error::new(format!(
                 "{relative} already defines a different MCP server named `ahu`; setup will not replace it"
             )));
         }
-        None => {
+        _ => {
             servers.insert("ahu".into(), server);
         }
     }
-    writes.push((
-        path,
-        serde_json::to_vec_pretty(&value).map_err(|e| Error::new(e.to_string()))?,
-    ));
-    Ok(())
+    let after = serde_json::to_vec_pretty(&value).map_err(|e| Error::new(e.to_string()))?;
+    let update = if shape == "kiro" && relative == ".kiro/settings/mcp.json" && key == "mcpServers"
+    {
+        before.map(|before| KiroUpdate {
+            path: path.clone(),
+            before,
+            after: after.clone(),
+        })
+    } else {
+        None
+    };
+    writes.push((path, after));
+    Ok(update)
 }
 
 fn add_codex_server(root: &Path, writes: &mut Vec<(PathBuf, Vec<u8>)>) -> Result<()> {
@@ -606,22 +811,28 @@ fn verify_client_configurations(root: &Path, detected: &[Detected]) -> Result<()
                     ));
                 }
             }
-            "claude-code" => verify_json_server(root, ".mcp.json", "mcpServers", false)?,
+            "claude-code" => verify_json_server(root, ".mcp.json", "mcpServers", "claude")?,
             "antigravity" => {
-                verify_json_server(root, ".agents/mcp_config.json", "mcpServers", false)?
+                verify_json_server(root, ".agents/mcp_config.json", "mcpServers", "antigravity")?
             }
-            "opencode" => verify_json_server(root, "opencode.json", "mcp", true)?,
+            "opencode" => verify_json_server(root, "opencode.json", "mcp", "opencode")?,
+            "kiro" => verify_json_server(root, ".kiro/settings/mcp.json", "mcpServers", "kiro")?,
             _ => {}
         }
     }
     Ok(())
 }
 
-fn verify_json_server(root: &Path, relative: &str, key: &str, opencode: bool) -> Result<()> {
+fn verify_json_server(root: &Path, relative: &str, key: &str, shape: &str) -> Result<()> {
     let text = std::fs::read(root.join(relative))?;
     let value: serde_json::Value = serde_json::from_slice(&text)?;
     let server = value.pointer(&format!("/{key}/ahu"));
-    let valid = if opencode {
+    let valid = if shape == "kiro" {
+        match server {
+            Some(server) => kiro_env_forwarding(server, relative)? == *server,
+            None => false,
+        }
+    } else if shape == "opencode" {
         server.is_some_and(|v| {
             v.get("type").and_then(serde_json::Value::as_str) == Some("local")
                 && v.get("command")
@@ -729,9 +940,21 @@ mod tests {
     }
 
     #[test]
+    fn codex_env_forwarding_missing_ahu_table_yields_typed_error() {
+        let existing = "[mcp_servers]\n";
+        let parsed = toml::from_str(existing).unwrap();
+        let error = super::codex_env_forwarding(existing, &parsed).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ahu MCP server not found in configuration"
+        );
+    }
+
+    #[test]
     fn each_supported_harness_gets_its_native_project_mcp_shape() {
         let root = tempfile::tempdir().unwrap();
         let detected = [
+            self::detected("kiro"),
             Detected {
                 id: "claude-code",
                 executable: "claude".into(),
@@ -769,6 +992,7 @@ mod tests {
             ("codex", "gpt-6-astra"),
             ("antigravity", "gemini-3.1-pro-high"),
             ("opencode", "ollama/glm-5.3:cloud"),
+            ("kiro", "claude-sonnet-4.5"),
         ] {
             let text = dev_agent(harness, model);
             let path = Path::new(".agents/ahu/agents/generated.md");
@@ -785,14 +1009,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join(".mcp.json"), r#"{"custom":{"keep":true}}"#).unwrap();
         let mut plan = Vec::new();
-        add_json_server(root.path(), ".mcp.json", "mcpServers", "claude", &mut plan).unwrap();
+        let _ =
+            add_json_server(root.path(), ".mcp.json", "mcpServers", "claude", &mut plan).unwrap();
         assert_eq!(plan.len(), 1);
         let value: serde_json::Value = serde_json::from_slice(&plan[0].1).unwrap();
         assert_eq!(value["custom"]["keep"], true);
         assert_eq!(value["mcpServers"]["ahu"]["args"][1], "serve");
         std::fs::write(&plan[0].0, &plan[0].1).unwrap();
         let mut second_plan = Vec::new();
-        add_json_server(
+        let _ = add_json_server(
             root.path(),
             ".mcp.json",
             "mcpServers",
@@ -801,6 +1026,168 @@ mod tests {
         )
         .unwrap();
         assert!(second_plan.is_empty());
+    }
+
+    fn expected_kiro_env() -> serde_json::Value {
+        serde_json::json!({
+            "AHU_TASK_ID": "${AHU_TASK_ID}",
+            "AHU_TASK_DIR": "${AHU_TASK_DIR}",
+            "AHU_EVAL_OTEL_ENDPOINT": "${AHU_EVAL_OTEL_ENDPOINT}",
+            "AHU_MCP_RESOURCE_ATTRIBUTES": "${AHU_MCP_RESOURCE_ATTRIBUTES}",
+            "OTEL_RESOURCE_ATTRIBUTES": "${OTEL_RESOURCE_ATTRIBUTES}",
+        })
+    }
+
+    #[test]
+    fn kiro_mcp_fresh_install_forwards_only_metadata_names() {
+        let root = tempfile::tempdir().unwrap();
+        let detected = [detected("kiro")];
+        let mut plan = Vec::new();
+        add_client_configurations(root.path(), &detected, &mut plan).unwrap();
+        assert_eq!(plan.len(), 1);
+        let (path, bytes) = &plan[0];
+        assert_eq!(path, &root.path().join(".kiro/settings/mcp.json"));
+        let value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"mcpServers": {"ahu": {
+                "command": "ahu", "args": ["mcp", "serve"], "env": expected_kiro_env()
+            }}})
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+        verify_client_configurations(root.path(), &detected).unwrap();
+        let mut second_plan = Vec::new();
+        add_client_configurations(root.path(), &detected, &mut second_plan).unwrap();
+        assert!(second_plan.is_empty());
+    }
+
+    #[test]
+    fn kiro_mcp_upgrades_legacy_and_partial_env_preserving_unrelated_settings() {
+        for env in [
+            None,
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({
+                "CUSTOM_NAME": "keep",
+                "AHU_TASK_ID": "${AHU_TASK_ID}"
+            })),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(".kiro/settings/mcp.json");
+            let mut original = serde_json::json!({
+                "custom": {"keep": true},
+                "mcpServers": {
+                    "other": {"command": "other-server", "env": {"DEBUG": "true"}},
+                    "ahu": {
+                        "command": "ahu", "args": ["mcp", "serve"],
+                        "type": "stdio", "timeout": 5000, "disabled": false,
+                        "autoApprove": [], "disabledTools": ["ahu_typed_decide"]
+                    }
+                }
+            });
+            if let Some(env) = env {
+                original["mcpServers"]["ahu"]["env"] = env;
+            }
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let bytes = serde_json::to_vec(&original).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let detected = [detected("kiro")];
+            assert!(verify_client_configurations(root.path(), &detected).is_err());
+            let mut plan = Vec::new();
+            let updates = add_client_configurations(root.path(), &detected, &mut plan).unwrap();
+            assert_eq!(plan.len(), 1);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            let updated: serde_json::Value = serde_json::from_slice(&plan[0].1).unwrap();
+            let mut expected = original;
+            let env = expected["mcpServers"]["ahu"]
+                .as_object_mut()
+                .unwrap()
+                .entry("env")
+                .or_insert_with(|| serde_json::json!({}));
+            env.as_object_mut()
+                .unwrap()
+                .extend(expected_kiro_env().as_object().unwrap().clone());
+            assert_eq!(updated, expected);
+            let mut input = std::io::Cursor::new(Vec::new());
+            let mut output = Vec::new();
+            super::apply_plan_with_kiro_updates(
+                &mut crate::launcher::Console {
+                    input: &mut input,
+                    output: &mut output,
+                    interactive: true,
+                },
+                &plan,
+                &updates,
+            )
+            .unwrap();
+            verify_client_configurations(root.path(), &detected).unwrap();
+            let mut second_plan = Vec::new();
+            add_client_configurations(root.path(), &detected, &mut second_plan).unwrap();
+            assert!(second_plan.is_empty());
+        }
+    }
+
+    #[test]
+    fn kiro_mcp_rejects_conflicting_fields_without_writes_or_value_disclosure() {
+        let mut conflicts = vec![
+            ("command", serde_json::json!("custom-ahu")),
+            ("args", serde_json::json!(["mcp", "serve", "--custom"])),
+            ("url", serde_json::json!("https://example.invalid/mcp")),
+            ("type", serde_json::json!("http")),
+            ("disabled", serde_json::json!(true)),
+            ("env", serde_json::json!(null)),
+            ("env", serde_json::json!([])),
+            ("env", serde_json::json!("invalid")),
+        ];
+        for name in expected_kiro_env().as_object().unwrap().keys() {
+            for value in [
+                serde_json::json!("synthetic-private-value"),
+                serde_json::json!("${OTHER_NAME}"),
+                serde_json::json!(null),
+                serde_json::json!(42),
+            ] {
+                let mut env = expected_kiro_env();
+                env[name] = value;
+                conflicts.push(("env", env));
+            }
+        }
+        for (field, value) in conflicts {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(".kiro/settings/mcp.json");
+            let mut original = serde_json::json!({"mcpServers": {"ahu": {
+                "command": "ahu", "args": ["mcp", "serve"], "env": expected_kiro_env()
+            }}});
+            original["mcpServers"]["ahu"][field] = value;
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let bytes = serde_json::to_vec(&original).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let detected = [detected("kiro")];
+            let mut plan = Vec::new();
+            let error = add_client_configurations(root.path(), &detected, &mut plan)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("ahu"));
+            assert!(!error.contains("synthetic-private-value"));
+            assert!(plan.is_empty());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert!(verify_client_configurations(root.path(), &detected).is_err());
+        }
+    }
+
+    #[test]
+    fn kiro_mcp_verification_requires_every_forwarded_name() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".kiro/settings/mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for name in expected_kiro_env().as_object().unwrap().keys() {
+            let mut env = expected_kiro_env();
+            env.as_object_mut().unwrap().remove(name);
+            let value = serde_json::json!({"mcpServers": {"ahu": {
+                "command": "ahu", "args": ["mcp", "serve"], "env": env
+            }}});
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(verify_client_configurations(root.path(), &[detected("kiro")]).is_err());
+        }
     }
 
     #[test]
@@ -1244,6 +1631,287 @@ mod tests {
             handshake,
         );
         (result, String::from_utf8(output).unwrap())
+    }
+
+    fn configure_kiro(
+        _: &mut crate::launcher::Console<'_>,
+    ) -> crate::util::Result<Option<crate::config::ProjectConfig>> {
+        let mut config = project_config();
+        config.harness_preferences = vec!["kiro".into()];
+        config.model_rankings = std::collections::BTreeMap::from([(
+            "kiro".into(),
+            vec![crate::catalog::models_for("kiro")[0].model.into()],
+        )]);
+        Ok(Some(config))
+    }
+
+    fn write_kiro_config(root: &Path, value: &serde_json::Value) -> std::path::PathBuf {
+        let path = root.join(".kiro/settings/mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn setup_transaction_updates_existing_kiro_config_and_preserves_other_entries() {
+        for server in [
+            None,
+            Some(serde_json::json!({"command": "ahu", "args": ["mcp", "serve"]})),
+            Some(serde_json::json!({"command": "ahu", "args": ["mcp", "serve"], "env": {}})),
+            Some(
+                serde_json::json!({"command": "ahu", "args": ["mcp", "serve"],
+                "env": {"AHU_TASK_ID": "${AHU_TASK_ID}", "CUSTOM_NAME": "keep"},
+                "timeout": 5000, "autoApprove": []}),
+            ),
+        ] {
+            let (root, repo) = setup_repo();
+            let mut original = serde_json::json!({"custom": {"keep": true}, "mcpServers": {
+                "other": {"command": "other-server", "env": {"DEBUG": "true"}}
+            }});
+            if let Some(server) = server {
+                original["mcpServers"]["ahu"] = server;
+            }
+            let path = write_kiro_config(root.path(), &original);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+            }
+            let (result, output) =
+                setup_with_input(&repo, &[detected("kiro")], "", configure_kiro, handshake_ok);
+            assert_eq!(result.unwrap(), 0);
+            assert!(output.contains("updated"));
+            let installed: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let mut expected = original;
+            if expected["mcpServers"].get("ahu").is_none() {
+                expected["mcpServers"]["ahu"] =
+                    serde_json::json!({"command": "ahu", "args": ["mcp", "serve"]});
+            }
+            expected["mcpServers"]["ahu"]
+                .as_object_mut()
+                .unwrap()
+                .entry("env")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .unwrap()
+                .extend(expected_kiro_env().as_object().unwrap().clone());
+            assert_eq!(installed, expected);
+            verify_client_configurations(root.path(), &[detected("kiro")]).unwrap();
+            assert!(root.path().join(crate::context_lock::LOCK_PATH).is_file());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o640
+                );
+            }
+            let mut writes = Vec::new();
+            let updates =
+                add_client_configurations(root.path(), &[detected("kiro")], &mut writes).unwrap();
+            assert!(writes.is_empty());
+            assert!(updates.is_empty());
+        }
+    }
+
+    #[test]
+    fn setup_transaction_kiro_conflicts_leave_original_and_project_untouched() {
+        for server in [
+            serde_json::json!({"command": "custom-ahu", "args": ["mcp", "serve"]}),
+            serde_json::json!({"command": "ahu", "args": ["mcp", "serve"],
+                "env": {"AHU_TASK_ID": "explicit-value"}}),
+        ] {
+            let (root, repo) = setup_repo();
+            let path = write_kiro_config(
+                root.path(),
+                &serde_json::json!({"mcpServers": {"ahu": server}}),
+            );
+            let before = std::fs::read(&path).unwrap();
+            let (result, _) =
+                setup_with_input(&repo, &[detected("kiro")], "", configure_kiro, handshake_ok);
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("will not replace it")
+            );
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert!(
+                !root
+                    .path()
+                    .join(crate::config::CONFIG_RELATIVE_PATH)
+                    .exists()
+            );
+            assert!(!root.path().join(".agents/ahu/agents/dev-kiro.md").exists());
+            assert!(
+                !root
+                    .path()
+                    .join(".kiro/skills/ahu-direct-agents/SKILL.md")
+                    .exists()
+            );
+            assert!(!root.path().join(crate::context_lock::LOCK_PATH).exists());
+        }
+    }
+
+    #[test]
+    fn setup_transaction_kiro_update_does_not_bypass_skill_or_agent_conflicts() {
+        for agent_conflict in [false, true] {
+            let (root, repo) = setup_repo();
+            let path = write_kiro_config(root.path(), &serde_json::json!({}));
+            let before = std::fs::read(&path).unwrap();
+            let (relative, content, diagnostic) = if agent_conflict {
+                (
+                    ".agents/ahu/agents/dev-kiro.md",
+                    dev_agent("kiro", crate::catalog::models_for("kiro")[0].model),
+                    "ambiguous agent",
+                )
+            } else {
+                (
+                    ".agents/skills/ahu-direct-agents/SKILL.md",
+                    "user-authored skill".into(),
+                    "will not overwrite",
+                )
+            };
+            let conflict = root.path().join(relative);
+            std::fs::create_dir_all(conflict.parent().unwrap()).unwrap();
+            std::fs::write(&conflict, &content).unwrap();
+            let (result, _) =
+                setup_with_input(&repo, &[detected("kiro")], "", configure_kiro, handshake_ok);
+            assert!(result.unwrap_err().to_string().contains(diagnostic));
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert_eq!(std::fs::read_to_string(conflict).unwrap(), content);
+            assert!(
+                !root
+                    .path()
+                    .join(crate::config::CONFIG_RELATIVE_PATH)
+                    .exists()
+            );
+        }
+    }
+
+    // Inject an edit/failure through Console after preflight, without threads,
+    // process-global environment mutation, or production-only testing hooks.
+    struct SetupOutputChange {
+        path: std::path::PathBuf,
+        trigger: &'static str,
+        replacement: Option<Vec<u8>>,
+        fail: bool,
+        fired: bool,
+    }
+
+    impl std::io::Write for SetupOutputChange {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if !self.fired && String::from_utf8_lossy(bytes).contains(self.trigger) {
+                self.fired = true;
+                if let Some(replacement) = &self.replacement {
+                    std::fs::write(&self.path, replacement)?;
+                }
+                if self.fail {
+                    return Err(std::io::Error::other("injected setup output failure"));
+                }
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn setup_transaction_refuses_concurrent_kiro_change_and_guards_rollback() {
+        let concurrent = b"{\"concurrent\": true}".to_vec();
+        for (trigger, replacement, fail, diagnostic) in [
+            (
+                "created",
+                Some(concurrent.clone()),
+                false,
+                "changed since planning",
+            ),
+            ("updated", None, true, "injected setup output failure"),
+            (
+                "updated",
+                Some(concurrent.clone()),
+                true,
+                "rollback incomplete",
+            ),
+        ] {
+            let (root, repo) = setup_repo();
+            let path = write_kiro_config(root.path(), &serde_json::json!({}));
+            let before = std::fs::read(&path).unwrap();
+            let expected = replacement.clone().unwrap_or(before);
+            let mut output = SetupOutputChange {
+                path: path.clone(),
+                trigger,
+                replacement,
+                fail,
+                fired: false,
+            };
+            let mut input = std::io::Cursor::new(Vec::new());
+            let error = run_detected(
+                &mut crate::launcher::Console {
+                    input: &mut input,
+                    output: &mut output,
+                    interactive: true,
+                },
+                &repo,
+                &[detected("kiro")],
+                configure_kiro,
+                handshake_ok,
+            )
+            .unwrap_err();
+            assert!(output.fired);
+            assert!(error.to_string().contains(diagnostic), "{error}");
+            assert_eq!(std::fs::read(&path).unwrap(), expected);
+            assert!(
+                !root
+                    .path()
+                    .join(crate::config::CONFIG_RELATIVE_PATH)
+                    .exists()
+            );
+            assert!(!root.path().join(".agents/ahu/agents/dev-kiro.md").exists());
+            assert!(!root.path().join(crate::context_lock::LOCK_PATH).exists());
+            assert_eq!(
+                std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+                1
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kiro_update_rolls_back_when_a_later_project_file_cannot_be_created() {
+        let root = tempfile::tempdir().unwrap();
+        let path = write_kiro_config(root.path(), &serde_json::json!({"keep": true}));
+        let before = std::fs::read(&path).unwrap();
+        let mut writes = Vec::new();
+        let updates =
+            add_client_configurations(root.path(), &[detected("kiro")], &mut writes).unwrap();
+        let first = root.path().join("first");
+        writes.insert(0, (first.clone(), b"created by setup".to_vec()));
+        let blocked = root.path().join("blocked");
+        let target = root.path().join("missing");
+        std::os::unix::fs::symlink(&target, &blocked).unwrap();
+        writes.push((blocked.clone(), b"cannot create".to_vec()));
+        let mut input = std::io::Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let error = super::apply_plan_with_kiro_updates(
+            &mut crate::launcher::Console {
+                input: &mut input,
+                output: &mut output,
+                interactive: true,
+            },
+            &writes,
+            &updates,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot create"));
+        assert!(String::from_utf8(output).unwrap().contains("updated"));
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert!(!first.exists());
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_link(blocked).unwrap(), target);
     }
 
     #[test]

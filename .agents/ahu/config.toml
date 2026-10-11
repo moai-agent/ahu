@@ -4,11 +4,18 @@
 schema_version = 1
 harness_preferences = ["antigravity", "codex"]
 model_selection = "project-ranked"
-catalog_version = "2026-09-27"
+catalog_version = "2026-10-09"
+
+[telemetry]
+enabled = true
+local_metrics = false
+endpoint = "http://127.0.0.1:4318"
 
 [model_rankings]
 "codex" = ["gpt-6-astra"]
 "antigravity" = ["gemini-3.1-pro-high"]
+"opencode" = ["ollama/glm-5.3:cloud"]
+"kiro" = ["claude-sonnet-4.5"]
 
 
 [knowledge]

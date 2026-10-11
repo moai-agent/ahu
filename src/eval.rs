@@ -1,4 +1,4 @@
-//! Comparison of local evaluation runs from external JSONL records.
+//! Comparison of local evaluation runs from bounded JSONL records.
 //!
 //! `ahu eval report` reads the compact records `scripts/local_eval.py record`
 //! appends and groups them into one row per comparable configuration. It is a
@@ -7,11 +7,8 @@
 //!
 //! Three constraints shape this module.
 //!
-//!   - Run evidence stays outside the checkout. The recorder already refuses to
-//!     write inside the repository, and this command refuses to read from
-//!     inside it, so a record file cannot become repository content by being
-//!     summarised from one. The path is canonicalised first, so a symlink that
-//!     points into the checkout is refused too.
+//!   - Bounded records and derived summaries may live in the primary checkout's
+//!     ignored, untracked `.ahu/evals/`. Raw run artifacts stay external.
 //!   - A missing observation is not a zero. Token, timing, and decision-call
 //!     figures are reported as coverage counts alongside means taken over the
 //!     records that carried them, so a configuration that reported nothing is
@@ -36,10 +33,14 @@ use crate::bail;
 use crate::table;
 use crate::util::{Error, ErrorKind, Result, display_path, display_safe};
 
+pub mod advice;
 pub mod case;
+pub mod comparison;
 pub mod decision;
 pub mod fingerprint;
+pub mod provenance;
 pub mod stats;
+pub mod storage;
 pub mod suite;
 pub mod trajectory;
 
@@ -74,11 +75,23 @@ const DEFAULT_STAGE: &str = "candidate";
 /// only has to keep meaning the same thing for the ones it reads.
 #[derive(Debug, Clone, Deserialize)]
 struct Record {
+    #[serde(default)]
+    observed_at_unix_seconds: Option<u64>,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    attempt: Option<u32>,
+    #[serde(default)]
+    reported_cost_source: Option<String>,
     schema_version: u64,
     case_id: String,
     model: String,
     harness: String,
     score: Option<f64>,
+    #[serde(default)]
+    score_policy: Option<String>,
     passed: bool,
     #[serde(default)]
     corpus_version: Option<String>,
@@ -129,6 +142,12 @@ struct Record {
     reported_tokens: Option<BTreeMap<String, serde_json::Value>>,
     #[serde(default)]
     decision_call_count: Option<f64>,
+    #[serde(default)]
+    decision_provenance: Option<provenance::Provenance>,
+    #[serde(default)]
+    evaluator_provenance: Option<provenance::Provenance>,
+    #[serde(default)]
+    harness_provenance: Option<provenance::Provenance>,
     #[serde(default)]
     elapsed_ms: Option<f64>,
     #[serde(default)]
@@ -214,6 +233,10 @@ struct Record {
     #[serde(default)]
     telemetry_coverage: Option<String>,
     #[serde(default)]
+    mcp_spans: Option<u64>,
+    #[serde(default)]
+    telemetry_dedup_untracked_spans: Option<u64>,
+    #[serde(default)]
     terminal_status: Option<String>,
     #[serde(default)]
     attempts: Option<f64>,
@@ -285,6 +308,7 @@ impl Record {
 /// Ordered as the report prints it, so sorting the map sorts the report.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GroupKey {
+    pub score_policy: String,
     pub case_id: String,
     pub corpus_version: String,
     pub stage: String,
@@ -349,14 +373,22 @@ pub struct Coverage {
     pub telemetry_partial: usize,
     /// Runs for which no telemetry arrived at all.
     pub telemetry_none: usize,
+    /// Older records without a coverage observation.
+    pub telemetry_unknown: usize,
     /// Runs that recorded local OTLP receiver drop/error counters.
     pub telemetry_receiver: usize,
+    pub receiver_projection: usize,
 }
 
 /// One comparable configuration.
 #[derive(Debug, Clone)]
 pub struct Group {
+    pub decision_provenance: provenance::Summary,
+    pub evaluator_provenance: provenance::Summary,
+    pub harness_provenance: provenance::Summary,
     pub trajectory: trajectory::Summary,
+    /// Evidence availability for ahu MCP only, not native tools or helpers.
+    pub mcp_evidence: BTreeMap<String, usize>,
     pub key: GroupKey,
     pub runs: usize,
     pub passes: usize,
@@ -452,6 +484,7 @@ pub struct Group {
     pub judge_passes: usize,
     pub mean_judge_score: Option<f64>,
     pub mean_answer_score: Option<f64>,
+    pub answer_score_observations: usize,
     /// Every criterion the judge scored anywhere in the group, with its mean.
     pub judge_criterion_means: BTreeMap<String, f64>,
     /// Every reason code the judge emitted anywhere in the group, with a count.
@@ -479,6 +512,8 @@ impl Group {
 /// The whole comparison, sorted by group key.
 #[derive(Debug, Clone)]
 pub struct Report {
+    /// SHA-256 over exact input bytes, independent of location.
+    pub records_fingerprint: String,
     /// Where the records were read from. Kept for the terminal view only: the
     /// JSON contract carries no local path.
     pub records: PathBuf,
@@ -535,52 +570,22 @@ fn observed_token(value: &serde_json::Value) -> bool {
     number.is_some_and(|number| number.is_finite() && number >= 0.0)
 }
 
-/// Confirm the record file is outside this repository, and return its real path.
-///
-/// Canonicalisation happens before the comparison, so neither a relative path
-/// nor a symlink outside the checkout that resolves into it gets past this.
-/// Both the invoking checkout and the primary checkout are refused, which also
-/// covers every task worktree, because those live under the primary root.
-pub fn records_path_outside_repository(repo: &crate::git::Repo, records: &Path) -> Result<PathBuf> {
-    let real = records.canonicalize().map_err(|error| {
-        Error::new(format!(
-            "cannot read eval records {}: {error}",
-            display_path(records)
-        ))
-        .with_kind(ErrorKind::Usage)
-    })?;
-    let mut roots = vec![repo.root.clone()];
-    if let Ok(primary) = repo.primary_root() {
-        roots.push(primary);
-    }
-    for root in roots {
-        let Ok(root) = root.canonicalize() else {
-            continue;
-        };
-        if real.starts_with(&root) {
-            return Err(Error::new(format!(
-                "eval records must live outside this repository, and {} resolves to {} inside {}.\n\
-                 Run evidence is kept in a user-owned directory; ahu neither reads nor writes it \
-                 inside the checkout.",
-                display_path(records),
-                display_path(&real),
-                display_path(&root)
-            ))
-            .with_kind(ErrorKind::Usage));
-        }
-    }
-    Ok(real)
-}
-
 /// Read, validate, and group the records at `records`.
 pub fn report(repo: &crate::git::Repo, records: &Path) -> Result<Report> {
-    let real = records_path_outside_repository(repo, records)?;
-    let metadata = std::fs::metadata(&real).map_err(|error| {
-        Error::new(format!(
-            "cannot read eval records {}: {error}",
-            display_path(records)
-        ))
-    })?;
+    let real = storage::results_path(repo, records)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(&real)
+        .map_err(|error| {
+            Error::new(format!(
+                "cannot read eval records {}: {error}",
+                display_path(records)
+            ))
+            .with_kind(ErrorKind::Usage)
+        })?;
+    let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(Error::new(format!(
             "eval records must be a JSONL file; {} is not a regular file.",
@@ -588,6 +593,7 @@ pub fn report(repo: &crate::git::Repo, records: &Path) -> Result<Report> {
         ))
         .with_kind(ErrorKind::Usage));
     }
+    crate::storage::validate_owned_metadata(&metadata, false)?;
     if metadata.len() > MAX_RECORDS_BYTES {
         return Err(Error::new(format!(
             "eval records {} is {} bytes, beyond the {MAX_RECORDS_BYTES} byte limit for a run record file.",
@@ -596,14 +602,21 @@ pub fn report(repo: &crate::git::Repo, records: &Path) -> Result<Report> {
         ))
         .with_kind(ErrorKind::Usage));
     }
-    let text = std::fs::read_to_string(&real).map_err(|error| {
-        Error::new(format!(
-            "cannot read eval records {}: {error}",
-            display_path(records)
-        ))
-    })?;
+    let mut text = String::new();
+    file.take(MAX_RECORDS_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|error| {
+            Error::new(format!(
+                "cannot read eval records {}: {error}",
+                display_path(records)
+            ))
+        })?;
+    if text.len() as u64 > MAX_RECORDS_BYTES {
+        bail!(kind: ErrorKind::Usage, "eval records exceed the {MAX_RECORDS_BYTES} byte limit");
+    }
     let parsed = parse_records(records, &text)?;
     Ok(Report {
+        records_fingerprint: crate::util::digest_bytes(text.as_bytes()),
         records: records.to_path_buf(),
         record_count: parsed.len(),
         groups: group(&parsed),
@@ -694,6 +707,17 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
                 "invalid evaluator observations",
             ));
         }
+        if [
+            &record.decision_provenance,
+            &record.evaluator_provenance,
+            &record.harness_provenance,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|p| !p.valid())
+        {
+            return Err(malformed_text(path, number, "invalid identity provenance"));
+        }
         if record.decision_request_bytes.is_some() != (record.decision_request_observations > 0)
             || record.score.is_some_and(|score| !score.is_finite())
             || [
@@ -757,6 +781,11 @@ fn parse_records(path: &Path, text: &str) -> Result<Vec<Record>> {
             // A reported token amount is a count. A non-numeric value stays
             // tolerated -- it is simply not an amount -- but a number that is
             // not a count is bad input rather than a metric to average.
+            || record.trajectory.as_ref().is_some_and(|o| {
+                o.kiro_metering.as_ref().is_some_and(|m| {
+                    o.source != trajectory::Source::KiroSessionUpdates || !m.valid()
+                })
+            })
             || record.reported_tokens.as_ref().is_some_and(|tokens| {
                 tokens.values().any(|value| {
                     value.as_f64().is_some_and(|amount| !amount.is_finite() || amount < 0.0)
@@ -804,6 +833,7 @@ fn key_for(record: &Record) -> GroupKey {
         value.map_or_else(|| UNSPECIFIED.to_owned(), |value| value.to_string())
     };
     GroupKey {
+        score_policy: or_unspecified(&record.score_policy, UNSPECIFIED),
         case_id: record.case_id.clone(),
         corpus_version: or_unspecified(&record.corpus_version, UNSPECIFIED),
         stage: or_unspecified(&record.stage, DEFAULT_STAGE),
@@ -911,6 +941,7 @@ fn group(records: &[Record]) -> Vec<Group> {
             let mut tool_not_applicable = 0usize;
             let mut terminal_statuses: BTreeMap<String, usize> = BTreeMap::new();
             let mut telemetry_receiver = crate::eval_otel::ReceiverStats::default();
+            let mut mcp_evidence = BTreeMap::new();
             for item in &items {
                 if let Some(value) = item.total_elapsed_ms {
                     total_elapsed.push(value);
@@ -1025,10 +1056,25 @@ fn group(records: &[Record]) -> Vec<Group> {
                         if item.mcp_observed == Some(true) {
                             coverage.telemetry_complete += 1;
                         } else {
-                            coverage.telemetry_none += 1;
+                            coverage.telemetry_unknown += 1;
                         }
                     }
                 }
+                let mcp_status = if item.telemetry_coverage.as_deref() == Some("complete_session")
+                    || item.mcp_observed == Some(true)
+                {
+                    "summary_observed"
+                } else if item.mcp_spans.is_some_and(|count| count > 0) {
+                    "spans_observed"
+                } else if item.mcp_spans == Some(0)
+                    || item.telemetry_coverage.as_deref() == Some("none")
+                {
+                    "none"
+                } else {
+                    // Legacy partial_spans may describe only harness/evaluator spans.
+                    "unknown"
+                };
+                *mcp_evidence.entry(mcp_status.to_owned()).or_default() += 1;
                 for (name, count) in item.mcp_tool_errors_by_name.iter().flatten() {
                     mcp_tool_errors_by_name
                         .entry(name.clone())
@@ -1108,7 +1154,8 @@ fn group(records: &[Record]) -> Vec<Group> {
                         let named_calls: f64 = tools.values().sum();
                         let all_calls_named = item
                             .mcp_tool_call_count
-                            .is_some_and(|total| total == named_calls);
+                            .is_some_and(|total| total == named_calls)
+                            && item.telemetry_dedup_untracked_spans.unwrap_or(0) == 0;
                         for name in crate::mcp::TOOL_NAMES {
                             if let Some(count) = tools.get(name) {
                                 mcp_tools.entry(name.to_owned()).or_default().push(*count);
@@ -1120,6 +1167,7 @@ fn group(records: &[Record]) -> Vec<Group> {
                 }
                 if let Some(stats) = item.telemetry_receiver {
                     coverage.telemetry_receiver += 1;
+                    coverage.receiver_projection += usize::from(stats.projection.is_some());
                     telemetry_receiver.add(stats);
                 }
             }
@@ -1129,6 +1177,16 @@ fn group(records: &[Record]) -> Vec<Group> {
                 .map(|(field, amounts)| (field.clone(), amounts.len()))
                 .collect();
             Group {
+                decision_provenance: provenance::Summary::collect(
+                    items.iter().map(|r| r.decision_provenance.as_ref()),
+                ),
+                evaluator_provenance: provenance::Summary::collect(
+                    items.iter().map(|r| r.evaluator_provenance.as_ref()),
+                ),
+                harness_provenance: provenance::Summary::collect(
+                    items.iter().map(|r| r.harness_provenance.as_ref()),
+                ),
+                mcp_evidence,
                 trajectory: trajectory::Summary::collect(items.iter().map(|r| {
                     (
                         r.trajectory.as_ref(),
@@ -1230,6 +1288,7 @@ fn group(records: &[Record]) -> Vec<Group> {
                 judge_passes,
                 mean_judge_score: mean(&judge_scores),
                 mean_answer_score: mean(&answer_scores),
+                answer_score_observations: answer_scores.len(),
                 judge_criterion_means: criterion_scores
                     .into_iter()
                     .filter_map(|(name, values)| mean(&values).map(|value| (name, value)))
@@ -1257,6 +1316,15 @@ pub fn render_at(report: &Report, width: usize) -> String {
         display_path(&report.records),
         report.groups.len()
     );
+    let evidence = comparison::evidence(report);
+    out.push_str(&format!(
+        "  comparison {}\n  records    {}\n",
+        evidence["comparison_fingerprint"]
+            .as_str()
+            .unwrap_or("unknown"),
+        report.records_fingerprint
+    ));
+    out.push_str("  identity   requested/reported observations are not model attestation\n");
     if report.groups.is_empty() {
         out.push_str(&style.paint(
             Role::Hint,
@@ -1303,6 +1371,33 @@ pub fn render_at(report: &Report, width: usize) -> String {
             display_safe(&key.ahu_version),
             display_safe(&key.skill_digest)
         ));
+        for (label, summary) in [
+            ("decision identity", &group.decision_provenance),
+            ("evaluator identity", &group.evaluator_provenance),
+            ("harness identity", &group.harness_provenance),
+        ] {
+            let evidence = &summary.evidence;
+            out.push_str(&format!(
+                "  {} {} observations; {} recorded / {} unknown runs; model mismatches {}, provider mismatches {}\n",
+                label, evidence.observations, summary.recorded_runs, summary.unknown_runs,
+                evidence.model_mismatches, evidence.provider_mismatches,
+            ));
+            if evidence.observations > 0 {
+                for (name, identity) in [
+                    ("requested provider", &evidence.requested_provider),
+                    ("requested model", &evidence.requested_model),
+                    ("reported provider", &evidence.reported_provider),
+                    ("reported model", &evidence.reported_model),
+                    ("unattributed model", &evidence.unattributed_model),
+                ] {
+                    out.push_str(&format!(
+                        "             {} {} {}; missing {}, redacted {}, conflicting {}, limited {}, partial {}\n",
+                        name, identity.status(), display_safe(&serde_json::to_string(&identity.values).unwrap_or_default()),
+                        identity.missing, identity.redacted, identity.conflicting, identity.limited, identity.partial,
+                    ));
+                }
+            }
+        }
         let trajectory = &group.trajectory;
         out.push_str(&format!(
             "  trajectory missing {}/{} runs; coverage {}; sources {}; tracking limited {}\n",
@@ -1328,6 +1423,28 @@ pub fn render_at(report: &Report, width: usize) -> String {
                 trajectory.observations.get(name).copied().unwrap_or(0),
                 group.runs
             ));
+        }
+        if trajectory.sources.contains_key("kiro_session_updates") {
+            out.push_str("             Kiro metering is partial: prompt completions are not model steps; context is a window snapshot; credits are not USD\n");
+            for name in [
+                "kiro_context_usage_percent",
+                "kiro_peak_context_usage_percent",
+                "kiro_prompt_completions",
+                "kiro_observed_credits",
+                "kiro_credit_observations",
+                "kiro_observed_elapsed_ms",
+                "kiro_elapsed_observations",
+                "kiro_duplicate_completions",
+                "kiro_rejected_updates",
+                "kiro_unattributed_completions",
+            ] {
+                out.push_str(&format!(
+                    "             {name} mean {} ({}/{} observations)\n",
+                    measurement(trajectory.means.get(name).copied()),
+                    trajectory.observations.get(name).copied().unwrap_or(0),
+                    group.runs,
+                ));
+            }
         }
         out.push_str(&format!(
             "             budgets {}; guards {}; tool error rate coverage {}\n",
@@ -1474,10 +1591,15 @@ pub fn render_at(report: &Report, width: usize) -> String {
             measurement(group.mean_judge_score)
         ));
         out.push_str(&format!(
-            "  telemetry  complete {}  partial {}  absent {}\n",
+            "  ahu spans  MCP summary {}  partial {}  absent {}  unknown {}\n",
             group.coverage.telemetry_complete,
             group.coverage.telemetry_partial,
-            group.coverage.telemetry_none
+            group.coverage.telemetry_none,
+            group.coverage.telemetry_unknown
+        ));
+        out.push_str(&format!(
+            "  MCP evidence {} (ahu MCP only; native tools and helpers are separate)\n",
+            serde_json::to_string(&group.mcp_evidence).unwrap_or_default()
         ));
         if let Some(receiver) = group.telemetry_receiver {
             out.push_str(&format!(
@@ -1488,9 +1610,20 @@ pub fn render_at(report: &Report, width: usize) -> String {
                 receiver.rejected_connections,
                 receiver.accept_errors,
             ));
+            if let Some(projection) = receiver.projection {
+                out.push_str(&format!(
+                    "             projection observed {}/{} runs; uncorrelated spans {}; dedup capacity {}; invalid identities {}\n",
+                    group.coverage.receiver_projection, group.runs,
+                    projection.uncorrelated_spans, projection.dedup_capacity_spans,
+                    projection.invalid_identity_spans,
+                ));
+            } else {
+                out.push_str("             projection limits unknown (older records)\n");
+            }
         } else {
             out.push_str("  OTLP recv  none observed\n");
         }
+        out.push_str("             receiver observations do not prove exporter delivery or native/helper coverage\n");
         // The coverage the means below were taken over, and the attempts that
         // produced no answer at all, on the same line as the means they qualify:
         // a mean over the survivors is not a mean over the attempts.
@@ -1827,11 +1960,15 @@ pub fn render_json(report: &Report) -> Result<String> {
     let value = serde_json::json!({
         "schema_version": REPORT_SCHEMA_VERSION,
         "command": "eval report",
+        "comparison": comparison::evidence(report),
         "record_count": report.record_count,
         // Said out loud in the contract rather than left to a reader to infer:
         // a single judge's score is one uncalibrated observation, and no
         // inferential interval is offered for the weighted continuous mean.
         "caveats": {
+            "telemetry_scope": "complete_session means an ahu MCP summary arrived; it does not establish full harness, native-tool or helper coverage",
+            "receiver_scope": "local receiver interval counters may include candidate and evaluator exports; missing counters are unknown, and zero rejections do not prove exporter delivery",
+            "evidence_availability": "MCP, native trajectory and each usage/cost metric are independent observations, not proof of complete session accounting",
             "judge_calibration": "single_judge_uncalibrated",
             "judge_repeats": "not_implemented",
             "conditional_efficiency": "latency and token means cover only the attempts that reported them; read them against coverage and attempts_without_answer rather than as the cost of the whole matrix",
@@ -1896,7 +2033,7 @@ pub fn run(
     {
         bail!(kind: ErrorKind::Usage, "--decision-evaluator conflicts with --evaluator and --evaluator-repo");
     }
-    let records = writable_records_path(repo, request.records)?;
+    let records = storage::results_path(repo, request.records)?;
 
     // ---- preflight: everything that can be refused is refused before a launch.
     let (suite_identity, cases) = load_cases(request)?;
@@ -2020,12 +2157,14 @@ pub fn run(
             cases.len(), candidates.len(), request.runs, plan.len());
     }
 
+    // Create missing local result directories only after request validation.
+    let records = writable_records_path(repo, &records)?;
+
     // ---- execution: sequential, in the planned order, one fresh task per trial.
     let run_id = make_run_id(&cases[0].case.id);
     let receiver = crate::eval_otel::Receiver::start_for(Some(&run_id), None)
         .map_err(|error| Error::new(format!("cannot start local OTLP receiver: {error}")))?;
-    let artifact_root =
-        create_private_run_dir(records.parent().unwrap_or_else(|| Path::new(".")), &run_id)?;
+    let artifact_root = create_private_run_dir(&storage::artifacts_dir(repo)?, &run_id)?;
     let build = fingerprint::BuildIdentity::detect();
     let mut outputs = Vec::new();
     for trial in &plan {
@@ -2194,7 +2333,10 @@ pub fn run(
                 insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
                 let trajectory_guard_status = record.get("trajectory_guard_status").cloned();
                 let trajectory_budget_status = record.get("trajectory_budget_status").cloned();
-                append_jsonl(&records, &serde_json::Value::Object(record))?;
+                append_jsonl(
+                    &storage::results_path(repo, &records)?,
+                    &serde_json::Value::Object(record),
+                )?;
                 outputs.push(serde_json::json!({
                     "trajectory_budget_status": trajectory_budget_status,
                     "trajectory_guard_status": trajectory_guard_status,
@@ -2286,7 +2428,10 @@ pub fn run(
                 insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
                 let trajectory_guard_status = record.get("trajectory_guard_status").cloned();
                 let trajectory_budget_status = record.get("trajectory_budget_status").cloned();
-                append_jsonl(&records, &serde_json::Value::Object(record))?;
+                append_jsonl(
+                    &storage::results_path(repo, &records)?,
+                    &serde_json::Value::Object(record),
+                )?;
                 outputs.push(serde_json::json!({
                     "trajectory_budget_status": trajectory_budget_status,
                     "trajectory_guard_status": trajectory_guard_status,
@@ -2307,6 +2452,7 @@ pub fn run(
         let mut judgement: Option<case::Judgement> = None;
         let mut judge_failure: Option<String> = None;
         let mut evaluator_task = None;
+        let mut evaluator_provenance = None;
         if request.decision_evaluator {
             match decision::judge_with(case, &answer, &mut evaluator_observation, |arguments| {
                 crate::mcp::typed_decide(repo, arguments)
@@ -2335,6 +2481,9 @@ pub fn run(
             {
                 evaluator_observation.telemetry_coverage = "typed_decision_span".into();
             }
+            evaluator_provenance = receiver
+                .task(&observation_id, 1)
+                .map(|t| t.evaluator_provenance);
         }
         if let Some(agent) = evaluator.as_ref() {
             let evaluator_started = std::time::Instant::now();
@@ -2370,6 +2519,10 @@ pub fn run(
                 print.evaluator_repo_head = evaluator_root.head.clone();
                 observe_evaluator_agent(&mut evaluator_observation, envelope, &receiver)?;
                 evaluator_task = evaluator_observation.task_id.clone();
+                evaluator_provenance = evaluator_task
+                    .as_ref()
+                    .and_then(|id| receiver.task(id, evaluator_observation.attempt.unwrap_or(1)))
+                    .map(|t| t.harness_provenance);
             }
             match evaluator_launch.result.and_then(|result| {
                 let worktree = result
@@ -2415,13 +2568,8 @@ pub fn run(
             case::score_tool_expectations(case.tool_expectations.as_ref(), telemetry.as_ref());
         let mcp_observed = telemetry.as_ref().is_some_and(|t| t.mcp_observed);
 
-        // Failed judging has no headline score. Deterministic answer checks
-        // remain available separately, and cannot turn a judge failure into a pass.
-        let (score, passed, score_source) = match &judgement {
-            Some(judged) => (Some(judged.score), judged.passed, "judge"),
-            None if judge_status == "failed" => (None, false, "judge_failed"),
-            None => (Some(answer_score), answer_passed, "deterministic"),
-        };
+        // A judge is independent evidence and cannot replace the answer check.
+        let (score, passed, score_source) = (Some(answer_score), answer_passed, "deterministic");
 
         let mut record = print.record_fields();
         record.extend(base_fields(&run_id, trial, "candidate"));
@@ -2619,6 +2767,13 @@ pub fn run(
             total_elapsed_ms,
         )?;
         insert_candidate_selection_fields(&mut record, telemetry.as_ref());
+        insert_telemetry_evidence_fields(&mut record, telemetry.as_ref());
+        if let Some(provenance) = evaluator_provenance {
+            record.insert(
+                "evaluator_provenance".into(),
+                serde_json::to_value(provenance)?,
+            );
+        }
         record.retain(|_, value| !value.is_null());
         insert_trajectory_fields(
             &mut record,
@@ -2629,7 +2784,10 @@ pub fn run(
         insert_evaluation_fields(&mut record, &evaluator_observation, trial_started)?;
         let trajectory_guard_status = record.get("trajectory_guard_status").cloned();
         let trajectory_budget_status = record.get("trajectory_budget_status").cloned();
-        append_jsonl(&records, &serde_json::Value::Object(record))?;
+        append_jsonl(
+            &storage::results_path(repo, &records)?,
+            &serde_json::Value::Object(record),
+        )?;
         outputs.push(serde_json::json!({
             "trajectory_budget_status": trajectory_budget_status,
             "trajectory_guard_status": trajectory_guard_status,
@@ -2666,6 +2824,8 @@ pub fn run(
         "planned_launches": launches,
         "trials": outputs,
         "telemetry_receiver": "local_otlp_http",
+        "telemetry_scope": "ahu_spans",
+        "telemetry_caveat": "complete_session means an ahu MCP summary arrived, not full harness/native/helper coverage",
     });
     if request.json_output {
         println!("{}", serde_json::to_string(&result)?);
@@ -2677,6 +2837,7 @@ pub fn run(
         cases.len(),
         candidates.len()
     ))?;
+    console.say("  telemetry: ahu spans; complete_session means an MCP summary arrived, not full harness/native/helper coverage\n")?;
     for row in result["trials"].as_array().into_iter().flatten() {
         console.say(&format!(
             "  trial {}  {} {}  run {}  score {}  answer {}  judge {}  tools {}  telemetry {}  trajectory budget {}  guard {}\n",
@@ -2726,7 +2887,11 @@ fn base_fields(
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
     fields.insert("schema_version".into(), RECORD_SCHEMA_VERSION.into());
+    fields.insert("telemetry_scope".into(), "ahu_spans".into());
     fields.insert("recorded_at".into(), crate::task::now_rfc3339().into());
+    if let Ok(age) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        fields.insert("observed_at_unix_seconds".into(), age.as_secs().into());
+    }
     fields.insert("run_id".into(), run_id.into());
     fields.insert("stage".into(), stage.into());
     fields.insert("trial_index".into(), trial.index.into());
@@ -2781,6 +2946,7 @@ fn insert_telemetry_fields(
     telemetry: Option<&crate::eval_otel::TaskTelemetry>,
 ) -> Result<()> {
     insert_candidate_selection_fields(record, telemetry);
+    insert_telemetry_evidence_fields(record, telemetry);
     let coverage = telemetry.map_or(crate::eval_otel::Coverage::None, |item| item.coverage());
     record.insert("telemetry_coverage".into(), coverage.as_str().into());
     record.insert(
@@ -2842,6 +3008,33 @@ fn insert_telemetry_fields(
         }
     }
     Ok(())
+}
+
+/// Separate MCP observations from unrelated ahu spans. Zero means the receiver
+/// observed no MCP spans, never that the harness performed no MCP work.
+fn insert_telemetry_evidence_fields(
+    record: &mut serde_json::Map<String, serde_json::Value>,
+    telemetry: Option<&crate::eval_otel::TaskTelemetry>,
+) {
+    record.insert(
+        "mcp_spans".into(),
+        telemetry.map_or(0, |t| t.mcp_spans).into(),
+    );
+    if let Some(telemetry) = telemetry {
+        for (name, evidence) in [
+            ("decision_provenance", &telemetry.decision_provenance),
+            ("harness_provenance", &telemetry.harness_provenance),
+        ] {
+            record.insert(
+                name.into(),
+                serde_json::to_value(evidence).expect("bounded provenance"),
+            );
+        }
+        record.insert(
+            "telemetry_dedup_untracked_spans".into(),
+            telemetry.dedup_untracked_spans.into(),
+        );
+    }
 }
 
 /// One case of the matrix, with the weight the suite gave it.
@@ -2908,39 +3101,7 @@ fn evaluator_checkout(repo: &crate::git::Repo, path: &Path) -> Result<crate::git
 }
 
 fn writable_records_path(repo: &crate::git::Repo, path: &Path) -> Result<PathBuf> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let parent = parent.canonicalize().map_err(|error| {
-        Error::new(format!(
-            "records directory {} is unavailable: {error}",
-            display_path(parent)
-        ))
-        .with_kind(ErrorKind::Usage)
-    })?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| Error::new("records path must name a file").with_kind(ErrorKind::Usage))?;
-    let target = parent.join(name);
-    let mut roots = vec![repo.root.clone()];
-    if let Ok(primary) = repo.primary_root() {
-        roots.push(primary);
-    }
-    for root in roots {
-        if root
-            .canonicalize()
-            .is_ok_and(|root| target.starts_with(root))
-        {
-            bail!(kind: ErrorKind::Usage, "evaluation records and run artifacts must live outside this repository");
-        }
-    }
-    if let Ok(metadata) = std::fs::symlink_metadata(&target)
-        && (!metadata.file_type().is_file() || metadata.file_type().is_symlink())
-    {
-        bail!(kind: ErrorKind::Usage, "evaluation records path must be a regular file, not a symlink or special file");
-    }
-    Ok(target)
+    storage::writable_records(repo, path)
 }
 
 fn make_run_id(case_id: &str) -> String {
@@ -3005,8 +3166,11 @@ fn append_jsonl(path: &Path, value: &serde_json::Value) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
-    options.mode(0o600);
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
     let mut file = options.open(path)?;
+    crate::storage::validate_owned_metadata(&file.metadata()?, false)?;
     serde_json::to_writer(&mut file, value)?;
     file.write_all(b"\n")?;
     Ok(())
@@ -3222,6 +3386,14 @@ fn insert_trajectory_fields(
     budgets: Option<&trajectory::Budgets>,
     guards: &trajectory::Guardrails,
 ) -> Result<()> {
+    // Preserve the native amount's bounded source label, never prices or quota.
+    if let Some(source) = envelope
+        .and_then(|value| value.pointer("/harness/cost/source"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|source| advice::supported_cost_source(source))
+    {
+        record.insert("reported_cost_source".into(), source.into());
+    }
     // Typed projection: never copy unrecognized payload fields into eval records.
     let observation = envelope
         .and_then(|value| value.pointer("/harness/trajectory"))
@@ -3347,6 +3519,9 @@ fn group_json(group: &Group) -> serde_json::Value {
         }
     };
     merge(serde_json::json!({
+        "decision_provenance": group.decision_provenance,
+        "evaluator_provenance": group.evaluator_provenance,
+        "harness_provenance": group.harness_provenance,
         "trajectory": group.trajectory,
         "case_id": key.case_id,
         "corpus_version": key.corpus_version,
@@ -3390,6 +3565,7 @@ fn group_json(group: &Group) -> serde_json::Value {
         "input_fingerprint": key.input_fingerprint,
     }));
     merge(serde_json::json!({
+        "score_policy": key.score_policy,
         "runs": group.runs,
         "passed": group.passes,
         "mean_score": group.mean_score,
@@ -3401,6 +3577,7 @@ fn group_json(group: &Group) -> serde_json::Value {
             "pass_rate": group.answer_pass_rate,
             "pass_interval": stats::interval_json(group.answer_pass_interval),
             "mean_score": group.mean_answer_score,
+            "score_observations": group.answer_score_observations,
             // Quality: over the attempts that produced a valid answer. Null
             // rather than zero when nothing was answered.
             "observations": group.answer_observations,
@@ -3439,8 +3616,22 @@ fn group_json(group: &Group) -> serde_json::Value {
             "telemetry_complete_session": group.coverage.telemetry_complete,
             "telemetry_partial_spans": group.coverage.telemetry_partial,
             "telemetry_absent": group.coverage.telemetry_none,
+            "telemetry_unknown": group.coverage.telemetry_unknown,
+            "receiver_projection": group.coverage.receiver_projection,
             "telemetry_receiver": group.coverage.telemetry_receiver,
         },
+        "evidence": {
+            "scope": "independent_observations_not_session_completeness",
+            "mcp": group.mcp_evidence,
+            "native_trajectory": {
+                "coverage": group.trajectory.coverage,
+                "missing_runs": group.trajectory.missing_runs,
+            },
+            "token_metric_observations": group.token_field_observations,
+            "cost_metric_observations": group.reported_cost_observations,
+        },
+    }));
+    merge(serde_json::json!({
         "telemetry_receiver": group.telemetry_receiver,
         "observed": {
             "mean_elapsed_ms": group.mean_elapsed_ms,

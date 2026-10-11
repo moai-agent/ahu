@@ -104,6 +104,14 @@ pub fn observed_liveness(owner: Option<bool>) -> ObservedLiveness {
 /// The frozen identity of one launch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LaunchIdentity {
+    /// Opaque OTel release grouping captured for this task; absence stays absent
+    /// on resume and when inheriting a parent created by an older runner.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::telemetry::deserialize_release_id"
+    )]
+    pub release_id: Option<String>,
     pub mode: LaunchMode,
     /// Agent name, or `auto` for an automatic launch.
     pub agent: String,

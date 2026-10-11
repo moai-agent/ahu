@@ -32,6 +32,19 @@ assert os.environ['AHU_EXECUTION_BACKEND']=='headless'
 assert not any(k.startswith('CMUX_') for k in os.environ)
 assert 'ahu delegation contract (v3, headless)' in a[-1]
 assert sys.stdin.read()==''
+if 'EXPECT_RELEASE' in os.environ:
+ attrs=dict(pair.split('=',1) for pair in os.environ['OTEL_RESOURCE_ATTRIBUTES'].split(','))
+ mcp=dict(pair.split('=',1) for pair in os.environ['AHU_MCP_RESOURCE_ATTRIBUTES'].split(','))
+ for key in ('ahu.release.id','ahu.task.id','ahu.task.root_id','ahu.task.parent_id','ahu.task.attempt','ahu.execution.mode'):
+  assert attrs.get(key)==mcp.get(key), (key,attrs,mcp)
+ assert attrs.get('ahu.release.id','')==os.environ['EXPECT_RELEASE'], attrs
+ assert attrs['ahu.execution.mode']=='headless',attrs
+ assert attrs['ahu.task.id']==os.environ['AHU_TASK_ID'],attrs
+ spec=json.load(open(os.path.join(os.environ['AHU_TASK_DIR'],'headless.json')))
+ assert attrs.get('ahu.task.root_id')==spec['root_task'],attrs
+ assert attrs.get('ahu.task.parent_id')==spec['parent_task'],attrs
+ assert attrs['ahu.task.attempt']==str(spec['attempt']),attrs
+ if 'EXPECT_ATTEMPT' in os.environ: assert attrs['ahu.task.attempt']==os.environ['EXPECT_ATTEMPT'],attrs
 scenario=os.environ.get('SCENARIO','success')
 if scenario in ('child','mailbox') and '\ndelegate synthetic task</ahu-request-' not in a[-1]: scenario='success'
 session=a[a.index('--resume')+1] if '--resume' in a else os.environ['AHU_PARENT_TASK']
@@ -52,6 +65,7 @@ if scenario in ('child','mailbox'):
   time.sleep(0.3)
  child=os.environ['CHILD_PROMPT']
  env=dict(os.environ,SCENARIO='success')
+ if 'REQUEST_RELEASE' in os.environ: env['OTEL_RESOURCE_ATTRIBUTES']='ahu.release.id='+os.environ['REQUEST_RELEASE']
  extra=['--name',os.environ['CHILD_TASK_NAME']] if 'CHILD_TASK_NAME' in os.environ else []
  r=subprocess.run([os.environ['AHU_BIN'],'@worker','--headless','--background','--output','json','--prompt-file',child]+extra,env=env,capture_output=True,text=True)
  assert r.returncode==0, r.stderr
@@ -3115,7 +3129,13 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             let observed = if entry.executable == executable {
                 version
             } else {
-                entry.headless_verified_versions[0]
+                entry
+                    .headless_verified_versions
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| {
+                        ahu::catalog::version_token(entry.verified_versions).unwrap()
+                    })
             };
             std::fs::write(&stub, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{observed}'; exit 0; fi\ntouch \"$HOME/worker-started\"\nexit 97\n")).unwrap();
             std::fs::set_permissions(stub, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3526,5 +3546,291 @@ fn opencode_preflight_refuses_missing_model_before_creating_a_worktree() {
                 .count(),
             1
         );
+    }
+}
+
+#[test]
+fn kiro_batch_lifecycle_tracks_fresh_resume_failure_and_timeout() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.repo
+        .add_agent_on("worker", "1.0.0", "kiro", "claude-sonnet-4.5");
+    f.repo.commit("synthetic Kiro assignment");
+    let path = f.bin.join("kiro-cli");
+    std::fs::write(&path,r#"#!/usr/bin/env python3
+import sys,os,json,time
+a=sys.argv[1:]
+if '--version' in a: print('kiro-cli 2.29.0');sys.exit(0)
+if 'whoami' in a: print(json.dumps({'accountType':'SocialGitHub','email':'fixture@example.invalid'}));sys.exit(0)
+if '--list-models' in a: print(json.dumps({'models':[{'model_id':'claude-sonnet-4.5'}]}));sys.exit(0)
+assert a[:2]==['chat','--v3']
+assert a[a.index('--model')+1]=='claude-sonnet-4.5'
+assert '--no-interactive' in a and '--require-mcp-startup' in a and '--' not in a
+assert a[a.index('--output-format')+1]=='stream-json'
+assert '--trust-all-tools' not in a
+assert not any(k.startswith('CMUX_') for k in os.environ)
+assert sys.stdin.read()==''
+scenario=os.environ.get('SCENARIO','success')
+session=a[a.index('--resume-id')+1] if '--resume-id' in a else 'sess_fixture'
+if scenario=='resume_mismatch': session='sess_wrong'
+def emit(t,d): print(json.dumps({'type':t,'data':d}),flush=True)
+emit('runStarted',{'payloadSchema':'acp','engine':'v3','acpProtocolVersion':1})
+emit('sessionUpdate',{'sessionId':session,'update':{'sessionUpdate':'session_info_update'}})
+def update(u): emit('sessionUpdate',{'sessionId':session,'update':u})
+if '--resume-id' in a:
+ update({'sessionUpdate':'tool_call_update','toolCallId':'old','status':'failed','rawOutput':'Tool use was not permitted.','_meta':{'kiro':{'replay':True}}})
+if scenario=='sleep': time.sleep(60)
+if scenario=='missing': sys.exit(0)
+if scenario=='malformed': print('{broken',flush=True)
+if scenario in ('denied','allowed'):
+ update({'sessionUpdate':'session_info_update','_meta':{'kiro':{'kind':'pending_interaction','toolCallId':'a','interactionType':'tool_approval','options':[{'optionId':'accept','kind':'allow_once'},{'optionId':'reject','kind':'reject_once'}]}}})
+ update({'sessionUpdate':'session_info_update','_meta':{'kiro':{'kind':'interaction_resolved','toolCallId':'a','outcome':'cancelled' if scenario=='denied' else 'selected','selectedOption':'accept' if scenario=='allowed' else None}}})
+ update({'sessionUpdate':'tool_call_update','toolCallId':'a','status':'failed' if scenario=='denied' else 'completed'})
+if scenario=='recovered':
+ update({'sessionUpdate':'tool_call','toolCallId':'a','kind':'read','status':'in_progress'})
+ update({'sessionUpdate':'tool_call_update','toolCallId':'a','status':'failed','rawOutput':{'message':'synthetic missing input'}})
+ update({'sessionUpdate':'tool_call','toolCallId':'b','kind':'read','status':'completed'})
+if scenario=='unresolved': update({'sessionUpdate':'tool_call','toolCallId':'a','status':'in_progress'})
+if scenario in ('run_error','error_then_success'):
+ emit('runError',{'sessionId':session,'stage':'prompt','message':'private synthetic error'})
+ if scenario=='run_error': sys.exit(0)
+end={'sessionId':session,'status':'success','stopReason':'end_turn','finalText':'synthetic','finalTextTruncated':False}
+if scenario=='interrupted': end.update(status='interrupted',stopReason='cancelled')
+if scenario=='session_changed': end['sessionId']='sess_changed'
+if scenario=='truncated': end['finalTextTruncated']=True
+if scenario=='missing_final_text': del end['finalText']
+emit('runFinished',end)
+if scenario in ('duplicate','conflicting'):
+ if scenario=='conflicting': end['status']='failed'
+ emit('runFinished',end)
+if scenario=='nonzero': sys.exit(7)
+if scenario=='signal_exit': os.kill(os.getpid(),15)
+"#).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = f.launch("success", &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value = Fixture::value(&out);
+    assert_eq!(value["outcome"], "succeeded");
+    let id = value["task_id"].as_str().unwrap();
+    let prompt = f.external.path().join("resume.txt");
+    std::fs::write(&prompt, "continue synthetic task").unwrap();
+    let resumed = f
+        .command()
+        .args(["resume", id, "--prompt-file"])
+        .arg(&prompt)
+        .args(["--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_eq!(Fixture::value(&resumed)["outcome"], "started");
+    let waited = f
+        .command()
+        .args(["wait", id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(Fixture::value(&waited)["outcome"], "succeeded");
+    // The fixture emits replayed denial history on every resume. It must not
+    // fail the new attempt. A different native session must still fail.
+    let resumed = f
+        .command()
+        .env("SCENARIO", "resume_mismatch")
+        .args(["resume", id, "--prompt-file"])
+        .arg(&prompt)
+        .args(["--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let waited = f
+        .command()
+        .args(["wait", id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(Fixture::value(&waited)["outcome"], "failed");
+    for scenario in ["recovered", "allowed"] {
+        let out = f.launch(scenario, &[]);
+        assert_eq!(Fixture::value(&out)["outcome"], "succeeded", "{scenario}");
+    }
+    for scenario in [
+        "missing",
+        "denied",
+        "malformed",
+        "unresolved",
+        "run_error",
+        "error_then_success",
+        "interrupted",
+        "session_changed",
+        "truncated",
+        "missing_final_text",
+        "duplicate",
+        "conflicting",
+        "nonzero",
+        "signal_exit",
+    ] {
+        let out = f.launch(scenario, &[]);
+        assert_eq!(Fixture::value(&out)["outcome"], "failed", "{scenario}");
+    }
+    let out = f.launch("sleep", &["--timeout", "1"]);
+    assert_eq!(Fixture::value(&out)["outcome"], "timed_out");
+    let launched = f.launch("sleep", &["--background"]);
+    assert!(launched.status.success());
+    let value = Fixture::value(&launched);
+    let id = value["task_id"].as_str().unwrap();
+    assert!(
+        f.command()
+            .args(["cancel", id, "--output", "json"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let waited = f
+        .command()
+        .args(["wait", id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(Fixture::value(&waited)["outcome"], "cancelled");
+}
+
+#[test]
+fn release_identity_is_frozen_across_resume_and_legacy_absence() {
+    for release in [None, Some("release-synthetic")] {
+        let f = Fixture::new();
+        let out = f
+            .command()
+            .env(
+                "OTEL_RESOURCE_ATTRIBUTES",
+                release
+                    .map(|value| format!("ahu.release.id={value}"))
+                    .unwrap_or_default(),
+            )
+            .env("EXPECT_RELEASE", release.unwrap_or_default())
+            .env("EXPECT_ATTEMPT", "1")
+            .args([
+                "@worker",
+                "--headless",
+                "--output",
+                "json",
+                "--prompt",
+                "synthetic task",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let first = Fixture::value(&out);
+        assert_eq!(first["outcome"], "succeeded");
+        let id = first["task_id"].as_str().unwrap();
+        let result = PathBuf::from(first["review"]["result_path"].as_str().unwrap());
+        let dir = result.parent().unwrap().parent().unwrap();
+        let record: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("task.json")).unwrap()).unwrap();
+        assert_eq!(record["identity"]["release_id"].as_str(), release);
+        // None is omitted, exercising the shape of a record written by an old runner.
+        if release.is_none() {
+            assert!(record["identity"].get("release_id").is_none());
+        }
+        let prompt = f.external.path().join("followup.txt");
+        std::fs::write(&prompt, "continue synthetic task").unwrap();
+        let resumed = f
+            .command()
+            .env(
+                "OTEL_RESOURCE_ATTRIBUTES",
+                "ahu.release.id=other-release,ahu.task.parent_id=wrong-parent,ahu.task.attempt=99",
+            )
+            .env("AHU_MCP_RESOURCE_ATTRIBUTES", "ahu.release.id=wrong-mcp")
+            .env("EXPECT_RELEASE", release.unwrap_or_default())
+            .env("EXPECT_ATTEMPT", "2")
+            .args(["resume", id, "--prompt-file"])
+            .arg(&prompt)
+            .args(["--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        let waited = f
+            .command()
+            .args(["wait", id, "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            waited.status.success(),
+            "{}",
+            String::from_utf8_lossy(&waited.stderr)
+        );
+        assert_eq!(Fixture::value(&waited)["outcome"], "succeeded");
+        assert_eq!(
+            ahu::task::load(dir).unwrap().identity.release_id.as_deref(),
+            release
+        );
+    }
+}
+
+#[test]
+fn broker_child_inherits_parent_release_including_absence_despite_request_drift() {
+    for release in [None, Some("release-synthetic")] {
+        let f = Fixture::new();
+        let prompt = f.external.path().join("child.txt");
+        std::fs::write(&prompt, "perform synthetic task").unwrap();
+        let out = f
+            .command()
+            .env(
+                "OTEL_RESOURCE_ATTRIBUTES",
+                release
+                    .map(|value| format!("ahu.release.id={value}"))
+                    .unwrap_or_default(),
+            )
+            .env("EXPECT_RELEASE", release.unwrap_or_default())
+            .env("REQUEST_RELEASE", "request-conflict")
+            .env("CHILD_PROMPT", &prompt)
+            .env("SCENARIO", "child")
+            .args([
+                "@worker",
+                "--headless",
+                "--output",
+                "json",
+                "--prompt",
+                "delegate synthetic task",
+                "--allow-child",
+                "@worker",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value = Fixture::value(&out);
+        assert_eq!(value["outcome"], "succeeded");
+        let child = value["ahu_children"][0]["task_id"].as_str().unwrap();
+        let child_result = f
+            .command()
+            .args(["result", child, "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(child_result.status.success());
+        let child_value = Fixture::value(&child_result);
+        let result_path = PathBuf::from(child_value["review"]["result_path"].as_str().unwrap());
+        let child_dir = result_path.parent().unwrap().parent().unwrap();
+        let record = ahu::task::load(child_dir).unwrap();
+        assert_eq!(record.identity.release_id.as_deref(), release);
     }
 }

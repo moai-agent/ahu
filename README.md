@@ -30,7 +30,7 @@ replace it using one of these fresh-file procedures before troubleshooting ahu.
 
 Tasks require Git and the selected harness installed and
 authenticated: Claude Code (`claude`), Codex (`codex`), Antigravity CLI (`agy`),
-or OpenCode (`opencode`). An OpenCode agent also needs the model's provider
+OpenCode (`opencode`), or Kiro CLI (`kiro-cli`, V3 interactive and headless). An OpenCode agent also needs the model's provider
 configured in your own OpenCode configuration; see
 [OpenCode with Ollama-hosted models](docs/reference.md#opencode-with-ollama-hosted-models).
 Interactive sessions also require cmux. Headless tasks need no cmux connection.
@@ -43,6 +43,8 @@ Read-only help and
 launch previews do not require a cmux connection. Git and default cmux lookup
 require executables outside Git working trees; see the
 [lookup rules](docs/reference.md#utility-lookup).
+
+See [Kiro setup and limits](docs/reference.md#kiro-cli) for installation, model selection, and supported features.
 
 ## Everyday use
 
@@ -96,9 +98,10 @@ Each task receives a short handle derived from its displayed title, such as
 `@configuration-review`. Use `--name review` to choose one. Task commands accept
 the handle: `ahu task @review`, `ahu focus @review`, or `ahu cancel @review`.
 Names belong to the repository and remain reserved after removal; task IDs still work.
-The development, security, and documentation agents declare `permissions = "auto"`,
-so their launches require the explicit approval-widening flag, even for previews. The flag controls
-the child's requested settings; it grants no extra access to the caller.
+Most registered agents declare `permissions = "auto"` (see each manifest's
+`permissions` field), so their launches require the explicit approval-widening
+flag, even for previews. The flag controls the child's requested settings; it
+grants no extra access to the caller.
 
 For unattended execution, use an initialized project and the same registered agent:
 
@@ -173,8 +176,9 @@ loaded from the repository each time, so this README does not duplicate a
 potentially stale agent catalog. [Manifests](.agents/ahu/agents/) are OKF
 Markdown documents that pair each agent's identity with its instructions.
 Named launches use their manifest's pair independently of automatic project
-selection. This repository's automatic choice is Codex / `gpt-6-astra`; it does
-not select a named agent.
+selection. This repository's automatic choice is Antigravity /
+`gemini-3.1-pro-high` (from `harness_preferences` and `model_rankings` in
+`.agents/ahu/config.toml`); it does not select a named agent.
 
 Automatic selection walks the configured harness order, takes the first harness
 with an available adapter and a nonempty project model ranking, and selects that
@@ -239,9 +243,10 @@ require explicit user permission.
 | `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
 | `ahu opencode` | Open a coordinating OpenCode session in the current terminal |
+| `ahu kiro` | Open a coordinating Kiro V3 session in the current terminal |
 | `ahu mcp serve` | Serve repository-scoped agent, task, and typed-decision tools over stdio MCP |
-| `ahu eval run --suite PATH --agent @name --records PATH` | Run the named cases against a registered agent and save evidence outside the repository |
-| `ahu eval report --records PATH` | Compare answer quality, tool behavior, failures, time, and observed usage |
+| `ahu eval run --suite PATH --agent @name [--records PATH]` | Run cases and save bounded records in primary ignored `.ahu/evals/` by default; raw artifacts stay external |
+| `ahu eval report [--records PATH]` | Compare answer quality, tool behavior, failures, time, and observed usage |
 
 Use the bundled `ahu-agent-context-critic` skill with `ahu eval run` and
 `ahu eval report` to investigate context changes against measured outcomes.
@@ -254,7 +259,7 @@ the candidate checkout when they contain information the candidate should not
 see. `ahu help` lists commands, `ahu help COMMAND` shows focused options, and
 `ahu help all` prints the full reference.
 
-All four shortcuts open the same way: approvals bypassed, on this project's
+All coordinator shortcuts open the same way: approvals bypassed, on this project's
 top-ranked model for that harness, both passed explicitly on the command line.
 
 | Shortcut | Arguments ahu passes |
@@ -263,6 +268,7 @@ top-ranked model for that harness, both passed explicitly on the command line.
 | `ahu claude` | `--model <m> --dangerously-skip-permissions` |
 | `ahu codex` | `-m <m> --dangerously-bypass-approvals-and-sandbox` |
 | `ahu opencode` | `--model <provider>/<model> --auto` |
+| `ahu kiro` | `chat --v3 --model <m> --trust-all-tools` |
 
 `<m>` is the first model listed for that harness in `[model_rankings]`, and each
 shortcut prints its whole argument list before starting, so the disclosed line is
@@ -274,7 +280,7 @@ set to `deny` in OpenCode's own configuration or agent frontmatter still apply,
 and ahu passes no `--pure`, so the user's plugins still load.
 
 Each shortcut names the installed executable (`codex`, `claude`, `agy`,
-`opencode`) and accepts no additional arguments. Registered child agents keep
+`opencode`, `kiro-cli`) and accepts no additional arguments. Registered child agents keep
 their own manifest permissions and launch requirements. Inside cmux, coordinator
 shortcuts place their workspace in the repository's group before starting. See
 [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
@@ -376,6 +382,5 @@ voice, such as required contractions and passive-voice warnings, along with the
 Oxford comma rules, which flag two-item conjunctions. The reasons are recorded
 beside each entry in `.vale.ini`.
 
-See the [0.9.0 release notes](docs/releases/0.9.0.md) for provider rate-limit
-budgets, capacity-aware delegation candidates, and headless completion and
-recovery reporting. Earlier notes are in [docs/releases/](docs/releases/).
+See the [0.10.0 release notes](docs/releases/0.10.0.md) for Kiro CLI support,
+headless Kiro agents, and improved evaluation and local telemetry evidence. Earlier notes are in [docs/releases/](docs/releases/).

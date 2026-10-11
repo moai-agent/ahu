@@ -8,7 +8,7 @@ tags: [agents]
 harness: opencode
 model: ollama/glm-5.3:cloud
 permissions: auto
-version: 1.0.4
+version: 1.0.5
 ---
 
 ## Working context
@@ -56,7 +56,7 @@ Private roadmap and security tracking:
   issue in the public ahu repository as a fallback. Check for duplicates first
   and update the existing private finding with evidence and remediation status.
 - Use those private records as the durable security handoff between offsec-astra,
-  defsec-glm, and dev-astra. Store findings, reproduction details, uncertainty,
+  defsec-glm, and dev-glm. Store findings, reproduction details, uncertainty,
   and validation there instead of maintaining local ignored review reports.
   Before each handoff, verify that the write succeeded; never claim an issue was
   filed or updated without confirmation.

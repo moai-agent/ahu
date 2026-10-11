@@ -34,6 +34,15 @@ impl Interval {
     /// No observations is not a rate of zero, so an empty sample yields nothing
     /// rather than an interval around a proportion that was never measured.
     pub fn wilson(successes: usize, samples: usize) -> Option<Self> {
+        Self::wilson_unrounded(successes, samples).map(|mut interval| {
+            interval.lower = round4(interval.lower);
+            interval.upper = round4(interval.upper);
+            interval
+        })
+    }
+
+    /// Full precision bounds for decisions; the rounded report is presentation only.
+    pub fn wilson_unrounded(successes: usize, samples: usize) -> Option<Self> {
         if samples == 0 || successes > samples {
             return None;
         }
@@ -44,8 +53,8 @@ impl Interval {
         let center = (p + z2 / (2.0 * n)) / denominator;
         let spread = (Z_95 / denominator) * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
         Some(Self {
-            lower: round4((center - spread).max(0.0)),
-            upper: round4((center + spread).min(1.0)),
+            lower: (center - spread).max(0.0),
+            upper: (center + spread).min(1.0),
             successes,
             samples,
         })

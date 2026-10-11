@@ -37,6 +37,8 @@ const SPAN_EXPORT_BATCH_SIZE: usize = 32;
 const SPAN_SCHEDULED_DELAY: Duration = Duration::from_millis(500);
 const SPAN_EXPORT_TIMEOUT: Duration = Duration::from_millis(500);
 
+// Expecting the mutex is correct for telemetry because poisoning only occurs
+// after a panic in this process, and halting is the intended fail-stop behavior.
 fn provider_slot() -> &'static Mutex<Option<SdkTracerProvider>> {
     PROVIDER.get_or_init(|| Mutex::new(None))
 }
@@ -55,6 +57,19 @@ fn bounded_span_processor(
         .build()
 }
 
+pub(crate) fn is_valid_local_endpoint(endpoint: &url::Url) -> bool {
+    let local = matches!(
+        endpoint.host_str(),
+        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+    );
+    endpoint.scheme() == "http"
+        && local
+        && endpoint.username().is_empty()
+        && endpoint.password().is_none()
+        && endpoint.query().is_none()
+        && endpoint.fragment().is_none()
+}
+
 pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
     let endpoint = config.endpoint.parse::<url::Url>().map_err(|error| {
         Error::new(format!(
@@ -62,19 +77,9 @@ pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
             path.display()
         ))
     })?;
-    if endpoint.scheme() != "http" {
+    if !crate::telemetry::is_valid_local_endpoint(&endpoint) {
         return Err(Error::new(format!(
-            "{}: telemetry.endpoint must use http:// for the local collector",
-            path.display()
-        )));
-    }
-    let local = matches!(
-        endpoint.host_str(),
-        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
-    );
-    if !local {
-        return Err(Error::new(format!(
-            "{}: telemetry.endpoint must point to localhost, 127.0.0.1, or ::1",
+            "{}: telemetry.endpoint must be a local http origin without credentials, query, or fragment",
             path.display()
         )));
     }
@@ -84,31 +89,24 @@ pub fn validate_config(config: &TelemetryConfig, path: &Path) -> Result<()> {
             path.display()
         )));
     }
-    if !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || !matches!(endpoint.path(), "" | "/")
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-    {
-        return Err(Error::new(format!(
-            "{}: telemetry.endpoint must be a collector origin without credentials, path, query, or fragment",
-            path.display()
-        )));
-    }
     Ok(())
 }
 
 /// Enable ahu's own spans when project telemetry is enabled.
 pub fn initialize(config: &TelemetryConfig) -> Result<()> {
-    initialize_named(config, "ahu")
+    initialize_named(config, "ahu", None)
 }
 
 /// Initialize the independently launched stdio MCP server as its own service.
 pub(crate) fn initialize_mcp(config: &TelemetryConfig) -> Result<()> {
-    initialize_named(config, "ahu-mcp")
+    initialize_named(config, "ahu-mcp", None)
 }
 
-fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Result<()> {
+fn initialize_named(
+    config: &TelemetryConfig,
+    service_name: &'static str,
+    identity: Option<Vec<(&'static str, String)>>,
+) -> Result<()> {
     let eval_endpoint = eval_endpoint_override();
     let enabled = config.enabled || eval_endpoint.is_some();
     if !enabled
@@ -155,23 +153,20 @@ fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Res
             return Ok(());
         }
     };
-    let mut resource = Resource::builder()
-        .with_service_name(service_name)
-        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")));
-    // Some harnesses remove OTEL_* from MCP child environments. Carry only
-    // ahu's bounded identity fields through a separate, non-secret channel.
-    let attributes = if service_name == "ahu-mcp" {
-        std::env::var("AHU_MCP_RESOURCE_ATTRIBUTES")
-            .ok()
-            .map(|raw| parse_ahu_resource_attributes(&raw))
-            .unwrap_or_else(ahu_resource_attributes)
-    } else {
-        ahu_resource_attributes()
-    };
-    for (key, value) in attributes {
-        resource = resource.with_attribute(KeyValue::new(key, value));
-    }
-    let resource = resource.build();
+    // SDK detectors retain non-ahu resource configuration. Rebuild ahu identity
+    // from one bounded source so an absent frozen field cannot fall through to
+    // an ambient value (including on independently launched MCP servers).
+    let attributes = identity.unwrap_or_else(|| {
+        if service_name == "ahu-mcp" {
+            std::env::var("AHU_MCP_RESOURCE_ATTRIBUTES")
+                .ok()
+                .map(|raw| parse_ahu_resource_attributes(&raw))
+                .unwrap_or_else(ahu_resource_attributes)
+        } else {
+            ahu_resource_attributes()
+        }
+    });
+    let resource = identity_resource(service_name, attributes);
     // Keep export asynchronous and bounded, and override OTEL_BSP_* values so
     // an inherited environment cannot turn a local ahu process into an
     // unbounded queue or stall task execution. Full queues drop telemetry.
@@ -185,6 +180,166 @@ fn initialize_named(config: &TelemetryConfig, service_name: &'static str) -> Res
     Ok(())
 }
 
+fn identity_resource(
+    service_name: &'static str,
+    attributes: Vec<(&'static str, String)>,
+) -> Resource {
+    let inherited = Resource::builder().build();
+    Resource::builder_empty()
+        .with_attributes(
+            inherited
+                .iter()
+                .filter(|(key, _)| !key.as_str().starts_with("ahu."))
+                .map(|(key, value)| KeyValue::new(key.clone(), value.clone())),
+        )
+        .with_service_name(service_name)
+        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+        .with_attributes(
+            attributes
+                .into_iter()
+                .map(|(key, value)| KeyValue::new(key, value)),
+        )
+        .build()
+}
+
+/// Freeze the operator's release label before launching a task. An explicitly
+/// supplied invalid or ambiguous label must not silently lose attribution.
+pub(crate) fn release_id_for_launch() -> Result<Option<String>> {
+    match std::env::var("OTEL_RESOURCE_ATTRIBUTES") {
+        Ok(raw) => release_id_from_attributes(&raw),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Error::new(
+            "OTEL_RESOURCE_ATTRIBUTES must be UTF-8 for task launch",
+        )),
+    }
+}
+
+fn release_id_from_attributes(raw: &str) -> Result<Option<String>> {
+    let (attributes, release_keys) = parse_attributes_with_release_count(raw);
+    let release = attributes
+        .into_iter()
+        .find_map(|(key, value)| (key == "ahu.release.id").then_some(value));
+    if release_keys > 0 && release.is_none() {
+        return Err(Error::new(
+            "invalid or repeated ahu.release.id in OTEL_RESOURCE_ATTRIBUTES; supply one opaque release label of 1-64 ASCII letters, digits, dots, underscores or hyphens before launching",
+        ));
+    }
+    Ok(release)
+}
+
+pub(crate) fn deserialize_release_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<String>::deserialize(deserializer)?
+        .filter(|value| safe_resource_value("ahu.release.id", value)))
+}
+
+fn task_resource_attributes(
+    record: &crate::task::TaskRecord,
+    spec: Option<&crate::headless::Spec>,
+    ambient: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut attributes = ambient
+        .map(parse_ahu_resource_attributes)
+        .unwrap_or_default();
+    // Only eval correlation survives from the ambient environment. All task
+    // identity, including absence of release/parent on old tasks, is frozen.
+    attributes.retain(|(key, _)| key.starts_with("ahu.eval."));
+    attributes.extend(parse_ahu_resource_attributes(&resource_attributes(
+        &record.identity.agent,
+        &record.identity.harness,
+        &record.identity.model,
+        record.identity.agent_version.as_deref(),
+        spec.map(|spec| spec.harness_version.as_str())
+            .or(record.enforcement.harness_version.as_deref()),
+        Some(&record.task_id),
+        Some(spec.map_or(1, |spec| spec.attempt)),
+        None,
+    )));
+    for (key, value) in [
+        ("ahu.release.id", record.identity.release_id.as_deref()),
+        (
+            "ahu.task.root_id",
+            spec.and_then(|spec| spec.root_task.as_deref()).or_else(|| {
+                // Legacy children without a root record have unknown root identity.
+                spec.filter(|spec| spec.parent_task.is_some())
+                    .is_none()
+                    .then_some(record.task_id.as_str())
+            }),
+        ),
+        (
+            "ahu.task.parent_id",
+            spec.and_then(|spec| spec.parent_task.as_deref()),
+        ),
+        (
+            "ahu.execution.mode",
+            Some(if spec.is_some() {
+                "headless"
+            } else {
+                "interactive"
+            }),
+        ),
+    ] {
+        if let Some(value) = value.filter(|value| safe_resource_value(key, value)) {
+            attributes.push((key, value.to_string()));
+        }
+    }
+    attributes
+}
+
+pub(crate) fn initialize_task(
+    config: &TelemetryConfig,
+    record: &crate::task::TaskRecord,
+    spec: Option<&crate::headless::Spec>,
+) -> Result<()> {
+    initialize_named(
+        config,
+        "ahu",
+        Some(task_resource_attributes(
+            record,
+            spec,
+            std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
+        )),
+    )
+}
+
+/// Explicitly carry recorded identity across process boundaries, even when
+/// export is off. This does not opt a harness into native instrumentation.
+pub(crate) fn configure_task_identity(
+    command: &mut std::process::Command,
+    record: &crate::task::TaskRecord,
+    spec: Option<&crate::headless::Spec>,
+) {
+    let attributes = task_resource_attributes(
+        record,
+        spec,
+        std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
+    );
+    let encoded = attributes
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    command
+        .env("OTEL_RESOURCE_ATTRIBUTES", &encoded)
+        .env("AHU_MCP_RESOURCE_ATTRIBUTES", encoded);
+}
+
+pub(crate) fn task_span_attributes(
+    span: &mut SpanGuard,
+    record: &crate::task::TaskRecord,
+    spec: Option<&crate::headless::Spec>,
+) {
+    for (key, value) in task_resource_attributes(record, spec, None) {
+        if key == "ahu.task.attempt" {
+            span.set_u64(key, u64::from(spec.map_or(1, |spec| spec.attempt)));
+        } else {
+            span.set_string(key, value);
+        }
+    }
+}
+
 /// Read only ahu's bounded identity attributes from the launch environment.
 /// Other inherited OTEL attributes may contain private values and are excluded.
 fn ahu_resource_attributes() -> Vec<(&'static str, String)> {
@@ -195,6 +350,10 @@ fn ahu_resource_attributes() -> Vec<(&'static str, String)> {
 }
 
 fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
+    parse_attributes_with_release_count(raw).0
+}
+
+fn parse_attributes_with_release_count(raw: &str) -> (Vec<(&'static str, String)>, usize) {
     const ALLOWED: &[&str] = &[
         "ahu.agent.name",
         "ahu.agent.version",
@@ -206,11 +365,16 @@ fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
         "ahu.harness.version",
         "ahu.model",
         "ahu.task.id",
+        "ahu.task.root_id",
+        "ahu.task.parent_id",
+        "ahu.execution.mode",
+        "ahu.release.id",
         "ahu.task.attempt",
         "ahu.version",
     ];
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let mut release_keys = 0;
     let mut pair = String::new();
     let mut escaped = false;
     let mut pairs = Vec::new();
@@ -232,21 +396,29 @@ fn parse_ahu_resource_attributes(raw: &str) -> Vec<(&'static str, String)> {
     pairs.push(pair);
     for pair in pairs {
         let Some((key, value)) = pair.split_once('=') else {
+            if pair.trim() == "ahu.release.id" {
+                release_keys += 1;
+            }
             continue;
         };
-        if ALLOWED.contains(&key) && safe_resource_value(key, value) && seen.insert(key.to_string())
+        // Match the SDK's surrounding-whitespace handling for standard
+        // OTEL_RESOURCE_ATTRIBUTES, including duplicate release detection.
+        let key = key.trim();
+        let value = value.trim();
+        if key == "ahu.release.id" {
+            release_keys += 1;
+        }
+        if let Some(&allowed_key) = ALLOWED.iter().find(|&&allowed| allowed == key)
+            && safe_resource_value(allowed_key, value)
+            && seen.insert(allowed_key.to_string())
         {
-            out.push((
-                ALLOWED
-                    .iter()
-                    .copied()
-                    .find(|allowed| *allowed == key)
-                    .unwrap(),
-                value.to_string(),
-            ));
+            out.push((allowed_key, value.to_string()));
         }
     }
-    out
+    if release_keys > 1 {
+        out.retain(|(key, _)| *key != "ahu.release.id");
+    }
+    (out, release_keys)
 }
 
 fn safe_resource_value(key: &str, value: &str) -> bool {
@@ -256,7 +428,10 @@ fn safe_resource_value(key: &str, value: &str) -> bool {
     if key == "ahu.task.attempt" {
         return value.bytes().all(|byte| byte.is_ascii_digit());
     }
-    if key.starts_with("ahu.eval.") {
+    if key == "ahu.execution.mode" {
+        return matches!(value, "headless" | "interactive");
+    }
+    if key == "ahu.release.id" || key.starts_with("ahu.eval.") {
         return safe_eval_identifier(value);
     }
     value
@@ -272,6 +447,9 @@ fn safe_eval_identifier(value: &str) -> bool {
 }
 
 /// Apply project telemetry only to a child process ahu is about to start.
+/// Trust boundary: attributes emitted by child processes are redacted only at the
+/// local collector; the child environment is NOT a trust boundary for attribute content.
+/// See docs/reference.md ~:906-914 and docs/knowledge/telemetry-evidence.md ~:74-76.
 #[allow(clippy::too_many_arguments)]
 pub fn configure_child(
     command: &mut std::process::Command,
@@ -284,29 +462,19 @@ pub fn configure_child(
     task_id: Option<&str>,
     attempt: Option<u32>,
 ) {
-    let Some(endpoint) =
-        eval_endpoint_override().or_else(|| config.enabled.then(|| config.endpoint.clone()))
-    else {
-        return;
-    };
-    let attributes = resource_attributes(
-        agent,
-        harness,
-        model,
-        agent_version,
-        harness_version,
-        task_id,
-        attempt,
-        std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref(),
-    );
-    let mcp_attributes = parse_ahu_resource_attributes(&attributes)
-        .into_iter()
-        .map(|(key, value)| format!("{key}={}", escape(&value)))
-        .collect::<Vec<_>>()
-        .join(",");
     command
-        .env("AHU_MCP_RESOURCE_ATTRIBUTES", mcp_attributes)
         .env_remove("AHU_EVAL_LOCAL_METRICS")
+        // Never forward a previous task's parent context or MCP identity.
+        .env_remove("AHU_MCP_RESOURCE_ATTRIBUTES")
+        .env_remove("AHU_BROKER_PARENT_ATTRIBUTES")
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("https_proxy")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
         .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
         .env_remove("OTEL_EXPORTER_OTLP_METRICS_HEADERS")
@@ -320,15 +488,141 @@ pub fn configure_child(
         .env_remove("OTEL_EXPORTER_OTLP_LOGS_COMPRESSION")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-        .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+        .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT");
+
+    let eval_endpoint = eval_endpoint_override();
+    let eval_mode = eval_endpoint.is_some();
+    let Some(endpoint_str) =
+        eval_endpoint.or_else(|| config.enabled.then(|| config.endpoint.clone()))
+    else {
+        return;
+    };
+    let Ok(endpoint_url) = endpoint_str.parse::<url::Url>() else {
+        eprintln!("ahu: invalid telemetry endpoint (not a URL); continuing without export");
+        return;
+    };
+    if !crate::telemetry::is_valid_local_endpoint(&endpoint_url) {
+        eprintln!("ahu: invalid telemetry endpoint; continuing without export");
+        return;
+    }
+
+    let ambient = std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok();
+    let safe_ambient = ambient.as_deref().and_then(|raw| {
+        let mut parsed = parse_ahu_resource_attributes(raw);
+        parsed.retain(|(key, _)| key.starts_with("ahu.eval.") || *key == "ahu.release.id");
+        if parsed.is_empty() && !raw.trim().is_empty() {
+            eprintln!("ahu: ambient OTEL_RESOURCE_ATTRIBUTES malformed or not allowed, dropping");
+            None
+        } else if parsed.is_empty() {
+            None
+        } else {
+            Some(
+                parsed
+                    .into_iter()
+                    .map(|(k, v)| format!("{k}={}", escape(&v)))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        }
+    });
+
+    let attributes = resource_attributes(
+        agent,
+        harness,
+        model,
+        agent_version,
+        harness_version,
+        task_id,
+        attempt,
+        safe_ambient.as_deref(),
+    );
+    let mcp_attributes = parse_ahu_resource_attributes(&attributes)
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", escape(&value)))
+        .collect::<Vec<_>>()
+        .join(",");
+    command
+        .env("AHU_MCP_RESOURCE_ATTRIBUTES", mcp_attributes)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint_str)
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
         .env("OTEL_EXPORTER_OTLP_TIMEOUT", "500")
         .env("OTEL_TRACES_EXPORTER", "otlp")
-        .env("OTEL_METRICS_EXPORTER", "none")
-        .env("OTEL_LOGS_EXPORTER", "none")
+        // The eval receiver implements only ExportTraceService. Ordinary
+        // collectors retain all supported signals. These settings do not
+        // enable native instrumentation in a harness that does not have it.
+        .env(
+            "OTEL_METRICS_EXPORTER",
+            if eval_mode { "none" } else { "otlp" },
+        )
+        .env(
+            "OTEL_LOGS_EXPORTER",
+            if eval_mode { "none" } else { "otlp" },
+        )
         .env("OTEL_SERVICE_NAME", "ahu-agent")
         .env("OTEL_RESOURCE_ATTRIBUTES", attributes);
+    if eval_mode && harness == "kiro" {
+        // Kiro V3 emits native OTLP JSON traces/metrics even when told to use
+        // protobuf and disable metrics. The eval receiver projects ahu's
+        // protobuf spans only. Keep its endpoint in AHU_EVAL_OTEL_ENDPOINT
+        // for ahu/MCP, without opting Kiro into incompatible native exports.
+        command
+            .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .env("OTEL_TRACES_EXPORTER", "none");
+    }
+}
+
+/// A director has no frozen task record. Carry its bounded release label for
+/// future task creation and apply the same export policy on either cmux path.
+pub(crate) fn configure_coordinator(
+    command: &mut std::process::Command,
+    config: &TelemetryConfig,
+    harness: &str,
+    model: &str,
+    harness_version: Option<&str>,
+) {
+    configure_child(
+        command,
+        config,
+        "director",
+        harness,
+        model,
+        None,
+        harness_version,
+        None,
+        None,
+    );
+    if let Some(endpoint) = eval_endpoint_override() {
+        command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint);
+    } else {
+        // A relocated workspace must not pick up a stale cmux-server receiver.
+        command.env_remove("AHU_EVAL_OTEL_ENDPOINT");
+    }
+    let mut inherited = ahu_resource_attributes();
+    inherited.retain(|(key, _)| key.starts_with("ahu.eval.") || *key == "ahu.release.id");
+    let inherited = inherited
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut identity = parse_ahu_resource_attributes(&resource_attributes(
+        "director",
+        harness,
+        model,
+        None,
+        harness_version,
+        None,
+        None,
+        Some(&inherited),
+    ));
+    identity.push(("ahu.execution.mode", "interactive".to_string()));
+    let encoded = identity
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    command
+        .env("OTEL_RESOURCE_ATTRIBUTES", &encoded)
+        .env("AHU_MCP_RESOURCE_ATTRIBUTES", encoded);
 }
 
 /// Evaluation capture is an internal, loopback-only override. It lets a
@@ -337,23 +631,10 @@ pub fn configure_child(
 pub(crate) fn eval_endpoint_override() -> Option<String> {
     let raw = std::env::var("AHU_EVAL_OTEL_ENDPOINT").ok()?;
     let endpoint = raw.parse::<url::Url>().ok()?;
-    let local = matches!(endpoint.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
-    if endpoint.scheme() != "http"
-        || !local
-        || endpoint.port().is_none()
-        || endpoint.username() != ""
-        || endpoint.password().is_some()
-        || !matches!(endpoint.path(), "" | "/")
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-    {
+    if !crate::telemetry::is_valid_local_endpoint(&endpoint) || endpoint.port().is_none() {
         return None;
     }
-    Some(format!(
-        "http://{}:{}",
-        endpoint.host_str()?,
-        endpoint.port()?
-    ))
+    Some(endpoint.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -481,7 +762,159 @@ pub struct SpanGuard {
     started: Instant,
 }
 
+/// A bounded metadata carrier already forwarded by ahu's MCP configuration.
+/// The reserved field is deliberately absent from the resource allowlist: it
+/// is consumed as parent context, never exported as a resource attribute.
+/// Matching task identity prevents accidental cross-task reuse, not forgery by
+/// same-user code. This is correlation metadata, never authorization evidence.
+mod causal_context {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    use opentelemetry::Context;
+    use opentelemetry::propagation::TextMapPropagator;
+    use opentelemetry::trace::{SpanContext, TraceContextExt};
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+
+    const ENV: &str = "AHU_MCP_RESOURCE_ATTRIBUTES";
+    const PARENT: &str = "ahu.internal.traceparent";
+    const MAX_CARRIER_BYTES: usize = 4096;
+
+    fn fields(raw: &str) -> Option<HashMap<&str, &str>> {
+        if raw.len() > MAX_CARRIER_BYTES || !raw.is_ascii() || raw.contains('\\') {
+            return None;
+        }
+        let mut fields = HashMap::new();
+        for pair in raw.split(',') {
+            let (key, value) = pair.split_once('=')?;
+            if (key != PARENT && !super::safe_resource_value(key, value))
+                || fields.insert(key, value).is_some()
+            {
+                return None;
+            }
+        }
+        let task = *fields.get("ahu.task.id")?;
+        if !super::safe_resource_value("ahu.task.id", task) {
+            return None;
+        }
+        let attempt = fields.get("ahu.task.attempt")?;
+        if attempt.parse::<u32>().ok()? == 0 {
+            return None;
+        }
+        Some(fields)
+    }
+
+    pub(super) fn extract(raw: Option<&str>, task: Option<&str>, attempt: Option<u32>) -> Context {
+        let root = Context::new();
+        let Some(fields) = raw.and_then(fields) else {
+            return root;
+        };
+        if fields.get("ahu.task.id").copied() != task
+            || fields
+                .get("ahu.task.attempt")
+                .and_then(|s| s.parse::<u32>().ok())
+                != attempt
+            || attempt.is_none_or(|n| n == 0)
+        {
+            return root;
+        }
+        let Some(parent) = fields.get(PARENT).copied() else {
+            return root;
+        };
+        // Accept only the exact version-00 form ahu emits, with no extensions,
+        // whitespace, uppercase, extra flags, tracestate, or baggage.
+        if parent.len() != 55
+            || !parent.starts_with("00-")
+            || !matches!(&parent[53..], "00" | "01")
+            || parent.bytes().enumerate().any(|(index, byte)| {
+                if matches!(index, 2 | 35 | 52) {
+                    byte != b'-'
+                } else {
+                    !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte)
+                }
+            })
+        {
+            return root;
+        }
+        let carrier = HashMap::from([("traceparent".to_string(), parent.to_string())]);
+        TraceContextPropagator::new().extract_with_context(&root, &carrier)
+    }
+
+    pub(super) fn from_environment() -> Context {
+        let raw = std::env::var(ENV).ok();
+        let task = std::env::var("AHU_TASK_ID").ok();
+        let frozen = std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok();
+        let attempt = frozen.as_deref().and_then(fields).and_then(|f| {
+            (f.get("ahu.task.id").copied() == task.as_deref())
+                .then(|| f.get("ahu.task.attempt").and_then(|s| s.parse().ok()))
+                .flatten()
+        });
+        extract(raw.as_deref(), task.as_deref(), attempt)
+    }
+
+    pub(super) fn inject(command: &mut Command, span: &SpanContext) {
+        if !span.is_valid() {
+            return;
+        }
+        // Read only configure_child's explicit command env, not inherited env.
+        let Some(raw) = command
+            .get_envs()
+            .find_map(|(key, value)| (key == ENV).then_some(value).flatten())
+            .and_then(|value| value.to_str())
+        else {
+            return;
+        };
+        if fields(raw).is_none() {
+            return;
+        }
+        let mut carrier = HashMap::new();
+        TraceContextPropagator::new().inject_context(
+            &Context::new().with_remote_span_context(span.clone()),
+            &mut carrier,
+        );
+        let Some(parent) = carrier.get("traceparent") else {
+            return;
+        };
+        // Rebuild from the resource allowlist so repeated calls replace the
+        // reserved field and cannot carry arbitrary attributes into MCP.
+        let attributes = super::parse_ahu_resource_attributes(raw)
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let attributes = format!("{attributes},{PARENT}={parent}");
+        if attributes.len() <= MAX_CARRIER_BYTES {
+            command.env(ENV, attributes);
+        }
+    }
+}
+
 impl SpanGuard {
+    pub(crate) fn task_parent_carrier(&self, task: &str, attempt: u32) -> Option<String> {
+        if !safe_resource_value("ahu.task.id", task) || attempt == 0 {
+            return None;
+        }
+        let mut command = std::process::Command::new("unused");
+        command.env(
+            "AHU_MCP_RESOURCE_ATTRIBUTES",
+            format!("ahu.task.id={task},ahu.task.attempt={attempt}"),
+        );
+        self.configure_child_context(&mut command);
+        command
+            .get_envs()
+            .find_map(|(k, v)| (k == "AHU_MCP_RESOURCE_ATTRIBUTES").then_some(v).flatten())
+            .and_then(|v| v.to_str())
+            .filter(|s| s.contains("ahu.internal.traceparent="))
+            .map(str::to_owned)
+    }
+    /// Propagate this span explicitly after configure_child. No context is
+    /// attached to a thread or held across a future's suspension points.
+    pub(crate) fn configure_child_context(&self, command: &mut std::process::Command) {
+        if let Some(span) = &self.span {
+            causal_context::inject(command, span.span_context());
+        }
+    }
+
     fn set_attribute(&mut self, attribute: KeyValue) {
         if let Some(span) = self.span.as_mut() {
             span.set_attribute(attribute);
@@ -531,14 +964,67 @@ pub fn span(
     name: &'static str,
     attributes: impl IntoIterator<Item = (&'static str, String)>,
 ) -> SpanGuard {
+    span_with_context(name, attributes, &causal_context::from_environment())
+}
+
+fn span_with_context(
+    name: &'static str,
+    attributes: impl IntoIterator<Item = (&'static str, String)>,
+    context: &opentelemetry::Context,
+) -> SpanGuard {
     let tracer = global::tracer("ahu");
-    let mut span = tracer.start(name);
+    let mut span = tracer.start_with_context(name, context);
     for (key, value) in attributes {
         span.set_attribute(KeyValue::new(key, Value::from(value)));
     }
     SpanGuard {
         span: Some(span),
         started: Instant::now(),
+    }
+}
+
+/// Child parentage is bound to the frozen supervisor spec, not harness input.
+pub(crate) fn task_span(
+    name: &'static str,
+    attributes: impl IntoIterator<Item = (&'static str, String)>,
+    spec: &crate::headless::Spec,
+) -> SpanGuard {
+    let carrier = std::env::var("AHU_BROKER_PARENT_ATTRIBUTES").ok();
+    let context = causal_context::extract(
+        carrier.as_deref(),
+        spec.parent_task.as_deref(),
+        spec.parent_attempt,
+    );
+    span_with_context(name, attributes, &context)
+}
+
+pub(crate) fn configure_supervisor_parent(
+    command: &mut std::process::Command,
+    spec: &crate::headless::Spec,
+) {
+    use opentelemetry::trace::TraceContextExt;
+    command.env_remove("AHU_BROKER_PARENT_ATTRIBUTES");
+    let carrier = std::env::var("AHU_BROKER_PARENT_ATTRIBUTES").ok();
+    let context = causal_context::extract(
+        carrier.as_deref(),
+        spec.parent_task.as_deref(),
+        spec.parent_attempt,
+    );
+    if context.span().span_context().is_valid() {
+        // Only the minimal broker-owned carrier is propagated; never baggage.
+        let span = context.span();
+        let sc = span.span_context();
+        command.env(
+            "AHU_BROKER_PARENT_ATTRIBUTES",
+            format!(
+                "ahu.task.id={},ahu.task.attempt={},ahu.internal.traceparent=00-{}-{}-{:02x}",
+                spec.parent_task.as_deref().unwrap(),
+                spec.parent_attempt.unwrap(),
+                sc.trace_id(),
+                sc.span_id(),
+                sc.trace_flags().to_u8()
+            ),
+        );
     }
 }
 
@@ -940,17 +1426,18 @@ fn mcp_result_attributes(method: &str, name: &str, response: &serde_json::Value)
     else {
         return attributes;
     };
-    for (input, output) in [
-        ("backend", "ahu.mcp.decision.backend"),
-        ("model", "ahu.mcp.decision.model"),
-    ] {
+    for (input, output) in [("model", "ahu.mcp.decision.model")] {
         if let Some(value) = service.get(input).and_then(serde_json::Value::as_str)
-            && !value.is_empty()
-            && value.len() <= 128
-            && safe_resource_value(output, value)
+            && crate::eval::provenance::safe_identity(value)
         {
             attributes.push(KeyValue::new(output, value.to_string()));
         }
+    }
+    for (suffix, value) in decision_identity_fields(service) {
+        attributes.push(KeyValue::new(
+            format!("ahu.mcp.decision.{suffix}"),
+            value.to_owned(),
+        ));
     }
     for (input, output) in [
         ("prompt_tokens", "ahu.mcp.decision.tokens.input"),
@@ -973,6 +1460,32 @@ fn mcp_result_attributes(method: &str, name: &str, response: &serde_json::Value)
         }
     }
     attributes
+}
+
+fn decision_identity_fields(
+    service: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<(&'static str, &str)> {
+    let mut fields = Vec::new();
+    for (input, suffix) in [
+        ("backend", "backend"),
+        ("requested_model", "model.requested"),
+    ] {
+        if let Some(value) = service.get(input).and_then(serde_json::Value::as_str)
+            && crate::eval::provenance::safe_identity(value)
+        {
+            fields.push((suffix, value));
+        }
+    }
+    if service
+        .get("model_reported")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && let Some(value) = service.get("model").and_then(serde_json::Value::as_str)
+        && crate::eval::provenance::safe_identity(value)
+    {
+        fields.push(("model.reported", value));
+    }
+    fields
 }
 
 fn mcp_error_category(method: &str, name: &str, response: &serde_json::Value) -> &'static str {
@@ -1105,7 +1618,45 @@ mod tests {
         configure_child(
             &mut child, &config, "agent", "codex", "model", None, None, None, None,
         );
-        assert_eq!(child.get_envs().count(), 0);
+        // Stripping is fail-closed: sensitive and proxy variables are removed
+        // even when telemetry is disabled, and nothing is set.
+        let envs: std::collections::HashMap<_, _> = child.get_envs().collect();
+        for key in [
+            "AHU_EVAL_LOCAL_METRICS",
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+            "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+            "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+            "OTEL_EXPORTER_OTLP_CERTIFICATE",
+            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+            "OTEL_EXPORTER_OTLP_CLIENT_KEY",
+            "OTEL_EXPORTER_OTLP_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_LOGS_COMPRESSION",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        ] {
+            assert!(
+                envs.get(std::ffi::OsStr::new(key))
+                    .map(|v| v.is_none())
+                    .unwrap_or(false),
+                "{key} should be stripped even when telemetry is disabled"
+            );
+        }
+        assert!(
+            envs.iter().all(|(_, value)| value.is_none()),
+            "no environment variables should be set when telemetry is disabled"
+        );
     }
 
     #[test]
@@ -1114,6 +1665,7 @@ mod tests {
             "http://localhost:4318",
             "http://127.0.0.1:4318/",
             "http://[::1]:4318",
+            "http://127.0.0.1:4318/v1/traces",
         ] {
             let config = TelemetryConfig {
                 endpoint: endpoint.into(),
@@ -1130,7 +1682,6 @@ mod tests {
             "http://synthetic-user:synthetic-password@127.0.0.1:4318",
             "http://synthetic-user@127.0.0.1:4318",
             "http://:synthetic-password@[::1]:4318",
-            "http://127.0.0.1:4318/v1/traces",
             "http://127.0.0.1:4318/?synthetic-query",
             "http://127.0.0.1:4318/#synthetic-fragment",
         ] {
@@ -1142,6 +1693,119 @@ mod tests {
                 .expect_err("only a local collector origin is valid");
             assert!(!error.to_string().contains("synthetic-"));
         }
+    }
+
+    #[test]
+    fn child_environment_proxy_vars_are_absent() {
+        let mut command = std::process::Command::new("true");
+        for key in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ] {
+            command.env(key, "synthetic-proxy");
+        }
+        let enabled = TelemetryConfig {
+            enabled: true,
+            endpoint: "http://127.0.0.1:4318".into(),
+            ..TelemetryConfig::default()
+        };
+        configure_child(
+            &mut command,
+            &enabled,
+            "agent",
+            "codex",
+            "model",
+            None,
+            None,
+            Some("task"),
+            Some(2),
+        );
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        for key in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ] {
+            assert!(
+                envs.get(std::ffi::OsStr::new(key))
+                    .map(|v| v.is_none())
+                    .unwrap_or(true),
+                "{} should be stripped",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn child_environment_invalid_endpoint_no_export() {
+        for endpoint in [
+            "https://127.0.0.1:4318",
+            "http://example.com:4318",
+            "http://user@127.0.0.1:4318",
+            "http://127.0.0.1:4318/?query=1",
+            "http://127.0.0.1:4318/#frag",
+        ] {
+            let mut command = std::process::Command::new("true");
+            let enabled = TelemetryConfig {
+                enabled: true,
+                endpoint: endpoint.into(),
+                ..TelemetryConfig::default()
+            };
+            configure_child(
+                &mut command,
+                &enabled,
+                "agent",
+                "codex",
+                "model",
+                None,
+                None,
+                Some("task"),
+                Some(2),
+            );
+            assert!(
+                command
+                    .get_envs()
+                    .all(|(key, _)| key != "OTEL_EXPORTER_OTLP_ENDPOINT")
+            );
+        }
+        // Test token path endpoint is accepted
+        let mut command = std::process::Command::new("true");
+        let enabled = TelemetryConfig {
+            enabled: true,
+            endpoint: "http://127.0.0.1:4318/token123/v1/traces".into(),
+            ..TelemetryConfig::default()
+        };
+        configure_child(
+            &mut command,
+            &enabled,
+            "agent",
+            "codex",
+            "model",
+            None,
+            None,
+            Some("task"),
+            Some(2),
+        );
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert!(envs.contains_key(std::ffi::OsStr::new("OTEL_EXPORTER_OTLP_ENDPOINT")));
+    }
+
+    #[test]
+    fn parse_ahu_resource_attributes_does_not_panic_on_valid_inputs() {
+        let parsed =
+            super::parse_ahu_resource_attributes("ahu.task.id=123,ahu.version=1.0,unknown=value");
+        assert_eq!(parsed.len(), 2);
     }
 
     #[test]
@@ -1194,6 +1858,9 @@ mod tests {
             .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
             .collect();
         assert_eq!(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://127.0.0.1:4318");
+        assert_eq!(env["OTEL_TRACES_EXPORTER"], "otlp");
+        assert_eq!(env["OTEL_METRICS_EXPORTER"], "otlp");
+        assert_eq!(env["OTEL_LOGS_EXPORTER"], "otlp");
         assert!(env["OTEL_RESOURCE_ATTRIBUTES"].contains("ahu.harness=codex"));
         assert!(env["OTEL_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=2"));
         assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=2"));
@@ -1207,6 +1874,35 @@ mod tests {
                     .any(|(name, value)| name == key && value.is_none())
             );
         }
+    }
+
+    #[test]
+    fn child_environment_enables_otlp_for_all_signals() {
+        let enabled = TelemetryConfig {
+            enabled: true,
+            ..TelemetryConfig::default()
+        };
+        let mut command = std::process::Command::new("true");
+        command.env("OTEL_METRICS_EXPORTER", "none");
+        command.env("OTEL_LOGS_EXPORTER", "none");
+        configure_child(
+            &mut command,
+            &enabled,
+            "agent",
+            "codex",
+            "model",
+            None,
+            None,
+            None,
+            None,
+        );
+        let env: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect();
+        assert_eq!(env["OTEL_TRACES_EXPORTER"], "otlp");
+        assert_eq!(env["OTEL_METRICS_EXPORTER"], "otlp");
+        assert_eq!(env["OTEL_LOGS_EXPORTER"], "otlp");
     }
 
     #[test]
@@ -1264,6 +1960,39 @@ mod tests {
             &serde_json::json!({"operation":"private-operation","summary":"secret"}),
         );
         assert_eq!(string_attr(&invalid, "ahu.mcp.approval.operation"), None);
+    }
+
+    #[test]
+    fn decision_identity_export_distinguishes_requested_from_reported_and_rejects_payloads() {
+        for reported in [None, Some(false), Some(true)] {
+            let mut service = serde_json::json!({"backend":"ollama","requested_model":"fixture","model":"actual"});
+            if let Some(reported) = reported {
+                service["model_reported"] = reported.into();
+            }
+            let response = serde_json::json!({"result":{"structuredContent":{"service":service}}});
+            let attrs = mcp_result_attributes("tools/call", "ahu_typed_decide", &response);
+            assert_eq!(
+                string_attr(&attrs, "ahu.mcp.decision.model.requested"),
+                Some("fixture".into())
+            );
+            assert_eq!(
+                string_attr(&attrs, "ahu.mcp.decision.model.reported"),
+                if reported == Some(true) {
+                    Some("actual".into())
+                } else {
+                    None
+                }
+            );
+            assert_eq!(
+                attrs
+                    .iter()
+                    .filter(|a| a.key.as_str() == "ahu.mcp.decision.backend")
+                    .count(),
+                1
+            );
+        }
+        let service = serde_json::json!({"backend":"https://private.invalid","requested_model":"/private/model","model":"sk-secret","model_reported":true});
+        assert!(super::decision_identity_fields(service.as_object().unwrap()).is_empty());
     }
 
     #[test]
@@ -1497,6 +2226,69 @@ mod tests {
     }
 
     #[test]
+    fn launch_rejects_explicit_invalid_release_attribution_without_echoing_it() {
+        assert_eq!(super::release_id_from_attributes("").unwrap(), None);
+        assert_eq!(
+            super::release_id_from_attributes("service.name=fixture,ahu.release.id=0.10.0")
+                .unwrap()
+                .as_deref(),
+            Some("0.10.0")
+        );
+        for raw in [
+            "ahu.release.id",
+            "ahu.release.id=",
+            "ahu.release.id=private-marker/invalid",
+            "ahu.release.id=a, ahu.release.id=b",
+            "ahu.release.id=a, ahu.release.id=a",
+        ] {
+            let error = super::release_id_from_attributes(raw).unwrap_err();
+            assert!(!error.to_string().contains("private-marker"));
+        }
+        assert_eq!(
+            super::release_id_from_attributes(r"unknown=escaped\,ahu.release.id=not-a-key")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn release_resource_values_are_bounded_and_ambiguous_labels_are_dropped() {
+        assert_eq!(
+            parse_ahu_resource_attributes("service.name=fixture, ahu.release.id = candidate-a "),
+            vec![("ahu.release.id", "candidate-a".to_string())]
+        );
+        assert!(parse_ahu_resource_attributes("ahu.release.id=a, ahu.release.id = b ").is_empty());
+        for value in ["release-01", "r_2.0", &"a".repeat(64)] {
+            assert_eq!(
+                parse_ahu_resource_attributes(&format!("ahu.release.id={value}")),
+                vec![("ahu.release.id", value.to_string())]
+            );
+        }
+        for value in [
+            "",
+            "two words",
+            "synthetic\nprivate",
+            "https://example.invalid/path",
+            "id=private",
+            "rélease",
+            &"a".repeat(65),
+        ] {
+            assert!(parse_ahu_resource_attributes(&format!("ahu.release.id={value}")).is_empty());
+        }
+        for raw in [
+            "ahu.release.id=r1,ahu.release.id=r2",
+            "ahu.release.id=bad/value,ahu.release.id=r2",
+        ] {
+            assert!(parse_ahu_resource_attributes(raw).is_empty());
+        }
+        let attrs = parse_ahu_resource_attributes(
+            "ahu.execution.mode=headless,ahu.task.root_id=root,ahu.task.parent_id=parent",
+        );
+        assert_eq!(attrs.len(), 3);
+        assert!(parse_ahu_resource_attributes("ahu.execution.mode=private-payload").is_empty());
+    }
+
+    #[test]
     fn mcp_tool_names_are_bounded_and_resource_identity_is_allowlisted() {
         let unknown = mcp_tool_attributes(
             "attacker-supplied-private-tool-name",
@@ -1676,6 +2468,202 @@ mod tests {
 }
 
 #[cfg(test)]
+mod causal_context_tests {
+    use super::{SpanGuard, causal_context, configure_child};
+    use crate::config::TelemetryConfig;
+    use opentelemetry::Context;
+    use opentelemetry::trace::{Span, TraceContextExt, Tracer, TracerProvider};
+    use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    const PARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    fn carrier(parent: &str) -> String {
+        format!("ahu.task.id=synthetic-task,ahu.task.attempt=1,ahu.internal.traceparent={parent}")
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct Capture(Arc<Mutex<Vec<SpanData>>>);
+
+    impl SpanExporter for Capture {
+        async fn export(&self, batch: Vec<SpanData>) -> opentelemetry_sdk::error::OTelSdkResult {
+            self.0.lock().unwrap().extend(batch);
+            Ok(())
+        }
+    }
+
+    pub(super) fn parent(provider: &SdkTracerProvider) -> SpanGuard {
+        let tracer = opentelemetry::global::BoxedTracer::new(Box::new(provider.tracer("test")));
+        SpanGuard {
+            span: Some(tracer.start_with_context("synthetic.parent", &Context::new())),
+            started: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn explicit_parent_survives_child_carrier_and_thread_without_attachment() {
+        let capture = Capture::default();
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .with_simple_exporter(capture.clone())
+            .build();
+        let parent = parent(&provider);
+        let expected = parent.span.as_ref().unwrap().span_context().clone();
+        let ambient = Context::current().span().span_context().clone();
+        let mut command = Command::new("synthetic-unused");
+        let config = TelemetryConfig {
+            enabled: true,
+            ..TelemetryConfig::default()
+        };
+        configure_child(
+            &mut command,
+            &config,
+            "agent",
+            "codex",
+            "model",
+            None,
+            None,
+            Some("synthetic-task"),
+            Some(1),
+        );
+        parent.configure_child_context(&mut command);
+        // Idempotent reinjection must not introduce duplicate identity/context.
+        parent.configure_child_context(&mut command);
+        let raw = command
+            .get_envs()
+            .find(|(key, _)| *key == "AHU_MCP_RESOURCE_ATTRIBUTES")
+            .unwrap()
+            .1
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !super::parse_ahu_resource_attributes(raw)
+                .iter()
+                .any(|(key, _)| key.contains("traceparent"))
+        );
+        let context = causal_context::extract(Some(raw), Some("synthetic-task"), Some(1));
+        assert!(context.span().span_context().is_remote());
+        assert_eq!(
+            context.span().span_context().trace_id(),
+            expected.trace_id()
+        );
+        let tracer = provider.tracer("child");
+        std::thread::spawn(move || {
+            assert!(!Context::current().span().span_context().is_valid());
+            tracer.start_with_context("synthetic.child", &context).end();
+            assert!(!Context::current().span().span_context().is_valid());
+        })
+        .join()
+        .unwrap();
+        drop(parent);
+        assert_eq!(Context::current().span().span_context(), &ambient);
+        provider.shutdown().unwrap();
+        let spans = capture.0.lock().unwrap();
+        let child = spans
+            .iter()
+            .find(|span| span.name == "synthetic.child")
+            .unwrap();
+        assert_eq!(child.span_context.trace_id(), expected.trace_id());
+        assert_eq!(child.parent_span_id, expected.span_id());
+        assert_ne!(child.span_context.span_id(), expected.span_id());
+        assert!(child.parent_span_is_remote);
+    }
+
+    #[test]
+    fn invalid_missing_or_mismatched_carriers_are_roots_even_with_ambient_context() {
+        let valid = carrier(PARENT);
+        let attached = causal_context::extract(Some(&valid), Some("synthetic-task"), Some(1));
+        let _guard = attached.attach();
+        let mut invalid = vec![
+            String::new(),
+            "x".repeat(4097),
+            carrier(&PARENT.to_uppercase()),
+            carrier(&format!("{PARENT}-extra")),
+            carrier(&format!(" {PARENT}")),
+            carrier(&format!("{PARENT}\n")),
+            carrier(&PARENT.replacen("00-", "01-", 1)),
+            carrier(&format!("{}03", &PARENT[..53])),
+            carrier("00-00000000000000000000000000000000-00f067aa0ba902b7-01"),
+            carrier("00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"),
+            carrier("秘密"),
+            carrier(&"é".repeat(55)),
+            valid.replace("attempt=1", "attempt=0"),
+            valid.replace("attempt=1", "attempt=4294967296"),
+            valid.replace("attempt=1", "attempt=-1"),
+            valid.replace("ahu.task.attempt=1,", ""),
+            valid.replace("ahu.task.id=synthetic-task,", ""),
+            valid.replace("synthetic-task", "synthetic\\-task"),
+            format!("{valid},ahu.task.id=synthetic-task"),
+            format!("{valid},ahu.task.attempt=2"),
+            format!("{valid},ahu.internal.traceparent={PARENT}"),
+        ];
+        invalid.push(valid.replace(&format!(",ahu.internal.traceparent={PARENT}"), ""));
+        for raw in &invalid {
+            assert!(
+                !causal_context::extract(Some(raw), Some("synthetic-task"), Some(1))
+                    .span()
+                    .span_context()
+                    .is_valid()
+            );
+        }
+        for (raw, task) in [
+            (None, Some("synthetic-task")),
+            (Some(valid.as_str()), None),
+            (Some(valid.as_str()), Some("other-task")),
+        ] {
+            assert!(
+                !causal_context::extract(raw, task, Some(1))
+                    .span()
+                    .span_context()
+                    .is_valid()
+            );
+        }
+        for attempt in [None, Some(0), Some(2)] {
+            assert!(
+                !causal_context::extract(Some(&valid), Some("synthetic-task"), attempt)
+                    .span()
+                    .span_context()
+                    .is_valid()
+            );
+        }
+        let unsampled = carrier(&format!("{}00", &PARENT[..53]));
+        let context = causal_context::extract(Some(&unsampled), Some("synthetic-task"), Some(1));
+        assert!(context.span().span_context().is_valid());
+        assert!(!context.span().span_context().is_sampled());
+    }
+
+    #[test]
+    fn disabled_child_cannot_reuse_inherited_context() {
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .build();
+        let parent = parent(&provider);
+        let mut command = Command::new("synthetic-unused");
+        command.env("AHU_MCP_RESOURCE_ATTRIBUTES", carrier(PARENT));
+        configure_child(
+            &mut command,
+            &TelemetryConfig::default(),
+            "agent",
+            "codex",
+            "model",
+            None,
+            None,
+            Some("synthetic-task"),
+            Some(1),
+        );
+        parent.configure_child_context(&mut command);
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "AHU_MCP_RESOURCE_ATTRIBUTES" && value.is_none())
+        );
+    }
+}
+
+#[cfg(test)]
 mod primary_export_tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
@@ -1692,6 +2680,44 @@ mod primary_export_tests {
         if let Ok(endpoint) = std::env::var("AHU_TEST_CONFIG_ENDPOINT") {
             config.enabled = true;
             config.endpoint = endpoint;
+        }
+        if mode == "child-settings" {
+            let mut command = Command::new("synthetic-unused");
+            super::configure_child(
+                &mut command,
+                &config,
+                "agent",
+                &std::env::var("AHU_TEST_CHILD_HARNESS").unwrap_or_else(|_| "codex".into()),
+                "model",
+                None,
+                None,
+                Some("synthetic-task"),
+                Some(1),
+            );
+            let env: std::collections::BTreeMap<_, _> = command
+                .get_envs()
+                .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+                .collect();
+            let expected = std::env::var("AHU_TEST_EXPECT_SIGNALS").unwrap();
+            if expected == "disabled" {
+                assert!(!env.contains_key("OTEL_TRACES_EXPORTER"));
+                assert!(!env.contains_key("AHU_MCP_RESOURCE_ATTRIBUTES"));
+            } else if expected == "kiro-eval" {
+                assert!(!env.contains_key("OTEL_EXPORTER_OTLP_ENDPOINT"));
+                assert_eq!(env["OTEL_TRACES_EXPORTER"], "none");
+                assert_eq!(env["OTEL_METRICS_EXPORTER"], "none");
+                assert_eq!(env["OTEL_LOGS_EXPORTER"], "none");
+                assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.id=synthetic-task"));
+                assert!(super::eval_endpoint_override().is_some());
+            } else {
+                assert_eq!(env["OTEL_TRACES_EXPORTER"], "otlp");
+                assert_eq!(env["OTEL_METRICS_EXPORTER"], expected);
+                assert_eq!(env["OTEL_LOGS_EXPORTER"], expected);
+                assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.id=synthetic-task"));
+                assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.attempt=1"));
+            }
+            println!("synthetic task completed");
+            return;
         }
         if mode == "ahu-mcp" {
             super::initialize_mcp(&config).unwrap();
@@ -1907,6 +2933,54 @@ mod primary_export_tests {
     }
 
     #[test]
+    fn mcp_otlp_resource_uses_carrier_identity_including_absent_release() {
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::any_value;
+        use prost::Message;
+        for release in [None, Some("release-frozen")] {
+            let collector = listener();
+            let trap = listener();
+            let mut command = child_command("ahu-mcp", &trap);
+            let mut carrier = "ahu.task.id=frozen-task,ahu.task.root_id=frozen-root,ahu.task.attempt=2,ahu.execution.mode=headless".to_string();
+            if let Some(release) = release {
+                carrier.push_str(&format!(",ahu.release.id={release}"));
+            }
+            command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint(&collector))
+                .env("OTEL_RESOURCE_ATTRIBUTES", "ahu.release.id=ambient-release,ahu.task.id=ambient-task,ahu.task.parent_id=ambient-parent,ahu.private=private-value")
+                .env("AHU_MCP_RESOURCE_ATTRIBUTES", carrier);
+            let capture = capture(
+                collector,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                false,
+            );
+            run_child(command);
+            let (_, bytes) = capture.join().unwrap().expect("MCP export");
+            let decoded = ExportTraceServiceRequest::decode(bytes.as_slice()).unwrap();
+            let attrs = &decoded.resource_spans[0]
+                .resource
+                .as_ref()
+                .unwrap()
+                .attributes;
+            let get = |key: &str| {
+                attrs.iter().find(|attr| attr.key == key).and_then(|attr| {
+                    match attr.value.as_ref()?.value.as_ref()? {
+                        any_value::Value::StringValue(value) => Some(value.as_str()),
+                        _ => None,
+                    }
+                })
+            };
+            assert_eq!(get("ahu.release.id"), release);
+            assert_eq!(get("ahu.task.id"), Some("frozen-task"));
+            assert_eq!(get("ahu.task.root_id"), Some("frozen-root"));
+            assert_eq!(get("ahu.task.attempt"), Some("2"));
+            assert_eq!(get("ahu.execution.mode"), Some("headless"));
+            assert_eq!(get("ahu.task.parent_id"), None);
+            assert_eq!(get("ahu.private"), None);
+            assert_unused(&trap);
+        }
+    }
+
+    #[test]
     fn primary_export_does_not_follow_redirects() {
         for status in [307, 308] {
             let collector = listener();
@@ -1958,7 +3032,6 @@ mod primary_export_tests {
         let trap = listener();
         for endpoint in [
             "http://synthetic-user:synthetic-password@127.0.0.1:4318",
-            "http://127.0.0.1:4318/path",
             "http://127.0.0.1:4318/?query",
             "http://127.0.0.1:4318/#fragment",
             "https://127.0.0.1:4318",
@@ -1970,6 +3043,129 @@ mod primary_export_tests {
                 run_child(command);
                 assert_unused(&trap);
             }
+        }
+    }
+
+    #[test]
+    fn eval_child_exports_only_traces_and_ordinary_collector_keeps_all_signals() {
+        let trap = listener();
+        for (eval, ordinary, expected) in [
+            (Some("http://127.0.0.1:54321"), false, "none"),
+            (Some("http://127.0.0.1:54321"), true, "none"),
+            (None, true, "otlp"),
+            (Some("https://example.invalid"), true, "otlp"),
+            (Some("https://example.invalid"), false, "disabled"),
+            (None, false, "disabled"),
+        ] {
+            let mut command = child_command("child-settings", &trap);
+            command.env("AHU_TEST_EXPECT_SIGNALS", expected);
+            if let Some(endpoint) = eval {
+                command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint);
+            }
+            if ordinary {
+                command.env("AHU_TEST_CONFIG_ENDPOINT", "http://127.0.0.1:4318");
+            }
+            run_child(command);
+        }
+        for eval in [false, true] {
+            let mut command = child_command("child-settings", &trap);
+            command.env("AHU_TEST_CHILD_HARNESS", "kiro");
+            command.env("AHU_TEST_CONFIG_ENDPOINT", "http://127.0.0.1:4318");
+            command.env(
+                "AHU_TEST_EXPECT_SIGNALS",
+                if eval { "kiro-eval" } else { "otlp" },
+            );
+            if eval {
+                command.env("AHU_EVAL_OTEL_ENDPOINT", "http://127.0.0.1:54321");
+            }
+            run_child(command);
+        }
+        assert_unused(&trap);
+    }
+
+    #[test]
+    fn child_process_exports_real_parent_ids_and_rejects_stale_identity() {
+        use opentelemetry::trace::Span;
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use prost::Message;
+
+        for (service, matches_task) in [
+            ("ahu", true),
+            ("ahu-mcp", true),
+            ("ahu", false),
+            ("ahu-mcp", false),
+        ] {
+            let collector = listener();
+            let trap = listener();
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+                .build();
+            let parent = super::causal_context_tests::parent(&provider);
+            let expected = parent.span.as_ref().unwrap().span_context().clone();
+            let mut command = child_command(service, &trap);
+            let config = crate::config::TelemetryConfig {
+                enabled: true,
+                endpoint: endpoint(&collector),
+                ..Default::default()
+            };
+            super::configure_child(
+                &mut command,
+                &config,
+                "agent",
+                "codex",
+                "model",
+                None,
+                None,
+                Some("synthetic-task"),
+                Some(1),
+            );
+            parent.configure_child_context(&mut command);
+            command
+                .env(
+                    "AHU_TASK_ID",
+                    if matches_task {
+                        "synthetic-task"
+                    } else {
+                        "stale-task"
+                    },
+                )
+                .env("AHU_EVAL_OTEL_ENDPOINT", endpoint(&collector))
+                // Generic inherited context must not repair a rejected ahu carrier.
+                .env(
+                    "TRACEPARENT",
+                    format!("00-{}-{}-01", expected.trace_id(), expected.span_id()),
+                );
+            let capture = capture(
+                collector,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                false,
+            );
+            run_child(command);
+            let (_, body) = capture.join().unwrap().unwrap();
+            let message = ExportTraceServiceRequest::decode(body.as_slice()).unwrap();
+            let span = message
+                .resource_spans
+                .iter()
+                .flat_map(|r| &r.scope_spans)
+                .flat_map(|s| &s.spans)
+                .find(|s| s.name == "ahu.synthetic.transport")
+                .unwrap();
+            if matches_task {
+                assert_eq!(span.trace_id, expected.trace_id().to_bytes());
+                assert_eq!(span.parent_span_id, expected.span_id().to_bytes());
+            } else {
+                assert_ne!(span.trace_id, expected.trace_id().to_bytes());
+                assert!(span.parent_span_id.iter().all(|byte| *byte == 0));
+            }
+            assert!(
+                message
+                    .resource_spans
+                    .iter()
+                    .filter_map(|r| r.resource.as_ref())
+                    .flat_map(|r| &r.attributes)
+                    .all(|attr| attr.key != "ahu.internal.traceparent")
+            );
+            assert_unused(&trap);
         }
     }
 }
@@ -2369,6 +3565,11 @@ pub(crate) fn export_eval_decision(
         ),
     ];
     if let Some(service) = &observation.service {
+        if let Some(service) = service.as_object() {
+            for (suffix, value) in decision_identity_fields(service) {
+                attributes.push(string(&format!("ahu.eval.decision.{suffix}"), value));
+            }
+        }
         for (field, key) in [
             ("prompt_tokens", "ahu.eval.decision.tokens.input"),
             ("generated_tokens", "ahu.eval.decision.tokens.output"),

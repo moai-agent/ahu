@@ -19,3 +19,23 @@ fn local_state_refuses_symlinks_and_non_ignoring_policy() {
             .is_none()
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn oversized_configuration_is_refused_without_being_parsed() {
+    let repo = TestRepo::new();
+    std::fs::create_dir_all(repo.path().join(".agents/ahu")).unwrap();
+    std::fs::write(
+        repo.path().join(".agents/ahu/config.toml"),
+        vec![0u8; 1048577],
+    )
+    .unwrap();
+    let error = ahu::config::load(repo.path())
+        .expect_err("oversized configuration must fail")
+        .to_string();
+    assert!(error.contains("cannot read"), "{error}");
+    assert!(
+        error.contains("file is larger than 1048576 bytes"),
+        "{error}"
+    );
+}

@@ -63,8 +63,20 @@ pub fn ensure_checkout_state(checkout: &Path) -> Result<PathBuf> {
             );
         }
         Ok(_) => {
-            let content = std::fs::read_to_string(&ignore)
+            let mut file = std::fs::File::open(&ignore)
                 .map_err(|e| state_io_error("read ignore file", &ignore, e))?;
+            let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
+                .map_err(|e| state_io_error("read ignore file", &ignore, e))?;
+            let content = String::from_utf8(bytes).map_err(|_| {
+                state_io_error(
+                    "read ignore file",
+                    &ignore,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "stream did not contain valid UTF-8",
+                    ),
+                )
+            })?;
             if !ignores_everything(&content) {
                 bail!(
                     "{} must ignore all state files with a bare * and no negations",
@@ -73,14 +85,13 @@ pub fn ensure_checkout_state(checkout: &Path) -> Result<PathBuf> {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&ignore)
-                .map_err(|e| state_io_error("create ignore file", &ignore, e))?;
-            file.write_all(b"# Local ahu session state. Never commit.\n*\n")
-                .map_err(|e| state_io_error("write ignore file", &ignore, e))?;
+            // `Ok(false)` means a concurrent ahu created the same fixed
+            // contents first; the next run re-reads and validates them.
+            crate::private_io::atomic_create(
+                &ignore,
+                b"# Local ahu session state. Never commit.\n*\n",
+                crate::private_io::Durability::Atomic,
+            )?;
         }
         Err(e) => return Err(state_io_error("inspect ignore file", &ignore, e)),
     }
@@ -218,8 +229,16 @@ pub fn ensure_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
             root.display()
         ),
         Ok(_) => {
-            let found = std::fs::read_to_string(&ignore)
+            let mut file = std::fs::File::open(&ignore)
                 .map_err(|e| Error::new(format!("cannot read {}: {e}", ignore.display())))?;
+            let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
+                .map_err(|e| Error::new(format!("cannot read {}: {e}", ignore.display())))?;
+            let found = String::from_utf8(bytes).map_err(|_| {
+                Error::new(format!(
+                    "cannot read {}: stream did not contain valid UTF-8",
+                    ignore.display()
+                ))
+            })?;
             if !ignores_everything(&found) {
                 bail!(
                     "{} exists but does not ignore everything under {}.\n\
@@ -234,8 +253,13 @@ pub fn ensure_worktrees_root(repo_root: &Path) -> Result<PathBuf> {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::write(&ignore, WORKTREES_GITIGNORE)
-                .map_err(|e| Error::new(format!("cannot create {}: {e}", ignore.display())))?;
+            // `Ok(false)` means a concurrent ahu created the same fixed
+            // contents first; the next run re-reads and validates them.
+            crate::private_io::atomic_create(
+                &ignore,
+                WORKTREES_GITIGNORE.as_bytes(),
+                crate::private_io::Durability::Atomic,
+            )?;
         }
         Err(e) => bail!("cannot inspect {}: {e}", ignore.display()),
     }
@@ -318,16 +342,17 @@ pub fn lock_path(repo_identity: &str) -> Result<PathBuf> {
     Ok(repo_dir(repo_identity)?.join("launch.lock"))
 }
 
-/// A crude cross-process lock built on exclusive file creation.
+/// A cross-process lock built on the operating system's advisory file lock.
 ///
 /// Concurrent launches must not create two cmux groups for one repository or
-/// collide on a branch. A stale lock older than `STALE_AFTER` is reclaimed so a
-/// killed launch cannot wedge the repository permanently.
+/// collide on a branch. The lock is held on a persistent file: it is released
+/// when the holder closes the file or exits, so a killed launch can never
+/// wedge the repository, and no lock is ever reclaimed based on its age.
+/// The holder's PID is written for diagnostics only; the lock itself is
+/// authoritative.
 pub struct LaunchLock {
-    path: PathBuf,
+    file: std::fs::File,
 }
-
-const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
 
 pub(crate) fn state_io_error(operation: &str, path: &Path, error: std::io::Error) -> Error {
     let mut message = format!(
@@ -351,6 +376,8 @@ impl LaunchLock {
     }
 
     pub fn acquire_at(path: PathBuf) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
         if let Some(parent) = path.parent() {
             create_private_dir_all(parent)?;
         }
@@ -358,35 +385,42 @@ impl LaunchLock {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             match std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
                 .write(true)
-                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
                 .open(&path)
             {
-                Ok(mut file) => {
+                Ok(file) => {
+                    // SAFETY: file owns a valid descriptor for the duration of
+                    // the call.
+                    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
+                    {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() == Some(libc::EWOULDBLOCK)
+                            || error.raw_os_error() == Some(libc::EAGAIN)
+                        {
+                            if std::time::Instant::now() >= deadline {
+                                bail!(
+                                    "another ahu launch is in progress for this repository ({}).\n\
+                                     Wait for it to finish; the operating system releases the \
+                                     lock when its holder exits.",
+                                    path.display()
+                                );
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            continue;
+                        }
+                        return Err(state_io_error("lock", &path, error));
+                    }
+                    let mut file = file;
+                    file.set_len(0)
+                        .map_err(|e| state_io_error("truncate", &path, e))?;
                     use std::io::Write;
                     let _ = write!(file, "{}", std::process::id());
-                    return Ok(Self { path });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // `symlink_metadata`, so a link planted at the lock name is
-                    // aged and unlinked as itself rather than as its target.
-                    if let Ok(meta) = std::fs::symlink_metadata(&path)
-                        && (meta.file_type().is_symlink()
-                            || meta
-                                .modified()
-                                .is_ok_and(|m| m.elapsed().unwrap_or_default() > STALE_AFTER))
-                    {
-                        let _ = std::fs::remove_file(&path);
-                        continue;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        bail!(
-                            "another ahu launch is in progress for this repository ({}).\n\
-                             Wait for it to finish, or remove the lock if you are sure it died.",
-                            path.display()
-                        );
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    return Ok(Self { file });
                 }
                 Err(e) => return Err(state_io_error("create launch lock", &path, e)),
             }
@@ -396,7 +430,11 @@ impl LaunchLock {
 
 impl Drop for LaunchLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        use std::os::fd::AsRawFd;
+        // SAFETY: this object still owns the descriptor.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -408,12 +446,48 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Resul
     if confine_file(path)?.is_none() {
         return Ok(T::default());
     }
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)
-            .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))?),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(e) => Err(state_io_error("read", path, e)),
-    }
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(e) => return Err(state_io_error("read", path, e)),
+    };
+    let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
+        .map_err(|e| state_io_error("read", path, e))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
+}
+
+/// Read a JSON state file that must exist and must be valid.
+///
+/// Unlike [`read_json`], a missing file is an error, not a default: records
+/// such as task state are written before they are relied on, so their absence
+/// is damage worth reporting instead of silently replacing with a default.
+pub fn read_json_strict<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    confine_file(path)?.ok_or_else(|| {
+        state_io_error(
+            "read",
+            path,
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        )
+    })?;
+    let mut file = std::fs::File::open(path).map_err(|e| state_io_error("read", path, e))?;
+    let bytes = crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
+        .map_err(|e| state_io_error("read", path, e))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
+}
+
+/// Write a compact JSON state file whose contents must survive a crash.
+///
+/// The parent directory is validated by the caller, not created here: this is
+/// the record path of a running task, whose store already exists. The body and
+/// the directory that holds it are flushed to storage before the call returns.
+pub fn write_durable_json_compact<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+    let mut body = serde_json::to_vec(value)
+        .map_err(|e| Error::new(format!("cannot serialize state: {e}")))?;
+    body.push(b'\n');
+    confine_file(path)?;
+    crate::private_io::atomic_write(path, &body, crate::private_io::Durability::Durable)
 }
 
 /// Create a directory tree that only its owner can enter.
@@ -516,7 +590,7 @@ fn confine_dir(base: &Path, dir: &Path, create: bool) -> Result<()> {
         current.push(name);
         match std::fs::symlink_metadata(&current) {
             Ok(meta) if meta.file_type().is_symlink() => return Err(symlink_refusal(&current)),
-            Ok(meta) if meta.is_dir() => {}
+            Ok(meta) if meta.is_dir() => ensure_owned_by_current_user(&current, &meta)?,
             Ok(_) => bail!(
                 "refusing ahu state path {}: expected a directory, found a file",
                 current.display()
@@ -544,7 +618,10 @@ fn create_one_dir(path: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             match std::fs::symlink_metadata(path) {
                 Ok(meta) if meta.file_type().is_symlink() => Err(symlink_refusal(path)),
-                Ok(meta) if meta.is_dir() => Ok(()),
+                Ok(meta) if meta.is_dir() => {
+                    ensure_owned_by_current_user(path, &meta)?;
+                    Ok(())
+                }
                 Ok(_) => Err(Error::new(format!(
                     "refusing ahu state path {}: expected a directory, found a file",
                     path.display()
@@ -568,6 +645,37 @@ fn symlink_refusal(path: &Path) -> Error {
          Inspect that path in the checkout before running ahu again.",
         path.display()
     ))
+}
+
+fn owner_refusal(path: &Path) -> Error {
+    Error::new(format!(
+        "refusing ahu state path {}: it is owned by another user.\n\
+         ahu state stays inside the store it was given. State written by a different \
+         account would let that account act as this one, so nothing was created, \
+         written, or changed.\n\
+         Inspect that path in the checkout before running ahu again.",
+        path.display()
+    ))
+}
+
+/// Refuse an entry inside the store that another user owns.
+///
+/// Every entry ahu creates is owned by the invoking account, so a foreign-owned
+/// directory or file under `.ahu/state` did not come from this ahu. Using it
+/// anyway would let that account's ahu read and write this one's records, so
+/// pre-existing entries are refused instead of traversed, read, or written.
+fn ensure_owned_by_current_user(path: &Path, meta: &std::fs::Metadata) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return Err(owner_refusal(path));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, meta);
+    Ok(())
 }
 
 /// Set owner-only permissions on a directory or file ahu already inspected.
@@ -646,7 +754,10 @@ pub fn confine_file(path: &Path) -> Result<Option<std::fs::Metadata>> {
             path.display(),
             describe_file_type(&meta)
         ))),
-        Ok(meta) => Ok(Some(meta)),
+        Ok(meta) => {
+            ensure_owned_by_current_user(path, &meta)?;
+            Ok(Some(meta))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(state_io_error("inspect", path, e)),
     }
@@ -743,12 +854,27 @@ pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 /// Write a state file that is not JSON, with the same confinement.
+///
+/// Task records must survive the crashes that can happen while they are being
+/// written, so the file and its parent directory are flushed to the storage
+/// that holds them before the call returns; see
+/// [`crate::private_io::Durability`]. Callers with weaker durability
+/// requirements use [`write_private_file_with`].
 pub fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
+    write_private_file_with(path, body, crate::private_io::Durability::Durable)
+}
+
+/// Write a state file with an explicit durability contract.
+pub(crate) fn write_private_file_with(
+    path: &Path,
+    body: &[u8],
+    durability: crate::private_io::Durability,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)?;
     }
     confine_file(path)?;
-    crate::private_io::atomic_write(path, body, crate::private_io::Durability::Atomic)
+    crate::private_io::atomic_write(path, body, durability)
 }
 
 /// Read a state file ahu wrote, refusing a redirected path.
@@ -760,7 +886,9 @@ pub fn read_private_file(path: &Path) -> Result<Vec<u8>> {
             std::io::Error::from(std::io::ErrorKind::NotFound),
         )
     })?;
-    std::fs::read(path).map_err(|e| state_io_error("read", path, e))
+    let mut file = std::fs::File::open(path).map_err(|e| state_io_error("read", path, e))?;
+    crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES)
+        .map_err(|e| state_io_error("read", path, e))
 }
 
 #[cfg(test)]
@@ -768,22 +896,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launch_lock_reclaims_stale_files_and_releases_on_drop() {
+    fn launch_lock_ignores_unheld_files_and_persists_after_release() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("coordination/launch.lock");
-        let lock = LaunchLock::acquire_at(path.clone()).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            std::process::id().to_string()
-        );
-        drop(lock);
-        assert!(!path.exists());
-
-        let stale = std::fs::File::create(&path).unwrap();
+        // A leftover file -- stale mtime, old PID -- does not block a launch:
+        // only a live flock does.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "99999999").unwrap();
+        let stale = std::fs::File::options().write(true).open(&path).unwrap();
         stale
-            .set_times(std::fs::FileTimes::new().set_modified(
-                std::time::SystemTime::now() - STALE_AFTER - std::time::Duration::from_secs(5),
-            ))
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(600),
+                ),
+            )
             .unwrap();
         drop(stale);
         let lock = LaunchLock::acquire_at(path.clone()).unwrap();
@@ -792,14 +918,25 @@ mod tests {
             std::process::id().to_string()
         );
         drop(lock);
-        assert!(!path.exists());
+        assert!(path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            std::process::id().to_string()
+        );
+        // The lock is released by closing the file, not by removing it, so a
+        // second acquire succeeds while the persistent file remains.
+        let lock = LaunchLock::acquire_at(path.clone()).unwrap();
+        drop(lock);
+        assert!(path.exists());
     }
 
     #[test]
-    fn launch_lock_times_out_without_removing_an_active_lock() {
+    fn launch_lock_times_out_when_another_holder_keeps_the_flock() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("launch.lock");
         let lock = LaunchLock::acquire_at(path.clone()).unwrap();
+        // flock is held per open-file-description, so a second open in the
+        // same process is excluded exactly like another process would be.
         let error = LaunchLock::acquire_at(path.clone())
             .err()
             .unwrap()
@@ -814,7 +951,8 @@ mod tests {
             std::process::id().to_string()
         );
         drop(lock);
-        assert!(!path.exists());
+        assert!(path.exists());
+        assert!(LaunchLock::acquire_at(path.clone()).is_ok());
     }
 
     #[test]
@@ -832,6 +970,37 @@ mod tests {
         assert!(error.contains("cannot serialize state"), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), b"not json");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn state_file_contracts_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let pretty = root.path().join("pretty.json");
+        write_json(&pretty, &vec!["record"]).unwrap();
+        assert_eq!(
+            std::fs::read(&pretty).unwrap(),
+            serde_json::to_vec_pretty(&vec!["record"]).unwrap()
+        );
+        assert_eq!(read_json::<Vec<String>>(&pretty).unwrap(), vec!["record"]);
+
+        let compact = root.path().join("compact.json");
+        write_durable_json_compact(&compact, &vec!["record"]).unwrap();
+        let body = std::fs::read_to_string(&compact).unwrap();
+        assert_eq!(body, "[\"record\"]\n");
+
+        let missing = root.path().join("missing.json");
+        assert!(read_json_strict::<Vec<String>>(&missing).is_err());
+        std::fs::write(&missing, b"not json").unwrap();
+        let error = read_json_strict::<Vec<String>>(&missing)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is not valid ahu state"), "{error}");
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+        assert!(read_json::<Vec<String>>(&missing).is_err());
+
+        let raw = root.path().join("raw.bin");
+        write_private_file(&raw, b"payload").unwrap();
+        assert_eq!(read_private_file(&raw).unwrap(), b"payload");
     }
 
     #[test]
@@ -904,6 +1073,16 @@ mod tests {
         let error = confine_file(&file.join("child")).unwrap_err().to_string();
         assert!(error.contains("cannot inspect ahu state"), "{error}");
         assert_eq!(std::fs::read_to_string(file).unwrap(), "preserve");
+    }
+
+    #[test]
+    fn owner_refusal_names_the_path_and_the_risk() {
+        let error = owner_refusal(Path::new("/repo/.ahu/state")).to_string();
+        assert!(
+            error.contains("refusing ahu state path /repo/.ahu/state"),
+            "{error}"
+        );
+        assert!(error.contains("owned by another user"), "{error}");
     }
 
     #[test]

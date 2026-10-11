@@ -591,6 +591,13 @@ pub(crate) fn service_metadata(value: &Value) -> Option<Value> {
             None => true, // A local service supplied its own model field.
         }),
     );
+    if let Some(value) = value.get("requested_model") {
+        let model = value.as_str()?;
+        if !crate::eval::provenance::safe_identity(model) {
+            return None;
+        }
+        service.insert("requested_model".into(), json!(model));
+    }
     for key in ["prompt_tokens", "generated_tokens"] {
         if let Some(tokens) = value.get(key) {
             service.insert(key.into(), json!(tokens.as_u64()?));

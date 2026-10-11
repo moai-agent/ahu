@@ -53,7 +53,16 @@ state which associated issues were closed and which remain open, with reasons.
 
 ## Repository privacy boundary
 
+Store structured evaluation records and derived evaluation summaries in the
+primary checkout's git-ignored `.ahu/evals/` directory by default. These local
+results must not contain private tracker content or raw execution captures, and
+must never be committed or uploaded to GitHub. Explicit external record paths
+remain supported. This exception covers bounded evaluation results only.
+
 Do not store execution traces anywhere in this repository, including ignored paths.
+Keep captured OpenTelemetry traces, metrics, and logs in local storage outside
+the repository. Never publish these captures to GitHub, including commits,
+issues, pull requests, release assets, or Actions artifacts.
 Do not put private tracker-derived content in public files without user confirmation
 of the exact material and destination. This includes tracker locations, IDs,
 references, issue titles and bodies, and private project metadata. The issue-type

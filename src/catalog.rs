@@ -12,7 +12,7 @@ use crate::bail;
 use crate::util::Result;
 
 /// The catalog revision shipped with this ahu build.
-pub const CATALOG_VERSION: &str = "2026-09-27";
+pub const CATALOG_VERSION: &str = "2026-10-09";
 
 /// One capability a harness adapter has actually been validated to deliver.
 ///
@@ -164,6 +164,9 @@ pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
         }
         "antigravity" => {
             "Absent inspected hook configuration; custom hooks, extensions and configuration overrides are unverified."
+        }
+        "kiro" => {
+            "V3 2.28.0/2.29.0 local configuration inspection admits a bounded declarative subset of native JSON/Markdown agents and CLI preferences. Nonempty hooks, extensions, Powers, workflows, unknown fields/formats, cloud configuration and environment indirection are refused. Native helper isolation and arbitrary MCP subprocess behavior remain unverified."
         }
         _ => return None,
     };
@@ -356,6 +359,27 @@ pub const HARNESSES: &[HarnessEntry] = &[
             "OpenCode has no sandbox of its own and ahu passes none, so its file tools act on whatever absolute path the model names. Observed under --auto on 1.18.30: a write landed in the parent checkout rather than the task worktree ahu launched in, where reviewing the task's branch does not look. ahu discloses such paths: headless attempts record write-tool targets outside the worktree in the result envelope, and `ahu task` and `ahu result` print them. The disclosure is post-run review information, not a boundary; the worktree is still where the session starts, not a wall",
         ],
     },
+    HarnessEntry {
+        id: "kiro",
+        display_name: "Kiro CLI",
+        adapter_available: true,
+        executable: "kiro-cli",
+        verified_versions: "2.28.0 (V3); 2.29.0 (V3 headless and native configuration)",
+        headless_verified_versions: &["2.28.0", "2.29.0"],
+        enforces_model_for_session: false,
+        features: &[
+            Feature::InteractiveLaunch,
+            Feature::AutoApprovals,
+            Feature::HeadlessLaunch,
+            Feature::HeadlessResume,
+        ],
+        enforcement_gaps: &[
+            "--model selects the first request's model; Kiro permits in-session model and agent changes",
+            "ahu supplies instructions as prompt text, not a native agent identity",
+            "native hooks, permissions, Powers, global and synchronized configuration remain under Kiro's control; headless admission refuses unreviewed executable configuration and does not provide a filesystem sandbox",
+            "headless V3 and --resume-id were exercised on 2.28.0 and 2.29.0; bounded native helpers remain refused, and disabled helpers are prompt-only rather than a native tool restriction; detailed trajectory, skill invocation, token and USD cost accounting remain unverified",
+        ],
+    },
 ];
 
 /// Claude Code model identifiers, checked against the Claude Code CLI's
@@ -363,6 +387,24 @@ pub const HARNESSES: &[HarnessEntry] = &[
 /// date below. Aliases such as `opus` are deliberately absent: a named agent
 /// must pin an exact identifier.
 pub const MODELS: &[ModelEntry] = &[
+    ModelEntry {
+        harness: "kiro",
+        model: "claude-sonnet-4.5",
+        display_name: "Claude Sonnet 4.5",
+        quality_rank: 0,
+        evaluation_basis: "listed by Kiro CLI 2.28.0; interactive and headless prompt receipt, tool use and native resume verified; not a comparative task evaluation",
+        reviewed_on: "2026-10-09",
+        is_moving_alias: false,
+    },
+    ModelEntry {
+        harness: "kiro",
+        model: "claude-haiku-4.5",
+        display_name: "Claude Haiku 4.5",
+        quality_rank: 1,
+        evaluation_basis: "listed by Kiro CLI 2.28.0; vendor speed/cost tier, not a comparative task evaluation",
+        reviewed_on: "2026-10-08",
+        is_moving_alias: false,
+    },
     ModelEntry {
         harness: "claude-code",
         model: "claude-opus-5",

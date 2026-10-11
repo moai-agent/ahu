@@ -488,6 +488,7 @@ fn write_record(
         worktree: worktree.to_path_buf(),
         base_commit: Some("0".repeat(40)),
         identity: LaunchIdentity {
+            release_id: None,
             mode: LaunchMode::Named,
             agent: "sable".to_string(),
             agent_version: Some("1.0.0".to_string()),

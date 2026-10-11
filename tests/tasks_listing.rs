@@ -103,6 +103,7 @@ fn write_current(tasks_dir: &Path, repo: &TestRepo, task_id: &str) -> PathBuf {
         worktree: discovered.root.join(format!(".worktrees/{task_id}")),
         base_commit: discovered.head.clone(),
         identity: ahu::task::LaunchIdentity {
+            release_id: None,
             mode: ahu::task::LaunchMode::Named,
             agent: "chris".to_string(),
             agent_version: Some("1.0.0".to_string()),

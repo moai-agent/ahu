@@ -42,6 +42,8 @@ pub struct DisplayMetadata {
 /// What a launch is going to do, shown before anything is created.
 #[derive(Debug, Clone)]
 pub struct LaunchPlan {
+    /// Frozen at preflight; exposed in previews and retained by every attempt.
+    pub release_id: Option<String>,
     pub mode: LaunchMode,
     pub agent: Option<ResolvedAgent>,
     pub pair: ResolvedPair,
@@ -161,6 +163,7 @@ pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
     }
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "schema_version": 1,
+        "release_id": plan.release_id,
         "agent": agent,
         "title": plan.title,
         "task_handle_candidate": format!("@{}", plan.task_name.clone().unwrap_or_else(|| crate::task_handles::generated_name(&plan.title))),
@@ -204,6 +207,7 @@ pub fn plan_with_state_home(
     prompt: &str,
     state_home: Option<&std::path::Path>,
 ) -> Result<LaunchPlan> {
+    let release_id = crate::telemetry::release_id_for_launch()?;
     if prompt.trim().is_empty() {
         bail!(kind: crate::util::ErrorKind::Usage, "the task prompt is empty; nothing was launched.");
     }
@@ -383,6 +387,7 @@ pub fn plan_with_state_home(
     let cmux_integration = crate::cmux::integration::inspect(&repo.root, &pair.harness)
         .with_version(enforcement.harness_version.as_deref());
     Ok(LaunchPlan {
+        release_id,
         mode: if agent.is_some() {
             LaunchMode::Named
         } else {
@@ -430,6 +435,7 @@ pub(crate) fn prepared_record(
         worktree: plan.worktree.clone(),
         base_commit: plan.base_commit.clone(),
         identity: LaunchIdentity {
+            release_id: plan.release_id.clone(),
             mode: plan.mode.clone(),
             agent: plan
                 .agent
@@ -1150,7 +1156,7 @@ fn run_verified_task(
     let telemetry = config
         .map(|config| config.telemetry.clone())
         .unwrap_or_default();
-    crate::telemetry::initialize(&telemetry)?;
+    crate::telemetry::initialize_task(&telemetry, &record, None)?;
     let mut _span = crate::telemetry::span(
         "ahu.harness.run",
         [
@@ -1161,6 +1167,8 @@ fn run_verified_task(
             ("ahu.task.id", record.task_id.clone()),
         ],
     );
+    crate::telemetry::task_span_attributes(&mut _span, &record, None);
+    _span.set_string("ahu.accounting.coverage", "unavailable");
     if let Some(version) = record.identity.agent_version.as_deref() {
         _span.set_string("ahu.agent.version", version);
     }
@@ -1219,8 +1227,9 @@ fn run_verified_task(
         task_dir,
     )?;
 
-    let mut child = {
+    let child = {
         use std::os::unix::process::CommandExt;
+        let pin = crate::executable_pin::ExecutablePin::create()?;
         let mut command = std::process::Command::new(&executable);
         command
             .args(&rebuilt.args)
@@ -1240,7 +1249,10 @@ fn run_verified_task(
             Some(&record.task_id),
             None,
         );
-        command
+        crate::telemetry::configure_task_identity(&mut command, &record, None);
+        _span.configure_child_context(&mut command);
+        pin.configure_command(&mut command)?;
+        let child = command
             // The run-task parent owns the harness's fresh process group, so
             // cancellation can terminate the whole tree without signalling
             // this parent or the pane it lives in.
@@ -1253,8 +1265,11 @@ fn run_verified_task(
                     record.worktree.display(),
                     task_dir.display()
                 ))
-            })?
+            })?;
+        // Keep pin alive until child completes
+        (child, pin)
     };
+    let (mut child, _pin) = child;
     *started = true;
 
     // The TUI harness needs the terminal's foreground or its first stdin read

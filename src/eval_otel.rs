@@ -32,14 +32,60 @@ const MAX_SPAN_IDS_PER_TASK: usize = 4096;
 /// Receiver-side telemetry losses/errors for one eval interval.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReceiverStats {
+    /// Absent in older records; these counters describe only this receiver.
+    #[serde(default)]
+    pub projection: Option<ProjectionStats>,
     pub rejected_spans: u64,
     pub rejected_requests: u64,
     pub rejected_connections: u64,
     pub accept_errors: u64,
 }
 
+/// Bounded accounting for routing losses and duplicate-detection limits.
+/// No raw identifiers or rejected payloads are retained here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectionStats {
+    /// Spans without a matching eval resource or usable task identifier.
+    pub uncorrelated_spans: u64,
+    /// Projected spans whose valid identity could not be retained at capacity.
+    pub dedup_capacity_spans: u64,
+    /// Projected spans without a valid trace/span identity pair.
+    pub invalid_identity_spans: u64,
+}
+
+impl ProjectionStats {
+    fn add(&mut self, other: Self) {
+        self.uncorrelated_spans = self
+            .uncorrelated_spans
+            .saturating_add(other.uncorrelated_spans);
+        self.dedup_capacity_spans = self
+            .dedup_capacity_spans
+            .saturating_add(other.dedup_capacity_spans);
+        self.invalid_identity_spans = self
+            .invalid_identity_spans
+            .saturating_add(other.invalid_identity_spans);
+    }
+
+    fn since(self, earlier: Self) -> Self {
+        Self {
+            uncorrelated_spans: self
+                .uncorrelated_spans
+                .saturating_sub(earlier.uncorrelated_spans),
+            dedup_capacity_spans: self
+                .dedup_capacity_spans
+                .saturating_sub(earlier.dedup_capacity_spans),
+            invalid_identity_spans: self
+                .invalid_identity_spans
+                .saturating_sub(earlier.invalid_identity_spans),
+        }
+    }
+}
+
 impl ReceiverStats {
     pub fn add(&mut self, other: Self) {
+        if let Some(projection) = other.projection {
+            self.projection.get_or_insert_default().add(projection);
+        }
         self.rejected_spans = self.rejected_spans.saturating_add(other.rejected_spans);
         self.rejected_requests = self
             .rejected_requests
@@ -52,6 +98,10 @@ impl ReceiverStats {
 
     pub fn since(self, earlier: Self) -> Self {
         Self {
+            projection: self
+                .projection
+                .zip(earlier.projection)
+                .map(|(now, before)| now.since(before)),
             rejected_spans: self.rejected_spans.saturating_sub(earlier.rejected_spans),
             rejected_requests: self
                 .rejected_requests
@@ -76,6 +126,9 @@ pub struct TaskTelemetry {
     pub tool_errors: u64,
     pub typed_decision_calls: u64,
     pub typed_decision_errors: u64,
+    pub decision_provenance: crate::eval::provenance::Provenance,
+    pub evaluator_provenance: crate::eval::provenance::Provenance,
+    pub harness_provenance: crate::eval::provenance::Provenance,
     pub decision_input_tokens: Option<u64>,
     pub decision_output_tokens: Option<u64>,
     pub decision_duration_ms: Option<f64>,
@@ -109,6 +162,10 @@ pub struct TaskTelemetry {
     /// Distinguishes "nothing was observed" from "spans arrived but no session
     /// summary did", which are different claims about a run.
     pub spans_recorded: u64,
+    /// Only ahu MCP spans, independently of harness/evaluator observations.
+    pub mcp_spans: u64,
+    /// Projected without duplicate protection; counters may overcount retries.
+    pub dedup_untracked_spans: u64,
     /// `ahu.mcp.session` summary spans seen. More than one is an anomaly worth
     /// seeing rather than hiding behind the boolean above.
     pub session_summaries: u64,
@@ -119,11 +176,11 @@ pub struct TaskTelemetry {
     /// Span identities already projected, so a resent export is not counted
     /// twice. Never serialized: it is bookkeeping, not an observation.
     #[serde(skip)]
-    pub(crate) seen_span_ids: BTreeSet<Vec<u8>>,
+    pub(crate) seen_span_ids: BTreeSet<([u8; 16], [u8; 8])>,
 }
 
 impl TaskTelemetry {
-    /// How much of the session this telemetry actually describes.
+    /// Legacy availability of ahu spans, not full harness/helper coverage.
     pub fn coverage(&self) -> Coverage {
         if self.session_summaries > 0 {
             Coverage::CompleteSession
@@ -137,16 +194,19 @@ impl TaskTelemetry {
     /// Whether every tool call the session summary counted is attributable to a
     /// named tool.
     ///
-    /// Only then can an absence be read as proof that a tool was not called:
+    /// Only within the received summaries can an absence be interpreted:
     /// a call the projection could not name leaves the question open.
+    /// Missing MCP sessions and exports remain outside this claim.
     pub fn tool_calls_fully_named(&self) -> bool {
         self.session_summaries > 0
+            && self.dedup_untracked_spans == 0
             && self.tool_calls_by_name.values().sum::<u64>() == self.tool_calls
     }
 
     /// Whether the session summary attributed every tool error to a named tool.
     pub fn tool_errors_fully_named(&self) -> bool {
         self.session_summaries > 0
+            && self.dedup_untracked_spans == 0
             && self.tool_errors_by_name.values().sum::<u64>() == self.tool_errors
     }
 }
@@ -158,7 +218,8 @@ pub enum Coverage {
     None,
     /// Spans arrived, but no session summary: counts are a floor, not a total.
     PartialSpans,
-    /// The session summary arrived, so its totals are the session's totals.
+    /// An ahu MCP session summary arrived. Other sessions, native tools and
+    /// helper activity may be unobserved; the legacy name is not completeness.
     CompleteSession,
 }
 
@@ -196,8 +257,22 @@ impl Receiver {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
-        let endpoint = format!("http://{address}");
+
+        let mut token_bytes = [0u8; 16];
+        crate::orchestration::os_entropy(&mut token_bytes)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let mut token = String::with_capacity(32);
+        for byte in token_bytes {
+            use std::fmt::Write;
+            write!(&mut token, "{:02x}", byte).unwrap();
+        }
+
+        let endpoint = format!("http://{address}/{token}");
         let state = Arc::new(Mutex::new(CaptureState {
+            receiver_stats: ReceiverStats {
+                projection: Some(ProjectionStats::default()),
+                ..ReceiverStats::default()
+            },
             expected_run_id: run_id.map(str::to_owned),
             expected_case_id: case_id.map(str::to_owned),
             ..CaptureState::default()
@@ -232,7 +307,10 @@ impl Receiver {
                             let connection_state = Arc::clone(&thread_state);
                             if let Ok(connection) = thread::Builder::new()
                                 .name("ahu-eval-otlp-client".into())
-                                .spawn(move || handle_connection(stream, &connection_state))
+                                .spawn({
+                                    let token = token.clone();
+                                    move || handle_connection(stream, &connection_state, &token)
+                                })
                             {
                                 connections.push(connection);
                             } else {
@@ -295,7 +373,7 @@ impl Drop for Receiver {
     }
 }
 
-fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<CaptureState>>) {
+fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<CaptureState>>, token: &str) {
     // Some platforms pass the listener's nonblocking mode to accepted sockets.
     // The parser relies on read/write timeouts, so restore blocking mode here.
     if stream.set_nonblocking(false).is_err() {
@@ -313,7 +391,8 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<CaptureState>>) {
         respond(&mut stream, 400, "bad request");
         return;
     };
-    if !headers.starts_with("POST /v1/traces HTTP/1.")
+    let expected_line = format!("POST /{}/v1/traces HTTP/1.", token);
+    if !headers.starts_with(&expected_line)
         || !headers
             .to_ascii_lowercase()
             .contains("content-type: application/x-protobuf")
@@ -457,6 +536,12 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
             resource_string_attribute(resource_spans.resource.as_ref(), "ahu.eval.case_id")
                 != Some(expected.as_str())
         }) {
+            let projection = state.receiver_stats.projection.get_or_insert_default();
+            for scope in &resource_spans.scope_spans {
+                projection.uncorrelated_spans = projection
+                    .uncorrelated_spans
+                    .saturating_add(scope.spans.len() as u64);
+            }
             continue;
         }
         let resource_task_id = resource.get("ahu.task.id").cloned();
@@ -474,6 +559,8 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                     .or_else(|| attrs.get("ahu.task.id").cloned())
                     .filter(|id| safe_identifier(id))
                 else {
+                    let projection = state.receiver_stats.projection.get_or_insert_default();
+                    projection.uncorrelated_spans = projection.uncorrelated_spans.saturating_add(1);
                     continue;
                 };
                 let attempt = resource
@@ -487,27 +574,99 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                         state.receiver_stats.rejected_spans.saturating_add(1);
                     continue;
                 }
-                let task = state.tasks.entry(key).or_insert_with(|| TaskTelemetry {
+                let CaptureState {
+                    tasks,
+                    receiver_stats,
+                    ..
+                } = &mut *state;
+                let projection = receiver_stats.projection.get_or_insert_default();
+                let task = tasks.entry(key).or_insert_with(|| TaskTelemetry {
                     task_id,
                     attempt,
                     ..TaskTelemetry::default()
                 });
-                // A resent export repeats span identities. Projecting one twice
-                // would inflate every counter below, so it is counted as a
-                // duplicate instead. A span with no identity cannot be
-                // recognised, so it is projected as it arrives.
-                if !span.span_id.is_empty() {
-                    if task.seen_span_ids.contains(&span.span_id) {
+                // OTLP identity is the trace/span pair, never the span ID alone.
+                // Invalid identities are projected but cannot establish absence.
+                let identity = <[u8; 16]>::try_from(span.trace_id.as_slice())
+                    .ok()
+                    .zip(<[u8; 8]>::try_from(span.span_id.as_slice()).ok())
+                    .filter(|(trace, span)| {
+                        trace.iter().any(|b| *b != 0) && span.iter().any(|b| *b != 0)
+                    });
+                if let Some(identity) = identity {
+                    if task.seen_span_ids.contains(&identity) {
                         task.duplicate_spans = task.duplicate_spans.saturating_add(1);
                         continue;
                     }
                     if task.seen_span_ids.len() < MAX_SPAN_IDS_PER_TASK {
-                        task.seen_span_ids.insert(span.span_id.clone());
+                        task.seen_span_ids.insert(identity);
+                    } else {
+                        projection.dedup_capacity_spans =
+                            projection.dedup_capacity_spans.saturating_add(1);
+                        task.dedup_untracked_spans = task.dedup_untracked_spans.saturating_add(1);
                     }
+                } else {
+                    projection.invalid_identity_spans =
+                        projection.invalid_identity_spans.saturating_add(1);
+                    task.dedup_untracked_spans = task.dedup_untracked_spans.saturating_add(1);
+                }
+                if matches!(
+                    span.name.as_str(),
+                    "ahu.mcp.session"
+                        | "ahu.mcp.tool.call"
+                        | "ahu.mcp.tools.list"
+                        | "ahu.mcp.initialize"
+                        | "ahu.mcp.ping"
+                        | "ahu.mcp.server.discover"
+                        | "ahu.mcp.tasks.operation"
+                        | "ahu.mcp.subscriptions.listen"
+                        | "ahu.mcp.notification"
+                        | "ahu.mcp.invalid_request"
+                        | "ahu.mcp.request"
+                        | "ahu.mcp.transport.error"
+                ) {
+                    task.mcp_spans = task.mcp_spans.saturating_add(1);
                 }
                 task.spans_recorded = task.spans_recorded.saturating_add(1);
                 match span.name.as_str() {
                     "ahu.harness.run" => {
+                        // ahu.model is launch configuration, not a harness report.
+                        // Keep duplicate keys so the projector can flag conflicts.
+                        let mut identity_attributes: Vec<_> = resource_spans
+                            .resource
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|r| &r.attributes)
+                            .filter(|a| matches!(a.key.as_str(), "ahu.model" | "ahu.harness"))
+                            .map(|a| {
+                                let mut a = a.clone();
+                                a.key = if a.key == "ahu.model" {
+                                    "ahu.harness.model.requested"
+                                } else {
+                                    "ahu.harness.backend"
+                                }
+                                .into();
+                                a
+                            })
+                            .collect();
+                        identity_attributes.extend(
+                            span.attributes
+                                .iter()
+                                .filter(|a| {
+                                    matches!(
+                                        a.key.as_str(),
+                                        "ahu.harness.backend"
+                                            | "ahu.harness.model.requested"
+                                            | "ahu.harness.provider.reported"
+                                            | "ahu.harness.model.reported"
+                                            | "ahu.harness.model.reported.coverage"
+                                            | "ahu.harness.model"
+                                    )
+                                })
+                                .cloned(),
+                        );
+                        task.harness_provenance
+                            .observe(&identity_attributes, "ahu.harness");
                         if span.end_time_unix_nano >= span.start_time_unix_nano {
                             task.elapsed_ms = Some(
                                 (span.end_time_unix_nano - span.start_time_unix_nano) / 1_000_000,
@@ -523,6 +682,8 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                         }
                     }
                     "ahu.eval.typed_decision" => {
+                        task.evaluator_provenance
+                            .observe(&span.attributes, "ahu.eval.decision");
                         task.evaluator_decision_observations =
                             task.evaluator_decision_observations.saturating_add(1);
                         if attrs
@@ -612,6 +773,8 @@ fn consume(request: ExportTraceServiceRequest, state: &Arc<Mutex<CaptureState>>)
                                 );
                             }
                             if name == "ahu_typed_decide" {
+                                task.decision_provenance
+                                    .observe(&span.attributes, "ahu.mcp.decision");
                                 if let Some(bytes) =
                                     integers.get("ahu.mcp.decision.arguments.bytes")
                                 {
@@ -719,6 +882,8 @@ fn string_attributes(
             "ahu.mcp.tool.name" => matches!(
                 value.as_str(),
                 "ahu_agents_list"
+                    | "ahu_agents_recommend"
+                    | "ahu_auth_budget"
                     | "ahu_tasks_list"
                     | "ahu_task_get"
                     | "ahu_typed_decide"
@@ -1000,6 +1165,7 @@ mod tests {
         Span {
             name: "ahu.mcp.session".into(),
             span_id: vec![span_id; 8],
+            trace_id: vec![1; 16],
             attributes: vec![count_attribute("ahu.mcp.tool.calls.count", tool_calls)],
             ..Span::default()
         }
@@ -1009,8 +1175,240 @@ mod tests {
         Span {
             name: "ahu.mcp.tool.call".into(),
             span_id: vec![span_id; 8],
+            trace_id: vec![1; 16],
             attributes: vec![string_attribute("ahu.mcp.tool.name", tool)],
             ..Span::default()
+        }
+    }
+
+    fn decision_identity_span(id: u8, requested: &str, reported: &str) -> Span {
+        let mut span = tool_call_span(id, "ahu_typed_decide");
+        span.attributes.extend([
+            string_attribute("ahu.mcp.decision.backend", "fixture-provider"),
+            string_attribute("ahu.mcp.decision.model.requested", requested),
+            string_attribute("ahu.mcp.decision.model.reported", reported),
+        ]);
+        span
+    }
+
+    #[test]
+    fn decision_provenance_separates_mixed_missing_conflicting_and_redacted_values() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let first = decision_identity_span(1, "fixture-a", "fixture-b");
+        let mut conflict = decision_identity_span(2, "fixture-a", "fixture-b");
+        conflict.attributes.push(string_attribute(
+            "ahu.mcp.decision.model.reported",
+            "fixture-c",
+        ));
+        let mut invalid = decision_identity_span(3, "fixture-a", "https://example.invalid/secret");
+        invalid.attributes.push(string_attribute(
+            "ahu.mcp.decision.endpoint",
+            "private-marker",
+        ));
+        invalid.attributes.push(string_attribute(
+            "ahu.mcp.decision.payload",
+            "private-marker",
+        ));
+        let mut legacy = tool_call_span(4, "ahu_typed_decide");
+        legacy
+            .attributes
+            .push(string_attribute("ahu.mcp.decision.model", "legacy-model"));
+        let other = decision_identity_span(5, "fixture-a", "fixture-c");
+        consume(
+            export(
+                "identity",
+                vec![first.clone(), first, conflict, invalid, legacy, other],
+            ),
+            &state,
+        );
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("identity".into(), 1)];
+        let provenance = &task.decision_provenance;
+        assert_eq!(provenance.observations, 5);
+        assert_eq!(provenance.model_mismatches, 2);
+        assert_eq!(task.duplicate_spans, 1);
+        assert_eq!(provenance.reported_model.values.len(), 2);
+        assert_eq!(provenance.reported_model.conflicting, 1);
+        assert_eq!(provenance.reported_model.redacted, 1);
+        assert_eq!(provenance.reported_model.missing, 1);
+        assert_eq!(provenance.unattributed_model.values["legacy-model"], 1);
+        assert_eq!(provenance.reported_provider.status(), "absent");
+        assert!(provenance.valid());
+        let json = serde_json::to_string(task).unwrap();
+        for forbidden in [
+            "https://",
+            "secret",
+            "private-marker",
+            "endpoint",
+            "payload",
+        ] {
+            assert!(!json.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
+    fn native_model_producer_projects_conflicts_gaps_and_explicit_provider_only() {
+        use serde_json::json;
+        for (model, expected) in [
+            (json!("fixture-model"), "single"),
+            (json!("other-model"), "conflicting"),
+            (serde_json::Value::Null, "partial"),
+            (json!("https://private.invalid/secret"), "redacted"),
+        ] {
+            let mut events = crate::headless::Events::default();
+            events.observe(
+                "claude-code",
+                &serde_json::to_vec(&json!({
+                    "type":"system", "subtype":"init", "model":"fixture-model"
+                }))
+                .unwrap(),
+            );
+            let mut last =
+                json!({"type":"result", "subtype":"success", "is_error":false, "result":"ok"});
+            if !model.is_null() {
+                last["model"] = model;
+            }
+            events.observe("claude-code", &serde_json::to_vec(&last).unwrap());
+            let mut attributes: Vec<_> =
+                crate::headless::identity::requested_attributes("claude-code", "fixture-model")
+                    .into_iter()
+                    .chain(events.reported_model_attributes())
+                    .map(|(key, value)| string_attribute(key, &value))
+                    .collect();
+            let state = Arc::new(Mutex::new(CaptureState::default()));
+            let span = |attributes| Span {
+                name: "ahu.harness.run".into(),
+                trace_id: vec![1; 16],
+                span_id: vec![1; 8],
+                attributes,
+                ..Span::default()
+            };
+            consume(export("native", vec![span(attributes.clone())]), &state);
+            let p = state.lock().unwrap().tasks[&("native".into(), 1)]
+                .harness_provenance
+                .clone();
+            assert_eq!(p.requested_provider.values["claude-code"], 1);
+            assert_eq!(p.reported_model.status(), expected);
+            assert_eq!(p.reported_provider.status(), "absent");
+            assert!(p.valid());
+            assert!(
+                !serde_json::to_string(&p)
+                    .unwrap()
+                    .contains("private.invalid")
+            );
+            // Only an explicit reported provider survives, and is not compared
+            // as though the requested harness were an inference provider.
+            attributes.push(string_attribute(
+                "ahu.harness.provider.reported",
+                "fixture-provider",
+            ));
+            let state = Arc::new(Mutex::new(CaptureState::default()));
+            consume(export("native", vec![span(attributes)]), &state);
+            let p = state.lock().unwrap().tasks[&("native".into(), 1)]
+                .harness_provenance
+                .clone();
+            assert_eq!(p.reported_provider.values["fixture-provider"], 1);
+            assert_eq!(p.provider_mismatches, 0);
+        }
+    }
+
+    #[test]
+    fn harness_resource_model_is_requested_never_reported_identity() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let mut requested = export(
+            "harness",
+            vec![Span {
+                name: "ahu.harness.run".into(),
+                trace_id: vec![1; 16],
+                span_id: vec![1; 8],
+                attributes: vec![string_attribute(
+                    "gen_ai.response.model",
+                    "untrusted-native",
+                )],
+                ..Span::default()
+            }],
+        );
+        requested.resource_spans[0]
+            .resource
+            .as_mut()
+            .unwrap()
+            .attributes
+            .push(string_attribute("ahu.model", "fixture-requested"));
+        requested.resource_spans[0]
+            .resource
+            .as_mut()
+            .unwrap()
+            .attributes
+            .push(string_attribute("ahu.harness", "opencode"));
+        consume(requested, &state);
+        let state = state.lock().unwrap();
+        let provenance = &state.tasks[&("harness".into(), 1)].harness_provenance;
+        assert_eq!(provenance.requested_model.values["fixture-requested"], 1);
+        assert_eq!(provenance.requested_provider.values["opencode"], 1);
+        assert_eq!(provenance.reported_provider.status(), "absent");
+        assert_eq!(provenance.reported_model.status(), "absent");
+        assert!(
+            !serde_json::to_string(provenance)
+                .unwrap()
+                .contains("untrusted-native")
+        );
+    }
+
+    #[test]
+    fn decision_provenance_caps_values_and_preserves_stage_boundaries() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let mut spans: Vec<_> = (1..=20)
+            .map(|id| decision_identity_span(id, "fixture", &format!("model-{id}")))
+            .collect();
+        let mut evaluator = decision_identity_span(21, "eval-request", "eval-response");
+        evaluator.name = "ahu.eval.typed_decision".into();
+        for attribute in &mut evaluator.attributes {
+            attribute.key = attribute
+                .key
+                .replace("ahu.mcp.decision", "ahu.eval.decision");
+        }
+        spans.push(evaluator);
+        let mut unrelated = decision_identity_span(22, "unrelated", "unrelated");
+        unrelated.name = "native.anything".into();
+        spans.push(unrelated);
+        consume(export("limits", spans), &state);
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("limits".into(), 1)];
+        assert_eq!(task.decision_provenance.observations, 20);
+        assert_eq!(task.decision_provenance.reported_model.values.len(), 16);
+        assert_eq!(task.decision_provenance.reported_model.limited, 4);
+        assert_eq!(task.decision_provenance.reported_model.status(), "limited");
+        assert_eq!(
+            task.evaluator_provenance.reported_model.values["eval-response"],
+            1
+        );
+        assert_eq!(task.harness_provenance.observations, 0);
+        assert!(task.decision_provenance.valid());
+    }
+
+    #[test]
+    fn startup_and_transport_spans_establish_partial_mcp_evidence() {
+        for name in [
+            "ahu.mcp.initialize",
+            "ahu.mcp.ping",
+            "ahu.mcp.server.discover",
+            "ahu.mcp.tasks.operation",
+            "ahu.mcp.subscriptions.listen",
+            "ahu.mcp.notification",
+            "ahu.mcp.invalid_request",
+            "ahu.mcp.request",
+            "ahu.mcp.transport.error",
+        ] {
+            let state = Arc::new(Mutex::new(CaptureState::default()));
+            let mut span = session_span(1, 0);
+            span.name = name.into();
+            span.attributes.clear();
+            consume(export("startup", vec![span]), &state);
+            let task = state.lock().unwrap().tasks[&("startup".into(), 1)].clone();
+            assert_eq!(task.mcp_spans, 1, "{name}");
+            assert_eq!(task.coverage(), Coverage::PartialSpans);
+            assert!(!task.mcp_observed);
+            assert!(!task.tool_calls_fully_named());
         }
     }
 
@@ -1106,6 +1504,164 @@ mod tests {
     }
 
     #[test]
+    fn deduplication_uses_trace_and_span_identity() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let first = tool_call_span(7, "ahu_agents_list");
+        let mut second = first.clone();
+        second.trace_id = vec![2; 16];
+        consume(
+            export("identity", vec![first.clone(), second.clone()]),
+            &state,
+        );
+        consume(export("identity", vec![first, second]), &state);
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("identity".into(), 1)];
+        assert_eq!(task.tool_call_spans, 2);
+        assert_eq!(task.mcp_spans, 2);
+        assert_eq!(task.tool_calls_by_name["ahu_agents_list"], 2);
+        assert_eq!(task.duplicate_spans, 2);
+        assert_eq!(task.seen_span_ids.len(), 2);
+    }
+
+    #[test]
+    fn dedup_limits_and_invalid_identities_are_visible_and_bounded() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let spans = (1..=MAX_SPAN_IDS_PER_TASK as u64)
+            .map(|id| {
+                let mut span = tool_call_span(1, "ahu_agents_list");
+                span.span_id = id.to_be_bytes().to_vec();
+                span
+            })
+            .collect();
+        consume(export("bounded", spans), &state);
+        let mut overflow = session_span(1, MAX_SPAN_IDS_PER_TASK as i64);
+        overflow.span_id = (MAX_SPAN_IDS_PER_TASK as u64 + 1).to_be_bytes().to_vec();
+        consume(export("bounded", vec![overflow.clone(), overflow]), &state);
+        let mut invalid = tool_call_span(3, "ahu_agents_list");
+        invalid.trace_id = vec![0; 16];
+        let mut oversized = invalid.clone();
+        oversized.trace_id = vec![1; 1024];
+        consume(
+            export("bounded", vec![invalid.clone(), invalid, oversized]),
+            &state,
+        );
+        // Known identities still deduplicate after capacity is reached.
+        let mut known = tool_call_span(1, "ahu_agents_list");
+        known.span_id = 1u64.to_be_bytes().to_vec();
+        consume(export("bounded", vec![known]), &state);
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("bounded".into(), 1)];
+        assert_eq!(task.seen_span_ids.len(), MAX_SPAN_IDS_PER_TASK);
+        assert_eq!(task.duplicate_spans, 1);
+        assert_eq!(task.dedup_untracked_spans, 5);
+        assert!(!task.tool_calls_fully_named());
+        assert!(!task.tool_errors_fully_named());
+        let projection = state.receiver_stats.projection.unwrap();
+        assert_eq!(projection.dedup_capacity_spans, 2);
+        assert_eq!(projection.invalid_identity_spans, 3);
+    }
+
+    #[test]
+    fn routing_losses_are_counted_without_retaining_rejected_content() {
+        let state = Arc::new(Mutex::new(CaptureState {
+            expected_run_id: Some("expected-run".into()),
+            ..CaptureState::default()
+        }));
+        consume(
+            export(
+                "wrong-run",
+                vec![session_span(1, 0), tool_call_span(2, "ahu_agents_list")],
+            ),
+            &state,
+        );
+        {
+            let mut state = state.lock().unwrap();
+            state.expected_run_id = None;
+        }
+        consume(export("invalid/task", vec![session_span(1, 0)]), &state);
+        let state = state.lock().unwrap();
+        assert!(state.tasks.is_empty());
+        assert_eq!(
+            state.receiver_stats.projection.unwrap().uncorrelated_spans,
+            3
+        );
+    }
+
+    #[test]
+    fn task_capacity_drops_are_counted_and_existing_tasks_still_accept_spans() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        for index in 0..MAX_TASKS {
+            consume(
+                export(&format!("task-{index}"), vec![session_span(1, 0)]),
+                &state,
+            );
+        }
+        consume(export("overflow", vec![session_span(1, 0)]), &state);
+        consume(
+            export("task-0", vec![tool_call_span(2, "ahu_agents_list")]),
+            &state,
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(state.tasks.len(), MAX_TASKS);
+        assert_eq!(state.receiver_stats.rejected_spans, 1);
+        assert_eq!(state.tasks[&("task-0".into(), 1)].tool_call_spans, 1);
+    }
+
+    #[test]
+    fn projection_counter_deltas_saturate_and_old_records_remain_unknown() {
+        let old: ReceiverStats = serde_json::from_str(r#"{"rejected_spans":0,"rejected_requests":0,"rejected_connections":0,"accept_errors":0}"#).unwrap();
+        assert_eq!(old.projection, None);
+        let mut total = old;
+        let observed = ReceiverStats {
+            projection: Some(ProjectionStats {
+                uncorrelated_spans: 4,
+                dedup_capacity_spans: u64::MAX,
+                invalid_identity_spans: 2,
+            }),
+            ..ReceiverStats::default()
+        };
+        total.add(observed);
+        total.add(observed);
+        total.add(old);
+        assert_eq!(total.projection.unwrap().uncorrelated_spans, 8);
+        assert_eq!(total.projection.unwrap().dedup_capacity_spans, u64::MAX);
+        assert_eq!(
+            total
+                .since(observed)
+                .projection
+                .unwrap()
+                .invalid_identity_spans,
+            2
+        );
+        assert_eq!(
+            observed.since(total).projection.unwrap().uncorrelated_spans,
+            0
+        );
+        assert_eq!(observed.since(old).projection, None);
+    }
+
+    #[test]
+    fn unrelated_spans_do_not_establish_mcp_observation() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        consume(
+            export(
+                "native-only",
+                vec![Span {
+                    name: "ahu.harness.run".into(),
+                    trace_id: vec![1; 16],
+                    span_id: vec![1; 8],
+                    ..Span::default()
+                }],
+            ),
+            &state,
+        );
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("native-only".into(), 1)];
+        assert_eq!(task.coverage(), Coverage::PartialSpans);
+        assert_eq!(task.mcp_spans, 0);
+    }
+
+    #[test]
     fn local_receiver_binds_loopback_and_accepts_otlp_http_protobuf() {
         let receiver = Receiver::start().unwrap();
         let endpoint = receiver.endpoint().parse::<url::Url>().unwrap();
@@ -1118,10 +1674,11 @@ mod tests {
                     ..Resource::default()
                 }),
                 scope_spans: vec![ScopeSpans {
-                    spans: vec![Span {
-                        name: "ahu.mcp.session".into(),
-                        ..Span::default()
-                    }],
+                    spans: vec![decision_identity_span(
+                        1,
+                        "fixture-request",
+                        "fixture-reported",
+                    )],
                     ..ScopeSpans::default()
                 }],
                 ..ResourceSpans::default()
@@ -1130,7 +1687,8 @@ mod tests {
         let body = request.encode_to_vec();
         let mut stream = TcpStream::connect(("127.0.0.1", endpoint.port().unwrap())).unwrap();
         let mut request_bytes = format!(
-            "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            endpoint.path(),
             body.len()
         )
         .into_bytes();
@@ -1159,14 +1717,26 @@ mod tests {
                 .tasks
                 .contains_key(&("task-http".into(), 1))
         );
+        let task = receiver.task("task-http", 1).unwrap();
+        assert_eq!(
+            task.decision_provenance.requested_model.values["fixture-request"],
+            1
+        );
+        assert_eq!(
+            task.decision_provenance.reported_model.values["fixture-reported"],
+            1
+        );
+        assert_eq!(task.decision_provenance.observations, 1);
+        assert!(task.decision_provenance.valid());
     }
 
     #[test]
     fn local_receiver_accepts_a_second_export_while_one_client_is_stalled() {
-        fn http_request(task_id: &str, span_id: u8) -> Vec<u8> {
+        fn http_request(task_id: &str, span_id: u8, path: &str) -> Vec<u8> {
             let body = export(task_id, vec![session_span(span_id, 0)]).encode_to_vec();
             let header = format!(
-                "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                path,
                 body.len()
             );
             let mut request = header.into_bytes();
@@ -1184,7 +1754,7 @@ mod tests {
             .unwrap();
         thread::sleep(Duration::from_millis(30));
 
-        let fast_request = http_request("task-fast", 22);
+        let fast_request = http_request("task-fast", 22, endpoint.path());
         let mut fast_stream = TcpStream::connect(address).unwrap();
         fast_stream
             .set_read_timeout(Some(Duration::from_millis(500)))
@@ -1259,20 +1829,39 @@ mod tests {
         let receiver = Receiver::start().unwrap();
         let endpoint = receiver.endpoint().parse::<url::Url>().unwrap();
         let port = endpoint.port().unwrap();
-        let missing_length = b"POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\n\r\n";
-        assert!(exchange(port, missing_length).starts_with("HTTP/1.1 411"));
+        let path = endpoint.path();
+
+        let missing_length = format!(
+            "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\n\r\n",
+            path
+        );
+        assert!(exchange(port, missing_length.as_bytes()).starts_with("HTTP/1.1 411"));
 
         let too_large = format!(
-            "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\n\r\n",
+            "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\n\r\n",
+            path,
             MAX_BODY_BYTES + 1
         );
         assert!(exchange(port, too_large.as_bytes()).starts_with("HTTP/1.1 413"));
 
-        let malformed = b"POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 1\r\n\r\nx";
-        assert!(exchange(port, malformed).starts_with("HTTP/1.1 400"));
+        let malformed = format!(
+            "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 1\r\n\r\nx",
+            path
+        );
+        assert!(exchange(port, malformed.as_bytes()).starts_with("HTTP/1.1 400"));
 
-        let truncated = b"POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 4\r\n\r\nx";
-        assert!(exchange(port, truncated).starts_with("HTTP/1.1 400"));
-        assert_eq!(receiver.receiver_stats().rejected_requests, 4);
+        let truncated = format!(
+            "POST {}/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 4\r\n\r\nx",
+            path
+        );
+        assert!(exchange(port, truncated.as_bytes()).starts_with("HTTP/1.1 400"));
+
+        let wrong_token = "POST /wrongtoken/v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 10\r\n\r\n1234567890";
+        assert!(exchange(port, wrong_token.as_bytes()).starts_with("HTTP/1.1 404"));
+
+        let missing_token = "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-protobuf\r\nContent-Length: 10\r\n\r\n1234567890";
+        assert!(exchange(port, missing_token.as_bytes()).starts_with("HTTP/1.1 404"));
+
+        assert_eq!(receiver.receiver_stats().rejected_requests, 6);
     }
 }

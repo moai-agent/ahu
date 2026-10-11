@@ -333,7 +333,8 @@ fn human_json_status_agree_without_socket_or_mutation() {
         .unwrap();
     assert!(output.status.success());
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["integrations"].as_array().unwrap().len(), 4);
+    assert_eq!(value["integrations"].as_array().unwrap().len(), 5);
+    assert_eq!(value["installation_plans"].as_array().unwrap().len(), 4);
     let human = f.command().args(["cmux", "status"]).output().unwrap();
     let text = String::from_utf8(human.stdout).unwrap();
     for status in value["integrations"].as_array().unwrap() {

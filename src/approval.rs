@@ -441,6 +441,7 @@ mod tests {
             worktree: repo.root.clone(),
             base_commit: None,
             identity: crate::task::LaunchIdentity {
+                release_id: None,
                 mode: crate::task::LaunchMode::Automatic,
                 agent: "auto".into(),
                 agent_version: None,

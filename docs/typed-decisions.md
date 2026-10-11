@@ -21,8 +21,8 @@ only those key names from `.env`; it does not source the file, evaluate shell
 code, or put other `.env` values into the process environment. Keep `.env`
 untracked, restrict it to your account (`chmod 600 .env` on macOS/Linux), and
 never put API keys in `.mcp.json`, agent manifests, prompts, or committed
-configuration. `.env` and `.env.*` are ignored; `.env.example` and
-`.env.template` remain available for safe placeholders.
+configuration. `.env` and `.env.*` are ignored; `.env.example` remains
+available for safe placeholders.
 
 ```sh
 # .env (local file; do not commit)

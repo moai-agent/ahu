@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "ahu": {
+      "command": "ahu",
+      "args": [
+        "mcp",
+        "serve"
+      ],
+      "env": {
+        "AHU_TASK_ID": "${AHU_TASK_ID}",
+        "AHU_TASK_DIR": "${AHU_TASK_DIR}",
+        "AHU_EVAL_OTEL_ENDPOINT": "${AHU_EVAL_OTEL_ENDPOINT}",
+        "AHU_MCP_RESOURCE_ATTRIBUTES": "${AHU_MCP_RESOURCE_ATTRIBUTES}",
+        "OTEL_RESOURCE_ATTRIBUTES": "${OTEL_RESOURCE_ATTRIBUTES}"
+      }
+    }
+  }
+}
