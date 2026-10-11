@@ -1427,6 +1427,132 @@ fn approval_requires_managed_task_context_for_direct_and_durable_calls() {
 }
 
 #[test]
+fn typed_decision_invalid_requests_precede_provider_selection_in_every_mode() {
+    const CASE: &str = "typed_decision_invalid_requests_precede_provider_selection_in_every_mode";
+    if !common::is_child_case(CASE) {
+        let output = common::run_child_case(CASE, |command| {
+            // Poison selection in this subprocess only. Even a validation
+            // regression cannot contact a provider or consult credentials.
+            command
+                .env("AHU_OLLAMA_MODEL", "fixture")
+                .env("AHU_DECISION_URL", "invalid")
+                .env_remove("TYPESAFE_API_KEY")
+                .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
+        });
+        common::assert_child_passed(CASE, &output);
+        return;
+    }
+    let fixture = common::TestRepo::new();
+    let repo = ahu::git::discover(fixture.path()).unwrap();
+    let question = json!({"type":"choice","instructions":"Classify.",
+        "options":{"a":"First","b":"Second"}});
+    // Positive control: valid arguments reach the poisoned configuration.
+    let valid = json!({"state":"fixture","questions":{"q":question}});
+    assert!(
+        ahu::mcp::typed_decide(&repo, &valid)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be combined")
+    );
+    let invalid = [
+        (json!({}), "must not be empty"),
+        (json!(null), "arguments must be an object"),
+        (json!([]), "arguments must be an object"),
+        (
+            json!({"state":"fixture"}),
+            "questions must be a nonempty object",
+        ),
+        (
+            json!({"questions":{"q":question}}),
+            "state must be a string, object, or array",
+        ),
+        (
+            json!({"state":"fixture","questions":{}}),
+            "questions must be a nonempty object",
+        ),
+        (
+            json!({"state":1,"questions":{"q":question}}),
+            "state must be a string, object, or array",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":{"type":"choice"}}}),
+            "requires instructions",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":question},"extra":true}),
+            "accepts only state and questions",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":{"type":"choice","instructions":"Choose.","options":{"a":"Only one"}}}}),
+            "requires 2 to 32 options",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":{"type":"freeform","instructions":"Judge."}}}),
+            "unsupported question type",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":{"type":"probability","instructions":"  "}}}),
+            "requires instructions",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":{"type":"probability","instructions":"True?","extra":true}}}),
+            "unknown field",
+        ),
+        (
+            json!({"items":{},"question":question}),
+            "items must be a nonempty object",
+        ),
+        (
+            json!({"items":{"a":"fixture"},"question":question,"state":"fixture"}),
+            "accepts either state/questions or items/question",
+        ),
+        (
+            json!({"items":{"a":"fixture"},"question":{"type":"score","instructions":"Score.","min":1,"max":0}}),
+            "invalid shared question",
+        ),
+        (
+            json!({"items":{"a":"fixture"},"question":{"type":"probability","instructions":"True?","telemetry_key":"shared"}}),
+            "shared question cannot set telemetry_key",
+        ),
+    ];
+    for mode in 0..3 {
+        let mut client = Client::new(&fixture, "invalid-decision-fixture");
+        if mode == 0 {
+            client.call("initialize", json!({}));
+        }
+        let params = |p| match mode {
+            0 => p,
+            1 => modern_without_tasks(p),
+            _ => modern(p),
+        };
+        for (arguments, expected) in &invalid {
+            let error = ahu::mcp::typed_decide(&repo, arguments)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{arguments}: {error}");
+            let response = client.call(
+                "tools/call",
+                params(json!({
+                    "name":"ahu_typed_decide", "arguments":arguments
+                })),
+            );
+            assert_eq!(response["error"]["code"], -32602, "mode {mode}: {response}");
+            assert_eq!(response["error"]["message"], error);
+        }
+        let omitted = client.call("tools/call", params(json!({"name":"ahu_typed_decide"})));
+        assert_eq!(omitted["error"]["code"], -32602);
+        assert!(
+            omitted["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("must not be empty")
+        );
+        client.stop();
+    }
+}
+
+#[test]
 fn native_ollama_configuration_errors_precede_credentials_and_network() {
     let repo = common::TestRepo::new();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
