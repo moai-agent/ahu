@@ -109,8 +109,10 @@ scoring:
 | `rubric` | One criterion per scored field; required by `--evaluator`. |
 | `tool_expectations` | Optional `required`, `required_successful`, and `forbidden` tool name lists. |
 
-`tool_expectations` names only tools ahu exposes over MCP: `ahu_agents_list`,
-`ahu_tasks_list`, `ahu_task_get`, and `ahu_typed_decide`. Every list is
+`tool_expectations` names only tools in the MCP `TOOL_NAMES` allowlist:
+`ahu_agents_recommend`, `ahu_agents_list`, `ahu_auth_budget`, `ahu_tasks_list`,
+`ahu_task_get`, `ahu_typed_decide`, `ahu_request_approval`, `ahu_skills_suggest`,
+`ahu_skills_list`, and `ahu_skills_get`. Every list is
 optional; a case with none makes no claim about tool use.
 
 The three lists ask three different questions:

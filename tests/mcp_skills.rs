@@ -339,3 +339,266 @@ fn unbundled_supporting_files_remote_content_and_path_escapes_are_never_exposed(
             .is_some()
     );
 }
+
+fn tool_call(server: &mut Server, modern: bool, name: &str, arguments: Value) -> Value {
+    let mut params = json!({"name":name,"arguments":arguments});
+    if modern {
+        // A tool-only client need not know either extension, including Tasks.
+        params["_meta"] = json!({VERSION:"2026-07-28", CLIENT:{}});
+    }
+    server.raw("tools/call", params)
+}
+
+#[test]
+fn tool_only_clients_discover_and_retrieve_verified_skills() {
+    for modern in [false, true] {
+        let repo = bundled_repo();
+        let mut server = Server::new(&repo);
+        if !modern {
+            server.raw("initialize", json!({"protocolVersion":"2025-11-25"}));
+        }
+        let params = if modern {
+            json!({"_meta":{VERSION:"2026-07-28",CLIENT:{}}})
+        } else {
+            json!({})
+        };
+        let tools = server.raw("tools/list", params);
+        for name in ["ahu_skills_list", "ahu_skills_get"] {
+            let definition = tools["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .expect("compatibility tool advertised");
+            assert_eq!(definition["inputSchema"]["additionalProperties"], false);
+            assert_eq!(definition["annotations"]["readOnlyHint"], true);
+            assert_eq!(definition["annotations"]["openWorldHint"], false);
+        }
+        let mut arguments = json!({});
+        let mut entries = Vec::new();
+        loop {
+            let response = tool_call(&mut server, modern, "ahu_skills_list", arguments.clone());
+            let result = &response["result"];
+            assert_eq!(result["ttlMs"], 0);
+            assert_eq!(result["cacheScope"], "private");
+            assert_eq!(result["resultType"].as_str(), modern.then_some("complete"));
+            let value = &result["structuredContent"];
+            assert_eq!(value["resultType"], "complete");
+            assert_eq!(value["ttlMs"], 0);
+            assert_eq!(value["cacheScope"], "private");
+            assert_eq!(
+                serde_json::from_str::<Value>(result["content"][0]["text"].as_str().unwrap())
+                    .unwrap(),
+                *value
+            );
+            assert!(value["skills"].as_array().unwrap().len() <= 2);
+            entries.extend(value["skills"].as_array().unwrap().iter().cloned());
+            let Some(cursor) = value.get("nextCursor") else {
+                break;
+            };
+            assert!(cursor.as_str().unwrap().len() <= 128);
+            arguments["cursor"] = cursor.clone();
+        }
+        assert_eq!(entries.len(), BUNDLED_SKILLS.len());
+        for (entry, &(name, text)) in entries.iter().zip(BUNDLED_SKILLS) {
+            let response = tool_call(
+                &mut server,
+                modern,
+                "ahu_skills_get",
+                json!({"uri":entry["uri"]}),
+            );
+            assert!(response.to_string().len() < 1024 * 1024);
+            assert!(!response.to_string().contains(repo.path().to_str().unwrap()));
+            let result = &response["result"];
+            let value = &result["structuredContent"];
+            assert_eq!(result["ttlMs"], 0);
+            assert_eq!(result["cacheScope"], "private");
+            assert_eq!(value["skill"], *entry);
+            assert_eq!(
+                value["contents"],
+                json!([{"uri":entry["uri"],"mimeType":"text/markdown","text":text}])
+            );
+            assert_eq!(value["skill"]["resources"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                value["skill"]["resources"][0]["digest"],
+                format!("sha256:{}", ahu::util::digest_bytes(text.as_bytes()))
+            );
+            assert_eq!(value["skill"]["resources"][0]["size"], text.len());
+            let origin = &value["skill"]["_meta"]["io.github.moai-agent.ahu/skillOrigin"];
+            assert_eq!(origin["path"], skill_path(name));
+            assert_eq!(origin["executionObserved"], false);
+            if modern {
+                assert_eq!(
+                    server.call("skills/get", json!({"uri":entry["uri"]}))["result"]["skill"],
+                    *entry
+                );
+                assert_eq!(
+                    server.call("resources/read", json!({"uri":entry["uri"]}))["result"]["contents"],
+                    value["contents"]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn skill_tools_reject_invalid_arguments_and_do_not_cache_stale_content() {
+    let repo = bundled_repo();
+    let mut server = Server::new(&repo);
+    for (name, arguments) in [
+        ("ahu_skills_list", json!(null)),
+        ("ahu_skills_list", json!([])),
+        ("ahu_skills_list", json!({"cursor":null})),
+        ("ahu_skills_list", json!({"cursor":3})),
+        ("ahu_skills_list", json!({"cursor":""})),
+        ("ahu_skills_list", json!({"cursor":"x".repeat(129)})),
+        ("ahu_skills_list", json!({"_meta":{}})),
+        ("ahu_skills_list", json!({"source":"private-marker"})),
+        ("ahu_skills_get", json!({})),
+        ("ahu_skills_get", json!({"uri":null})),
+        ("ahu_skills_get", json!({"uri":3})),
+        ("ahu_skills_get", json!({"uri":""})),
+        ("ahu_skills_get", json!({"uri":"x".repeat(257)})),
+        (
+            "ahu_skills_get",
+            json!({"uri":"private-marker","extra":true}),
+        ),
+    ] {
+        let result = tool_call(&mut server, true, name, arguments);
+        assert_eq!(result["error"]["code"], -32602, "{result}");
+        assert!(!result.to_string().contains("private-marker"));
+    }
+    let page = tool_call(&mut server, true, "ahu_skills_list", json!({}));
+    let cursor = page["result"]["structuredContent"]["nextCursor"].clone();
+    let fingerprint = cursor.as_str().unwrap().split_once(':').unwrap().0;
+    for invalid in [
+        json!("../x"),
+        json!("0:18446744073709551615"),
+        json!(format!("{fingerprint}:0")),
+        json!(format!("{fingerprint}:1")),
+        json!(format!("{fingerprint}:999")),
+    ] {
+        let response = tool_call(
+            &mut server,
+            true,
+            "ahu_skills_list",
+            json!({"cursor":invalid}),
+        );
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(response["result"]["ttlMs"], 0);
+        assert_eq!(response["result"]["cacheScope"], "private");
+    }
+    let (name, original) = BUNDLED_SKILLS[0];
+    let uri = format!("ahu://skills/{name}/SKILL.md");
+    for changed in [
+        "private-marker".to_string(),
+        "---\nname: broken\n---".into(),
+        String::new(),
+        "x".repeat(64 * 1024 + 1),
+    ] {
+        repo.write(&skill_path(name), &changed);
+        for (name, args) in [
+            ("ahu_skills_list", json!({"cursor":cursor})),
+            ("ahu_skills_get", json!({"uri":uri})),
+        ] {
+            let response = tool_call(&mut server, true, name, args);
+            assert_eq!(response["result"]["isError"], true);
+            assert_eq!(response["result"]["resultType"], "complete");
+            assert!(!response.to_string().contains("private-marker"));
+        }
+        let response = tool_call(&mut server, true, "ahu_skills_list", json!({}));
+        assert!(
+            !response["result"]["structuredContent"]["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["uri"] == uri)
+        );
+    }
+    repo.write(&skill_path(name), original);
+    assert_eq!(
+        tool_call(&mut server, true, "ahu_skills_get", json!({"uri":uri}))["result"]["structuredContent"]
+            ["contents"][0]["text"],
+        original
+    );
+}
+
+#[test]
+fn skill_tools_preserve_local_bundle_privacy_boundary() {
+    let repo = bundled_repo();
+    let (name, _) = BUNDLED_SKILLS[0];
+    repo.write(
+        &format!(".agents/skills/{name}/references/local.md"),
+        "private-marker",
+    );
+    repo.write(".agents/skills/unbundled/SKILL.md", "private-marker");
+    let mut server = Server::new(&repo);
+    for uri in [
+        format!("ahu://skills/{name}/references/local.md"),
+        format!("ahu://skills/{name}/../SKILL.md"),
+        format!("ahu://skills/{name}/%2e%2e/SKILL.md"),
+        format!("ahu://skills/{name}//SKILL.md"),
+        format!("ahu://skills/{name}/SKILL.md?source=remote"),
+        format!("ahu://skills/{name}/SKILL.md#fragment"),
+        "ahu://skills/unbundled/SKILL.md".into(),
+        "https://example.invalid/SKILL.md".into(),
+        "file:///private-marker".into(),
+        repo.path().join(skill_path(name)).display().to_string(),
+    ] {
+        let response = tool_call(&mut server, true, "ahu_skills_get", json!({"uri":uri}));
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(!response.to_string().contains("private-marker"));
+        assert!(!response.to_string().contains(repo.path().to_str().unwrap()));
+    }
+    let path = repo.path().join(skill_path(name));
+    let saved = repo.path().join("saved.md");
+    std::fs::rename(&path, &saved).unwrap();
+    std::os::unix::fs::symlink(&saved, &path).unwrap();
+    let response = tool_call(
+        &mut server,
+        true,
+        "ahu_skills_get",
+        json!({"uri":format!("ahu://skills/{name}/SKILL.md")}),
+    );
+    assert_eq!(response["result"]["isError"], true);
+    std::fs::remove_file(path).unwrap();
+    for &(name, _) in &BUNDLED_SKILLS[1..] {
+        repo.remove(&skill_path(name));
+    }
+    assert_eq!(
+        tool_call(&mut server, true, "ahu_skills_list", json!({}))["result"]["structuredContent"]["skills"],
+        json!([])
+    );
+}
+
+#[test]
+fn skill_tools_stay_synchronous_with_tasks_capability_and_default_arguments() {
+    let repo = bundled_repo();
+    let mut server = Server::new(&repo);
+    let metadata =
+        json!({VERSION:"2026-07-28", CLIENT:{"extensions":{"io.modelcontextprotocol/tasks":{}}}});
+    let list = server.raw(
+        "tools/call",
+        json!({"name":"ahu_skills_list","_meta":metadata}),
+    );
+    assert_eq!(list["result"]["resultType"], "complete");
+    assert!(list["result"].get("task").is_none());
+    assert_eq!(
+        server.raw(
+            "tools/call",
+            json!({"name":"ahu_skills_get","_meta":metadata})
+        )["error"]["code"],
+        -32602
+    );
+    let uri = &list["result"]["structuredContent"]["skills"][0]["uri"];
+    let get = server.raw(
+        "tools/call",
+        json!({"name":"ahu_skills_get","arguments":{"uri":uri},"_meta":metadata}),
+    );
+    assert_eq!(get["result"]["resultType"], "complete");
+    assert!(get["result"]["structuredContent"]["contents"][0]["text"].is_string());
+    assert_eq!(
+        get["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "ahu"
+    );
+}

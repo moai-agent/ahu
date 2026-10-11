@@ -103,9 +103,12 @@ impl Session {
             return Some(response(id, super::tool_list_result(tools, true)));
         }
         if method == "tools/call" && capable(params) {
-            // Decision calls are synchronous service requests, not durable
-            // repository inspection jobs. Keep their MCP result direct.
-            if params["name"].as_str() == Some("ahu_typed_decide") {
+            // Decisions and verified skill retrieval stay synchronous. Skill
+            // snapshots must not be retained as durable inspection jobs.
+            if params["name"]
+                .as_str()
+                .is_some_and(|name| name == "ahu_typed_decide" || super::skills::is_tool(name))
+            {
                 return None;
             }
             self.enabled = true;

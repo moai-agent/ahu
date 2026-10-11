@@ -140,6 +140,11 @@ provider capacity stays unknown. This helps route work away from a constrained
 known account, but does not compare token prices, confirm model availability,
 or reserve shared capacity.
 
+Tool-only clients can discover verified bundled skills with `ahu_skills_list`
+and retrieve a manifest plus Markdown with `ahu_skills_get`. Both are read-only
+and preserve the [local Skills privacy and provenance contract](mcp-protocol.md#tool-only-skill-compatibility).
+Retrieval does not establish harness loading or execution.
+
 The advisory `ahu_skills_suggest` MCP tool accepts a task and a lexical or
 decision policy. It suggests committed skills without loading them. Decision
 mode sends task text and skill names/descriptions to the configured provider.

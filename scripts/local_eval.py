@@ -353,7 +353,10 @@ def trend(args) -> int:
             values = [item[field] for item in subset if item.get(field) is not None]
             return round(statistics.mean(values), 4) if values else None
 
-        known_tools = ("ahu_agents_list", "ahu_tasks_list", "ahu_task_get", "ahu_typed_decide")
+        known_tools = ("ahu_agents_recommend", "ahu_agents_list", "ahu_auth_budget",
+                       "ahu_tasks_list", "ahu_task_get", "ahu_typed_decide",
+                       "ahu_request_approval", "ahu_skills_suggest",
+                       "ahu_skills_list", "ahu_skills_get")
         tool_values = {name: [] for name in known_tools}
         for item in measured:
             named = item.get("mcp_tools")
