@@ -556,10 +556,25 @@ fn workspace_creation_failed(
     }
 }
 
-/// Record the created workspace without reverting task metadata written by
-/// `run-task` after the workspace shell started. The child uses the same lock
-/// for task-state transitions, so whichever write acquires it second reloads
-/// and preserves the first write.
+/// Reload and update task metadata under the same lock used for task-state
+/// transitions so concurrent startup and coordinator writes cannot restore
+/// stale records.
+fn update_task_record_locked(
+    task_dir: &Path,
+    record: &mut TaskRecord,
+    update: impl FnOnce(&mut TaskRecord),
+) -> Result<()> {
+    let _lock = task::lock_state(task_dir)?;
+    let mut latest = task::load(task_dir)?;
+    update(&mut latest);
+    state::write_json(
+        &crate::storage::TaskStorage::new(task_dir).record(),
+        &latest,
+    )?;
+    *record = latest;
+    Ok(())
+}
+
 fn record_created_workspace(
     task_dir: &Path,
     record: &mut TaskRecord,
@@ -567,17 +582,23 @@ fn record_created_workspace(
     workspace_id: &str,
     window_id: &str,
 ) -> Result<()> {
-    let _lock = task::lock_state(task_dir)?;
-    let mut latest = task::load(task_dir)?;
-    latest.cmux_group_id = Some(group_id.to_owned());
-    latest.cmux_workspace_id = Some(workspace_id.to_owned());
-    latest.cmux_window_id = Some(window_id.to_owned());
-    state::write_json(
-        &crate::storage::TaskStorage::new(task_dir).record(),
-        &latest,
-    )?;
-    *record = latest;
-    Ok(())
+    update_task_record_locked(task_dir, record, |latest| {
+        latest.cmux_group_id = Some(group_id.to_owned());
+        latest.cmux_workspace_id = Some(workspace_id.to_owned());
+        latest.cmux_window_id = Some(window_id.to_owned());
+    })
+}
+
+fn record_runtime_metadata(
+    task_dir: &Path,
+    record: &mut TaskRecord,
+    version: &str,
+    executable: &Path,
+) -> Result<()> {
+    update_task_record_locked(task_dir, record, |latest| {
+        latest.enforcement.harness_version = Some(version.to_owned());
+        latest.harness_executable = executable.to_path_buf();
+    })
 }
 
 /// Remove a task directory a failed launch created, but never through a path
@@ -1219,9 +1240,7 @@ fn run_verified_task(
             .and_then(|config| config.harness_version_pins.get(&record.identity.harness))
             .map(String::as_str),
     )?;
-    record.enforcement.harness_version = Some(version);
-    record.harness_executable = executable.clone();
-    task::save(task_dir, &record, &task::load_prompt(task_dir)?)?;
+    record_runtime_metadata(task_dir, &mut record, &version, &executable)?;
     let telemetry = config
         .map(|config| config.telemetry.clone())
         .unwrap_or_default();

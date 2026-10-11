@@ -229,15 +229,29 @@ fn prepared_record_freezes_identity_and_redacts_assignment() {
 
 #[test]
 fn created_workspace_metadata_preserves_a_state_written_by_the_started_task() {
-    for state in [TaskState::Running, TaskState::Exited] {
+    for (state, runtime_first) in [
+        (TaskState::Running, true),
+        (TaskState::Running, false),
+        (TaskState::Exited, true),
+        (TaskState::Exited, false),
+    ] {
         let (_temp, repo, loaded, plan) = fixture();
         let mut record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
         std::fs::create_dir_all(&plan.worktree).unwrap();
         task::save(&plan.task_dir, &record, PROMPT).unwrap();
-
-        // A fast startup command can update the record before workspace
-        // creation returns to the coordinator.
         task::set_state(&plan.task_dir, state).unwrap();
+
+        // The two processes may write in either order while startup races the
+        // coordinator's return from workspace creation.
+        if runtime_first {
+            record_runtime_metadata(
+                &plan.task_dir,
+                &mut record,
+                "1.2.3",
+                Path::new("/synthetic/codex"),
+            )
+            .unwrap();
+        }
         record_created_workspace(
             &plan.task_dir,
             &mut record,
@@ -246,12 +260,26 @@ fn created_workspace_metadata_preserves_a_state_written_by_the_started_task() {
             "window-1",
         )
         .unwrap();
+        if !runtime_first {
+            record_runtime_metadata(
+                &plan.task_dir,
+                &mut record,
+                "1.2.3",
+                Path::new("/synthetic/codex"),
+            )
+            .unwrap();
+        }
 
         let persisted = task::load(&plan.task_dir).unwrap();
         assert_eq!(persisted.state, state);
         assert_eq!(persisted.cmux_group_id.as_deref(), Some("group-1"));
         assert_eq!(persisted.cmux_workspace_id.as_deref(), Some("workspace-1"));
         assert_eq!(persisted.cmux_window_id.as_deref(), Some("window-1"));
+        assert_eq!(
+            persisted.enforcement.harness_version.as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(persisted.harness_executable, Path::new("/synthetic/codex"));
         assert_eq!(record, persisted);
     }
 }
