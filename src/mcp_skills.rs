@@ -15,6 +15,86 @@ const MAX_FILE_BYTES: usize = 64 * 1024;
 const EXTENSION: &str = "io.modelcontextprotocol/skills";
 const PAGE_SIZE: usize = 2;
 const PROVENANCE: &str = "io.github.moai-agent.ahu/skillOrigin";
+const MAX_CURSOR_BYTES: usize = 128;
+const MAX_URI_BYTES: usize = 256;
+const MAX_TOOL_PAYLOAD_BYTES: usize = 128 * 1024;
+
+pub(super) fn tool_definitions() -> [Value; 2] {
+    [
+        json!({
+            "name": "ahu_skills_list",
+            "description": "List digest-verified, locally installed ahu-bundled skills with opaque pagination. Read-only discovery does not establish that a harness loaded or followed a skill.",
+            "inputSchema": {"type":"object", "properties": {
+                "cursor": {"type":"string", "minLength":1, "maxLength":MAX_CURSOR_BYTES}
+            }, "additionalProperties":false},
+            "annotations": {"readOnlyHint":true, "destructiveHint":false, "openWorldHint":false}
+        }),
+        json!({
+            "name": "ahu_skills_get",
+            "description": "Retrieve a verified ahu-bundled skill manifest and Markdown contents by exact URI. Reads only bundled SKILL.md files, never neighbors or remote content. Retrieval does not establish that a harness loaded or followed the skill.",
+            "inputSchema": {"type":"object", "properties": {
+                "uri": {"type":"string", "minLength":1, "maxLength":MAX_URI_BYTES,
+                    "enum": super::BUNDLED_SKILLS.iter().map(|(name, _)| format!("ahu://skills/{name}/SKILL.md")).collect::<Vec<_>>()}
+            }, "required":["uri"], "additionalProperties":false},
+            "annotations": {"readOnlyHint":true, "destructiveHint":false, "openWorldHint":false}
+        }),
+    ]
+}
+
+pub(super) fn is_tool(name: &str) -> bool {
+    matches!(name, "ahu_skills_list" | "ahu_skills_get")
+}
+
+pub(super) fn validate_tool_arguments(name: &str, arguments: &Value) -> Result<()> {
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| Error::new("skill tool arguments must be an object"))?;
+    let listing = name == "ahu_skills_list";
+    let key = if listing { "cursor" } else { "uri" };
+    if object.keys().any(|candidate| candidate != key) {
+        return Err(Error::new("unexpected skill tool argument"));
+    }
+    let Some(value) = object.get(key) else {
+        return if listing {
+            Ok(())
+        } else {
+            Err(Error::new("skill retrieval requires uri"))
+        };
+    };
+    let limit = if listing {
+        MAX_CURSOR_BYTES
+    } else {
+        MAX_URI_BYTES
+    };
+    let value = value
+        .as_str()
+        .filter(|text| !text.is_empty() && text.len() <= limit)
+        .ok_or_else(|| Error::new("skill tool argument must be a bounded nonempty string"))?;
+    if !listing
+        && !super::BUNDLED_SKILLS
+            .iter()
+            .any(|(name, _)| value == format!("ahu://skills/{name}/SKILL.md"))
+    {
+        return Err(Error::new("unknown bundled skill URI"));
+    }
+    Ok(())
+}
+
+pub(super) fn call_tool(root: &Path, name: &str, arguments: &Value) -> Result<Value> {
+    validate_tool_arguments(name, arguments)?;
+    let method = if name == "ahu_skills_list" {
+        "skills/list"
+    } else {
+        "skills/get"
+    };
+    let result = execute_with_content(root, method, arguments, true)?;
+    // Bound the serialized payload too, before MCP duplicates it as text and
+    // structured content. This keeps the complete response below the frame cap.
+    if serde_json::to_vec(&result)?.len() > MAX_TOOL_PAYLOAD_BYTES {
+        return Err(Error::new("skill tool result exceeds 128 KiB"));
+    }
+    Ok(result)
+}
 
 #[derive(Deserialize)]
 struct Frontmatter {
@@ -200,6 +280,15 @@ pub(super) fn handle(
 }
 
 fn execute(root: &Path, method: &str, params: &Value) -> Result<Value> {
+    execute_with_content(root, method, params, false)
+}
+
+fn execute_with_content(
+    root: &Path,
+    method: &str,
+    params: &Value,
+    include_content: bool,
+) -> Result<Value> {
     let listing = matches!(method, "skills/list" | "resources/list");
     let argument = if listing { "cursor" } else { "uri" };
     if !params.is_object()
@@ -264,9 +353,12 @@ fn execute(root: &Path, method: &str, params: &Value) -> Result<Value> {
         .find(|skill| skill.uri() == uri)
         .ok_or_else(|| Error::new("unknown or unverified skill resource"))?;
     if method == "skills/get" {
-        Ok(
-            json!({"resultType": "complete", "skill": skill.manifest(), "ttlMs": 0, "cacheScope": "private"}),
-        )
+        let mut result = json!({"resultType": "complete", "skill": skill.manifest(), "ttlMs": 0, "cacheScope": "private"});
+        if include_content {
+            result["contents"] =
+                json!([{"uri":skill.uri(), "mimeType":"text/markdown", "text":skill.text}]);
+        }
+        Ok(result)
     } else {
         Ok(
             json!({"resultType": "complete", "contents": [{"uri": skill.uri(), "mimeType": "text/markdown", "text": skill.text}]}),

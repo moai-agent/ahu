@@ -772,6 +772,13 @@ mod tests {
         assert_eq!(expectations.required, ["ahu_typed_decide"]);
         assert_eq!(expectations.forbidden, ["ahu_task_get"]);
 
+        let skills = parse(&document(2,
+            "tool_expectations: {required: [ahu_skills_list], required_successful: [ahu_skills_get]}\n",
+        )).expect("skill tool expectations");
+        let skills = skills.tool_expectations.unwrap();
+        assert_eq!(skills.required, ["ahu_skills_list"]);
+        assert_eq!(skills.required_successful, ["ahu_skills_get"]);
+
         for (front, needle) in [
             (
                 "tool_expectations: {required: [ahu_not_a_tool]}\n",

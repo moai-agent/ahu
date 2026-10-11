@@ -72,7 +72,7 @@ A `notifications/*` method sent with an ID receives `-32601`.
 Unknown methods receive `-32601`. Unknown tools, missing/non-string tool names,
 and invalid tool arguments receive `-32602` in both synchronous and Tasks paths,
 before any handle is created. Arguments must be objects matching the advertised
-schema: list tools accept no keys, `ahu_task_get` requires `task`, and only the
+schema: agent/task list tools accept no keys, `ahu_task_get` requires `task`, and only the
 experimental adapter permits its omission. Selectors must be nonempty strings
 of at most 256 UTF-8 bytes; arguments are limited to 8 KiB. Failures while
 executing a valid inspection (such as a missing repository task) return text
@@ -188,3 +188,33 @@ When MCP telemetry is enabled, these retrieval methods use the existing bounded
 request spans: method, outcome, and a fixed error category on failure. Skill
 text, frontmatter, resource identifiers, content digests, and origin metadata are not
 exported. These observations describe retrieval only, not harness execution.
+
+## Tool-only skill compatibility
+
+Clients that expose only ordinary MCP tools can use the read-only
+`ahu_skills_list` and `ahu_skills_get` tools on either the legacy or modern
+connection. They require no Skills or Tasks extension capability. They remain
+synchronous even when the client advertises Tasks. The standard Skills and
+resource methods above retain their negotiation and response contracts.
+
+`ahu_skills_list` accepts an optional opaque `cursor` (1–128 UTF-8 bytes).
+It returns the same `skills`, two-entry pages, inventory-bound `nextCursor`,
+digests, resource metadata, and sanitized provenance as `skills/list`.
+`ahu_skills_get` requires an exact bundled `ahu://skills/<name>/SKILL.md` URI
+(at most 256 UTF-8 bytes). It returns `skill` plus `contents`, containing the
+Markdown bytes from the same verified snapshot. No separate resource call is
+needed. Arguments must be objects; additional keys, including argument-level
+`_meta`, are rejected. Invalid argument shapes or non-bundled URIs produce
+`-32602`; invalid/stale cursor values or unavailable verified content produce
+ordinary tool errors with `isError: true`.
+
+Both tools return JSON in `structuredContent` and equivalent JSON text in
+`content`. The payload carries `resultType: "complete"`, `ttlMs: 0`, and
+`cacheScope: "private"`. The outer tool result also disables caching, including
+on tool errors; modern outer results carry `resultType: "complete"`.
+Serialized compatibility payloads are limited to 128 KiB before the MCP
+text/structured duplication. The existing two-entry pagination and 64 KiB
+per-file read limits still apply. The tools share the bundle verification,
+local-file restrictions, supporting-resource contract, and payload-free
+telemetry described above. Retrieval never establishes that a harness loaded,
+followed, or executed the skill.

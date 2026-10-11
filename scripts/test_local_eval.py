@@ -58,6 +58,26 @@ class LocalEvalRecordTests(unittest.TestCase):
             local_eval.score(case, {"route": "billing", "confidence": 100}, {}, None, None, "d")
 
 
+class LocalEvalToolTrendTests(unittest.TestCase):
+    def test_skill_retrieval_counts_survive_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "records.jsonl"
+            path.write_text(json.dumps({
+                "schema_version": local_eval.MANUAL_RECORD_SCHEMA_VERSION,
+                "case_id": "fixture", "model": "fixture", "harness": "fixture",
+                "score": 1, "passed": True, "mcp_observed": True,
+                "mcp_tool_call_count": 3,
+                "mcp_tools": {"ahu_skills_list": 1, "ahu_skills_get": 2},
+            }) + "\n")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(local_eval.trend(type("Args", (), {"records": path})()), 0)
+            tools = json.loads(output.getvalue())[0]["mcp_tools"]
+            self.assertEqual(tools["ahu_skills_list"], 1)
+            self.assertEqual(tools["ahu_skills_get"], 2)
+            self.assertEqual(tools["ahu_typed_decide"], 0)
+
+
 class LocalEvalStorageTests(unittest.TestCase):
     def setUp(self):
         env = {key: value for key, value in os.environ.items()

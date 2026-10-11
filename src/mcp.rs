@@ -470,7 +470,7 @@ pub fn typed_decide(repo: &Repo, arguments: &Value) -> Result<Value> {
 }
 
 fn tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         crate::eval::advice::tool_definition(),
         json!({
             "name":"ahu_agents_list",
@@ -510,7 +510,9 @@ fn tools() -> Vec<Value> {
                 "mode":{"type":"string","enum":["lexical","decision"],"default":"decision"}
             },"required":["task"],"additionalProperties":false}
         }),
-    ]
+    ];
+    tools.extend(skills::tool_definitions());
+    tools
 }
 
 /// Every tool name an ahu MCP session can expose, including the explicit
@@ -518,7 +520,7 @@ fn tools() -> Vec<Value> {
 ///
 /// Evaluation case tool expectations and evaluation record validation are both
 /// bounded by this list, so neither can name a tool that does not exist.
-pub const TOOL_NAMES: [&str; 8] = [
+pub const TOOL_NAMES: [&str; 10] = [
     "ahu_agents_recommend",
     "ahu_agents_list",
     "ahu_auth_budget",
@@ -527,6 +529,8 @@ pub const TOOL_NAMES: [&str; 8] = [
     "ahu_typed_decide",
     "ahu_request_approval",
     "ahu_skills_suggest",
+    "ahu_skills_list",
+    "ahu_skills_get",
 ];
 
 /// SHA-256 over the served tool definitions, descriptions and schemas included.
@@ -549,6 +553,8 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
         | "ahu_tasks_list"
         | "ahu_typed_decide"
         | "ahu_skills_suggest"
+        | "ahu_skills_list"
+        | "ahu_skills_get"
         | "ahu_request_approval" => false,
         "ahu_task_get" => true,
         "ahu_task_inspect" if inspection_adapter => true,
@@ -556,6 +562,9 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
     };
     let empty = json!({});
     let arguments = params.get("arguments").unwrap_or(&empty);
+    if skills::is_tool(name) {
+        return skills::validate_tool_arguments(name, arguments);
+    }
     if name == "ahu_agents_recommend" {
         return crate::eval::advice::validate(arguments).map(|_| ());
     }
@@ -676,6 +685,7 @@ pub(super) fn call_response_with_cancellation(
         .cloned()
         .unwrap_or_else(|| json!({}));
     let result = match name {
+        "ahu_skills_list" | "ahu_skills_get" => skills::call_tool(&repo.root, name, &arguments),
         "ahu_agents_list" => agents(repo),
         "ahu_agents_recommend" => crate::eval::advice::call(repo, &arguments),
         "ahu_auth_budget" => auth_budget(repo, &arguments),
@@ -709,6 +719,10 @@ pub(super) fn call_response_with_cancellation(
             if modern {
                 result["resultType"] = json!("complete");
             }
+            if skills::is_tool(name) {
+                result["ttlMs"] = json!(0);
+                result["cacheScope"] = json!("private");
+            }
             response(id, result)
         }
         Err(error) => {
@@ -716,6 +730,10 @@ pub(super) fn call_response_with_cancellation(
                 json!({"isError":true,"content":[{"type":"text","text":error.to_string()}]});
             if modern {
                 result["resultType"] = json!("complete");
+            }
+            if skills::is_tool(name) {
+                result["ttlMs"] = json!(0);
+                result["cacheScope"] = json!("private");
             }
             response(id, result)
         }
@@ -984,6 +1002,8 @@ mod tests {
                 "ahu_typed_decide",
                 "ahu_request_approval",
                 "ahu_skills_suggest",
+                "ahu_skills_list",
+                "ahu_skills_get",
             ]
         );
         // The exported name list is what bounds evaluation tool expectations,

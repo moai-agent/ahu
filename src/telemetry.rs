@@ -2361,6 +2361,39 @@ mod tests {
     }
 
     #[test]
+    fn skill_tool_telemetry_retains_only_names_and_outcomes() {
+        let marker = "synthetic-private-skill";
+        let payload = serde_json::json!({
+            "uri": marker, "cursor": marker, "contents": [{"text":marker}],
+            "skill": {"frontmatter": {"description":marker}, "_meta": {"origin":marker}},
+        });
+        for name in ["ahu_skills_list", "ahu_skills_get"] {
+            let arguments = mcp_tool_attributes(name, &payload);
+            assert_eq!(arguments.len(), 1);
+            assert_eq!(
+                string_attr(&arguments, "ahu.mcp.tool.name"),
+                Some(name.into())
+            );
+            for response in [
+                serde_json::json!({"result":{"structuredContent":payload, "content":[{"type":"text","text":marker}]}}),
+                serde_json::json!({"result":{"isError":true,"content":[{"type":"text","text":marker}]}}),
+                serde_json::json!({"error":{"code":-32602,"message":marker}}),
+            ] {
+                let attributes = mcp_result_attributes("tools/call", name, &response);
+                assert!(attributes.iter().all(|attribute| {
+                    [
+                        "ahu.mcp.outcome",
+                        "ahu.mcp.error.code",
+                        "ahu.mcp.error.category",
+                    ]
+                    .contains(&attribute.key.as_str())
+                }));
+                assert!(!format!("{attributes:?}").contains(marker));
+            }
+        }
+    }
+
+    #[test]
     fn mcp_protocol_spans_include_offered_tools_and_protocol_outcomes() {
         let tools = mcp_result_attributes(
             "tools/list",
