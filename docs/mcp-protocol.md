@@ -138,3 +138,53 @@ revision) legacy inspection path for the connection. It always returns ordinary
 synchronous tool results and refuses Tasks methods even if later requests
 include modern capabilities. `tasks/list` and `tasks/result` are not
 implemented.
+
+## Local Skills extension
+
+The modern stdio path implements the local subset of the public
+[Skills extension (SEP-2640)](https://github.com/modelcontextprotocol/ext-skills/blob/main/specification/stable/skills.mdx)
+for the existing `2026-07-28` base protocol. `server/discover` advertises
+`resources: {}` and `extensions["io.modelcontextprotocol/skills"]: {}` when
+at least one installed bundled skill verifies. Legacy `initialize` connections
+do not advertise or serve Skills. Each `skills/list` and `skills/get` request
+must declare `io.modelcontextprotocol/skills: {}` in the modern client
+capabilities metadata. Standard resource reads do not require that extension.
+
+`skills/list` returns `skills` and an optional opaque `nextCursor`; pass it as
+`cursor` to continue. Pages contain at most two entries. Cursors are bound to
+the verified inventory and must be discarded if a file changes or disappears.
+`skills/get` takes `uri` and returns `skill`. Both results carry
+`resultType: "complete"`, `ttlMs: 0`, and `cacheScope: "private"`.
+Each skill exposes its `ahu://skills/<name>/SKILL.md` URI, unchanged parsed
+`frontmatter`, and a complete `resources` array with raw-byte
+`sha256:<64 lowercase hex>` digests and byte sizes. Standard `resources/list`
+also lists these files, and `resources/read` takes their exact `uri` and
+returns Markdown text in `contents`. Directory reads, subscriptions, and
+`directoryRead` are not advertised or implemented.
+
+Only the four distributable skills in the binary's `BUNDLED_SKILLS` allowlist
+are eligible, at `.agents/skills/<name>/SKILL.md`. Each request verifies
+frontmatter and the installed file's digest against the embedded bytes before
+exposing it. Missing, malformed, changed, inaccessible, oversized, or symlinked
+copies are omitted; lookup of an omitted resource fails. Reads are limited to
+64 KiB per file, require regular files, and open every relative component with
+no-follow descriptor operations. The response uses the bytes already verified,
+without reopening the path. It is a verified content snapshot, not a guarantee
+that the filesystem stays unchanged after a request.
+
+The current distributed bundle contains only `SKILL.md`; its complete resource
+array therefore contains one file. Adjacent scripts, references, Markdown links
+outside the skill, user skills, and remote content are never added implicitly.
+Supporting files would need explicit inclusion in the trusted bundle before
+being served. The server never resolves client URIs into arbitrary paths,
+fetches content, executes scripts, installs skills, or changes permissions.
+`_meta["io.github.moai-agent.ahu/skillOrigin"]` retains the bundled origin,
+server version, relative local path, and content digest. `executionObserved`
+is false: listing or retrieval is not evidence that a harness loaded, followed,
+or executed a skill. Clients must preserve the server origin when presenting
+skills; an MCP URI does not replace a harness's own local skill precedence.
+
+When MCP telemetry is enabled, these retrieval methods use the existing bounded
+request spans: method, outcome, and a fixed error category on failure. Skill
+text, frontmatter, resource URIs, content digests, and origin metadata are not
+exported. These observations describe retrieval only, not harness execution.

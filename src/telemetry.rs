@@ -1060,6 +1060,10 @@ pub(crate) fn mcp_request_span(request: &serde_json::Value) -> SpanGuard {
         | "server/discover"
         | "tools/list"
         | "tools/call"
+        | "skills/list"
+        | "skills/get"
+        | "resources/list"
+        | "resources/read"
         | "tasks/get"
         | "tasks/update"
         | "tasks/cancel"
@@ -2310,6 +2314,50 @@ mod tests {
         let duplicate =
             parse_ahu_resource_attributes("ahu.model=qwen-local,ahu.model=private-marker");
         assert_eq!(duplicate, vec![("ahu.model", "qwen-local".to_string())]);
+    }
+
+    #[test]
+    fn skill_retrieval_telemetry_excludes_content_uris_metadata_and_digests() {
+        let marker = "synthetic-sensitive-skill";
+        let digest = crate::util::digest_bytes(marker.as_bytes());
+        let skill = serde_json::json!({
+            "uri": format!("ahu://skills/{marker}/SKILL.md"),
+            "frontmatter": {"name": marker, "description": marker},
+            "resources": [{"uri": marker, "digest": format!("sha256:{digest}"), "size": 42}],
+            "_meta": {"origin": marker},
+        });
+        for method in [
+            "skills/list",
+            "skills/get",
+            "resources/list",
+            "resources/read",
+        ] {
+            for response in [
+                serde_json::json!({"result": {
+                    "skills": [skill.clone()], "skill": skill,
+                    "resources": [{"uri": marker, "digest": digest}],
+                    "contents": [{"uri": marker, "text": marker}],
+                    "_meta": {"origin": marker},
+                }}),
+                serde_json::json!({"error": {"code": -32602, "message": marker, "data": skill}}),
+            ] {
+                let attributes = mcp_result_attributes(method, marker, &response);
+                assert!(attributes.iter().all(|attribute| {
+                    [
+                        "ahu.mcp.outcome",
+                        "ahu.mcp.error.code",
+                        "ahu.mcp.error.category",
+                    ]
+                    .contains(&attribute.key.as_str())
+                }));
+                assert!(string_attr(&attributes, "ahu.mcp.outcome").is_some());
+                let rendered = format!("{attributes:?}");
+                assert!(!rendered.contains(marker));
+                assert!(!rendered.contains(&digest));
+                assert!(!rendered.contains("ahu://"));
+                assert!(!rendered.contains("execution"));
+            }
+        }
     }
 
     #[test]

@@ -16,6 +16,9 @@ mod task_protocol;
 #[path = "mcp_decisions.rs"]
 mod decisions;
 
+#[path = "mcp_skills.rs"]
+mod skills;
+
 const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const TASKS_EXTENSION: &str = "io.modelcontextprotocol/tasks";
@@ -400,6 +403,9 @@ fn handle(repo: &Repo, request: &Value, session: &mut task_protocol::Session) ->
     if let Some(result) = session.handle(repo, &id, method, &params) {
         return Some(result);
     }
+    if let Some(result) = skills::handle(&repo.root, &id, method, &params, session.modern()) {
+        return Some(result);
+    }
     match method {
         "initialize" => Some(response(
             &id,
@@ -423,7 +429,7 @@ fn handle(repo: &Repo, request: &Value, session: &mut task_protocol::Session) ->
             json!({
                 "resultType": "complete",
                 "supportedVersions": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
-                "capabilities": {"tools": {}, "extensions": {TASKS_EXTENSION: {}}},
+                "capabilities": skills::capabilities(&repo.root),
                 "_meta": {SERVER_INFO_META: {"name": SERVER_NAME, "version": SERVER_VERSION}},
                 "instructions": "ahu exposes repository-scoped agent and task inspection.",
                 "ttlMs": 0,
