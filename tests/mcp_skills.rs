@@ -454,7 +454,7 @@ fn near_limit_tool_request_ids_are_rejected_without_oversized_responses_in_both_
     for modern in [false, true] {
         let mut server = Server::new(&repo);
         if modern {
-            server.call("initialize", json!({}));
+            server.call("server/discover", json!({}));
         } else {
             server.raw("initialize", json!({"protocolVersion":"2025-11-25"}));
         }
