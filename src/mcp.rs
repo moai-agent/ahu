@@ -28,6 +28,7 @@ const CLIENT_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabiliti
 const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
 const SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_ID_BYTES: usize = 256;
 
 #[cfg(unix)]
 mod termination_signal {
@@ -290,7 +291,12 @@ fn discard_frame(reader: &mut impl BufRead) -> io::Result<()> {
 
 // MCP request IDs are strings or integers; null and fractional IDs are invalid.
 fn validate_envelope(request: &Value) -> Option<Value> {
-    let valid_id = |id: &Value| id.is_string() || id.is_i64() || id.is_u64();
+    let valid_id = |id: &Value| {
+        id.as_str()
+            .is_some_and(|value| value.len() <= MAX_REQUEST_ID_BYTES)
+            || id.is_i64()
+            || id.is_u64()
+    };
     if !request.is_object()
         || request["jsonrpc"] != "2.0"
         || !request["method"].is_string()
@@ -364,7 +370,17 @@ fn validate_request(request: &Value, session: &mut task_protocol::Session) -> Op
 }
 
 fn write_response(output: &mut impl Write, value: &Value) -> Result<()> {
-    serde_json::to_writer(&mut *output, value)?;
+    let encoded = serde_json::to_vec(value)?;
+    if encoded.len().saturating_add(1) > MAX_FRAME_BYTES {
+        let fallback = rpc_error(
+            &Value::Null,
+            -32603,
+            format!("MCP response exceeds {MAX_FRAME_BYTES} bytes"),
+        );
+        serde_json::to_writer(&mut *output, &fallback)?;
+    } else {
+        output.write_all(&encoded)?;
+    }
     output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
@@ -886,10 +902,12 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Cursor;
 
+    use serde_json::Value;
+
     use super::{
-        AGENT_CONTEXT_CRITIC_SKILL, BUNDLED_SKILLS, MAX_FRAME_BYTES, TOOL_NAMES, read_frame,
-        skill_path, tool_definitions_digest, tools, validate_envelope, validate_tool_call,
-        verify_bundled_skills,
+        AGENT_CONTEXT_CRITIC_SKILL, BUNDLED_SKILLS, MAX_FRAME_BYTES, MAX_REQUEST_ID_BYTES,
+        TOOL_NAMES, read_frame, skill_path, tool_definitions_digest, tools, validate_envelope,
+        validate_tool_call, verify_bundled_skills, write_response,
     };
 
     #[test]
@@ -931,6 +949,31 @@ mod tests {
         let mut final_frame = Cursor::new(b"{}".to_vec());
         assert_eq!(read_frame(&mut final_frame).unwrap().as_deref(), Some("{}"));
         assert!(read_frame(&mut final_frame).unwrap().is_none());
+    }
+
+    #[test]
+    fn oversized_string_ids_and_responses_cannot_exceed_the_frame_limit() {
+        let request = serde_json::json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "id":"x".repeat(MAX_REQUEST_ID_BYTES + 1),
+            "params":{"name":"ahu_skills_get","arguments":{"uri":"ahu://skills/discover-requirements/SKILL.md"}}
+        });
+        let error = validate_envelope(&request).expect("oversized request id is rejected");
+        assert_eq!(error["error"]["code"], -32600);
+        assert_eq!(error["id"], Value::Null);
+
+        let oversized = serde_json::json!({
+            "jsonrpc":"2.0",
+            "id":"x".repeat(MAX_FRAME_BYTES),
+            "result":{}
+        });
+        let mut encoded = Vec::new();
+        write_response(&mut encoded, &oversized).unwrap();
+        assert!(encoded.len() <= MAX_FRAME_BYTES);
+        let fallback: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(fallback["id"], Value::Null);
+        assert_eq!(fallback["error"]["code"], -32603);
     }
 
     #[test]

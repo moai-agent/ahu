@@ -9,6 +9,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 const EXT: &str = "io.modelcontextprotocol/skills";
 const CLIENT: &str = "io.modelcontextprotocol/clientCapabilities";
 const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+const FRAME_LIMIT: usize = 1024 * 1024;
 
 fn bundled_repo() -> common::TestRepo {
     let repo = common::TestRepo::new();
@@ -53,19 +54,24 @@ impl Server {
 
     fn raw(&mut self, method: &str, params: Value) -> Value {
         self.id += 1;
+        let (response, _) = self.raw_request(json!({
+            "jsonrpc":"2.0", "id":self.id, "method":method, "params":params
+        }));
+        assert_eq!(response["id"], self.id);
+        response
+    }
+
+    fn raw_request(&mut self, request: Value) -> (Value, usize) {
         let input = self.input.as_mut().unwrap();
-        writeln!(
-            input,
-            "{}",
-            json!({"jsonrpc":"2.0", "id":self.id, "method":method, "params":params})
-        )
-        .unwrap();
+        input
+            .write_all(&serde_json::to_vec(&request).unwrap())
+            .unwrap();
+        input.write_all(b"\n").unwrap();
         input.flush().unwrap();
         let mut line = String::new();
         self.output.read_line(&mut line).unwrap();
         let response: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["id"], self.id);
-        response
+        (response, line.len())
     }
 }
 
@@ -438,6 +444,47 @@ fn tool_only_clients_discover_and_retrieve_verified_skills() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn near_limit_tool_request_ids_are_rejected_without_oversized_responses_in_both_modes() {
+    let repo = bundled_repo();
+    let uri = format!("ahu://skills/{}/SKILL.md", BUNDLED_SKILLS[0].0);
+    for modern in [false, true] {
+        let mut server = Server::new(&repo);
+        if modern {
+            server.call("initialize", json!({}));
+        } else {
+            server.raw("initialize", json!({"protocolVersion":"2025-11-25"}));
+        }
+        let mut params = json!({"name":"ahu_skills_get","arguments":{"uri":uri}});
+        if modern {
+            params["_meta"] = json!({
+                VERSION:"2026-07-28",
+                CLIENT:{"extensions":{"io.modelcontextprotocol/tasks":{}}}
+            });
+        }
+        let mut request = json!({"jsonrpc":"2.0","id":"","method":"tools/call","params":params});
+        let base_len = serde_json::to_vec(&request).unwrap().len() + 1;
+        request["id"] = json!("x".repeat(FRAME_LIMIT - base_len));
+        assert_eq!(serde_json::to_vec(&request).unwrap().len() + 1, FRAME_LIMIT);
+
+        let (response, response_bytes) = server.raw_request(request);
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(response["id"], Value::Null);
+        assert!(response_bytes <= FRAME_LIMIT);
+
+        let mut valid_params = json!({"name":"ahu_skills_get","arguments":{"uri":uri}});
+        if modern {
+            valid_params["_meta"] = json!({
+                VERSION:"2026-07-28",
+                CLIENT:{"extensions":{"io.modelcontextprotocol/tasks":{}}}
+            });
+        }
+        let response = server.raw("tools/call", valid_params);
+        assert_eq!(response["result"]["isError"], Value::Null);
+        assert!(response["result"]["structuredContent"]["contents"][0]["text"].is_string());
     }
 }
 

@@ -204,8 +204,8 @@ digests, resource metadata, and sanitized provenance as `skills/list`.
 (at most 256 UTF-8 bytes). It returns `skill` plus `contents`, containing the
 Markdown bytes from the same verified snapshot. No separate resource call is
 needed. Arguments must be objects; additional keys, including argument-level
-`_meta`, are rejected. Invalid argument shapes or non-bundled URIs produce
-`-32602`; invalid/stale cursor values or unavailable verified content produce
+`_meta`, are rejected. Invalid argument shapes or non-bundled URI values produce
+`-32602`; invalid or stale cursor values, and unavailable verified content, produce
 ordinary tool errors with `isError: true`.
 
 Both tools return JSON in `structuredContent` and equivalent JSON text in
@@ -218,3 +218,26 @@ per-file read limits still apply. The tools share the bundle verification,
 local-file restrictions, supporting-resource contract, and payload-free
 telemetry described above. Retrieval never establishes that a harness loaded,
 followed, or executed the skill.
+
+## Interoperability matrix
+
+| Dimension | ahu bundled skills | Hugging Face MCP Server |
+| --- | --- | --- |
+| Operations | `skills/list`, `skills/get`, `resources/list`, and `resources/read`; no directory reads. Tool-only clients can use `ahu_skills_list` and `ahu_skills_get`. | `skills/list`, `skills/get`, `resources/read`, and optional `resources/directory/read`. A skill manifest identifies its resources; content is retrieved separately. |
+| Transport | Local MCP stdio process. Standard Skills methods require modern protocol negotiation. The two compatibility tools work on legacy and modern tool connections. ahu does not expose a remote HTTP MCP endpoint. | Skills use the `Streamable HTTP` transport; the long-lived STDIO transport does not expose the Skills extension. |
+| Authentication | No remote service or Skills credential is used. Access follows the local process and project permissions that launch ahu. | Access is determined by the endpoint's deployment. The catalog is supplied through the server's local `HF_SKILLS_DIR`; ahu neither stores nor forwards Hugging Face credentials. |
+| Catalog freshness | The catalog is embedded in the ahu binary. A local skill is available only while its installed bytes match that embedded snapshot; updates arrive with a new ahu bundle. The server does not refresh from a remote source. | The server documents a three-hour snapshot TTL. A stale request uses the last verified snapshot while a background refresh runs; refresh failures retain that snapshot and delay the next retry. |
+| Content verification | The installed `SKILL.md` must match the embedded digest. Only exact bundled skill URI values are served; neighboring files and linked resources are not followed or fetched. | The server verifies snapshot SHA-256 digests and actual `SKILL.md` frontmatter before retaining files. Its manifest can describe nested supporting files and directory reads. |
+| Client availability | Standard Skills methods require a client that negotiates and calls the extension methods. The tool fallback requires ordinary `tools/call`; a live interactive Codex call to both tools has been verified. Other harness clients remain unverified. | A client must reach a `Streamable HTTP` endpoint and support the methods it wants to use. Availability and authentication vary by deployment. |
+
+The fallback tools are a client-compatibility path to the same local ahu catalog;
+they do not connect to the remote Hugging Face server or make it a local-use
+dependency. Choose a path according to client capability: use the standard
+Skills methods when the client exposes them, otherwise use ahu's ordinary tools.
+Both paths keep ahu's embedded digest as the trust root. No remote skill content
+is accepted, and current ahu bundles advertise no
+supporting resources beyond each `SKILL.md`. This is not a claim that every
+supported harness implements SEP-2640, nor that retrieval means the harness
+installed, loaded, or followed a skill. See the [Hugging Face MCP Server
+documentation](https://github.com/huggingface/hf-mcp-server) for its current
+transport and snapshot behavior.
