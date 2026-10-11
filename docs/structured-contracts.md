@@ -92,4 +92,7 @@ integers within 64-bit range.
 Input/result artifacts must be singly linked regular files. Diagnostics name
 fixed schema keywords and bounds without echoing private paths, values, broker
 capabilities, or supervisor state. These checks do not isolate same-user
-processes or establish semantic correctness.
+processes or establish semantic correctness. Schema literals and artifacts
+containing the reserved JSON member names `$serde_json::private::Number` or
+`$serde_json::private::RawValue` are rejected at any nesting level so stored
+contracts and results cannot be reinterpreted during JSON round trips.
