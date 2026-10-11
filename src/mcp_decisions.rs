@@ -8,10 +8,14 @@ use std::path::Path;
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
+// Keep the example in the discovery surface and the empty-request diagnostic:
+// a harness may expose the tool without loading the bundled skill.
+const REQUEST_GUIDANCE: &str = r#"Read this tool's inputSchema from tools/list before calling; do not send empty probes such as {}. Supply exactly one pair: state and questions, or items and question. Minimal choice example: {"state":"A bug report says a button label is misspelled.","questions":{"category":{"type":"choice","instructions":"Classify the reported defect.","options":{"text":"Incorrect displayed text","behavior":"Incorrect application behavior"}}}}"#;
+
 pub(super) fn tool_definition() -> Value {
     let mut definition = json!({
         "name":"ahu_typed_decide",
-        "description":"Ask the configured typed decision provider for bounded classification, scoring, or probability estimates; treat results as evidence and make the final decision yourself. If TypeSafe Jev is configured, this sends state and questions to TypeSafe AI over HTTPS. Native local Ollama uses AHU_OLLAMA_MODEL and optional AHU_OLLAMA_URL; the generic loopback adapter uses AHU_DECISION_URL. Native Ollama sends no authentication and rejects cloud model variants; its settings cannot be combined with AHU_DECISION_URL or AHU_DECISION_MODEL.",
+        "description":format!("Ask the configured typed decision provider for bounded classification, scoring, or probability estimates; treat results as evidence and make the final decision yourself. If TypeSafe Jev is configured, this sends state and questions to TypeSafe AI over HTTPS. Native local Ollama uses AHU_OLLAMA_MODEL and optional AHU_OLLAMA_URL; the generic loopback adapter uses AHU_DECISION_URL. Native Ollama sends no authentication and rejects cloud model variants; its settings cannot be combined with AHU_DECISION_URL or AHU_DECISION_MODEL. {REQUEST_GUIDANCE}"),
         "inputSchema":{
             "type":"object",
             "properties":{
@@ -78,6 +82,11 @@ fn normalize_arguments(arguments: &Value) -> Result<Value> {
     let object = arguments
         .as_object()
         .ok_or_else(|| Error::new("arguments must be an object"))?;
+    if object.is_empty() {
+        return Err(Error::new(format!(
+            "typed decision arguments must not be empty. {REQUEST_GUIDANCE}"
+        )));
+    }
     if !object.contains_key("items") && !object.contains_key("question") {
         validate_questions_arguments(arguments)?;
         return Ok(arguments.clone());
@@ -1008,6 +1017,36 @@ mod tests {
 
     fn batch(question: Value) -> Value {
         json!({"items":{"alpha":"evidence", "beta":{"text":"other"}, "gamma":["third"]}, "question":question})
+    }
+
+    #[test]
+    fn discovery_and_documentation_examples_pass_runtime_validation() {
+        let definition = super::tool_definition();
+        let error = validate_arguments(&json!({})).unwrap_err().to_string();
+        for surface in [definition["description"].as_str().unwrap(), &error] {
+            assert!(surface.contains("tools/list"));
+            assert!(surface.contains("do not send empty probes"));
+            let (_, example) = surface.split_once("Minimal choice example: ").unwrap();
+            let request: Value = serde_json::from_str(example).unwrap();
+            validate_arguments(&request).expect("advertised example must remain valid");
+        }
+        // Check the actual committed request examples, not copies in test data.
+        // Response and configuration examples are not tool arguments.
+        for document in [
+            include_str!("../docs/typed-decisions.md"),
+            include_str!("../.agents/skills/ahu-typed-decisions/SKILL.md"),
+        ] {
+            let mut requests = 0;
+            for block in document.split("```json\n").skip(1) {
+                let (example, _) = block.split_once("```").unwrap();
+                let value: Value = serde_json::from_str(example).unwrap();
+                if value.get("questions").is_some() || value.get("items").is_some() {
+                    validate_arguments(&value).expect("documented request must remain valid");
+                    requests += 1;
+                }
+            }
+            assert!(requests > 0, "missing request example");
+        }
     }
 
     #[test]
