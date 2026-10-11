@@ -3585,7 +3585,9 @@ elif method == 'workspace.group.list':
  members = ['anchor']
  if (base/'dispatch.json').exists(): members.append('synthetic-task')
  print(json.dumps({'groups':[{'id':'saved-group','name':'synthetic group','anchor_workspace_id':'anchor','member_workspace_ids':members}]}))
-elif method == 'workspace.list': print(json.dumps({'workspaces':[]}))
+elif method == 'workspace.list':
+ dispatch = json.loads((base/'dispatch.json').read_text()) if (base/'dispatch.json').exists() else []
+ print(json.dumps({'workspaces':[{'id':'synthetic-task','current_directory':dispatch[dispatch.index('--cwd')+1]}] if dispatch else []}))
 elif method == 'workspace.group.expand':
  assert params == {'group_id':'saved-group'}
  print('{}')

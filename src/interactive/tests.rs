@@ -2,7 +2,9 @@
 //! native harness, or additional Git worktree.
 use super::*;
 use crate::interactive::repository::RepositoryManager;
-use crate::interactive::v1::{CreatedWorkspace, Group, Host, WorkspaceInfo, WorkspaceRequest};
+use crate::interactive::v1::{
+    CreatedWorkspace, Group, Host, WorkspaceCreationResult, WorkspaceInfo, WorkspaceRequest,
+};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -92,7 +94,10 @@ impl Host for SyntheticHost {
     fn workspaces_in_window(&self, _: Option<&str>) -> Result<BTreeMap<String, WorkspaceInfo>> {
         self.workspaces()
     }
-    fn create_task_workspace(&self, request: &WorkspaceRequest<'_>) -> Result<CreatedWorkspace> {
+    fn create_task_workspace(
+        &self,
+        request: &WorkspaceRequest<'_>,
+    ) -> WorkspaceCreationResult<CreatedWorkspace> {
         assert_eq!(request.group_id, "group");
         assert_eq!(request.window_id, Some("window"));
         self.requests.borrow_mut().push((
@@ -215,7 +220,7 @@ fn host_boundary_distinguishes_missing_workspace_from_failed_inventory() {
 }
 
 #[test]
-fn host_boundary_keeps_creation_routing_and_closes_only_inconsistent_new_workspace() {
+fn host_boundary_keeps_creation_routing_and_preserves_inconsistent_workspace() {
     let (_temp, repo, _, plan) = fixture();
     state::write_json(
         &mapping_path(&repo).unwrap(),
@@ -255,7 +260,11 @@ fn host_boundary_keeps_creation_routing_and_closes_only_inconsistent_new_workspa
             assert_eq!(result.unwrap().workspace.workspace_id, "new-workspace");
             assert!(host.mutations.borrow().is_empty());
         } else {
-            assert_eq!(*host.mutations.borrow(), ["close:new-workspace"]);
+            assert!(matches!(
+                result,
+                Err(interactive::v1::WorkspaceCreationError::OutcomeUnknown(_))
+            ));
+            assert!(host.mutations.borrow().is_empty());
         }
     }
 }

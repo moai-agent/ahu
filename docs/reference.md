@@ -1896,12 +1896,24 @@ hide it. Such a worktree may still be preparing or may remain from a failed
 launch. Missing worktrees have no worktree-local record to list; independent
 legacy records are not automatically deleted.
 
-On launch failure, rollback uses ordinary Git worktree removal, without force.
+On launch failure, rollback is allowed only when the task session could not have
+started, and uses ordinary Git worktree removal, without force.
 If removal fails, the error names the retained worktree and branch for inspection.
 ahu attempts to discard partial task state only after validating its path; it
 leaves redirected paths alone. Cleanup can itself fail, so inspect the reported
 paths. A retained worktree without a record appears as incomplete in `ahu tasks`.
 Listing does not remove it or establish that its contents are safe to delete.
+
+Once the cmux create command has started, a failed command or discovery lookup
+does not prove non-creation. ahu retains the task record, index, worktree and
+branch, reports the task identity and inspection paths, and does not invent a
+terminal outcome. Every new workspace candidate must match the requested
+worktree directory, even when only one candidate appears. Unrelated or ambiguous
+workspaces are preserved. Inspect the task and cmux session before retrying;
+confirm termination before cleanup. `ahu remove` requires a terminal record. If
+the record remains `starting` and manual inspection confirms no session uses the
+checkout, use non-forced Git worktree and branch removal rather than fabricating
+a terminal task state.
 
 The primary checkout owns the launch lock, cmux group mapping, headless
 coordination, and scoped task index. Generated architecture documents use the

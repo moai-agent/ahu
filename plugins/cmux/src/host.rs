@@ -1,7 +1,9 @@
 //! Built-in implementation of the versioned interactive host contract.
 use super::Cmux;
 use ahu_host_api::Result;
-use ahu_host_api::v1::{CreatedWorkspace, Group, Host, WorkspaceInfo, WorkspaceRequest};
+use ahu_host_api::v1::{
+    CreatedWorkspace, Group, Host, WorkspaceCreationResult, WorkspaceInfo, WorkspaceRequest,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -58,7 +60,10 @@ impl Host for Cmux {
         Cmux::expand_group(self, group_id)
     }
 
-    fn create_task_workspace(&self, request: &WorkspaceRequest<'_>) -> Result<CreatedWorkspace> {
+    fn create_task_workspace(
+        &self,
+        request: &WorkspaceRequest<'_>,
+    ) -> WorkspaceCreationResult<CreatedWorkspace> {
         Cmux::create_task_workspace(
             self,
             request.group_id,

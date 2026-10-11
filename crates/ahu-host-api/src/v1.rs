@@ -36,6 +36,40 @@ pub struct CreatedWorkspace {
     pub group_id: Option<String>,
 }
 
+/// A failed create request is not evidence that its startup command never ran.
+#[derive(Debug)]
+pub enum WorkspaceCreationError {
+    /// The request could not have created a workspace or started its command.
+    NotCreated(crate::Error),
+    /// Creation or startup may have occurred. Preserve all task inputs and work.
+    OutcomeUnknown(crate::Error),
+}
+
+pub type WorkspaceCreationResult<T> = std::result::Result<T, WorkspaceCreationError>;
+
+impl std::fmt::Display for WorkspaceCreationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotCreated(error) => write!(f, "workspace was not created: {error}"),
+            Self::OutcomeUnknown(error) => {
+                write!(f, "workspace creation outcome is unknown: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceCreationError {}
+
+impl From<WorkspaceCreationError> for crate::Error {
+    fn from(error: WorkspaceCreationError) -> Self {
+        let kind = match &error {
+            WorkspaceCreationError::NotCreated(error)
+            | WorkspaceCreationError::OutcomeUnknown(error) => error.kind(),
+        };
+        Self::new(error.to_string()).with_kind(kind)
+    }
+}
+
 /// A shell startup command assembled by ahu, never a task prompt.
 /// The host may start it immediately; callers must persist task inputs first.
 pub struct WorkspaceRequest<'a> {
@@ -81,7 +115,13 @@ pub trait Host {
 
     fn expand_group(&self, group_id: &str) -> Result<()>;
 
-    fn create_task_workspace(&self, request: &WorkspaceRequest<'_>) -> Result<CreatedWorkspace>;
+    /// Success must identify the new workspace by its exact requested directory,
+    /// including when it is the only new candidate. A failed command or lookup
+    /// after dispatch must not claim non-creation without affirmative evidence.
+    fn create_task_workspace(
+        &self,
+        request: &WorkspaceRequest<'_>,
+    ) -> WorkspaceCreationResult<CreatedWorkspace>;
 
     fn open_markdown(&self, path: &Path, focus: bool) -> Result<String>;
 
