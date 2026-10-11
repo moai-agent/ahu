@@ -103,6 +103,8 @@ elif scenario=='outside_bad_input':
 elif scenario=='measure_no_terminal':
  print(json.dumps({'type':'assistant','usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120}}),flush=True)
 else: open('proof.txt','w').write('synthetic proof\n')
+if 'AHU_STRUCTURED_RESULT' in os.environ:
+ open(os.environ['AHU_STRUCTURED_RESULT'],'w').write(os.environ.get('AHU_STRUCTURED_RESULT_JSON','{"answer":42}'))
 result={'type':'result','subtype':'success','result':'validated synthetic proof','session_id':session,'is_error':False,'permission_denials':([{'tool':'Bash'}] if scenario=='denied' else [])}
 if scenario in ('measure','measure_no_terminal'): result.update({'usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120},'total_cost_usd':0.0125})
 if scenario!='measure_no_terminal': print(json.dumps(result),flush=True)
@@ -204,6 +206,130 @@ fn structured_input_refusal_precedes_worktree_creation_and_harness_probe() {
             "{error}"
         );
         assert!(!f.repo.path().join(".worktrees").exists());
+    }
+}
+
+#[test]
+fn structured_contract_completes_and_persists_a_validated_result() {
+    let f = Fixture::new();
+    let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        original.replacen(
+            "---\n",
+            "---\ninput_schema:\n  type: object\n  required: [ok]\n  properties:\n    ok: {type: boolean}\n  additionalProperties: false\noutput_schema:\n  type: object\n  required: [answer]\n  properties:\n    answer: {type: integer}\n  additionalProperties: false\n",
+            1,
+        ),
+    )
+    .unwrap();
+    f.repo.commit("declare structured worker contract");
+    let input = f.external.path().join("input.json");
+    std::fs::write(&input, r#"{"ok":true}"#).unwrap();
+    let out = f
+        .command()
+        .env("SCENARIO", "success")
+        .args([
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "perform a typed synthetic task",
+            "--input-file",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let launch = Fixture::value(&out);
+    assert_eq!(launch["outcome"], "succeeded");
+    let result: Value = serde_json::from_slice(
+        &std::fs::read(launch["review"]["result_path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        result["structured_output"],
+        serde_json::json!({"answer":42})
+    );
+}
+
+#[test]
+fn structured_reserved_marker_artifacts_cannot_change_after_result_persistence() {
+    let f = Fixture::new();
+    let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        original.replacen(
+            "---\n",
+            "---\ninput_schema:\n  type: object\n  required: [ok]\n  properties:\n    ok: {type: boolean}\n  additionalProperties: false\noutput_schema:\n  type: object\n  additionalProperties:\n    type: string\n",
+            1,
+        ),
+    )
+    .unwrap();
+    f.repo
+        .commit("declare marker-resistant structured contract");
+    let input = f.external.path().join("input.json");
+    std::fs::write(&input, r#"{"ok":true}"#).unwrap();
+    for (index, marker) in [
+        r#"{"$serde_json::private::RawValue":"{\"approved\":true}"}"#,
+        r#"{"$serde_json::private::Number":"123"}"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let out = f
+            .command()
+            .env("SCENARIO", "success")
+            .env("AHU_STRUCTURED_RESULT_JSON", marker)
+            .args([
+                "@worker",
+                "--headless",
+                "--output",
+                "json",
+                "--prompt",
+                "reject reserved structured marker data",
+                "--input-file",
+                input.to_str().unwrap(),
+                "--name",
+                if index == 0 {
+                    "marker-raw"
+                } else {
+                    "marker-number"
+                },
+            ])
+            .output()
+            .unwrap();
+        let launch = Fixture::value(&out);
+        let task_id = launch["task_id"].as_str().unwrap();
+        let readback = f
+            .command()
+            .args(["result", task_id, "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            readback.status.success(),
+            "{}",
+            String::from_utf8_lossy(&readback.stderr)
+        );
+        let result = Fixture::value(&readback);
+        assert_eq!(result["outcome"], "failed");
+        assert!(result["structured_output"].is_null());
+        assert!(
+            result["review"]["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| blocker
+                    .as_str()
+                    .is_some_and(|text| text.contains("reserved serde_json marker")))
+        );
     }
 }
 

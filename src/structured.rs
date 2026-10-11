@@ -129,6 +129,7 @@ pub fn parse(bytes: &[u8]) -> Result<Value> {
         })?
         .0;
     bounded(&value, 0, &mut 0)?;
+    reject_private_marker_keys(&value)?;
     Ok(value)
 }
 
@@ -171,7 +172,11 @@ impl<'de> Deserialize<'de> for UniqueValue {
         match raw.get().as_bytes().first() {
             Some(b'{') => serde::Deserializer::deserialize_map(&mut parser, Visitor),
             Some(b'[') => serde::Deserializer::deserialize_seq(&mut parser, Visitor),
-            _ => serde_json::from_str(raw.get())
+            // Scalars cannot contain marker keys, so deserialize them directly
+            // as Value. Recursing through UniqueValue here turns serde_json's
+            // arbitrary-precision scalar representation into its private map
+            // marker instead of preserving it as a Number.
+            _ => serde_json::from_str::<Value>(raw.get())
                 .map(UniqueValue)
                 .map_err(serde::de::Error::custom),
         }
@@ -208,8 +213,41 @@ fn schema_error(keyword: &str) -> Error {
     Error::new(format!("invalid contract schema: check {keyword}"))
 }
 
+/// serde_json reserves these object keys for its own number and raw-value
+/// encodings. With those features enabled, an ordinary `Value` deserialize can
+/// reinterpret a user object carrying one of the keys as a different JSON value.
+/// Reject them before a contract or artifact crosses a serialize/deserialize
+/// boundary so validation and later result reads see the same data.
+fn reject_private_marker_keys(value: &Value) -> Result<()> {
+    match value {
+        Value::Object(object) => {
+            if object.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "$serde_json::private::Number" | "$serde_json::private::RawValue"
+                )
+            }) {
+                return Err(Error::new(
+                    "JSON contains a reserved serde_json marker property",
+                ));
+            }
+            for nested in object.values() {
+                reject_private_marker_keys(nested)?;
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                reject_private_marker_keys(nested)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub fn check_schema(schema: &Value) -> Result<()> {
     bounded(schema, 0, &mut 0)?;
+    reject_private_marker_keys(schema)?;
     if serde_json::to_vec(schema)?.len() > MAX_BYTES {
         return Err(schema_error("65536 byte limit"));
     }
@@ -636,6 +674,30 @@ mod tests {
     }
 
     #[test]
+    fn structured_reserved_serde_marker_keys_are_rejected_before_round_trip() {
+        let raw_value = br#"{"$serde_json::private::RawValue":"{\"approved\":true}"}"#;
+        let raw_number = br#"{"nested":{"$serde_json::private::Number":"123"}}"#;
+        for artifact in [raw_value.as_slice(), raw_number.as_slice()] {
+            assert!(parse(artifact).is_err());
+        }
+        for schema in [
+            json!({"const":{"$serde_json::private::Number":"123"}}),
+            json!({"properties":{"nested":{"enum":[{"$serde_json::private::RawValue":"{}"}]}}}),
+        ] {
+            assert!(check_schema(&schema).is_err());
+        }
+
+        let schema = json!({"const":{"approved":"yes"}});
+        let contract = Contract {
+            output: Some(schema.clone()),
+            ..Default::default()
+        };
+        let persisted = serde_json::to_vec(&contract).unwrap();
+        let restored: Contract = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(restored.output, Some(schema));
+    }
+
+    #[test]
     fn structured_draft202012_tuple_and_applicator_semantics() {
         let cases = [
             (
@@ -706,10 +768,7 @@ mod tests {
             assert!(validate(&integer, &parse(raw.as_bytes()).unwrap()).is_err());
         }
         assert!(parse(b"1e1000001").is_err());
-        assert_eq!(
-            parse(br#"{"$serde_json::private::Number":"123"}"#).unwrap(),
-            json!({"$serde_json::private::Number":"123"})
-        );
+        assert!(parse(br#"{"$serde_json::private::Number":"123"}"#).is_err());
     }
 
     #[test]
