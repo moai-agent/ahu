@@ -2,7 +2,7 @@
 
 A registered agent may declare `input_schema` and/or `output_schema` directly
 in its OKF YAML frontmatter. Each value is a nested JSON Schema object or a
-boolean schema. String paths are not supported. For example, add these fields
+true/false schema. String paths are not supported. For example, add these fields
 to a manifest's existing frontmatter:
 
 ```yaml
@@ -80,11 +80,11 @@ Schema checking and artifact evaluation each have a 100000-step budget. YAML
 schema expansion also enforces node, nesting, and string-byte limits while
 parsing aliases. Duplicate keys, custom YAML tags, merge keys, and non-string
 mapping keys are rejected. Quote YAML strings that would otherwise become
-booleans or null, such as `type: "null"` and property names like `"true"`.
+the words `true` or `false`, or null, such as `type: "null"` and property names like `"true"`.
 
 YAML schema numbers must use integer scalar notation within signed or unsigned
 128-bit range. Floating-point YAML scalars, including `1.0`, exponent notation,
-and nonfinite values, are rejected: the YAML decoder would round them before
+and non-finite values, are rejected: the YAML decoder would round them before
 schema validation. JSON artifacts retain exact decimal numbers, with exponent
 magnitude limited to 1000000. Length/count schema bounds use unsigned JSON
 integers within 64-bit range.

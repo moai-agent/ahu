@@ -176,15 +176,15 @@ The current distributed bundle contains only `SKILL.md`; its complete resource
 array therefore contains one file. Adjacent scripts, references, Markdown links
 outside the skill, user skills, and remote content are never added implicitly.
 Supporting files would need explicit inclusion in the trusted bundle before
-being served. The server never resolves client URIs into arbitrary paths,
+being served. The server never resolves client resource identifiers into arbitrary paths,
 fetches content, executes scripts, installs skills, or changes permissions.
 `_meta["io.github.moai-agent.ahu/skillOrigin"]` retains the bundled origin,
 server version, relative local path, and content digest. `executionObserved`
 is false: listing or retrieval is not evidence that a harness loaded, followed,
 or executed a skill. Clients must preserve the server origin when presenting
-skills; an MCP URI does not replace a harness's own local skill precedence.
+skills; an MCP resource identifier does not replace a harness's own local skill precedence.
 
 When MCP telemetry is enabled, these retrieval methods use the existing bounded
 request spans: method, outcome, and a fixed error category on failure. Skill
-text, frontmatter, resource URIs, content digests, and origin metadata are not
+text, frontmatter, resource identifiers, content digests, and origin metadata are not
 exported. These observations describe retrieval only, not harness execution.

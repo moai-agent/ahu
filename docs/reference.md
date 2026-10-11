@@ -1661,8 +1661,8 @@ file that exists but cannot be parsed is reported as *unknown* hooks, never as
 Interactive session operations use the in-process Rust interface
 `interactive::v1::Host`. The built-in cmux adapter supplies capability checks,
 workspace and group queries, creation, focus, close, sidebar updates, and
-Markdown opening. The repository manager remains in ahu and revalidates recorded
-group/window ownership before task mutations. Launch admission, native
+Markdown opening. The repository manager remains in ahu and validates recorded
+group/window ownership again before task mutations. Launch admission, native
 credentials and approvals, `run-task` supervision, cancellation confirmation,
 and worktree cleanup remain in their existing core paths.
 
@@ -1674,7 +1674,7 @@ group/window/workspace topology and is versioned by its Rust module; it offers
 no runtime negotiation or stable binary ABI.
 
 Headless execution still needs no interactive host. Native cmux hook inspection,
-wrapper refusal, environment sanitization, and headless isolation checks remain
+wrapper refusal, environment cleanup, and headless isolation checks remain
 active independently of session hosting. Removing the session adapter must not
 remove those checks.
 
