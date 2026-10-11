@@ -1,24 +1,41 @@
 //! Interactive session hosting, independent of harness execution.
 //!
 //! V1 is an in-process Rust boundary, not a dynamic plugin ABI or wire protocol.
-//! Discovery deliberately retains cmux as the only built-in host. Headless
-//! execution does not discover a host; native hook isolation remains separate.
+//! The optional compiled cmux package supplies session mechanics; inventory is
+//! side-effect-free and activation is separate from executable discovery.
 
+pub mod plugins;
 pub mod repository;
 pub mod v1;
 
 use crate::util::{Result, shell_single_quote};
 use std::path::Path;
 
-/// Resolve the current interactive host, preserving cmux discovery and errors.
+/// Activate the selected host, preserving the historical connection API.
+/// Side-effect-free plugin discovery uses `plugins::status`, not this function.
 pub fn discover() -> Result<Box<dyn v1::Host>> {
-    Ok(Box::new(crate::cmux::Cmux::discover()?))
+    plugins::require_cmux()?;
+    #[cfg(feature = "cmux-plugin")]
+    {
+        Ok(Box::new(crate::cmux::Cmux::discover()?))
+    }
+    #[cfg(not(feature = "cmux-plugin"))]
+    unreachable!("require_cmux refuses a build without the plugin")
 }
 
 /// A coordinator outside a cmux workspace still runs in its invoking terminal.
 /// Keep this selection at the adapter boundary, before probing any host.
 pub fn discover_for_coordinator() -> Result<Option<Box<dyn v1::Host>>> {
-    if crate::cmux::inherited_workspace().is_none() {
+    let status = plugins::status()?;
+    if !status.selected {
+        return Ok(None);
+    }
+    plugins::require_cmux()?;
+    if std::env::var("CMUX_WORKSPACE_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
+        .is_none()
+    {
         return Ok(None);
     }
     discover().map(Some)

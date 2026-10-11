@@ -16,6 +16,8 @@ name = "ahu"
 path = "src/lib.rs"
 
 [dependencies]
+ahu-host-api = { version = "0.1.0", path = "crates/ahu-host-api" }
+ahu-cmux-plugin = { version = "0.1.0", path = "plugins/cmux", optional = true }
 dotenvy = "0.15"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
@@ -34,3 +36,10 @@ yaml_serde = "0.10"
 [dev-dependencies]
 tempfile = "3"
 toml = "0.9"
+
+[workspace]
+members = ["crates/ahu-host-api", "plugins/cmux"]
+
+[features]
+default = ["cmux-plugin"]
+cmux-plugin = ["dep:ahu-cmux-plugin"]

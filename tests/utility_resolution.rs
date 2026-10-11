@@ -131,8 +131,14 @@ fn repository_utilities_are_excluded_before_discovery_and_launch() {
                 assert!(result.status.success(), "{args:?}: {result:?}");
             } else {
                 assert!(!result.status.success(), "{args:?}: {result:?}");
-                assert!(fixture.outside.path().join("external-cmux-ran").exists());
-                std::fs::remove_file(fixture.outside.path().join("external-cmux-ran")).unwrap();
+                let marker = fixture.outside.path().join("external-cmux-ran");
+                assert_eq!(
+                    marker.exists(),
+                    cfg!(feature = "cmux-plugin") || args == ["doctor"]
+                );
+                if marker.exists() {
+                    std::fs::remove_file(marker).unwrap();
+                }
             }
             std::fs::remove_file(fixture.outside.path().join("external-git-ran")).unwrap();
         }
@@ -180,7 +186,14 @@ fn utility_resolution_fails_closed_without_an_external_installation() {
         assert!(!result.status.success());
         let text = String::from_utf8_lossy(&result.stdout);
         assert!(text.contains("git was not found"), "{result:?}");
-        assert!(text.contains("cmux was not found"), "{result:?}");
+        assert!(
+            text.contains(if cfg!(feature = "cmux-plugin") {
+                "cmux was not found"
+            } else {
+                "cmux session plugin is not included"
+            }),
+            "{result:?}"
+        );
     }
 }
 
@@ -234,8 +247,8 @@ fn default_cmux_pins_the_external_target_across_rpc_calls() {
         .unwrap();
     fixture.assert_unexecuted(&result);
     assert!(
-        marker.exists(),
-        "the pinned external cmux must receive capabilities: {result:?}"
+        marker.exists() == cfg!(feature = "cmux-plugin"),
+        "only an included plugin probes capabilities through the pinned executable: {result:?}"
     );
 }
 

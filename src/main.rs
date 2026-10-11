@@ -45,6 +45,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             println!("{}", cli::help_for(topic.as_deref())?);
             Ok(0)
         }
+        Command::Plugins { output_json } => {
+            ahu::interactive::plugins::list(output_json)?;
+            Ok(0)
+        }
         Command::Version => {
             println!("ahu {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
@@ -499,6 +503,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::EvalReport { .. }
                 | Command::EvalVerify { .. }
                 | Command::EvalRun { .. }
+                | Command::Plugins { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })
         }

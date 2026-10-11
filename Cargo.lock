@@ -6,6 +6,8 @@ version = 4
 name = "ahu"
 version = "0.11.0"
 dependencies = [
+ "ahu-cmux-plugin",
+ "ahu-host-api",
  "dotenvy",
  "libc",
  "opentelemetry",
@@ -21,6 +23,23 @@ dependencies = [
  "toml",
  "url",
  "yaml_serde",
+]
+
+[[package]]
+name = "ahu-cmux-plugin"
+version = "0.1.0"
+dependencies = [
+ "ahu-host-api",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "ahu-host-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

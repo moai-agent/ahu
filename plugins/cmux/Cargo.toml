@@ -1,0 +1,15 @@
+[package]
+name = "ahu-cmux-plugin"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Optional compiled cmux session plugin for ahu"
+repository = "https://github.com/moai-agent/ahu"
+publish = false
+
+[dependencies]
+ahu-host-api = { version = "0.1.0", path = "../../crates/ahu-host-api" }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

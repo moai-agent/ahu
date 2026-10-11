@@ -70,6 +70,7 @@ Commands:
   remove <task-id>      Remove a terminal task's record, worktree, and branch
   message <task-id> <text>
                         Append an operator message; subsequent flags are literal text
+  plugins [--output json] Inspect compiled session plugins without executing them
   cmux status [--output json]
                         Inspect native integration evidence and headless isolation
   cmux install --harness ID [--dry-run]
@@ -276,6 +277,7 @@ Commands:
   focus|message ID ...  Focus a task or send it a message
   eval run|report       Run and compare local agent evaluations
   knowledge lint        Check configured OKF bundles
+  plugins               Inspect compiled session plugins and selection
   cmux status|install   Inspect or install native cmux integration
   auth profiles|status|readiness|budget|bind|select
                         Check or manage local project auth profiles
@@ -316,6 +318,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "knowledge lint" => help_section("knowledge lint options:", "eval report options:"),
         "doctor" => "Usage: ahu doctor\n\nSummarize project, context-lock, skills, harness, telemetry, and cmux readiness. Use --verbose for component-level diagnostics.\n".to_string(),
         "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes ahu.lock and accepts local context in owner-only host state; review and commit ahu.lock only when shared context changed.\n".to_string(),
+        "plugins" => "Usage: ahu plugins [--output json]\n\nInspect compiled session plugins and AHU_INTERACTIVE_PLUGIN selection without executing plugins.\n".to_string(),
         "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
         "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
         "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth budget [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics. `auth budget` reports verified provider rate-limit windows for the active profile. These are percentages and reset periods, not literal token counts; agents sharing one account share its capacity. Unsupported providers remain unknown.\n\nIdentity probes: codex, claude-code, antigravity, kiro (GitHub social login), and ollama. Use --harness ollama to check the loopback daemon selected by OLLAMA_HOST (default 127.0.0.1:11434). OpenCode readiness requires --model with an Ollama cloud model; other OpenCode providers remain unsupported. Readiness checks account identity and project binding only: it does not verify OpenCode's configured provider endpoint, model availability, or inference access.\n".to_string(),
@@ -487,6 +490,9 @@ pub enum Command {
     Message {
         task_id: String,
         text: String,
+    },
+    Plugins {
+        output_json: bool,
     },
     CmuxStatus {
         output_json: bool,
@@ -713,6 +719,13 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 Ok(Command::Tasks { limit })
             }
         }
+        "plugins" => match &args[1..] {
+            [] => Ok(Command::Plugins { output_json: false }),
+            [flag, value] if flag == "--output" && value == "json" => {
+                Ok(Command::Plugins { output_json: true })
+            }
+            _ => bail!("expected ahu plugins [--output json]"),
+        },
         "cmux" => parse_cmux(&args[1..]),
         "mcp" => match args.get(1).map(String::as_str) {
             Some("serve") if args.len() == 2 => Ok(Command::McpServe),
