@@ -1073,15 +1073,70 @@ fn current_claude_isolates_hooks_without_admitting_plugins_or_managed_sources() 
 #[test]
 fn current_codex_requires_fresh_metadata_even_without_visible_sources() {
     let f = Fixture::new();
-    let status = integration::headless_status(f.inspect("codex"), "codex-cli 0.160.0");
-    assert!(!status.headless.allowed);
-    assert!(
-        status
-            .headless
-            .reasons
-            .iter()
-            .any(|r| r.contains("fresh native"))
-    );
+    for version in ["0.157.1", "0.160.0"] {
+        for decorated in [version.to_owned(), format!("codex-cli v{version}")] {
+            let status = integration::headless_status(f.inspect("codex"), &decorated);
+            assert!(!status.headless.allowed, "{decorated}");
+            assert!(
+                status
+                    .headless
+                    .reasons
+                    .iter()
+                    .any(|r| r.contains("fresh native"))
+            );
+        }
+    }
+}
+
+#[test]
+fn codex_empty_notify_is_declarative_but_other_sources_still_refuse() {
+    let f = Fixture::new();
+    let metadata = json!({"data":[{"cwd":f.root,"hooks":[],"warnings":[],"errors":[]}]});
+    for path in [
+        f.home.join(".codex/config.toml"),
+        f.root.join(".codex/config.toml"),
+        f.root.join("config.toml"),
+    ] {
+        for (config, allowed) in [
+            ("notify = []\n", true),
+            ("[profiles.quiet]\nnotify = []\n", true),
+            ("notify = ['unknown-command']\n", false),
+            ("notify = ''\n", false),
+            ("notify = false\n", false),
+            ("notify = {}\n", false),
+            ("notify = [0]\n", false),
+            ("[profiles.quiet]\nnotify = ['unknown-command']\n", false),
+            ("notify = []\ninclude = 'unknown.toml'\n", false),
+            ("notify = []\n[plugins.unknown]\nenabled = true\n", false),
+            (
+                "notify = []\ncli_auth_credentials_store = 'unknown'\n",
+                false,
+            ),
+        ] {
+            f.write(&path, config);
+            let status = f.inspect("codex");
+            assert_eq!(status.headless.allowed, allowed, "{path:?}: {config}");
+            // Empty notify never substitutes for effective hook inspection.
+            assert!(
+                !integration::headless_status(status, "0.160.0")
+                    .headless
+                    .allowed
+            );
+            assert_eq!(
+                integration::codex_effective_status(
+                    f.inspect("codex"),
+                    &f.root,
+                    &metadata,
+                    "0.160.0"
+                )
+                .is_ok(),
+                allowed,
+                "{path:?}: {config}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), config);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[test]
