@@ -1725,7 +1725,7 @@ activate this session package.
 ### Local session package discovery and selection
 
 `AHU_PLUGIN_PATH` is an explicit colon-separated list of absolute package
-directories. Each directory must contain `ahu-plugin.md`. There is no default
+directories. Each directory must contain `ahu-plugin.md`. Discovery uses no default
 search directory, recursive scan, installation, network lookup, Cargo invocation,
 or execution of package code. Unset the variable to inspect only compiled packages;
 an empty value or empty path entry is an error. Discovery never selects a local
@@ -1734,7 +1734,7 @@ package, even when cmux was omitted at build time.
 A package manifest is OKF 0.2 Markdown with YAML frontmatter on the first line,
 closed by a standalone `---` line. LF and CRLF line endings are supported. The
 optional Markdown body is documentation only: it is never configuration or code.
-There is no fallback to the old TOML plugin manifest filename. The required
+Discovery does not fall back to the old TOML plugin manifest filename. The required
 frontmatter fields are shown below; an optional `executable` mapping enables the
 separate executable protocol described below.
 
@@ -1805,7 +1805,7 @@ the package. Compiled cmux remains the default, and headless execution does not
 consult this inventory.
 
 **Durable external sessions remain blocked.** Existing `cmux_*` task fields and
-`cmux.json` mappings do not pin an external package identity or executable. Ahu
+`cmux.json` mappings do not pin an external package identity or executable. ahu
 refuses external task launch, coordinator placement, and operations on those
 records before querying the external host. This preserves existing ownership and
 liveness interpretation. The supplied `cmux-local` package is still source-only:
