@@ -343,6 +343,22 @@ fn observe(
         &AtomicBool::new(false),
     )
 }
+fn observe_with_data(
+    repo: &ahu::git::Repo,
+    grant: &TaskReadGrant,
+    observations: Value,
+    data: Value,
+) -> plugin_exec::Result<Value> {
+    task_service::invoke(
+        repo,
+        grant,
+        &serde_json::to_vec(&json!({
+            "version": 1, "observations": observations, "data": data
+        }))
+        .unwrap(),
+        &AtomicBool::new(false),
+    )
+}
 fn task_core(repo: &ahu::git::Repo, local: bool) -> Controller {
     let core = if local {
         Controller::local(repo).unwrap()
@@ -442,6 +458,49 @@ fn task_observations_are_exact_scoped_projected_and_read_only() {
 }
 
 #[test]
+fn task_observation_provider_data_is_forwarded_without_expanding_task_grants() {
+    let fixture = Fixture::new("normal");
+    fixture.install();
+    let repo = ahu::git::discover(&fixture.root).unwrap();
+    let core = task_core(&repo, false);
+    let grant = task_grant(&repo, &core, &[TASK_A]);
+    let data = json!({
+        "provider": "synthetic",
+        "kb_root": "/synthetic/project/.kb",
+        "allow_tasks": [TASK_HIDDEN]
+    });
+    let result = observe_with_data(
+        &repo,
+        &grant,
+        json!([{"operation":"read","task":TASK_A}]),
+        data.clone(),
+    )
+    .unwrap();
+    assert_eq!(result["input"]["data"], data);
+    assert_eq!(
+        result["input"]["observations"][0]["snapshot"]["task"],
+        TASK_A
+    );
+    assert!(
+        !result["input"]["observations"]
+            .to_string()
+            .contains(TASK_HIDDEN)
+    );
+
+    // Provider input can carry policy hints, but only the independently minted
+    // TaskReadGrant decides which observations the core will load.
+    let error = observe_with_data(
+        &repo,
+        &grant,
+        json!([{"operation":"read","task":TASK_HIDDEN}]),
+        data,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, Code::Denied);
+    assert!(!error.outcome_may_be_unknown);
+}
+
+#[test]
 fn task_observations_deny_ungranted_ids_cursors_and_authority_injection() {
     let fixture = Fixture::new("normal");
     fixture.install();
@@ -488,6 +547,7 @@ fn task_observations_deny_ungranted_ids_cursors_and_authority_injection() {
         br#"{"version":1,"observations":[],"version":1}"#,
         br#"{"version":1,"observations":[{"operation":"list","limit":1,"limit":2}]}"#,
         br#"{"version":1,"observations":[]} {}"#,
+        br#"{"version":1,"observations":[],"data":{"x":1,"x":2}}"#,
     ] {
         assert_eq!(
             task_service::invoke(&repo, &grant, request, &AtomicBool::new(false))

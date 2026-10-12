@@ -49,6 +49,9 @@ impl TaskReadGrant {
 struct Request {
     version: u32,
     observations: Vec<Observation>,
+    /// Explicit operator-supplied provider input. This is data, never authority.
+    #[serde(default)]
+    data: Option<Value>,
 }
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -100,6 +103,8 @@ struct Payload {
     version: u32,
     capabilities: v1::Capabilities,
     observations: Vec<Observed>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
 }
 
 /// Invoke an enabled executable with core-collected observations of exact grants.
@@ -129,6 +134,7 @@ pub fn invoke(
         version: VERSION,
         capabilities: service.capabilities(v1::VERSION).map_err(service_error)?,
         observations: Vec::new(),
+        data: request.data,
     };
     for observation in request.observations {
         check_cancel()?;

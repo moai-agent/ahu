@@ -1,6 +1,6 @@
 //! Bounded lifecycle tests: only synthetic local packages and Git repositories.
 mod common;
-use ahu::plugin_binding::{Binding, Compatibility, Source, SourceKind};
+use ahu::plugin_binding::{Binding, Compatibility, Grant, Source, SourceKind};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -577,6 +577,50 @@ fn running_tasks_retain_versions_and_terminal_tasks_allow_cleanup() {
     ahu::task::set_state(&task_dir, ahu::task::TaskState::Exited).unwrap();
     success(run(repo.path(), "remove"));
     assert!(versions(repo.path()).is_empty());
+}
+
+#[test]
+fn terminal_external_workspace_task_retains_its_plugin_until_removal() {
+    let source = source();
+    let mut binding = binding(source.path());
+    binding.enabled = true;
+    binding.grants = vec![Grant::InteractiveBackend];
+    let repo = project(&binding);
+    success(run(repo.path(), "install"));
+
+    let task_dir = record(repo.path(), "terminal-host");
+    let mut task = ahu::task::load(&task_dir).unwrap();
+    task.state = ahu::task::TaskState::Exited;
+    task.session_host = Some(ahu::interactive::binding::FrozenHost {
+        binding: binding.clone(),
+        policy_revision: common::git(repo.path(), &["rev-parse", "HEAD"]),
+        package: "fixture-package".into(),
+        executable: ahu::interactive::external::Executable {
+            path: "bin/host".into(),
+            protocol_version: 1,
+            timeout_ms: 5_000,
+        },
+        executable_sha256: "0".repeat(64),
+        discovered_root: None,
+    });
+    task.cmux_workspace_id = Some("already-closed-workspace".into());
+    ahu::task::save(&task_dir, &task, "synthetic prompt").unwrap();
+
+    failure(
+        run(repo.path(), "disable"),
+        "recorded tasks still require this package for workspace cleanup",
+    );
+
+    // Reproduce a previously disabled binding as well: cleanup still refuses
+    // to remove the exact host package needed to inspect the recorded workspace.
+    binding.enabled = false;
+    save(repo.path(), &binding);
+    commit_binding(repo.path());
+    failure(
+        run(repo.path(), "remove"),
+        "recorded tasks still require this package for workspace cleanup",
+    );
+    assert_eq!(versions(repo.path()).len(), 1);
 }
 
 #[test]

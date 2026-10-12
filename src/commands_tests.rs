@@ -476,7 +476,11 @@ fn indexed_task_loading_rejects_stale_corrupt_and_mismatched_records() {
         match changed {
             "task" => mismatched.task_id = "different01".into(),
             "repository" => mismatched.repo_identity = "different".into(),
-            "checkout" => mismatched.worktree = repo.root.join("absent"),
+            "checkout" => {
+                let other = repo.root.join("different-checkout");
+                std::fs::create_dir_all(&other).unwrap();
+                mismatched.worktree = other;
+            }
             _ => unreachable!(),
         }
         task::save(&dir, &mismatched, "synthetic prompt").unwrap();

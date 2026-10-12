@@ -121,16 +121,66 @@ fn execute(options: Options, repository: Option<&Path>) -> Result<serde_json::Va
         std::env::set_current_dir(path).map_err(|_| Failure::before(Code::Unavailable))?;
     }
     let repo = crate::commands::repo_from_cwd().map_err(|_| Failure::before(Code::Unavailable))?;
-    let invocation_id = crate::task::new_task_id().map_err(|_| Failure::before(Code::Io))?;
-    let context = serde_json::json!({"invocation_id": invocation_id}).to_string();
-    let grant = HostGrant::new(&repo, &options.id, context.as_bytes())?;
-    super::authorized_binding(&repo, &grant)?;
-    let input = read_input(&options.input_file)?;
-    match options.mode {
-        Mode::Json => super::invoke(&repo, &grant, &input, &CANCELLED),
-        Mode::TaskObservations(tasks) => {
-            super::task_service::invoke_inspected(&repo, grant, tasks, &input, &CANCELLED)
+    initialize_telemetry(&repo);
+    let mode = match &options.mode {
+        Mode::Json => "json",
+        Mode::TaskObservations(_) => "task_observations",
+    };
+    let mut span = crate::telemetry::span(
+        "ahu.plugin.invoke",
+        [
+            ("ahu.plugin.id", options.id.clone()),
+            ("ahu.plugin.mode", mode.to_string()),
+        ],
+    );
+    let result = (|| {
+        let invocation_id = crate::task::new_task_id().map_err(|_| Failure::before(Code::Io))?;
+        let context = serde_json::json!({"invocation_id": invocation_id}).to_string();
+        let grant = HostGrant::new(&repo, &options.id, context.as_bytes())?;
+        super::authorized_binding(&repo, &grant)?;
+        let input = read_input(&options.input_file)?;
+        match options.mode {
+            Mode::Json => super::invoke(&repo, &grant, &input, &CANCELLED),
+            Mode::TaskObservations(tasks) => {
+                super::task_service::invoke_inspected(&repo, grant, tasks, &input, &CANCELLED)
+            }
         }
+    })();
+    match &result {
+        Ok(_) => span.set_string("ahu.plugin.outcome", "succeeded"),
+        Err(failure) => {
+            span.set_string("ahu.plugin.outcome", failure_code(failure.code));
+            span.set_bool(
+                "ahu.plugin.outcome_may_be_unknown",
+                failure.outcome_may_be_unknown,
+            );
+        }
+    }
+    result
+}
+
+fn initialize_telemetry(repo: &crate::git::Repo) {
+    let Ok(root) = repo.primary_root() else {
+        return;
+    };
+    let Ok(Some(config)) = crate::config::load(&root) else {
+        return;
+    };
+    // Telemetry is optional and must never prevent an authorized plugin call.
+    let _ = crate::telemetry::initialize(&config.config.telemetry);
+}
+
+fn failure_code(code: Code) -> &'static str {
+    match code {
+        Code::Denied => "denied",
+        Code::InvalidInput => "invalid_input",
+        Code::Unavailable => "unavailable",
+        Code::Cancelled => "cancelled",
+        Code::TimedOut => "timed_out",
+        Code::OutputLimit => "output_limit",
+        Code::Protocol => "protocol",
+        Code::Failed => "failed",
+        Code::Io => "io",
     }
 }
 
