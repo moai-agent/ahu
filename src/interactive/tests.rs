@@ -14,6 +14,7 @@ struct SyntheticHost {
     window: String,
     workspaces: BTreeMap<String, WorkspaceInfo>,
     inventory_error: bool,
+    close_error: bool,
     groups_error: bool,
     window_error: bool,
     created: CreatedWorkspace,
@@ -42,6 +43,7 @@ impl SyntheticHost {
                 },
             )]),
             inventory_error: false,
+            close_error: false,
             groups_error: false,
             window_error: false,
             created: CreatedWorkspace {
@@ -119,6 +121,9 @@ impl Host for SyntheticHost {
         Ok(())
     }
     fn close_workspace(&self, id: &str) -> Result<()> {
+        if self.close_error {
+            bail!("synthetic close failed");
+        }
         self.mutations.borrow_mut().push(format!("close:{id}"));
         Ok(())
     }
@@ -311,4 +316,226 @@ fn coordinator_without_inherited_workspace_does_not_probe_or_mutate_host() {
     assert!(placement.notes.is_empty());
     assert!(host.mutations.borrow().is_empty());
     assert!(host.requests.borrow().is_empty());
+}
+
+#[test]
+fn cancellation_cleanup_uses_ownership_published_before_confirmation() {
+    cancellation_cleanup_for_publication_order(true);
+}
+
+#[test]
+fn cancellation_cleanup_hands_off_ownership_published_after_confirmation() {
+    cancellation_cleanup_for_publication_order(false);
+}
+
+fn cancellation_cleanup_for_publication_order(ownership_first: bool) {
+    for case in [
+        "valid",
+        "no-owner",
+        "ambiguous-owner",
+        "wrong-group",
+        "wrong-window",
+        "inventory-error",
+        "groups-error",
+        "window-error",
+        "close-error",
+    ] {
+        let (_temp, repo, loaded, plan) = fixture();
+        let mut launcher = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+        let mut canceller = launcher.clone();
+        std::fs::create_dir_all(&plan.worktree).unwrap();
+        task::save(&plan.task_dir, &launcher, PROMPT).unwrap();
+        let marker = plan.worktree.join("keep.txt");
+        std::fs::write(&marker, "keep work").unwrap();
+        let mut host = SyntheticHost::new(&repo);
+        let placement = interactive::repository::ManagedTaskWorkspace {
+            group: host.groups[0].clone(),
+            workspace: CreatedWorkspace {
+                workspace_id: "task-workspace".into(),
+                window_id: "window".into(),
+                group_id: Some("group".into()),
+            },
+        };
+        match case {
+            "no-owner" => host.groups.clear(),
+            "ambiguous-owner" => host.groups.push(host.groups[0].clone()),
+            "wrong-group" => host.groups[0].id = "unrelated".into(),
+            "wrong-window" => host.window = "unrelated".into(),
+            "inventory-error" => host.inventory_error = true,
+            "groups-error" => host.groups_error = true,
+            "window-error" => host.window_error = true,
+            "close-error" => host.close_error = true,
+            _ => {}
+        }
+        let manager = RepositoryManager::new(&host, &repo);
+        if ownership_first {
+            // Publication happens after cancel's initial read, before its
+            // confirmation read. Cleanup must use the refreshed ownership.
+            record_created_workspace(
+                &plan.task_dir,
+                &mut launcher,
+                "group",
+                "task-workspace",
+                "window",
+            )
+            .unwrap();
+        }
+        task::set_state(&plan.task_dir, TaskState::Cancelled).unwrap();
+        let confirmation = crate::commands::confirm_interactive_cancellation(
+            &plan.task_dir,
+            &mut canceller,
+            Duration::ZERO,
+            |current| manager.close_task_workspace(current).map(|_| ()),
+        );
+        if ownership_first {
+            if case == "valid" {
+                assert_eq!(confirmation.unwrap(), ("confirmed", "closed"));
+            } else {
+                assert!(
+                    confirmation
+                        .unwrap_err()
+                        .to_string()
+                        .contains("close failed")
+                );
+            }
+            assert_eq!(canceller, task::load(&plan.task_dir).unwrap());
+        } else {
+            assert_eq!(confirmation.unwrap(), ("confirmed", "absent"));
+            // The cancel command has already returned. The launcher must
+            // finish cleanup after publishing the workspace's ownership.
+            let mut notes = Vec::new();
+            finish_workspace_launch(
+                &plan.task_dir,
+                &mut launcher,
+                &manager,
+                &placement,
+                &mut notes,
+            );
+            if case == "valid" {
+                assert!(notes.is_empty(), "{notes:?}");
+            } else {
+                assert!(
+                    notes.iter().any(|n| n.contains("close failed")),
+                    "{notes:?}"
+                );
+            }
+            assert_eq!(launcher, task::load(&plan.task_dir).unwrap());
+        }
+        let mutations = host.mutations.borrow();
+        if case == "valid" {
+            assert_eq!(*mutations, ["close:task-workspace"]);
+        } else {
+            assert!(mutations.is_empty(), "{case}: {mutations:?}");
+        }
+        let durable = task::load(&plan.task_dir).unwrap();
+        assert_eq!(durable.state, TaskState::Cancelled);
+        assert_eq!(durable.cmux_workspace_id.as_deref(), Some("task-workspace"));
+        assert_eq!(durable.cmux_group_id.as_deref(), Some("group"));
+        assert_eq!(durable.cmux_window_id.as_deref(), Some("window"));
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "keep work");
+        assert_eq!(task::load_prompt(&plan.task_dir).unwrap(), PROMPT);
+    }
+}
+
+#[test]
+fn cancellation_cleanup_preserves_unconfirmed_and_other_terminal_outcomes() {
+    for outcome in [TaskState::Running, TaskState::Failed, TaskState::Exited] {
+        let (_temp, repo, loaded, plan) = fixture();
+        let mut launcher = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+        let mut canceller = launcher.clone();
+        std::fs::create_dir_all(&plan.worktree).unwrap();
+        task::save(&plan.task_dir, &launcher, PROMPT).unwrap();
+        task::set_state(&plan.task_dir, outcome).unwrap();
+        let host = SyntheticHost::new(&repo);
+        let manager = RepositoryManager::new(&host, &repo);
+        let placement = interactive::repository::ManagedTaskWorkspace {
+            group: host.groups[0].clone(),
+            workspace: CreatedWorkspace {
+                workspace_id: "task-workspace".into(),
+                window_id: "window".into(),
+                group_id: Some("group".into()),
+            },
+        };
+        finish_workspace_launch(
+            &plan.task_dir,
+            &mut launcher,
+            &manager,
+            &placement,
+            &mut Vec::new(),
+        );
+        assert!(
+            !host
+                .mutations
+                .borrow()
+                .iter()
+                .any(|m| m.starts_with("close:"))
+        );
+        let (cancellation, workspace) = crate::commands::confirm_interactive_cancellation(
+            &plan.task_dir,
+            &mut canceller,
+            Duration::ZERO,
+            |_| panic!("unconfirmed cancellation must not close a workspace"),
+        )
+        .unwrap();
+        assert_eq!(
+            cancellation,
+            if outcome.is_live() {
+                "requested-unconfirmed"
+            } else {
+                "finished-on-its-own"
+            }
+        );
+        assert_eq!(workspace, "left open");
+        assert_eq!(canceller, task::load(&plan.task_dir).unwrap());
+        assert_eq!(canceller.state, outcome);
+        state::write_private_file(&plan.task_dir.join("task.json"), b"{}").unwrap();
+        assert_eq!(
+            crate::commands::confirm_interactive_cancellation(
+                &plan.task_dir,
+                &mut canceller,
+                Duration::ZERO,
+                |_| panic!("unreadable outcome must not close a workspace"),
+            )
+            .unwrap(),
+            ("requested-unconfirmed", "left open")
+        );
+    }
+}
+
+#[test]
+fn cancellation_cleanup_preserves_workspace_when_publication_cannot_be_verified() {
+    let (_temp, repo, loaded, plan) = fixture();
+    let mut record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+    std::fs::create_dir_all(&plan.worktree).unwrap();
+    task::save(&plan.task_dir, &record, PROMPT).unwrap();
+    let host = SyntheticHost::new(&repo);
+    let manager = RepositoryManager::new(&host, &repo);
+    let placement = interactive::repository::ManagedTaskWorkspace {
+        group: host.groups[0].clone(),
+        workspace: CreatedWorkspace {
+            workspace_id: "task-workspace".into(),
+            window_id: "window".into(),
+            group_id: Some("group".into()),
+        },
+    };
+    // Even an in-memory cancellation outcome cannot authorize cleanup if
+    // publication cannot reload and persist verified durable ownership.
+    record.state = TaskState::Cancelled;
+    state::write_private_file(&plan.task_dir.join("task.json"), b"{}").unwrap();
+    let mut notes = Vec::new();
+    finish_workspace_launch(
+        &plan.task_dir,
+        &mut record,
+        &manager,
+        &placement,
+        &mut notes,
+    );
+    assert!(host.mutations.borrow().is_empty());
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].contains("task record could not be updated"));
+    assert_eq!(
+        std::fs::read(plan.task_dir.join("task.json")).unwrap(),
+        b"{}"
+    );
+    assert_eq!(task::load_prompt(&plan.task_dir).unwrap(), PROMPT);
 }

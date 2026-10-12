@@ -285,6 +285,74 @@ fn created_workspace_metadata_preserves_a_state_written_by_the_started_task() {
 }
 
 #[test]
+fn reconciliation_preserves_terminal_outcomes_in_both_orders() {
+    for terminal in [TaskState::Cancelled, TaskState::Failed, TaskState::Exited] {
+        for terminal_first in [true, false] {
+            let (_temp, repo, loaded, plan) = fixture();
+            let mut stale = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+            std::fs::create_dir_all(&plan.worktree).unwrap();
+            task::save(&plan.task_dir, &stale, PROMPT).unwrap();
+            let mut latest = stale.clone();
+            record_created_workspace(&plan.task_dir, &mut latest, "group", "workspace", "window")
+                .unwrap();
+            record_runtime_metadata(
+                &plan.task_dir,
+                &mut latest,
+                "1.2.3",
+                Path::new("/synthetic/runtime"),
+            )
+            .unwrap();
+            if terminal_first {
+                task::set_state(&plan.task_dir, terminal).unwrap();
+            }
+            task::set_exited_if_live(&plan.task_dir, &mut stale).unwrap();
+            latest.state = if terminal_first {
+                terminal
+            } else {
+                TaskState::Exited
+            };
+            assert_eq!(stale.state, latest.state);
+            assert_eq!(stale, latest);
+            assert_eq!(task::load(&plan.task_dir).unwrap(), latest);
+            if !terminal_first {
+                task::set_state(&plan.task_dir, terminal).unwrap();
+                // A second stale reconciler cannot undo the supervisor's outcome.
+                task::set_exited_if_live(&plan.task_dir, &mut stale).unwrap();
+                latest.state = terminal;
+                assert_eq!(stale, latest);
+                assert_eq!(task::load(&plan.task_dir).unwrap(), latest);
+            }
+        }
+    }
+}
+
+#[test]
+fn reconciliation_only_transitions_verified_live_records() {
+    for live in [
+        TaskState::Starting,
+        TaskState::Running,
+        TaskState::WaitingForApproval,
+    ] {
+        let (_temp, repo, loaded, plan) = fixture();
+        let mut record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+        record.state = live;
+        std::fs::create_dir_all(&plan.worktree).unwrap();
+        task::save(&plan.task_dir, &record, PROMPT).unwrap();
+        task::set_exited_if_live(&plan.task_dir, &mut record).unwrap();
+        assert_eq!(record.state, TaskState::Exited);
+        assert_eq!(record, task::load(&plan.task_dir).unwrap());
+        let before = record.clone();
+        state::write_private_file(&plan.task_dir.join("task.json"), b"{}").unwrap();
+        assert!(task::set_exited_if_live(&plan.task_dir, &mut record).is_err());
+        assert_eq!(record, before);
+        assert_eq!(
+            std::fs::read(plan.task_dir.join("task.json")).unwrap(),
+            b"{}"
+        );
+    }
+}
+
+#[test]
 fn verify_refuses_missing_record_without_destroying_work() {
     let (_temp, _, _, plan) = fixture();
     std::fs::create_dir_all(&plan.worktree).unwrap();

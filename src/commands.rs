@@ -2169,7 +2169,7 @@ pub fn eval_report(
 /// recorded cmux workspace; an unconfirmed request leaves it open. The worktree,
 /// branch and record are never deleted.
 pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
-    let (dir, record) = inspect_task(repo, id)?;
+    let (dir, mut record) = inspect_task(repo, id)?;
     if dir.join("headless.json").exists() {
         return crate::headless::control(repo, "cancel", &record.task_id, None, json_output);
     }
@@ -2208,21 +2208,54 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
             .as_bytes(),
     )?;
 
+    let (cancellation, workspace) =
+        confirm_interactive_cancellation(&dir, &mut record, Duration::from_secs(5), |current| {
+            interactive::discover_for_tasks().and_then(|client| {
+                interactive::repository::RepositoryManager::new(client.as_ref(), repo)
+                    .close_task_workspace(current)
+                    .map(|_| ())
+            })
+        })?;
+
+    crate::headless::emit(
+        &serde_json::json!({
+            "schema_version": 1,
+            "task_id": record.task_id,
+            "task_ref": crate::task_ref::display(&record.task_id),
+            "cancellation": cancellation,
+            "state": record.state.as_str(),
+            "workspace": workspace,
+            "retention": "the worktree, branch and record are kept",
+        }),
+        json_output,
+    )?;
+    Ok(0)
+}
+
+/// Wait for the supervisor's durable outcome before attempting workspace cleanup.
+pub(crate) fn confirm_interactive_cancellation(
+    dir: &Path,
+    record: &mut task::TaskRecord,
+    timeout: Duration,
+    close_workspace: impl FnOnce(&task::TaskRecord) -> Result<()>,
+) -> Result<(&'static str, &'static str)> {
     let mut cancellation = "requested-unconfirmed";
-    let mut state = record.state;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + timeout;
     loop {
-        match task::load(&dir) {
-            Ok(current) if !current.state.is_live() => {
-                state = current.state;
-                if state == task::TaskState::Cancelled {
-                    cancellation = "confirmed";
-                } else {
-                    cancellation = "finished-on-its-own";
+        match task::load(dir) {
+            Ok(current) => {
+                // Ownership can be published while cancellation is waiting.
+                // Keep the whole verified record for cleanup and reporting.
+                *record = current;
+                if !record.state.is_live() {
+                    cancellation = if record.state == task::TaskState::Cancelled {
+                        "confirmed"
+                    } else {
+                        "finished-on-its-own"
+                    };
+                    break;
                 }
-                break;
             }
-            Ok(_) => {}
             Err(_) => break,
         }
         if Instant::now() >= deadline {
@@ -2236,35 +2269,17 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
     let workspace = match record.cmux_workspace_id.as_deref() {
         None => "absent",
         Some(_workspace_id) if cancellation == "confirmed" => {
-            interactive::discover_for_tasks()
-                .and_then(|client| {
-                    interactive::repository::RepositoryManager::new(client.as_ref(), repo)
-                        .close_task_workspace(&record)
-                        .map(|_| ())
-                })
-                .map_err(|error| {
-                    crate::util::Error::new(format!(
-                        "cancellation confirmed, but cmux workspace close failed: {error}"
-                    ))
-                })?;
+            close_workspace(record).map_err(|error| {
+                crate::util::Error::new(format!(
+                    "cancellation confirmed, but cmux workspace close failed: {error}"
+                ))
+            })?;
             "closed"
         }
         Some(_) => "left open",
     };
 
-    crate::headless::emit(
-        &serde_json::json!({
-            "schema_version": 1,
-            "task_id": record.task_id,
-            "task_ref": crate::task_ref::display(&record.task_id),
-            "cancellation": cancellation,
-            "state": state.as_str(),
-            "workspace": workspace,
-            "retention": "the worktree, branch and record are kept",
-        }),
-        json_output,
-    )?;
-    Ok(0)
+    Ok((cancellation, workspace))
 }
 
 /// Resolve the single durable MCP approval checkpoint attached to a task.

@@ -391,6 +391,19 @@ pub fn set_state(dir: &Path, new_state: TaskState) -> Result<()> {
     set_state_locked(dir, new_state)
 }
 
+/// Reconcile a missing workspace with the durable task outcome.
+pub(crate) fn set_exited_if_live(dir: &Path, record: &mut TaskRecord) -> Result<()> {
+    let _lock = lock_state(dir)?;
+    *record = load(dir)?;
+    if record.state.is_live() {
+        let mut exited = record.clone();
+        exited.state = TaskState::Exited;
+        state::write_json(&crate::storage::TaskStorage::new(dir).record(), &exited)?;
+        *record = exited;
+    }
+    Ok(())
+}
+
 pub(crate) fn lock_state(dir: &Path) -> Result<StateLock> {
     StateLock::acquire(&dir.join("state.lock"))
 }

@@ -717,13 +717,35 @@ pub fn execute(
         Ok(placement) => placement,
         Err(e) => return Err(workspace_creation_failed(repo, plan, e)),
     };
-    let group = placement.group;
-    let created = placement.workspace;
-    // Past this point the workspace exists and its shell may already be running
-    // the harness, so nothing is torn down automatically; problems are reported.
-    if let Err(e) = record_created_workspace(
+    finish_workspace_launch(
         &plan.task_dir,
         &mut record,
+        &manager,
+        &placement,
+        &mut notes,
+    );
+
+    Ok(Launched {
+        record,
+        task_dir: plan.task_dir.clone(),
+        notes,
+    })
+}
+
+fn finish_workspace_launch(
+    task_dir: &Path,
+    record: &mut TaskRecord,
+    manager: &interactive::repository::RepositoryManager<'_>,
+    placement: &interactive::repository::ManagedTaskWorkspace,
+    notes: &mut Vec<String>,
+) {
+    let group = &placement.group;
+    let created = &placement.workspace;
+    // The workspace's shell may already be running. Cleanup requires both
+    // durable cancellation and the manager's exact ownership validation.
+    if let Err(e) = record_created_workspace(
+        task_dir,
+        record,
         &group.id,
         &created.workspace_id,
         &created.window_id,
@@ -731,22 +753,28 @@ pub fn execute(
         notes.push(format!(
             "the cmux session started but its task record could not be updated: {e}"
         ));
+        return;
+    }
+    // Publication reloads under the task-state lock. If cancellation won that
+    // lock, cancel may already have returned without a workspace to close. If
+    // publication won, cancel's confirmation read will see these identifiers.
+    if record.state == TaskState::Cancelled {
+        if let Err(error) = manager.close_task_workspace(record) {
+            notes.push(format!(
+                "cancellation confirmed, but cmux workspace close failed: {error}"
+            ));
+        }
+        return;
     }
     if let Err(e) = manager.set_task_status(
-        &record,
+        record,
         &interactive::workspace_identity(&record.identity.agent, &record.identity.model),
     ) {
         notes.push(format!("could not set the sidebar status: {e}"));
     }
-    if let Err(e) = manager.expand_task_group(&record) {
+    if let Err(e) = manager.expand_task_group(record) {
         notes.push(format!("could not expand the repository group: {e}"));
     }
-
-    Ok(Launched {
-        record,
-        task_dir: plan.task_dir.clone(),
-        notes,
-    })
 }
 
 /// Compatibility wrapper for launch-local tests; policy lives in the shared manager.
@@ -775,13 +803,9 @@ pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
             continue;
         };
         if !live.contains_key(workspace_id) && record.state.is_live() {
-            record.state = TaskState::Exited;
-            // Best effort, and deliberately not fatal: reconciliation is a
-            // status refresh, and a state directory that has gone read-only
-            // must not stop `ahu tasks` listing what exists. The value returned
-            // to the caller is the true one either way — cmux is the authority
-            // on whether the workspace is still there, not this file.
-            let _ = task::set_state(dir, TaskState::Exited);
+            // Best effort: failed persistence must not break listing or invent
+            // an outcome. Reload under lock so a supervisor's terminal state wins.
+            let _ = task::set_exited_if_live(dir, record);
         }
     }
     Ok(tasks)
