@@ -1,6 +1,6 @@
 ---
 ahu:
-  catalog_version: 2026-10-09
+  catalog_version: "2026-10-09"
   harness_preferences:
   - antigravity
   - codex

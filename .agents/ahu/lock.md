@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: bcd178c3eed6183942f90e9a549a18a83f9055d708f906964caafcaed1a56337
+  digest: 94359cf1f17bb02cc7058bb158fa87016f7480f9f5d507033674bd6c9746d51f
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -94,8 +94,8 @@ ahu:
     digest: b8d4ffe8b00869990867ed05ac289781b12ff76bba303687f45b06a179ed7cc8
     executable: false
     path: .agents/ahu/agents/test-kiro.md
-  - bytes: 662
-    digest: 97c4e5a8d7955a8e60f8d45a041400d717ffd6cd3a01018157214fa6e6b67b37
+  - bytes: 664
+    digest: ffde5d7ea664c260e1e2324ef1edcecbd2db6c70221507c19ff74d39942a9106
     executable: false
     path: .agents/ahu/config.md
   - bytes: 117
@@ -222,6 +222,7 @@ ahu:
   skipped_directories:
   - .ahu
   - .worktrees
+  - target
   symlinks: []
   unscanned_config: []
 okf_version: '0.2'
