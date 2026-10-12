@@ -435,6 +435,46 @@ pub fn store(repo: &crate::git::Repo) -> Result<PathBuf> {
     Ok(crate::storage::HeadlessStore::for_repo(repo)?.directory)
 }
 
+/// Hold fresh headless admission and terminal-task resume ownership while
+/// plugin cleanup validates references and removes installed source data.
+pub(crate) struct PluginCleanupGuard {
+    locks: Vec<Lock>,
+}
+impl PluginCleanupGuard {
+    pub(crate) fn retain_terminal_owner(&mut self, dir: &Path) -> Result<()> {
+        self.locks
+            .push(Lock::try_acquire(&dir.join("owner.lock"))?.ok_or_else(|| {
+                Error::new("plugin cleanup refused: task supervisor is live or resuming")
+            })?);
+        if task::load(dir)?.state.is_live() {
+            bail!("plugin cleanup refused: task became live while acquiring resume ownership");
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn plugin_cleanup_guard(repo: &crate::git::Repo) -> Result<PluginCleanupGuard> {
+    let current = store(repo)?;
+    let mut paths = stores(repo)?;
+    paths.sort();
+    paths.dedup();
+    let mut guard = PluginCleanupGuard { locks: Vec::new() };
+    for path in paths {
+        // Only current admission can start a fresh task. Missing legacy stores
+        // have no resumable tasks and must not be created by cleanup.
+        if path != current && !path.exists() {
+            continue;
+        }
+        confined_in(repo, &path, true)?;
+        guard.locks.push(
+            Lock::try_acquire(&path.join("launch.lock"))?.ok_or_else(|| {
+                Error::new("plugin cleanup refused: headless task admission is in progress")
+            })?,
+        );
+    }
+    Ok(guard)
+}
+
 pub(crate) fn stores(repo: &crate::git::Repo) -> Result<Vec<PathBuf>> {
     let mut stores = vec![store(repo)?];
     stores.extend(

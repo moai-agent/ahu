@@ -1,5 +1,5 @@
 //! Inert project plugin bindings. Parsing a binding never installs a package,
-//! loads code, or authorizes execution; a future lifecycle must enforce grants.
+//! loads code, or authorizes execution. Lifecycle operations verify sources separately.
 use crate::util::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -26,6 +26,40 @@ pub struct Source {
     pub repository: String,
     pub revision: String,
     pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdirectory: Option<String>,
+    #[serde(default, skip_serializing_if = "SourceKind::is_git")]
+    pub kind: SourceKind,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceKind {
+    #[default]
+    Git,
+    Local,
+}
+impl SourceKind {
+    fn is_git(&self) -> bool {
+        *self == Self::Git
+    }
+}
+
+pub fn plain_relative(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 1024
+        && value.split('/').count() <= 32
+        && value.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.eq_ignore_ascii_case(".git")
+                && !part.contains(['\\', ':'])
+                && !part.chars().any(char::is_control)
+        })
+}
+
+pub fn local_path(value: &str) -> bool {
+    value.starts_with('/') && plain_relative(&value[1..])
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -68,18 +102,31 @@ pub fn parse(text: &str, expected_id: &str) -> Result<(Binding, crate::okf::Docu
         ));
     }
     let source = &binding.source;
-    let repository = url::Url::parse(&source.repository)
-        .map_err(|_| Error::new("invalid plugin source repository"))?;
-    if repository.scheme() != "https"
-        || repository.host_str().is_none()
-        || !repository.username().is_empty()
-        || repository.password().is_some()
-        || repository.query().is_some()
-        || repository.fragment().is_some()
+    if source
+        .subdirectory
+        .as_deref()
+        .is_some_and(|path| !plain_relative(path))
     {
         return Err(Error::new(
-            "plugin source requires a credential-free HTTPS repository URL",
+            "plugin source subdirectory must be a plain relative path",
         ));
+    }
+    if !local_path(&source.repository) {
+        let repository = url::Url::parse(&source.repository)
+            .map_err(|_| Error::new("invalid plugin source repository"))?;
+        if source.kind == SourceKind::Local
+            || repository.scheme() != "https"
+            || repository.host_str().is_none()
+            || !repository.username().is_empty()
+            || repository.password().is_some()
+            || repository.query().is_some()
+            || repository.fragment().is_some()
+            || source.repository.chars().any(char::is_control)
+        {
+            return Err(Error::new(
+                "plugin source requires an absolute local path or credential-free HTTPS Git URL",
+            ));
+        }
     }
     let hex = |s: &str, n| {
         s.len() == n
@@ -89,6 +136,11 @@ pub fn parse(text: &str, expected_id: &str) -> Result<(Binding, crate::okf::Docu
     if !(hex(&source.revision, 40) || hex(&source.revision, 64)) || !hex(&source.sha256, 64) {
         return Err(Error::new(
             "plugin source requires an exact revision and SHA-256 content pin",
+        ));
+    }
+    if source.kind == SourceKind::Local && source.revision != source.sha256 {
+        return Err(Error::new(
+            "local source revision must equal its SHA-256 content pin",
         ));
     }
     if binding.grants.iter().collect::<BTreeSet<_>>().len() != binding.grants.len() {
@@ -127,6 +179,8 @@ mod tests {
                 repository: "https://example.invalid/plugin.git".into(),
                 revision: "a".repeat(40),
                 sha256: "b".repeat(64),
+                subdirectory: None,
+                kind: SourceKind::Git,
             },
             compatibility: Compatibility {
                 ahu: "0.11.0".into(),

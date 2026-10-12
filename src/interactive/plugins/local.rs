@@ -355,7 +355,7 @@ fn open_root(root: &Path) -> Result<File> {
     Ok(directory)
 }
 
-fn read_package(root: &Path) -> Result<PluginStatus> {
+pub(crate) fn read_package(root: &Path) -> Result<PluginStatus> {
     let directory = open_root(root)?;
     let manifest = read_manifest(open_child(&directory, OsStr::new("ahu-plugin.md"), false)?)?;
     if manifest.schema_version != 1 || manifest.host_api != 1 {

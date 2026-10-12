@@ -1765,10 +1765,115 @@ launch readiness or validate the project's context lock.
 
 `--project` and `--probe` are mutually exclusive. Project `enabled: true` does not
 select a process backend or authorize activation, and a project binding does not
-verify or constrain a separately supplied `AHU_PLUGIN_PATH` package. Installation,
-source-pin verification and activation governed by project grants remain future
-work. The existing local executable path below still requires explicit selection
-and activation.
+verify or constrain a separately supplied `AHU_PLUGIN_PATH` package. Explicit
+installation and source verification are described below. Host activation governed
+by project grants remains unsupported; the existing local executable path still
+requires its separate explicit selection and activation.
+
+### Project-local installation lifecycle
+
+The lifecycle operates on the selected checkout's **committed** OKF binding.
+Create or edit `.agents/ahu/plugins/<id>.md`, review its pins and capabilities,
+and commit it before installing. These commands never stage or commit changes:
+
+```sh
+ahu plugins digest /absolute/path/to/package
+ahu plugins install example
+ahu plugins installed --output json
+ahu plugins enable example
+# Review the changed binding, refresh the context lock, and commit them.
+ahu plugins update example
+ahu plugins disable example
+# Review and commit the disabled binding before removal.
+ahu plugins remove example
+```
+
+`install` acquires and verifies a declared source; a different existing installation
+requires `update`. `update` installs the newly committed pin and retains all previous
+versions. An already installed pin is reverified without reacquisition. Neither
+operation changes enablement, grants, native harness configuration, or process host
+selection. `enable` requires a verified installation; `disable` and `enable` edit
+only `ahu.enabled` in the working binding, preserving general OKF metadata and the
+Markdown body. Enable, disable and remove require the binding to match HEAD in both the index
+and working tree, including enablement, metadata, body and executable mode.
+Staged changes are refused even when the working copy has been restored to HEAD.
+The check reads Git objects and working bytes without running content filters.
+Review and refresh the context lock before committing policy changes.
+
+Sources support these declaration forms within `ahu.source`:
+
+```yaml
+# Git on any HTTPS forge, without credentials, query parameters or fragments.
+kind: git                     # default; existing declarations remain valid
+repository: https://example.invalid/team/packages.git
+revision: <full-lowercase-commit-object-id>
+subdirectory: packages/example # optional; plain relative path
+sha256: <64-lowercase-hex-digits>
+```
+
+Git `repository` may also be an absolute local ordinary or bare repository path.
+Local Git sources copy bounded object data into an isolated temporary repository;
+source Git configuration, hooks, replacement refs and upload-pack are never used.
+Linked-worktree `.git` files and object alternates are refused. Missing objects fail
+instead of lazy fetching. Remote sources use only HTTPS and fetch the exact commit;
+mutable refs, tags and tree objects are not accepted as revision pins. Submodules
+are not fetched. Redirects, credential helpers, askpass, inherited Git environment,
+proxies and global/system Git configuration are disabled for source operations.
+Private authenticated repositories, SSH, file URLs, custom certificate configuration
+and custom transports are unsupported. HTTPS transfer has a 120-second deadline
+and a 128 MiB per-file output limit; extracted content is bounded as below.
+
+For a local directory snapshot use `kind: local`, an absolute `repository` path,
+optional `subdirectory`, and set **both** `revision` and `sha256` to the digest
+returned by `ahu plugins digest /absolute/package/path`. This reads and hashes local
+files only. For Git sources, calculate the same digest from the intended package
+content; install independently verifies it against the immutable commit's blobs.
+Use physical absolute paths: symlinks in any source path component are rejected.
+A directory containing `.git` cannot itself be a package; select its package
+subdirectory. Acquisition copies content; subsequent edits to a local source do
+not alter an installed version.
+
+The digest is SHA-256 over `ahu-plugin-tree-v1` plus a NUL, followed by files in
+UTF-8 path byte order. Each file contributes its relative path length (u64 big
+endian), path bytes, one byte for whether any executable bit is set, content length
+(u64 big endian), then content bytes. Empty directories are excluded. There are at
+most 4096 entries, 32 path components, 64 MiB per file, and 128 MiB total content.
+Symlinks, special files, setid files, unsafe paths, Git metadata and Git submodules
+are rejected. Manifest ID and host API must match the binding; the manifest's
+Cargo package name must match Cargo.toml, and its explicit package version must
+match the binding. Cargo is never invoked. Build scripts, hooks, install scripts,
+filters and declared package executables are never executed by installation.
+
+Snapshots and receipts live in the primary checkout's owner-only, self-ignored
+`.ahu/state/plugins/<id>/<installation-key>/`. An installation key includes source,
+version and compatibility, but excludes enablement and grants. Data is verified in
+private staging and published by directory rename; old installations are never
+replaced. Ordinary errors remove their staging directory. A crash may leave an
+`.install-*` staging directory; it is never considered installed. Retry with
+`update`; explicit `remove` can clean incomplete staging once cleanup is safe.
+Tampered installed data is refused: disable and remove it before reinstalling.
+Tracked installation paths and redirected state directories are refused.
+
+`installed [--output json]` reads receipts and reverifies installed data offline,
+without creating state or cleaning staging. It reports source verification,
+whether each version matches the current committed binding, and its declared
+enablement. `--project` remains a declaration-only inventory; it never reads or
+modifies installed state. Neither inventory executes a plugin or activates a host.
+
+Because current task records have no durable plugin-version pin, cleanup is
+conservative: `disable` and `remove` refuse while **any** project task is live or
+unreadable, or task ownership is uncertain. Updates retain all versions, including
+those possibly referenced by tasks. Cleanup holds the interactive and headless admission locks and locks terminal
+headless task ownership against concurrent resume.
+`remove` requires the binding to be disabled or absent in both HEAD and the
+working tree, removes the plugin's installed versions and staging, and retains the binding.
+Selective version pruning and automatic reclamation are not implemented. Filesystem checks do not isolate concurrent
+hostile processes running as the same user.
+
+Project host execution and task-level plugin pinning remain incomplete: `enable`
+records project intent but does not execute or select a host; inventory continues
+to report `activation_supported: false`. Capability grants are never expanded or
+treated as authorization to execute package code by these lifecycle commands.
 
 ### Local session package discovery and selection
 

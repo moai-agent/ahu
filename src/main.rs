@@ -59,6 +59,14 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             }
             Ok(0)
         }
+        Command::PluginsInstalled { output_json } => {
+            ahu::plugin_install::list(&std::env::current_dir()?, output_json)?;
+            Ok(0)
+        }
+        Command::PluginLifecycle { action, id } => {
+            ahu::plugin_install::run(&std::env::current_dir()?, &action, &id)?;
+            Ok(0)
+        }
         Command::Version => {
             println!("ahu {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
@@ -515,6 +523,8 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::EvalVerify { .. }
                 | Command::EvalRun { .. }
                 | Command::Plugins { .. }
+                | Command::PluginLifecycle { .. }
+                | Command::PluginsInstalled { .. }
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })
         }

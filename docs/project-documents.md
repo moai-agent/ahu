@@ -106,9 +106,14 @@ host must separately authorize capabilities and verify compatibility/source pins
 
 The strict `ahu` schema contains `schema_version: 1`, a lowercase plain `id`
 matching the filename, exact semantic `version`, `source` with a credential-free
-HTTPS `repository`, full lowercase hexadecimal Git `revision` (40 or 64 digits)
-and `sha256` (64 digits), and `compatibility` with an exact semantic `ahu` version
+HTTPS or absolute local Git `repository`, full lowercase hexadecimal Git
+`revision` (40 or 64 digits) and `sha256` (64 digits), and `compatibility` with an exact semantic `ahu` version
 and `host_api: 1`. `enabled` defaults to false; `grants` defaults to empty. The
 foundation recognizes `interactive-backend` and `read-project-context` grants;
 unknown or duplicate grants are errors. Grant settings remain inert data.
+Optional `source.subdirectory` selects a plain relative package directory.
+`source.kind` defaults to `git`; `local` instead selects an absolute directory
+snapshot and requires `revision` to equal `sha256`. See the
+[installation lifecycle](reference.md#project-local-installation-lifecycle) for the
+content digest format, verification rules and explicit enable/disable commands.
 Private credentials, account bindings and local acceptance never belong here.
