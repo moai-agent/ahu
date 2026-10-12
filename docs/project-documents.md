@@ -120,10 +120,19 @@ Mixed-format migration supports projects that previously refreshed their lock
 while retaining legacy policy. All starting states share the same interruption,
 conflict and rollback checks.
 
+If preview refuses because a legacy lock no longer matches the current context,
+`ahu lock --update` will also refuse while `ahu.lock` remains. Preserve the old
+lock outside the checkout, then explicitly move or remove `ahu.lock` and rerun
+`ahu migrate --preview`. With no existing lock, the preview builds a new lock
+from the current context while still checking policy parity. Review the exact
+preview and resulting Git diff before applying and committing; keep the backup
+until the new lock is accepted. This procedure explicitly accepts the current
+context as the new baseline and does not silently discard the old pins.
+
 Existing tasks keep their exact recorded configuration and snapshot byte pins.
-Their task worktrees and task records are never rewritten. The bounded legacy
-reader allows existing legacy worktrees to be inspected and resumed,
-subject to their existing schema, identity and drift checks. The generated
+Their task worktrees and task records are never rewritten. Bounded legacy
+readers preserve task inspection, but ahu v0.11 refuses schema-1 task resume or
+dispatch; use the original runner or submit a new assignment. The generated
 `lock.md` is excluded from the snapshot it fingerprints and arrives in new task
 worktrees through the required committed base. Configuration and plugin binding files
 are ordinary recognized context inputs and participate in drift detection.

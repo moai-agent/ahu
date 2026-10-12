@@ -897,4 +897,46 @@ mod tests {
                 .contains("managed task")
         );
     }
+
+    #[test]
+    fn stale_legacy_lock_requires_explicit_backup_before_accepting_current_context() {
+        let (_dir, repo) = fixture();
+        std::fs::write(repo.root.join("AGENTS.md"), "New reviewed context\n").unwrap();
+        assert!(
+            Plan::preview(&repo)
+                .unwrap_err()
+                .to_string()
+                .contains("resolve context drift")
+        );
+        assert!(
+            context_lock::refresh_shared_only(
+                &repo,
+                &crate::snapshot::collect(&repo.root).unwrap()
+            )
+            .is_err()
+        );
+
+        let legacy_lock = repo.root.join(PATHS[1]);
+        let original_bytes = std::fs::read(&legacy_lock).unwrap();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let backup = backup_dir.path().join("ahu.lock.backup");
+        std::fs::rename(&legacy_lock, &backup).unwrap();
+
+        let plan = Plan::preview(&repo).unwrap();
+        assert!(plan.display().contains(PATHS[3]));
+        apply(&repo, &plan).unwrap();
+        git(&repo.root, &["add", "-A", "-f"]);
+        git(
+            &repo.root,
+            &[
+                "commit",
+                "-qm",
+                "accept reviewed context after explicit backup",
+            ],
+        );
+
+        let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+        assert!(context_lock::check(&repo, &snapshot).unwrap().current);
+        assert_eq!(std::fs::read(backup).unwrap(), original_bytes);
+    }
 }
