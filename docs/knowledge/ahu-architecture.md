@@ -43,6 +43,12 @@ sources:
 
 # ahu system architecture
 
+The [core agent-task service V1](../agent-task-service.md) defines an opt-in,
+provider-neutral task lifecycle interface for core-issued scoped sessions. Its
+in-memory and local implementations retain admission and execution control in
+core. It is independent of the terminal Host V1 API and adds no remote agent
+protocol or plugin storage access. Existing CLI/MCP routing remains unchanged.
+
 This diagram follows the main paths through the CLI. Agent behavior occurs in a
 provider harness; ahu prepares and records the session, while the MCP server
 exposes ahu tools to connected agents. Telemetry and task records provide

@@ -18,6 +18,7 @@
 
 pub mod agent;
 pub mod agent_ref;
+pub mod agent_task;
 pub mod approval;
 pub mod auth_binding;
 pub mod catalog;
