@@ -27,7 +27,7 @@ mutations additionally require the recorded owner. Worker sessions have only
 read/replay rights, even if a caller mistakenly requests mutation grants.
 Plugin principals can receive an explicit, scoped session from core; neither the
 controller nor its private store is part of the plugin contract. This is an
-application boundary, not isolation from arbitrary same-user code.
+app boundary, not isolation from arbitrary same-user code.
 
 The ordinary registered-agent, fixed model, context-lock, executable resolution,
 parent-attempt/grant, native admission and approval-widening checks stay in core's
@@ -61,12 +61,12 @@ The lifecycle is `Prepared -> Queued -> Starting -> Running` with optional
 `Cancelled`. A negative startup acknowledgement is `Failed`. A claimed startup
 whose acknowledgement is lost is `OutcomeUnknown`; a crashed controller can
 leave `Starting` with a `Claimed` effect. Neither permits replaying startup.
-`Exited` means process completion, not acceptance. There is no implicit retry,
-resume, owner transfer, provider fallback, or identity mutation in V1. Further
+`Exited` means process completion, not acceptance. V1 has no implicit retry,
+resume, owner transfer, provider fallback, or identity mutation. Further
 execution after a terminal or indeterminate attempt requires deliberate core
 recovery and, if appropriate, a newly admitted task.
 
-## Idempotency, concurrency and recovery
+## Safe replay, concurrency and recovery
 
 Every mutation includes V1, task ID, operation ID, expected revision and action.
 Operation IDs are scoped to the task and owning principal. Repeat the **exact**
@@ -78,7 +78,7 @@ A new request with a stale revision returns the current revision without writing
 
 Snapshots, receipts, intent and replay changes are published as one transaction.
 Every successful state change increments a checked monotonic task revision.
-The last 128 bounded coordination changes are replayable; an older cursor returns
+Clients can replay the last 128 bounded coordination changes; an older cursor returns
 `ReplayExpired`, and clients recover with `get`/`effects` and continue from that
 revision. These changes are lifecycle metadata, not captured execution events.
 Future cursors are refused. Receipt retention is independent of replay: receipts
@@ -91,9 +91,9 @@ callback. This prevents a concurrent cancellation from confirming termination
 before startup returns. A crash releases the OS lock but retains the claim.
 `Claimed` or `Unknown` effects return `OutcomeUnknown` instead of invoking the
 adapter again. Core can reconcile lifecycle evidence using a revision check;
-reconciliation cannot reset claims or requeue execution.
+reconciliation cannot reset claims or queue execution again.
 
-This provides **at-most-once adapter invocation**, not exactly-once execution.
+This provides **at-most-once adapter invocation**, not exactly once execution.
 A crash between writing a claim and invoking the adapter can leave work that
 never started. A crash after invocation can leave running work with no reply.
 Core must inspect existing supervisor/native-reference evidence and reconcile;
@@ -125,8 +125,8 @@ Linked checkouts share coordination. No ambient state override, plugin path or
 unrelated repository is accepted. The implementation reuses the existing state
 confinement, descriptor ownership checks, task state locks and durable atomic
 write helpers. New directories/files are owner-only. Reads are bounded and
-refuse symlinks, hardlinks, unsafe modes, repository/task mismatches, corrupt
-records and unknown versions. Locks are persistent inodes; kernel ownership,
+refuse symlinks, multiple hard links, unsafe modes, repository/task mismatches, corrupt
+records and unknown versions. Lock files persist; kernel ownership,
 not an age or recorded PID, controls exclusion. Cooperative races are serialized;
 this does not defend against an arbitrary hostile same-user process replacing
 ancestry or altering the records and their digests.
@@ -136,8 +136,8 @@ and ownership checks. It never rewrites `task.json`, moves a legacy record,
 imports native history, or infers permission to start an existing task again.
 An existing `Starting` record becomes `OutcomeUnknown` for inspection. Further
 observations must come through explicit core `reconcile` calls. Service receipts
-stay in primary-owned coordination when a worktree is removed; no automatic
-cleanup erases idempotency history.
+stay in primary-owned coordination when a worktree is removed; cleanup never
+erases the operation history.
 
 ## Integration status and validation
 
@@ -175,15 +175,15 @@ all tasks, and remains frozen until core opens another view.
 Core can give a plugin `Inspection::plugin_read_session` or
 `Controller::plugin_read_session`, selecting the plugin identity and exact task
 IDs itself. Only the opaque `TaskService` is handed to the consumer. The grant
-contains read/replay only, never prefix matching or repository discovery. An
-ungranted ID is denied before lookup; an explicitly granted missing ID is
+contains read/replay only, never prefix matching or repository discovery. IDs
+lacking a grant are denied before lookup; explicitly granted missing IDs are
 `NotFound`. Every submit/cancel/input request is denied, even for an owning
 plugin. Core must reevaluate grants when reconnecting. This is an in-process
 capability boundary, not isolation from arbitrary same-user code; no terminal
 plugin wire protocol or plugin-selected storage path is added.
 
 Existing launch, cancel, approval and message commands, plus headless wait/result
-attempt inspection, remain on their current core paths. There is no production
+attempt inspection, remain on their current core paths. No production
 `ExecutionAdapter` in this change. A future adapter integration must place
 registration before startup and retain the existing launch/admission and native
 approval checks; wrapping an already executed launch in `register_admitted`

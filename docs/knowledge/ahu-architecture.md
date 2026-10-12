@@ -143,7 +143,7 @@ Git commit. It reports exact ahu-version compatibility and declared source pins
 and grants. It neither reads the working-tree configuration nor fetches or runs
 plugins. Missing local Git objects fail with all Git transports denied. Committed
 symlinks and non-file bindings are refused; metadata reads are bounded.
-Project enablement remains a declaration, with source verification and activation
+Project plugin bindings remain declarations, with source verification and activation
 reported as unsupported. The separate local-package inventory and explicit
 executable probe retain their existing selection boundary. See the
 [CLI reference](../reference.md#committed-project-plugin-bindings) for output,

@@ -1790,12 +1790,12 @@ ahu plugins remove example
 
 `install` acquires and verifies a declared source; a different existing installation
 requires `update`. `update` installs the newly committed pin and retains all previous
-versions. An already installed pin is reverified without reacquisition. Neither
-operation changes enablement, grants, native harness configuration, or process host
+versions. An already installed pin is verified again without reacquisition. Neither
+operation changes whether the plugin is enabled, grants, native harness configuration, or process host
 selection. `enable` requires a verified installation; `disable` and `enable` edit
 only `ahu.enabled` in the working binding, preserving general OKF metadata and the
 Markdown body. Enable, disable and remove require the binding to match HEAD in both the index
-and working tree, including enablement, metadata, body and executable mode.
+and working tree, including enabled state, metadata, body and executable mode.
 Staged changes are refused even when the working copy has been restored to HEAD.
 The check reads Git objects and working bytes without running content filters.
 Review and refresh the context lock before committing policy changes.
@@ -1817,8 +1817,8 @@ source Git configuration, hooks, replacement refs and upload-pack are never used
 Linked-worktree `.git` files and object alternates are refused. Missing objects fail
 instead of lazy fetching. Remote sources use only HTTPS and fetch the exact commit;
 mutable refs, tags and tree objects are not accepted as revision pins. Submodules
-are not fetched. Redirects, credential helpers, askpass, inherited Git environment,
-proxies and global/system Git configuration are disabled for source operations.
+are not fetched. Redirects, credential helpers, credential prompt programs, inherited Git environment,
+proxies and global/system Git configuration are excluded from source operations.
 Private authenticated repositories, SSH, file URLs, custom certificate configuration
 and custom transports are unsupported. HTTPS transfer has a 120-second deadline
 and a 128 MiB per-file output limit; extracted content is bounded as below.
@@ -1827,26 +1827,27 @@ For a local directory snapshot use `kind: local`, an absolute `repository` path,
 optional `subdirectory`, and set **both** `revision` and `sha256` to the digest
 returned by `ahu plugins digest /absolute/package/path`. This reads and hashes local
 files only. For Git sources, calculate the same digest from the intended package
-content; install independently verifies it against the immutable commit's blobs.
+content; install independently checks each blob in the immutable commit.
 Use physical absolute paths: symlinks in any source path component are rejected.
 A directory containing `.git` cannot itself be a package; select its package
 subdirectory. Acquisition copies content; subsequent edits to a local source do
 not alter an installed version.
 
 The digest is SHA-256 over `ahu-plugin-tree-v1` plus a NUL, followed by files in
-UTF-8 path byte order. Each file contributes its relative path length (u64 big
-endian), path bytes, one byte for whether any executable bit is set, content length
-(u64 big endian), then content bytes. Empty directories are excluded. There are at
-most 4096 entries, 32 path components, 64 MiB per file, and 128 MiB total content.
-Symlinks, special files, setid files, unsafe paths, Git metadata and Git submodules
+UTF-8 path byte order. Each file contributes its relative path length (u64, most
+significant byte first), path bytes, one byte for whether any executable bit is set,
+content length (u64, most significant byte first), then content bytes. Empty
+directories are excluded. Packages support up to 4,096 entries and 32 path
+components, with a 64 MiB per-file limit and 128 MiB total content limit.
+Symlinks, special files, files with set-user-ID or set-group-ID bits, unsafe paths, Git metadata and Git submodules
 are rejected. Manifest ID and host API must match the binding; the manifest's
-Cargo package name must match Cargo.toml, and its explicit package version must
+Cargo package name must match the Cargo manifest, and its explicit package version must
 match the binding. Cargo is never invoked. Build scripts, hooks, install scripts,
 filters and declared package executables are never executed by installation.
 
 Snapshots and receipts live in the primary checkout's owner-only, self-ignored
 `.ahu/state/plugins/<id>/<installation-key>/`. An installation key includes source,
-version and compatibility, but excludes enablement and grants. Data is verified in
+version and compatibility, but excludes enabled state and grants. Data is verified in
 private staging and published by directory rename; old installations are never
 replaced. Ordinary errors remove their staging directory. A crash may leave an
 `.install-*` staging directory; it is never considered installed. Retry with
@@ -1854,10 +1855,10 @@ replaced. Ordinary errors remove their staging directory. A crash may leave an
 Tampered installed data is refused: disable and remove it before reinstalling.
 Tracked installation paths and redirected state directories are refused.
 
-`installed [--output json]` reads receipts and reverifies installed data offline,
+`installed [--output json]` reads receipts and verifies installed data again offline,
 without creating state or cleaning staging. It reports source verification,
-whether each version matches the current committed binding, and its declared
-enablement. `--project` remains a declaration-only inventory; it never reads or
+whether each version matches the current committed binding, and whether it is enabled.
+`--project` remains a declaration-only inventory; it never reads or
 modifies installed state. Neither inventory executes a plugin or activates a host.
 
 Because current task records have no durable plugin-version pin, cleanup is
