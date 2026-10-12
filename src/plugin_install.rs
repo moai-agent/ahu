@@ -10,7 +10,8 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 const MAX_FILES: usize = 4096;
 const MAX_FILE: u64 = 64 * 1024 * 1024;
@@ -85,7 +86,11 @@ fn git(root: &Path, args: &[&str], network: bool, limit: u64) -> Result<Vec<u8>>
             Ok(())
         });
     }
-    let mut child = command.spawn()?;
+    supervise_git(command.spawn()?, limit, Duration::from_secs(120))
+}
+
+fn supervise_git(mut child: Child, limit: u64, timeout: Duration) -> Result<Vec<u8>> {
+    let deadline = Instant::now() + timeout;
     let stdout = child.stdout.take().expect("piped stdout");
     let (tx, rx) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
@@ -93,51 +98,62 @@ fn git(root: &Path, args: &[&str], network: bool, limit: u64) -> Result<Vec<u8>>
         let read = stdout.take(limit + 1).read_to_end(&mut bytes);
         let _ = tx.send((read, bytes));
     });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    let mut output = None;
-    let status = loop {
-        if output.is_none() {
-            match rx.try_recv() {
-                Ok((Ok(_), bytes)) if bytes.len() as u64 <= limit => output = Some(bytes),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                _ => break None,
-            }
-        }
-        if let Some(status) = child.try_wait()? {
-            break Some(status);
-        }
-        if std::time::Instant::now() >= deadline {
-            break None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    };
-    let Some(status) = status else {
-        // SAFETY: the child starts its own process group; kill only that group.
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
-        let _ = child.wait();
-        let _ = reader.join();
-        return Err(Error::new(
-            "plugin Git operation timed out or exceeded its output limit",
-        ));
-    };
-    let bytes = match output {
-        Some(bytes) => bytes,
-        None => match rx.recv_timeout(std::time::Duration::from_secs(1)) {
-            Ok((Ok(_), bytes)) if bytes.len() as u64 <= limit => bytes,
-            _ => {
-                // SAFETY: only descendants in this child's group can hold stdout.
-                unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+    let output = (|| {
+        let mut output = None;
+        loop {
+            if output.is_none() {
+                match rx.try_recv() {
+                    Ok((Ok(_), bytes)) if bytes.len() as u64 <= limit => output = Some(bytes),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    _ => bail!("plugin Git operation timed out or exceeded its output limit"),
                 }
-                return Err(Error::new(
-                    "plugin Git output is unreadable or exceeds its limit",
-                ));
             }
-        },
-    };
-    let _ = reader.join();
+            // Observe exit without reaping. Even an exited leader must reserve
+            // its PID until output validation and process-group cleanup finish.
+            match crate::headless::child_exited(child.id()) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(_) => bail!("plugin Git process status is unreadable"),
+            }
+            if Instant::now() >= deadline {
+                bail!("plugin Git operation timed out or exceeded its output limit");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        match output {
+            Some(bytes) => Ok(bytes),
+            None => {
+                let grace =
+                    Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now()));
+                match rx.recv_timeout(grace) {
+                    Ok((Ok(_), bytes)) if bytes.len() as u64 <= limit => Ok(bytes),
+                    _ => Err(Error::new(
+                        "plugin Git output is unreadable or exceeds its limit",
+                    )),
+                }
+            }
+        }
+    })();
+
+    // All paths converge here before the only reap. Also stop descendants that
+    // closed stdout, so successful output cannot bypass process-group cleanup.
+    #[cfg(test)]
+    assert!(
+        crate::headless::child_exited(child.id()).is_ok(),
+        "Git leader was reaped before process-group cleanup"
+    );
+    // SAFETY: this child started its own group and its PID is still unreaped.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let status = child.wait();
+    // A descendant that escaped the group may still hold stdout. Do not let a
+    // reader join extend the operation's deadline; its read remains size-bounded.
+    if reader.is_finished() {
+        let _ = reader.join();
+    }
+    let bytes = output?;
+    let status = status.map_err(|_| Error::new("plugin Git process status is unreadable"))?;
     if !status.success() {
         bail!(
             "plugin Git operation failed; source and pinned objects must be available (credentials and redirects are disabled)"
@@ -766,4 +782,133 @@ pub fn list(root: &Path, output_json: bool) -> Result<()> {
         println!("Installed source inspection only; no package code executed or host activated.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    // stderr is a separate lifetime probe: EOF proves every fixture descendant
+    // holding it was stopped, without kill(pid, 0) races or zombie assumptions.
+    fn fixture(script: &str) -> (Child, mpsc::Receiver<Vec<u8>>) {
+        let mut child = Command::new("/bin/sh")
+            .env_clear()
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).unwrap();
+            let _ = tx.send(bytes);
+        });
+        (child, rx)
+    }
+
+    fn await_exit(child: &Child) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !crate::headless::child_exited(child.id()).unwrap() {
+            assert!(Instant::now() < deadline, "fixture leader did not exit");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn assert_cleaned(pid: u32, probe: mpsc::Receiver<Vec<u8>>) {
+        assert_eq!(
+            probe
+                .recv_timeout(Duration::from_secs(5))
+                .expect("descendant still holds pipe"),
+            b"private fixture diagnostic"
+        );
+        assert_eq!(
+            crate::headless::child_exited(pid)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ECHILD),
+            "leader was not reaped after cleanup"
+        );
+    }
+
+    #[test]
+    fn oversized_git_output_cleans_group_before_reaping_exited_leader() {
+        let (child, probe) = fixture(
+            "printf 'private fixture diagnostic' >&2; printf '123456789'; /bin/sleep 30 & exit 0",
+        );
+        let pid = child.id();
+        await_exit(&child);
+        let error = supervise_git(child, 8, Duration::from_secs(5)).unwrap_err();
+        assert!(matches!(
+            error.to_string().as_str(),
+            "plugin Git operation timed out or exceeded its output limit"
+                | "plugin Git output is unreadable or exceeds its limit"
+        ));
+        assert_cleaned(pid, probe);
+    }
+
+    #[test]
+    fn git_output_timeout_cleans_descendants_of_unreaped_exited_leader() {
+        let (child, probe) =
+            fixture("printf 'private fixture diagnostic' >&2; /bin/sleep 30 & exit 0");
+        let pid = child.id();
+        // The leader is definitely exited and the descendant definitely holds
+        // stdout open. A try_wait here would deterministically reap too early.
+        await_exit(&child);
+        let started = Instant::now();
+        let error = supervise_git(child, 8, Duration::from_millis(100)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "plugin Git output is unreadable or exceeds its limit"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_cleaned(pid, probe);
+    }
+
+    #[test]
+    fn git_deadline_stops_live_leader_even_after_stdout_closes() {
+        let (child, probe) =
+            fixture("printf 'private fixture diagnostic' >&2; exec 1>&-; exec /bin/sleep 30");
+        let pid = child.id();
+        let started = Instant::now();
+        let error = supervise_git(child, 8, Duration::from_millis(100)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "plugin Git operation timed out or exceeded its output limit"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_cleaned(pid, probe);
+    }
+
+    #[test]
+    fn exact_git_output_limit_succeeds_and_cleans_descendants_without_stdout() {
+        let (child, probe) = fixture(
+            "printf 'private fixture diagnostic' >&2; printf '12345678'; /bin/sleep 30 >/dev/null & exit 0",
+        );
+        let pid = child.id();
+        await_exit(&child);
+        assert_eq!(
+            supervise_git(child, 8, Duration::from_secs(5)).unwrap(),
+            b"12345678"
+        );
+        assert_cleaned(pid, probe);
+    }
+
+    #[test]
+    fn failed_git_status_remains_sanitized() {
+        let (child, probe) =
+            fixture("printf 'private fixture diagnostic' >&2; printf 'private stdout'; exit 1");
+        let pid = child.id();
+        await_exit(&child);
+        let error = supervise_git(child, 64, Duration::from_secs(5)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "plugin Git operation failed; source and pinned objects must be available (credentials and redirects are disabled)"
+        );
+        assert_cleaned(pid, probe);
+    }
 }
