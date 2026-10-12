@@ -1312,6 +1312,33 @@ fn approval_record(repo: &common::TestRepo, id: &str) -> std::path::PathBuf {
     dir
 }
 
+#[test]
+fn task_service_inspection_jobs_preserve_schema_and_job_ownership() {
+    let repo = common::TestRepo::new();
+    let task_id = ahu::task::new_task_id().unwrap();
+    let dir = approval_record(&repo, &task_id);
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    let mut alice = Client::new(&repo, "alice");
+    let job = alice.create("ahu_task_get", json!({"task":task_id}));
+    let completed = alice.until(&job, "completed");
+    let metadata = &completed["result"]["structuredContent"];
+    assert_eq!(metadata["schema_version"], 1);
+    assert_eq!(metadata["task_id"], task_id);
+    assert_eq!(metadata["session_state"], "running");
+    assert!(!completed.to_string().contains("secret prompt"));
+    let mut bob = Client::new(&repo, "bob");
+    assert_eq!(bob.task("tasks/get", &job)["error"]["code"], -32602);
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+    assert!(
+        !dir.parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("agent-tasks-v1")
+            .exists()
+    );
+}
+
 fn wait_for_approval(dir: &std::path::Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

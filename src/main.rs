@@ -120,7 +120,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         }
         Command::TasksJson => {
             let repo = commands::repo_from_cwd()?;
-            let listing = ahu::task::list(&repo)?;
+            let listing = ahu::agent_task::inspection::list(&repo)?;
             let workspaces = commands::liveness_workspaces(&listing.records);
             println!(
                 "{}",

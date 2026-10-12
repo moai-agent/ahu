@@ -1010,13 +1010,7 @@ fn tasks_limited_at(
     width: usize,
     limit: Option<usize>,
 ) -> Result<i32> {
-    let listing = if std::env::var("AHU_EXECUTION_BACKEND").ok().as_deref() == Some("headless")
-        || !crate::headless::discover(repo)?.is_empty()
-    {
-        task::list(repo)?
-    } else {
-        launch::reconcile(repo)?
-    };
+    let listing = crate::agent_task::inspection::list(repo)?;
     // Printed before anything returns: a store can hold something that is not a
     // task and nothing that is, and that is exactly when saying so matters.
     for note in &listing.notes {
@@ -1489,6 +1483,11 @@ fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
 
 /// Resolve exact IDs before unique prefixes, including unreadable candidates.
 pub(crate) fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
+    crate::agent_task::inspection::get(repo, id)
+}
+
+// Existing mutation lookup stays local; inspection integration does not widen it.
+fn inspect_local_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
     let normalized = crate::task_ref::resolve(repo, id)?;
     let id: &str = &normalized;
     // Inspection needs no live cmux connection and does not rewrite records.
@@ -1521,6 +1520,17 @@ pub(crate) fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::Task
         crate::util::Error::new(format!("no task matching {id:?}."))
             .with_kind(crate::util::ErrorKind::Usage)
     })
+}
+
+/// Core-only repository/index discovery; the read adapter applies service grants.
+pub(crate) fn resolve_inspection(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
+    match resolve_task(repo, id)? {
+        Located::Listing(dir, record) | Located::Pointer(_, dir, record) => Ok((dir, record)),
+        Located::Unreadable(blocked) => Err(unreadable_record(&blocked)),
+        Located::NoMatch { .. } => {
+            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {id:?}.")
+        }
+    }
 }
 
 pub fn task_summary(
@@ -1564,13 +1574,7 @@ pub fn task_summary(
 
 /// A small, versioned inspection contract; never expose the full launch record.
 pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) -> Result<i32> {
-    let (dir, record) = match resolve_task(repo, id)? {
-        Located::Listing(dir, record) | Located::Pointer(_, dir, record) => (dir, record),
-        Located::Unreadable(blocked) => return Err(unreadable_record(&blocked)),
-        Located::NoMatch { .. } => {
-            bail!(kind: crate::util::ErrorKind::Usage, "no task matching {id:?}.")
-        }
-    };
+    let (dir, record) = inspect_task(repo, id)?;
     let workspaces = if cmux_liveness_needed(&dir, &record) {
         cmux_workspaces()
     } else {
@@ -2186,7 +2190,7 @@ pub fn eval_report(
 /// recorded cmux workspace; an unconfirmed request leaves it open. The worktree,
 /// branch and record are never deleted.
 pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
-    let (dir, mut record) = inspect_task(repo, id)?;
+    let (dir, mut record) = inspect_local_task(repo, id)?;
     if dir.join("headless.json").exists() {
         return crate::headless::control(repo, "cancel", &record.task_id, None, json_output);
     }
@@ -2306,7 +2310,7 @@ pub fn approval_cmd(repo: &Repo, id: &str, approve: bool, json_output: bool) -> 
     // task does not grant operator authority. Like the resume guard, this is
     // cooperative: same-user code can remove its environment or edit state.
     crate::util::require_host_operator("ahu approve and ahu reject")?;
-    let (dir, record) = inspect_task(repo, id)?;
+    let (dir, record) = inspect_local_task(repo, id)?;
     if !matches!(record.state, task::TaskState::WaitingForApproval) {
         bail!(
             "task {} is not waiting for approval (state: {})",

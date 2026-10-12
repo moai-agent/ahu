@@ -112,6 +112,74 @@ pub struct Controller {
     repository: String,
 }
 impl Controller {
+    /// Read-only, session-local observations. Call only after core discovery has
+    /// checked repository/store ownership. This does not attach or migrate tasks.
+    pub(super) fn inspection(
+        repo: &crate::git::Repo,
+        records: &[crate::task::TaskRecord],
+    ) -> Result<Self> {
+        let repository = repo.identity();
+        let entries = records
+            .iter()
+            .map(|record| {
+                let mut entry = Entry {
+                    version: VERSION,
+                    snapshot: Snapshot {
+                        version: VERSION,
+                        identity: Identity {
+                            repository: repository.clone(),
+                            task: record.task_id.clone(),
+                            // Execution remains owned by the legacy core. Terminal
+                            // workspace IDs and selected plugins are not providers.
+                            provider: "ahu.legacy-core".into(),
+                            agent: record.identity.clone(),
+                            policy_digest: record.policy_digest.clone(),
+                            config_digest: record.config_snapshot_digest.clone(),
+                            prompt_digest: record.prompt_digest.clone(),
+                        },
+                        owner: Principal::Operator("ahu.legacy-core".into()),
+                        revision: 0,
+                        lifecycle: observed_lifecycle(record.state),
+                        cancellation_requested: false,
+                        supports_input: false,
+                    },
+                    supports_input: false,
+                    start: Delivery::Unknown,
+                    cancel: None,
+                    inputs: vec![],
+                    receipts: vec![],
+                    changes: vec![],
+                };
+                entry
+                    .change(ChangeKind::Reconciled)
+                    .expect("initial revision");
+                (record.task_id.clone(), entry)
+            })
+            .collect();
+        Ok(Self {
+            store: Arc::new(Store::inspection(repo, entries)?),
+            repository,
+        })
+    }
+
+    /// Core grants a plugin only these exact IDs. Requests cannot select a
+    /// principal, add scope, or obtain execution rights. Do not hand out `self`.
+    pub fn plugin_read_session(
+        &self,
+        plugin: &str,
+        tasks: BTreeSet<String>,
+    ) -> Result<impl TaskService + use<>> {
+        let principal = Principal::Plugin(plugin.into());
+        if !valid_principal(&principal) {
+            return Err(Error::InvalidRequest);
+        }
+        Ok(self.session(
+            principal,
+            tasks,
+            [Operation::Read, Operation::Replay].into(),
+        ))
+    }
+
     /// Conformance implementation: identical transitions/receipts, no disk I/O.
     pub fn memory(repository: &str) -> Self {
         Self {
@@ -191,15 +259,7 @@ impl Controller {
             .into_iter()
             .find(|(_, r)| r.task_id == id)
             .ok_or(Error::NotFound)?;
-        use crate::task::TaskState as T;
-        let lifecycle = match record.state {
-            T::Starting => Lifecycle::OutcomeUnknown,
-            T::Running => Lifecycle::Running,
-            T::WaitingForApproval => Lifecycle::WaitingForApproval,
-            T::Exited => Lifecycle::Exited,
-            T::Failed => Lifecycle::Failed,
-            T::Cancelled => Lifecycle::Cancelled,
-        };
+        let lifecycle = observed_lifecycle(record.state);
         self.register(
             &record,
             provider,
@@ -672,5 +732,17 @@ fn valid_token(value: &str) -> bool {
 fn valid_principal(value: &Principal) -> bool {
     match value {
         Principal::Operator(v) | Principal::Plugin(v) | Principal::Worker(v) => valid_token(v),
+    }
+}
+
+fn observed_lifecycle(state: crate::task::TaskState) -> Lifecycle {
+    use crate::task::TaskState as T;
+    match state {
+        T::Starting => Lifecycle::OutcomeUnknown,
+        T::Running => Lifecycle::Running,
+        T::WaitingForApproval => Lifecycle::WaitingForApproval,
+        T::Exited => Lifecycle::Exited,
+        T::Failed => Lifecycle::Failed,
+        T::Cancelled => Lifecycle::Cancelled,
     }
 }

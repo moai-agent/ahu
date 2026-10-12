@@ -2,9 +2,307 @@ mod common;
 use common::TestRepo;
 use std::process::Output;
 
+fn mcp_read(repo: &TestRepo, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+    use std::{io::Write, process::Stdio};
+    let mut child = common::ahu()
+        .args(["mcp", "serve"])
+        .current_dir(repo.path())
+        .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    for request in [
+        serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{}}),
+        serde_json::json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":name,"arguments":arguments}}),
+    ] {
+        writeln!(input, "{request}").unwrap();
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|value| value["id"] == 2)
+        .unwrap()
+}
+
+#[test]
+fn cli_mcp_reads_share_resolution_permissions_and_legacy_schemas_without_migration() {
+    use serde_json::{Value, json};
+    let repo = TestRepo::new();
+    let dir = record(&repo, "abc1");
+    record(&repo, "abc12");
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    for selector in ["abc1", "ahu:task:abc1", "abc12"] {
+        let cli = run(&repo, &["task", selector, "--output", "json"]);
+        assert!(cli.status.success(), "{cli:?}");
+        let cli: Value = serde_json::from_slice(&cli.stdout).unwrap();
+        let mcp = mcp_read(&repo, "ahu_task_get", json!({"task":selector}));
+        assert_eq!(cli, mcp["result"]["structuredContent"]);
+    }
+    let cli = run(&repo, &["tasks", "--output", "json"]);
+    assert!(cli.status.success());
+    let cli: Value = serde_json::from_slice(&cli.stdout).unwrap();
+    let mcp = mcp_read(&repo, "ahu_tasks_list", json!({}));
+    for key in ["schema_version", "tasks", "unreadable", "notes"] {
+        assert_eq!(cli[key], mcp["result"]["structuredContent"][key]);
+    }
+    for selector in ["missing", "abc"] {
+        let cli = run(&repo, &["task", selector, "--output", "json"]);
+        assert!(!cli.status.success());
+        let mcp = mcp_read(&repo, "ahu_task_get", json!({"task":selector}));
+        assert!(
+            mcp.get("error").is_some() || mcp["result"]["isError"] == true,
+            "{mcp}"
+        );
+    }
+    // Neither transport accepts a record belonging to a different repository.
+    let foreign_dir = record(&repo, "ffff");
+    let mut foreign: Value =
+        serde_json::from_slice(&std::fs::read(foreign_dir.join("task.json")).unwrap()).unwrap();
+    foreign["repo_identity"] = "another-repository".into();
+    std::fs::write(
+        foreign_dir.join("task.json"),
+        serde_json::to_vec(&foreign).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !run(&repo, &["task", "ffff", "--output", "json"])
+            .status
+            .success()
+    );
+    let denied = mcp_read(&repo, "ahu_task_get", json!({"task":"ffff"}));
+    assert!(denied.get("error").is_some() || denied["result"]["isError"] == true);
+    let forged = mcp_read(
+        &repo,
+        "ahu_task_get",
+        json!({"task":"abc1", "principal":"operator"}),
+    );
+    assert!(forged.get("error").is_some());
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+    assert!(
+        !dir.parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("agent-tasks-v1")
+            .exists()
+    );
+}
+
+#[test]
+fn plugin_read_session_is_exact_immutable_and_denies_all_execution_controls() {
+    use ahu::agent_task::{inspection::Inspection, v1::*};
+    let repo = TestRepo::new();
+    let dir = record(&repo, "abc1");
+    record(&repo, "abc2");
+    let mut starting: ahu::task::TaskRecord =
+        serde_json::from_slice(&std::fs::read(dir.join("task.json")).unwrap()).unwrap();
+    starting.state = ahu::task::TaskState::Starting;
+    ahu::state::write_json(&dir.join("task.json"), &starting).unwrap();
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let view = Inspection::open(&discovered).unwrap();
+    assert!(view.plugin_read_session("", Default::default()).is_err());
+    let ungranted = view
+        .plugin_read_session("other", Default::default())
+        .unwrap();
+    assert_eq!(ungranted.get(VERSION, "abc1"), Err(Error::Denied));
+    let plugin = view
+        .plugin_read_session("fixture", ["abc1".into(), "missing".into()].into())
+        .unwrap();
+    assert_eq!(
+        plugin.capabilities(VERSION).unwrap().operations,
+        [Operation::Read, Operation::Replay].into()
+    );
+    assert_eq!(plugin.get(VERSION, "abc2"), Err(Error::Denied));
+    assert_eq!(plugin.get(VERSION, "abc"), Err(Error::Denied));
+    assert_eq!(plugin.get(VERSION, "missing"), Err(Error::NotFound));
+    assert_eq!(plugin.effects(VERSION, "abc2"), Err(Error::Denied));
+    assert_eq!(plugin.replay(VERSION, "abc2", 0), Err(Error::Denied));
+    assert_eq!(plugin.replay(VERSION, "missing", 0), Err(Error::NotFound));
+    assert_eq!(
+        plugin.get(VERSION + 1, "abc1"),
+        Err(Error::UnsupportedVersion)
+    );
+    let snapshot = plugin.get(VERSION, "abc1").unwrap();
+    assert_eq!(snapshot.lifecycle, Lifecycle::OutcomeUnknown);
+    assert_eq!(snapshot.identity.provider, "ahu.legacy-core");
+    assert!(!snapshot.supports_input);
+    assert_eq!(
+        plugin.effects(VERSION, "abc1").unwrap().start,
+        DeliveryState::Unknown
+    );
+    let replay = plugin.replay(VERSION, "abc1", 0).unwrap();
+    assert_eq!(replay.snapshot, snapshot);
+    assert_eq!(replay.changes.len(), 1);
+    assert!(
+        plugin
+            .replay(VERSION, "abc1", snapshot.revision)
+            .unwrap()
+            .changes
+            .is_empty()
+    );
+    assert_eq!(
+        plugin.replay(VERSION, "abc1", snapshot.revision + 1),
+        Err(Error::StaleRevision {
+            current: snapshot.revision
+        })
+    );
+    for action in [
+        Action::Submit,
+        Action::Cancel,
+        Action::Input("literal".into()),
+    ] {
+        assert_eq!(
+            plugin.mutate(Mutation {
+                version: VERSION,
+                task: "abc1".into(),
+                operation_id: "attempt".into(),
+                expected_revision: snapshot.revision,
+                action
+            }),
+            Err(Error::Denied)
+        );
+    }
+    let mut saved: ahu::task::TaskRecord =
+        serde_json::from_slice(&std::fs::read(dir.join("task.json")).unwrap()).unwrap();
+    saved.state = ahu::task::TaskState::Exited;
+    ahu::state::write_json(&dir.join("task.json"), &saved).unwrap();
+    assert_eq!(plugin.get(VERSION, "abc1").unwrap(), snapshot);
+    let fresh = Inspection::open(&discovered)
+        .unwrap()
+        .plugin_read_session("fixture", ["abc1".into()].into())
+        .unwrap();
+    assert_eq!(
+        fresh.get(VERSION, "abc1").unwrap().lifecycle,
+        Lifecycle::Exited
+    );
+    assert_eq!(fresh.get(VERSION, "abc2"), Err(Error::Denied));
+}
+
+#[test]
+fn inspection_preserves_durable_owner_identity_effects_and_replay_boundaries() {
+    use ahu::agent_task::{Controller, inspection::Inspection, v1::*};
+    let repo = TestRepo::new();
+    let id = ahu::task::new_task_id().unwrap();
+    let dir = record(&repo, &id);
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let core = Controller::local(&discovered).unwrap();
+    let owner = Principal::Plugin("original-owner".into());
+    let mut snapshot = core
+        .track_existing(&discovered, &id, "fixture-provider", owner.clone(), true)
+        .unwrap();
+    for index in 0..REPLAY_WINDOW + 2 {
+        snapshot = core
+            .reconcile(
+                &id,
+                "fixture-provider",
+                snapshot.revision,
+                if index % 2 == 0 {
+                    Lifecycle::WaitingForApproval
+                } else {
+                    Lifecycle::Running
+                },
+            )
+            .unwrap();
+    }
+    let path = dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("agent-tasks-v1")
+        .join(format!("{id}.json"));
+    let before = std::fs::read(&path).unwrap();
+    let record_before = std::fs::read(dir.join("task.json")).unwrap();
+    let plugin = Inspection::open(&discovered)
+        .unwrap()
+        .plugin_read_session("original-owner", [id.clone()].into())
+        .unwrap();
+    assert_eq!(plugin.get(VERSION, &id).unwrap(), snapshot);
+    assert_eq!(snapshot.owner, owner);
+    assert_eq!(snapshot.identity.provider, "fixture-provider");
+    assert!(matches!(
+        plugin.replay(VERSION, &id, 0),
+        Err(Error::ReplayExpired { .. })
+    ));
+    let replay = plugin
+        .replay(VERSION, &id, snapshot.revision - REPLAY_WINDOW as u64)
+        .unwrap();
+    assert_eq!(replay.changes.len(), REPLAY_WINDOW);
+    assert!(
+        replay
+            .changes
+            .iter()
+            .all(|change| change.revision > snapshot.revision - REPLAY_WINDOW as u64)
+    );
+    assert!(
+        plugin
+            .replay(VERSION, &id, snapshot.revision)
+            .unwrap()
+            .changes
+            .is_empty()
+    );
+    assert_eq!(
+        plugin.replay(VERSION, &id, snapshot.revision + 1),
+        Err(Error::StaleRevision {
+            current: snapshot.revision
+        })
+    );
+    assert_eq!(
+        plugin.effects(VERSION, &id).unwrap().start,
+        DeliveryState::Confirmed
+    );
+    for action in [
+        Action::Submit,
+        Action::Cancel,
+        Action::Input("literal".into()),
+    ] {
+        assert_eq!(
+            plugin.mutate(Mutation {
+                version: VERSION,
+                task: id.clone(),
+                operation_id: "deny".into(),
+                expected_revision: snapshot.revision,
+                action
+            }),
+            Err(Error::Denied)
+        );
+    }
+    assert!(
+        run(&repo, &["task", &id, "--output", "json"])
+            .status
+            .success()
+    );
+    assert!(mcp_read(&repo, "ahu_task_get", serde_json::json!({"task":id}))["result"].is_object());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), record_before);
+    // A legacy record cannot rewrite a service-owned frozen identity.
+    let mut changed: ahu::task::TaskRecord = serde_json::from_slice(&record_before).unwrap();
+    changed.identity.model = "different-model".into();
+    ahu::state::write_json(&dir.join("task.json"), &changed).unwrap();
+    assert!(Inspection::open(&discovered).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    // Existing corrupt V1 state must not silently fall back to legacy metadata.
+    std::fs::write(dir.join("task.json"), &record_before).unwrap();
+    ahu::state::write_private_file(&path, b"corrupt").unwrap();
+    assert!(
+        !run(&repo, &["task", &id, "--output", "json"])
+            .status
+            .success()
+    );
+    let denied = mcp_read(&repo, "ahu_task_get", serde_json::json!({"task":id}));
+    assert!(denied.get("error").is_some() || denied["result"]["isError"] == true);
+    assert_eq!(std::fs::read(&path).unwrap(), b"corrupt");
+}
+
 #[test]
 #[cfg(unix)]
-fn cross_window_liveness_requires_complete_enumeration_before_reconciliation() {
+fn read_only_listing_preserves_records_and_observes_cross_window_liveness() {
     use std::os::unix::fs::PermissionsExt;
     for case in ["live", "closed", "unreadable", "malformed"] {
         let repo = TestRepo::new();
@@ -47,14 +345,7 @@ else: raise AssertionError(method)
         );
         let persisted: ahu::task::TaskRecord =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(
-            persisted.state,
-            if case == "closed" {
-                ahu::task::TaskState::Exited
-            } else {
-                ahu::task::TaskState::Running
-            }
-        );
+        assert_eq!(persisted.state, ahu::task::TaskState::Running);
         let detail = run(&["task", "crosswindow", "--output", "json"]);
         assert!(
             detail.status.success(),

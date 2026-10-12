@@ -141,9 +141,49 @@ cleanup erases idempotency history.
 
 ## Integration status and validation
 
-V1, both storage implementations, core dispatch gates and existing-record
-attachment are library facilities. Existing CLI/MCP launch, cancel and message
-commands are not yet routed through this interface. There is no production
+`agent_task::inspection` routes `ahu tasks` (human and JSON), `ahu task`, and
+the approved MCP tools `ahu_tasks_list` and `ahu_task_get` through the same
+core-minted `Session::get` authorization. Their existing JSON schemas and legacy
+task IDs remain unchanged. Exact IDs, unique prefixes, handles and validated
+repository index pointers resolve through the same core lookup. Human task
+listing observes liveness without reconciling or rewriting task records.
+The local CLI and stdio MCP inspection entrypoints retain repository read access;
+JSON arguments cannot supply a principal or grants. MCP Tasks extension jobs
+retain their separate caller ownership, cancellation and subscription protocol;
+their inspection work uses this bridge too.
+
+`Inspection::open` is a trusted core factory. It captures a read-only view of
+ownership-validated task records and, where present, atomically published V1
+state. Existing V1 owner, provider, identity, revisions, effect claims and replay
+history are preserved. Conflicting identity, corrupt state and unsafe storage
+fail closed. It creates no V1 directories or locks, calls no execution adapter,
+and never invokes `track_existing`, registration or reconciliation. Compatibility
+output continues to describe the legacy record and existing liveness evidence;
+it does not pretend those observations updated durable service state.
+
+For records without V1 state, the view contains one session-local `Reconciled`
+observation at revision 1. `Starting` maps to `OutcomeUnknown`. Provider and owner
+identify `ahu.legacy-core`, not a terminal host or the reading plugin. Startup
+delivery is unknown and input support is false; no historical effects or native
+events are inferred. Replay after 0 returns that observation, after 1 is empty,
+and a future cursor is refused. **Legacy observation cursors apply only within
+that immutable view; they are not reconnect cursors.** Reopening refreshes legacy
+observations without migrating them. Existing V1 cursors retain their durable
+meaning and bounded expiry. A view is coherent per task, not a transaction across
+all tasks, and remains frozen until core opens another view.
+
+Core can give a plugin `Inspection::plugin_read_session` or
+`Controller::plugin_read_session`, selecting the plugin identity and exact task
+IDs itself. Only the opaque `TaskService` is handed to the consumer. The grant
+contains read/replay only, never prefix matching or repository discovery. An
+ungranted ID is denied before lookup; an explicitly granted missing ID is
+`NotFound`. Every submit/cancel/input request is denied, even for an owning
+plugin. Core must reevaluate grants when reconnecting. This is an in-process
+capability boundary, not isolation from arbitrary same-user code; no terminal
+plugin wire protocol or plugin-selected storage path is added.
+
+Existing launch, cancel, approval and message commands, plus headless wait/result
+attempt inspection, remain on their current core paths. There is no production
 `ExecutionAdapter` in this change. A future adapter integration must place
 registration before startup and retain the existing launch/admission and native
 approval checks; wrapping an already executed launch in `register_admitted`
@@ -154,7 +194,10 @@ and durable state using synthetic adapters. It covers authorization, versions,
 identity conflicts, duplicates, stale revisions, replay and reconnect, cancellation
 intent, literal input, lost responses, provider failure, concurrency, persisted
 claims and storage refusal. It starts no native provider session and reads no
-native auth stores. Live provider behavior and command routing are not claimed.
+native auth stores. `tests/task_inspection.rs` additionally checks CLI/MCP response
+and permission equivalence, denied and unknown tasks, immutable plugin scopes,
+replay boundaries, preserved ownership and no implicit migration. Live provider
+behavior, execution routing and native history replay are not claimed.
 
 See [system architecture](knowledge/ahu-architecture.md),
 [task state](knowledge/task-state.md), [task communication](knowledge/task-communication.md),

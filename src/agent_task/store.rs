@@ -12,6 +12,9 @@ use std::{
 const MAX_RECORD_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) enum Store {
+    /// Immutable observations of validated legacy records. Never a launch store;
+    /// legacy IDs need not be UUIDs and no read creates durable service state.
+    Inspection { entries: BTreeMap<String, Entry> },
     Memory {
         entries: Mutex<BTreeMap<String, Entry>>,
         effects: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
@@ -33,6 +36,42 @@ pub(super) fn task_id(id: &str) -> Result<()> {
 }
 
 impl Store {
+    pub(super) fn inspection(
+        repo: &crate::git::Repo,
+        mut entries: BTreeMap<String, Entry>,
+    ) -> Result<Self> {
+        let directory = crate::storage::RepositoryStorage::new(repo)
+            .map_err(storage)?
+            .coordination_dir()
+            .map_err(storage)?
+            .join("agent-tasks-v1");
+        crate::state::confine_existing_dir(&directory).map_err(storage)?;
+        match std::fs::symlink_metadata(&directory) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(storage(e)),
+            Ok(_) => {
+                check_directory(&directory, false)?;
+                for (id, observed) in &mut entries {
+                    if !crate::task::is_canonical_task_uuid(id) {
+                        continue;
+                    }
+                    // Atomic publication permits a coherent read without creating
+                    // lock files. No reconciliation, claims or receipts are written.
+                    if let Some(entry) = read(&directory.join(format!("{id}.json")))? {
+                        validate(&entry, id, &repo.identity())?;
+                        let mut identity = observed.snapshot.identity.clone();
+                        identity.provider = entry.snapshot.identity.provider.clone();
+                        if identity != entry.snapshot.identity {
+                            return Err(Error::Conflict);
+                        }
+                        *observed = entry;
+                    }
+                }
+            }
+        }
+        Ok(Self::Inspection { entries })
+    }
+
     pub fn memory() -> Self {
         Self::Memory {
             entries: Mutex::new(BTreeMap::new()),
@@ -65,8 +104,12 @@ impl Store {
     }
 
     pub fn execution_lock(&self, id: &str) -> Result<ExecutionLock> {
+        if matches!(self, Self::Inspection { .. }) {
+            return Err(Error::Denied);
+        }
         task_id(id)?;
         match self {
+            Self::Inspection { .. } => unreachable!(),
             Self::Memory { effects, .. } => {
                 let flag = effects
                     .lock()
@@ -99,8 +142,19 @@ impl Store {
         id: &str,
         f: impl FnOnce(&mut Option<Entry>) -> Result<R>,
     ) -> Result<R> {
+        if let Self::Inspection { entries } = self {
+            let before = entries.get(id).cloned();
+            let mut entry = before.clone();
+            let result = f(&mut entry)?;
+            return if entry == before {
+                Ok(result)
+            } else {
+                Err(Error::Denied)
+            };
+        }
         task_id(id)?;
         match self {
+            Self::Inspection { .. } => unreachable!(),
             Self::Memory { entries, .. } => {
                 let mut entries = entries.lock().map_err(|_| Error::Busy)?;
                 let mut entry = entries.get(id).cloned();
