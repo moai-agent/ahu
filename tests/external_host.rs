@@ -81,7 +81,7 @@ fn save_binding(root: &Path, binding: &ahu::plugin_binding::Binding) {
     let directory = root.join(".agents/ahu/plugins");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
-        directory.join("fixture.md"),
+        directory.join(format!("{}.md", binding.id)),
         ahu::okf::Document::new("ahu:plugin-binding", binding, "")
             .unwrap()
             .render()
@@ -579,6 +579,7 @@ fn launch_fixture(
         );
     }
     let mut launch = installed_command(repo.path());
+    launch.env_remove("AHU_INTERACTIVE_PLUGIN");
     if discovered {
         launch.env("AHU_PLUGIN_PATH", &package);
     }
@@ -834,4 +835,252 @@ fn frozen_versions_survive_updates_and_tampering_refuses_before_execution() {
         .unwrap();
     assert!(!output.status.success());
     assert!(executable.exists());
+}
+
+#[test]
+fn terminal_package_cleanup_requires_task_removal_first() {
+    const CASE: &str = "terminal_package_cleanup_requires_task_removal_first";
+    if !common::in_harness_fixture(CASE) {
+        return;
+    }
+    for already_closed in [false, true] {
+        let (repo, source, _package, dir, record) = launch_fixture("durable", false);
+        succeeds(
+            installed_command(repo.path())
+                .args(["run-task", "--task-dir", dir.to_str().unwrap()])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(
+            ahu::task::load(&dir).unwrap().state,
+            ahu::task::TaskState::Exited
+        );
+        if already_closed {
+            let git = ahu::git::discover(repo.path()).unwrap();
+            interactive::discover_for_record(&git, &record)
+                .unwrap()
+                .close_workspace(record.cmux_workspace_id.as_deref().unwrap())
+                .unwrap();
+        }
+        let marker = source.path().join("started");
+        std::fs::remove_file(&marker).unwrap();
+        let binding_path = repo.path().join(".agents/ahu/plugins/fixture.md");
+        let original = std::fs::read(&binding_path).unwrap();
+        for action in ["disable", "remove"] {
+            let output = installed_command(repo.path())
+                .args(["plugins", action, "fixture"])
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{action}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("workspace cleanup"),
+                "{output:?}"
+            );
+            assert_eq!(std::fs::read(&binding_path).unwrap(), original);
+            assert!(
+                !marker.exists(),
+                "package lifecycle must not execute the host"
+            );
+        }
+        // Direct committed revocation still fails closed; removal retains the pin.
+        let mut binding = record.session_host.as_ref().unwrap().binding.clone();
+        binding.enabled = false;
+        save_binding(repo.path(), &binding);
+        let output = installed_command(repo.path())
+            .args(["remove", &record.task_id])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("committed enablement"),
+            "{output:?}"
+        );
+        let output = installed_command(repo.path())
+            .args(["plugins", "remove", "fixture"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("workspace cleanup"),
+            "{output:?}"
+        );
+        assert!(!marker.exists());
+        assert!(dir.exists());
+        assert!(repo.path().join(".ahu/state/plugins/fixture").exists());
+        // Restore explicit authority, remove the terminal task, then disable/remove.
+        binding.enabled = true;
+        save_binding(repo.path(), &binding);
+        let output = installed_command(repo.path())
+            .args(["remove", &record.task_id])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(if already_closed {
+                "already absent"
+            } else {
+                "closed"
+            }),
+            "{output:?}"
+        );
+        succeeds(output);
+        assert!(!record.worktree.exists());
+        succeeds(
+            installed_command(repo.path())
+                .args(["plugins", "disable", "fixture"])
+                .output()
+                .unwrap(),
+        );
+        common::git(repo.path(), &["add", ".agents/ahu/plugins/fixture.md"]);
+        common::git(
+            repo.path(),
+            &["commit", "-qm", "disable fixture after task cleanup"],
+        );
+        succeeds(
+            installed_command(repo.path())
+                .args(["plugins", "remove", "fixture"])
+                .output()
+                .unwrap(),
+        );
+        assert!(!repo.path().join(".ahu/state/plugins/fixture").exists());
+    }
+}
+
+#[test]
+fn installed_inventory_agrees_with_activation_selection_without_execution() {
+    const CASE: &str = "installed_inventory_agrees_with_activation_selection_without_execution";
+    if !common::in_harness_fixture(CASE) {
+        return;
+    }
+    let (repo, source, _package, _dir, record) = launch_fixture("durable", false);
+    for explicit in [false, true] {
+        let marker = source.path().join("started");
+        std::fs::remove_file(&marker).unwrap();
+        let mut inventory = installed_command(repo.path());
+        let mut probe = installed_command(repo.path());
+        if !explicit {
+            inventory.env_remove("AHU_INTERACTIVE_PLUGIN");
+            probe.env_remove("AHU_INTERACTIVE_PLUGIN");
+        }
+        let output = inventory
+            .args(["plugins", "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let selected: Vec<_> = value["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["selected"] == true)
+            .collect();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0]["id"], "fixture");
+        assert_eq!(selected[0]["package"], "fixture-host");
+        assert_eq!(
+            selected[0]["selection_source"],
+            if explicit {
+                "environment"
+            } else {
+                "committed-project-binding"
+            }
+        );
+        assert!(!marker.exists());
+        let output = probe
+            .args(["plugins", "--probe", "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["plugin_id"], selected[0]["id"]);
+        assert_eq!(
+            record.session_host.as_ref().unwrap().binding.id,
+            selected[0]["id"]
+        );
+    }
+    let mut second = record.session_host.as_ref().unwrap().binding.clone();
+    second.id = "second".into();
+    save_binding(repo.path(), &second);
+    succeeds(
+        installed_command(repo.path())
+            .args(["lock", "--update"])
+            .output()
+            .unwrap(),
+    );
+    common::git(repo.path(), &["add", ".agents/ahu/lock.md"]);
+    common::git(
+        repo.path(),
+        &["commit", "-qm", "lock second fixture binding"],
+    );
+    let marker = source.path().join("started");
+    std::fs::remove_file(&marker).unwrap();
+    for args in [
+        vec!["plugins"],
+        vec!["plugins", "--probe"],
+        vec!["@worker", "--prompt", "ambiguous host"],
+    ] {
+        let output = installed_command(repo.path())
+            .env_remove("AHU_INTERACTIVE_PLUGIN")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("multiple enabled session hosts"),
+            "{output:?}"
+        );
+        assert!(!marker.exists());
+    }
+    // Explicit selection resolves ambiguity without needing the other installation.
+    succeeds(
+        installed_command(repo.path())
+            .arg("plugins")
+            .output()
+            .unwrap(),
+    );
+    // Selection remains inspectable without a verified installation.
+    let output = installed_command(repo.path())
+        .env("AHU_INTERACTIVE_PLUGIN", "second")
+        .args(["plugins", "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let selected = value["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["selected"] == true)
+        .unwrap();
+    assert_eq!(selected["id"], "second");
+    assert_eq!(selected["origin"], "committed-binding");
+    assert!(selected["activation_blocker"].is_string());
+    let output = installed_command(repo.path())
+        .env("AHU_INTERACTIVE_PLUGIN", "second")
+        .args(["plugins", "--probe"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!marker.exists());
+}
+
+#[test]
+fn doctor_attributes_external_reachability_separately_from_native_cmux() {
+    const CASE: &str = "doctor_attributes_external_reachability_separately_from_native_cmux";
+    if !common::in_harness_fixture(CASE) {
+        return;
+    }
+    let (repo, _source, _package, _dir, _record) = launch_fixture("durable", false);
+    let output = installed_command(repo.path())
+        .env_remove("AHU_INTERACTIVE_PLUGIN")
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("session host fixture (fixture-host)"),
+        "{output:?}"
+    );
+    assert!(stdout.contains("host         reachable"), "{output:?}");
+    assert!(stdout.contains("native cmux  unavailable"), "{output:?}");
+    assert!(!stdout.contains("cmux         reachable"), "{output:?}");
 }
