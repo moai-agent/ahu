@@ -2291,14 +2291,17 @@ or unknown capacity; ahu does not estimate it from run telemetry, scrape a TUI,
 or send an inference request. The MCP tool's name and outcome join ordinary MCP
 telemetry, while its arguments and result values are not added to OTel.
 
-The view reports one row per probed provider: `codex`, `claude-code`,
-`antigravity`, and `ollama`. OpenCode has no row, so an agent on that harness is
-never an eligible routing candidate. Each row carries one status:
+The view reports rows for `codex`, `claude-code`, `antigravity`, `kiro`, and
+`ollama`. Only a bound Codex account is probed for capacity. Bound Claude Code,
+Antigravity, Kiro, and Ollama accounts report `status: "unsupported"` with
+`signal_type: "unknown"`; ahu has no supported capacity signal for them.
+OpenCode has no row, so an agent on that harness is never an eligible routing
+candidate. Each row carries one status:
 
 | Status | Meaning |
 | --- | --- |
-| `available` | At least one rate-limit window was read for the verified account |
-| `unknown` | The provider was probed but reported no usable window |
+| `available` | At least one window was read for the verified account, and every reported window is usable |
+| `unknown` | The provider was probed but reported no usable windows, or a reported window was malformed or stale |
 | `unsupported` | ahu has no machine-readable rate-limit view for this provider |
 | `not_bound` | The active profile exists but holds no binding for this provider |
 | `not_configured` | The project has no active profile to check against |

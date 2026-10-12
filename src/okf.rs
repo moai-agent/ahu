@@ -235,6 +235,26 @@ impl<'de> Visitor<'de> for BoundedValue<'_> {
 mod tests {
     use super::*;
     #[test]
+    fn date_like_strings_round_trip_in_settings_and_metadata() {
+        for value in [
+            "2026-10-09",
+            "2026-1-9",
+            "2026-10-09T12:34:56Z",
+            "2026-10-09 12:34:56.123 -05:00",
+        ] {
+            let mut doc = Document::new(
+                "ahu:project",
+                &serde_json::json!({"catalog_version": value, "nested": [value]}),
+                "# Unchanged body\n",
+            )
+            .unwrap();
+            doc.fields.insert(value.into(), value.into());
+            let rendered = doc.render().unwrap();
+            assert_eq!(Document::parse(&rendered, "ahu:project").unwrap(), doc);
+        }
+    }
+
+    #[test]
     fn nested_metadata_round_trips_without_changing_body_or_granting_settings() {
         let text = "---\nokf_version: 0.2\ntype: ahu:project\nahu: {schema_version: 1}\nnotes:\n  nested: [one, {two: [true, null, 42, 0.5]}]\nexecution: {command: inert}\n---\n# Body\nRun nothing.\n";
         let doc = Document::parse(text, "ahu:project").unwrap();

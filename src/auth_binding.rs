@@ -118,7 +118,8 @@ fn budget_with_probe(
                 "cannot inspect local auth profile: {error}"
             )));
         }
-        Ok(_) => load(repo, &path)?,
+        // Capacity inspection must not persist even a legacy migration.
+        Ok(_) => load_with_migration(repo, &path, false)?,
     };
     let active = bindings.active_profile.clone();
     let profile = bindings.profiles.get(&active);
@@ -1901,6 +1902,90 @@ mod profile_tests {
                 assert!(provider["windows"].as_array().unwrap().is_empty());
             }
         }
+    }
+
+    #[test]
+    fn budget_preserves_binding_bytes_on_success_and_errors() {
+        let (_temp, repo) = repo_fixture();
+        let path = binding_path(&repo).unwrap();
+        let identity = Identity {
+            harness: "codex".into(),
+            identity_kind: "chatgpt".into(),
+            principal: "fixture@example.invalid".into(),
+            organization: None,
+            workspace: None,
+        };
+        let providers = BTreeMap::from([(
+            "codex".into(),
+            StoredBinding {
+                fingerprint: identity.fingerprint().unwrap(),
+                identity_kind: identity.identity_kind.clone(),
+                profile: None,
+            },
+        )]);
+        let mut current = BindingFile {
+            repo_identity: repo.identity(),
+            profiles: BTreeMap::from([("default".into(), providers.clone())]),
+            ..BindingFile::default()
+        };
+        current.content_digest = content_digest(&current).unwrap();
+        for bindings in [
+            json!({"schema_version": 1, "bindings": providers}),
+            serde_json::to_value(current).unwrap(),
+        ] {
+            // Noncanonical whitespace makes rewrites visible even when the
+            // decoded binding would be equivalent.
+            let original = format!(" \n{}\n\n", serde_json::to_string(&bindings).unwrap());
+            for outcome in ["success", "probe_error", "mismatch"] {
+                std::fs::write(&path, &original).unwrap();
+                let mut probed = false;
+                let result = budget_with_probe(&repo, |_| {
+                    probed = true;
+                    if outcome == "probe_error" {
+                        return Err(Error::new("synthetic provider failure"));
+                    }
+                    let mut observed = identity.clone();
+                    if outcome == "mismatch" {
+                        observed.principal = "different@example.invalid".into();
+                    }
+                    Ok((
+                        observed,
+                        json!({"primary": {
+                            "usedPercent": 25, "windowDurationMins": 300
+                        }}),
+                    ))
+                });
+                assert!(probed);
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    original.as_bytes(),
+                    "{outcome}"
+                );
+                match outcome {
+                    "success" => {
+                        let budget = result.unwrap();
+                        assert_eq!(budget["profile"], "default");
+                        assert_eq!(budget["providers"][0]["status"], "available");
+                    }
+                    "probe_error" => assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "synthetic provider failure"
+                    ),
+                    _ => assert!(result.unwrap_err().to_string().contains("does not match")),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn budget_preserves_empty_legacy_binding_bytes_without_probing() {
+        let (_temp, repo) = repo_fixture();
+        let path = binding_path(&repo).unwrap();
+        let original = b"{ \"schema_version\": 1, \"bindings\": {} }\n";
+        std::fs::write(&path, original).unwrap();
+        let budget = budget_with_probe(&repo, |_| panic!("unbound provider")).unwrap();
+        assert_eq!(budget["profile"], Value::Null);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     #[test]

@@ -17,8 +17,9 @@ The synchronous `ahu_auth_budget` tool accepts an optional
 profile label and per-provider rate-limit status; supported windows expose
 percentages and reset periods, not token counts. Codex capacity is returned
 only after ahu verifies the current account against the active profile in the
-same native app-server session. Other providers may be marked unsupported or
-unknown. The `routing.candidates` list matches registered agents to their
+same native app-server session. Bound Claude Code, Antigravity, Kiro, and Ollama
+accounts report unsupported capacity with an unknown signal type; OpenCode has
+no provider row. The `routing.candidates` list matches registered agents to their
 harness windows and marks candidates `eligible` only when every reported
 window meets the requested threshold. Unknown provider capacity is never
 eligible. This is a quota filter, not a cost estimate, model-availability

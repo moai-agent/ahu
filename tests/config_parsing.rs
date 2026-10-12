@@ -160,6 +160,17 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
 }
 
 #[test]
+fn legacy_catalog_date_round_trips_through_okf() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    let original = config::load(repo.path()).unwrap().unwrap().config;
+    let rendered = config::try_render(&original).unwrap();
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    repo.write(config::CONFIG_RELATIVE_PATH, &rendered);
+    assert_eq!(config::load(repo.path()).unwrap().unwrap().config, original);
+}
+
+#[test]
 fn rendered_config_round_trips() {
     let repo = TestRepo::new();
     let original = config::ProjectConfig {
