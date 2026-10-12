@@ -121,6 +121,125 @@ fn activation_and_coordinator_selection() {
 }
 
 #[test]
+fn compiled_host_runtime_activation_and_failure_paths() {
+    const CASE: &str = "compiled_host_runtime_activation_and_failure_paths";
+    if common::is_child_case(CASE) {
+        let mode = std::env::var("HOST_MODE").unwrap();
+        let root = std::path::PathBuf::from(std::env::var_os("HOST_ROOT").unwrap());
+        let result = ahu::interactive::discover_for_tasks();
+        if mode == "disabled" || !cfg!(feature = "cmux-plugin") || mode == "unavailable" {
+            let error = result.err().expect("activation must refuse");
+            assert_eq!(error.kind(), ahu::util::ErrorKind::Prerequisite);
+            assert_eq!(
+                root.join("pinged").exists(),
+                mode == "unavailable" && cfg!(feature = "cmux-plugin")
+            );
+            assert!(!root.join("state.json").exists());
+            return;
+        }
+        // Exercise the public package contract returned by actual runtime
+        // selection, rather than directly constructing a compatibility client.
+        let host: Box<dyn ahu_host_api::v1::Host> = result.unwrap();
+        assert!(root.join("pinged").exists());
+        host.check_persistence().unwrap();
+        if mode == "capability-failure" {
+            assert!(host.check_capabilities().is_err());
+            assert!(!root.join("state.json").exists());
+            return;
+        }
+        host.check_capabilities().unwrap();
+        if mode == "inventory-failure" {
+            assert!(host.workspaces().is_err());
+            return;
+        }
+        let before = host.workspaces().unwrap();
+        assert_eq!(before.len(), 1);
+        let group = host.create_group("fixture", &root).unwrap();
+        let request = ahu_host_api::v1::WorkspaceRequest {
+            group_id: &group.id,
+            window_id: Some("window"),
+            title: "literal $(not-executed)",
+            summary: "fixture session",
+            cwd: &root,
+            startup_command: "'synthetic ahu' run-task --task-dir '/synthetic/task'",
+            focus: false,
+        };
+        let created = host.create_task_workspace(&request);
+        if mode == "creation-failure" {
+            assert!(matches!(
+                created,
+                Err(ahu_host_api::v1::WorkspaceCreationError::OutcomeUnknown(_))
+            ));
+            // A failed command after dispatch may already have created a
+            // workspace. Neither it nor unrelated work is closed implicitly.
+            let live = host.workspaces().unwrap();
+            assert!(live.contains_key("task"));
+            assert_eq!(live["unrelated"], before["unrelated"]);
+            return;
+        }
+        let created = created.unwrap();
+        assert_eq!(created.workspace_id, "task");
+        assert_eq!(created.group_id.as_deref(), Some(group.id.as_str()));
+        assert_eq!(created.window_id, "window");
+        if mode == "focus-failure" || mode == "close-failure" {
+            let result = if mode == "focus-failure" {
+                host.select_workspace(&created.workspace_id)
+            } else {
+                host.close_workspace(&created.workspace_id)
+            };
+            assert!(result.is_err());
+            let live = host.workspaces().unwrap();
+            assert!(live.contains_key("task"));
+            assert_eq!(live["unrelated"], before["unrelated"]);
+            return;
+        }
+        host.select_workspace(&created.workspace_id).unwrap();
+        host.close_workspace(&created.workspace_id).unwrap();
+        let after = host.workspaces().unwrap();
+        assert!(!after.contains_key("task"));
+        assert_eq!(after["unrelated"], before["unrelated"]);
+        assert!(after.contains_key("anchor"));
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("state.json")).unwrap()).unwrap();
+        assert_eq!(state["selected"], "task");
+        assert_eq!(state["closed"], serde_json::json!(["task"]));
+        assert_eq!(state["startup_command"], request.startup_command);
+        assert_eq!(state["title"], request.title);
+        return;
+    }
+    for mode in [
+        "enabled",
+        "disabled",
+        "unavailable",
+        "capability-failure",
+        "creation-failure",
+        "inventory-failure",
+        "focus-failure",
+        "close-failure",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("cmux");
+        std::fs::write(&executable, include_str!("fixtures/cmux-host.py")).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = common::run_child_case(CASE, |command| {
+            command
+                .env_clear()
+                .env(common::CHILD_CASE, CASE)
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", root.path())
+                .env("HOST_ROOT", root.path())
+                .env("HOST_MODE", mode)
+                .env("AHU_CMUX_BIN", &executable)
+                .env(
+                    "AHU_INTERACTIVE_PLUGIN",
+                    if mode == "disabled" { "none" } else { "cmux" },
+                );
+        });
+        common::assert_child_passed(CASE, &output);
+    }
+}
+
+#[test]
 fn plugin_cli_rejects_mutation_and_extra_arguments() {
     for args in [
         vec!["plugins", "install"],

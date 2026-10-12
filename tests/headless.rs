@@ -457,6 +457,45 @@ fn structured_reserved_marker_artifacts_cannot_change_after_result_persistence()
 }
 
 #[test]
+fn headless_planning_does_not_activate_the_selected_session_host() {
+    let f = Fixture::new();
+    let worktrees = common::git(f.repo.path(), &["worktree", "list", "--porcelain"]);
+    let marker = f.external.path().join("cmux-activated");
+    std::fs::write(
+        f.bin.join("cmux"),
+        "#!/bin/sh\ntouch \"$HOST_ACTIVATION_MARKER\"\nexit 97\n",
+    )
+    .unwrap();
+    for selection in ["none", "cmux"] {
+        let output = f
+            .command()
+            .env("AHU_INTERACTIVE_PLUGIN", selection)
+            .env_remove("AHU_PLUGIN_PATH")
+            .env("AHU_CMUX_BIN", f.bin.join("cmux"))
+            .env("HOST_ACTIVATION_MARKER", &marker)
+            .args([
+                "@worker",
+                "--headless",
+                "--dry-run",
+                "--output",
+                "json",
+                "--prompt",
+                "synthetic task",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{selection}: {output:?}");
+        let preview = Fixture::value(&output);
+        assert_eq!(preview["task_handle_reserved"], false);
+        assert!(!marker.exists());
+        assert_eq!(
+            common::git(f.repo.path(), &["worktree", "list", "--porcelain"]),
+            worktrees
+        );
+    }
+}
+
+#[test]
 fn foreground_keeps_primary_coordination_and_identity_without_native_copies() {
     let f = Fixture::new();
     let out = f.launch("success", &[]);
