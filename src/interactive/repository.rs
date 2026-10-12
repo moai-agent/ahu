@@ -129,6 +129,22 @@ impl<'a> RepositoryManager<'a> {
         if expected != self.client.persistence_key() {
             bail!("task session host identity mismatch; no workspace was selected or closed");
         }
+        // Executable hosts always publish all three identifiers together.
+        // Missing identifiers may mean creation succeeded without a reply, not
+        // that no workspace exists. Legacy cmux records predate this contract.
+        if record.session_host.is_some()
+            && [
+                &record.cmux_workspace_id,
+                &record.cmux_group_id,
+                &record.cmux_window_id,
+            ]
+            .iter()
+            .any(|id| id.as_deref().is_none_or(str::is_empty))
+        {
+            bail!(
+                "external session workspace ownership is incomplete; creation may have succeeded. Preserve task inputs and reconcile ownership before focus or cleanup"
+            );
+        }
         let Some(workspace_id) = record.cmux_workspace_id.as_deref() else {
             return Ok(None);
         };

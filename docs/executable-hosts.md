@@ -24,6 +24,12 @@ old records without a binding and `cmux.json` still belong only to compiled cmux
 Focus and cleanup verify host identity, workspace directory, group and window.
 Core retains harness startup, supervision, approvals, cancellation confirmation,
 and worktree cleanup. Uncertain creation preserves task inputs and work.
+Executable task focus and cleanup require the recorded workspace, group, and
+window identifiers; missing identifiers do not prove absence. If creation is
+uncertain, a later terminal supervisor outcome still retains the task inputs and
+package. An in-flight cancellation reports missing workspace ownership as unknown,
+and automated removal refuses until ownership is reconciled. There is no automatic
+ownership recovery from a lost creation reply.
 
 Updating a binding retains old installations and existing tasks keep their exact
 version. The binding's enabled state and grants in the launching checkout still

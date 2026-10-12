@@ -557,11 +557,12 @@ fn cleanup_allowed(
         );
     }
     if tasks.records.iter().any(|(_, record)| {
-        record.cmux_workspace_id.is_some()
-            && record
-                .session_host
-                .as_ref()
-                .is_some_and(|host| host.binding.id == id)
+        // A terminal supervisor outcome does not resolve a lost creation reply.
+        // Retain the package even when workspace ownership was never published.
+        record
+            .session_host
+            .as_ref()
+            .is_some_and(|host| host.binding.id == id)
     }) {
         bail!(
             "plugin cleanup refused: recorded tasks still require this package for workspace cleanup; run `ahu remove TASK` for each affected task before disabling or removing the package, even if its workspace is already closed. If authority was revoked, restore and commit the binding's enablement and interactive-backend grant and restore the exact recorded package before task removal"

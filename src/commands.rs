@@ -2092,10 +2092,10 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     } else {
         None
     };
-    let cmux_status = if record.cmux_workspace_id.is_some() {
+    let cmux_status = if record.cmux_workspace_id.is_some() || record.session_host.is_some() {
         let client = interactive::discover_for_record(gate, &record).map_err(|error| {
             Error::new(format!(
-                "cannot safely remove task {} while its recorded cmux workspace cannot be checked: {error}",
+                "cannot safely remove task {} while its recorded session workspace cannot be checked: {error}",
                 display_safe(task_id)
             ))
         })?;
@@ -2343,6 +2343,7 @@ pub(crate) fn confirm_interactive_cancellation(
     // Only the spawning supervisor can confirm termination. A timeout or a
     // read failure preserves the pane; closing it is not process supervision.
     let workspace = match record.cmux_workspace_id.as_deref() {
+        None if record.session_host.is_some() => "unknown",
         None => "absent",
         Some(_workspace_id) if cancellation == "confirmed" => {
             close_workspace(record).map_err(|error| {

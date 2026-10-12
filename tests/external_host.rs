@@ -737,6 +737,122 @@ fn public_launch_focus_cancel_remove_and_uncertain_creation() {
 }
 
 #[test]
+fn incomplete_external_ownership_refuses_focus_and_removal() {
+    const CASE: &str = "incomplete_external_ownership_refuses_focus_and_removal";
+    if !common::in_harness_fixture(CASE) {
+        return;
+    }
+    let (repo, source, _package, dir, record) = launch_fixture("durable", false);
+    ahu::task::set_state(&dir, ahu::task::TaskState::Exited).unwrap();
+    let task_path = dir.join("task.json");
+    let original = std::fs::read(&task_path).unwrap();
+    let backend = std::fs::read(source.path().join("backend.json")).unwrap();
+    for (field, missing) in ["cmux_group_id", "cmux_window_id", "cmux_workspace_id"]
+        .into_iter()
+        .flat_map(|field| [serde_json::Value::Null, serde_json::json!("")].map(|v| (field, v)))
+    {
+        let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        value[field] = missing;
+        std::fs::write(&task_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        for action in ["focus", "remove"] {
+            let output = installed_command(repo.path())
+                .args([action, &record.task_id])
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{field}, {action}: {output:?}");
+            assert!(task_path.exists());
+            assert!(record.worktree.exists());
+            assert_eq!(
+                std::fs::read(source.path().join("backend.json")).unwrap(),
+                backend
+            );
+        }
+    }
+    // Complete, legitimate ownership still permits cleanup.
+    std::fs::write(&task_path, original).unwrap();
+    succeeds(
+        installed_command(repo.path())
+            .args(["remove", &record.task_id])
+            .output()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn uncertain_external_creation_retains_inputs_after_terminal_outcome() {
+    const CASE: &str = "uncertain_external_creation_retains_inputs_after_terminal_outcome";
+    if !common::in_harness_fixture(CASE) {
+        return;
+    }
+    let (repo, source, _package, dir, record) = launch_fixture("durable_uncertain", false);
+    let backend = std::fs::read(source.path().join("backend.json")).unwrap();
+    let mut cancel = installed_command(repo.path())
+        .args(["cancel", &record.task_id, "--output", "json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !dir.join("cancel.json").exists() {
+        assert!(Instant::now() < deadline);
+        assert!(cancel.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Model the core supervisor's confirmation; the synthetic host starts no process.
+    ahu::task::set_state(&dir, ahu::task::TaskState::Cancelled).unwrap();
+    let output = cancel.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let outcome: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(outcome["cancellation"], "confirmed");
+    assert_eq!(outcome["workspace"], "unknown");
+    let output = installed_command(repo.path())
+        .args(["remove", &record.task_id])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ownership"),
+        "{output:?}"
+    );
+    assert!(dir.join("prompt.txt").exists());
+    assert!(record.worktree.exists());
+    assert_eq!(
+        std::fs::read(source.path().join("backend.json")).unwrap(),
+        backend
+    );
+}
+
+#[test]
+fn uncertain_external_creation_retains_package_after_terminal_outcome() {
+    const CASE: &str = "uncertain_external_creation_retains_package_after_terminal_outcome";
+    if !common::in_harness_fixture(CASE) {
+        return;
+    }
+    let (repo, source, _package, dir, record) = launch_fixture("durable_uncertain", false);
+    ahu::task::set_state(&dir, ahu::task::TaskState::Cancelled).unwrap();
+    let marker = source.path().join("started");
+    std::fs::remove_file(&marker).unwrap();
+    let binding_path = repo.path().join(".agents/ahu/plugins/fixture.md");
+    let original = std::fs::read(&binding_path).unwrap();
+    let output = installed_command(repo.path())
+        .args(["plugins", "disable", "fixture"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read(&binding_path).unwrap(), original);
+    let mut revoked = record.session_host.as_ref().unwrap().binding.clone();
+    revoked.enabled = false;
+    save_binding(repo.path(), &revoked);
+    let output = installed_command(repo.path())
+        .args(["plugins", "remove", "fixture"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(repo.path().join(".ahu/state/plugins/fixture").exists());
+    assert!(!marker.exists());
+}
+
+#[test]
 fn frozen_versions_survive_updates_and_tampering_refuses_before_execution() {
     const CASE: &str = "frozen_versions_survive_updates_and_tampering_refuses_before_execution";
     if !common::in_harness_fixture(CASE) {
