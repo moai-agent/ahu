@@ -14,10 +14,20 @@ use std::path::Path;
 
 pub mod binding;
 
-/// Select a committed executable binding, or retain the compiled host default.
-fn selected_id(repo: Option<&crate::git::Repo>) -> Result<Option<String>> {
+/// Selection intent only: no package reads, authority checks, or host execution.
+pub(crate) struct Selection {
+    pub id: String,
+    pub source: &'static str,
+}
+
+pub(crate) fn selection(repo: Option<&crate::git::Repo>) -> Result<Selection> {
     match std::env::var("AHU_INTERACTIVE_PLUGIN") {
-        Ok(id) => return Ok(Some(id)),
+        Ok(id) => {
+            return Ok(Selection {
+                id,
+                source: "environment",
+            });
+        }
         Err(std::env::VarError::NotPresent) => {}
         Err(_) => return Err(crate::util::Error::new("invalid session host selection")),
     }
@@ -30,7 +40,12 @@ fn selected_id(repo: Option<&crate::git::Repo>) -> Result<Option<String>> {
             .collect();
         match enabled.as_slice() {
             [] => {}
-            [id] => return Ok(Some(id.clone())),
+            [id] => {
+                return Ok(Selection {
+                    id: id.clone(),
+                    source: "committed-project-binding",
+                });
+            }
             _ => {
                 return Err(crate::util::Error::new(
                     "multiple enabled session hosts; select an exact AHU_INTERACTIVE_PLUGIN id",
@@ -38,7 +53,10 @@ fn selected_id(repo: Option<&crate::git::Repo>) -> Result<Option<String>> {
             }
         }
     }
-    Ok(None)
+    Ok(Selection {
+        id: "cmux".into(),
+        source: "build-default",
+    })
 }
 
 fn compiled() -> Result<Box<dyn v1::Host>> {
@@ -63,11 +81,11 @@ fn compiled() -> Result<Box<dyn v1::Host>> {
 pub fn discover_for_launch(
     repo: &crate::git::Repo,
 ) -> Result<(Box<dyn v1::Host>, Option<binding::FrozenHost>)> {
-    match selected_id(Some(repo))?.as_deref() {
-        None | Some("cmux") => Ok((compiled()?, None)),
-        Some("none") => Err(crate::util::Error::new("session hosting is disabled")
+    match selection(Some(repo))?.id.as_str() {
+        "cmux" => Ok((compiled()?, None)),
+        "none" => Err(crate::util::Error::new("session hosting is disabled")
             .with_kind(crate::util::ErrorKind::Prerequisite)),
-        Some(id) => {
+        id => {
             let (status, frozen) = binding::select(repo, id)?;
             let host = external::ExternalHost::connect_bound(&status, &frozen)?;
             Ok((Box::new(host), Some(frozen)))
@@ -78,10 +96,9 @@ pub fn discover_for_launch(
 /// Public activation always checks committed policy before executing a package.
 pub fn discover() -> Result<Box<dyn v1::Host>> {
     let repo = crate::git::discover(&std::env::current_dir()?);
-    match selected_id(repo.as_ref().ok())?.as_deref() {
-        None | Some("cmux") => compiled(),
-        Some("none") => compiled(),
-        Some(_) => discover_for_launch(&repo.map_err(|_| {
+    match selection(repo.as_ref().ok())?.id.as_str() {
+        "cmux" | "none" => compiled(),
+        _ => discover_for_launch(&repo.map_err(|_| {
             crate::util::Error::new("session host requires a committed project binding")
                 .with_kind(crate::util::ErrorKind::Prerequisite)
         })?)
