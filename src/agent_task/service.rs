@@ -112,6 +112,10 @@ pub struct Controller {
     repository: String,
 }
 impl Controller {
+    pub(crate) fn repository_identity(&self) -> &str {
+        &self.repository
+    }
+
     /// Read-only, session-local observations. Call only after core discovery has
     /// checked repository/store ownership. This does not attach or migrate tasks.
     pub(super) fn inspection(

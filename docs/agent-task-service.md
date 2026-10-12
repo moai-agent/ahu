@@ -117,12 +117,17 @@ session; cursors do not restore revoked grants. Consumers should negotiate
 `Operation::List`; older `TaskService` implementations default to
 `UnsupportedOperation` and must not advertise that operation.
 
-This slice supplies in-process task reads only. It adds no tracker client,
-external record mapping, credential handling, synchronization policy, network
-calls, plugin wire operations or CLI commands. Existing task execution works
+The service supplies in-process task reads. The optional
+[executable integration](executable-plugins.md#read-only-taskservice-invocation)
+uses core-minted exact grants to collect a bounded, versioned projection and
+passes it through generic plugin input. It exposes no service callback or
+controller. Neither path adds a tracker client, external record mapping, credential
+handling, synchronization policy, network calls or CLI commands. Existing task
+execution works
 without any tracker provider or terminal plugin. A future tracker integration
-still needs an explicit activation and grant path and a separately reviewed
-external data boundary. A task's process exit does not establish issue acceptance
+still needs a separately reviewed external data boundary and synchronization
+policy; executable activation alone authorizes neither tracker writes nor task
+mutations. A task's process exit does not establish issue acceptance
 or closure.
 
 ## Safe replay, concurrency and recovery
@@ -238,8 +243,11 @@ contains list/read/replay only, never prefix matching or repository discovery. I
 lacking a grant are denied before lookup; explicitly granted missing IDs are
 `NotFound`. Every submit/cancel/input request is denied, even for an owning
 plugin. Core must reevaluate grants when reconnecting. This is an in-process
-capability boundary, not isolation from arbitrary same-user code; no terminal
-plugin wire protocol or plugin-selected storage path is added.
+capability boundary, not isolation from arbitrary same-user code. The optional
+`plugin_exec::task_service::TaskReadGrant` binds a controller read session to
+the generic host grant's repository and plugin identity. Its invocation path
+exports only selected lifecycle observations, never the full service snapshot,
+a terminal protocol extension or a plugin-selected storage path.
 
 CLI and MCP task inspection use the service's scoped `Inspection` interface.
 Existing launch, cancel, approval and message commands, plus headless wait/result

@@ -22,6 +22,7 @@ if MODE == "early_output":
     sys.stdout.write("x" * (65536 + 1))
     sys.stdout.flush()
 request = json.load(sys.stdin)
+assert set(request) == {"protocol_version", "plugin_id", "grant", "context", "input"}
 assert request["protocol_version"] == 1
 assert request["plugin_id"] == "fixture"
 assert request["grant"] == {"operation": "invoke"}
@@ -34,6 +35,9 @@ if MODE == "exact_limit":
     response = json.dumps({"status": "ok", "protocol_version": 1,
                            "result": {"input": request["input"], "context": request["context"]}})
     sys.stdout.write(response + " " * (65536 - len(response.encode())))
+elif MODE == "mutation_result":
+    json.dump({"status": "ok", "protocol_version": 1,
+               "result": {"operation": "submit", "task": request["input"]["observations"][0]["snapshot"]["task"]}}, sys.stdout)
 elif MODE == "overflow":
     sys.stdout.write("x" * (65536 + 1))
 elif MODE == "malformed":

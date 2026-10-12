@@ -2,10 +2,11 @@
 
 A package can declare a generic JSON entrypoint separately from its optional
 [session-host executable](executable-hosts.md). The host library exposes
-`ahu::plugin_exec::invoke`; this initial slice has no CLI invoke command, MCP
-registration, background activation, or TaskService callbacks. It is suitable for
+`ahu::plugin_exec::invoke` and the read-only
+`ahu::plugin_exec::task_service::invoke` integration below. Neither adds a CLI
+invoke command, MCP registration, background activation, or TaskService callbacks. It is suitable for
 an explicit host call to a trusted local package that processes supplied data.
-It does not implement an execution provider or grant access to task operations.
+It does not implement an execution provider or grant task mutation rights.
 
 Add this field to the existing `ahu-plugin.md` frontmatter:
 
@@ -68,12 +69,126 @@ callers must explicitly authorize its release and exclude credentials and sensit
 paths. It is not a secret detector. Treat returned values as untrusted data, not
 instructions or grants.
 
-TaskService remains a separate host-owned boundary. Hosts can release data they
-have already authorized through a scoped TaskService session, but this transport
-neither creates such a session nor gives the executable a service/controller
-handle, task IDs, storage paths, credentials, or callback channel. A package
-cannot expand authority by returning a task mutation or embedding grants in its
-input. Those values are ordinary JSON data with no dispatch behavior.
+## Read-only TaskService invocation
+
+`ahu::plugin_exec::task_service::invoke` is the core path for sending task
+observations to an enabled executable. It uses the generic protocol unchanged:
+`input` contains an `ahu.task-observations` V1 payload. There is no duplex RPC or
+callback endpoint. The executable cannot request more data after startup.
+
+Core constructs a `TaskReadGrant` from a `HostGrant`, an existing `Controller`,
+and an explicit set of canonical Ahu task UUIDs. The controller's repository
+must match the host grant. The plugin principal is minted from the host grant's
+plugin ID; observation requests cannot supply identity, scope or operations beyond
+list/read/replay. The grant is opaque and not deserializable. Only trusted core
+code may construct it; accepting plugin-chosen grants through an untrusted request
+handler would defeat this boundary. The controller stays in core.
+
+```rust,ignore
+use ahu::plugin_exec::{HostGrant, task_service::{self, TaskReadGrant}};
+use std::sync::atomic::AtomicBool;
+
+// `repo` and `core` are the host-selected Repo and existing Controller.
+// Core has already admitted the tasks through normal launch policy. This call
+// neither registers tasks nor opens/discovers arbitrary repository task records.
+let host = HostGrant::new(&repo, "example", br#"{"invocation_id":"read-1"}"#)?;
+let grant = TaskReadGrant::new(host, &core, [
+    "00000000-0000-7000-8000-000000000001".to_owned(),
+].into())?;
+let result = task_service::invoke(&repo, &grant, br#"{
+  "version":1,
+  "observations":[
+    {"operation":"list","limit":1},
+    {"operation":"read","task":"00000000-0000-7000-8000-000000000001"},
+    {"operation":"replay","task":"00000000-0000-7000-8000-000000000001","after":0}
+  ]
+}"#, &AtomicBool::new(false))?;
+```
+
+The strict request has exactly `version` and `observations`. Each observation is
+one of `list` (`limit`, optional/null `after` task ID), `read` (`task`), or `replay`
+(`task`, required `after` revision). Unknown fields, duplicate keys, trailing
+JSON, excessive nesting, unsupported versions and other operations are refused.
+Capabilities are always included, so an empty observations array is a
+capabilities-only request. Empty task scopes are valid and list no tasks.
+
+The generic envelope still identifies the host-selected plugin and contains
+`grant: {"operation":"invoke"}`. Its input has exactly these fields:
+
+```json
+{
+  "kind":"ahu.task-observations",
+  "version":1,
+  "capabilities":{
+    "version":1,
+    "operations":["list","read","replay"],
+    "max_input_bytes":65536,
+    "replay_window":128
+  },
+  "observations":[{
+    "operation":"read",
+    "snapshot":{
+      "version":1,
+      "task":"00000000-0000-7000-8000-000000000001",
+      "revision":1,
+      "lifecycle":"prepared",
+      "cancellation_requested":false
+    }
+  }]
+}
+```
+
+Observations retain request order. `read` contains `snapshot`; `list` contains
+`tasks` (snapshots in ascending task-ID order) and `next_after` (an exclusive
+cursor or null); `replay` contains `snapshot` and `changes`. Each change contains
+only `revision`, `kind`, `lifecycle`, and `cancellation_requested`, with the V1
+TaskService meanings. A snapshot's fields are exactly those shown above: full
+service identities, owners, source paths, prompts, digests, argv, native
+credentials, effect receipts and repository records are omitted. The task ID is
+an Ahu UUID, never an external work-item ID. External associations and any
+subsequent writes require separate host policy; this API accepts and persists
+no tracker identity or mapping. Returned JSON is untrusted data and never
+triggers task or tracker operations, even if it resembles a mutation request.
+
+Bounds and failure semantics:
+
+- At most 128 granted task IDs and 128 requested observations per invocation.
+  IDs must be canonical UUIDs; prefixes and `ahu:task:` handles are not expanded.
+- List limits are 1–128. A list cursor must itself be granted. Read/replay require
+  exact granted IDs; unknown or ungranted IDs and cursors are denied before lookup.
+  Only the IDs on a requested page are read. No repository enumeration occurs.
+- Replay includes at most the last 128 coordination changes, strictly after the
+  supplied revision. Expired and future revisions fail; refresh with a separately
+  authorized read. This is lifecycle metadata, never execution history.
+- Request JSON, projected input, the complete generic envelope, and stdout each
+  have a 64 KiB limit. Collection checks the projected payload after each
+  observation using a bounded writer. Overflow fails without truncation or plugin
+  startup. Envelope overhead can cause rejection even when input alone fits.
+  The capability's `max_input_bytes` is the TaskService V1 limit, not a new input
+  mutation grant; the stricter transport/envelope limits also apply here.
+- Every snapshot is coherent and each replay pairs changes with its snapshot
+  atomically. Multiple observations are collected sequentially, not as a
+  cross-task or cross-observation transaction. Already collected input is fixed
+  for that invocation. Reinvoke to refresh; core must reauthorize scopes and mint
+  a fresh grant when reconnecting. Old in-memory grants have no revocation feed.
+- The current committed enabled/execute binding is checked before collection and
+  again by generic invocation. Package and compatibility validation, cancellation,
+  fixed failures, output bounds and process cleanup retain their generic behavior.
+  A missing installation never causes automatic installation.
+- Service denial maps to `Denied`; invalid requests, version/operation errors,
+  expired replay and future revisions map to `InvalidInput`; missing records and
+  other service/storage failures map to `Unavailable`. No service diagnostics or
+  storage paths escape. Any collection failure prevents startup; no partial
+  payload is delivered. Cancellation is checked between observations. Service
+  reads and package verification precede the generic process deadline and are
+  not interruptible filesystem operations.
+
+This path works with existing memory or local controllers. It adds no launch
+adapter, legacy-record discovery/migration, task registration, effects operation,
+Submit/Cancel/Input, CLI/MCP execution control, tracker client, network call or
+credential lookup. Local service reads may acquire coordination locks but do not
+change lifecycle, revisions or effect state. It is a data-release boundary, with
+the same same-user executable limitations described below.
 
 ## Wire contract and process lifetime
 

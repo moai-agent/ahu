@@ -11,6 +11,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+pub mod task_service;
+
 pub const VERSION: u32 = 1;
 pub const MAX_BYTES: usize = 64 * 1024;
 pub const MAX_CONTEXT_BYTES: usize = 256;
@@ -177,19 +179,7 @@ pub fn invoke(
         return Err(Failure::before(Code::InvalidInput));
     }
     // Authorize before touching the package, executable or any provider state.
-    let binding = crate::interactive::plugins::project::inventory(&repo.root)
-        .map_err(|_| Failure::before(Code::Unavailable))?
-        .bindings
-        .into_iter()
-        .find(|s| s.binding.id == grant.plugin)
-        .ok_or_else(|| Failure::before(Code::Denied))?
-        .binding;
-    if !binding.enabled
-        || !binding.grants.contains(&Grant::Execute)
-        || binding.compatibility.ahu != env!("CARGO_PKG_VERSION")
-    {
-        return Err(Failure::before(Code::Denied));
-    }
+    let binding = authorized_binding(repo, grant)?;
     let prepared = (|| -> crate::util::Result<_> {
         let store = crate::state::checkout_root(&repo.primary_root()?)?.join("plugins");
         let installation = crate::plugin_install::installed(&store, &binding)?;
@@ -251,6 +241,28 @@ pub fn invoke(
         }
         _ => Err(Failure::after(Code::Protocol)),
     }
+}
+
+// Shared committed policy gate. Task observations are collected only after this
+// check; invoke checks it again immediately before preparing the executable.
+fn authorized_binding(repo: &Repo, grant: &HostGrant) -> Result<crate::plugin_binding::Binding> {
+    if repo.identity() != grant.repository {
+        return Err(Failure::before(Code::Denied));
+    }
+    let binding = crate::interactive::plugins::project::inventory(&repo.root)
+        .map_err(|_| Failure::before(Code::Unavailable))?
+        .bindings
+        .into_iter()
+        .find(|s| s.binding.id == grant.plugin)
+        .ok_or_else(|| Failure::before(Code::Denied))?
+        .binding;
+    if !binding.enabled
+        || !binding.grants.contains(&Grant::Execute)
+        || binding.compatibility.ahu != env!("CARGO_PKG_VERSION")
+    {
+        return Err(Failure::before(Code::Denied));
+    }
+    Ok(binding)
 }
 
 // Cleanup before reaping prevents group signalling after PID reuse. No records
