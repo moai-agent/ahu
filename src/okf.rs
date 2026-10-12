@@ -88,20 +88,98 @@ impl Document {
         Ok(())
     }
     pub fn render(&self) -> Result<String> {
-        // serde_json's arbitrary_precision Number uses a private serde struct
-        // when sent directly to non-JSON serializers. Convert through JSON text
-        // (a YAML subset) so numbers remain scalars, not metadata-shaped maps.
-        let json = serde_json::to_string(&self.fields)
-            .map_err(|_| Error::new("cannot encode OKF metadata"))?;
-        let values: yaml_serde::Value =
-            yaml_serde::from_str(&json).map_err(|_| Error::new("cannot encode OKF metadata"))?;
-        let yaml = yaml_serde::to_string(&values)
+        // Serialize numbers as scalar primitives. Converting through a YAML
+        // Value would lose integers wider than 64 bits; serializing JSON Value
+        // directly would expose serde_json's private arbitrary-precision marker.
+        let values = Value::Object(self.fields.clone());
+        validate_render_bounds(&values, 0, &mut 0, &mut 0)?;
+        let yaml = yaml_serde::to_string(&YamlValue(&values))
             .map_err(|_| Error::new("cannot encode OKF frontmatter"))?;
         let text = format!("---\n{yaml}---\n{}", self.body);
         if text.len() as u64 > MAX_BYTES {
             return Err(Error::new("OKF document exceeds byte limit"));
         }
+        let kind = self
+            .fields
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::new("unsupported OKF document type"))?;
+        if Self::parse(&text, kind)? != *self {
+            return Err(Error::new("OKF rendering changed metadata values"));
+        }
         Ok(text)
+    }
+}
+
+fn validate_render_bounds(
+    value: &Value,
+    depth: usize,
+    nodes: &mut usize,
+    bytes: &mut usize,
+) -> Result<()> {
+    *nodes += 1;
+    *bytes = bytes.saturating_add(1);
+    if depth > MAX_DEPTH || *nodes > MAX_NODES || *bytes > MAX_BYTES as usize {
+        return Err(Error::new("OKF metadata exceeds rendering bounds"));
+    }
+    match value {
+        Value::Object(values) => {
+            for (key, value) in values {
+                *bytes = bytes.saturating_add(key.len());
+                validate_render_bounds(value, depth + 1, nodes, bytes)?;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                validate_render_bounds(value, depth + 1, nodes, bytes)?;
+            }
+        }
+        Value::String(text) => *bytes = bytes.saturating_add(text.len()),
+        _ => {}
+    }
+    if *bytes > MAX_BYTES as usize {
+        return Err(Error::new("OKF metadata exceeds rendering bounds"));
+    }
+    Ok(())
+}
+
+struct YamlValue<'a>(&'a Value);
+impl Serialize for YamlValue<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self.0 {
+            Value::Null => serializer.serialize_unit(),
+            Value::Bool(value) => serializer.serialize_bool(*value),
+            Value::String(value) => serializer.serialize_str(value),
+            Value::Number(value) => {
+                if let Some(value) = value.as_i128() {
+                    serializer.serialize_i128(value)
+                } else if let Some(value) = value.as_u128() {
+                    serializer.serialize_u128(value)
+                } else if let Some(value) = value.as_f64().filter(|v| v.is_finite()) {
+                    serializer.serialize_f64(value)
+                } else {
+                    Err(serde::ser::Error::custom("unsupported YAML number"))
+                }
+            }
+            Value::Array(values) => {
+                let mut seq = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    seq.serialize_element(&YamlValue(value))?;
+                }
+                seq.end()
+            }
+            Value::Object(values) => {
+                let mut map = serializer.serialize_map(Some(values.len()))?;
+                for (key, value) in values {
+                    map.serialize_entry(key, &YamlValue(value))?;
+                }
+                map.end()
+            }
+        }
     }
 }
 
@@ -234,6 +312,36 @@ impl<'de> Visitor<'de> for BoundedValue<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wide_integer_metadata_round_trips_exactly() {
+        for number in [
+            "18446744073709551616",
+            "340282366920938463463374607431768211455",
+            "-9223372036854775809",
+        ] {
+            let text = format!(
+                "---\nokf_version: '0.2'\ntype: ahu:project\nahu: {{}}\nnumber: {number}\n---\nBody\n"
+            );
+            let doc = Document::parse(&text, "ahu:project").unwrap();
+            assert_eq!(doc.fields["number"].to_string(), number);
+            assert_eq!(
+                Document::parse(&doc.render().unwrap(), "ahu:project").unwrap(),
+                doc
+            );
+        }
+    }
+
+    #[test]
+    fn rendering_refuses_values_outside_the_readers_bounds() {
+        let mut value = serde_json::json!("leaf");
+        for _ in 0..MAX_DEPTH + 1 {
+            value = serde_json::json!([value]);
+        }
+        let mut doc = Document::new("ahu:project", &serde_json::json!({}), "Body\n").unwrap();
+        doc.fields.insert("notes".into(), value);
+        assert!(doc.render().is_err());
+    }
+
     #[test]
     fn date_like_strings_round_trip_in_settings_and_metadata() {
         for value in [

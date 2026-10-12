@@ -351,9 +351,14 @@ pub fn render(config: &ProjectConfig) -> String {
 }
 
 pub fn try_render(config: &ProjectConfig) -> Result<String> {
-    crate::okf::Document::new("ahu:project", config,
+    let text = crate::okf::Document::new("ahu:project", config,
         "\n# Project policy\n\nOne policy for every ahu user in this project. Review and commit this file.\n")
-        .and_then(|document| document.render())
+        .and_then(|document| document.render())?;
+    // Rendering must not publish a policy that the bounded loader cannot read.
+    if text.len() as u64 > crate::util::MAX_TASK_RECORD_BYTES {
+        bail!("configuration exceeds byte limit");
+    }
+    Ok(text)
 }
 
 /// Write a new configuration, creating only the missing ahu directories.

@@ -12,14 +12,34 @@ with YAML frontmatter. Native harness files keep their native formats.
 | `.ahu/migrations/project-okf-v1/journal.json` | Ignored local transaction, source digests, modes, repository/base identity and exact backups |
 | Task/runtime JSON, private auth bindings and local acceptance | Existing private storage and formats |
 
-Every new shared document has `okf_version: '0.2'`, the corresponding `type`,
-and an `ahu` mapping. Project settings retain schema version 1, all existing
+The declarative-source inventory is broader than these two migrated files:
+
+| Source | Owner and migration treatment |
+| --- | --- |
+| `.agents/ahu/agents/*.md` | Ahu agent identities and optional nested input/output schemas; existing OKF `ahu:agent` schema stays compatible |
+| `ahu-plugin.md` | Ahu package declaration, already OKF `ahu:plugin`; its existing flat schema stays compatible |
+| `evals/**` case and suite Markdown | Ahu evaluation definitions, already `ahu:eval-case` / `ahu:eval-suite`; no implicit schema conversion |
+| `.agents/skills/*/SKILL.md`, `docs/knowledge/*.md` | Skill and knowledge Markdown with their existing frontmatter conventions; migration never rewrites instructions |
+| `src/catalog.rs` | Compiled compatibility catalog; `ahu.catalog_version` selects its revision, with no independent TOML source |
+| Evaluation reference, freeze and manifest JSON | Experiment inputs and provenance, outside project launch policy and lock migration |
+| Native harness settings, MCP registrations, native agents and hooks | Harness-owned TOML, JSON, JSONC, Markdown or scripts, retained at native paths |
+| `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `deny.toml`, workflow YAML | Cargo, toolchain, dependency-check and CI formats; not Ahu project policy |
+| Task, attempt, plugin-install and migration JSON | Local runtime records; existing formats and frozen task inputs remain exact |
+| Auth bindings, credentials, private context acceptance | Private host storage; never promoted into shared OKF documents |
+
+The migration operates only on project settings and their context lock. It does
+not infer a common operational schema from Markdown elsewhere in the repository.
+
+New project policy, context lock and project plugin-binding documents have
+`okf_version: '0.2'`, the corresponding `type`, and an `ahu` mapping. Project settings retain schema version 1, all existing
 field names, defaults, harness/model identities, permissions behavior and ranking
 order. Unknown fields inside `ahu` are errors. Unknown top-level metadata and
 the Markdown body are descriptive; they cannot enable execution or override
 settings. The document loader retains nested metadata and body text when
-rendering, and lock refresh retains existing descriptive metadata. YAML comments
-and formatting are not preserved; semantic metadata values and the body are.
+rendering, and lock refresh retains existing descriptive metadata, including
+signed and unsigned integers through 128 bits. Rendering checks the same
+structural limits and verifies a semantic round trip before publishing. YAML
+comments and formatting are not preserved; semantic metadata values and the body are.
 
 Project configuration retains the existing 1 MiB input limit. Other shared
 documents are limited to 2 MiB of UTF-8, 32 nested levels, 100,000 expanded
@@ -53,14 +73,17 @@ ahu lock
 
 Preview is read-only. It shows the exact deterministic targets, their digests,
 and verified effective typed-policy parity. Apply recomputes the preview,
-refuses existing target files, symlinks in any checked path component, managed
-task worktrees and changed source/context inputs. If a legacy lock exists, its
-pins must match current shared inputs. Review and commit both new documents and
-legacy source removals before launching; `ahu lock` reports their uncommitted
+refuses duplicate formats for the same document, symlinks in any checked path
+component, managed task worktrees and changed source/context inputs. Any existing
+lock must match current shared inputs. Repository identity and HEAD are read
+again at apply time; shared context is checked again before completion. Review
+and commit both new documents and legacy source removals before launching; `ahu lock` reports their uncommitted
 status until then. Neither command stages or commits anything.
 
 The transaction saves bounded exact source backups and provenance before writing
-targets, then removes the legacy sources. Readers refuse an unfinished journal.
+targets, then removes the legacy sources. An existing canonical lock may be
+refreshed after its exact bytes are backed up; an existing canonical policy is
+retained byte-for-byte. Readers refuse an unfinished journal.
 If applying it fails, rollback attempts to restore original bytes. After an
 interruption, use:
 
@@ -82,11 +105,20 @@ process replacing ancestors between filesystem operations.
 Setup, launch, inspection and lock refresh never migrate legacy documents.
 Lock refresh and setup refuse an existing root legacy lock with an explicit
 migration diagnostic. If both policy formats or both lock formats exist,
-loading refuses them even if their effective values agree. Migration also
-refuses existing canonical destinations; reconcile conflicting sources before
-retrying. The supported migration starts from legacy project policy, optionally
-with its current legacy lock. A standalone legacy lock without legacy project
-policy needs manual reconciliation; it is not silently accepted for migration.
+loading and migration refuse them even if their effective values agree;
+reconcile duplicate sources before retrying. Supported starting states are:
+
+| Policy | Lock | Result |
+| --- | --- | --- |
+| Legacy TOML | Legacy TOML or absent | Convert policy and generate canonical lock |
+| Legacy TOML | Canonical OKF | Convert policy and refresh lock, retaining metadata and Markdown |
+| Canonical OKF | Legacy TOML | Retain exact policy and convert lock |
+| Absent | Legacy TOML | Refuse: no policy against which to establish parity |
+| Canonical OKF | Canonical OKF or absent | No legacy migration; use explicit lock refresh if needed |
+
+Mixed-format migration supports projects that previously refreshed their lock
+while retaining legacy policy. All starting states share the same interruption,
+conflict and rollback checks.
 
 Existing tasks keep their exact recorded configuration and snapshot byte pins.
 Their task worktrees and task records are never rewritten. The bounded legacy

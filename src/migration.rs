@@ -67,9 +67,10 @@ fn read_journal(root: &Path) -> Result<Option<Plan>> {
             bail!("migration journal document exceeds limit");
         }
     }
-    if plan.before[0].is_none()
-        || plan.before[2].is_some()
-        || plan.before[3].is_some()
+    if plan.before[0].is_some() == plan.before[2].is_some()
+        || (plan.before[1].is_some() && plan.before[3].is_some())
+        || (plan.before[0].is_none() && plan.before[1].is_none())
+        || (plan.before[2].is_some() && plan.before[2] != plan.after[2])
         || plan.after[0].is_some()
         || plan.after[1].is_some()
         || plan.after[2].is_none()
@@ -88,9 +89,17 @@ fn read_journal(root: &Path) -> Result<Option<Plan>> {
         return Ok(Some(plan));
     }
     let old = config::parse(
-        plan.before[0].as_ref().unwrap().as_bytes(),
-        true,
-        Path::new(PATHS[0]),
+        plan.before[0]
+            .as_ref()
+            .or(plan.before[2].as_ref())
+            .unwrap()
+            .as_bytes(),
+        plan.before[0].is_some(),
+        Path::new(if plan.before[0].is_some() {
+            PATHS[0]
+        } else {
+            PATHS[2]
+        }),
     )?;
     let new = config::parse(
         plan.after[2].as_ref().unwrap().as_bytes(),
@@ -123,6 +132,8 @@ fn refuse_task(repo: &Repo) -> Result<()> {
 }
 impl Plan {
     pub fn preview(repo: &Repo) -> Result<Self> {
+        let current_repo = crate::git::discover(&repo.root)?;
+        let repo = &current_repo;
         ensure_idle(&repo.root)?;
         let previous = read_journal(&repo.root)?;
         let mut before: [Option<String>; 4] = Default::default();
@@ -139,45 +150,61 @@ impl Plan {
                 );
             }
         }
-        if before[2].is_some() || before[3].is_some() {
-            bail!(
-                "migration refuses existing OKF destinations or conflicting sources; no precedence is implied"
-            );
+        if (before[0].is_some() && before[2].is_some())
+            || (before[1].is_some() && before[3].is_some())
+        {
+            bail!("migration refuses conflicting formats; no precedence is implied");
         }
-        let legacy = before[0]
+        if before[0].is_none() && before[1].is_none() {
+            bail!("no legacy project documents to migrate");
+        }
+        let policy_index = if before[0].is_some() { 0 } else { 2 };
+        let policy = before[policy_index]
             .as_ref()
-            .ok_or_else(|| Error::new("no legacy project policy to migrate"))?;
-        let config = config::parse(legacy.as_bytes(), true, Path::new(PATHS[0]))?;
-        let target = config::try_render(&config)?;
+            .ok_or_else(|| Error::new("no project policy for lock migration"))?;
+        let config = config::parse(
+            policy.as_bytes(),
+            policy_index == 0,
+            Path::new(PATHS[policy_index]),
+        )?;
+        // An existing canonical policy is already authoritative: retain every byte.
+        let target = if policy_index == 0 {
+            config::try_render(&config)?
+        } else {
+            policy.clone()
+        };
         if config != config::parse(target.as_bytes(), false, Path::new(PATHS[2]))? {
             bail!("effective policy parity failed");
         }
         let mut snapshot = crate::snapshot::collect(&repo.root)?;
-        if let Some(old) = &before[1] {
-            let lock = context_lock::LockFile::decode(old.as_bytes(), true)?;
+        let lock_index = if before[1].is_some() { 1 } else { 3 };
+        if let Some(old) = &before[lock_index] {
+            let lock = context_lock::LockFile::decode(old.as_bytes(), lock_index == 1)?;
             if !lock.matches_snapshot(&snapshot) {
                 bail!(
-                    "legacy lock does not match current shared context; resolve context drift before migration"
+                    "existing lock does not match current shared context; resolve context drift before migration"
                 );
             }
         }
-        let entry = snapshot
-            .entries
-            .iter_mut()
-            .find(|e| e.path == PATHS[0])
-            .ok_or_else(|| Error::new("legacy policy is absent from the context snapshot"))?;
-        entry.path = PATHS[2].into();
-        entry.bytes = target.len() as u64;
-        entry.digest = digest_bytes(target.as_bytes());
-        entry.executable = false;
-        snapshot.entries.sort_by(|a, b| a.path.cmp(&b.path));
+        if policy_index == 0 {
+            let entry = snapshot
+                .entries
+                .iter_mut()
+                .find(|e| e.path == PATHS[0])
+                .ok_or_else(|| Error::new("legacy policy is absent from the context snapshot"))?;
+            entry.path = PATHS[2].into();
+            entry.bytes = target.len() as u64;
+            entry.digest = digest_bytes(target.as_bytes());
+            entry.executable = false;
+            snapshot.entries.sort_by(|a, b| a.path.cmp(&b.path));
+        }
         // Apply creates ignored local journal storage. Predict its disclosed
         // scan gap without making preview write anything.
         if !snapshot.skipped_directories.iter().any(|p| p == ".ahu") {
             snapshot.skipped_directories.push(".ahu".into());
             snapshot.skipped_directories.sort();
         }
-        let lock = context_lock::LockFile::from_snapshot(&snapshot).render(None)?;
+        let lock = context_lock::LockFile::from_snapshot(&snapshot).render(before[3].as_deref())?;
         use std::os::unix::fs::PermissionsExt;
         let mut source_modes = [None; 4];
         for (index, path) in PATHS.iter().enumerate() {
@@ -266,12 +293,19 @@ fn replace(
     if read(root, PATHS[index])? != *expected {
         bail!("concurrent edit; migration stopped");
     }
+    if expected == target {
+        return Ok(());
+    }
     let path = crate::util::resolve_within(root, PATHS[index], true)?;
     if let Some(text) = target {
         if expected.is_some() {
-            bail!("migration never overwrites an existing destination");
-        }
-        if !private_io::atomic_create(&path, text.as_bytes(), Durability::Durable)? {
+            if index != 3 {
+                bail!("migration never overwrites existing policy");
+            }
+            // Only the generated canonical lock may be refreshed. Its exact
+            // bytes are journaled and checked above, including during rollback.
+            private_io::atomic_write(&path, text.as_bytes(), Durability::Durable)?;
+        } else if !private_io::atomic_create(&path, text.as_bytes(), Durability::Durable)? {
             bail!("migration destination appeared concurrently");
         }
     } else if expected.is_some() {
@@ -279,6 +313,13 @@ fn replace(
         std::fs::File::open(path.parent().unwrap())?.sync_all()?;
     }
     Ok(())
+}
+fn check_identity(repo: &Repo, plan: &Plan) -> Result<()> {
+    let current = crate::git::discover(&repo.root)?;
+    if current.identity() != plan.repository || current.head != plan.base_commit {
+        bail!("repository or HEAD changed since migration preview");
+    }
+    refuse_task(&current)
 }
 pub fn apply(repo: &Repo, plan: &Plan) -> Result<()> {
     apply_with(repo, plan, |_| Ok(()))
@@ -289,6 +330,7 @@ fn apply_with(
     mut checkpoint: impl FnMut(usize) -> Result<()>,
 ) -> Result<()> {
     refuse_task(repo)?;
+    check_identity(repo, plan)?;
     matches(&repo.root, &plan.before)?;
     let _guard = guard(&repo.root)?;
     ensure_idle(&repo.root)?;
@@ -313,6 +355,13 @@ fn apply_with(
             expected[index] = plan.after[index].clone();
         }
         matches(&repo.root, &plan.after)?;
+        check_identity(repo, plan)?;
+        let snapshot = crate::snapshot::collect(&repo.root)?;
+        let target_lock =
+            context_lock::LockFile::decode(plan.after[3].as_ref().unwrap().as_bytes(), false)?;
+        if !target_lock.matches_snapshot(&snapshot) {
+            bail!("context changed during migration");
+        }
         let mut complete = fresh.clone();
         complete.phase = "complete".into();
         save(&repo.root, &complete)
@@ -405,6 +454,137 @@ mod tests {
         let repo = crate::git::discover(root).unwrap();
         (dir, repo)
     }
+    #[test]
+    fn stale_head_is_refused() {
+        let (_dir, repo) = fixture();
+        let plan = Plan::preview(&repo).unwrap();
+        git(
+            &repo.root,
+            &["commit", "--allow-empty", "-qm", "new fixture head"],
+        );
+        assert!(apply(&repo, &plan).is_err(), "stale HEAD was accepted");
+        matches(&repo.root, &plan.before).unwrap();
+    }
+
+    #[test]
+    fn context_edits_during_apply_are_refused() {
+        let (_dir, repo) = fixture();
+        let plan = Plan::preview(&repo).unwrap();
+        let error = apply_with(&repo, &plan, |step| {
+            if step == 3 {
+                std::fs::write(repo.root.join("AGENTS.md"), "Concurrent context edit")?;
+            }
+            Ok(())
+        });
+        assert!(
+            error.is_err(),
+            "concurrent context was silently pinned stale"
+        );
+        matches(&repo.root, &plan.before).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.root.join("AGENTS.md")).unwrap(),
+            "Concurrent context edit"
+        );
+    }
+
+    #[test]
+    fn migration_supports_mixed_policy_and_lock_formats() {
+        for canonical_policy in [false, true] {
+            let (_dir, repo) = fixture();
+            if canonical_policy {
+                let settings = config::load(&repo.root).unwrap().unwrap().config;
+                std::fs::remove_file(repo.root.join(PATHS[0])).unwrap();
+                config::write_new(&repo.root, &settings).unwrap();
+                let lock = context_lock::LockFile::from_snapshot(
+                    &crate::snapshot::collect(&repo.root).unwrap(),
+                );
+                std::fs::write(repo.root.join(PATHS[1]), toml::to_string(&lock).unwrap()).unwrap();
+            } else {
+                std::fs::remove_file(repo.root.join(PATHS[1])).unwrap();
+                let lock = context_lock::LockFile::from_snapshot(
+                    &crate::snapshot::collect(&repo.root).unwrap(),
+                );
+                let mut doc =
+                    okf::Document::parse(&lock.render(None).unwrap(), "ahu:lock").unwrap();
+                doc.fields
+                    .insert("notes".into(), serde_json::json!({"nested": ["retained"]}));
+                doc.body = "\nRetain this explanation.\n".into();
+                std::fs::write(repo.root.join(PATHS[3]), doc.render().unwrap()).unwrap();
+            }
+            let plan = Plan::preview(&repo).unwrap();
+            for failure in 0..4 {
+                assert!(
+                    apply_with(&repo, &plan, |step| if step == failure {
+                        Err(Error::new("synthetic failure"))
+                    } else {
+                        Ok(())
+                    })
+                    .is_err()
+                );
+                matches(&repo.root, &plan.before).unwrap();
+            }
+            // A process can disappear without executing the error handler.
+            for stop in 0..=4 {
+                let guard_file = guard(&repo.root).unwrap();
+                save(&repo.root, &plan).unwrap();
+                for index in [2, 3, 0, 1].into_iter().take(stop) {
+                    replace(&repo.root, index, &plan.before[index], &plan.after[index]).unwrap();
+                }
+                assert!(config::load(&repo.root).is_err());
+                drop(guard_file);
+                rollback(&repo).unwrap();
+                matches(&repo.root, &plan.before).unwrap();
+            }
+            apply(&repo, &plan).unwrap();
+            matches(&repo.root, &plan.after).unwrap();
+            if canonical_policy {
+                assert_eq!(plan.before[2], plan.after[2]);
+            } else {
+                let doc =
+                    okf::Document::parse(plan.after[3].as_ref().unwrap(), "ahu:lock").unwrap();
+                assert_eq!(
+                    doc.fields["notes"],
+                    serde_json::json!({"nested": ["retained"]})
+                );
+                assert_eq!(doc.body, "\nRetain this explanation.\n");
+            }
+        }
+    }
+
+    #[test]
+    fn exclusive_guard_and_lock_edits_leave_user_bytes_intact() {
+        let (_dir, repo) = fixture();
+        let plan = Plan::preview(&repo).unwrap();
+        let guard_file = guard(&repo.root).unwrap();
+        assert!(
+            apply(&repo, &plan)
+                .unwrap_err()
+                .to_string()
+                .contains("another migration")
+        );
+        matches(&repo.root, &plan.before).unwrap();
+        drop(guard_file);
+        std::fs::remove_file(repo.root.join(PATHS[1])).unwrap();
+        let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+        context_lock::refresh(&repo, &snapshot).unwrap();
+        let plan = Plan::preview(&repo).unwrap();
+        let error = apply_with(&repo, &plan, |step| {
+            if step == 1 {
+                std::fs::write(repo.root.join(PATHS[3]), "Concurrent lock annotation")?;
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("rollback needs attention"));
+        assert_eq!(
+            read(&repo.root, PATHS[3]).unwrap().unwrap(),
+            "Concurrent lock annotation"
+        );
+        std::fs::write(repo.root.join(PATHS[3]), plan.before[3].as_ref().unwrap()).unwrap();
+        rollback(&repo).unwrap();
+        matches(&repo.root, &plan.before).unwrap();
+    }
+
     #[test]
     fn preview_is_read_only_apply_preserves_policy_and_lock_is_deterministic() {
         let (_dir, repo) = fixture();

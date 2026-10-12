@@ -183,3 +183,14 @@ fn migration_cli_preview_apply_and_legacy_refresh_boundary() {
     assert!(!command(&["lock", "--update"]).status.success());
     assert_eq!(old, repo.read(context_lock::LEGACY_LOCK_PATH));
 }
+
+#[test]
+fn new_policy_never_writes_a_document_its_reader_will_refuse() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    let mut settings = config::load(repo.path()).unwrap().unwrap().config;
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    settings.knowledge.bundles = vec!["a".repeat(1024 * 1024)];
+    assert!(config::write_new(repo.path(), &settings).is_err());
+    assert!(!repo.path().join(config::CONFIG_RELATIVE_PATH).exists());
+}
