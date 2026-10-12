@@ -111,12 +111,13 @@ fn plugin_read_session_is_exact_immutable_and_denies_all_execution_controls() {
         .plugin_read_session("other", Default::default())
         .unwrap();
     assert_eq!(ungranted.get(VERSION, "abc1"), Err(Error::Denied));
+    assert!(ungranted.list(VERSION, None, 1).unwrap().tasks.is_empty());
     let plugin = view
         .plugin_read_session("fixture", ["abc1".into(), "missing".into()].into())
         .unwrap();
     assert_eq!(
         plugin.capabilities(VERSION).unwrap().operations,
-        [Operation::Read, Operation::Replay].into()
+        [Operation::List, Operation::Read, Operation::Replay].into()
     );
     assert_eq!(plugin.get(VERSION, "abc2"), Err(Error::Denied));
     assert_eq!(plugin.get(VERSION, "abc"), Err(Error::Denied));
@@ -129,6 +130,14 @@ fn plugin_read_session_is_exact_immutable_and_denies_all_execution_controls() {
         Err(Error::UnsupportedVersion)
     );
     let snapshot = plugin.get(VERSION, "abc1").unwrap();
+    assert_eq!(plugin.list(VERSION, None, 2), Err(Error::NotFound));
+    let scoped = view
+        .plugin_read_session("fixture", ["abc1".into()].into())
+        .unwrap();
+    let page = scoped.list(VERSION, None, 1).unwrap();
+    assert_eq!(page.tasks, vec![snapshot.clone()]);
+    assert_eq!(page.next_after, None);
+    assert_eq!(scoped.list(VERSION, Some("abc2"), 1), Err(Error::Denied));
     assert_eq!(snapshot.lifecycle, Lifecycle::OutcomeUnknown);
     assert_eq!(snapshot.identity.provider, "ahu.legacy-core");
     assert!(!snapshot.supports_input);
@@ -173,6 +182,7 @@ fn plugin_read_session_is_exact_immutable_and_denies_all_execution_controls() {
     saved.state = ahu::task::TaskState::Exited;
     ahu::state::write_json(&dir.join("task.json"), &saved).unwrap();
     assert_eq!(plugin.get(VERSION, "abc1").unwrap(), snapshot);
+    assert_eq!(scoped.list(VERSION, None, 1).unwrap(), page);
     let fresh = Inspection::open(&discovered)
         .unwrap()
         .plugin_read_session("fixture", ["abc1".into()].into())

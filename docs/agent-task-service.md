@@ -22,9 +22,9 @@ The controller mints a `Session` with a principal, exact task IDs and allowed
 operations. Consumers receive only the `TaskService` interface. Caller identity
 and grants are not request fields. Core must establish them from its own trusted
 entrypoint, and reevaluate them when minting a session after reconnect. Possession
-of a task ID is insufficient. Read/replay require an explicit task grant;
+of a task ID is insufficient. List/read/replay require an explicit task grant;
 mutations additionally require the recorded owner. Worker sessions have only
-read/replay rights, even if a caller mistakenly requests mutation grants.
+list/read/replay rights, even if a caller mistakenly requests mutation grants.
 Plugin principals can receive an explicit, scoped session from core; neither the
 controller nor its private store is part of the plugin contract. This is an
 app boundary, not isolation from arbitrary same-user code.
@@ -40,6 +40,7 @@ not a storage handle, shell command or authorization callback.
 | Operation | Result and requirements |
 | --- | --- |
 | `capabilities` | Negotiates V1 and reports the session's operations and limits. Unsupported versions fail. |
+| `list` | Bounded snapshots of exact core-granted task IDs, in ascending ID order. Requires the `List` operation grant. |
 | `get` | Current snapshot, owner, frozen identity, task input support, revision and cancellation intent. |
 | `effects` | Current revision and startup, cancellation and input delivery states; no input payloads. |
 | `replay` | Changes strictly after a task revision and the current snapshot, read atomically. |
@@ -65,6 +66,64 @@ leave `Starting` with a `Claimed` effect. Neither permits replaying startup.
 resume, owner transfer, provider fallback, or identity mutation. Further
 execution after a terminal or indeterminate attempt requires deliberate core
 recovery and, if appropriate, a newly admitted task.
+
+## Optional tracker foundation: scoped task listing
+
+An optional tracker adapter can consume task metadata through `TaskService`
+without discovering task directories or obtaining repository-wide access.
+`list(VERSION, after, limit)` enumerates only the session's frozen set of exact
+task grants. The core-minted plugin read session grants `List`, `Read` and
+`Replay`. A custom session must grant `List` explicitly; `Read` alone does not
+authorize listing, and `List` alone does not authorize other operations.
+Plugin installation, enablement, terminal grants and a task ID do not mint a
+task session. The trusted core caller must select the plugin identity and scope.
+
+The limit is between 1 and `MAX_PAGE_SIZE` (128), inclusive. Start with `None`;
+pass the returned `next_after` to continue. It is an exclusive task-ID cursor,
+not a replay revision. A supplied cursor must itself be an exact granted ID;
+prefixes, unknown IDs and revoked IDs return `Denied` before storage access.
+An empty scope returns an empty page. Missing records return `NotFound` and
+unreadable records retain their storage error; neither produces a partial
+successful page. Only records on the requested page are read. `next_after`
+indicates remaining granted IDs, not evidence that their records exist.
+
+For example, trusted core code can supply a synthetic adapter with two admitted
+tasks. `core` below is an existing `Controller`; registration and admission
+remain core responsibilities:
+
+```rust,ignore
+use ahu::agent_task::v1::{TaskService, VERSION};
+
+let reader = core.plugin_read_session(
+    "sample-tracker",
+    [
+        "00000000-0000-7000-8000-000000000001".to_owned(),
+        "00000000-0000-7000-8000-000000000002".to_owned(),
+    ].into(),
+)?;
+// Hand only this interface to the adapter, never the controller.
+let service: &dyn TaskService = &reader;
+let first = service.list(VERSION, None, 1)?;
+if let Some(after) = first.next_after.as_deref() {
+    let second = service.list(VERSION, Some(after), 1)?;
+    assert!(second.next_after.is_none());
+}
+```
+
+Memory and durable controllers read current snapshots, each coherent under its
+task lock; a page is not a transaction across tasks. An `Inspection` session
+remains frozen until reopened. Reconnecting requires a fresh core-authorized
+session; cursors do not restore revoked grants. Consumers should negotiate
+`Operation::List`; older `TaskService` implementations default to
+`UnsupportedOperation` and must not advertise that operation.
+
+This slice supplies in-process task reads only. It adds no tracker client,
+external record mapping, credential handling, synchronization policy, network
+calls, plugin wire operations or CLI commands. Existing task execution works
+without any tracker provider or terminal plugin. A future tracker integration
+still needs an explicit activation and grant path and a separately reviewed
+external data boundary. A task's process exit does not establish issue acceptance
+or closure.
 
 ## Safe replay, concurrency and recovery
 
@@ -175,7 +234,7 @@ all tasks, and remains frozen until core opens another view.
 Core can give a plugin `Inspection::plugin_read_session` or
 `Controller::plugin_read_session`, selecting the plugin identity and exact task
 IDs itself. Only the opaque `TaskService` is handed to the consumer. The grant
-contains read/replay only, never prefix matching or repository discovery. IDs
+contains list/read/replay only, never prefix matching or repository discovery. IDs
 lacking a grant are denied before lookup; explicitly granted missing IDs are
 `NotFound`. Every submit/cancel/input request is denied, even for an owning
 plugin. Core must reevaluate grants when reconnecting. This is an in-process
@@ -195,7 +254,9 @@ and durable state using synthetic adapters. It covers authorization, versions,
 identity conflicts, duplicates, stale revisions, replay and reconnect, cancellation
 intent, literal input, lost responses, provider failure, concurrency, persisted
 claims and storage refusal. It starts no native provider session and reads no
-native auth stores. `tests/task_inspection.rs` additionally checks CLI/MCP response
+native auth stores. Scoped listing tests cover pagination, exact grants, revoked
+cursors, bounds, missing records and storage errors against memory and durable
+stores. `tests/task_inspection.rs` additionally checks CLI/MCP response
 and permission equivalence, denied and unknown tasks, immutable plugin scopes,
 replay boundaries, preserved ownership and no implicit migration. Live provider
 behavior, execution routing and native history replay are not claimed.

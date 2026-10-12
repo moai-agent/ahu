@@ -80,6 +80,7 @@ fn owner() -> Principal {
 }
 fn operations() -> BTreeSet<Operation> {
     [
+        Operation::List,
         Operation::Read,
         Operation::Replay,
         Operation::Submit,
@@ -228,7 +229,7 @@ fn conformance_denials_versions_ownership_and_capabilities() {
         );
         assert_eq!(
             worker.capabilities(1).unwrap().operations,
-            [Operation::Read, Operation::Replay].into()
+            [Operation::List, Operation::Read, Operation::Replay].into()
         );
         assert_eq!(
             worker.mutate(mutation(&f.id, "x", 1, Action::Input("text".into()))),
@@ -244,6 +245,176 @@ fn conformance_denials_versions_ownership_and_capabilities() {
             Err(Error::Denied)
         );
         assert_eq!(wrong_provider.starts.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn scoped_listing_pages_exact_grants_and_reauthorizes_cursors() {
+    for local in [false, true] {
+        let f = Fixture::new(local);
+        let mut granted = BTreeSet::new();
+        for n in 1..=3 {
+            let id = format!("00000000-0000-7000-8000-{n:012}");
+            let record = record_for(&f.repo, &id, f.repo.path());
+            f.core
+                .register_admitted(&record, "fixture", owner(), true)
+                .unwrap();
+            granted.insert(id);
+        }
+        let ids = granted.iter().cloned().collect::<Vec<_>>();
+        let plugin = f
+            .core
+            .plugin_read_session("fixture", granted.clone())
+            .unwrap();
+        let service: &dyn TaskService = &plugin;
+        assert!(
+            service
+                .capabilities(VERSION)
+                .unwrap()
+                .operations
+                .contains(&Operation::List)
+        );
+        let first = service.list(VERSION, None, 2).unwrap();
+        assert_eq!(first.tasks.len(), 2);
+        assert_eq!(first.next_after.as_deref(), Some(ids[1].as_str()));
+        for (snapshot, id) in first.tasks.iter().zip(&ids) {
+            assert_eq!(*snapshot, plugin.get(VERSION, id).unwrap());
+        }
+        let reconnected = f
+            .reconnect()
+            .plugin_read_session("fixture", granted)
+            .unwrap();
+        let second = reconnected
+            .list(VERSION, first.next_after.as_deref(), 2)
+            .unwrap();
+        assert_eq!(second.tasks, vec![plugin.get(VERSION, &ids[2]).unwrap()]);
+        assert_eq!(second.next_after, None);
+        assert!(
+            plugin
+                .list(VERSION, Some(&ids[2]), 1)
+                .unwrap()
+                .tasks
+                .is_empty()
+        );
+        assert_eq!(plugin.list(VERSION, Some(&f.id), 1), Err(Error::Denied));
+        assert_eq!(
+            plugin.list(VERSION, Some(&ids[0][..8]), 1),
+            Err(Error::Denied)
+        );
+        let revoked = f
+            .reconnect()
+            .plugin_read_session("fixture", [ids[2].clone()].into())
+            .unwrap();
+        assert_eq!(
+            revoked.list(VERSION, first.next_after.as_deref(), 2),
+            Err(Error::Denied)
+        );
+        assert_eq!(revoked.list(VERSION, None, 2).unwrap().tasks, second.tasks);
+        // A list capability conveys no execution rights or implicit Read grant.
+        let list_only = f
+            .core
+            .session(owner(), [f.id.clone()].into(), [Operation::List].into());
+        assert_eq!(
+            list_only.list(VERSION, None, 1).unwrap().tasks,
+            vec![f.client().get(VERSION, &f.id).unwrap()]
+        );
+        assert_eq!(list_only.get(VERSION, &f.id), Err(Error::Denied));
+        assert_eq!(
+            list_only.mutate(mutation(&f.id, "submit", 1, Action::Submit)),
+            Err(Error::Denied)
+        );
+    }
+}
+
+#[test]
+fn scoped_listing_requires_capability_valid_version_and_bounded_pages() {
+    for local in [false, true] {
+        let f = Fixture::new(local);
+        let read_only = f
+            .core
+            .session(owner(), [f.id.clone()].into(), [Operation::Read].into());
+        assert_eq!(read_only.list(VERSION, None, 1), Err(Error::Denied));
+        let empty = f
+            .core
+            .plugin_read_session("fixture", BTreeSet::new())
+            .unwrap();
+        assert_eq!(
+            empty.list(VERSION, None, 1).unwrap(),
+            TaskPage {
+                tasks: vec![],
+                next_after: None
+            }
+        );
+        assert_eq!(empty.list(VERSION, Some(&f.id), 1), Err(Error::Denied));
+        let plugin = f
+            .core
+            .plugin_read_session("fixture", [f.id.clone()].into())
+            .unwrap();
+        assert_eq!(
+            plugin.list(VERSION + 1, None, 1),
+            Err(Error::UnsupportedVersion)
+        );
+        for limit in [0, MAX_PAGE_SIZE + 1, usize::MAX] {
+            assert_eq!(
+                plugin.list(VERSION, None, limit),
+                Err(Error::InvalidRequest)
+            );
+        }
+        assert_eq!(
+            plugin
+                .list(VERSION, None, MAX_PAGE_SIZE)
+                .unwrap()
+                .tasks
+                .len(),
+            1
+        );
+        let worker = f.core.session(
+            Principal::Worker("fixture".into()),
+            [f.id.clone()].into(),
+            operations(),
+        );
+        assert_eq!(
+            worker.list(VERSION, None, 1).unwrap().tasks,
+            plugin.list(VERSION, None, 1).unwrap().tasks
+        );
+        assert_eq!(
+            worker.mutate(mutation(&f.id, "submit", 1, Action::Submit)),
+            Err(Error::Denied)
+        );
+    }
+}
+
+#[test]
+fn scoped_listing_propagates_missing_records_and_storage_errors_without_partial_pages() {
+    for local in [false, true] {
+        let f = Fixture::new(local);
+        // Sort after the admitted task to test failure following a valid snapshot.
+        let missing = "ffffffff-ffff-7fff-bfff-ffffffffffff".to_string();
+        let plugin = f
+            .core
+            .plugin_read_session("fixture", [f.id.clone(), missing.clone()].into())
+            .unwrap();
+        assert_eq!(plugin.list(VERSION, None, 2), Err(Error::NotFound));
+        // Looking ahead does not read the next page's record.
+        let first = plugin.list(VERSION, None, 1).unwrap();
+        assert_eq!(first.next_after, Some(f.id.clone()));
+        assert_eq!(
+            plugin.list(VERSION, first.next_after.as_deref(), 1),
+            Err(Error::NotFound)
+        );
+        assert_eq!(f.client().get(VERSION, &f.id).unwrap().revision, 1);
+        if local {
+            std::fs::write(f.path(), b"invalid synthetic state").unwrap();
+            assert!(matches!(
+                plugin.list(VERSION, None, 1),
+                Err(Error::Storage(_))
+            ));
+            let only_missing = f
+                .core
+                .plugin_read_session("fixture", [missing].into())
+                .unwrap();
+            assert_eq!(only_missing.list(VERSION, None, 1), Err(Error::NotFound));
+        }
     }
 }
 

@@ -176,7 +176,7 @@ impl Controller {
         Ok(self.session(
             principal,
             tasks,
-            [Operation::Read, Operation::Replay].into(),
+            [Operation::List, Operation::Read, Operation::Replay].into(),
         ))
     }
 
@@ -203,7 +203,8 @@ impl Controller {
         // Workers may inspect explicitly granted tasks, but never obtain operator
         // delivery rights by supplying a task ID or by reconnecting.
         if matches!(principal, Principal::Worker(_)) {
-            operations.retain(|v| matches!(v, Operation::Read | Operation::Replay));
+            operations
+                .retain(|v| matches!(v, Operation::List | Operation::Read | Operation::Replay));
         }
         Session {
             controller: self.clone(),
@@ -546,6 +547,36 @@ impl TaskService for Session {
             max_input_bytes: MAX_INPUT_BYTES,
             replay_window: REPLAY_WINDOW,
         })
+    }
+    fn list(&self, version: u32, after: Option<&str>, limit: usize) -> Result<TaskPage> {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        check_version(version)?;
+        if !self.operations.contains(&Operation::List) {
+            return Err(Error::Denied);
+        }
+        if let Some(task) = after {
+            self.authorize(task, Operation::List)?;
+        }
+        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
+            return Err(Error::InvalidRequest);
+        }
+        // Range over the frozen grant set, never over repository/store contents.
+        // Look ahead at one ID only; do not read records beyond this page.
+        let mut ids = self
+            .tasks
+            .range::<str, _>((after.map_or(Unbounded, Excluded), Unbounded));
+        let tasks = ids
+            .by_ref()
+            .take(limit)
+            .map(|id| self.controller.snapshot(id))
+            .collect::<Result<Vec<_>>>()?;
+        let next_after = if ids.next().is_some() {
+            tasks.last().map(|task| task.identity.task.clone())
+        } else {
+            None
+        };
+        Ok(TaskPage { tasks, next_after })
     }
     fn get(&self, version: u32, task: &str) -> Result<Snapshot> {
         check_version(version)?;

@@ -6,6 +6,7 @@ pub const VERSION: u32 = 1;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_OPERATIONS: usize = 256;
 pub const REPLAY_WINDOW: usize = 128;
+pub const MAX_PAGE_SIZE: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
@@ -18,6 +19,7 @@ pub enum Principal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
+    List,
     Read,
     Replay,
     Submit,
@@ -80,6 +82,17 @@ pub struct Snapshot {
     /// Intent only, never proof of provider termination.
     pub cancellation_requested: bool,
     pub supports_input: bool,
+}
+
+/// Snapshots in ascending task-ID order, restricted to the session's exact
+/// grants. Each snapshot is coherent; a page is not a cross-task transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskPage {
+    pub tasks: Vec<Snapshot>,
+    /// Exclusive task-ID cursor, present only when more granted IDs remain.
+    /// Reauthorize scope on reconnect; this cursor never confers authority.
+    pub next_after: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +200,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// supplied in a request. IDs locate tasks; they do not confer ownership.
 pub trait TaskService: Send + Sync {
     fn capabilities(&self, version: u32) -> Result<Capabilities>;
+    /// Enumerate only core-granted task IDs, with an explicit List grant.
+    /// Limit must be 1..=MAX_PAGE_SIZE; after must be an exact granted ID.
+    /// Missing or unreadable records fail the page, never a partial success.
+    /// Implementations predating listing may omit it and must not advertise List.
+    fn list(&self, version: u32, after: Option<&str>, limit: usize) -> Result<TaskPage> {
+        let _ = (after, limit);
+        if version != VERSION {
+            return Err(Error::UnsupportedVersion);
+        }
+        Err(Error::UnsupportedOperation)
+    }
     fn get(&self, version: u32, task: &str) -> Result<Snapshot>;
     fn effects(&self, version: u32, task: &str) -> Result<Effects>;
     fn replay(&self, version: u32, task: &str, after: u64) -> Result<Replay>;

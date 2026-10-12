@@ -301,6 +301,9 @@ External issue tracking is optional and remains policy in skills and tracker
 tools, not in ahu's task CLI. The bundled `ahu-direct-agents` skill lets a project
 choose whether to use tracker records and, when configured, link those records
 to ahu task IDs on the provider side.
+The shared [task service](docs/agent-task-service.md#optional-tracker-foundation-scoped-task-listing)
+also provides scoped, paginated task reads as an in-process foundation for future
+optional adapters. It does not activate a tracker or grant external access.
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON
 contracts, prompt transport, hooks, state, and delegation boundaries.
