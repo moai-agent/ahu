@@ -175,11 +175,17 @@ impl Lock {
         }
     }
     pub(super) fn try_acquire(path: &Path) -> Result<Option<Self>> {
+        Self::try_open(path, true)
+    }
+    pub(super) fn try_acquire_existing(path: &Path) -> Result<Option<Self>> {
+        Self::try_open(path, false)
+    }
+    fn try_open(path: &Path, create: bool) -> Result<Option<Self>> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
         state::confine_file(path)?;
         let file = std::fs::OpenOptions::new()
-            .create(true)
+            .create(create)
             .truncate(false)
             .read(true)
             .write(true)

@@ -2023,6 +2023,11 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
             display_safe(task_id)
         );
     }
+    let _removal_owner = if crate::headless::review::is_headless(&record_dir) {
+        Some(crate::headless::removal_guard(gate, &record_dir, &record)?)
+    } else {
+        None
+    };
     let worktree_present = record.worktree.is_dir();
     let branch_present = git::branch_exists(gate, &record.branch)?;
     if worktree_present {
@@ -2113,14 +2118,23 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
                 completed.push(("worktree", "removed".to_string()));
                 worktree_removed = true;
             }
+            Err(e) if _removal_owner.is_some() => {
+                bail!(
+                    "could not remove task worktree: {e}\nTask record and branch were preserved; workspace {cmux_status}."
+                );
+            }
             Err(e) => not_removed.push(("worktree", format!("{e}"))),
         }
     } else {
         completed.push(("worktree", "already absent".to_string()));
     }
     if record_dir.exists() {
-        let record_result = crate::state::confine_existing_dir(&record_dir)
-            .and_then(|()| std::fs::remove_dir_all(&record_dir).map_err(Error::from));
+        let record_result = if let Some(owner) = &_removal_owner {
+            owner.remove_record()
+        } else {
+            crate::state::confine_existing_dir(&record_dir)
+                .and_then(|()| std::fs::remove_dir_all(&record_dir).map_err(Error::from))
+        };
         match record_result {
             Ok(()) => completed.push(("record", "removed".to_string())),
             Err(e) => not_removed.push(("record", format!("{e}"))),

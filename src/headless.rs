@@ -435,6 +435,93 @@ pub fn store(repo: &crate::git::Repo) -> Result<PathBuf> {
     Ok(crate::storage::HeadlessStore::for_repo(repo)?.directory)
 }
 
+/// Exclude resume and supervision for this task throughout destructive cleanup.
+pub(crate) struct RemovalGuard {
+    _owner: Lock,
+    dir: PathBuf,
+}
+
+pub(crate) fn removal_guard(
+    repo: &crate::git::Repo,
+    dir: &Path,
+    expected: &task::TaskRecord,
+) -> Result<RemovalGuard> {
+    confined_in(repo, dir, false)?;
+    // A finished supervised task already has this file. Do not create missing
+    // ownership evidence, including when another removal won the race.
+    let owner = Lock::try_acquire_existing(&dir.join("owner.lock"))?.ok_or_else(|| {
+        Error::new("task is owned by a supervisor or resume; nothing was removed")
+    })?;
+    let current = task::load(dir)?;
+    if current.state.is_live() {
+        bail!("task became live while acquiring removal ownership; nothing was removed");
+    }
+    if current.repo_identity != repo.identity()
+        || dir
+            .file_name()
+            .is_none_or(|id| id != current.task_id.as_str())
+        || serde_json::to_value(&current)? != serde_json::to_value(expected)?
+    {
+        bail!("task changed while acquiring removal ownership; nothing was removed");
+    }
+    let spec: Spec = review::read(&dir.join("headless.json"))?;
+    if spec.attempt == 0 {
+        bail!("task attempt is uncertain; nothing was removed");
+    }
+    let result = review::read_result(
+        &attempt_dir(dir, &spec).join("result.json"),
+        Some(1024 * 1024),
+    )?;
+    review::validate_result(&result, &current.task_id, spec.attempt)?;
+    if result["schema_version"] != spec.schema_version
+        || !matches!(
+            result["outcome"].as_str(),
+            Some(
+                "succeeded"
+                    | "failed"
+                    | "cancelled"
+                    | "timed_out"
+                    | "capture_failed"
+                    | "boundary_violation"
+            )
+        )
+    {
+        bail!("task process ownership is uncertain; nothing was removed");
+    }
+    Ok(RemovalGuard {
+        _owner: owner,
+        dir: dir.to_path_buf(),
+    })
+}
+
+impl RemovalGuard {
+    pub(crate) fn remove_record(&self) -> Result<()> {
+        self.remove_execution_inputs()?;
+        std::fs::remove_file(self.dir.join("owner.lock"))?;
+        std::fs::remove_dir(&self.dir)?;
+        Ok(())
+    }
+
+    fn remove_execution_inputs(&self) -> Result<()> {
+        state::confine_existing_dir(&self.dir)?;
+        // Keep the lock pathname until all execution inputs are gone. An
+        // unordered remove_dir_all could unlink owner.lock first, letting
+        // resume/supervise create and own another inode while inputs survive.
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            if entry.file_name() == "owner.lock" {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(entry.path())?;
+            } else {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Hold fresh headless admission and terminal-task resume ownership while
 /// plugin cleanup validates references and removes installed source data.
 pub(crate) struct PluginCleanupGuard {
@@ -4906,6 +4993,97 @@ mod profile_and_metadata_tests {
         durable_json(&dir.join("headless.json"), spec).unwrap();
         confined(&attempt_dir(&dir, spec), true).unwrap();
         dir
+    }
+
+    fn removable_attempt(repo: &crate::git::Repo, id: &str) -> PathBuf {
+        let spec = sample_spec();
+        let dir = saved_attempt(repo, id, &spec);
+        drop(Lock::acquire(&dir.join("owner.lock")).unwrap());
+        durable_json(
+            &attempt_dir(&dir, &spec).join("result.json"),
+            &json!({"schema_version": 2, "task_id": id, "attempt": spec.attempt,
+                "outcome": "succeeded", "process": {"exit_code": 0},
+                "harness": {"terminal": true, "failed": false}}),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn removal_revalidates_resolved_record_after_resume_releases_ownership() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let dir = removable_attempt(&repo, "abc");
+        let resolved = task::load(&dir).unwrap();
+        for state in [
+            task::TaskState::Starting,
+            task::TaskState::Running,
+            task::TaskState::WaitingForApproval,
+        ] {
+            // Deterministic lookup/lock interleaving: resume wins ownership
+            // after removal's lookup and publishes a live state before handing
+            // off to its supervisor. Removal must not use the old terminal state.
+            let owner = Lock::acquire(&dir.join("owner.lock")).unwrap();
+            let mut changed = resolved.clone();
+            changed.state = state;
+            task::save(&dir, &changed, "original prompt").unwrap();
+            drop(owner);
+            let error = removal_guard(&repo, &dir, &resolved).err().unwrap();
+            assert!(error.to_string().contains("became live"));
+            assert_eq!(task::load(&dir).unwrap().state, state);
+        }
+        task::save(&dir, &resolved, "original prompt").unwrap();
+        assert!(removal_guard(&repo, &dir, &resolved).is_ok());
+    }
+
+    #[test]
+    fn removal_revalidates_identity_and_destructive_targets_under_ownership() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let dir = removable_attempt(&repo, "abc");
+        let resolved = task::load(&dir).unwrap();
+        for field in [
+            "task_id",
+            "repo_identity",
+            "repo_root",
+            "worktree",
+            "branch",
+        ] {
+            let owner = Lock::acquire(&dir.join("owner.lock")).unwrap();
+            let mut changed = serde_json::to_value(&resolved).unwrap();
+            changed[field] = json!("changed");
+            durable_json(&dir.join("task.json"), &changed).unwrap();
+            drop(owner);
+            let error = removal_guard(&repo, &dir, &resolved).err().unwrap();
+            assert!(error.to_string().contains("task changed"), "{error}");
+            assert!(dir.join("headless.json").exists());
+        }
+        state::write_private_file(&dir.join("task.json"), b"{").unwrap();
+        assert!(removal_guard(&repo, &dir, &resolved).is_err());
+    }
+
+    #[test]
+    fn removal_keeps_resume_excluded_until_execution_inputs_are_gone() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let dir = removable_attempt(&repo, "abc");
+        let resolved = task::load(&dir).unwrap();
+        let guard = removal_guard(&repo, &dir, &resolved).unwrap();
+        assert!(
+            Lock::try_acquire(&dir.join("owner.lock"))
+                .unwrap()
+                .is_none()
+        );
+        guard.remove_execution_inputs().unwrap();
+        assert!(dir.join("owner.lock").is_file());
+        assert!(!dir.join("task.json").exists());
+        assert!(!dir.join("headless.json").exists());
+        assert!(
+            Lock::try_acquire(&dir.join("owner.lock"))
+                .unwrap()
+                .is_none()
+        );
+        guard.remove_record().unwrap();
+        // A stale resume/supervisor cannot recreate the removed task's lock.
+        assert!(Lock::try_acquire(&dir.join("owner.lock")).is_err());
+        assert!(!dir.exists());
     }
 
     #[test]

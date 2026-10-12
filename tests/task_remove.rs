@@ -427,3 +427,193 @@ fn unavailable_plugin_preserves_legacy_cmux_records_and_owned_resources() {
         assert!(git::branch_exists(&git::discover(repo.path()).unwrap(), &branch_of(id)).unwrap());
     }
 }
+
+fn prepare_headless_task(repo: &TestRepo, id: &str) -> PathBuf {
+    use std::os::unix::fs::OpenOptionsExt;
+    let old = prepare_task(repo, id);
+    let record = task::load(&old).unwrap();
+    std::fs::remove_dir_all(old).unwrap();
+    let dir = ahu::headless::store(&git::discover(repo.path()).unwrap())
+        .unwrap()
+        .join(id);
+    task::save(&dir, &record, "current work").unwrap();
+    state::write_json(
+        &dir.join("headless.json"),
+        &serde_json::json!({
+            "schema_version": 2, "options": ahu::headless::Options::default(),
+            "harness_version": "synthetic", "executable_digest": "synthetic",
+            "parent_task": null, "root_task": null, "depth": 0, "attempt": 1,
+            "session": "synthetic", "native_controls": [], "gaps": []
+        }),
+    )
+    .unwrap();
+    state::create_private_dir_all(&dir.join("attempt-1")).unwrap();
+    state::write_json(
+        &dir.join("attempt-1/result.json"),
+        &serde_json::json!({
+            "schema_version": 2, "task_id": id, "attempt": 1, "outcome": "succeeded",
+            "process": {"exit_code": 0}, "harness": {"terminal": true, "failed": false}
+        }),
+    )
+    .unwrap();
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(dir.join("owner.lock"))
+        .unwrap();
+    dir
+}
+
+fn hold_owner(dir: &Path) -> std::fs::File {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::File::open(dir.join("owner.lock")).unwrap();
+    assert_eq!(
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    file
+}
+
+fn assert_task_preserved(repo: &TestRepo, id: &str, dir: &Path, before: &[u8]) {
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+    assert!(dir.join("headless.json").is_file());
+    assert!(dir.join("attempt-1/result.json").is_file());
+    assert!(worktree_of(repo, id).is_dir());
+    assert!(git::branch_exists(&git::discover(repo.path()).unwrap(), &branch_of(id)).unwrap());
+}
+
+#[test]
+fn remove_headless_refuses_resume_owner_without_removing_resources() {
+    let repo = fixture();
+    let id = "00000000-0000-7000-8000-000000000001";
+    let dir = prepare_headless_task(&repo, id);
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    // Deterministically model resume after it acquires ownership, before it
+    // publishes Starting. The public removal sees a terminal record.
+    let held = hold_owner(&dir);
+    let out = ahu_in(repo.path(), &["remove", id]);
+    assert!(!out.status.success(), "{}", text_of(&out));
+    assert!(text_of(&out).contains("owned"), "{}", text_of(&out));
+    assert_task_preserved(&repo, id, &dir, &before);
+    drop(held);
+    let out = ahu_in(repo.path(), &["remove", id]);
+    assert!(out.status.success(), "{}", text_of(&out));
+    assert!(!dir.exists());
+    assert!(!worktree_of(&repo, id).exists());
+    assert!(!git::branch_exists(&git::discover(repo.path()).unwrap(), &branch_of(id)).unwrap());
+}
+
+#[test]
+fn remove_headless_preserves_coordination_when_git_refuses_worktree_removal() {
+    let repo = fixture();
+    let id = "00000000-0000-7000-8000-000000000002";
+    let dir = prepare_headless_task(&repo, id);
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    let worktree = worktree_of(&repo, id);
+    common::git(
+        repo.path(),
+        &["worktree", "lock", worktree.to_str().unwrap()],
+    );
+    let out = ahu_in(repo.path(), &["remove", id]);
+    assert!(!out.status.success(), "{}", text_of(&out));
+    assert_task_preserved(&repo, id, &dir, &before);
+    common::git(
+        repo.path(),
+        &["worktree", "unlock", worktree.to_str().unwrap()],
+    );
+    let out = ahu_in(repo.path(), &["remove", id]);
+    assert!(out.status.success(), "{}", text_of(&out));
+}
+
+#[test]
+fn remove_headless_does_not_block_on_unrelated_ownership() {
+    let repo = fixture();
+    let id = "00000000-0000-7000-8000-000000000003";
+    let other = "00000000-0000-7000-8000-000000000004";
+    let dir = prepare_headless_task(&repo, id);
+    let other_dir = prepare_headless_task(&repo, other);
+    task::set_state(&other_dir, task::TaskState::Running).unwrap();
+    let before = std::fs::read(other_dir.join("task.json")).unwrap();
+    let _held = hold_owner(&other_dir);
+    let out = ahu_in(repo.path(), &["remove", id]);
+    assert!(out.status.success(), "{}", text_of(&out));
+    assert!(!dir.exists());
+    assert_task_preserved(&repo, other, &other_dir, &before);
+}
+
+#[test]
+fn remove_headless_refuses_uncertain_metadata_without_side_effects() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let repo = fixture();
+    let id = "00000000-0000-7000-8000-000000000005";
+    let dir = prepare_headless_task(&repo, id);
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    let spec = std::fs::read(dir.join("headless.json")).unwrap();
+    let result = std::fs::read(dir.join("attempt-1/result.json")).unwrap();
+    for variant in [
+        "missing-lock",
+        "symlink-lock",
+        "hardlink-lock",
+        "public-lock",
+        "missing-spec",
+        "malformed-spec",
+        "missing-result",
+        "malformed-result",
+        "wrong-attempt",
+        "uncertain-result",
+    ] {
+        let lock = dir.join("owner.lock");
+        match variant {
+            "missing-lock" => std::fs::remove_file(&lock).unwrap(),
+            "symlink-lock" => {
+                std::fs::remove_file(&lock).unwrap();
+                symlink(dir.join("prompt.txt"), &lock).unwrap();
+            }
+            "hardlink-lock" => std::fs::hard_link(&lock, dir.join("alias.lock")).unwrap(),
+            "public-lock" => {
+                std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap()
+            }
+            "missing-spec" => std::fs::remove_file(dir.join("headless.json")).unwrap(),
+            "malformed-spec" => std::fs::write(dir.join("headless.json"), "{").unwrap(),
+            "missing-result" => std::fs::remove_file(dir.join("attempt-1/result.json")).unwrap(),
+            "malformed-result" => std::fs::write(dir.join("attempt-1/result.json"), "{").unwrap(),
+            "wrong-attempt" | "uncertain-result" => {
+                let mut value: serde_json::Value = serde_json::from_slice(&result).unwrap();
+                if variant == "wrong-attempt" {
+                    value["attempt"] = 2.into();
+                } else {
+                    value["outcome"] = "supervisor_error".into();
+                }
+                state::write_json(&dir.join("attempt-1/result.json"), &value).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let out = ahu_in(repo.path(), &["remove", id]);
+        assert!(!out.status.success(), "{variant}: {}", text_of(&out));
+        assert_eq!(
+            std::fs::read(dir.join("task.json")).unwrap(),
+            before,
+            "{variant}"
+        );
+        assert!(worktree_of(&repo, id).is_dir(), "{variant}");
+        assert!(
+            git::branch_exists(&git::discover(repo.path()).unwrap(), &branch_of(id)).unwrap(),
+            "{variant}"
+        );
+        if variant == "missing-lock" {
+            assert!(!lock.exists());
+        }
+        if variant == "hardlink-lock" {
+            std::fs::remove_file(dir.join("alias.lock")).unwrap();
+        }
+        if std::fs::symlink_metadata(&lock).is_ok() {
+            std::fs::remove_file(&lock).unwrap();
+        }
+        state::write_private_file(&lock, b"").unwrap();
+        state::write_private_file(&dir.join("headless.json"), &spec).unwrap();
+        state::write_private_file(&dir.join("attempt-1/result.json"), &result).unwrap();
+    }
+    let out = ahu_in(repo.path(), &["remove", id]);
+    assert!(out.status.success(), "{}", text_of(&out));
+}
