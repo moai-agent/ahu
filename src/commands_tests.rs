@@ -239,7 +239,7 @@ fn lock_update_requires_commit_and_detects_context_changes() {
     assert!(output.contains("Refreshed"));
     git(&repo.root, &["diff", "--cached", "--exit-code"]);
     assert!(scripted("", |c| lock_cmd(c, &repo, false)).0.is_err());
-    git(&repo.root, &["add", "AGENTS.md", "ahu.lock"]);
+    git(&repo.root, &["add", "AGENTS.md", ".agents/ahu/lock.md"]);
     git(
         &repo.root,
         &[
@@ -789,7 +789,7 @@ fn doctor_reports_invalid_agents_and_lock_without_changing_them() {
     std::fs::create_dir_all(&manifests).unwrap();
     let manifest = manifests.join("broken.md");
     std::fs::write(&manifest, "not an agent manifest").unwrap();
-    let lock = repo.root.join("ahu.lock");
+    let lock = repo.root.join(".agents/ahu/lock.md");
     std::fs::write(&lock, "not a context lock").unwrap();
     let repo = Ok(repo);
     for verbose in [false, true] {
@@ -940,7 +940,7 @@ fn run_task_refuses_invalid_project_configuration_before_starting_a_harness() {
     let before = std::fs::read(dir.join("task.json")).unwrap();
     std::fs::write(config::config_path(&repo.root), "invalid = [").unwrap();
     let error = run_task(&dir).unwrap_err().to_string();
-    assert!(error.contains("TOML"), "{error}");
+    assert!(error.contains("YAML frontmatter"), "{error}");
     assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
 }
 

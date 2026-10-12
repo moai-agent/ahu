@@ -651,7 +651,7 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
             !preview.contains("no harness enforces this agent's identity"),
             "{preview}"
         );
-        assert!(preview.contains("ahu.lock"), "{preview}");
+        assert!(preview.contains(".agents/ahu/lock.md"), "{preview}");
         // And it must still say where the instructions came from.
         assert!(
             preview.contains(".agents/ahu/agents/vela.md"),

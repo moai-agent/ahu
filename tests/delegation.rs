@@ -5,8 +5,12 @@ use common::{HOSTILE_PROMPT, TestRepo};
 fn launch(repo: &TestRepo, name: &str, dry_run: bool) -> std::process::Output {
     let temp = repo.state_path();
     let bin = common::fake_harness(temp, &temp.join("argv"));
+    let home = temp.join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let mut cmd = common::ahu();
     cmd.current_dir(repo.path())
+        .env("HOME", &home)
+        .env_remove("OTEL_RESOURCE_ATTRIBUTES")
         .args([name, "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
@@ -442,7 +446,7 @@ fn inline_and_piped_prompts_produce_clean_json_without_cmux() {
         let diagnostics = String::from_utf8_lossy(&output.stderr);
         assert!(diagnostics.contains("About to submit"));
         assert!(diagnostics.contains("Enforcement"));
-        assert!(diagnostics.contains("ahu.lock"));
+        assert!(diagnostics.contains(".agents/ahu/lock.md"));
     }
     assert_eq!(common::git(repo.path(), &["branch", "--list", "ahu/*"]), "");
 }

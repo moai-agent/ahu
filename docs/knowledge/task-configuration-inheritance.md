@@ -23,7 +23,7 @@ sources:
 # Task configuration inheritance
 
 A task worktree starts from the parent checkout's HEAD. Before planning a launch,
-ahu compares shared recognized context with committed `ahu.lock` and requires
+ahu compares shared recognized context with committed `.agents/ahu/lock.md` and requires
 those inputs and the lock to be tracked and clean. Recognized user-local Claude
 settings and registered native Antigravity MCP settings are checked against a
 separate owner-only acceptance in host state,
@@ -38,7 +38,7 @@ directories, along with supported instruction and configuration filenames,
 including `GEMINI.md`, `opencode.json` and `opencode.jsonc`. It records content
 digests and executable bits. User-local settings needed by a harness still
 travel with the task snapshot, but their fingerprints are kept in private host
-state rather than `ahu.lock`. Collection has a depth limit and skips directories
+state rather than `.agents/ahu/lock.md`. Collection has a depth limit and skips directories
 such as `.git`, `.worktrees`, and build output; it does not cover every possible
 configuration location. The lock records recognized configuration it could not
 scan, along with symlinks, and refuses those cases. It cannot discover all nested

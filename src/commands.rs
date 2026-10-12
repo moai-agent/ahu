@@ -192,7 +192,24 @@ fn config_or_setup(repo: &Repo, _console: &mut Console<'_>) -> Result<Option<Loa
         .ok_or_else(|| Error::new("this repository is not set up for ahu; run `ahu setup` first"))
 }
 
-/// Check or refresh `ahu.lock`. Refreshing never stages or commits.
+pub fn migrate_cmd(console: &mut Console<'_>, repo: &Repo, action: &str) -> Result<i32> {
+    if action == "--rollback" {
+        crate::migration::rollback(repo)?;
+        console.say(
+            "Migration rolled back; exact source backups remain in the migration journal.\n",
+        )?;
+    } else {
+        let plan = crate::migration::Plan::preview(repo)?;
+        console.say(&plan.display())?;
+        if action == "--apply" {
+            crate::migration::apply(repo, &plan)?;
+            console.say("\nMigration applied. Review and commit the shared documents and legacy source removals. No files were staged.\n")?;
+        }
+    }
+    Ok(0)
+}
+
+/// Check or refresh `.agents/ahu/lock.md`. Refreshing never stages or commits.
 pub fn lock_cmd(console: &mut Console<'_>, repo: &Repo, update: bool) -> Result<i32> {
     let snapshot = crate::snapshot::collect(&repo.root)?;
     if update {
@@ -2915,7 +2932,7 @@ pub fn render_preview(
         plan.hooks.short_digest()
     ));
     out.push_str(
-        "\nThe task worktree starts at the base commit above. ahu.lock and every recognized\n\
+        "\nThe task worktree starts at the base commit above. .agents/ahu/lock.md and every recognized\n\
          repository context input must match committed HEAD before launch. Harness-level and\n\
          provider-managed context remains outside this repository lock.\n",
     );

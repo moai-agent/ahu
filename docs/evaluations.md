@@ -223,7 +223,7 @@ For a one-skill ablation, replace `--all-project-skills` with
 `--skill ahu-typed-decisions`. The helper requires a clean source checkout
 without ignored harness context and a new destination outside it. It creates a
 reviewable local branch/worktree, removes selected paths from `.agents/skills`,
-`.claude/skills`, and `.opencode/skills`, refreshes `ahu.lock`, and commits only
+`.claude/skills`, and `.opencode/skills`, refreshes `.agents/ahu/lock.md`, and commits only
 those changes. It uses disposable ahu state while refreshing the lock, so
 per-user context fingerprints are not accepted into the user's normal ahu state. The branch and
 worktree remain for review and evaluation; remove them after the experiment

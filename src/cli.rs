@@ -37,7 +37,9 @@ Commands:
                         Also accepts --prompt or --prompt-file.
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
-  lock [--update]       Check committed agent context, or refresh ahu.lock before committing it
+  migrate [--preview|--apply|--rollback]
+                        Explicitly migrate legacy project policy and context lock
+  lock [--update]       Check committed agent context, or refresh .agents/ahu/lock.md before committing it
   knowledge lint [--output json]
                         Check the OKF bundles named in [knowledge] with okf.
                         Reads only; nothing is fetched, indexed, or rewritten
@@ -144,7 +146,7 @@ onboard options:
 
 knowledge lint options:
   --output json         Emit a versioned JSON report on stdout, diagnostics on
-                        stderr. Bundles come from [knowledge] in the project
+                        stderr. Bundles come from ahu.knowledge in the project
                         configuration; knowledge.fail_on_warnings decides whether
                         warnings fail the check. Errors always do.
 
@@ -276,6 +278,7 @@ Commands:
   cleanup|remove ID     Clean headless captures or remove a terminal task
   focus|message ID ...  Focus a task or send it a message
   eval run|report       Run and compare local agent evaluations
+  migrate               Preview/apply the explicit shared-policy format migration
   knowledge lint        Check configured OKF bundles
   plugins               Inspect compiled/local session plugins and selection
   cmux status|install   Inspect or install native cmux integration
@@ -307,7 +310,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         return Ok(HELP_ALL.to_string());
     }
     let help = match topic {
-        "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh ahu.lock. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
+        "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh .agents/ahu/lock.md. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
         "eval run" => help_section("eval run options:", "tasks options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
@@ -317,7 +320,8 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "onboard" => help_section("onboard options:", "knowledge lint options:"),
         "knowledge lint" => help_section("knowledge lint options:", "eval report options:"),
         "doctor" => "Usage: ahu doctor\n\nSummarize project, context-lock, skills, harness, telemetry, and cmux readiness. Use --verbose for component-level diagnostics.\n".to_string(),
-        "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes ahu.lock and accepts local context in owner-only host state; review and commit ahu.lock only when shared context changed.\n".to_string(),
+        "migrate" => "Usage: ahu migrate [--preview|--apply|--rollback]\n\nPreview is read-only and shows deterministic OKF targets and typed-policy parity. Apply refuses managed task worktrees and existing destinations, preserves exact legacy backups in .ahu/migrations/project-okf-v1/journal.json, and checks concurrent edits. Rollback explicitly recovers an interrupted transaction. No task, native, auth, or local-acceptance files are migrated. Review and commit the resulting shared files and source removals.\n".to_string(),
+        "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes .agents/ahu/lock.md and accepts local context in owner-only host state; review and commit .agents/ahu/lock.md only when shared context changed.\n".to_string(),
         "plugins" => "Usage: ahu plugins [--probe] [--output json]\n\nInspect compiled/local session plugins and AHU_INTERACTIVE_PLUGIN selection without executing plugins.\nAHU_PLUGIN_PATH lists absolute package directories containing ahu-plugin.md (OKF 0.2 YAML frontmatter, type ahu:plugin; Cargo.toml remains TOML).\nSelect cmux, none, or a discovered id with AHU_INTERACTIVE_PLUGIN. Source-only packages cannot be activated. --probe explicitly executes the selected host, negotiates its protocol, and reads its inventory; it never launches a task.\n".to_string(),
         "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
         "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
@@ -361,6 +365,7 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "setup" => "ahu setup — configure this project",
         "tasks" => "ahu tasks — list recent tasks",
         "doctor" => "ahu doctor — check project readiness",
+        "migrate" => "ahu migrate — explicitly migrate shared project documents",
         "lock" => "ahu lock — check committed agent context",
         "eval" => "ahu eval — run, compare or verify evaluations",
         "knowledge" => "ahu knowledge lint — validate configured knowledge bundles",
@@ -441,6 +446,9 @@ pub enum Command {
         remove: Option<String>,
         model: Option<String>,
         version: String,
+    },
+    Migrate {
+        action: String,
     },
     Lock {
         update: bool,
@@ -899,6 +907,15 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 })?;
             let text = args[2..].join(" ");
             Ok(Command::Message { task_id, text })
+        }
+        "migrate" => {
+            let action = args.get(1).map(String::as_str).unwrap_or("--preview");
+            if args.len() > 2 || !matches!(action, "--preview" | "--apply" | "--rollback") {
+                bail!("Usage: ahu migrate [--preview|--apply|--rollback]");
+            }
+            Ok(Command::Migrate {
+                action: action.into(),
+            })
         }
         "lock" => match args.get(1).map(String::as_str) {
             None => Ok(Command::Lock { update: false }),
@@ -2787,7 +2804,7 @@ mod focused_help_tests {
         assert_eq!(help_for(Some("all")).unwrap(), HELP_ALL);
         for (topic, expected) in [
             ("setup", "Detect installed harnesses"),
-            ("lock", "--update refreshes ahu.lock"),
+            ("lock", "--update refreshes .agents/ahu/lock.md"),
             ("cmux status", "native integration evidence"),
             ("cmux install", "Preview or delegate"),
             ("mcp serve", "stdio MCP"),

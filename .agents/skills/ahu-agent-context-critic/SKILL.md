@@ -11,8 +11,9 @@ changes and commits them; never commit or push as part of this workflow.
 
 ## Boundaries
 
-- `ahu.lock` fingerprints recognized repository context. `ahu lock` checks it;
-  `ahu lock --update` refreshes it. Agent launches require the lock and all
+- `.agents/ahu/lock.md` fingerprints recognized repository context. `ahu lock` checks it;
+  `ahu lock --update` refreshes it. A bounded legacy `ahu.lock` remains readable
+  until explicit migration. Agent launches require the lock and all
   recognized project context inputs to be tracked, clean, and committed.
 - The lock does not capture harness built-ins, user or managed settings, provider
   memory, caches, or context that ahu cannot inspect. Call these unknown; do not
@@ -31,7 +32,8 @@ changes and commits them; never commit or push as part of this workflow.
    success matter. Separate task outcome, tool behavior, latency, and token use.
    If there is no concrete behavior to measure, collect an example with the user
    before proposing a context edit.
-2. **Read committed inputs.** Check `ahu lock`, inspect `ahu.lock`, the registered
+2. **Read committed inputs.** Check `ahu lock`, inspect `.agents/ahu/lock.md` (or the
+   legacy `ahu.lock` before migration), the registered
    agent manifest, the referenced instruction file, and relevant repository
    context. Use Git to establish their committed paths and revisions. Label what
    is declared, what ahu fingerprints, and what remains unknown to the harness.

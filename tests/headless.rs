@@ -510,8 +510,11 @@ fn local_metrics_survive_attempt_persistence_without_an_exporter() {
     let f = Fixture::new();
     let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
     config.telemetry.local_metrics = true;
-    f.repo
-        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo.remove(ahu::config::LEGACY_CONFIG_PATH);
+    f.repo.write(
+        ahu::config::CONFIG_RELATIVE_PATH,
+        &ahu::config::render(&config),
+    );
     f.repo.commit("enable local metrics for fixture");
     let out = f.launch("success", &[]);
     assert!(
@@ -543,8 +546,11 @@ fn private_telemetry_cli_links_and_reports_opt_in_attempt_measurements() {
     let f = Fixture::new();
     let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
     config.telemetry.local_metrics = true;
-    f.repo
-        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo.remove(ahu::config::LEGACY_CONFIG_PATH);
+    f.repo.write(
+        ahu::config::CONFIG_RELATIVE_PATH,
+        &ahu::config::render(&config),
+    );
     f.repo
         .commit("enable local metrics for private report fixture");
     let launched = f.launch("measure", &[]);
@@ -651,8 +657,11 @@ fn private_report_keeps_observed_usage_separate_from_missing_terminal_evidence()
     let f = Fixture::new();
     let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
     config.telemetry.local_metrics = true;
-    f.repo
-        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo.remove(ahu::config::LEGACY_CONFIG_PATH);
+    f.repo.write(
+        ahu::config::CONFIG_RELATIVE_PATH,
+        &ahu::config::render(&config),
+    );
     f.repo
         .commit("enable local metrics for incomplete stream fixture");
 
@@ -725,8 +734,11 @@ fn exporter_setup_failure_does_not_block_headless_execution() {
     let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
     config.telemetry.enabled = true;
     config.telemetry.local_metrics = true;
-    f.repo
-        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo.remove(ahu::config::LEGACY_CONFIG_PATH);
+    f.repo.write(
+        ahu::config::CONFIG_RELATIVE_PATH,
+        &ahu::config::render(&config),
+    );
     f.repo.commit("enable telemetry for fixture");
     let out = f
         .command()

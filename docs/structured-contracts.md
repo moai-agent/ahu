@@ -34,7 +34,7 @@ output_schema:
 
 Schemas are validated when the manifest loads. Their values participate in the
 agent identity and are frozen with a child grant and task attempt. Commit the
-manifest and update `ahu.lock` as with other agent context changes.
+manifest and update `.agents/ahu/lock.md` as with other agent context changes.
 
 For an input artifact containing `{"files":[{"path":"src/lib.rs"}]}`, dispatch
 a granted child with an ordinary assignment and its structured input:

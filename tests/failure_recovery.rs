@@ -411,7 +411,7 @@ fn a_noninteractive_first_run_requires_the_single_setup_command() {
     };
     let error = result.unwrap_err().to_string();
     assert!(error.contains("run `ahu setup` first"), "{error}");
-    assert!(!repo.path().join(".agents/ahu/config.toml").exists());
+    assert!(!repo.path().join(config::CONFIG_RELATIVE_PATH).exists());
 }
 
 #[test]
@@ -426,7 +426,7 @@ fn cancelled_setup_writes_nothing() {
     });
     assert_eq!(code, 1, "{text}");
     assert!(text.contains("Nothing was written"), "{text}");
-    assert!(!repo.path().join(".agents/ahu/config.toml").exists());
+    assert!(!repo.path().join(config::CONFIG_RELATIVE_PATH).exists());
 }
 
 #[test]
@@ -439,11 +439,8 @@ fn setup_saves_only_the_config_file() {
         scripted("1\n\ny\n", |console| policy_wizard(console, repo.path()))
     });
     assert_eq!(code, 0, "{text}");
-    let written = repo.read(".agents/ahu/config.toml");
-    assert!(
-        written.contains("harness_preferences = [\"claude-code\"]"),
-        "{written}"
-    );
+    let written = repo.read(config::CONFIG_RELATIVE_PATH);
+    assert!(written.contains("harness_preferences:"), "{written}");
     assert!(written.contains("claude-opus-5"), "{written}");
 
     // Only the config file was added, and nothing was staged.

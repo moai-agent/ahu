@@ -1,7 +1,7 @@
 //! Per-user acceptance for local context that changes agent behavior.
 //!
 //! Fingerprints live in owner-only host state outside checkouts. The shared
-//! `ahu.lock` therefore stays collaborative and does not churn with local MCP
+//! `.agents/ahu/lock.md` therefore stays collaborative and does not churn with local MCP
 //! or permission settings.
 
 use std::collections::BTreeMap;

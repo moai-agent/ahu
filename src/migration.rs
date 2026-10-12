@@ -1,0 +1,572 @@
+//! Explicit fixed-path migration. A durable journal contains exact source
+//! backups and deterministic targets. Recovery only touches matching bytes;
+//! concurrent user edits stop rollback instead of being overwritten.
+use crate::private_io::{self, Durability};
+use crate::util::{Error, Result, digest_bytes};
+use crate::{bail, config, context_lock, git::Repo, okf};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+const JOURNAL: &str = ".ahu/migrations/project-okf-v1/journal.json";
+const GUARD: &str = ".ahu/migrations/project-okf-v1/guard";
+const PATHS: [&str; 4] = [
+    config::LEGACY_CONFIG_PATH,
+    context_lock::LEGACY_LOCK_PATH,
+    config::CONFIG_RELATIVE_PATH,
+    context_lock::LOCK_PATH,
+];
+const JOURNAL_LIMIT: u64 = 24 * 1024 * 1024;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Plan {
+    schema_version: u32,
+    phase: String,
+    repository: String,
+    base_commit: Option<String>,
+    before: [Option<String>; 4],
+    after: [Option<String>; 4],
+    source_digests: [Option<String>; 4],
+    source_modes: [Option<u32>; 4],
+}
+fn read(root: &Path, relative: &str) -> Result<Option<String>> {
+    crate::util::resolve_existing_within(root, relative)?
+        .map(|path| {
+            String::from_utf8(okf::read(&path)?)
+                .map_err(|_| Error::new("migration input is not UTF-8"))
+        })
+        .transpose()
+}
+fn read_journal(root: &Path) -> Result<Option<Plan>> {
+    let Some(path) = crate::util::resolve_existing_within(root, JOURNAL)? else {
+        return Ok(None);
+    };
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        bail!("migration journal must be a regular file");
+    }
+    let bytes = crate::util::read_limited(&mut file, JOURNAL_LIMIT)?;
+    let plan: Plan =
+        serde_json::from_slice(&bytes).map_err(|_| Error::new("invalid migration journal"))?;
+    if plan.schema_version != 1
+        || !matches!(plan.phase.as_str(), "prepared" | "complete" | "rolled-back")
+    {
+        bail!("unsupported migration journal");
+    }
+    for (value, digest) in plan.before.iter().zip(&plan.source_digests) {
+        if value.as_ref().map(|s| digest_bytes(s.as_bytes())) != *digest {
+            bail!("migration backup digest mismatch");
+        }
+    }
+    for value in plan.before.iter().chain(&plan.after).flatten() {
+        if value.len() as u64 > okf::MAX_BYTES {
+            bail!("migration journal document exceeds limit");
+        }
+    }
+    if plan.before[0].is_none()
+        || plan.before[2].is_some()
+        || plan.before[3].is_some()
+        || plan.after[0].is_some()
+        || plan.after[1].is_some()
+        || plan.after[2].is_none()
+        || plan.after[3].is_none()
+    {
+        bail!("unexpected migration journal destinations");
+    }
+    for (value, mode) in plan.before.iter().zip(&plan.source_modes) {
+        if value.is_some() != mode.is_some() || mode.is_some_and(|m| m & !0o777 != 0) {
+            bail!("invalid migration source mode");
+        }
+    }
+    // Historical backups must not pin future readers to the catalog version
+    // supported at migration time. Only a pending recovery needs their schema.
+    if plan.phase != "prepared" {
+        return Ok(Some(plan));
+    }
+    let old = config::parse(
+        plan.before[0].as_ref().unwrap().as_bytes(),
+        true,
+        Path::new(PATHS[0]),
+    )?;
+    let new = config::parse(
+        plan.after[2].as_ref().unwrap().as_bytes(),
+        false,
+        Path::new(PATHS[2]),
+    )?;
+    if old != new {
+        bail!("migration journal effective policy differs");
+    }
+    context_lock::LockFile::decode(plan.after[3].as_ref().unwrap().as_bytes(), false)?;
+    Ok(Some(plan))
+}
+/// Every shared reader/writer refuses an unfinished transaction. No automatic
+/// recovery: inspection must not write and interrupted policy must not launch.
+pub fn ensure_idle(root: &Path) -> Result<()> {
+    if read_journal(root)?.is_some_and(|p| p.phase == "prepared") {
+        bail!("project migration is incomplete; run `ahu migrate --rollback` before using policy");
+    }
+    Ok(())
+}
+fn refuse_task(repo: &Repo) -> Result<()> {
+    let root = repo.root.canonicalize()?;
+    let managed = repo.primary_root()?.join(crate::state::WORKTREES_DIR);
+    if root.starts_with(&managed)
+        || crate::git::run_ok(&repo.root, &["branch", "--show-current"])?.starts_with("ahu/")
+    {
+        bail!("migration refuses managed task worktrees; existing task pins must remain exact");
+    }
+    Ok(())
+}
+impl Plan {
+    pub fn preview(repo: &Repo) -> Result<Self> {
+        ensure_idle(&repo.root)?;
+        let previous = read_journal(&repo.root)?;
+        let mut before: [Option<String>; 4] = Default::default();
+        for (index, path) in PATHS.iter().enumerate() {
+            before[index] = read(&repo.root, path)?;
+        }
+        if let Some(previous) = previous {
+            if previous.phase == "complete" {
+                bail!("a completed migration journal already exists; its backups are preserved");
+            }
+            if previous.before != before {
+                bail!(
+                    "legacy sources differ from the retained rollback backups; preserve and reconcile the existing journal before retrying"
+                );
+            }
+        }
+        if before[2].is_some() || before[3].is_some() {
+            bail!(
+                "migration refuses existing OKF destinations or conflicting sources; no precedence is implied"
+            );
+        }
+        let legacy = before[0]
+            .as_ref()
+            .ok_or_else(|| Error::new("no legacy project policy to migrate"))?;
+        let config = config::parse(legacy.as_bytes(), true, Path::new(PATHS[0]))?;
+        let target = config::try_render(&config)?;
+        if config != config::parse(target.as_bytes(), false, Path::new(PATHS[2]))? {
+            bail!("effective policy parity failed");
+        }
+        let mut snapshot = crate::snapshot::collect(&repo.root)?;
+        if let Some(old) = &before[1] {
+            let lock = context_lock::LockFile::decode(old.as_bytes(), true)?;
+            if !lock.matches_snapshot(&snapshot) {
+                bail!(
+                    "legacy lock does not match current shared context; resolve context drift before migration"
+                );
+            }
+        }
+        let entry = snapshot
+            .entries
+            .iter_mut()
+            .find(|e| e.path == PATHS[0])
+            .ok_or_else(|| Error::new("legacy policy is absent from the context snapshot"))?;
+        entry.path = PATHS[2].into();
+        entry.bytes = target.len() as u64;
+        entry.digest = digest_bytes(target.as_bytes());
+        entry.executable = false;
+        snapshot.entries.sort_by(|a, b| a.path.cmp(&b.path));
+        // Apply creates ignored local journal storage. Predict its disclosed
+        // scan gap without making preview write anything.
+        if !snapshot.skipped_directories.iter().any(|p| p == ".ahu") {
+            snapshot.skipped_directories.push(".ahu".into());
+            snapshot.skipped_directories.sort();
+        }
+        let lock = context_lock::LockFile::from_snapshot(&snapshot).render(None)?;
+        use std::os::unix::fs::PermissionsExt;
+        let mut source_modes = [None; 4];
+        for (index, path) in PATHS.iter().enumerate() {
+            if before[index].is_some() {
+                source_modes[index] = Some(
+                    std::fs::symlink_metadata(repo.root.join(path))?
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                );
+            }
+        }
+        let source_digests = before
+            .clone()
+            .map(|value| value.map(|s| digest_bytes(s.as_bytes())));
+        Ok(Self {
+            schema_version: 1,
+            phase: "prepared".into(),
+            repository: repo.identity(),
+            base_commit: repo.head.clone(),
+            before,
+            after: [None, None, Some(target), Some(lock)],
+            source_digests,
+            source_modes,
+        })
+    }
+    pub fn display(&self) -> String {
+        let mut out = String::from(
+            "Effective typed policy parity: identical (including defaults and ranking order).\nLegacy sources are backed up in the private migration journal; task pins and local acceptance stay unchanged.\n",
+        );
+        for (index, path) in PATHS.iter().enumerate().skip(2) {
+            out.push_str(&format!(
+                "\nTarget: {}\nSHA-256: {}\n{}",
+                path,
+                digest_bytes(self.after[index].as_ref().unwrap().as_bytes()),
+                self.after[index].as_ref().unwrap()
+            ));
+        }
+        out
+    }
+}
+fn guard(root: &Path) -> Result<std::fs::File> {
+    use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
+    crate::state::ensure_checkout_state(root)?;
+    let path = crate::util::resolve_within(root, GUARD, true)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        bail!("migration guard must be a regular file");
+    }
+    // SAFETY: file owns a live descriptor. The lock is released when it drops.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        bail!("another migration is active");
+    }
+    Ok(file)
+}
+fn save(root: &Path, plan: &Plan) -> Result<()> {
+    let path = crate::util::resolve_within(root, JOURNAL, true)?;
+    let bytes =
+        serde_json::to_vec(plan).map_err(|_| Error::new("cannot encode migration journal"))?;
+    if bytes.len() as u64 > JOURNAL_LIMIT {
+        bail!("migration journal exceeds limit");
+    }
+    private_io::atomic_write(&path, &bytes, Durability::Durable)
+}
+fn matches(root: &Path, expected: &[Option<String>; 4]) -> Result<()> {
+    for (path, value) in PATHS.iter().zip(expected) {
+        if read(root, path)? != *value {
+            bail!("concurrent edit at {path}; migration stopped");
+        }
+    }
+    Ok(())
+}
+fn replace(
+    root: &Path,
+    index: usize,
+    expected: &Option<String>,
+    target: &Option<String>,
+) -> Result<()> {
+    if read(root, PATHS[index])? != *expected {
+        bail!("concurrent edit; migration stopped");
+    }
+    let path = crate::util::resolve_within(root, PATHS[index], true)?;
+    if let Some(text) = target {
+        if expected.is_some() {
+            bail!("migration never overwrites an existing destination");
+        }
+        if !private_io::atomic_create(&path, text.as_bytes(), Durability::Durable)? {
+            bail!("migration destination appeared concurrently");
+        }
+    } else if expected.is_some() {
+        std::fs::remove_file(&path)?;
+        std::fs::File::open(path.parent().unwrap())?.sync_all()?;
+    }
+    Ok(())
+}
+pub fn apply(repo: &Repo, plan: &Plan) -> Result<()> {
+    apply_with(repo, plan, |_| Ok(()))
+}
+fn apply_with(
+    repo: &Repo,
+    plan: &Plan,
+    mut checkpoint: impl FnMut(usize) -> Result<()>,
+) -> Result<()> {
+    refuse_task(repo)?;
+    matches(&repo.root, &plan.before)?;
+    let _guard = guard(&repo.root)?;
+    ensure_idle(&repo.root)?;
+    matches(&repo.root, &plan.before)?;
+    // Recompute against current context, not only the two source files.
+    let fresh = Plan::preview(repo)?;
+    if fresh.after != plan.after
+        || fresh.source_modes != plan.source_modes
+        || fresh.repository != plan.repository
+        || fresh.base_commit != plan.base_commit
+    {
+        bail!("context changed since migration preview");
+    }
+    save(&repo.root, &fresh)?;
+    let mut expected = plan.before.clone();
+    // Publish complete targets first. Readers refuse the pending journal.
+    let result = (|| {
+        for (step, index) in [2, 3, 0, 1].into_iter().enumerate() {
+            checkpoint(step)?;
+            matches(&repo.root, &expected)?;
+            replace(&repo.root, index, &expected[index], &plan.after[index])?;
+            expected[index] = plan.after[index].clone();
+        }
+        matches(&repo.root, &plan.after)?;
+        let mut complete = fresh.clone();
+        complete.phase = "complete".into();
+        save(&repo.root, &complete)
+    })();
+    if let Err(error) = result {
+        match rollback_inner(repo) {
+            Ok(()) => {
+                return Err(Error::new(format!(
+                    "migration failed and rolled back: {error}"
+                )));
+            }
+            Err(recovery) => {
+                return Err(Error::new(format!(
+                    "migration failed: {error}; rollback needs attention: {recovery}; backups remain in {JOURNAL}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+fn rollback_inner(repo: &Repo) -> Result<()> {
+    let mut plan = read_journal(&repo.root)?.ok_or_else(|| Error::new("no migration journal"))?;
+    if plan.repository != repo.identity() {
+        bail!("migration journal belongs to a different repository");
+    }
+    if plan.phase != "prepared" {
+        bail!("only an interrupted migration can be rolled back");
+    }
+    // Validate every path before writing anything; do not clobber later edits.
+    for (index, path) in PATHS.iter().enumerate() {
+        let current = read(&repo.root, path)?;
+        if current != plan.before[index] && current != plan.after[index] {
+            bail!("concurrent edit at {path}; preserve it and resolve before rollback");
+        }
+    }
+    for index in [0, 1, 3, 2] {
+        let current = read(&repo.root, PATHS[index])?;
+        if current != plan.before[index] {
+            replace(&repo.root, index, &plan.after[index], &plan.before[index])?;
+            if let Some(mode) = plan.source_modes[index] {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    repo.root.join(PATHS[index]),
+                    std::fs::Permissions::from_mode(mode),
+                )?;
+            }
+        }
+    }
+    plan.phase = "rolled-back".into();
+    save(&repo.root, &plan)
+}
+pub fn rollback(repo: &Repo) -> Result<()> {
+    refuse_task(repo)?;
+    let _guard = guard(&repo.root)?;
+    rollback_inner(repo)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fn fixture() -> (tempfile::TempDir, Repo) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(root.join(config::CONFIG_DIR)).unwrap();
+        std::fs::write(root.join(PATHS[0]), format!("schema_version = 1\nharness_preferences = ['codex']\nmodel_selection = 'project-ranked'\ncatalog_version = '{}'\n[model_rankings]\ncodex = ['gpt-6-astra']\n", crate::catalog::CATALOG_VERSION)).unwrap();
+        let snapshot = crate::snapshot::collect(root).unwrap();
+        let lock = context_lock::LockFile::from_snapshot(&snapshot);
+        std::fs::write(root.join(PATHS[1]), toml::to_string(&lock).unwrap()).unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", "fixture"]);
+        let repo = crate::git::discover(root).unwrap();
+        (dir, repo)
+    }
+    #[test]
+    fn preview_is_read_only_apply_preserves_policy_and_lock_is_deterministic() {
+        let (_dir, repo) = fixture();
+        let before = config::load(&repo.root).unwrap().unwrap();
+        assert!(
+            context_lock::check(&repo, &crate::snapshot::collect(&repo.root).unwrap())
+                .unwrap()
+                .current
+        );
+        let plan = Plan::preview(&repo).unwrap();
+        assert_eq!(plan.display(), Plan::preview(&repo).unwrap().display());
+        assert!(!repo.root.join(".ahu").exists());
+        assert!(
+            crate::git::run_ok(&repo.root, &["status", "--porcelain"])
+                .unwrap()
+                .is_empty()
+        );
+        apply(&repo, &plan).unwrap();
+        let after = config::load(&repo.root).unwrap().unwrap();
+        assert_eq!(before.config, after.config);
+        assert_ne!(before.digest, after.digest);
+        assert!(!repo.root.join(PATHS[0]).exists());
+        assert!(!repo.root.join(PATHS[1]).exists());
+        let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+        assert!(!snapshot.entries.iter().any(|e| e.path == PATHS[3]));
+        let locked = std::fs::read(repo.root.join(PATHS[3])).unwrap();
+        context_lock::refresh(&repo, &snapshot).unwrap();
+        assert_eq!(locked, std::fs::read(repo.root.join(PATHS[3])).unwrap());
+        assert!(!context_lock::check(&repo, &snapshot).unwrap().current);
+        git(&repo.root, &["add", "-A"]);
+        git(&repo.root, &["commit", "-qm", "migrate fixture"]);
+        assert!(context_lock::check(&repo, &snapshot).unwrap().current);
+        assert_eq!(
+            read_journal(&repo.root).unwrap().unwrap().before,
+            plan.before
+        );
+        assert!(
+            !crate::git::run_ok(&repo.root, &["ls-files", JOURNAL])
+                .unwrap()
+                .contains("journal")
+        );
+    }
+    #[test]
+    fn failures_at_each_boundary_restore_sources_and_keep_backup() {
+        for fail in 0..4 {
+            let (_dir, repo) = fixture();
+            let plan = Plan::preview(&repo).unwrap();
+            assert!(
+                apply_with(&repo, &plan, |step| if step == fail {
+                    Err(Error::new("synthetic interruption"))
+                } else {
+                    Ok(())
+                })
+                .is_err()
+            );
+            matches(&repo.root, &plan.before).unwrap();
+            assert_eq!(
+                read_journal(&repo.root).unwrap().unwrap().phase,
+                "rolled-back"
+            );
+            assert_eq!(
+                config::load(&repo.root).unwrap().unwrap().digest,
+                plan.source_digests[0].as_ref().unwrap().as_str()
+            );
+        }
+    }
+    #[test]
+    fn recovery_refuses_concurrent_edits_then_recovers_interrupted_transaction() {
+        let (_dir, repo) = fixture();
+        let plan = Plan::preview(&repo).unwrap();
+        let _guard = guard(&repo.root).unwrap();
+        save(&repo.root, &plan).unwrap();
+        replace(&repo.root, 2, &None, &plan.after[2]).unwrap();
+        assert!(config::load(&repo.root).is_err());
+        std::fs::write(repo.root.join(PATHS[2]), "concurrent edit").unwrap();
+        assert!(rollback_inner(&repo).is_err());
+        assert_eq!(
+            read(&repo.root, PATHS[2]).unwrap().unwrap(),
+            "concurrent edit"
+        );
+        std::fs::write(repo.root.join(PATHS[2]), plan.after[2].as_ref().unwrap()).unwrap();
+        rollback_inner(&repo).unwrap();
+        matches(&repo.root, &plan.before).unwrap();
+    }
+    #[test]
+    fn edits_during_apply_stop_without_overwriting_and_modes_survive_recovery() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, repo) = fixture();
+        std::fs::set_permissions(
+            repo.root.join(PATHS[1]),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        let plan = Plan::preview(&repo).unwrap();
+        let error = apply_with(&repo, &plan, |step| {
+            if step == 1 {
+                std::fs::write(repo.root.join(PATHS[0]), "synthetic concurrent edit")?;
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("rollback needs attention"));
+        assert_eq!(
+            read(&repo.root, PATHS[0]).unwrap().unwrap(),
+            "synthetic concurrent edit"
+        );
+        assert_eq!(read_journal(&repo.root).unwrap().unwrap().phase, "prepared");
+        std::fs::write(repo.root.join(PATHS[0]), plan.before[0].as_ref().unwrap()).unwrap();
+        rollback(&repo).unwrap();
+        matches(&repo.root, &plan.before).unwrap();
+        // Simulate power loss after removing both old sources.
+        save(&repo.root, &plan).unwrap();
+        for index in [2, 3, 0, 1] {
+            replace(&repo.root, index, &plan.before[index], &plan.after[index]).unwrap();
+        }
+        rollback(&repo).unwrap();
+        matches(&repo.root, &plan.before).unwrap();
+        assert_eq!(
+            std::fs::metadata(repo.root.join(PATHS[1]))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+    }
+    #[test]
+    fn journal_symlink_and_changed_context_are_refused() {
+        let (_dir, repo) = fixture();
+        let plan = Plan::preview(&repo).unwrap();
+        std::fs::write(repo.root.join("AGENTS.md"), "changed shared input").unwrap();
+        assert!(apply(&repo, &plan).is_err());
+        matches(&repo.root, &plan.before).unwrap();
+        std::fs::remove_file(repo.root.join("AGENTS.md")).unwrap();
+        let target = tempfile::NamedTempFile::new().unwrap();
+        let journal = crate::util::resolve_within(&repo.root, JOURNAL, true).unwrap();
+        std::os::unix::fs::symlink(target.path(), journal).unwrap();
+        assert!(Plan::preview(&repo).is_err());
+        assert!(rollback(&repo).is_err());
+        assert!(std::fs::read(target.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_preview_conflicts_symlinks_and_managed_checkouts_are_refused() {
+        let (_dir, repo) = fixture();
+        let plan = Plan::preview(&repo).unwrap();
+        std::fs::write(repo.root.join(PATHS[0]), "concurrent source edit").unwrap();
+        assert!(apply(&repo, &plan).is_err());
+        std::fs::write(repo.root.join(PATHS[0]), plan.before[0].as_ref().unwrap()).unwrap();
+        std::fs::write(repo.root.join(PATHS[2]), plan.after[2].as_ref().unwrap()).unwrap();
+        assert!(Plan::preview(&repo).is_err());
+        assert!(config::load(&repo.root).is_err());
+        std::fs::remove_file(repo.root.join(PATHS[2])).unwrap();
+        std::os::unix::fs::symlink("config.toml", repo.root.join(PATHS[2])).unwrap();
+        assert!(Plan::preview(&repo).is_err());
+        std::fs::remove_file(repo.root.join(PATHS[2])).unwrap();
+        git(&repo.root, &["checkout", "-qb", "ahu/fixture"]);
+        assert!(
+            apply(&repo, &plan)
+                .unwrap_err()
+                .to_string()
+                .contains("managed task")
+        );
+    }
+}

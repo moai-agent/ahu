@@ -41,7 +41,8 @@ class SkillAblationTests(unittest.TestCase):
                 path = self.repo / skill_root / name / "SKILL.md"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(f"---\nname: {name}\ndescription: fixture\n---\n{name}\n")
-        (self.repo / "ahu.lock").write_text("before\n")
+        (self.repo / ".agents/ahu").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".agents/ahu/lock.md").write_text("before\n")
         git(self.repo, "add", ".")
         git(self.repo, "add", "-f", *SKILL_ROOTS)
         git(self.repo, "commit", "-m", "fixture")
@@ -52,7 +53,7 @@ class SkillAblationTests(unittest.TestCase):
             "state = pathlib.Path(os.environ['XDG_STATE_HOME'])\n"
             "assert state.is_dir() and not state.is_relative_to(pathlib.Path(sys.argv[2]))\n"
             "assert sys.argv[1] == '--repo'\n"
-            "pathlib.Path(sys.argv[2], 'ahu.lock').write_text('refreshed\\n')\n"
+            "pathlib.Path(sys.argv[2], '.agents/ahu/lock.md').write_text('refreshed\\n')\n"
         )
         self.ahu.chmod(0o755)
 
@@ -79,9 +80,9 @@ class SkillAblationTests(unittest.TestCase):
         for skill_root in SKILL_ROOTS:
             self.assertFalse((destination / skill_root).exists())
             self.assertTrue((self.repo / skill_root / "alpha" / "SKILL.md").is_file())
-        self.assertEqual((destination / "ahu.lock").read_text(), "refreshed\n")
+        self.assertEqual((destination / ".agents/ahu/lock.md").read_text(), "refreshed\n")
         self.assertEqual(git(destination, "status", "--porcelain"), "")
-        self.assertIn("ahu.lock", git(destination, "show", "--format=", "--name-only", "HEAD"))
+        self.assertIn(".agents/ahu/lock.md", git(destination, "show", "--format=", "--name-only", "HEAD"))
 
     def test_single_skill_removal_preserves_other_skill_files(self) -> None:
         destination = self.root / "control"
@@ -98,7 +99,7 @@ class SkillAblationTests(unittest.TestCase):
         result = self.prepare(destination, "--skill", "alpha")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(before, (git(self.repo, "rev-parse", "HEAD"), git(self.repo, "write-tree")))
-        self.assertEqual((self.repo / "ahu.lock").read_text(), "before\n")
+        self.assertEqual((self.repo / ".agents/ahu/lock.md").read_text(), "before\n")
         self.assertEqual(git(self.repo, "status", "--porcelain"), "")
         self.assertEqual(git(destination, "rev-parse", "HEAD^"), before[0])
         self.assertNotEqual(git(destination, "rev-parse", "HEAD"), before[0])
@@ -132,9 +133,9 @@ class SkillAblationTests(unittest.TestCase):
     def test_lock_symlink_is_refused_before_worktree_creation(self) -> None:
         marker = self.root / "external-lock"
         marker.write_text("preserve\n")
-        (self.repo / "ahu.lock").unlink()
-        (self.repo / "ahu.lock").symlink_to(marker)
-        git(self.repo, "add", "ahu.lock")
+        (self.repo / ".agents/ahu/lock.md").unlink()
+        (self.repo / ".agents/ahu/lock.md").symlink_to(marker)
+        git(self.repo, "add", ".agents/ahu/lock.md")
         git(self.repo, "commit", "-m", "symlink lock fixture")
         destination = self.root / "control"
         result = self.prepare(destination, "--all-project-skills")
@@ -204,7 +205,7 @@ class SkillAblationTests(unittest.TestCase):
         self.assertEqual(git(destination, "rev-parse", "HEAD"), baseline)
         self.assertNotEqual(git(destination, "status", "--porcelain"), "")
         self.assertEqual(git(self.repo, "status", "--porcelain"), "")
-        self.assertEqual((self.repo / "ahu.lock").read_text(), "before\n")
+        self.assertEqual((self.repo / ".agents/ahu/lock.md").read_text(), "before\n")
 
     def test_skill_path_traversal_is_refused_before_worktree_creation(self) -> None:
         for name in ("..", "../alpha", "/alpha", "alpha/beta", "-alpha"):
@@ -220,11 +221,11 @@ class SkillAblationTests(unittest.TestCase):
         destination = self.root / "control"
         result = self.prepare(destination, "--skill", "alpha")
         self.assertEqual(result.returncode, 0, result.stderr)
-        lock = (destination / "ahu.lock").read_text()
+        lock = (destination / ".agents/ahu/lock.md").read_text()
         self.assertIn(".agents/skills/beta/SKILL.md", lock)
         self.assertNotIn(".agents/skills/alpha/SKILL.md", lock)
         self.assertEqual(git(destination, "status", "--porcelain"), "")
-        self.assertEqual((self.repo / "ahu.lock").read_text(), "before\n")
+        self.assertEqual((self.repo / ".agents/ahu/lock.md").read_text(), "before\n")
         self.assertEqual(git(self.repo, "status", "--porcelain"), "")
 
     def test_dirty_source_is_refused_before_worktree_creation(self) -> None:

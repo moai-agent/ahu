@@ -727,7 +727,7 @@ mod tests {
                 "--",
                 ".agents/skills/review/SKILL.md",
                 "AGENTS.md",
-                "ahu.lock",
+                ".agents/ahu/lock.md",
             ],
         );
         git_cmd(dir.path(), &["commit", "-q", "-m", "Synthetic context"]);
@@ -1125,7 +1125,13 @@ mod tests {
                     if variant == "assume-unchanged" {
                         git_cmd(
                             dir.path(),
-                            &["update-index", "--assume-unchanged", "--", path, "ahu.lock"],
+                            &[
+                                "update-index",
+                                "--assume-unchanged",
+                                "--",
+                                path,
+                                ".agents/ahu/lock.md",
+                            ],
                         );
                     }
                 }
@@ -1134,7 +1140,7 @@ mod tests {
                 "instructions" => {
                     std::fs::write(dir.path().join("AGENTS.md"), "Changed instructions").unwrap()
                 }
-                "lock" => std::fs::remove_file(dir.path().join("ahu.lock")).unwrap(),
+                "lock" => std::fs::remove_file(dir.path().join(".agents/ahu/lock.md")).unwrap(),
                 _ => unreachable!(),
             }
             assert!(

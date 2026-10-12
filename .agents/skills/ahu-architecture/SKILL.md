@@ -92,7 +92,7 @@ design and data handling, and `docs/typed-decisions.md` for provider configurati
 
 ```mermaid
 flowchart TD
-    A["ahu (in a Git repo)"] --> B{".agents/ahu/config.toml?"}
+    A["ahu (in a Git repo)"] --> B{".agents/ahu/config.md?"}
     B -- no --> C["First-run setup:<br/>project-agreed harness order,<br/>model order, catalog pin"]
     C --> D
     B -- yes --> D["Launcher"]
@@ -203,7 +203,7 @@ flowchart TB
 Every task gets a unique id, a fresh branch `ahu/<agent>/<task-id>`, and a fresh
 worktree under .worktrees/ in the primary checkout. The worktree starts at the invoking checkout's HEAD. Before planning the launch,
 ahu requires every recognized context input to be tracked and clean and checks
-that `ahu.lock` matches. Operators update and commit the lock with context edits;
+that `.agents/ahu/lock.md` matches. Operators update and commit the lock with context edits;
 ahu never stages or commits. Scan skips and depth limits still bound coverage,
 and harness-managed or global context remains outside the repository lock.
 
@@ -235,7 +235,7 @@ flowchart LR
     style unseen fill:#fdf1e7,stroke:#b5651d
 ```
 
-`ahu.lock` records committed recognized context; it does not prove a harness loaded every source.
+`.agents/ahu/lock.md` records committed recognized context; it does not prove a harness loaded every source.
 and ends with what ahu cannot see. `available` means the harness can discover a
 source, not that its contents reached the model. The lock is never described as
 proof that the harness loaded the source.

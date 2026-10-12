@@ -757,30 +757,17 @@ pub fn launch(
     contract.validate_input(structured_input.as_deref())?;
     let contracted_prompt = contract.prompt(prompt, structured_input.as_deref());
     let prompt = contracted_prompt.as_str();
-    if !options.native_helpers_explicit {
-        match agent
+    if !options.native_helpers_explicit
+        && let Some(policy) = agent
             .as_ref()
             .ok_or_else(|| Error::new("named agent required"))?
             .manifest
             .native_helpers
             .clone()
-        {
-            Some(policy) => options.native_helpers = policy,
-            None => {
-                let project: toml::Value = toml::from_str(&std::fs::read_to_string(&loaded.path)?)
-                    .map_err(|e| Error::new(e.to_string()))?;
-                if let Some(value) = project
-                    .get("execution")
-                    .and_then(|v| v.get("native_helpers"))
-                {
-                    options.native_helpers = value
-                        .as_str()
-                        .ok_or_else(|| Error::new("native_helpers must be disabled or bounded"))?
-                        .into();
-                }
-            }
-        }
+    {
+        options.native_helpers = policy;
     }
+
     if contract.output.is_some()
         && pair.harness == "codex"
         && agent

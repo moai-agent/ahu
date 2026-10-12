@@ -158,6 +158,11 @@ impl ConfigSnapshot {
 }
 
 fn is_config_path(relative: &Path) -> bool {
+    // Generated lock must not fingerprint itself. Legacy task snapshot bytes
+    // remain identical; neither format is an inherited source input.
+    if relative == Path::new(crate::context_lock::LOCK_PATH) {
+        return false;
+    }
     for component in relative.components() {
         if let Component::Normal(name) = component {
             let name = name.to_string_lossy();

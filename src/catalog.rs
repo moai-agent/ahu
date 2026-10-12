@@ -3,7 +3,7 @@
 //! The catalog is data, not policy. It records what a pair *is* — a verified
 //! identifier, the harness versions it was checked against, and the basis for
 //! its quality rank. Which pair a project actually uses is decided by the
-//! project's own rankings in `.agents/ahu/config.toml`.
+//! project's own rankings in `.agents/ahu/config.md`.
 //!
 //! The catalog revision is fixed in project configuration so that installing
 //! a newer ahu cannot silently change a project's selection.
@@ -526,7 +526,7 @@ pub fn require_version(pinned: &str) -> Result<()> {
             "this project pins compatibility catalog {pinned:?}, but this ahu build ships {CATALOG_VERSION}.\n\
              Selection behaviour differs between catalogs, so ahu will not substitute one for the other.\n\
              Install the ahu release carrying catalog {pinned:?}, or agree a project change to catalog {CATALOG_VERSION} \
-             by editing `catalog_version` in .agents/ahu/config.toml."
+             by editing `catalog_version` in .agents/ahu/config.md."
         );
     }
     Ok(())

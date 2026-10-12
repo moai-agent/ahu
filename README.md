@@ -57,7 +57,7 @@ ahu
 
 Run `ahu setup` once in each project. It detects installed harnesses, asks you
 to choose models for their ahu development agents, installs the bundled skills, adds
-project MCP entries, and writes `.agents/ahu/config.toml` and `ahu.lock`.
+project MCP entries, and writes `.agents/ahu/config.md` and `.agents/ahu/lock.md`.
 Review and commit the generated files so future ahu commands can use the same
 project setup. ahu does not stage, commit, or push them.
 
@@ -178,7 +178,7 @@ Markdown documents that pair each agent's identity with its instructions.
 Named launches use their manifest's pair independently of automatic project
 selection. This repository's automatic choice is Antigravity /
 `gemini-3.1-pro-high` (from `harness_preferences` and `model_rankings` in
-`.agents/ahu/config.toml`); it does not select a named agent.
+`.agents/ahu/config.md`); it does not select a named agent.
 
 Automatic selection walks the configured harness order, takes the first harness
 with an available adapter and a nonempty project model ranking, and selects that
@@ -222,14 +222,14 @@ require explicit user permission.
 
 | Command | Purpose |
 | --- | --- |
-| `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness development agents, and refresh `ahu.lock` |
+| `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness development agents, and refresh `.agents/ahu/lock.md` |
 | `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
 | `ahu doctor` | Concise readiness summary; add `--verbose` for component diagnostics |
 | `ahu auth readiness --harness codex --output json` | Check native identity and local project binding without a model request |
 | `ahu auth budget --output json` / MCP `ahu_auth_budget` | View the active profile's verified provider rate-limit windows; unsupported budgets remain unknown |
 | `ahu approve TASK` / `ahu reject TASK` | Resolve a task's explicit MCP approval checkpoint after inspecting it with `ahu task TASK` |
-| `ahu lock` | Check that recognized agent context and `ahu.lock` are committed and current |
-| `ahu lock --update` | Fingerprint current recognized context into `ahu.lock` for review and commit |
+| `ahu lock` | Check that recognized agent context and `.agents/ahu/lock.md` are committed and current |
+| `ahu lock --update` | Fingerprint current recognized context into `.agents/ahu/lock.md` for review and commit |
 | `ahu agents` | List registered agents and detected drift |
 | `ahu tasks` | List the 20 most recent tasks; use `--limit N` or `--all` to change the range |
 | `ahu cmux status` | Inspect native integration evidence and headless isolation |
@@ -251,7 +251,7 @@ require explicit user permission.
 Use the bundled `ahu-agent-context-critic` skill with `ahu eval run` and
 `ahu eval report` to investigate context changes against measured outcomes.
 The skill treats repository files as declared context, not proof that a
-harness loaded them. Shared project inputs are covered by committed `ahu.lock`;
+harness loaded them. Shared project inputs are covered by committed `.agents/ahu/lock.md`;
 recognized private local settings are accepted in owner-only per-user ahu state.
 Other harness, managed, and provider context remains outside that coverage.
 The eval cases, OTel observations, and private run artifacts should stay outside
@@ -291,7 +291,7 @@ agent and task inspection over stdio, and can expose the optional
 decision service. `ahu setup`
 configures a project MCP entry for each detected harness, installs bundled
 skills in harness-supported paths, creates a `dev-<harness>` ahu agent using a
-model you choose, and refreshes `ahu.lock`. Review and commit the generated
+model you choose, and refreshes `.agents/ahu/lock.md`. Review and commit the generated
 project files before launching. Claude Code asks before using project MCP
 servers, and Codex must trust the repository before loading project configuration. See the
 [typed-decision experiment](docs/typed-decisions.md) for its model-neutral
@@ -384,3 +384,5 @@ beside each entry in `.vale.ini`.
 
 See the [0.10.0 release notes](docs/releases/0.10.0.md) for Kiro CLI support,
 headless Kiro agents, and improved evaluation and local telemetry evidence. Earlier notes are in [docs/releases/](docs/releases/).
+
+See [shared project documents and explicit migration](docs/project-documents.md) for OKF schemas, legacy compatibility, and recovery.

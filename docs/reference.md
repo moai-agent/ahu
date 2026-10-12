@@ -55,7 +55,7 @@ The canonical `ahu @name` form accepts `--prompt`, `--prompt-file`, or piped std
 Do not combine a positional prompt with either prompt flag. Direct prompts are
 passed as one literal
 argument; quote multi-word prompts in the shell. `ahu lock` checks that the
-recognized repository context matches committed `ahu.lock`; `ahu lock --update`
+recognized repository context matches committed `.agents/ahu/lock.md`; `ahu lock --update`
 refreshes it for review. Every changed context input and the lock must be
 tracked, clean, and committed before an agent can run. The bundled
 `ahu-agent-context-critic` skill uses evaluations to test context hypotheses rather than
@@ -182,7 +182,7 @@ Code uses `.claude/skills/`. The
 canonical bundle remains `.agents/skills/`; for Claude, setup creates ordinary
 project-file copies. Setup checks the local MCP process with an
 initialize/tools-list handshake, validates existing files before writing, and
-refuses conflicting skill, agent, or MCP entries. It refreshes `ahu.lock` after
+refuses conflicting skill, agent, or MCP entries. It refreshes `.agents/ahu/lock.md` after
 creating the project context. Review and commit the files and lock before
 launching; setup does not stage, commit, or push them.
 
@@ -222,16 +222,18 @@ describes project trust and the separate per-tool MCP approval settings.
 
 Harness CLI versions float to the version installed on each machine by default;
 ahu does not install or update harnesses. To require an exact version for a
-project, add a pin to `.agents/ahu/config.toml`:
+project, add a pin to `.agents/ahu/config.md`:
 
-```toml
-[harness_version_pins]
-codex = "0.160.0"
-claude-code = "2.1.288"
+```yaml
+ahu:
+  # Keep the other existing ahu settings.
+  harness_version_pins:
+    codex: "0.160.0"
+    claude-code: "2.1.288"
 ```
 
 Omit a harness from this table to follow its installed version. Pins are shared
-project policy and are covered by `ahu.lock`; each task records the version it
+project policy and are covered by `.agents/ahu/lock.md`; each task records the version it
 actually used. The catalog's verified versions describe where behavior has been
 checked, rather than an allowlist. Floating permits newer CLI versions with a readable semantic version,
 but does not claim that every upstream change is compatible. ahu checks
@@ -273,7 +275,7 @@ frontmatter, unique names, and that the compiled user-facing skill bundle in
 When the same skill name appears in more than one discovered location, each
 harness resolves the collision according to its own discovery precedence. ahu
 does not control that choice. Claude's `.claude/skills/` copies are ordinary
-project files created by setup and are fingerprinted by `ahu.lock`. Skill
+project files created by setup and are fingerprinted by `.agents/ahu/lock.md`. Skill
 presence does not prove that a run loaded it; user, managed, and provider
 context remains outside the repository lock.
 
@@ -705,12 +707,14 @@ Git, valid project configuration, and `okf` on PATH outside the repository;
 it does not need cmux or a provider session. The check reads bundles without
 fetching content, generating indexes, or rewriting files.
 
-Add the optional section to `.agents/ahu/config.toml`, preserving existing policy:
+Add the optional section to `.agents/ahu/config.md`, preserving existing policy:
 
-```toml
-[knowledge]
-bundles = ["docs/knowledge"]
-fail_on_warnings = false
+```yaml
+ahu:
+  # Keep the other existing ahu settings.
+  knowledge:
+    bundles: ["docs/knowledge"]
+    fail_on_warnings: false
 ```
 
 Paths are repository-relative directories. Absolute paths, empty segments,
@@ -761,7 +765,7 @@ for source provenance.
 ## Local traces
 
 For local numeric headless attempt metrics without an exporter, set
-`local_metrics = true` in `[telemetry]` and leave `enabled = false`.
+`local_metrics: true` in `ahu.telemetry` and leave `enabled: false`.
 Both options default to false and operate independently. Headless attempt results
 then include a `metrics` object with `schema_version = 2`, six normalized
 `ahu.tokens.*` fields under `values`, and
@@ -898,10 +902,12 @@ but does not impose its own span queue limits on them. An earlier panic while
 telemetry holds its internal lock can still terminate the process; the
 delivery-failure guarantee does not cover that case.
 
-```toml
-[telemetry]
-enabled = true
-endpoint = "http://127.0.0.1:4318"
+```yaml
+ahu:
+  # Keep the other existing ahu settings.
+  telemetry:
+    enabled: true
+    endpoint: "http://127.0.0.1:4318"
 ```
 
 The exporter accepts only the local OTLP/HTTP endpoint on port
@@ -1522,7 +1528,7 @@ the full recorded list.
   `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`, `.mcp.json`,
   `opencode.json`, and `opencode.jsonc` files, are
   copied at their native paths from the committed checkout. Launch admission
-  requires these inputs and `ahu.lock` to match clean Git state; uncommitted or
+  requires these inputs and `.agents/ahu/lock.md` to match clean Git state; uncommitted or
   untracked context must be reviewed, locked, and committed before launch. Some of this is executable
   configuration—hooks, and OpenCode `plugin` modules—so it travels with the
   same trust consequences as the rest of the repository.
@@ -1900,7 +1906,7 @@ static inspection, PTY coverage, or cmux plumbing.
 See [Evaluate agents with ahu](evaluations.md) for a complete Markdown case,
 comparison commands, and how to interpret quality, tool and usage measurements.
 
-`ahu.lock` fingerprints the recognized shared repository context files ahu
+`.agents/ahu/lock.md` fingerprints the recognized shared repository context files ahu
 copies into task worktrees. `ahu lock --update` refreshes it from the current
 checkout; it never stages or commits. Review the context diff and lock diff
 together, then commit changed shared context before launching. `ahu lock` and
@@ -1911,11 +1917,11 @@ match committed `HEAD`.
 Claude's project-local `.claude/settings.local.json` can change the tools
 available to an agent, so ahu checks its fingerprint too. That fingerprint is
 stored in owner-only host state outside the checkout, separately for each user
-and repository. It does not enter shared `ahu.lock` or telemetry. A local
+and repository. It does not enter shared `.agents/ahu/lock.md` or telemetry. A local
 harness may use the file to enable ahu MCP, and a task worktree may inherit it
 for startup. Keep it limited to settings the task agent may read. A change
 blocks launch until that user runs `ahu lock --update`; local acceptance does
-not change or require a commit to shared `ahu.lock`.
+not change or require a commit to shared `.agents/ahu/lock.md`.
 
 When a project has `.agents/mcp_config.json`, ahu also privately fingerprints
 the native Antigravity MCP file at `~/.gemini/config/mcp_config.json`. Its contents,
@@ -2240,7 +2246,7 @@ request bounds, fingerprints, timing, and evaluator telemetry coverage.
 
 Auth profiles are project-local and Git-ignored. They are stored under the
 primary checkout's owner-only `.ahu/state/repos/<repo-identity>/` directory,
-separate from committed `ahu.lock` because account identities are private.
+separate from committed `.agents/ahu/lock.md` because account identities are private.
 Each profile contains a fingerprint per bound provider, not account metadata,
 tokens, or API keys. A content digest detects edits outside the auth CLI;
 changes should go through `bind`, `select`, or an explicit `--replace`. This
@@ -2403,7 +2409,7 @@ so ahu checks native sign-in first and bounds both probes.
 `.kiro/settings/mcp.json`, installs bundled skills under `.kiro/skills/`, and
 creates an inline ahu agent manifest. Native JSON agent definitions are not
 imported by `ahu onboard`; write the ahu manifest's instructions inline instead.
-`.kiro/` and `.kiroignore` are recognized context, included in `ahu.lock` and
+`.kiro/` and `.kiroignore` are recognized context, included in `.agents/ahu/lock.md` and
 inherited into task worktrees. Global, synchronized, and harness-managed
 configuration remains outside that lock. Native discovery and the actual
 loading of skills, steering, hooks, and MCP remain Kiro's responsibility.
@@ -2497,3 +2503,5 @@ helper invocation or isolation. Global native configuration and provider state
 still apply, so a refusal or unavailable provider is a failed compatibility row,
 not evidence that the adapter passed. The report identifies the binary digest,
 source revision, source dirtiness, Kiro version, exact model and headless mode.
+
+See [shared project documents and explicit migration](project-documents.md) for OKF schemas, legacy compatibility, and recovery.

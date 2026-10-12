@@ -102,7 +102,7 @@ impl TestRepo {
             ahu::context_lock::refresh_with_state_home(&repo, &snapshot, Some(&state_home))
                 .unwrap();
         }
-        git(self.dir.path(), &["add", "-f", "ahu.lock"]);
+        git(self.dir.path(), &["add", "-f", ".agents/ahu/lock.md"]);
         git(
             self.dir.path(),
             &["commit", "-q", "--amend", "--allow-empty", "--no-edit"],

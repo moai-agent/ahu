@@ -13,20 +13,21 @@ fn local_metrics_default_off_and_round_trip_independently_of_export() {
     assert!(!loaded.telemetry.local_metrics);
     assert!(!loaded.telemetry.enabled);
     loaded.telemetry.local_metrics = true;
-    repo.write(".agents/ahu/config.toml", &config::render(&loaded));
+    repo.remove(".agents/ahu/config.toml");
+    repo.write(config::CONFIG_RELATIVE_PATH, &config::render(&loaded));
     assert_eq!(config::load(repo.path()).unwrap().unwrap().config, loaded);
     let rendered = config::render(&loaded);
     repo.write(
-        ".agents/ahu/config.toml",
-        &rendered.replace("local_metrics = true", "local_metrics = \"yes\""),
+        config::CONFIG_RELATIVE_PATH,
+        &rendered.replace("local_metrics: true", "local_metrics: \"yes\""),
     );
     assert!(config::load(repo.path()).is_err());
     for field in ["tracker_url", "record_key", "private_mapping", "tracker_id"] {
         repo.write(
-            ".agents/ahu/config.toml",
+            config::CONFIG_RELATIVE_PATH,
             &rendered.replace(
-                "local_metrics = true",
-                &format!("{field} = \"private-marker\""),
+                "local_metrics: true",
+                &format!("{field}: \"private-marker\""),
             ),
         );
         assert!(config::load(repo.path()).is_err());
@@ -177,9 +178,7 @@ fn rendered_config_round_trips() {
         .collect(),
         // A non-default knowledge section so the round trip proves it is
         // rendered, not silently dropped back to the default. The non-ASCII
-        // paths are the reason the bundles are rendered as TOML rather than
-        // with `{:?}`: Rust's escapes for these are not TOML's, so a config
-        // rendered with them would load once and then fail to parse.
+        // paths exercise the YAML serializer rather than Rust debug escapes.
         knowledge: config::Knowledge {
             bundles: vec![
                 "docs/knowledge".to_string(),
@@ -199,7 +198,7 @@ fn rendered_config_round_trips() {
 fn missing_harness_version_pins_float_and_invalid_pins_are_refused() {
     let repo = TestRepo::new();
     repo.write(
-        config::CONFIG_RELATIVE_PATH,
+        config::LEGACY_CONFIG_PATH,
         &format!(
             "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = {:?}\n[model_rankings]\n\"claude-code\" = [\"claude-opus-5\"]\n",
             catalog::CATALOG_VERSION
@@ -209,7 +208,7 @@ fn missing_harness_version_pins_float_and_invalid_pins_are_refused() {
     assert!(loaded.config.harness_version_pins.is_empty());
 
     repo.write(
-        config::CONFIG_RELATIVE_PATH,
+        config::LEGACY_CONFIG_PATH,
         &format!(
             "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = {:?}\n[model_rankings]\n\"claude-code\" = [\"claude-opus-5\"]\n[harness_version_pins]\n\"claude-code\" = \"2.1\"\n",
             catalog::CATALOG_VERSION

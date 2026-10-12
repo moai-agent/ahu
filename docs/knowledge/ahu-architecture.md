@@ -54,7 +54,7 @@ flowchart LR
     Operator["Operator / ahu CLI"] --> CLI["CLI dispatch"]
     CLI --> Doctor["Doctor and readiness"]
     CLI --> LockCmd["ahu lock --update"]
-    LockCmd --> LockFile["ahu.lock"]
+    LockCmd --> LockFile[".agents/ahu/lock.md"]
     LockCmd --> PrivateLock["Private acceptance per user and project"]
     Local["Recognized local Claude / native Antigravity settings"] --> PrivateLock
     PrivateLock --> Admission
@@ -90,7 +90,7 @@ flowchart LR
 
 ## Reading the boundaries
 
-`ahu.lock` gates use of recognized project context. `ahu lock --update` writes a
+`.agents/ahu/lock.md` gates use of recognized project context. `ahu lock --update` writes a
 candidate lock; an operator reviews and commits it with the context files. The
 lock does not contain per-user settings. Recognized local settings that affect
 agent behavior are separately fingerprinted in owner-only host state per user

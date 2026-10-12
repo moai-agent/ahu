@@ -141,7 +141,7 @@ Per the [skills documentation][claude-skills], a project skill must live at
 does not replace it. `ahu setup` writes ordinary, byte-identical copies to
 `.claude/skills/` when Claude Code is detected. It refuses to replace a changed
 copy. The canonical source remains under `.agents/skills/`; when Claude Code
-setup is committed, its `.claude/skills/` copies are pinned in `ahu.lock` and
+setup is committed, its `.claude/skills/` copies are pinned in `.agents/ahu/lock.md` and
 reviewed with the rest of setup. `.claude/settings.local.json` never enters the
 shared lock.
 

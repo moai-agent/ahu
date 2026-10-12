@@ -445,8 +445,8 @@ fn run_setup_using(
         telemetry: crate::config::TelemetryConfig::default(),
     };
 
-    console.say("\nConfiguration to be written to .agents/ahu/config.toml:\n\n")?;
-    console.say(&crate::config::render(&config))?;
+    console.say("\nConfiguration to be written to .agents/ahu/config.md:\n\n")?;
+    console.say(&crate::config::try_render(&config)?)?;
     console.say(
         "\nThis file is usable immediately, committed or not. ahu will not stage, commit, or\n\
          push it; sharing it with the project is yours to do.\n",

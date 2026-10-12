@@ -274,6 +274,13 @@ fn run_detected_with_native(
     // This remains a shared, explicit choice, separate from the per-harness
     // developer agents created below.
     let loaded = config::load(&repo.root)?;
+    if crate::util::resolve_existing_within(&repo.root, crate::context_lock::LEGACY_LOCK_PATH)?
+        .is_some()
+    {
+        return Err(Error::new(
+            "legacy context lock requires explicit `ahu migrate --preview` and `ahu migrate --apply` before setup",
+        ));
+    }
     let (new_config, existing_config) = if loaded.is_none() {
         let Some(config) = configure_project(console)? else {
             console.say("Cancelled. Nothing was changed.\n")?;
@@ -369,7 +376,7 @@ fn run_detected_with_native(
     if let Some(config) = new_config {
         writes.push((
             safe_new_path(&repo.root, config::CONFIG_RELATIVE_PATH)?,
-            config::render(&config).into_bytes(),
+            config::try_render(&config)?.into_bytes(),
         ));
     }
     for &(name, content) in crate::mcp::BUNDLED_SKILLS {

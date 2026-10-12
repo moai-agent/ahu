@@ -472,6 +472,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                     model.as_deref(),
                     &version,
                 ),
+                Command::Migrate { action } => commands::migrate_cmd(console, &repo, &action),
                 Command::Lock { update } => commands::lock_cmd(console, &repo, update),
                 Command::Tasks { limit } => commands::tasks_with_limit(console, &repo, limit),
                 Command::Task {

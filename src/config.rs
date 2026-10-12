@@ -1,4 +1,4 @@
-//! Project configuration: `.agents/ahu/config.toml`.
+//! Project configuration: `.agents/ahu/config.md`.
 //!
 //! One policy per project. The file holds the project-agreed harness order, the
 //! project-agreed model order within each harness, the required compatibility
@@ -15,7 +15,8 @@ use crate::catalog;
 use crate::util::{Error, Result, digest_bytes};
 
 pub const CONFIG_DIR: &str = ".agents/ahu";
-pub const CONFIG_RELATIVE_PATH: &str = ".agents/ahu/config.toml";
+pub const CONFIG_RELATIVE_PATH: &str = ".agents/ahu/config.md";
+pub const LEGACY_CONFIG_PATH: &str = ".agents/ahu/config.toml";
 pub const AGENTS_RELATIVE_DIR: &str = ".agents/ahu/agents";
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
@@ -122,7 +123,7 @@ impl ProjectFiles {
         self.root.join(CONFIG_RELATIVE_PATH)
     }
     fn existing_config(&self) -> Result<Option<PathBuf>> {
-        crate::util::resolve_existing_within(&self.root, CONFIG_RELATIVE_PATH)
+        existing_path(&self.root)
     }
     fn new_config(&self) -> Result<PathBuf> {
         crate::util::resolve_within(&self.root, CONFIG_RELATIVE_PATH, true)
@@ -142,44 +143,63 @@ pub fn config_path(repo_root: &Path) -> PathBuf {
 /// never resets or overwrites a file it could not understand.
 pub fn load(repo_root: &Path) -> Result<Option<LoadedConfig>> {
     // Resolved component by component rather than joined: a repository can
-    // commit a symlink at `.agents`, `.agents/ahu`, or `config.toml` itself, and
-    // reading through one would let it hand ahu any file the user can read —
-    // whose contents the parse error below then quotes back.
+    // commit a symlink at `.agents`, `.agents/ahu`, or the policy file itself, and
+    // reading through one would let it hand ahu any file the user can read.
     let Some(path) = crate::storage::CheckoutStorage::new(repo_root)
         .configuration()
         .existing_config()?
     else {
         return Ok(None);
     };
-    let mut file = match std::fs::File::open(&path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(Error::new(format!("cannot read {}: {e}", path.display())));
-        }
-    };
-    let bytes = match crate::util::read_limited(&mut file, crate::util::MAX_TASK_RECORD_BYTES) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return Err(Error::new(format!("cannot read {}: {e}", path.display())));
-        }
-    };
+    let bytes = crate::okf::read_with_limit(&path, crate::util::MAX_TASK_RECORD_BYTES)
+        .map_err(|error| Error::new(format!("cannot read {}: {error}", path.display())))?;
     let digest = digest_bytes(&bytes);
-    let text = String::from_utf8(bytes)
-        .map_err(|_| Error::new(format!("{} is not valid UTF-8", path.display())))?;
-    let config: ProjectConfig = toml::from_str(&text).map_err(|e| {
-        Error::new(format!(
-            "{} is not valid ahu configuration: {e}\n\
-             ahu will not rewrite or reset it. Fix the file, or move it aside and run `ahu setup`.",
-            path.display()
-        ))
-    })?;
+    let config = parse(&bytes, path.ends_with(LEGACY_CONFIG_PATH), &path)?;
     validate(&config, &path)?;
     Ok(Some(LoadedConfig {
         config,
         path,
         digest,
     }))
+}
+
+/// Dual-format policy is always an error, even if the effective values agree.
+pub fn existing_path(root: &Path) -> Result<Option<PathBuf>> {
+    crate::migration::ensure_idle(root)?;
+    let current = crate::util::resolve_existing_within(root, CONFIG_RELATIVE_PATH)?;
+    let legacy = crate::util::resolve_existing_within(root, LEGACY_CONFIG_PATH)?;
+    if current.is_some() && legacy.is_some() {
+        bail!(
+            "conflicting project formats; inspect `ahu migrate --preview` and resolve the conflict explicitly"
+        );
+    }
+    Ok(current.or(legacy))
+}
+
+pub(crate) fn parse(bytes: &[u8], legacy: bool, path: &Path) -> Result<ProjectConfig> {
+    if bytes.len() as u64 > crate::util::MAX_TASK_RECORD_BYTES {
+        bail!("configuration exceeds byte limit");
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::new("configuration is not UTF-8"))?;
+    let config = if legacy {
+        // TOML's diagnostic contains field names and source positions, not the
+        // document text. Preserve the useful legacy unknown-field detail.
+        toml::from_str(text).map_err(|error| {
+            Error::new(format!(
+                "not valid ahu configuration: {error}; ahu will not rewrite or reset it"
+            ))
+        })?
+    } else {
+        crate::okf::Document::parse(text, "ahu:project")
+            .and_then(|document| document.settings())
+            .map_err(|error| {
+                Error::new(format!(
+                    "not valid ahu configuration: {error}; ahu will not rewrite or reset it"
+                ))
+            })?
+    };
+    validate(&config, path)?;
+    Ok(config)
 }
 
 fn validate(config: &ProjectConfig, path: &Path) -> Result<()> {
@@ -324,82 +344,16 @@ fn validate_bundle_path(bundle: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Quote a string as TOML.
-///
-/// Rust's `{:?}` is close enough to TOML for the catalog-constrained values
-/// elsewhere in this file, which are ASCII by construction. It is not close
-/// enough for a bundle path, which the project writes and which may hold any
-/// character the validation accepts: Rust escapes a non-ASCII character in the
-/// `\u{...}` form, which TOML does not accept, so rendering a configuration
-/// that loaded could produce one that no longer parses. The TOML serializer is
-/// the only thing that knows TOML's own rules.
-fn toml_string(value: &str) -> String {
-    toml::Value::String(value.to_string()).to_string()
+/// Render new shared policy exclusively as OKF. Existing documents can retain
+/// descriptive metadata with Document::set_settings and Document::render.
+pub fn render(config: &ProjectConfig) -> String {
+    try_render(config).expect("bounded project configuration is serializable")
 }
 
-/// Render a config to the exact TOML ahu writes during initialization.
-pub fn render(config: &ProjectConfig) -> String {
-    let mut out = String::new();
-    out.push_str("# ahu project configuration.\n");
-    out.push_str("# One policy for every ahu user in this project. Share it by committing it;\n");
-    out.push_str("# ahu never stages, commits, or pushes this file for you.\n");
-    out.push_str(&format!("schema_version = {}\n", config.schema_version));
-    out.push_str(&format!(
-        "harness_preferences = [{}]\n",
-        config
-            .harness_preferences
-            .iter()
-            .map(|h| format!("{h:?}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
-    out.push_str(&format!("model_selection = {:?}\n", config.model_selection));
-    out.push_str(&format!("catalog_version = {:?}\n", config.catalog_version));
-    if !config.harness_version_pins.is_empty() {
-        out.push_str("\n[harness_version_pins]\n");
-        for (harness_id, version) in &config.harness_version_pins {
-            out.push_str(&format!("{:?} = {:?}\n", harness_id, version));
-        }
-    }
-    out.push_str("\n[model_rankings]\n");
-    for (harness_id, models) in &config.model_rankings {
-        out.push_str(&format!(
-            "{:?} = [{}]\n",
-            harness_id,
-            models
-                .iter()
-                .map(|m| format!("{m:?}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    out.push_str("\n[knowledge]\n");
-    out.push_str("# Repository-relative OKF bundle directories for `ahu knowledge lint`.\n");
-    out.push_str(&format!(
-        "bundles = [{}]\n",
-        config
-            .knowledge
-            .bundles
-            .iter()
-            .map(|b| toml_string(b))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
-    out.push_str(&format!(
-        "fail_on_warnings = {}\n",
-        config.knowledge.fail_on_warnings
-    ));
-    out.push_str("\n[telemetry]\n");
-    out.push_str(&format!("enabled = {}\n", config.telemetry.enabled));
-    out.push_str(&format!(
-        "local_metrics = {}\n",
-        config.telemetry.local_metrics
-    ));
-    out.push_str(&format!(
-        "endpoint = {}\n",
-        toml_string(&config.telemetry.endpoint)
-    ));
-    out
+pub fn try_render(config: &ProjectConfig) -> Result<String> {
+    crate::okf::Document::new("ahu:project", config,
+        "\n# Project policy\n\nOne policy for every ahu user in this project. Review and commit this file.\n")
+        .and_then(|document| document.render())
 }
 
 /// Write a new configuration, creating only the missing ahu directories.
@@ -407,12 +361,18 @@ pub fn render(config: &ProjectConfig) -> String {
 /// The file is created exclusively: a concurrent `ahu setup` that got there first
 /// keeps its result and this call reports the collision instead of overwriting.
 pub fn write_new(repo_root: &Path, config: &ProjectConfig) -> Result<PathBuf> {
+    validate(config, &config_path(repo_root))?;
+    if existing_path(repo_root)?.is_some() {
+        bail!(
+            "project configuration already exists; nothing was overwritten; use explicit migration for legacy policy"
+        );
+    }
     // Component-by-component, so a symlinked `.agents` or `.agents/ahu` cannot
     // redirect where the project's configuration is created.
     let path = crate::storage::CheckoutStorage::new(repo_root)
         .configuration()
         .new_config()?;
-    let body = render(config);
+    let body = try_render(config)?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     let mut file = match options.open(&path) {

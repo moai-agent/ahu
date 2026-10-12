@@ -25,10 +25,7 @@ pub fn freeze_grants(
     ordinary: &[String],
     widened: &[String],
 ) -> Result<Vec<ChildGrant>> {
-    let loaded =
-        crate::config::load(&repo.root)?.ok_or_else(|| Error::new("configuration required"))?;
-    let project: toml::Value = toml::from_str(&std::fs::read_to_string(loaded.path)?)
-        .map_err(|e| Error::new(e.to_string()))?;
+    crate::config::load(&repo.root)?.ok_or_else(|| Error::new("configuration required"))?;
     let mut grants = Vec::new();
     for name in ordinary.iter().chain(widened) {
         let agent = crate::agent::find(&repo.root, name)?;
@@ -39,15 +36,7 @@ pub fn freeze_grants(
         }
         let policy = match &agent.manifest.native_helpers {
             Some(policy) => policy.as_str(),
-            None => match project
-                .get("execution")
-                .and_then(|v| v.get("native_helpers"))
-            {
-                None => "disabled",
-                Some(value) => value.as_str().ok_or_else(|| {
-                    Error::new("child native_helpers must be disabled or bounded")
-                })?,
-            },
+            None => "disabled",
         };
         if !matches!(policy, "disabled" | "bounded") {
             bail!("child native_helpers must be disabled or bounded");
