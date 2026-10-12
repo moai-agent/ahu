@@ -12,6 +12,28 @@ pub struct Inspection {
 }
 
 impl Inspection {
+    /// Load only exact demanded indexed IDs. The caller must authorize them first.
+    pub(crate) fn open_exact(
+        repo: &Repo,
+        ids: &BTreeSet<String>,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> util::Result<Self> {
+        let mut listing = TaskListing::default();
+        for id in ids {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(error(Error::Denied));
+            }
+            listing
+                .records
+                .push(crate::commands::load_exact_indexed_task(repo, id)?);
+        }
+        Self::from_listing(repo, listing)
+    }
+
+    pub(crate) fn repository_identity(&self) -> &str {
+        self.controller.repository_identity()
+    }
+
     pub fn open(repo: &Repo) -> util::Result<Self> {
         Self::from_listing(repo, crate::task::list(repo)?)
     }

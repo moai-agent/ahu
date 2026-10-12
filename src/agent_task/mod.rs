@@ -8,3 +8,5 @@ mod service;
 mod store;
 pub mod v1;
 pub use service::{Controller, Session};
+
+pub(crate) use service::read_page_ids;

@@ -272,3 +272,17 @@ behavior, execution routing and native history replay are not claimed.
 See [system architecture](knowledge/ahu-architecture.md),
 [task state](knowledge/task-state.md), [task communication](knowledge/task-communication.md),
 and [terminal Host V1](../crates/ahu-host-api/src/v1.rs).
+
+## Executable plugin CLI observations
+
+`ahu plugins invoke ID --task-observations --allow-task UUID --input-file PATH|-`
+collects the bounded read-only projection for an installed, committed execute
+grant. Repeat `--allow-task` for each exact canonical UUID; absent grants mean
+empty scope. The CLI validates every operation/cursor before reading only the
+requested indexed task records. It never enumerates tasks or creates coordination
+state/locks, and plugin response JSON cannot request effects or mutations.
+Only current primary-owned schema-2 index entries are supported; unindexed tasks
+and legacy external stores require separate inspection, with no automatic recovery.
+Durable V1 identity/replay checks remain in force. Synthesized revision-1 replay
+is meaningful only within this invocation. See [executable plugins](executable-plugins.md#foreground-cli-invocation)
+for input/output limits, fixed errors, deadlines, and the same-user trust boundary.

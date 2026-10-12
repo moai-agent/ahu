@@ -38,6 +38,12 @@ if MODE == "exact_limit":
 elif MODE == "mutation_result":
     json.dump({"status": "ok", "protocol_version": 1,
                "result": {"operation": "submit", "task": request["input"]["observations"][0]["snapshot"]["task"]}}, sys.stdout)
+elif MODE == "unicode_expansion":
+    json.dump({"status": "ok", "protocol_version": 1, "result": "\u0085" * 16000}, sys.stdout, ensure_ascii=False)
+elif MODE == "cli_framing_limit":
+    # Fill the wire budget; escaping this last character overflows the CLI frame.
+    prefix = '{"status":"ok","protocol_version":1,"result":'
+    sys.stdout.write(prefix + json.dumps("x" * (65536 - len(prefix) - 5) + "\u0085", ensure_ascii=False) + "}")
 elif MODE == "overflow":
     sys.stdout.write("x" * (65536 + 1))
 elif MODE == "malformed":

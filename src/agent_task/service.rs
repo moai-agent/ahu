@@ -553,33 +553,15 @@ impl TaskService for Session {
         })
     }
     fn list(&self, version: u32, after: Option<&str>, limit: usize) -> Result<TaskPage> {
-        use std::ops::Bound::{Excluded, Unbounded};
-
         check_version(version)?;
         if !self.operations.contains(&Operation::List) {
             return Err(Error::Denied);
         }
-        if let Some(task) = after {
-            self.authorize(task, Operation::List)?;
-        }
-        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
-            return Err(Error::InvalidRequest);
-        }
-        // Range over the frozen grant set, never over repository/store contents.
-        // Look ahead at one ID only; do not read records beyond this page.
-        let mut ids = self
-            .tasks
-            .range::<str, _>((after.map_or(Unbounded, Excluded), Unbounded));
+        let (ids, next_after) = read_page_ids(&self.tasks, after, limit)?;
         let tasks = ids
-            .by_ref()
-            .take(limit)
+            .iter()
             .map(|id| self.controller.snapshot(id))
             .collect::<Result<Vec<_>>>()?;
-        let next_after = if ids.next().is_some() {
-            tasks.last().map(|task| task.identity.task.clone())
-        } else {
-            None
-        };
         Ok(TaskPage { tasks, next_after })
     }
     fn get(&self, version: u32, task: &str) -> Result<Snapshot> {
@@ -780,4 +762,27 @@ fn observed_lifecycle(state: crate::task::TaskState) -> Lifecycle {
         T::Failed => Lifecycle::Failed,
         T::Cancelled => Lifecycle::Cancelled,
     }
+}
+
+/// Select from authority, never from storage. Shared with observation preflight.
+pub(crate) fn read_page_ids(
+    tasks: &BTreeSet<String>,
+    after: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<String>, Option<String>)> {
+    use std::ops::Bound::{Excluded, Unbounded};
+    if after.is_some_and(|id| !tasks.contains(id)) {
+        return Err(Error::Denied);
+    }
+    if !(1..=MAX_PAGE_SIZE).contains(&limit) {
+        return Err(Error::InvalidRequest);
+    }
+    let mut ids = tasks.range::<str, _>((after.map_or(Unbounded, Excluded), Unbounded));
+    let page: Vec<String> = ids.by_ref().take(limit).cloned().collect();
+    let next_after = if ids.next().is_some() {
+        page.last().cloned()
+    } else {
+        None
+    };
+    Ok((page, next_after))
 }

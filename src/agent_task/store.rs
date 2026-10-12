@@ -40,6 +40,9 @@ impl Store {
         repo: &crate::git::Repo,
         mut entries: BTreeMap<String, Entry>,
     ) -> Result<Self> {
+        if entries.is_empty() {
+            return Ok(Self::Inspection { entries });
+        }
         let directory = crate::storage::RepositoryStorage::new(repo)
             .map_err(storage)?
             .coordination_dir()

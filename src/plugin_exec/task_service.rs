@@ -122,14 +122,7 @@ pub fn invoke(
     check_cancel()?;
     // Gate service access on the same current committed authority as execution.
     super::authorized_binding(repo, &grant.host)?;
-    if request_json.len() > MAX_BYTES {
-        return Err(Failure::before(Code::InvalidInput));
-    }
-    let request: Request =
-        from_slice(request_json).map_err(|_| Failure::before(Code::InvalidInput))?;
-    if request.version != VERSION || request.observations.len() > MAX_OBSERVATIONS {
-        return Err(Failure::before(Code::InvalidInput));
-    }
+    let request = parse_request(request_json)?;
     let service = &grant.service;
     let mut payload = Payload {
         kind: "ahu.task-observations",
@@ -205,4 +198,74 @@ fn bounded_json(value: &impl Serialize) -> Result<Vec<u8>> {
     let mut output = Bounded(Vec::new());
     serde_json::to_writer(&mut output, value).map_err(|_| Failure::before(Code::InvalidInput))?;
     Ok(output.0)
+}
+
+fn parse_request(bytes: &[u8]) -> Result<Request> {
+    if bytes.len() > MAX_BYTES {
+        return Err(Failure::before(Code::InvalidInput));
+    }
+    let request: Request = from_slice(bytes).map_err(|_| Failure::before(Code::InvalidInput))?;
+    if request.version != VERSION || request.observations.len() > MAX_OBSERVATIONS {
+        return Err(Failure::before(Code::InvalidInput));
+    }
+    Ok(request)
+}
+
+/// Operator-only CLI bridge. Authority is separate from the observation JSON;
+/// only immutable, exact indexed observations are admitted, never a local store.
+pub(crate) fn invoke_inspected(
+    repo: &Repo,
+    host: HostGrant,
+    tasks: BTreeSet<String>,
+    bytes: &[u8],
+    cancelled: &AtomicBool,
+) -> Result<Value> {
+    super::authorized_binding(repo, &host)?;
+    if tasks.len() > MAX_TASKS
+        || tasks
+            .iter()
+            .any(|id| !crate::task::is_canonical_task_uuid(id))
+    {
+        return Err(Failure::before(Code::InvalidInput));
+    }
+    let request = parse_request(bytes)?;
+    let mut demanded = BTreeSet::new();
+    // Preflight every operation and cursor before any task lookup.
+    for observation in &request.observations {
+        match observation {
+            Observation::List { after, limit } => {
+                demanded.extend(
+                    crate::agent_task::read_page_ids(&tasks, after.as_deref(), *limit)
+                        .map_err(service_error)?
+                        .0,
+                );
+            }
+            Observation::Read { task } | Observation::Replay { task, .. } => {
+                if !tasks.contains(task) {
+                    return Err(Failure::before(Code::Denied));
+                }
+                demanded.insert(task.clone());
+            }
+        }
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(Failure::before(Code::Cancelled));
+    }
+    let inspected =
+        crate::agent_task::inspection::Inspection::open_exact(repo, &demanded, cancelled);
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(Failure::before(Code::Cancelled));
+    }
+    let inspected = inspected.map_err(|_| Failure::before(Code::Unavailable))?;
+    if inspected.repository_identity() != host.repository {
+        return Err(Failure::before(Code::Denied));
+    }
+    let service = inspected
+        .plugin_read_session(&host.plugin, tasks)
+        .map_err(service_error)?;
+    let grant = TaskReadGrant {
+        host,
+        service: Box::new(service),
+    };
+    invoke(repo, &grant, bytes, cancelled)
 }

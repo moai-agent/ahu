@@ -408,3 +408,5 @@ pub fn in_child_fixture(test_name: &str, configure: impl FnOnce(&mut Command)) -
 pub fn in_harness_fixture(test_name: &str) -> bool {
     in_child_fixture(test_name, |_| {})
 }
+
+pub mod plugin;

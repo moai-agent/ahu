@@ -32,6 +32,9 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         cli::extract_color(args).map_err(|error| error.with_kind(ahu::util::ErrorKind::Usage))?;
     style::configure(color);
     let command = cli::parse_with_stdin(args, !std::io::stdin().is_terminal())?;
+    if let Command::PluginInvoke(options) = command {
+        return Ok(ahu::plugin_exec::cli::run(options, repository.as_deref()));
+    }
     if let Some(repository) = repository {
         std::env::set_current_dir(&repository).map_err(|error| {
             ahu::util::Error::new(format!(
@@ -67,6 +70,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             ahu::plugin_install::run(&std::env::current_dir()?, &action, &id)?;
             Ok(0)
         }
+        Command::PluginInvoke(_) => unreachable!("handled before repository selection"),
         Command::Version => {
             println!("ahu {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
@@ -525,6 +529,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Plugins { .. }
                 | Command::PluginLifecycle { .. }
                 | Command::PluginsInstalled { .. }
+                | Command::PluginInvoke(_)
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })
         }

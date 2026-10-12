@@ -1403,6 +1403,56 @@ fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task:
             crate::headless::lookup(&repo, &entry.task_id)?
         }
     };
+    load_indexed_record(entry, dir)
+}
+
+/// Narrow read-only resolver: no enumeration, legacy store fallback or repair.
+pub(crate) fn load_exact_indexed_task(
+    repo: &Repo,
+    id: &str,
+) -> Result<(PathBuf, task::TaskRecord)> {
+    if !task::is_canonical_task_uuid(id) {
+        bail!("exact task UUID required");
+    }
+    let entry = crate::task_index::lookup_current_in(repo, id)?
+        .ok_or_else(|| Error::new("indexed task unavailable"))?;
+    if entry.schema_version != crate::task_index::INDEX_SCHEMA_VERSION
+        || entry.repo_identity != repo.identity()
+    {
+        bail!("unsupported task index ownership or version");
+    }
+    let checkout = crate::git::discover(&entry.checkout)?;
+    if checkout.root != entry.checkout.canonicalize()?
+        || checkout.identity() != repo.identity()
+        || checkout.primary_root()? != repo.primary_root()?
+    {
+        bail!("task index checkout ownership mismatch");
+    }
+    let dir = match entry.store {
+        crate::task_index::StoreKind::Worktree => {
+            crate::storage::CheckoutStorage::new(&entry.checkout)
+                .tasks_dir(&entry.repo_identity)?
+                .join(id)
+        }
+        crate::task_index::StoreKind::Headless => {
+            if checkout.root != repo.primary_root()? {
+                bail!("headless index must name the primary checkout");
+            }
+            let dir = crate::storage::HeadlessStore::for_repo(repo)?
+                .directory
+                .join(id);
+            crate::headless::confined_in(repo, &dir, false)?;
+            dir
+        }
+    };
+    crate::state::confine_existing_dir(&dir)?;
+    load_indexed_record(&entry, dir)
+}
+
+fn load_indexed_record(
+    entry: &crate::task_index::Entry,
+    dir: PathBuf,
+) -> Result<(PathBuf, task::TaskRecord)> {
     if !dir.exists() {
         bail!(
             "the task index records task {} at {}, but its task directory {} no longer exists; the \
@@ -1426,7 +1476,7 @@ fn load_indexed_task(entry: &crate::task_index::Entry) -> Result<(PathBuf, task:
         crate::task_index::StoreKind::Worktree => {
             record.task_id != entry.task_id
                 || record.repo_identity != entry.repo_identity
-                || record.worktree.canonicalize().ok() != entry.checkout.canonicalize().ok()
+                || record.worktree.canonicalize()? != entry.checkout.canonicalize()?
         }
         crate::task_index::StoreKind::Headless => {
             record.task_id != entry.task_id || record.repo_identity != entry.repo_identity

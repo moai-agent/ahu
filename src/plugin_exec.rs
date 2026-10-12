@@ -11,6 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+pub mod cli;
 pub mod task_service;
 
 pub const VERSION: u32 = 1;

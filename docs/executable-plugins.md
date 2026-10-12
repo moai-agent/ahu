@@ -3,8 +3,9 @@
 A package can declare a generic JSON entrypoint separately from its optional
 [session-host executable](executable-hosts.md). The host library exposes
 `ahu::plugin_exec::invoke` and the read-only
-`ahu::plugin_exec::task_service::invoke` integration below. Neither adds a CLI
-invoke command, MCP registration, background activation, or TaskService callbacks. It is suitable for
+`ahu::plugin_exec::task_service::invoke` integration below. The foreground CLI
+uses these transports without MCP registration, background activation or
+TaskService callbacks. It is suitable for
 an explicit host call to a trusted local package that processes supplied data.
 It does not implement an execution provider or grant task mutation rights.
 
@@ -35,6 +36,83 @@ packages. Discovery, installation and enablement never invoke the entrypoint.
 An enabled binding with `execute` but no `interactive-backend` grant is excluded
 from default session-host selection. Explicit interactive selection still needs
 its separate host declaration and grant.
+
+## Foreground CLI invocation
+
+```sh
+ahu --repo /absolute/checkout plugins invoke example --input-file /absolute/input.json
+printf '%s' '{"text":"synthetic input"}' | ahu plugins invoke example --input-file -
+ahu plugins invoke example --task-observations \
+  --allow-task 00000000-0000-7000-8000-000000000001 \
+  --input-file /absolute/observations.json
+```
+
+The package must already be installed and have a committed enabled binding with
+an exact ahu version and `execute` grant. This command runs once in the foreground;
+it does not install, fetch, probe, retry, load provider configuration or authenticate.
+Task/worker-marked processes are refused at the cooperative host-operator boundary.
+This is not authentication against other code running as the same OS user.
+
+`--input-file` is required. `-` explicitly selects nonterminal stdin; relative
+file paths resolve after global `--repo` selection. Named inputs must be regular
+files, opened without following a leaf symlink, never FIFOs or devices. Input
+reads stop at 65,537 bytes and reject anything exceeding 64 KiB. Stdin intake has
+a fixed 30-second deadline. SIGINT/SIGTERM request cancellation during intake,
+collection and execution. The command temporarily ignores SIGPIPE so a closed
+output reader produces a fixed `io` error; prior signal dispositions are restored
+on exit. Filesystem and Git operations are not interruptible;
+package verification and collection precede the separate manifest process timeout.
+
+A successful stdout document is compact JSON followed by a newline:
+
+```json
+{"schema_version":1,"status":"ok","result":null}
+```
+
+Runtime failures leave stdout empty and write one fixed JSON document to stderr:
+
+```json
+{"schema_version":1,"status":"error","code":"denied","outcome_may_be_unknown":false}
+```
+
+| Code | Exit status |
+| --- | --- |
+| `invalid_input` | 2 |
+| `denied`, `unavailable` | 4 |
+| `cancelled`, `timed_out`, `output_limit`, `protocol`, `failed`, `io` | 5 |
+
+Argument syntax errors use static usage diagnostics and exit 2. Success exits 0.
+The complete stdout document, including framing, JSON escaping and newline, must
+fit in 64 KiB. Non-ASCII characters and terminal controls are JSON escaped without
+changing their values. Overflow fails before writing stdout. Delivery uses bounded
+nonblocking I/O with a separate 30-second deadline per output stream. If stdout
+fails or stalls after a partial write, those bytes cannot be recalled; the error
+has `outcome_may_be_unknown: true`. Post-execution failures always retain this
+uncertainty, including CLI framing overflow. Error output never includes input,
+plugin data, task data, paths or OS diagnostics. Successful result data is released
+intentionally; it is not secret-filtered or interpreted as an action.
+
+`--task-observations` accepts the request shape in the next section. Repeat
+`--allow-task UUID` to supply an independent maximum scope (up to 128 unique,
+canonical UUIDs). Scope flags are invalid in generic mode. No grants means an
+empty scope, never all tasks. Prefixes, handles, duplicate grants and operations
+other than list/read/replay are refused. Every operation and list cursor is
+validated against the full scope before any task read. Only read/replay IDs and
+IDs on requested list pages are loaded; unused missing or corrupt granted tasks
+and unrelated records do not block a narrow request. Capabilities-only requests
+and empty pages do not access task storage.
+
+CLI observations support current schema-2 pointers in the primary-owned task
+index, with validated checkout/store ownership and readable task record schemas.
+Unindexed tasks and legacy external indexes/stores are explicitly unsupported
+(`unavailable`); there is no enumeration, repair, migration or registration fallback.
+Inspect `ahu task UUID` or `ahu tasks` separately for legacy recovery diagnostics.
+Matching durable V1 observations retain revision/replay semantics; conflicting
+identity fails closed. Without durable V1 state, observations synthesize revision 1
+and replay is local to this invocation, not reconnectable execution history.
+Collection never creates V1 directories or locks or reconciles task state.
+Snapshots are coherent per task, not a repository transaction. Returned plugin
+JSON cannot dispatch Submit/Cancel/Input or any task action.
 
 ## Trusted host call
 
@@ -183,7 +261,8 @@ Bounds and failure semantics:
   reads and package verification precede the generic process deadline and are
   not interruptible filesystem operations.
 
-This path works with existing memory or local controllers. It adds no launch
+The library path works with existing memory or local controllers; the CLI uses
+an immutable exact inspection. The library path adds no launch
 adapter, legacy-record discovery/migration, task registration, effects operation,
 Submit/Cancel/Input, CLI/MCP execution control, tracker client, network call or
 credential lookup. Local service reads may acquire coordination locks but do not

@@ -407,7 +407,7 @@ pub(crate) fn read_package(root: &Path) -> Result<PluginStatus> {
         None
     } else if manifest.entrypoint.is_some() {
         Some(
-            "This package has a generic entrypoint but no session host; use the explicit plugin_exec host API.",
+            "This package has a generic entrypoint but no session host; use ahu plugins invoke ID --input-file PATH|- or the plugin_exec host API.",
         )
     } else {
         Some(LOADING_BLOCKER)
