@@ -202,7 +202,8 @@ fn lock_cli_escapes_hostile_context_paths_before_terminal_output() {
     repo.commit("configured fixture");
 
     let mut lock = okf::Document::parse(&repo.read(context_lock::LOCK_PATH), "ahu:lock").unwrap();
-    lock.fields["ahu"]["entries"][0]["path"] = "\u{1b}[31mowned".into();
+    let hostile_path = "\u{1b}[31mowned\nforged-line\u{1b}]52;c;marker\u{7}\u{009b}31m\u{202e}";
+    lock.fields["ahu"]["entries"][0]["path"] = hostile_path.into();
     repo.write(context_lock::LOCK_PATH, &lock.render().unwrap());
 
     let output = common::ahu()
@@ -212,9 +213,25 @@ fn lock_cli_escapes_hostile_context_paths_before_terminal_output() {
         .unwrap();
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(r"\x1b[31mowned"), "{stdout:?}");
+    assert!(
+        stdout.contains(r"\x1b[31mowned\x0aforged-line\x1b]52;c;marker\x07\x9b31m\u{202e}"),
+        "{stdout:?}"
+    );
+    assert!(!stdout.contains("\nforged-line"), "{stdout:?}");
     assert!(
         !stdout.contains('\u{1b}'),
         "raw terminal control in {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\u{7}'),
+        "raw terminal control in {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\u{009b}'),
+        "raw terminal control in {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\u{202e}'),
+        "raw bidi control in {stdout:?}"
     );
 }

@@ -98,6 +98,10 @@ backups. A completed journal is never reused; a rolled-back migration can retry
 only with the same original sources. The journal contains shared configuration
 bytes and pins, never raw execution captures. It lives under owner-only,
 self-ignored `.ahu` storage.
+Rollback publishes restored bytes with their recorded source mode atomically.
+For journals created by older builds, restored source bytes at mode `0600` are
+ambiguous with an intentional permission change; rollback refuses that state.
+Inspect the journal and restore the recorded mode before retrying.
 Concurrent migrations use an exclusive local file lock. These checks detect
 ordinary concurrent edits; they are not isolation from a hostile same-user
 process replacing ancestors between filesystem operations.

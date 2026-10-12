@@ -325,6 +325,58 @@ fn replace(
     }
     Ok(())
 }
+fn restore(root: &Path, index: usize, plan: &Plan) -> Result<()> {
+    let current = read(root, PATHS[index])?;
+    if current != plan.before[index] && current != plan.after[index] {
+        bail!(
+            "concurrent edit at {}; preserve it and resolve before rollback",
+            PATHS[index]
+        );
+    }
+    if current == plan.before[index] {
+        if plan.before[index] != plan.after[index]
+            && file_mode(root, PATHS[index])? != plan.source_modes[index]
+        {
+            bail!(
+                "concurrent permission change at {}; preserve it and resolve before rollback",
+                PATHS[index]
+            );
+        }
+        return Ok(());
+    }
+    let expected_mode = if plan.after[index].is_some() {
+        Some(0o600)
+    } else {
+        None
+    };
+    if file_mode(root, PATHS[index])? != expected_mode {
+        bail!(
+            "concurrent permission change at {}; preserve it and resolve before rollback",
+            PATHS[index]
+        );
+    }
+    let path = crate::util::resolve_within(root, PATHS[index], true)?;
+    match (&plan.before[index], plan.source_modes[index]) {
+        (Some(text), Some(mode)) => {
+            if current.is_some() {
+                private_io::atomic_write_mode(&path, text.as_bytes(), mode, Durability::Durable)?;
+            } else if !private_io::atomic_create_mode(
+                &path,
+                text.as_bytes(),
+                mode,
+                Durability::Durable,
+            )? {
+                bail!("rollback destination appeared concurrently");
+            }
+        }
+        (None, None) => {
+            std::fs::remove_file(&path)?;
+            std::fs::File::open(path.parent().unwrap())?.sync_all()?;
+        }
+        _ => bail!("invalid migration rollback source mode"),
+    }
+    Ok(())
+}
 fn check_identity(repo: &Repo, plan: &Plan) -> Result<()> {
     let current = crate::git::discover(&repo.root)?;
     if current.identity() != plan.repository || current.head != plan.base_commit {
@@ -407,19 +459,21 @@ fn rollback_inner(repo: &Repo) -> Result<()> {
         if current != plan.before[index] && current != plan.after[index] {
             bail!("concurrent edit at {path}; preserve it and resolve before rollback");
         }
-        if plan.before[index] != plan.after[index]
-            && let Some(mode) = file_mode(&repo.root, path)?
-        {
-            // Atomic restoration publishes owner-only bytes before the separate
-            // chmod that restores the original mode. Accept that exact
-            // interruption state and the original mode; refuse other chmods.
-            let original = plan.source_modes[index];
+        if plan.before[index] != plan.after[index] {
+            let mode = file_mode(&repo.root, path)?;
             let expected = if current == plan.before[index] {
-                Some(mode) == original || mode == 0o600
+                plan.source_modes[index]
+            } else if plan.after[index].is_some() {
+                Some(0o600)
             } else {
-                mode == 0o600
+                None
             };
-            if !expected {
+            if mode != expected {
+                if current == plan.before[index] && mode == Some(0o600) {
+                    bail!(
+                        "ambiguous legacy rollback permission state at {path}; inspect the journal and restore its recorded source mode before retrying"
+                    );
+                }
                 bail!(
                     "concurrent permission change at {path}; preserve it and resolve before rollback"
                 );
@@ -427,20 +481,7 @@ fn rollback_inner(repo: &Repo) -> Result<()> {
         }
     }
     for index in [0, 1, 3, 2] {
-        let current = read(&repo.root, PATHS[index])?;
-        if current != plan.before[index] {
-            replace(&repo.root, index, &plan.after[index], &plan.before[index])?;
-        }
-        if plan.before[index] != plan.after[index]
-            && let Some(mode) = plan.source_modes[index]
-            && file_mode(&repo.root, PATHS[index])? != Some(mode)
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                repo.root.join(PATHS[index]),
-                std::fs::Permissions::from_mode(mode),
-            )?;
-        }
+        restore(&repo.root, index, &plan)?;
     }
     plan.phase = "rolled-back".into();
     save(&repo.root, &plan)
@@ -800,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_permission_restore_is_repaired_but_concurrent_modes_are_preserved() {
+    fn rollback_restores_source_mode_atomically_and_refuses_ambiguous_or_changed_modes() {
         use std::os::unix::fs::PermissionsExt;
 
         let (_dir, repo) = fixture();
@@ -823,12 +864,47 @@ mod tests {
         let plan = Plan::preview(&repo).unwrap();
         save(&repo.root, &plan).unwrap();
 
-        // Simulate a process stopping after atomic byte restoration (0600) but
-        // before rollback applies the journaled source mode (0755).
-        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // A completed migration leaves the legacy source absent and target
+        // files owner-only. Rollback must restore original bytes and mode in
+        // one atomic publication.
+        for index in [2, 3, 0, 1] {
+            replace(&repo.root, index, &plan.before[index], &plan.after[index]).unwrap();
+        }
         rollback(&repo).unwrap();
         assert_eq!(read(&repo.root, PATHS[0]).unwrap(), plan.before[0]);
         assert_eq!(file_mode(&repo.root, PATHS[0]).unwrap(), Some(0o755));
+
+        let (_dir, repo) = fixture();
+        let source = repo.root.join(PATHS[0]);
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+        std::fs::write(
+            repo.root.join(PATHS[3]),
+            context_lock::LockFile::from_snapshot(&snapshot)
+                .render(None)
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_file(repo.root.join(PATHS[1])).unwrap();
+        git(&repo.root, &["add", "-A", "-f"]);
+        git(
+            &repo.root,
+            &["commit", "--amend", "--allow-empty", "-qm", "fixture mode"],
+        );
+        let plan = Plan::preview(&repo).unwrap();
+        save(&repo.root, &plan).unwrap();
+        // Old rollback code could leave original bytes at 0600 before chmod.
+        // This journal state is indistinguishable from an intentional chmod;
+        // require the operator to inspect and restore the recorded mode.
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            rollback(&repo)
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous legacy rollback permission state")
+        );
+        assert_eq!(read(&repo.root, PATHS[0]).unwrap(), plan.before[0]);
+        assert_eq!(file_mode(&repo.root, PATHS[0]).unwrap(), Some(0o600));
 
         let (_dir, repo) = fixture();
         let source = repo.root.join(PATHS[0]);
