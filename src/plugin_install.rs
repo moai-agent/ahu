@@ -28,6 +28,16 @@ struct Receipt {
 // askpass, proxies, alternate object stores, SSH commands, or native auth homes.
 // All package Git operations use our own fresh repository, never source config.
 fn git(root: &Path, args: &[&str], network: bool, limit: u64) -> Result<Vec<u8>> {
+    git_with_ca(root, args, network, limit, None)
+}
+
+fn git_with_ca(
+    root: &Path,
+    args: &[&str],
+    network: bool,
+    limit: u64,
+    ca_info: Option<&Path>,
+) -> Result<Vec<u8>> {
     let mut command = Command::new(crate::selection::resolve_utility("git")?);
     command
         .env_clear()
@@ -40,10 +50,17 @@ fn git(root: &Path, args: &[&str], network: bool, limit: u64) -> Result<Vec<u8>>
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_ALLOW_PROTOCOL", if network { "https" } else { "" })
+        .env("GIT_ALLOW_PROTOCOL", if network { "https" } else { "" });
+    command.args(["--no-pager", "--no-replace-objects"]);
+    if let Some(ca_info) = ca_info {
+        let ca_info = ca_info
+            .to_str()
+            .ok_or_else(|| Error::new("test CA path must be UTF-8"))?;
+        let setting = format!("http.sslCAInfo={ca_info}");
+        command.args(["-c", &setting]);
+    }
+    command
         .args([
-            "--no-pager",
-            "--no-replace-objects",
             "-c",
             "core.hooksPath=/dev/null",
             "-c",
@@ -319,6 +336,10 @@ fn verify(root: &Path, binding: &Binding) -> Result<()> {
 }
 
 fn materialize(stage: &Path, binding: &Binding) -> Result<PathBuf> {
+    materialize_with_ca(stage, binding, None)
+}
+
+fn materialize_with_ca(stage: &Path, binding: &Binding, ca_info: Option<&Path>) -> Result<PathBuf> {
     let package = stage.join("package");
     fs::create_dir(&package)?;
     if binding.source.kind == SourceKind::Local {
@@ -362,7 +383,7 @@ fn materialize(stage: &Path, binding: &Binding) -> Result<PathBuf> {
             }
             copy_tree(&objects, &gitdir.join("objects"))?;
         } else {
-            git(
+            git_with_ca(
                 &gitdir,
                 &[
                     "fetch",
@@ -375,6 +396,7 @@ fn materialize(stage: &Path, binding: &Binding) -> Result<PathBuf> {
                 ],
                 true,
                 4096,
+                ca_info,
             )?;
         }
         let revision = &binding.source.revision;
@@ -832,6 +854,309 @@ mod tests {
                 .raw_os_error(),
             Some(libc::ECHILD),
             "leader was not reaped after cleanup"
+        );
+    }
+
+    #[test]
+    fn https_git_fetch_rejects_an_untrusted_local_certificate() {
+        use std::net::{SocketAddr, TcpStream};
+
+        struct HttpsServer(Child);
+        impl Drop for HttpsServer {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let cert = temp.path().join("server.pem");
+        let key = temp.path().join("server-key.pem");
+        let generated = Command::new("openssl")
+            .args([
+                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-keyout",
+            ])
+            .arg(&key)
+            .arg("-out")
+            .arg(&cert)
+            .args([
+                "-subj",
+                "/CN=127.0.0.1",
+                "-addext",
+                "subjectAltName=IP:127.0.0.1",
+            ])
+            .output()
+            .expect("OpenSSL is installed for the local transport fixture");
+        assert!(generated.status.success());
+
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let server = Command::new("openssl")
+            .args([
+                "s_server",
+                "-quiet",
+                "-www",
+                "-accept",
+                &address.port().to_string(),
+                "-cert",
+            ])
+            .arg(&cert)
+            .arg("-key")
+            .arg(&key)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("OpenSSL TLS server starts");
+        let _server = HttpsServer(server);
+        let address = SocketAddr::from(([127, 0, 0, 1], address.port()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "local HTTPS fixture did not start"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let repo = temp.path().join("client");
+        fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "--quiet"], false, 4096).unwrap();
+        let url = format!("https://127.0.0.1:{}/missing", address.port());
+        let error = git(
+            &repo,
+            &[
+                "fetch",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--depth=1",
+                "--",
+                &url,
+                "HEAD",
+            ],
+            true,
+            4096,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("plugin Git operation failed"));
+    }
+
+    #[test]
+    fn https_package_acquisition_fetches_a_pinned_commit_with_a_trusted_local_ca() {
+        use std::net::{SocketAddr, TcpStream};
+
+        struct HttpsServer(Child);
+        impl Drop for HttpsServer {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        const SERVER: &str = r#"
+import http.server, os, ssl, subprocess, sys, urllib.parse
+root, cert, key, port, exec_path = sys.argv[1:]
+backend = os.path.join(exec_path, 'git-http-backend')
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self): self.handle_git()
+    def do_POST(self): self.handle_git()
+    def handle_git(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        length = int(self.headers.get('Content-Length', '0'))
+        body = self.rfile.read(length) if length else b''
+        env = {
+            'PATH': exec_path + ':/usr/bin:/bin',
+            'GIT_PROJECT_ROOT': root,
+            'GIT_HTTP_EXPORT_ALL': '1',
+            'PATH_INFO': urllib.parse.unquote(parsed.path),
+            'QUERY_STRING': parsed.query,
+            'REQUEST_METHOD': self.command,
+            'CONTENT_TYPE': self.headers.get('Content-Type', ''),
+            'CONTENT_LENGTH': str(length),
+            'REMOTE_USER': '',
+            'REMOTE_ADDR': self.client_address[0],
+        }
+        if self.headers.get('Git-Protocol'):
+            env['HTTP_GIT_PROTOCOL'] = self.headers['Git-Protocol']
+        result = subprocess.run([backend], env=env, input=body,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        headers, separator, payload = result.stdout.partition(b'\r\n\r\n')
+        if not separator:
+            self.send_error(500)
+            return
+        lines = headers.decode('latin1').split('\r\n')
+        status = 200
+        for line in lines:
+            if line.startswith('Status:'):
+                status = int(line.split()[1])
+        self.send_response(status)
+        for line in lines:
+            if ':' in line and not line.startswith('Status:'):
+                name, value = line.split(':', 1)
+                self.send_header(name, value.strip())
+        self.end_headers()
+        self.wfile.write(payload)
+    def log_message(self, *_args): pass
+server = http.server.ThreadingHTTPServer(('127.0.0.1', int(port)), Handler)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(cert, key)
+server.socket = context.wrap_socket(server.socket, server_side=True)
+server.serve_forever()
+"#;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let cert = root.join("server.pem");
+        let key = root.join("server-key.pem");
+        let generated = Command::new("openssl")
+            .args([
+                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-keyout",
+            ])
+            .arg(&key)
+            .arg("-out")
+            .arg(&cert)
+            .args([
+                "-subj",
+                "/CN=127.0.0.1",
+                "-addext",
+                "subjectAltName=IP:127.0.0.1",
+            ])
+            .output()
+            .expect("OpenSSL is installed for the local transport fixture");
+        assert!(generated.status.success());
+
+        let source_repo = root.join("source");
+        let package = source_repo.join("plugins/fixture");
+        let remote = root.join("fixture.git");
+        let git_bin = crate::selection::resolve_utility("git").unwrap();
+        let fixture_git = |cwd: &Path, args: &[&str]| {
+            let output = Command::new(&git_bin)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_ALLOW_PROTOCOL", "file")
+                .args(["-C", cwd.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("ahu-plugin.md"),
+            "---\nokf_version: '0.2'\ntype: ahu:plugin\nschema_version: 1\nid: fixture\npackage: fixture-package\nhost_api: 1\ncargo_manifest: Cargo.toml\n---\nfixture\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = 'fixture-package'\nversion = '1.0.0'\n",
+        )
+        .unwrap();
+        fixture_git(&source_repo, &["init", "--quiet"]);
+        fixture_git(&source_repo, &["add", "--all"]);
+        fixture_git(
+            &source_repo,
+            &[
+                "-c",
+                "user.name=ahu-test",
+                "-c",
+                "user.email=ahu-test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+        let revision = String::from_utf8(fixture_git(&source_repo, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_string();
+        fixture_git(
+            &root,
+            &["init", "--bare", "--quiet", remote.to_str().unwrap()],
+        );
+        fixture_git(
+            &source_repo,
+            &[
+                "push",
+                "--quiet",
+                remote.to_str().unwrap(),
+                "HEAD:refs/heads/main",
+            ],
+        );
+        let remote_arg = format!("--git-dir={}", remote.display());
+        fixture_git(&root, &[&remote_arg, "update-server-info"]);
+
+        let exec_path = String::from_utf8(fixture_git(&root, &["--exec-path"]))
+            .unwrap()
+            .trim()
+            .to_string();
+        let port_probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = port_probe.local_addr().unwrap().port();
+        drop(port_probe);
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let server = Command::new("python3")
+            .args(["-c", SERVER])
+            .arg(&root)
+            .arg(&cert)
+            .arg(&key)
+            .arg(port.to_string())
+            .arg(exec_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("Python 3 starts the local Git HTTPS fixture");
+        let _server = HttpsServer(server);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "local Git HTTPS server did not start"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let url = format!("https://127.0.0.1:{port}/fixture.git");
+        let binding = Binding {
+            schema_version: 1,
+            id: "fixture".into(),
+            version: "1.0.0".into(),
+            source: crate::plugin_binding::Source {
+                kind: SourceKind::Git,
+                repository: url,
+                revision,
+                sha256: digest(&package).unwrap(),
+                subdirectory: Some("plugins/fixture".into()),
+            },
+            compatibility: crate::plugin_binding::Compatibility {
+                ahu: env!("CARGO_PKG_VERSION").into(),
+                host_api: 1,
+            },
+            enabled: false,
+            grants: vec![],
+        };
+        let stage = root.join("stage");
+        fs::create_dir(&stage).unwrap();
+        let acquired = materialize_with_ca(&stage, &binding, Some(&cert)).unwrap();
+        assert_eq!(digest(&acquired).unwrap(), binding.source.sha256);
+        assert_eq!(
+            fs::read(acquired.join("ahu-plugin.md")).unwrap(),
+            fs::read(package.join("ahu-plugin.md")).unwrap()
         );
     }
 

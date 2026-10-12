@@ -182,9 +182,10 @@ plugin. Core must reevaluate grants when reconnecting. This is an in-process
 capability boundary, not isolation from arbitrary same-user code; no terminal
 plugin wire protocol or plugin-selected storage path is added.
 
+CLI and MCP task inspection use the service's scoped `Inspection` interface.
 Existing launch, cancel, approval and message commands, plus headless wait/result
-attempt inspection, remain on their current core paths. No production
-`ExecutionAdapter` in this change. A future adapter integration must place
+attempt inspection, remain on their current core paths. This change adds no
+production `ExecutionAdapter`. A future adapter integration must place
 registration before startup and retain the existing launch/admission and native
 approval checks; wrapping an already executed launch in `register_admitted`
 would be incorrect. Consumers cannot use `Submit` to bypass that prerequisite.

@@ -171,8 +171,11 @@ The opt-in [core agent-task service V1](../agent-task-service.md) keeps scoped
 ownership, monotonic revisions, operation receipts and one-shot effect claims in
 primary-owned `agent-tasks-v1/` coordination. It reuses the existing state and
 record-discovery helpers without rewriting task records or importing native
-history. It is separate from terminal Host V1; existing CLI/MCP commands are not
-yet routed through it. Core admission and execution ownership remain prerequisites.
+history. CLI and MCP task inspection use its scoped read interface. Launch,
+cancel, approval, message, and headless wait/result operations remain on their
+existing core paths; the service has no production execution adapter yet. It is
+separate from terminal Host V1 and does not import native history. Core admission
+and execution ownership remain prerequisites.
 
 The state reference in docs/reference.md at the repository root details storage
 paths and explicit legacy lookup configuration. [Task identity](task-identity.md) records
