@@ -1736,8 +1736,9 @@ activate this session package.
 `.agents/ahu/plugins/<id>.md` in the selected checkout's HEAD. Use `ahu --repo PATH`
 to select another checkout. It pins the commit once and reads local Git objects;
 index and working-tree changes, including untracked bindings, are excluded.
-An absent binding directory yields an empty inventory; a repository without a
-commit is an error. No ahu project configuration, context lock, credentials,
+An absent binding directory or a genuinely unborn HEAD yields an empty inventory
+(`revision: null` for unborn HEAD). Malformed refs or missing committed objects
+remain errors. No ahu project configuration, context lock, credentials,
 native auth stores, or local package selection is consulted.
 
 This mode accepts the [project binding schema](project-documents.md#plugin-binding-foundation),
@@ -1770,7 +1771,8 @@ launch readiness or validate the project's context lock.
 verified package matching the source, identity and version pins. These checks
 also apply to `AHU_PLUGIN_PATH` packages. A single enabled binding selects that
 host by default; multiple enabled bindings require `AHU_INTERACTIVE_PLUGIN=<id>`.
-Explicit `cmux` retains the compiled host and `none` disables hosting.
+Explicit `cmux` retains the compiled host and `none` disables hosting and selects
+no inventory rows. Both names are reserved and cannot be used as binding IDs.
 
 ### Project-local installation lifecycle
 
@@ -1890,12 +1892,20 @@ alone does not remove its task record or establish safe cleanup.
 
 If authority was already revoked by a direct binding edit, task removal still
 fails closed. To recover, explicitly review and restore the committed enabled state and the
-`interactive-backend` grant in the task's launching checkout. Restore the exact
-recorded package if it was deleted: recover its pinned source and binding version,
-then use `plugins install` or `plugins update` as appropriate; updates retain old
-versions. Refresh the context lock with policy changes. Remove the tasks while
-that trusted version is available, then disable and remove the package in the
-order above. If the package cannot safely be trusted or recovered, leave the task
+`interactive-backend` grant in the task's launching checkout. Package recovery depends
+on the task's frozen host pin:
+
+- For an installed package (`discovered_root` is absent), restore the exact recorded
+  binding, package, and version, including its pinned source and executable identity.
+  Recover the pinned source and commit the recorded binding, then use
+  `plugins install` or `plugins update` as appropriate; updates retain old versions.
+- For a discovered package, restore the exact trusted package at the recorded
+  `discovered_root` path, including executable permissions. Installing a copy in
+  the package store or changing `AHU_PLUGIN_PATH` does not replace that frozen path.
+
+Refresh the context lock with policy changes. Remove the tasks while the recorded
+package is available and authorized, then disable and remove the package in the
+order above. If its identity or authority cannot safely be restored, leave the task
 records and work intact; ahu does not execute a disabled package or substitute a
 different host to bypass this check.
 

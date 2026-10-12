@@ -95,8 +95,9 @@ pub fn inventory() -> Result<Vec<PluginStatus>> {
         ).with_kind(ErrorKind::Usage));
     }
     for plugin in &mut plugins {
-        plugin.selected =
-            plugin.id == selection.id && (selection.source != "build-default" || compiled);
+        plugin.selected = selection.id != "none"
+            && plugin.id == selection.id
+            && (selection.source != "build-default" || compiled);
         plugin.selection_source = selection.source;
     }
     Ok(plugins)

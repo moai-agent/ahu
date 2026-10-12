@@ -91,6 +91,11 @@ pub fn parse(text: &str, expected_id: &str) -> Result<(Binding, crate::okf::Docu
             "plugin binding identity must match its plain filename",
         ));
     }
+    if matches!(id.as_str(), "none" | "cmux") {
+        return Err(Error::new(format!(
+            "plugin binding id '{id}' is reserved; choose an id other than none or cmux"
+        )));
+    }
     if binding.schema_version != 1 || binding.compatibility.host_api != 1 {
         return Err(Error::new("unsupported plugin binding schema or host API"));
     }

@@ -169,11 +169,15 @@ fn committed_symlinks_and_nested_directories_are_refused() {
 }
 
 #[test]
-fn missing_bindings_are_empty_but_missing_commits_and_excess_entries_fail() {
+fn absent_committed_bindings_are_empty_but_excess_entries_fail() {
     let root = tempfile::tempdir().unwrap();
     assert!(!inventory(root.path()).status.success());
     common::git(root.path(), &["init", "-q"]);
-    assert!(!inventory(root.path()).status.success());
+    let output = inventory(root.path());
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["revision"], serde_json::Value::Null);
+    assert_eq!(value["bindings"], serde_json::json!([]));
     common::git(
         root.path(),
         &[
@@ -325,4 +329,143 @@ fn repository_selector_and_text_help_explain_the_inspection_boundary() {
     let help = common::ahu().args(["help", "plugins"]).output().unwrap();
     assert!(help.status.success());
     assert!(String::from_utf8_lossy(&help.stdout).contains("--project"));
+}
+
+fn selected_inventory(root: &Path, selection: Option<&str>) -> Output {
+    let mut command = common::ahu();
+    command
+        .current_dir(root)
+        .env_remove("AHU_PLUGIN_PATH")
+        .env_remove("AHU_INTERACTIVE_PLUGIN");
+    if let Some(selection) = selection {
+        command.env("AHU_INTERACTIVE_PLUGIN", selection);
+    }
+    command
+        .args(["plugins", "--output", "json"])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn reserved_committed_binding_ids_are_rejected() {
+    for id in ["none", "cmux"] {
+        for enabled in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            common::git(root.path(), &["init", "-q"]);
+            write(
+                root.path(),
+                &format!("{id}.md"),
+                &document(id).replace("enabled: true", &format!("enabled: {enabled}")),
+            );
+            commit(root.path());
+            for output in [
+                inventory(root.path()),
+                selected_inventory(root.path(), Some("none")),
+                selected_inventory(root.path(), Some("cmux")),
+                selected_inventory(root.path(), None),
+            ] {
+                assert!(!output.status.success(), "{id}: {output:?}");
+                assert!(output.stdout.is_empty(), "{output:?}");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains(&format!("plugin binding id '{id}' is reserved")),
+                    "{output:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn none_selects_no_committed_binding_and_never_activates() {
+    let root = repo();
+    let output = selected_inventory(root.path(), Some("none"));
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["selected"] == false)
+    );
+    let output = common::ahu()
+        .current_dir(root.path())
+        .env_remove("AHU_PLUGIN_PATH")
+        .env("AHU_INTERACTIVE_PLUGIN", "none")
+        .args(["plugins", "--probe"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+}
+
+#[test]
+fn corrupt_refs_missing_objects_and_malformed_policy_are_not_unborn() {
+    for damage in [
+        "ref",
+        "commit",
+        "tree",
+        "blob",
+        "policy",
+        "config",
+        "detached",
+        "invalid-head",
+    ] {
+        let root = repo();
+        match damage {
+            "ref" => {
+                let reference = common::git(root.path(), &["symbolic-ref", "HEAD"]);
+                std::fs::write(root.path().join(".git").join(reference), "broken\n").unwrap();
+            }
+            "invalid-head" => {
+                std::fs::write(
+                    root.path().join(".git/HEAD"),
+                    "ref: refs/heads/invalid..branch\n",
+                )
+                .unwrap();
+            }
+            "config" => {
+                std::fs::write(root.path().join(".git/config"), "[invalid\n").unwrap();
+            }
+            "detached" => {
+                std::fs::write(
+                    root.path().join(".git/HEAD"),
+                    format!("{}\n", "a".repeat(40)),
+                )
+                .unwrap();
+            }
+            "policy" => {
+                write(root.path(), "fixture.md", "invalid");
+                commit(root.path());
+            }
+            _ => {
+                let spec = match damage {
+                    "commit" => "HEAD",
+                    "tree" => "HEAD^{tree}",
+                    _ => "HEAD:.agents/ahu/plugins/fixture.md",
+                };
+                let object = common::git(root.path(), &["rev-parse", spec]);
+                std::fs::remove_file(
+                    root.path()
+                        .join(".git/objects")
+                        .join(&object[..2])
+                        .join(&object[2..]),
+                )
+                .unwrap();
+            }
+        }
+        let output = inventory(root.path());
+        assert!(!output.status.success(), "{damage}: {output:?}");
+        assert!(output.stdout.is_empty());
+        if !matches!(damage, "config" | "invalid-head") {
+            for selection in [None, Some("none"), Some("cmux")] {
+                let output = selected_inventory(root.path(), selection);
+                assert!(
+                    !output.status.success(),
+                    "{damage}/{selection:?}: {output:?}"
+                );
+                assert!(output.stdout.is_empty());
+            }
+        }
+    }
 }

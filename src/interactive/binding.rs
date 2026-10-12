@@ -91,7 +91,9 @@ pub(crate) fn select(repo: &Repo, id: &str) -> Result<(PluginStatus, FrozenHost)
         .ok_or_else(|| refused("package has no executable host declaration"))?;
     let frozen = FrozenHost {
         binding,
-        policy_revision: inventory.revision,
+        policy_revision: inventory
+            .revision
+            .ok_or_else(|| refused("session host requires a committed project binding"))?,
         package: status.package.clone(),
         executable,
         executable_sha256: executable_digest(&status)?,

@@ -13,7 +13,7 @@ const MAX_TREE_BYTES: u64 = 64 * 1024;
 pub struct Inventory {
     pub schema_version: u32,
     pub origin: &'static str,
-    pub revision: String,
+    pub revision: Option<String>,
     pub bindings: Vec<BindingStatus>,
 }
 
@@ -30,7 +30,11 @@ pub struct BindingStatus {
 // Plumbing commands only: no checkout, filters, hooks, Cargo or remote access.
 // Deny every Git transport, including file/ext helpers, even on older Git
 // versions that do not recognize GIT_NO_LAZY_FETCH. Missing objects fail offline.
-fn git(root: &Path, args: &[&str], limit: u64) -> Result<Vec<u8>> {
+fn git_output(
+    root: &Path,
+    args: &[&str],
+    limit: u64,
+) -> Result<(std::process::ExitStatus, Vec<u8>, u64)> {
     let mut child = Command::new(crate::selection::resolve_utility("git")?)
         .args(["--no-pager", "--no-replace-objects"])
         .args(args)
@@ -47,8 +51,12 @@ fn git(root: &Path, args: &[&str], limit: u64) -> Result<Vec<u8>> {
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
+    // Drain diagnostics without retaining them. Some Git plumbing reports a
+    // broken ref as a warning despite exiting successfully.
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let diagnostics = std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
     let mut bytes = Vec::new();
     let read = child
         .stdout
@@ -59,11 +67,21 @@ fn git(root: &Path, args: &[&str], limit: u64) -> Result<Vec<u8>> {
     if read.is_err() || bytes.len() as u64 > limit {
         let _ = child.kill();
         let _ = child.wait();
+        let _ = diagnostics.join();
         return Err(Error::new(
             "project plugin Git output is unreadable or exceeds its bound",
         ));
     }
-    if !child.wait()?.success() {
+    let status = child.wait()?;
+    let diagnostic_bytes = diagnostics
+        .join()
+        .map_err(|_| Error::new("cannot inspect project plugin Git diagnostics"))??;
+    Ok((status, bytes, diagnostic_bytes))
+}
+
+fn git(root: &Path, args: &[&str], limit: u64) -> Result<Vec<u8>> {
+    let (status, bytes, _) = git_output(root, args, limit)?;
+    if !status.success() {
         return Err(Error::new(
             "cannot inspect committed project plugins offline; a local Git commit and its objects are required",
         ));
@@ -108,7 +126,42 @@ fn entries(bytes: &[u8]) -> Result<Vec<Entry>> {
 }
 
 pub fn inventory(root: &Path) -> Result<Inventory> {
-    let revision = String::from_utf8(git(root, &["rev-parse", "--verify", "HEAD^{commit}"], 128)?)
+    let (status, bytes, _) = git_output(root, &["rev-parse", "--verify", "HEAD^{commit}"], 128)?;
+    if !status.success() {
+        // An unborn HEAD is a symbolic branch whose ref is absent. A failed
+        // revision lookup alone also includes corruption and missing objects.
+        let reference = String::from_utf8(git(root, &["symbolic-ref", "--quiet", "HEAD"], 1024)?)
+            .map_err(|_| Error::new("invalid project HEAD reference"))?;
+        let reference = reference.trim();
+        if reference.starts_with("refs/heads/") {
+            git(root, &["check-ref-format", reference], 128)?;
+            // Older Git supports this bounded ref listing. Do not mistake its
+            // successful-but-warning response for an absent branch.
+            let (status, refs, diagnostics) = git_output(
+                root,
+                &[
+                    "for-each-ref",
+                    "--count=1",
+                    "--format=%(refname)",
+                    "--",
+                    reference,
+                ],
+                1024,
+            )?;
+            if status.success() && refs.is_empty() && diagnostics == 0 {
+                return Ok(Inventory {
+                    schema_version: 1,
+                    origin: "committed-project-bindings",
+                    revision: None,
+                    bindings: Vec::new(),
+                });
+            }
+        }
+        return Err(Error::new(
+            "cannot inspect committed project plugins offline; HEAD is neither a local commit nor an unborn branch",
+        ));
+    }
+    let revision = String::from_utf8(bytes)
         .map_err(|_| Error::new("invalid project commit"))?
         .trim()
         .to_string();
@@ -126,7 +179,7 @@ pub(crate) fn inventory_at(root: &Path, revision: &str) -> Result<Inventory> {
     let mut report = Inventory {
         schema_version: 1,
         origin: "committed-project-bindings",
-        revision: revision.clone(),
+        revision: Some(revision.clone()),
         bindings: Vec::new(),
     };
     // Walk each committed ancestor: a symlink or submodule must not masquerade
@@ -211,7 +264,7 @@ pub fn list(root: &Path, output_json: bool) -> Result<()> {
     } else {
         println!(
             "Project plugin bindings at {} (committed files only)",
-            report.revision
+            report.revision.as_deref().unwrap_or("unborn HEAD")
         );
         for status in report.bindings {
             println!(

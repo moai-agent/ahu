@@ -48,6 +48,63 @@ fn inventory_never_executes_plugins_or_requires_a_repository() {
 }
 
 #[test]
+fn unborn_inventory_and_activation_share_selection() {
+    let root = tempfile::tempdir().unwrap();
+    common::git(root.path(), &["init", "-q"]);
+    // Uncommitted policy is not authority, even when it is malformed.
+    std::fs::create_dir_all(root.path().join(".agents/ahu/plugins")).unwrap();
+    std::fs::write(
+        root.path().join(".agents/ahu/plugins/fixture.md"),
+        "invalid",
+    )
+    .unwrap();
+    for selection in [None, Some("none"), Some("cmux")] {
+        let mut command = fixture_command(root.path());
+        if let Some(value) = selection {
+            command.env("AHU_INTERACTIVE_PLUGIN", value);
+        }
+        let output = command
+            .args(["plugins", "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{selection:?}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let plugins = value["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(
+            plugins[0]["selected"],
+            selection.map_or(cfg!(feature = "cmux-plugin"), |v| v == "cmux")
+        );
+        assert!(!root.path().join("executed").exists());
+
+        let mut probe = fixture_command(root.path());
+        std::fs::write(
+            root.path().join("cmux"),
+            include_str!("fixtures/cmux-host.py"),
+        )
+        .unwrap();
+        probe
+            .env("HOST_ROOT", root.path())
+            .env("HOST_MODE", "normal");
+        if let Some(value) = selection {
+            probe.env("AHU_INTERACTIVE_PLUGIN", value);
+        }
+        let output = probe
+            .args(["plugins", "--probe", "--output", "json"])
+            .output()
+            .unwrap();
+        let active = cfg!(feature = "cmux-plugin") && selection != Some("none");
+        assert_eq!(output.status.success(), active, "{selection:?}: {output:?}");
+        assert_eq!(root.path().join("pinged").exists(), active);
+        if active {
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["plugin_id"], "cmux");
+            std::fs::remove_file(root.path().join("pinged")).unwrap();
+        }
+    }
+}
+
+#[test]
 fn unknown_or_empty_selection_fails_without_execution() {
     let root = tempfile::tempdir().unwrap();
     for selection in ["", "other", "CMUX", " cmux"] {

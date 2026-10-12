@@ -1081,6 +1081,82 @@ fn doctor_attributes_external_reachability_separately_from_native_cmux() {
         "{output:?}"
     );
     assert!(stdout.contains("host         reachable"), "{output:?}");
-    assert!(stdout.contains("native cmux  unavailable"), "{output:?}");
+    assert!(output.status.success(), "{output:?}");
+    let warning = if cfg!(feature = "cmux-plugin") {
+        "native cmux  unavailable: cmux executable was not found.\nNative cmux workspace, group, and integration operations are unavailable.\nInstall cmux, or set AHU_CMUX_BIN to its executable.\n"
+    } else {
+        "native cmux  unavailable: compiled adapter not included; reachability not checked\n"
+    };
+    assert!(stdout.contains(warning), "{output:?}");
+    // Account readiness, missing bundled skills, and four native integrations
+    // each warn; an unavailable compiled cmux adds one independent warning.
+    let warnings = if cfg!(feature = "cmux-plugin") { 7 } else { 6 };
+    assert!(stdout.contains(&format!("No general prerequisite failures found. Review {warnings} warning(s); some modes or account checks may still prevent launch.")), "{output:?}");
+    assert!(!stdout.contains("problem(s) would block"), "{output:?}");
     assert!(!stdout.contains("cmux         reachable"), "{output:?}");
+}
+
+#[test]
+fn discovered_task_removal_requires_original_path_and_executable_permissions() {
+    const CASE: &str = "discovered_task_removal_requires_original_path_and_executable_permissions";
+    if !common::in_harness_fixture(CASE) {
+        return;
+    }
+    let (repo, source, package, dir, record) = launch_fixture("durable", true);
+    assert_eq!(
+        record
+            .session_host
+            .as_ref()
+            .unwrap()
+            .discovered_root
+            .as_ref(),
+        Some(&package)
+    );
+    succeeds(
+        installed_command(repo.path())
+            .args(["run-task", "--task-dir", dir.to_str().unwrap()])
+            .output()
+            .unwrap(),
+    );
+    succeeds(
+        installed_command(repo.path())
+            .args(["plugins", "install", "fixture"])
+            .output()
+            .unwrap(),
+    );
+    let saved = package.with_extension("saved");
+    std::fs::rename(&package, &saved).unwrap();
+    let marker = source.path().join("started");
+    std::fs::remove_file(&marker).unwrap();
+    // Neither installed data nor redirecting discovery replaces the frozen path.
+    for discovery in [None, Some(&saved)] {
+        let mut command = installed_command(repo.path());
+        if let Some(discovery) = discovery {
+            command.env("AHU_PLUGIN_PATH", discovery);
+        }
+        let output = command.args(["remove", &record.task_id]).output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(dir.exists());
+        assert!(record.worktree.exists());
+        assert!(!marker.exists());
+    }
+    std::fs::rename(&saved, &package).unwrap();
+    let executable = package.join("bin/host");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let output = installed_command(repo.path())
+        .args(["remove", &record.task_id])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(dir.exists());
+    assert!(!marker.exists());
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    succeeds(
+        installed_command(repo.path())
+            .args(["remove", &record.task_id])
+            .output()
+            .unwrap(),
+    );
+    assert!(!record.worktree.exists());
+    assert!(marker.exists());
 }
