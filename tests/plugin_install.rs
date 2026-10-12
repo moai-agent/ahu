@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 fn temp() -> tempfile::TempDir {
-    tempfile::tempdir_in("/private/tmp").unwrap()
+    let root = fs::canonicalize(std::env::temp_dir()).unwrap();
+    tempfile::tempdir_in(root).unwrap()
 }
 fn write(root: &Path, relative: &str, bytes: &str) {
     let path = root.join(relative);

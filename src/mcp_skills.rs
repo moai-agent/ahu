@@ -380,6 +380,119 @@ mod tests {
         root
     }
 
+    fn bundled_fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        for (name, text) in super::super::BUNDLED_SKILLS {
+            let directory = root.path().join(".agents/skills").join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("SKILL.md"), text).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn skill_tool_arguments_are_exact_bounded_and_allowlisted() {
+        let uri = format!(
+            "ahu://skills/{}/SKILL.md",
+            super::super::BUNDLED_SKILLS[0].0
+        );
+        assert!(validate_tool_arguments("ahu_skills_list", &json!({})).is_ok());
+        assert!(validate_tool_arguments("ahu_skills_list", &json!({"cursor":"digest:2"})).is_ok());
+        assert!(validate_tool_arguments("ahu_skills_get", &json!({"uri":uri})).is_ok());
+        for (name, arguments) in [
+            ("ahu_skills_list", json!([])),
+            ("ahu_skills_list", json!({"extra":true})),
+            ("ahu_skills_list", json!({"cursor":7})),
+            (
+                "ahu_skills_list",
+                json!({"cursor":"x".repeat(MAX_CURSOR_BYTES + 1)}),
+            ),
+            ("ahu_skills_get", json!({})),
+            (
+                "ahu_skills_get",
+                json!({"uri":"ahu://skills/other/SKILL.md"}),
+            ),
+            (
+                "ahu_skills_get",
+                json!({"uri":"x".repeat(MAX_URI_BYTES + 1)}),
+            ),
+        ] {
+            assert!(validate_tool_arguments(name, &arguments).is_err());
+        }
+    }
+
+    #[test]
+    fn capabilities_and_handlers_gate_skill_access_and_read_verified_resources() {
+        let empty = tempfile::tempdir().unwrap();
+        let absent = capabilities(empty.path());
+        assert!(absent.get("resources").is_none());
+        assert!(absent["extensions"].get(EXTENSION).is_none());
+
+        let root = bundled_fixture();
+        let advertised = capabilities(root.path());
+        assert_eq!(advertised["extensions"][EXTENSION], json!({}));
+        assert_eq!(advertised["resources"], json!({}));
+
+        let id = json!(7);
+        assert!(handle(root.path(), &id, "unrelated/method", &json!({}), true).is_none());
+        let legacy = handle(root.path(), &id, "skills/list", &json!({}), false).unwrap();
+        assert_eq!(legacy["error"]["code"], -32601);
+        let missing = handle(root.path(), &id, "skills/list", &json!({}), true).unwrap();
+        assert_eq!(missing["error"]["code"], -32021);
+        assert_eq!(
+            missing["error"]["data"]["requiredCapabilities"]["extensions"][EXTENSION],
+            json!({})
+        );
+
+        let params = json!({
+            "_meta": {"io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {EXTENSION: {}}
+            }}
+        });
+        let listed = handle(root.path(), &id, "skills/list", &params, true).unwrap();
+        assert_eq!(listed["result"]["resultType"], "complete");
+        assert_eq!(
+            listed["result"]["skills"].as_array().unwrap().len(),
+            PAGE_SIZE
+        );
+        let cursor = listed["result"]["nextCursor"].as_str().unwrap();
+        let second_page = execute(root.path(), "skills/list", &json!({"cursor":cursor})).unwrap();
+        assert!(!second_page["skills"].as_array().unwrap().is_empty());
+
+        let name = super::super::BUNDLED_SKILLS[0].0;
+        let uri = format!("ahu://skills/{name}/SKILL.md");
+        let manifest = handle(
+            root.path(),
+            &id,
+            "skills/get",
+            &json!({"uri":uri,"_meta":params["_meta"]}),
+            true,
+        )
+        .unwrap();
+        assert_eq!(manifest["result"]["skill"]["uri"], uri);
+        assert!(manifest["result"].get("contents").is_none());
+        let tool_result = call_tool(root.path(), "ahu_skills_get", &json!({"uri":uri})).unwrap();
+        assert!(tool_result["contents"].is_array());
+        let resource = handle(
+            root.path(),
+            &id,
+            "resources/read",
+            &json!({"uri":uri}),
+            true,
+        )
+        .unwrap();
+        assert_eq!(resource["result"]["contents"][0]["uri"], uri);
+        let invalid = handle(
+            root.path(),
+            &id,
+            "resources/read",
+            &json!({"uri":"ahu://skills/other/SKILL.md"}),
+            true,
+        )
+        .unwrap();
+        assert_eq!(invalid["error"]["code"], -32602);
+    }
+
     #[test]
     fn verifies_exact_bytes_and_metadata() {
         let root = fixture();
