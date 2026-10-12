@@ -44,7 +44,9 @@ references, not a replacement for task identity or delivery authority.[^commands
 
 Record schema 4 writes these version-7 IDs and adds the `waiting-for-approval`
 state. Schema 3 also used version-7 IDs; schema 2 used 18-character hex IDs.
-The build reads schemas 2, 3, and 4 without rewriting their IDs. It refuses
+Schema 5 freezes executable session-host identity; older binaries refuse it
+rather than interpreting external identifiers as cmux workspaces. The build reads
+schemas 2, 3, 4, and 5 without rewriting their IDs. It refuses
 schema 1, whose digest field reinterprets file bytes as delivered bytes.[^task]
 
 The repository-scoped task index maps IDs to durable state. Each entry holds the

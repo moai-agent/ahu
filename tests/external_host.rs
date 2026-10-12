@@ -31,13 +31,77 @@ fn fixture(root: &Path, mode: &str) -> PathBuf {
                 serde_json::to_string(&root.join("started")).unwrap()
             ),
         );
+    let script = if mode.starts_with("durable") {
+        script.replace(
+            "STATE = \"\"",
+            &format!(
+                "STATE = {}",
+                serde_json::to_string(&root.join("backend.json")).unwrap()
+            ),
+        )
+    } else {
+        script
+    };
     std::fs::write(package.join("bin/host"), script).unwrap();
     std::fs::set_permissions(
         package.join("bin/host"),
         std::fs::Permissions::from_mode(0o700),
     )
     .unwrap();
-    package.canonicalize().unwrap()
+    let package = package.canonicalize().unwrap();
+    authorize(root, &package);
+    package
+}
+fn authorize(root: &Path, package: &Path) -> ahu::plugin_binding::Binding {
+    use ahu::plugin_binding::*;
+    let digest = ahu::plugin_install::digest(package).unwrap();
+    let binding = Binding {
+        schema_version: 1,
+        id: "fixture".into(),
+        version: "0.1.0".into(),
+        source: Source {
+            repository: package.to_str().unwrap().into(),
+            revision: digest.clone(),
+            sha256: digest,
+            subdirectory: None,
+            kind: SourceKind::Local,
+        },
+        compatibility: Compatibility {
+            ahu: env!("CARGO_PKG_VERSION").into(),
+            host_api: 1,
+        },
+        enabled: true,
+        grants: vec![Grant::InteractiveBackend],
+    };
+    common::git(root, &["init", "-q"]);
+    save_binding(root, &binding);
+    binding
+}
+fn save_binding(root: &Path, binding: &ahu::plugin_binding::Binding) {
+    let directory = root.join(".agents/ahu/plugins");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("fixture.md"),
+        ahu::okf::Document::new("ahu:plugin-binding", binding, "")
+            .unwrap()
+            .render()
+            .unwrap(),
+    )
+    .unwrap();
+    common::git(root, &["add", ".agents"]);
+    common::git(
+        root,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "synthetic binding",
+        ],
+    );
 }
 fn command(package: &Path) -> std::process::Command {
     let mut command = common::ahu();
@@ -91,7 +155,7 @@ fn executable_discovery_never_runs_and_explicit_probe_negotiates() {
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["plugin_id"], "fixture");
         assert_eq!(value["protocol_version"], 1);
-        assert_eq!(value["persistent_sessions"], false);
+        assert_eq!(value["persistent_sessions"], true);
         assert_eq!(
             marker(root.path())["argv"],
             serde_json::json!(["--ahu-host-protocol=1"])
@@ -172,36 +236,12 @@ fn host_operations_and_partial_start_classification() {
         let root = PathBuf::from(std::env::var_os("FIXTURE_ROOT").unwrap());
         let selected = interactive::plugins::status().unwrap();
         let host = ExternalHost::connect(&selected).unwrap();
-        assert!(host.check_persistence().is_err());
+        assert!(host.check_persistence().is_ok());
         if mode == "duplicate_workspace" {
             assert!(host.workspaces().is_err());
             drop(host);
             assert_stopped(&root);
             return;
-        }
-        if mode == "normal" {
-            let fixture_repo = common::TestRepo::new();
-            let repo = ahu::git::discover(fixture_repo.path()).unwrap();
-            let manager = interactive::repository::RepositoryManager::new(&host, &repo);
-            assert!(
-                manager
-                    .ensure_group(&mut Vec::new())
-                    .unwrap_err()
-                    .to_string()
-                    .contains("cannot own durable sessions")
-            );
-            assert!(
-                manager
-                    .group_coordinator("unused", "fixture", "fixture", "fixture", &[])
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("cannot own durable sessions")
-            );
-            assert!(matches!(
-                manager.create_task_workspace("task", "", &root, "unused", false, &mut Vec::new()),
-                Err(WorkspaceCreationError::NotCreated(_))
-            ));
         }
         if mode != "backpressure" {
             host.create_group("fixture", &root).unwrap();
@@ -311,6 +351,7 @@ fn host_operations_and_partial_start_classification() {
         let root_path = root.path().canonicalize().unwrap();
         let output = common::run_child_case(CASE, |command| {
             command
+                .current_dir(root.path())
                 .env("AHU_PLUGIN_PATH", &package)
                 .env("AHU_INTERACTIVE_PLUGIN", "fixture")
                 .env("FIXTURE_MODE", mode)
@@ -321,32 +362,43 @@ fn host_operations_and_partial_start_classification() {
 }
 
 #[test]
-fn durable_paths_refuse_external_identity_before_execution() {
-    const CASE: &str = "durable_paths_refuse_external_identity_before_execution";
-    if common::is_child_case(CASE) {
-        for result in [
-            interactive::discover_for_tasks(),
-            interactive::discover_for_coordinator().map(|_| unreachable!()),
-        ] {
-            assert!(
-                result
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("cannot own durable sessions")
-            );
-        }
-        return;
-    }
+fn durable_paths_require_committed_authority_before_execution() {
     let root = tempfile::tempdir().unwrap();
     let package = fixture(root.path(), "normal");
-    let output = common::run_child_case(CASE, |command| {
-        command
-            .env("AHU_PLUGIN_PATH", package)
-            .env("AHU_INTERACTIVE_PLUGIN", "fixture");
-    });
-    assert!(output.status.success(), "{output:?}");
-    assert!(!root.path().join("started").exists());
+    let mut binding = authorize(root.path(), &package);
+    for reason in ["disabled", "ungranted", "incompatible", "absent"] {
+        binding.enabled = reason != "disabled";
+        binding.grants = if reason == "ungranted" {
+            vec![]
+        } else {
+            vec![ahu::plugin_binding::Grant::InteractiveBackend]
+        };
+        binding.compatibility.ahu = if reason == "incompatible" {
+            "99.0.0".into()
+        } else {
+            env!("CARGO_PKG_VERSION").into()
+        };
+        save_binding(root.path(), &binding);
+        if reason == "absent" {
+            common::git(root.path(), &["rm", ".agents/ahu/plugins/fixture.md"]);
+            common::git(
+                root.path(),
+                &[
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "commit",
+                    "-qm",
+                    "remove synthetic binding",
+                ],
+            );
+        }
+        let output = command(&package)
+            .args(["plugins", "--probe"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{reason}: {output:?}");
+        assert!(!root.path().join("started").exists());
+    }
 }
 
 #[test]
@@ -424,6 +476,7 @@ fn activation_rechecks_paths_after_discovery() {
     let package = fixture(root.path(), "normal");
     let output = common::run_child_case(CASE, |command| {
         command
+            .current_dir(root.path())
             .env("AHU_PLUGIN_PATH", &package)
             .env("AHU_INTERACTIVE_PLUGIN", "fixture");
     });
@@ -479,4 +532,306 @@ fn executable_size_special_files_and_setid_are_rejected_before_spawn() {
             .success()
     );
     assert!(!root.path().join("started").exists());
+}
+
+fn installed_command(root: &Path) -> std::process::Command {
+    let mut command = common::ahu();
+    command
+        .current_dir(root)
+        .env_remove("AHU_PLUGIN_PATH")
+        .env("AHU_INTERACTIVE_PLUGIN", "fixture")
+        .env("AHU_CMUX_BIN", root.join("no-cmux"))
+        .env("OTEL_SDK_DISABLED", "true");
+    command
+}
+fn succeeds(output: std::process::Output) {
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+fn launch_fixture(
+    mode: &str,
+    discovered: bool,
+) -> (
+    common::TestRepo,
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    ahu::task::TaskRecord,
+) {
+    let source = tempfile::tempdir().unwrap();
+    let package = fixture(source.path(), mode);
+    let binding = authorize(source.path(), &package);
+    let repo = common::TestRepo::new();
+    repo.init_config();
+    repo.add_agent("worker", "1.0.0", "claude-opus-5");
+    save_binding(repo.path(), &binding);
+    repo.commit("synthetic launch context");
+    if !discovered {
+        succeeds(
+            installed_command(repo.path())
+                .args(["plugins", "install", "fixture"])
+                .output()
+                .unwrap(),
+        );
+    }
+    let mut launch = installed_command(repo.path());
+    if discovered {
+        launch.env("AHU_PLUGIN_PATH", &package);
+    }
+    let output = launch
+        .args(["@worker", "--prompt", "synthetic task"])
+        .output()
+        .unwrap();
+    if mode == "durable_uncertain" {
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("may have started"),
+            "{output:?}"
+        );
+    } else {
+        succeeds(output);
+    }
+    let git = ahu::git::discover(repo.path()).unwrap();
+    let listing = ahu::task::list(&git).unwrap();
+    assert_eq!(listing.records.len(), 1, "{listing:?}");
+    let (dir, record) = listing.records.into_iter().next().unwrap();
+    assert!(record.session_host.is_some());
+    assert!(record.worktree.exists());
+    (repo, source, package, dir, record)
+}
+
+#[test]
+fn public_launch_focus_cancel_remove_and_uncertain_creation() {
+    const CASE: &str = "public_launch_focus_cancel_remove_and_uncertain_creation";
+    if !common::in_harness_fixture(CASE) {
+        return;
+    }
+    for discovered in [false, true] {
+        let (repo, source, package, dir, record) = launch_fixture("durable", discovered);
+        let frozen = record.session_host.as_ref().unwrap();
+        assert_eq!(frozen.discovered_root.is_some(), discovered);
+        assert_eq!(frozen.binding.version, "0.1.0");
+        assert_eq!(record.schema_version, 5);
+        let task_path = dir.join("task.json");
+        let saved_record = std::fs::read(&task_path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&saved_record).unwrap();
+        value.as_object_mut().unwrap().remove("session_host");
+        std::fs::write(&task_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(ahu::task::load(&dir).is_err());
+        value["schema_version"] = 4.into();
+        std::fs::write(&task_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(ahu::task::load(&dir).unwrap().session_host.is_none());
+        value["session_host"] = serde_json::to_value(frozen).unwrap();
+        std::fs::write(&task_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(ahu::task::load(&dir).is_err());
+        std::fs::write(&task_path, saved_record).unwrap();
+
+        assert!(!repo.path().join(".ahu/state/cmux.json").exists());
+        // No discovery environment is needed to address a recorded task.
+        succeeds(
+            installed_command(repo.path())
+                .args(["focus", &record.task_id])
+                .output()
+                .unwrap(),
+        );
+        let git = ahu::git::discover(repo.path()).unwrap();
+        let host = interactive::discover_for_record(&git, &record).unwrap();
+        let manager = interactive::repository::RepositoryManager::new(host.as_ref(), &git);
+        let mut forged = record.clone();
+        forged.session_host = None;
+        assert!(manager.close_task_workspace(&forged).is_err());
+        forged = record.clone();
+        forged.cmux_group_id = Some("someone-else".into());
+        assert!(manager.select_task_workspace(&forged).is_err());
+        forged = record.clone();
+        forged.worktree = repo.path().to_path_buf();
+        assert!(manager.close_task_workspace(&forged).is_err());
+        drop(host);
+        // Missing discovered packages fail before any host execution.
+        if discovered {
+            let saved = package.with_extension("saved");
+            std::fs::rename(&package, &saved).unwrap();
+            let output = installed_command(repo.path())
+                .args(["focus", &record.task_id])
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            std::fs::rename(saved, &package).unwrap();
+        } else {
+            // Installed selection also works without AHU_PLUGIN_PATH or an environment selector.
+            succeeds(
+                installed_command(repo.path())
+                    .env_remove("AHU_INTERACTIVE_PLUGIN")
+                    .args(["plugins", "--probe"])
+                    .output()
+                    .unwrap(),
+            );
+        }
+        // Core cancellation requires a durable supervisor confirmation before close.
+        ahu::task::set_state(&dir, ahu::task::TaskState::Running).unwrap();
+        let mut cancel = installed_command(repo.path())
+            .args(["cancel", &record.task_id, "--output", "json"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while !dir.join("cancel.json").exists() {
+            assert!(Instant::now() < deadline);
+            assert!(cancel.try_wait().unwrap().is_none());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let backend: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(source.path().join("backend.json")).unwrap())
+                .unwrap();
+        assert!(backend["workspaces"].get("workspace").is_some());
+        ahu::task::set_state(&dir, ahu::task::TaskState::Cancelled).unwrap();
+        succeeds(cancel.wait_with_output().unwrap());
+        let backend: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(source.path().join("backend.json")).unwrap())
+                .unwrap();
+        assert!(backend["workspaces"].get("workspace").is_none());
+        succeeds(
+            installed_command(repo.path())
+                .args(["remove", &record.task_id])
+                .output()
+                .unwrap(),
+        );
+        assert!(!record.worktree.exists());
+    }
+    // Terminal removal itself closes a still-present host workspace.
+    let (repo, source, _package, dir, record) = launch_fixture("durable", false);
+    succeeds(
+        installed_command(repo.path())
+            .args(["run-task", "--task-dir", dir.to_str().unwrap()])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        ahu::task::load(&dir).unwrap().state,
+        ahu::task::TaskState::Exited
+    );
+    succeeds(
+        installed_command(repo.path())
+            .args(["remove", &record.task_id])
+            .output()
+            .unwrap(),
+    );
+    let backend: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(source.path().join("backend.json")).unwrap())
+            .unwrap();
+    assert!(backend["workspaces"].get("workspace").is_none());
+
+    let (_repo, source, _package, dir, record) = launch_fixture("durable_uncertain", false);
+    assert!(record.cmux_workspace_id.is_none());
+    assert!(dir.join("prompt.txt").exists());
+    let backend: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(source.path().join("backend.json")).unwrap())
+            .unwrap();
+    assert!(backend["workspaces"].get("workspace").is_some());
+}
+
+#[test]
+fn frozen_versions_survive_updates_and_tampering_refuses_before_execution() {
+    const CASE: &str = "frozen_versions_survive_updates_and_tampering_refuses_before_execution";
+    if !common::in_harness_fixture(CASE) {
+        return;
+    }
+    let (repo, source, package, dir, record) = launch_fixture("durable", false);
+    let frozen = record.session_host.clone().unwrap();
+    let store = repo.path().join(".ahu/state/plugins/fixture");
+    let old = std::fs::read_dir(&store)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let executable = old.join("package/bin/host");
+    let original_bytes = std::fs::read(&executable).unwrap();
+    std::fs::write(
+        package.join("Cargo.toml"),
+        "[package]\nname = 'fixture-host'\nversion = '0.2.0'\n",
+    )
+    .unwrap();
+    let mut new = frozen.binding.clone();
+    new.version = "0.2.0".into();
+    new.source.sha256 = ahu::plugin_install::digest(&package).unwrap();
+    new.source.revision = new.source.sha256.clone();
+    save_binding(repo.path(), &new);
+    succeeds(
+        installed_command(repo.path())
+            .args(["plugins", "update", "fixture"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(std::fs::read_dir(&store).unwrap().count(), 2);
+    succeeds(
+        installed_command(repo.path())
+            .args(["focus", &record.task_id])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        ahu::task::load(&dir).unwrap().session_host,
+        Some(frozen.clone())
+    );
+    let output = installed_command(repo.path())
+        .args(["plugins", "disable", "fixture"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("live"));
+    assert!(executable.exists());
+    let marker = source.path().join("started");
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::write(&executable, "#!/bin/sh\nexit 99\n").unwrap();
+    let output = installed_command(repo.path())
+        .args(["focus", &record.task_id])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!marker.exists());
+    // The fixed startup entrypoint also refuses the tampered package before a harness starts.
+    let output = installed_command(repo.path())
+        .args(["run-task", "--task-dir", dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("pin mismatch"),
+        "{output:?}"
+    );
+    std::fs::write(&executable, &original_bytes).unwrap();
+    let git = ahu::git::discover(repo.path()).unwrap();
+    for change in ["digest", "protocol", "package", "source", "revision"] {
+        let mut altered = record.clone();
+        let pin = altered.session_host.as_mut().unwrap();
+        match change {
+            "digest" => pin.executable_sha256 = "0".repeat(64),
+            "protocol" => pin.executable.protocol_version = 2,
+            "package" => pin.package = "different".into(),
+            "source" => pin.binding.source.sha256 = "0".repeat(64),
+            _ => pin.policy_revision = "0".repeat(40),
+        }
+        assert!(
+            interactive::discover_for_record(&git, &altered).is_err(),
+            "{change}"
+        );
+        assert!(!marker.exists());
+    }
+    // Committed revocation is authoritative even though the old receipt grants access.
+    new.enabled = false;
+    save_binding(repo.path(), &new);
+    assert!(interactive::discover_for_record(&git, &record).is_err());
+    assert!(!marker.exists());
+    let output = installed_command(repo.path())
+        .args(["plugins", "remove", "fixture"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(executable.exists());
 }

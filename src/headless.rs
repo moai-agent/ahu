@@ -2277,7 +2277,7 @@ impl SessionCheckpoint {
         if self.schema_version != 2
             || self.task_id != id
             || record.task_id != id
-            || !matches!(record.schema_version, 2..=4)
+            || !matches!(record.schema_version, 2..=5)
             || self.attempt == 0
             || self.attempt != spec.attempt
             || self.harness != record.identity.harness

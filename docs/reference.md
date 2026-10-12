@@ -1704,9 +1704,10 @@ individual `.crate` archives are package-boundary inspection artifacts, not a
 standalone installation channel. Source installation includes local dependencies.
 
 Set `AHU_INTERACTIVE_PLUGIN=cmux` to explicitly select the compiled package for a process,
-or `AHU_INTERACTIVE_PLUGIN=none` to disable session hosting. Unset uses the build
-default. Empty, unknown, and non-Unicode values refuse selection. This is process
-configuration, not persisted project policy or an installation side effect.
+or `AHU_INTERACTIVE_PLUGIN=none` to disable session hosting. Activation without an
+environment selector uses a single enabled committed binding, otherwise the build
+default. Multiple enabled bindings require an explicit id. Empty, unknown, and
+non-Unicode values refuse selection. Process selection never grants execution.
 Actual cmux activation resolves the executable with the existing core checks,
 then the package pings cmux. Task launch checks capabilities before creating a
 worktree. No harness, model, or backend substitution occurs.
@@ -1749,12 +1750,12 @@ control. Missing local objects fail offline. No Git hooks or content filters run
 JSON schema 1 identifies `origin: committed-project-bindings`, the inspected
 `revision`, and ID-sorted `bindings`. Each entry has `path`, the typed `binding`,
 `ahu_compatible` (exact match with this ahu version), `source_verified: false`,
-`activation_supported: false`, and `activation_blockers`. Blockers always include
-`source-unverified` and `project-activation-not-supported`; disabled or incompatible
+`activation_supported: true`, and `activation_blockers`. This inventory does not
+verify packages, so blockers include `source-unverified`; disabled or incompatible
 bindings add `disabled` or `ahu-version-mismatch`. A successful listing means the
 declarations parsed, not that the source exists, its pin matches, or execution is
 approved. General OKF metadata and document bodies remain inert and are omitted
-from this report. Grants are displayed without enforcement or expansion.
+from this report. Activation separately enforces committed grants.
 
 At most 32 regular binding files are accepted, each bounded by the shared OKF
 2 MiB limit. Tree listings are bounded to 64 KiB. Symlinks (including committed
@@ -1763,12 +1764,12 @@ bindings fail the whole inventory without partial output. Inspection writes no
 state and does not require the working tree to match HEAD. It does not establish
 launch readiness or validate the project's context lock.
 
-`--project` and `--probe` are mutually exclusive. Project `enabled: true` does not
-select a process backend or authorize activation, and a project binding does not
-verify or constrain a separately supplied `AHU_PLUGIN_PATH` package. Explicit
-installation and source verification are described below. Host activation governed
-by project grants remains unsupported; the existing local executable path still
-requires its separate explicit selection and activation.
+`--project` and `--probe` are mutually exclusive. Activation requires committed
+`enabled: true`, the `interactive-backend` grant, exact ahu compatibility, and a
+verified package matching the source, identity and version pins. These checks
+also apply to `AHU_PLUGIN_PATH` packages. A single enabled binding selects that
+host by default; multiple enabled bindings require `AHU_INTERACTIVE_PLUGIN=<id>`.
+Explicit `cmux` retains the compiled host and `none` disables hosting.
 
 ### Project-local installation lifecycle
 
@@ -1861,7 +1862,7 @@ whether each version matches the current committed binding, and whether it is en
 `--project` remains a declaration-only inventory; it never reads or
 modifies installed state. Neither inventory executes a plugin or activates a host.
 
-Because current task records have no durable plugin-version pin, cleanup is
+Legacy records lack plugin-version pins, so cleanup remains
 conservative: `disable` and `remove` refuse while **any** project task is live or
 unreadable, or task ownership is uncertain. Updates retain all versions, including
 those possibly referenced by tasks. Cleanup holds the interactive and headless admission locks and locks terminal
@@ -1871,10 +1872,10 @@ working tree, removes the plugin's installed versions and staging, and retains t
 Selective version pruning and automatic reclamation are not implemented. Filesystem checks do not isolate concurrent
 hostile processes running as the same user.
 
-Project host execution and task-level plugin pinning remain incomplete: `enable`
-records project intent but does not execute or select a host; inventory continues
-to report `activation_supported: false`. Capability grants are never expanded or
-treated as authorization to execute package code by these lifecycle commands.
+Lifecycle commands do not execute package code. `enable` edits the binding;
+commit that edit before activation. Executable activation freezes a task-level
+package and executable pin. Updates preserve every installed version, and task
+operations resolve the recorded version rather than the current selection.
 
 ### Local session package discovery and selection
 
@@ -1947,8 +1948,8 @@ not enable it. JSON schema 1 retains the existing fields and adds `origin`,
 `manifest`, `cargo_manifest`, `executable`, and `activation_blocker`. The compiled cmux entry
 comes first, followed by local packages sorted by ID. Local entries always have
 `compiled: false`; source-only entries have an activation blocker. `selected: true`
-records intent, not a running host. Selection remains per-process environment
-configuration; it is not written to tasks, worktrees, or harness settings.
+records selection intent, not a running host or an execution grant. A successful
+launch freezes the verified package identity in its task record.
 
 Packages with an `executable` frontmatter mapping can be activated explicitly with
 `ahu plugins --probe [--output json]` or through `interactive::discover()`. The
@@ -1958,22 +1959,19 @@ path protections, and partial-start outcomes. Ordinary discovery never executes
 the package. Compiled cmux remains the default, and headless execution does not
 consult this inventory.
 
-**Durable external sessions remain blocked.** Existing `cmux_*` task fields and
-`cmux.json` mappings do not pin an external package identity or executable. ahu
-refuses external task launch, coordinator placement, and operations on those
-records before querying the external host. This preserves existing ownership and
-liveness interpretation. The supplied `cmux-local` package is still source-only:
-there is no executable cmux server, and its native process environment requirements
-have not been converted. Use `cmux` for existing session hosting or `none` to
-disable it. The protocol fixture proves executable activation and Host V1 calls;
-it does not launch real terminal sessions.
+Executable task launch, focus, reconciliation, cancellation cleanup and removal
+use the task's frozen `session_host` identity. Current committed grants still
+apply. Old records without that field retain compiled cmux semantics. Group
+mappings are separate for each exact external package identity; `cmux.json` is
+reserved for compiled cmux. Headless tasks do not activate a session host, and
+current-terminal coordinators do not require cmux.
 
-This is an executable protocol increment, not complete runtime plugin lifecycle
-support. Plugins run as same-user executable code, without a manifest sandbox.
-Core ownership checks do not protect against a hostile plugin or concurrent
-same-user mutation. Runtime installation/updates, durable references for multiple
-backends, non-cmux topologies, and dynamic compatibility negotiation remain future
-integration decisions. GitKB behavior is not defined or implemented here.
+The supplied `cmux-local` package remains source-only: no executable cmux server
+or reviewed native environment contract is provided. Synthetic protocol fixtures
+exercise the lifecycle without starting real terminal sessions. Plugins run as
+same-user executable code, without a manifest sandbox; ownership checks do not
+isolate hostile plugins or concurrent same-user mutation. Non-cmux topologies and
+dynamic compatibility negotiation remain unsupported.
 
 ## cmux native integration
 
@@ -2248,8 +2246,9 @@ ahu uses the one its own resolution picks; it does not search for a version that
 matches the catalog. An exact project pin can make that choice reproducible.
 Project configuration pins catalog `2026-10-09`; a mismatch is an error.
 
-Persisted task records use schema 4, including the `waiting-for-approval` state,
-and use hyphenated `UUID v7` IDs. Schema 3 records remain readable; schema 2 records
+Persisted task records use schema 5, including the frozen `session_host` binding
+and `waiting-for-approval` state, with hyphenated `UUID v7` IDs. Schemas 3 and 4
+remain readable; schema 2 records
 also remain readable with their original 18-character hex IDs. Schema 1 is refused. Launch-preview and task-inspection JSON use
 schema 1. Incompatible persisted records are refused and listed as unreadable;
 ahu does not reinterpret their digests or delete their worktrees.

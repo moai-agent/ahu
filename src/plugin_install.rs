@@ -311,7 +311,7 @@ pub fn digest(root: &Path) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn verify(root: &Path, binding: &Binding) -> Result<()> {
+pub(crate) fn verify(root: &Path, binding: &Binding) -> Result<()> {
     if digest(root)? != binding.source.sha256 {
         bail!("plugin content SHA-256 pin mismatch");
     }
@@ -445,7 +445,7 @@ fn materialize_with_ca(stage: &Path, binding: &Binding, ca_info: Option<&Path>) 
     Ok(package)
 }
 
-fn key(binding: &Binding) -> Result<String> {
+pub(crate) fn key(binding: &Binding) -> Result<String> {
     // Enablement/grants are project policy, not a new copy of package content.
     Ok(crate::util::digest_bytes(&serde_json::to_vec(&(
         &binding.id,
@@ -455,11 +455,11 @@ fn key(binding: &Binding) -> Result<String> {
     ))?))
 }
 
-fn installed(store: &Path, binding: &Binding) -> Result<PathBuf> {
+pub(crate) fn installed(store: &Path, binding: &Binding) -> Result<PathBuf> {
     Ok(store.join(&binding.id).join(key(binding)?))
 }
 
-fn verify_installed(path: &Path, binding: &Binding) -> Result<()> {
+pub(crate) fn verify_installed(path: &Path, binding: &Binding) -> Result<()> {
     state::confine_existing_dir(path)?;
     let receipt: Receipt = state::read_json_strict(&path.join("receipt.json"))?;
     if receipt.schema_version != 1 || key(&receipt.binding)? != key(binding)? {
@@ -540,7 +540,7 @@ fn require_clean_binding(repo: &crate::git::Repo, id: &str) -> Result<()> {
 fn cleanup_allowed(repo: &crate::git::Repo) -> Result<crate::headless::PluginCleanupGuard> {
     let mut guard = crate::headless::plugin_cleanup_guard(repo)?;
     let tasks = crate::task::list(repo)?;
-    // Old records do not freeze plugin installation pins. Treat any live task
+    // Legacy records do not freeze plugin installation pins. Treat any live task
     // as a possible reference, including unknown/incomplete/corrupt records.
     if !tasks.unreadable.is_empty()
         || !tasks.notes.is_empty()
@@ -772,7 +772,7 @@ pub fn list(root: &Path, output_json: bool) -> Result<()> {
                     "installation": path, "source_verified": true,
                     "matches_committed_binding": matches,
                     "enabled": matches && current.is_some_and(|s| s.binding.enabled),
-                    "activation_supported": false,
+                    "activation_supported": crate::interactive::plugins::local::read_package(&path.join("package"))?.executable.is_some(),
                 }));
                 if rows.len() > 256 {
                     bail!("installed plugin inventory exceeds 256 versions");

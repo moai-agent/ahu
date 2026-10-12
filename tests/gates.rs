@@ -514,6 +514,7 @@ fn write_record(
         harness_executable: harness_path.to_path_buf(),
         reliability_warning: None,
         enforcement,
+        session_host: None,
         cmux_group_id: None,
         cmux_workspace_id: None,
         cmux_window_id: None,
@@ -532,7 +533,7 @@ fn write_record(
 /// name, which is worse than failing.
 #[test]
 fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
-    assert_eq!(ahu::task::TASK_SCHEMA_VERSION, 4);
+    assert_eq!(ahu::task::TASK_SCHEMA_VERSION, 5);
     assert!(
         ahu::task::READABLE_SCHEMA_VERSIONS.contains(&2),
         "schema 2 is this build's immediate predecessor and must stay readable"

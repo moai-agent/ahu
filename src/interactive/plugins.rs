@@ -121,16 +121,14 @@ pub fn list(output_json: bool) -> Result<()> {
 
 /// Explicit activation is separate from read-only package discovery.
 pub fn probe(output_json: bool) -> Result<()> {
-    let status = status()?;
-    if !status.selected {
-        return Err(Error::new("no session host is selected").with_kind(ErrorKind::Prerequisite));
-    }
     let host = super::discover()?;
+    let repo = crate::git::discover(&std::env::current_dir()?);
+    let id = super::selected_id(repo.as_ref().ok())?.unwrap_or_else(|| "cmux".into());
     let capabilities = host.check_capabilities()?;
     let workspaces = host.workspaces()?;
     let report = serde_json::json!({
-        "schema_version": 1, "plugin_id": status.id,
-        "protocol_version": status.executable.as_ref().map(|e| e.protocol_version),
+        "schema_version": 1, "plugin_id": id,
+        "protocol_version": host.persistence_key().map(|_| 1),
         "capabilities": capabilities, "workspaces": workspaces,
         "persistent_sessions": host.check_persistence().is_ok(),
     });
@@ -139,7 +137,7 @@ pub fn probe(output_json: bool) -> Result<()> {
     } else {
         println!(
             "{}: activated; {} capabilities, {} workspaces; durable sessions supported={}",
-            status.id,
+            id,
             capabilities.len(),
             workspaces.len(),
             host.check_persistence().is_ok()

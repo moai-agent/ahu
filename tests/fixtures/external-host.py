@@ -9,6 +9,7 @@ import time
 MODE = "normal"
 MARKER = ""
 PLUGIN_ID = "fixture"
+STATE = ""
 
 if MARKER:
     with open(MARKER, "w") as stream:
@@ -20,6 +21,17 @@ if MARKER:
 workspaces = {}
 group = {"id": "group", "name": "fixture", "anchor_workspace_id": "anchor",
          "member_workspace_ids": ["anchor"], "is_collapsed": False}
+
+if STATE and os.path.exists(STATE):
+    with open(STATE) as stream:
+        saved = json.load(stream)
+        workspaces, group = saved["workspaces"], saved["group"]
+
+
+def persist():
+    if STATE:
+        with open(STATE, "w") as stream:
+            json.dump({"workspaces": workspaces, "group": group}, stream)
 
 
 def read_exact(size):
@@ -105,6 +117,18 @@ while True:
     elif method == "find_group":
         response["result"] = group if params["group_id"] == group["id"] else None
     elif method == "create_task_workspace":
+        if MODE.startswith("durable"):
+            import shlex
+            words = shlex.split(params["startup_command"])
+            assert words[1:3] == ["run-task", "--task-dir"]
+            with open(os.path.join(words[3], "task.json")) as stream:
+                task = json.load(stream)
+                pin = task["session_host"]
+                assert pin["package"] == "fixture-host"
+                assert pin["executable"]["protocol_version"] == 1
+                assert len(pin["executable_sha256"]) == 64
+                assert task["cmux_workspace_id"] is None
+
         if MODE == "created_then_exit":
             with open(os.path.join(params["cwd"], "startup-observed"), "w") as stream:
                 stream.write("synthetic startup side effect")
@@ -139,6 +163,9 @@ while True:
         response["error"] = {"code": "failed", "message": "unsupported fixture operation"}
     if method == "create_task_workspace" and MODE == "malformed_create":
         response["result"] = "invalid result"
+    persist()
+    if method == "create_task_workspace" and MODE == "durable_uncertain":
+        sys.exit(0)
     send(response)
     if method == "hello" and MODE == "backpressure":
         time.sleep(60)

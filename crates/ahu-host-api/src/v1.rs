@@ -86,9 +86,15 @@ pub struct WorkspaceRequest<'a> {
 /// This trait is object safe so lifecycle code can use a synthetic host in tests.
 pub trait Host {
     /// Core must refuse unbound backends before reading or mutating durable
-    /// task/group associations. Existing records belong exclusively to cmux.
+    /// task/group associations. Records without a package key belong to cmux.
     fn check_persistence(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Core's opaque durable package key. None identifies the legacy compiled cmux host.
+    /// Executable hosts receive this only after core verifies project policy and bytes.
+    fn persistence_key(&self) -> Option<String> {
+        None
     }
 
     /// Workspace inherited by the invoking process, without a host query.

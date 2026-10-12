@@ -465,6 +465,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
         launch_command: command.redacted(),
         reliability_warning: Some(harness::RELIABILITY_WARNING.to_string()),
         enforcement,
+        session_host: None,
         cmux_group_id: None,
         cmux_workspace_id: None,
         cmux_window_id: None,

@@ -32,6 +32,17 @@ pub fn mapping_path(repo: &Repo) -> Result<PathBuf> {
     Ok(state::coordination_dir(repo)?.join("cmux.json"))
 }
 
+// External versions never reuse cmux.json or another package's group mapping.
+fn host_mapping_path(repo: &Repo, host: &dyn Host) -> Result<PathBuf> {
+    match host.persistence_key() {
+        None => mapping_path(repo),
+        Some(key) => Ok(state::coordination_dir(repo)?.join(format!(
+            "host-{}.json",
+            crate::util::digest_bytes(key.as_bytes())
+        ))),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ManagedTaskWorkspace {
     pub group: Group,
@@ -74,7 +85,8 @@ impl<'a> RepositoryManager<'a> {
         let group = self
             .ensure_group(notes)
             .map_err(WorkspaceCreationError::NotCreated)?;
-        let path = mapping_path(self.repo).map_err(WorkspaceCreationError::NotCreated)?;
+        let path = host_mapping_path(self.repo, self.client)
+            .map_err(WorkspaceCreationError::NotCreated)?;
         let mapping: GroupMapping =
             state::read_json(&path).map_err(WorkspaceCreationError::NotCreated)?;
         let workspace = self.client.create_task_workspace(&WorkspaceRequest {
@@ -106,11 +118,26 @@ impl<'a> RepositoryManager<'a> {
     /// a similarly named or newly reused surface.
     fn recorded_workspace(&self, record: &TaskRecord) -> Result<Option<String>> {
         self.client.check_persistence()?;
+        if record.repo_identity != self.repo.identity() {
+            bail!("task belongs to a different repository; no workspace was selected or closed");
+        }
+        let expected = record
+            .session_host
+            .as_ref()
+            .map(|pin| pin.key())
+            .transpose()?;
+        if expected != self.client.persistence_key() {
+            bail!("task session host identity mismatch; no workspace was selected or closed");
+        }
         let Some(workspace_id) = record.cmux_workspace_id.as_deref() else {
             return Ok(None);
         };
-        if !self.client.workspaces()?.contains_key(workspace_id) {
+        let inventory = self.client.workspaces()?;
+        let Some(workspace) = inventory.get(workspace_id) else {
             return Ok(None);
+        };
+        if record.session_host.is_some() && Path::new(&workspace.directory) != record.worktree {
+            bail!("task workspace directory mismatch; no workspace was selected or closed");
         }
         let groups = self.client.list_groups(record.cmux_window_id.as_deref())?;
         let owners: Vec<_> = groups
@@ -212,7 +239,7 @@ impl<'a> RepositoryManager<'a> {
             LaunchLock::acquire_at(state::coordination_dir(self.repo)?.join("launch.lock"))?;
         let mut notes = Vec::new();
         let group = self.ensure_group(&mut notes)?;
-        let mapping: GroupMapping = state::read_json(&mapping_path(self.repo)?)?;
+        let mapping: GroupMapping = state::read_json(&host_mapping_path(self.repo, self.client)?)?;
         let window = mapping
             .window_id
             .ok_or_else(|| Error::new("cmux repository group has no known window"))?;
@@ -308,7 +335,7 @@ pub fn group_coordinator(
 }
 
 fn ensure_group(client: &dyn Host, repo: &Repo, notes: &mut Vec<String>) -> Result<Group> {
-    let path = mapping_path(repo)?;
+    let path = host_mapping_path(repo, client)?;
     let mut mapping: GroupMapping = state::read_json(&path)?;
     let current_window = client.current_window().ok().flatten();
     let groups = client.list_groups(current_window.as_deref())?;

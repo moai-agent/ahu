@@ -1,4 +1,4 @@
-//! A persistent, bounded executable transport for Host V1. No durable routing.
+//! A persistent, bounded executable transport for Host V1.
 use super::{plugins::PluginStatus, v1::*};
 use crate::util::{Error, ErrorKind, Result};
 use ahu_host_api::protocol::{self, ErrorCode, Hello, Request, Response};
@@ -20,8 +20,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
-
-pub const PERSISTENCE_BLOCKER: &str = "External hosts cannot own durable sessions yet: task cmux_* fields and cmux.json do not pin a package identity, executable digest, or protocol version. Task launch, reconciliation, and repository mutations are refused; use the compiled cmux host for those operations.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -263,6 +261,7 @@ impl Process {
 pub struct ExternalHost {
     process: RefCell<Process>,
     hello: Hello,
+    persistence_key: String,
 }
 impl ExternalHost {
     /// Another thread may set this token to cancel the current/next request.
@@ -276,6 +275,17 @@ impl ExternalHost {
         process.abort();
     }
     pub fn connect(status: &PluginStatus) -> Result<Self> {
+        let repo = crate::git::discover(&std::env::current_dir()?)?;
+        let (verified, frozen) = super::binding::select(&repo, &status.id)?;
+        if verified.manifest != status.manifest || verified.executable != status.executable {
+            return Err(Error::new("selected session host changed since discovery"));
+        }
+        Self::connect_bound(&verified, &frozen)
+    }
+    pub(crate) fn connect_bound(
+        status: &PluginStatus,
+        frozen: &super::binding::FrozenHost,
+    ) -> Result<Self> {
         let spec = status.executable.as_ref().ok_or_else(|| {
             Error::new(
                 status
@@ -295,6 +305,11 @@ impl ExternalHost {
             .tempdir_in(base)?;
         let executable = snapshot.path().join("host");
         let bytes = crate::util::read_limited(&mut source, 64 * 1024 * 1024)?;
+        if crate::util::digest_bytes(&bytes) != frozen.executable_sha256 {
+            return Err(Error::new(
+                "session host executable changed before activation",
+            ));
+        }
         let mut file = File::options()
             .write(true)
             .create_new(true)
@@ -353,6 +368,7 @@ impl ExternalHost {
         Ok(Self {
             process: RefCell::new(process),
             hello,
+            persistence_key: frozen.key()?,
         })
     }
     fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T> {
@@ -423,8 +439,8 @@ fn path_text(path: &Path) -> Result<&str> {
         .ok_or_else(|| Error::new("external host paths must be absolute UTF-8 paths"))
 }
 impl Host for ExternalHost {
-    fn check_persistence(&self) -> Result<()> {
-        Err(Error::new(PERSISTENCE_BLOCKER).with_kind(ErrorKind::Prerequisite))
+    fn persistence_key(&self) -> Option<String> {
+        Some(self.persistence_key.clone())
     }
     fn inherited_workspace(&self) -> Option<String> {
         self.hello.inherited_workspace.clone()

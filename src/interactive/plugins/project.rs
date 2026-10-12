@@ -115,6 +115,14 @@ pub fn inventory(root: &Path) -> Result<Inventory> {
     if !oid(&revision) {
         return Err(Error::new("invalid project commit"));
     }
+    inventory_at(root, &revision)
+}
+
+pub(crate) fn inventory_at(root: &Path, revision: &str) -> Result<Inventory> {
+    if !oid(revision) {
+        return Err(Error::new("invalid project commit"));
+    }
+    let revision = revision.to_owned();
     let mut report = Inventory {
         schema_version: 1,
         origin: "committed-project-bindings",
@@ -174,13 +182,19 @@ pub fn inventory(root: &Path) -> Result<Inventory> {
         if !ahu_compatible {
             blockers.push("ahu-version-mismatch");
         }
-        blockers.extend(["source-unverified", "project-activation-not-supported"]);
+        if !binding
+            .grants
+            .contains(&plugin_binding::Grant::InteractiveBackend)
+        {
+            blockers.push("interactive-backend-not-granted");
+        }
+        blockers.push("source-unverified");
         report.bindings.push(BindingStatus {
             path: format!("{}/{name}", plugin_binding::DIRECTORY, name = entry.name),
             binding,
             ahu_compatible,
             source_verified: false,
-            activation_supported: false,
+            activation_supported: true,
             activation_blockers: blockers,
         });
     }

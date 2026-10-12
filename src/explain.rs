@@ -207,7 +207,7 @@ pub fn write_document() -> Result<PathBuf> {
 }
 
 pub fn open_in_cmux(path: &Path, focus: bool) -> Result<String> {
-    let client = crate::interactive::discover_for_tasks()?;
+    let client = crate::interactive::discover()?;
     client.open_markdown(path, focus)
 }
 

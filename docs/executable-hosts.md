@@ -6,13 +6,27 @@ its standard input and output. Compiled cmux remains the default. Discovery with
 host, negotiates compatibility, reads its complete workspace inventory, then
 terminates the connection. Neither command creates an ahu task.
 
-External hosts are currently usable through `interactive::discover()` and the
-probe command. They cannot own durable tasks or repository groups: existing
-`cmux_*` task fields and `cmux.json` mappings do not bind a package identity,
-executable digest, or protocol version. ahu refuses that routing before executing
-an external host, creating a task worktree, or interpreting external inventory as
-cmux liveness. This also prevents external IDs from reaching cmux focus, close,
-reconciliation, or coordinator grouping. Headless execution is unchanged.
+Executable hosts require an enabled committed OKF binding with an
+`interactive-backend` grant and exact ahu compatibility. Discovery metadata and
+manifest capabilities never grant execution. The selected package must match the
+binding's source digest, identity and version. Installations resolve by their
+content-addressed receipt; discovered packages are verified in place.
+
+Before workspace startup, ahu persists `session_host` in a schema-5 task record
+(older ahu binaries refuse this schema): the
+original committed binding and revision, package name, executable declaration,
+executable SHA-256 and protocol version. Task operations use that frozen identity,
+not the current selection. Each package identity has a separate group mapping;
+old records without a binding and `cmux.json` still belong only to compiled cmux.
+Focus and cleanup verify host identity, workspace directory, group and window.
+Core retains harness startup, supervision, approvals, cancellation confirmation,
+and worktree cleanup. Uncertain creation preserves task inputs and work.
+
+Updating a binding retains old installations and existing tasks keep their exact
+version. The binding's enabled state and grants in the launching checkout still
+apply: revocation, absent packages, incompatible policy and tampering refuse host
+activation. A discovered package must remain available at its frozen location.
+Headless execution and coordinators in the current terminal need no host.
 
 ## Package declaration and process resolution
 
@@ -183,10 +197,7 @@ indeterminate startup, deadlines, cancellation, cleanup, and executable paths.
 
 The compiled cmux adapter is unchanged. Its local source manifest lacks an
 executable entry, and its Rust API is not an executable server. Converting it
-requires a reviewed server wrapper plus durable, immutable backend binding and
-routing for launch, focus, reconciliation, cancellation, Markdown operations,
-coordinator placement, and cleanup. cmux's socket/environment requirements also
+requires a reviewed server wrapper. cmux's socket/environment requirements also
 need an explicit reviewed process contract. Merely adding an executable entry
-would not solve those ownership or compatibility requirements. External probing
-and the fixture Host V1 round trip are implemented; general external task/session
-lifecycle and external cmux activation are not.
+would not solve those compatibility requirements. Executable task lifecycle is
+covered with synthetic peers; external cmux activation is not provided.

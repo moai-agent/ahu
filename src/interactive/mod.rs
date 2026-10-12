@@ -12,50 +12,126 @@ pub mod v1;
 use crate::util::{Result, shell_single_quote};
 use std::path::Path;
 
-/// Activate the selected host, preserving the historical connection API.
-/// Side-effect-free plugin discovery uses `plugins::status`, not this function.
-pub fn discover() -> Result<Box<dyn v1::Host>> {
-    let status = plugins::status()?;
-    if status.selected && status.origin == "local-manifest" {
-        return Ok(Box::new(external::ExternalHost::connect(&status)?));
+pub mod binding;
+
+/// Select a committed executable binding, or retain the compiled host default.
+fn selected_id(repo: Option<&crate::git::Repo>) -> Result<Option<String>> {
+    match std::env::var("AHU_INTERACTIVE_PLUGIN") {
+        Ok(id) => return Ok(Some(id)),
+        Err(std::env::VarError::NotPresent) => {}
+        Err(_) => return Err(crate::util::Error::new("invalid session host selection")),
     }
-    plugins::require_cmux()?;
+    if let Some(repo) = repo {
+        let enabled: Vec<_> = plugins::project::inventory(&repo.root)?
+            .bindings
+            .into_iter()
+            .filter(|s| s.binding.enabled)
+            .map(|s| s.binding.id)
+            .collect();
+        match enabled.as_slice() {
+            [] => {}
+            [id] => return Ok(Some(id.clone())),
+            _ => {
+                return Err(crate::util::Error::new(
+                    "multiple enabled session hosts; select an exact AHU_INTERACTIVE_PLUGIN id",
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn compiled() -> Result<Box<dyn v1::Host>> {
     #[cfg(feature = "cmux-plugin")]
     {
-        Ok(Box::new(crate::cmux::Cmux::discover()?))
+        if std::env::var("AHU_INTERACTIVE_PLUGIN").as_deref() == Ok("none") {
+            return Err(crate::util::Error::new(
+                "cmux session plugin is disabled by AHU_INTERACTIVE_PLUGIN=none. Set AHU_INTERACTIVE_PLUGIN=cmux for this operation. No backend was substituted.",
+            ).with_kind(crate::util::ErrorKind::Prerequisite));
+        }
+        Ok(Box::new(crate::cmux::Cmux::connect_recorded()?))
     }
     #[cfg(not(feature = "cmux-plugin"))]
-    unreachable!("require_cmux refuses a build without the plugin")
-}
-
-/// Existing durable records have no external host binding. Never let a
-/// selected executable interpret cmux identifiers or liveness evidence.
-pub fn discover_for_tasks() -> Result<Box<dyn v1::Host>> {
-    let status = plugins::status()?;
-    if status.selected && status.origin == "local-manifest" {
-        return Err(crate::util::Error::new(external::PERSISTENCE_BLOCKER)
-            .with_kind(crate::util::ErrorKind::Prerequisite));
+    {
+        Err(
+            crate::util::Error::new("cmux session plugin is not included in this build; rebuild with --features cmux-plugin")
+                .with_kind(crate::util::ErrorKind::Prerequisite),
+        )
     }
-    discover()
 }
 
-/// A coordinator outside a cmux workspace still runs in its invoking terminal.
-/// Keep this selection at the adapter boundary, before probing any host.
+pub fn discover_for_launch(
+    repo: &crate::git::Repo,
+) -> Result<(Box<dyn v1::Host>, Option<binding::FrozenHost>)> {
+    match selected_id(Some(repo))?.as_deref() {
+        None | Some("cmux") => Ok((compiled()?, None)),
+        Some("none") => Err(crate::util::Error::new("session hosting is disabled")
+            .with_kind(crate::util::ErrorKind::Prerequisite)),
+        Some(id) => {
+            let (status, frozen) = binding::select(repo, id)?;
+            let host = external::ExternalHost::connect_bound(&status, &frozen)?;
+            Ok((Box::new(host), Some(frozen)))
+        }
+    }
+}
+
+/// Public activation always checks committed policy before executing a package.
+pub fn discover() -> Result<Box<dyn v1::Host>> {
+    let repo = crate::git::discover(&std::env::current_dir()?);
+    match selected_id(repo.as_ref().ok())?.as_deref() {
+        None | Some("cmux") => compiled(),
+        Some("none") => compiled(),
+        Some(_) => discover_for_launch(&repo.map_err(|_| {
+            crate::util::Error::new("session host requires a committed project binding")
+                .with_kind(crate::util::ErrorKind::Prerequisite)
+        })?)
+        .map(|(host, _)| host),
+    }
+}
+
+/// Legacy records belong to compiled cmux regardless of a newer host selection.
+pub fn discover_for_tasks() -> Result<Box<dyn v1::Host>> {
+    compiled()
+}
+
+pub fn discover_for_record(
+    repo: &crate::git::Repo,
+    record: &crate::task::TaskRecord,
+) -> Result<Box<dyn v1::Host>> {
+    match &record.session_host {
+        None => compiled(),
+        Some(frozen) => {
+            if std::env::var("AHU_INTERACTIVE_PLUGIN").as_deref() == Ok("none") {
+                return Err(crate::util::Error::new("session hosting is disabled"));
+            }
+            let policy_repo = crate::git::discover(&record.repo_root)?;
+            if policy_repo.identity() != repo.identity() || record.repo_identity != repo.identity()
+            {
+                return Err(crate::util::Error::new(
+                    "task session host belongs to a different repository",
+                ));
+            }
+            let status = binding::verify(&policy_repo, frozen)?;
+            Ok(Box::new(external::ExternalHost::connect_bound(
+                &status, frozen,
+            )?))
+        }
+    }
+}
+
+/// No host is needed by a coordinator in its current terminal.
 pub fn discover_for_coordinator() -> Result<Option<Box<dyn v1::Host>>> {
-    let status = plugins::status()?;
-    if !status.selected {
+    if !cfg!(feature = "cmux-plugin") && std::env::var_os("AHU_INTERACTIVE_PLUGIN").is_none() {
         return Ok(None);
     }
-    if status.origin == "local-manifest" {
-        return Err(crate::util::Error::new(external::PERSISTENCE_BLOCKER)
-            .with_kind(crate::util::ErrorKind::Prerequisite));
-    }
-    plugins::require_cmux()?;
     if std::env::var("CMUX_WORKSPACE_ID")
         .ok()
         .filter(|id| !id.is_empty())
         .is_none()
     {
+        return Ok(None);
+    }
+    if std::env::var("AHU_INTERACTIVE_PLUGIN").as_deref() == Ok("none") {
         return Ok(None);
     }
     discover().map(Some)

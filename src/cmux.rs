@@ -16,6 +16,11 @@ pub struct Cmux(ahu_cmux_plugin::Cmux);
 impl Cmux {
     pub fn discover() -> Result<Self> {
         crate::interactive::plugins::require_cmux()?;
+        Self::connect_recorded()
+    }
+
+    /// Legacy task records bind cmux independently of selection for new tasks.
+    pub(crate) fn connect_recorded() -> Result<Self> {
         Ok(Self(ahu_cmux_plugin::Cmux::connect(resolve_executable()?)?))
     }
 }

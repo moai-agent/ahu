@@ -209,6 +209,7 @@ fn compiled_host_runtime_activation_and_failure_paths() {
     }
     for mode in [
         "enabled",
+        "legacy-external-selection",
         "disabled",
         "unavailable",
         "capability-failure",
@@ -232,7 +233,13 @@ fn compiled_host_runtime_activation_and_failure_paths() {
                 .env("AHU_CMUX_BIN", &executable)
                 .env(
                     "AHU_INTERACTIVE_PLUGIN",
-                    if mode == "disabled" { "none" } else { "cmux" },
+                    if mode == "disabled" {
+                        "none"
+                    } else if mode == "legacy-external-selection" {
+                        "unavailable-new-host"
+                    } else {
+                        "cmux"
+                    },
                 );
         });
         common::assert_child_passed(CASE, &output);
@@ -393,16 +400,14 @@ fn local_metadata_discovery_is_sorted_and_selection_never_executes() {
 fn local_selection_refuses_activation_without_cmux_or_terminal_fallback() {
     const CASE: &str = "local_selection_refuses_activation_without_cmux_or_terminal_fallback";
     if common::is_child_case(CASE) {
-        for result in [
-            ahu::interactive::discover(),
-            ahu::interactive::discover_for_coordinator().map(|_| unreachable!()),
-        ] {
-            let error = result.err().unwrap();
-            assert_eq!(error.kind(), ahu::util::ErrorKind::Prerequisite);
-            assert!(
-                error.to_string().contains("no executable host declaration")
-                    || error.to_string().contains("cannot own durable sessions")
-            );
+        let error = ahu::interactive::discover().err().unwrap();
+        assert_eq!(error.kind(), ahu::util::ErrorKind::Prerequisite);
+        assert!(error.to_string().contains("committed project binding"));
+        let coordinator = ahu::interactive::discover_for_coordinator();
+        if std::env::var_os("CMUX_WORKSPACE_ID").is_some() {
+            assert!(coordinator.is_err());
+        } else {
+            assert!(coordinator.unwrap().is_none());
         }
         return;
     }

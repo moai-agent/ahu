@@ -475,6 +475,7 @@ pub(crate) fn prepared_record(
         enforcement: plan.enforcement.clone(),
         // Retain the field for compatibility with older records.
         reliability_warning: None,
+        session_host: None,
         cmux_group_id: None,
         cmux_workspace_id: None,
         cmux_window_id: None,
@@ -647,7 +648,7 @@ pub fn execute(
 
     // cmux must be reachable before a worktree is created, so an unavailable
     // cmux never leaves a worktree behind.
-    let session_host = interactive::discover_for_tasks()
+    let (session_host, frozen_host) = interactive::discover_for_launch(repo)
         .map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
     session_host.check_capabilities()?;
 
@@ -688,6 +689,7 @@ pub fn execute(
     }
 
     let mut record = prepared_record(repo, loaded, plan, prompt, materialize);
+    record.session_host = frozen_host;
 
     if let Err(e) = task::save(&plan.task_dir, &record, prompt) {
         return Err(rollback_worktree(repo, plan, e));
@@ -791,14 +793,19 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
 /// user what exists needs to know about the ones it could not.
 pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
     let mut tasks = task::list(repo)?;
-    let Ok(client) = interactive::discover_for_tasks() else {
-        return Ok(tasks);
-    };
-    let Ok(live) = client.workspaces() else {
-        // Partial or unreadable window coverage cannot prove a session exited.
-        return Ok(tasks);
-    };
     for (dir, record) in tasks.records.iter_mut() {
+        if dir.join("headless.json").exists()
+            || record.cmux_workspace_id.is_none()
+            || !record.state.is_live()
+        {
+            continue;
+        }
+        let Ok(client) = interactive::discover_for_record(repo, record) else {
+            continue;
+        };
+        let Ok(live) = client.workspaces() else {
+            continue;
+        };
         let Some(workspace_id) = record.cmux_workspace_id.as_deref() else {
             continue;
         };
@@ -911,6 +918,12 @@ pub(crate) fn verify_task(
             record.repo_root.display(),
             discovered.identity()
         );
+    }
+    if let Some(frozen) = &record.session_host {
+        if batch.is_some() {
+            bail!("headless task cannot carry an interactive host binding");
+        }
+        interactive::binding::verify(&discovered, frozen)?;
     }
     let expected_worktree = state::worktree_dir(&discovered.root, &record.task_id)?;
     // `.worktrees` could have been replaced by a symlink between submission and
@@ -1301,10 +1314,9 @@ fn run_verified_task(
     // Nested commands discover the checkout the session edits.
     state::ensure_checkout_state(&record.worktree)?;
     task::set_state(task_dir, TaskState::Running)?;
-    if let (Ok(client), Ok(repo)) = (
-        interactive::discover_for_tasks(),
-        git::discover(&record.worktree),
-    ) {
+    if let Ok(repo) = git::discover(&record.worktree)
+        && let Ok(client) = interactive::discover_for_record(&repo, &record)
+    {
         let _ = interactive::repository::RepositoryManager::new(client.as_ref(), &repo)
             .set_task_status(
                 &record,

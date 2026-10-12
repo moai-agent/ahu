@@ -403,7 +403,7 @@ fn notify_cmux(repo: &crate::git::Repo, record: &crate::task::TaskRecord, status
     if record.cmux_workspace_id.is_none() {
         return;
     }
-    if let Ok(client) = crate::interactive::discover_for_tasks()
+    if let Ok(client) = crate::interactive::discover_for_record(repo, record)
         && let manager =
             crate::interactive::repository::RepositoryManager::new(client.as_ref(), repo)
     {
@@ -475,6 +475,7 @@ mod tests {
             harness_executable: "/synthetic/codex".into(),
             enforcement: adapter.enforcement("gpt-6", Default::default()).unwrap(),
             reliability_warning: None,
+            session_host: None,
             cmux_group_id: None,
             cmux_workspace_id: None,
             cmux_window_id: None,

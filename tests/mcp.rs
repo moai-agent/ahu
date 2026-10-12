@@ -1297,6 +1297,7 @@ fn approval_record(repo: &common::TestRepo, id: &str) -> std::path::PathBuf {
         launch_command: command,
         reliability_warning: None,
         enforcement,
+        session_host: None,
         cmux_group_id: None,
         cmux_workspace_id: None,
         cmux_window_id: None,

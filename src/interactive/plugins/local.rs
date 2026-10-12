@@ -415,7 +415,7 @@ pub(crate) fn read_package(root: &Path) -> Result<PluginStatus> {
     })
 }
 
-pub(super) fn discover() -> Result<Vec<PluginStatus>> {
+pub(crate) fn discover() -> Result<Vec<PluginStatus>> {
     let Some(value) = std::env::var_os("AHU_PLUGIN_PATH") else {
         return Ok(Vec::new());
     };

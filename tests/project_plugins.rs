@@ -74,10 +74,10 @@ fn committed_bindings_are_offline_inert_and_separate_from_local_selection() {
     assert_eq!(status["binding"]["enabled"], true);
     assert_eq!(status["ahu_compatible"], true);
     assert_eq!(status["source_verified"], false);
-    assert_eq!(status["activation_supported"], false);
+    assert_eq!(status["activation_supported"], true);
     assert_eq!(
         status["activation_blockers"],
-        serde_json::json!(["source-unverified", "project-activation-not-supported"])
+        serde_json::json!(["source-unverified"])
     );
     assert!(!root.path().join("executed").exists());
     assert!(!root.path().join(".ahu").exists());
@@ -118,12 +118,7 @@ fn disabled_and_incompatible_declarations_have_explicit_blockers_and_sorted_ids(
     assert_eq!(value["bindings"][0]["ahu_compatible"], false);
     assert_eq!(
         value["bindings"][0]["activation_blockers"],
-        serde_json::json!([
-            "disabled",
-            "ahu-version-mismatch",
-            "source-unverified",
-            "project-activation-not-supported"
-        ])
+        serde_json::json!(["disabled", "ahu-version-mismatch", "source-unverified"])
     );
 }
 

@@ -131,6 +131,7 @@ fn write_current(tasks_dir: &Path, repo: &TestRepo, task_id: &str) -> PathBuf {
         enforcement: adapter
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
+        session_host: None,
         cmux_group_id: None,
         cmux_workspace_id: None,
         cmux_window_id: None,
@@ -204,7 +205,7 @@ fn tasks_lists_the_readable_record_and_reports_the_unreadable_one() {
         "{text}"
     );
     assert!(
-        text.contains("schema version (1)") && text.contains("reads task schemas 2, 3, and 4"),
+        text.contains("schema version (1)") && text.contains("reads task schemas 2, 3, 4, and 5"),
         "the reason must say why, not just that: {text}"
     );
     assert!(

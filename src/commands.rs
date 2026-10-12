@@ -837,7 +837,7 @@ pub fn doctor_with_verbosity(
         }
     }
 
-    match interactive::discover_for_tasks() {
+    match interactive::discover() {
         Ok(client) => {
             console.say("cmux         reachable\n")?;
             match client.check_capabilities() {
@@ -943,7 +943,9 @@ pub const NO_TASKS: &str = "No ahu tasks have been launched from this repository
 /// directory; everything else is interactive and, when a workspace id was
 /// recorded, is read from the cmux workspace list.
 fn cmux_liveness_needed(dir: &Path, record: &task::TaskRecord) -> bool {
-    !dir.join("headless.json").exists() && record.cmux_workspace_id.is_some()
+    !dir.join("headless.json").exists()
+        && record.session_host.is_none()
+        && record.cmux_workspace_id.is_some()
 }
 
 /// The cmux workspace list, if any record being shown needs it.
@@ -983,6 +985,11 @@ fn session_owner(
         return crate::headless::supervisor_owns_attempt(dir).ok();
     }
     let id = record.cmux_workspace_id.as_deref()?;
+    if record.session_host.is_some() {
+        let repo = crate::git::discover(&record.repo_root).ok()?;
+        let host = interactive::discover_for_record(&repo, record).ok()?;
+        return host.workspaces().ok().map(|list| list.contains_key(id));
+    }
     workspaces.map(|list| list.contains_key(id))
 }
 
@@ -1553,6 +1560,7 @@ pub fn task_summary(
         "worktree_exists": record.worktree.is_dir(),
         "record_path": dir.join("task.json"),
         "cmux_workspace_id": record.cmux_workspace_id,
+        "session_host": record.session_host,
         "cmux_window_id": record.cmux_window_id,
         "session_state": record.state.as_str(),
         "state_source": "record",
@@ -1562,6 +1570,8 @@ pub fn task_summary(
     });
     value["execution_backend"] = if crate::headless::review::is_headless(dir) {
         "headless".into()
+    } else if record.session_host.is_some() {
+        "external-host".into()
     } else {
         "cmux".into()
     };
@@ -1934,7 +1944,7 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
     if record.cmux_workspace_id.is_none() {
         bail!("task {} has no recorded cmux session.", record.task_id);
     }
-    let client = interactive::discover_for_tasks()?;
+    let client = interactive::discover_for_record(repo, &record)?;
     interactive::repository::RepositoryManager::new(client.as_ref(), repo)
         .select_task_workspace(&record)?;
     console.say(&format!(
@@ -2047,7 +2057,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
         None
     };
     let cmux_status = if record.cmux_workspace_id.is_some() {
-        let client = interactive::discover_for_tasks().map_err(|error| {
+        let client = interactive::discover_for_record(gate, &record).map_err(|error| {
             Error::new(format!(
                 "cannot safely remove task {} while its recorded cmux workspace cannot be checked: {error}",
                 display_safe(task_id)
@@ -2231,7 +2241,7 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
 
     let (cancellation, workspace) =
         confirm_interactive_cancellation(&dir, &mut record, Duration::from_secs(5), |current| {
-            interactive::discover_for_tasks().and_then(|client| {
+            interactive::discover_for_record(repo, current).and_then(|client| {
                 interactive::repository::RepositoryManager::new(client.as_ref(), repo)
                     .close_task_workspace(current)
                     .map(|_| ())

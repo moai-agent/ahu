@@ -466,7 +466,7 @@ fn headless_planning_does_not_activate_the_selected_session_host() {
         "#!/bin/sh\ntouch \"$HOST_ACTIVATION_MARKER\"\nexit 97\n",
     )
     .unwrap();
-    for selection in ["none", "cmux"] {
+    for selection in ["none", "cmux", "absent-external-host"] {
         let output = f
             .command()
             .env("AHU_INTERACTIVE_PLUGIN", selection)
