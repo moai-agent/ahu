@@ -21,6 +21,7 @@ pub struct PluginStatus {
     pub manifest: Option<PathBuf>,
     pub cargo_manifest: Option<PathBuf>,
     pub executable: Option<super::external::Executable>,
+    pub entrypoint: Option<crate::plugin_exec::Entrypoint>,
     pub activation_blocker: Option<&'static str>,
     pub metadata: BTreeMap<String, Value>,
 }
@@ -41,6 +42,7 @@ pub fn inventory() -> Result<Vec<PluginStatus>> {
         manifest: None,
         cargo_manifest: None,
         executable: None,
+        entrypoint: None,
         activation_blocker: if compiled {
             None
         } else {
@@ -79,6 +81,7 @@ pub fn inventory() -> Result<Vec<PluginStatus>> {
                 manifest: None,
                 cargo_manifest: None,
                 executable: None,
+                entrypoint: None,
                 activation_blocker: Some("Installed package metadata unavailable; inspect the binding and installation. Selection does not establish authority or readiness."),
                 metadata: BTreeMap::new(),
             });

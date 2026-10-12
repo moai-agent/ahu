@@ -1707,8 +1707,9 @@ standalone installation channel. Source installation includes local dependencies
 Set `AHU_INTERACTIVE_PLUGIN=cmux` to explicitly select the compiled package for a process,
 or `AHU_INTERACTIVE_PLUGIN=none` to disable session hosting. Activation without an
 environment selector uses a single enabled committed binding, otherwise the build
-default. Multiple enabled bindings require an explicit id. Empty, unknown, and
-non-Unicode values refuse selection. Process selection never grants execution.
+default. Bindings with `execute` but no `interactive-backend` grant are excluded
+from session defaults. Multiple enabled session bindings require an explicit id.
+Empty, unknown, and non-Unicode values refuse selection. Process selection never grants execution.
 Actual cmux activation resolves the executable with the existing core checks,
 then the package pings cmux. Task launch checks capabilities before creating a
 worktree. No harness, model, or backend substitution occurs.
@@ -1770,7 +1771,8 @@ launch readiness or validate the project's context lock.
 `enabled: true`, the `interactive-backend` grant, exact ahu compatibility, and a
 verified package matching the source, identity and version pins. These checks
 also apply to `AHU_PLUGIN_PATH` packages. A single enabled binding selects that
-host by default; multiple enabled bindings require `AHU_INTERACTIVE_PLUGIN=<id>`.
+host by default; generic `execute`-only bindings are excluded. Multiple enabled
+session bindings require `AHU_INTERACTIVE_PLUGIN=<id>`.
 Explicit `cmux` retains the compiled host and `none` disables hosting and selects
 no inventory rows. Both names are reserved and cannot be used as binding IDs.
 
@@ -1924,7 +1926,9 @@ closed by a standalone `---` line. LF and CRLF line endings are supported. The
 optional Markdown body is documentation only: it is never configuration or code.
 Discovery does not fall back to the old TOML plugin manifest filename. The required
 frontmatter fields are shown below; an optional `executable` mapping enables the
-separate executable protocol described below.
+separate executable protocol described below. A generic `entrypoint` mapping uses
+the [one-shot executable plugin protocol](executable-plugins.md) instead; invocation
+requires an explicit host grant and committed `execute` permission.
 
 ```markdown
 ---
@@ -1978,7 +1982,7 @@ AHU_PLUGIN_PATH="$(pwd -P)/plugins/cmux" AHU_INTERACTIVE_PLUGIN=cmux-local ahu p
 
 The second command explicitly selects the local package for inspection. It does
 not enable it. JSON schema 1 retains the existing fields and adds `origin`,
-`manifest`, `cargo_manifest`, `executable`, and `activation_blocker`. The compiled cmux entry
+`manifest`, `cargo_manifest`, `executable`, `entrypoint`, and `activation_blocker`. The compiled cmux entry
 comes first, followed by binding/local entries sorted by ID. A discovery path for
 a binding ID takes precedence over its installation, matching activation.
 Installed metadata has origin `installed-manifest`; a binding whose installed

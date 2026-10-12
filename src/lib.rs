@@ -46,6 +46,7 @@ pub mod onboard;
 pub mod orchestration;
 pub mod otel_report;
 pub mod plugin_binding;
+pub mod plugin_exec;
 pub mod plugin_install;
 pub(crate) mod private_context_lock;
 mod private_io;

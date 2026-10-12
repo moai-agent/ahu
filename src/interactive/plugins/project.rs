@@ -238,8 +238,9 @@ pub(crate) fn inventory_at(root: &Path, revision: &str) -> Result<Inventory> {
         if !binding
             .grants
             .contains(&plugin_binding::Grant::InteractiveBackend)
+            && !binding.grants.contains(&plugin_binding::Grant::Execute)
         {
-            blockers.push("interactive-backend-not-granted");
+            blockers.push("execution-not-granted");
         }
         blockers.push("source-unverified");
         report.bindings.push(BindingStatus {

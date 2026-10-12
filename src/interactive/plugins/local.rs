@@ -29,6 +29,7 @@ struct Manifest {
     host_api: u32,
     cargo_manifest: String,
     executable: Option<crate::interactive::external::Executable>,
+    entrypoint: Option<crate::plugin_exec::Entrypoint>,
     // General OKF metadata is preserved for inspection but never interpreted
     // as host capabilities or execution settings.
     #[serde(default, flatten)]
@@ -398,7 +399,19 @@ pub(crate) fn read_package(root: &Path) -> Result<PluginStatus> {
         executable.validate()?;
         validate_executable(&open_relative(&directory, &executable.path)?)?;
     }
-    let activation_blocker = manifest.executable.is_none().then_some(LOADING_BLOCKER);
+    if let Some(entrypoint) = &manifest.entrypoint {
+        entrypoint.validate()?;
+        validate_executable(&open_relative(&directory, &entrypoint.path)?)?;
+    }
+    let activation_blocker = if manifest.executable.is_some() {
+        None
+    } else if manifest.entrypoint.is_some() {
+        Some(
+            "This package has a generic entrypoint but no session host; use the explicit plugin_exec host API.",
+        )
+    } else {
+        Some(LOADING_BLOCKER)
+    };
     Ok(PluginStatus {
         id: manifest.id,
         package: manifest.package,
@@ -410,6 +423,7 @@ pub(crate) fn read_package(root: &Path) -> Result<PluginStatus> {
         manifest: Some(root.join("ahu-plugin.md")),
         cargo_manifest: Some(root.join(manifest.cargo_manifest)),
         executable: manifest.executable,
+        entrypoint: manifest.entrypoint,
         metadata: manifest.metadata,
         activation_blocker,
     })
@@ -487,4 +501,21 @@ fn validate_executable(file: &File) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Reopen a generic entrypoint through the same no-symlink package boundary.
+pub(crate) fn entrypoint_file(status: &PluginStatus) -> Result<File> {
+    let root = status
+        .manifest
+        .as_ref()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| invalid("package has no manifest root"))?;
+    let spec = status
+        .entrypoint
+        .as_ref()
+        .ok_or_else(|| invalid("package has no generic entrypoint"))?;
+    spec.validate()?;
+    let file = open_relative(&open_root(root)?, &spec.path)?;
+    validate_executable(&file)?;
+    Ok(file)
 }

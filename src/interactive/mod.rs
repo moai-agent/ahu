@@ -35,7 +35,19 @@ pub(crate) fn selection(repo: Option<&crate::git::Repo>) -> Result<Selection> {
         let enabled: Vec<_> = plugins::project::inventory(&repo.root)?
             .bindings
             .into_iter()
-            .filter(|s| s.binding.enabled)
+            .filter(|s| {
+                // Generic-only bindings are not session hosts. Preserve the
+                // existing fail-closed selection for legacy grantless bindings.
+                s.binding.enabled
+                    && (s
+                        .binding
+                        .grants
+                        .contains(&crate::plugin_binding::Grant::InteractiveBackend)
+                        || !s
+                            .binding
+                            .grants
+                            .contains(&crate::plugin_binding::Grant::Execute))
+            })
             .map(|s| s.binding.id)
             .collect();
         match enabled.as_slice() {

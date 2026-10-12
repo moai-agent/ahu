@@ -380,7 +380,7 @@ impl ExternalHost {
     }
 }
 
-fn validate_snapshot_base(base: &Path) -> Result<()> {
+pub(crate) fn validate_snapshot_base(base: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     for path in base.ancestors() {
         match std::fs::symlink_metadata(path.join(".git")) {

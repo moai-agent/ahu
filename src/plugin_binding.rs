@@ -71,6 +71,7 @@ pub struct Compatibility {
 #[serde(rename_all = "kebab-case")]
 pub enum Grant {
     InteractiveBackend,
+    Execute,
     ReadProjectContext,
 }
 

@@ -781,12 +781,16 @@ pub fn list(root: &Path, output_json: bool) -> Result<()> {
                     .find(|s| s.binding.id == binding.id);
                 let matches = current.map(|s| key(&s.binding)).transpose()?.as_deref()
                     == Some(&key(binding)?);
+                let metadata =
+                    crate::interactive::plugins::local::read_package(&path.join("package"))?;
+                let activation_supported =
+                    metadata.executable.is_some() || metadata.entrypoint.is_some();
                 rows.push(serde_json::json!({
                     "id": binding.id, "version": binding.version, "source": binding.source,
                     "installation": path, "source_verified": true,
                     "matches_committed_binding": matches,
                     "enabled": matches && current.is_some_and(|s| s.binding.enabled),
-                    "activation_supported": crate::interactive::plugins::local::read_package(&path.join("package"))?.executable.is_some(),
+                    "activation_supported": activation_supported,
                 }));
                 if rows.len() > 256 {
                     bail!("installed plugin inventory exceeds 256 versions");

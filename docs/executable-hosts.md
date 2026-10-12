@@ -1,5 +1,8 @@
 # Executable session hosts (protocol V1)
 
+For generic one-shot JSON processing without session-host methods, see
+[executable plugins](executable-plugins.md). The two declarations and grants are separate.
+
 ahu can explicitly activate a discovered local executable and speak Host V1 over
 its standard input and output. Compiled cmux remains the default. Discovery with
 `ahu plugins` reads metadata only. `ahu plugins --probe` executes the selected
