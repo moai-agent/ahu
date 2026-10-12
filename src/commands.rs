@@ -837,15 +837,28 @@ pub fn doctor_with_verbosity(
         }
     }
 
+    let selected_host = interactive::plugins::status();
+    match &selected_host {
+        Ok(status) if status.selected => console.say(&format!(
+            "session host {} ({})\n",
+            display_safe(&status.id),
+            display_safe(&status.package),
+        ))?,
+        Ok(_) => console.say("session host disabled or not included in this build\n")?,
+        Err(e) => console.say(&format!(
+            "session host selection unavailable: {}\n",
+            display_safe_block(&e.to_string())
+        ))?,
+    }
     match interactive::discover() {
         Ok(client) => {
-            console.say("cmux         reachable\n")?;
+            console.say("host         reachable\n")?;
             match client.check_capabilities() {
-                Ok(_) => console.say("  groups     supported\n")?,
+                Ok(_) => console.say("  host groups supported\n")?,
                 Err(e) => {
                     problems += 1;
                     console.say(&format!(
-                        "  groups     {}\n",
+                        "  host groups {}\n",
                         display_safe_block(&e.to_string())
                     ))?;
                 }
@@ -854,11 +867,29 @@ pub fn doctor_with_verbosity(
         Err(e) => {
             problems += 1;
             console.say(&format!(
-                "cmux         {}\n",
+                "host         {}\n",
                 display_safe_block(&e.to_string())
             ))?;
         }
     }
+
+    // Native cmux integration is independent of an external Host V1 peer.
+    // Its absence is not a blocker for an otherwise ready external host.
+    #[cfg(feature = "cmux-plugin")]
+    match cmux::Cmux::connect_recorded() {
+        Ok(_) => console.say("native cmux  reachable\n")?,
+        Err(e) => {
+            warnings += 1;
+            console.say(&format!(
+                "native cmux  unavailable: {}\n",
+                display_safe_block(&e.to_string())
+            ))?;
+        }
+    }
+    #[cfg(not(feature = "cmux-plugin"))]
+    console.say(
+        "native cmux  unavailable: compiled adapter not included; reachability not checked\n",
+    )?;
 
     let state_root = match repo {
         Ok(repo) => crate::storage::CheckoutStorage::new(&repo.root).state_root()?,

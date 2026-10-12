@@ -537,7 +537,10 @@ fn require_clean_binding(repo: &crate::git::Repo, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn cleanup_allowed(repo: &crate::git::Repo) -> Result<crate::headless::PluginCleanupGuard> {
+fn cleanup_allowed(
+    repo: &crate::git::Repo,
+    id: &str,
+) -> Result<crate::headless::PluginCleanupGuard> {
     let mut guard = crate::headless::plugin_cleanup_guard(repo)?;
     let tasks = crate::task::list(repo)?;
     // Legacy records do not freeze plugin installation pins. Treat any live task
@@ -551,6 +554,17 @@ fn cleanup_allowed(repo: &crate::git::Repo) -> Result<crate::headless::PluginCle
     {
         bail!(
             "plugin cleanup refused: project tasks are live or their state is uncertain; all installed versions are retained"
+        );
+    }
+    if tasks.records.iter().any(|(_, record)| {
+        record.cmux_workspace_id.is_some()
+            && record
+                .session_host
+                .as_ref()
+                .is_some_and(|host| host.binding.id == id)
+    }) {
+        bail!(
+            "plugin cleanup refused: recorded tasks still require this package for workspace cleanup; run `ahu remove TASK` for each affected task before disabling or removing the package, even if its workspace is already closed. If authority was revoked, restore and commit the binding's enablement and interactive-backend grant and restore the exact recorded package before task removal"
         );
     }
     for (dir, _) in &tasks.records {
@@ -638,7 +652,7 @@ pub fn run(root: &Path, action: &str, id: &str) -> Result<()> {
     let _lock = state::LaunchLock::acquire_at(state::coordination_dir(&repo)?.join("launch.lock"))?;
     state::create_private_dir_all(&store)?;
     let _cleanup = if matches!(action, "disable" | "remove") {
-        Some(cleanup_allowed(&repo)?)
+        Some(cleanup_allowed(&repo, id)?)
     } else {
         None
     };

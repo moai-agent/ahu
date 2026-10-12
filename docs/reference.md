@@ -1695,10 +1695,11 @@ cargo build --locked --no-default-features
 ```
 
 The default Cargo feature includes cmux for existing users. `ahu plugins`
-(or `--output json`) reports compiled and explicitly supplied local packages,
-declared Host API version, and selection
-without executing plugin code, probing cmux, reading repository configuration,
-or changing activation. `compiled` and `selected` do not establish reachability
+(or `--output json`) reports compiled packages, committed bindings, and explicitly
+supplied local packages, declared Host API version, and selection. It reads
+committed binding policy and available installed metadata without executing plugin
+code, probing cmux, verifying source pins, or changing activation.
+`compiled` and `selected` do not establish authority, reachability
 or capability support. The workspace crates are not published to a registry;
 individual `.crate` archives are package-boundary inspection artifacts, not a
 standalone installation channel. Source installation includes local dependencies.
@@ -1867,6 +1868,10 @@ conservative: `disable` and `remove` refuse while **any** project task is live o
 unreadable, or task ownership is uncertain. Updates retain all versions, including
 those possibly referenced by tasks. Cleanup holds the interactive and headless admission locks and locks terminal
 headless task ownership against concurrent resume.
+Both commands also refuse when a terminal task records this package and a workspace
+ID: the host is still needed to verify workspace ownership or absence during task
+removal, even if the workspace was already closed externally. This check reads
+records without executing the package.
 `remove` requires the binding to be disabled or absent in both HEAD and the
 working tree, removes the plugin's installed versions and staging, and retains the binding.
 Selective version pruning and automatic reclamation are not implemented. Filesystem checks do not isolate concurrent
@@ -1877,12 +1882,30 @@ commit that edit before activation. Executable activation freezes a task-level
 package and executable pin. Updates preserve every installed version, and task
 operations resolve the recorded version rather than the current selection.
 
+Finish or cancel affected tasks, preserve their work (including integrating any
+task-only commits), and run `ahu remove TASK` while the package remains installed
+and authorized. Then run `ahu plugins disable ID`, review and commit the binding
+and refreshed context lock, and run `ahu plugins remove ID`. Closing a workspace
+alone does not remove its task record or establish safe cleanup.
+
+If authority was already revoked by a direct binding edit, task removal still
+fails closed. To recover, explicitly review and restore the committed enabled state and the
+`interactive-backend` grant in the task's launching checkout. Restore the exact
+recorded package if it was deleted: recover its pinned source and binding version,
+then use `plugins install` or `plugins update` as appropriate; updates retain old
+versions. Refresh the context lock with policy changes. Remove the tasks while
+that trusted version is available, then disable and remove the package in the
+order above. If the package cannot safely be trusted or recovered, leave the task
+records and work intact; ahu does not execute a disabled package or substitute a
+different host to bypass this check.
+
 ### Local session package discovery and selection
 
 `AHU_PLUGIN_PATH` is an explicit colon-separated list of absolute package
 directories. Each directory must contain `ahu-plugin.md`. Discovery uses no default
 search directory, recursive scan, installation, network lookup, Cargo invocation,
-or execution of package code. Unset the variable to inspect only compiled packages;
+or execution of package code. Unset the variable to inspect compiled packages and
+committed bindings with available installed metadata;
 an empty value or empty path entry is an error. Discovery never selects a local
 package, even when cmux was omitted at build time.
 
@@ -1946,7 +1969,12 @@ AHU_PLUGIN_PATH="$(pwd -P)/plugins/cmux" AHU_INTERACTIVE_PLUGIN=cmux-local ahu p
 The second command explicitly selects the local package for inspection. It does
 not enable it. JSON schema 1 retains the existing fields and adds `origin`,
 `manifest`, `cargo_manifest`, `executable`, and `activation_blocker`. The compiled cmux entry
-comes first, followed by local packages sorted by ID. Local entries always have
+comes first, followed by binding/local entries sorted by ID. A discovery path for
+a binding ID takes precedence over its installation, matching activation.
+Installed metadata has origin `installed-manifest`; a binding whose installed
+metadata is unavailable has origin `committed-binding`, package `unknown`, and an
+inspection blocker without changing selection. Selection sources are
+`environment`, `committed-project-binding`, or `build-default`. Local entries always have
 `compiled: false`; source-only entries have an activation blocker. `selected: true`
 records selection intent, not a running host or an execution grant. A successful
 launch freezes the verified package identity in its task record.
@@ -1956,7 +1984,8 @@ Packages with an `executable` frontmatter mapping can be activated explicitly wi
 [executable host protocol](executable-hosts.md) specifies process resolution,
 framing bounds, version and capability negotiation, deadlines, cancellation,
 path protections, and partial-start outcomes. Ordinary discovery never executes
-the package. Compiled cmux remains the default, and headless execution does not
+the package. Compiled cmux is the default when no enabled binding or environment
+selector exists, and headless execution does not
 consult this inventory.
 
 Executable task launch, focus, reconciliation, cancellation cleanup and removal
@@ -1965,6 +1994,11 @@ apply. Old records without that field retain compiled cmux semantics. Group
 mappings are separate for each exact external package identity; `cmux.json` is
 reserved for compiled cmux. Headless tasks do not activate a session host, and
 current-terminal coordinators do not require cmux.
+
+`ahu doctor` identifies the selected session host ID and package and reports its
+reachability and group capabilities separately from native cmux reachability.
+An external host's success does not establish that native cmux is available;
+native cmux absence is a warning when the selected external host is ready.
 
 The supplied `cmux-local` package remains source-only: no executable cmux server
 or reviewed native environment contract is provided. Synthetic protocol fixtures
