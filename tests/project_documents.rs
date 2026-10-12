@@ -194,3 +194,27 @@ fn new_policy_never_writes_a_document_its_reader_will_refuse() {
     assert!(config::write_new(repo.path(), &settings).is_err());
     assert!(!repo.path().join(config::CONFIG_RELATIVE_PATH).exists());
 }
+
+#[test]
+fn lock_cli_escapes_hostile_context_paths_before_terminal_output() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.commit("configured fixture");
+
+    let mut lock = okf::Document::parse(&repo.read(context_lock::LOCK_PATH), "ahu:lock").unwrap();
+    lock.fields["ahu"]["entries"][0]["path"] = "\u{1b}[31mowned".into();
+    repo.write(context_lock::LOCK_PATH, &lock.render().unwrap());
+
+    let output = common::ahu()
+        .current_dir(repo.path())
+        .arg("lock")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(r"\x1b[31mowned"), "{stdout:?}");
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "raw terminal control in {stdout:?}"
+    );
+}

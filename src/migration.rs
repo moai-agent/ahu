@@ -37,6 +37,16 @@ fn read(root: &Path, relative: &str) -> Result<Option<String>> {
         })
         .transpose()
 }
+fn file_mode(root: &Path, relative: &str) -> Result<Option<u32>> {
+    use std::os::unix::fs::PermissionsExt;
+    crate::util::resolve_existing_within(root, relative)?
+        .map(|path| {
+            std::fs::symlink_metadata(path)
+                .map(|metadata| metadata.permissions().mode() & 0o777)
+                .map_err(Into::into)
+        })
+        .transpose()
+}
 fn read_journal(root: &Path) -> Result<Option<Plan>> {
     let Some(path) = crate::util::resolve_existing_within(root, JOURNAL)? else {
         return Ok(None);
@@ -397,18 +407,39 @@ fn rollback_inner(repo: &Repo) -> Result<()> {
         if current != plan.before[index] && current != plan.after[index] {
             bail!("concurrent edit at {path}; preserve it and resolve before rollback");
         }
+        if plan.before[index] != plan.after[index]
+            && let Some(mode) = file_mode(&repo.root, path)?
+        {
+            // Atomic restoration publishes owner-only bytes before the separate
+            // chmod that restores the original mode. Accept that exact
+            // interruption state and the original mode; refuse other chmods.
+            let original = plan.source_modes[index];
+            let expected = if current == plan.before[index] {
+                Some(mode) == original || mode == 0o600
+            } else {
+                mode == 0o600
+            };
+            if !expected {
+                bail!(
+                    "concurrent permission change at {path}; preserve it and resolve before rollback"
+                );
+            }
+        }
     }
     for index in [0, 1, 3, 2] {
         let current = read(&repo.root, PATHS[index])?;
         if current != plan.before[index] {
             replace(&repo.root, index, &plan.after[index], &plan.before[index])?;
-            if let Some(mode) = plan.source_modes[index] {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(
-                    repo.root.join(PATHS[index]),
-                    std::fs::Permissions::from_mode(mode),
-                )?;
-            }
+        }
+        if plan.before[index] != plan.after[index]
+            && let Some(mode) = plan.source_modes[index]
+            && file_mode(&repo.root, PATHS[index])? != Some(mode)
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                repo.root.join(PATHS[index]),
+                std::fs::Permissions::from_mode(mode),
+            )?;
         }
     }
     plan.phase = "rolled-back".into();
@@ -766,6 +797,67 @@ mod tests {
                 & 0o777,
             0o640
         );
+    }
+
+    #[test]
+    fn interrupted_permission_restore_is_repaired_but_concurrent_modes_are_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, repo) = fixture();
+        let source = repo.root.join(PATHS[0]);
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+        std::fs::write(
+            repo.root.join(PATHS[3]),
+            context_lock::LockFile::from_snapshot(&snapshot)
+                .render(None)
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_file(repo.root.join(PATHS[1])).unwrap();
+        git(&repo.root, &["add", "-A", "-f"]);
+        git(
+            &repo.root,
+            &["commit", "--amend", "--allow-empty", "-qm", "fixture mode"],
+        );
+        let plan = Plan::preview(&repo).unwrap();
+        save(&repo.root, &plan).unwrap();
+
+        // Simulate a process stopping after atomic byte restoration (0600) but
+        // before rollback applies the journaled source mode (0755).
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        rollback(&repo).unwrap();
+        assert_eq!(read(&repo.root, PATHS[0]).unwrap(), plan.before[0]);
+        assert_eq!(file_mode(&repo.root, PATHS[0]).unwrap(), Some(0o755));
+
+        let (_dir, repo) = fixture();
+        let source = repo.root.join(PATHS[0]);
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+        std::fs::write(
+            repo.root.join(PATHS[3]),
+            context_lock::LockFile::from_snapshot(&snapshot)
+                .render(None)
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_file(repo.root.join(PATHS[1])).unwrap();
+        git(&repo.root, &["add", "-A", "-f"]);
+        git(
+            &repo.root,
+            &["commit", "--amend", "--allow-empty", "-qm", "fixture mode"],
+        );
+        let plan = Plan::preview(&repo).unwrap();
+        save(&repo.root, &plan).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            rollback(&repo)
+                .unwrap_err()
+                .to_string()
+                .contains("concurrent permission change")
+        );
+        assert_eq!(read(&repo.root, PATHS[0]).unwrap(), plan.before[0]);
+        assert_eq!(file_mode(&repo.root, PATHS[0]).unwrap(), Some(0o640));
     }
     #[test]
     fn journal_symlink_and_changed_context_are_refused() {

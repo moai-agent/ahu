@@ -222,10 +222,13 @@ pub fn lock_cmd(console: &mut Console<'_>, repo: &Repo, update: bool) -> Result<
     }
     let status = context_lock::check(repo, &snapshot)?;
     if status.current {
-        console.say(&format!("{}\n", status.detail))?;
+        console.say(&format!("{}\n", display_safe_block(&status.detail)))?;
         Ok(0)
     } else {
-        console.say(&format!("Context is not launchable: {}\n", status.detail))?;
+        console.say(&format!(
+            "Context is not launchable: {}\n",
+            display_safe_block(&status.detail)
+        ))?;
         Err(Error::new("agent context lock is not current")
             .with_kind(crate::util::ErrorKind::Prerequisite))
     }
