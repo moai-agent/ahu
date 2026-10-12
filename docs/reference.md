@@ -1728,6 +1728,48 @@ core and active independently of session hosting. `ahu cmux install` still
 explicitly delegates native harness hook installation; it does not install or
 activate this session package.
 
+### Committed project plugin bindings
+
+`ahu plugins --project [--output json]` inspects only the bindings committed at
+`.agents/ahu/plugins/<id>.md` in the selected checkout's HEAD. Use `ahu --repo PATH`
+to select another checkout. It pins the commit once and reads local Git objects;
+index and working-tree changes, including untracked bindings, are excluded.
+An absent binding directory yields an empty inventory; a repository without a
+commit is an error. No ahu project configuration, context lock, credentials,
+native auth stores, or local package selection is consulted.
+
+This mode accepts the [project binding schema](project-documents.md#plugin-binding-foundation),
+including credential-free HTTPS repositories on any host. Repository URLs,
+revisions, hashes and grants remain declarations. Nothing fetches, checks out,
+builds, installs or executes a package. Git replacement objects are disabled.
+`GIT_NO_LAZY_FETCH=1` requests local-only object reads; an empty `GIT_ALLOW_PROTOCOL` denies every transport, including
+file and executable helpers, even on Git versions that predate that lazy-fetch
+control. Missing local objects fail offline. No Git hooks or content filters run.
+
+JSON schema 1 identifies `origin: committed-project-bindings`, the inspected
+`revision`, and ID-sorted `bindings`. Each entry has `path`, the typed `binding`,
+`ahu_compatible` (exact match with this ahu version), `source_verified: false`,
+`activation_supported: false`, and `activation_blockers`. Blockers always include
+`source-unverified` and `project-activation-not-supported`; disabled or incompatible
+bindings add `disabled` or `ahu-version-mismatch`. A successful listing means the
+declarations parsed, not that the source exists, its pin matches, or execution is
+approved. General OKF metadata and document bodies remain inert and are omitted
+from this report. Grants are displayed without enforcement or expansion.
+
+At most 32 regular binding files are accepted, each bounded by the shared OKF
+2 MiB limit. Tree listings are bounded to 64 KiB. Symlinks (including committed
+ancestors), submodules, nested directories, non-Markdown entries and malformed
+bindings fail the whole inventory without partial output. Inspection writes no
+state and does not require the working tree to match HEAD. It does not establish
+launch readiness or validate the project's context lock.
+
+`--project` and `--probe` are mutually exclusive. Project `enabled: true` does not
+select a process backend or authorize activation, and a project binding does not
+verify or constrain a separately supplied `AHU_PLUGIN_PATH` package. Installation,
+source-pin verification and activation governed by project grants remain future
+work. The existing local executable path below still requires explicit selection
+and activation.
+
 ### Local session package discovery and selection
 
 `AHU_PLUGIN_PATH` is an explicit colon-separated list of absolute package

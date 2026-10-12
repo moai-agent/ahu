@@ -1,6 +1,7 @@
 //! Compiled and local plugin inventory and per-process selection.
 //! Discovery reads metadata only; executable activation is explicitly separate.
 pub(super) mod local;
+pub mod project;
 
 use crate::util::{Error, ErrorKind, Result};
 use serde::Serialize;

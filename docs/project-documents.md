@@ -98,9 +98,11 @@ are ordinary recognized context inputs and participate in drift detection.
 
 ## Plugin-binding foundation
 
-A binding is not an installed or executable plugin. No lifecycle command,
-package installer or plugin-code loader is added by this format. A later host
-must separately authorize capabilities and verify compatibility/source pins.
+A binding is not an installed or executable plugin. `ahu plugins --project`
+provides an offline inventory of committed bindings and compatibility blockers;
+see [project plugin inspection](reference.md#committed-project-plugin-bindings).
+It does not install packages, verify source pins or load plugin code. A later
+host must separately authorize capabilities and verify compatibility/source pins.
 
 The strict `ahu` schema contains `schema_version: 1`, a lowercase plain `id`
 matching the filename, exact semantic `version`, `source` with a credential-free

@@ -130,6 +130,19 @@ requests cancellation. The checkpoint does not intercept arbitrary tool calls,
 shell commands, or filesystem writes, and does not expand native harness
 permissions.[^approval]
 
+## Project plugin inspection
+
+`ahu plugins --project` reads typed OKF plugin bindings from one pinned local
+Git commit. It reports exact ahu-version compatibility and declared source pins
+and grants. It neither reads the working-tree configuration nor fetches or runs
+plugins. Missing local Git objects fail with all Git transports denied. Committed
+symlinks and non-file bindings are refused; metadata reads are bounded.
+Project enablement remains a declaration, with source verification and activation
+reported as unsupported. The separate local-package inventory and explicit
+executable probe retain their existing selection boundary. See the
+[CLI reference](../reference.md#committed-project-plugin-bindings) for output,
+bounds and limitations.
+
 [^main]: CLI routing in src/main.rs.
 [^launch]: Launch admission and task planning in src/launch.rs.
 [^lock]: Lock generation and checks in src/context_lock.rs.
