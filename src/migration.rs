@@ -2,7 +2,7 @@
 //! backups and deterministic targets. Recovery only touches matching bytes;
 //! concurrent user edits stop rollback instead of being overwritten.
 use crate::private_io::{self, Durability};
-use crate::util::{Error, Result, digest_bytes};
+use crate::util::{Error, Result, digest_bytes, display_safe_block};
 use crate::{bail, config, context_lock, git::Repo, okf};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -236,11 +236,12 @@ impl Plan {
             "Effective typed policy parity: identical (including defaults and ranking order).\nLegacy sources are backed up in the private migration journal; task pins and local acceptance stay unchanged.\n",
         );
         for (index, path) in PATHS.iter().enumerate().skip(2) {
+            let document = self.after[index].as_ref().unwrap();
             out.push_str(&format!(
                 "\nTarget: {}\nSHA-256: {}\n{}",
                 path,
-                digest_bytes(self.after[index].as_ref().unwrap().as_bytes()),
-                self.after[index].as_ref().unwrap()
+                digest_bytes(document.as_bytes()),
+                display_safe_block(document)
             ));
         }
         out
@@ -548,6 +549,61 @@ mod tests {
                 );
                 assert_eq!(doc.body, "\nRetain this explanation.\n");
             }
+        }
+    }
+
+    #[test]
+    fn migration_display_escapes_preserved_terminal_controls() {
+        let hostile_body =
+            "\nretained \u{1b}[2J\u{1b}[H\u{1b}]52;c;marker\u{7}\u{009b}31m\u{202e} end\n";
+        for canonical_policy in [false, true] {
+            let (_dir, repo) = fixture();
+            if canonical_policy {
+                let settings = config::load(&repo.root).unwrap().unwrap().config;
+                std::fs::remove_file(repo.root.join(PATHS[0])).unwrap();
+                config::write_new(&repo.root, &settings).unwrap();
+                let policy_path = repo.root.join(PATHS[2]);
+                let mut policy = okf::Document::parse(
+                    &std::fs::read_to_string(&policy_path).unwrap(),
+                    "ahu:project",
+                )
+                .unwrap();
+                policy.body = hostile_body.to_owned();
+                std::fs::write(&policy_path, policy.render().unwrap()).unwrap();
+                let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+                let lock = context_lock::LockFile::from_snapshot(&snapshot);
+                std::fs::write(repo.root.join(PATHS[1]), toml::to_string(&lock).unwrap()).unwrap();
+            } else {
+                std::fs::remove_file(repo.root.join(PATHS[1])).unwrap();
+                let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+                let lock = context_lock::LockFile::from_snapshot(&snapshot);
+                let mut doc =
+                    okf::Document::parse(&lock.render(None).unwrap(), "ahu:lock").unwrap();
+                doc.body = hostile_body.to_owned();
+                std::fs::write(repo.root.join(PATHS[3]), doc.render().unwrap()).unwrap();
+            }
+
+            let plan = Plan::preview(&repo).unwrap();
+            let rendered = plan.display();
+            assert!(!rendered.contains('\u{1b}'));
+            assert!(!rendered.contains('\u{7}'));
+            assert!(!rendered.contains('\u{009b}'));
+            assert!(!rendered.contains('\u{202e}'));
+            assert!(rendered.contains(r"\x1b[2J"));
+            assert!(rendered.contains(r"\x1b]52;c;marker\x07\x9b31m\u{202e}"));
+
+            apply(&repo, &plan).unwrap();
+            let preserved_path = if canonical_policy { PATHS[2] } else { PATHS[3] };
+            let preserved = okf::Document::parse(
+                &std::fs::read_to_string(repo.root.join(preserved_path)).unwrap(),
+                if canonical_policy {
+                    "ahu:project"
+                } else {
+                    "ahu:lock"
+                },
+            )
+            .unwrap();
+            assert_eq!(preserved.body, hostile_body);
         }
     }
 
