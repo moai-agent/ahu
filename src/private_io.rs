@@ -11,7 +11,7 @@ pub(crate) enum Durability {
 }
 
 pub(crate) fn atomic_write(path: &Path, body: &[u8], durability: Durability) -> Result<()> {
-    atomic_write_with(path, durability, |file| file.write_all(body))
+    atomic_write_with_mode(path, 0o600, durability, |file| file.write_all(body))
 }
 
 pub(crate) fn atomic_write_mode(
@@ -178,12 +178,21 @@ pub(crate) fn atomic_write_with(
     durability: Durability,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> Result<()> {
-    atomic_write_with_mode(path, 0o600, durability, write)
+    atomic_write_with_permissions(path, None, durability, write)
 }
 
 pub(crate) fn atomic_write_with_mode(
     path: &Path,
     mode: u32,
+    durability: Durability,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<()> {
+    atomic_write_with_permissions(path, Some(mode), durability, write)
+}
+
+fn atomic_write_with_permissions(
+    path: &Path,
+    mode: Option<u32>,
     durability: Durability,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> Result<()> {
@@ -227,8 +236,13 @@ pub(crate) fn atomic_write_with_mode(
     // SAFETY: openat returned a fresh descriptor whose ownership is transferred here.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     let result = (|| -> std::io::Result<()> {
+        // openat's mode is filtered by umask. Restore the private default
+        // before writing, while still allowing callbacks to select a mode.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         write(&mut file)?;
-        file.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+        if let Some(mode) = mode {
+            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+        }
         if matches!(durability, Durability::Durable) {
             file.sync_all()?;
         }
@@ -381,6 +395,31 @@ mod tests {
         );
         assert!(!atomic_create_mode(&created, b"changed", 0o600, Durability::Durable).unwrap());
         assert_eq!(std::fs::read(&created).unwrap(), b"restored");
+    }
+
+    #[test]
+    fn callback_atomic_write_keeps_private_default_and_preserves_callback_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private");
+        atomic_write_with(&private, Durability::Durable, |file| {
+            file.write_all(b"private")
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let shared = dir.path().join("shared");
+        atomic_write_with(&shared, Durability::Durable, |file| {
+            file.write_all(b"shared")?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o640))
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
     }
 
     #[cfg(any(
