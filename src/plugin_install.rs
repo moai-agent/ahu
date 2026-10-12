@@ -858,94 +858,6 @@ mod tests {
     }
 
     #[test]
-    fn https_git_fetch_rejects_an_untrusted_local_certificate() {
-        use std::net::{SocketAddr, TcpStream};
-
-        struct HttpsServer(Child);
-        impl Drop for HttpsServer {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-
-        let temp = tempfile::tempdir().unwrap();
-        let cert = temp.path().join("server.pem");
-        let key = temp.path().join("server-key.pem");
-        let generated = Command::new("openssl")
-            .args([
-                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-keyout",
-            ])
-            .arg(&key)
-            .arg("-out")
-            .arg(&cert)
-            .args([
-                "-subj",
-                "/CN=127.0.0.1",
-                "-addext",
-                "subjectAltName=IP:127.0.0.1",
-            ])
-            .output()
-            .expect("OpenSSL is installed for the local transport fixture");
-        assert!(generated.status.success());
-
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = probe.local_addr().unwrap();
-        drop(probe);
-        let server = Command::new("openssl")
-            .args([
-                "s_server",
-                "-quiet",
-                "-www",
-                "-accept",
-                &address.port().to_string(),
-                "-cert",
-            ])
-            .arg(&cert)
-            .arg("-key")
-            .arg(&key)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("OpenSSL TLS server starts");
-        let _server = HttpsServer(server);
-        let address = SocketAddr::from(([127, 0, 0, 1], address.port()));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "local HTTPS fixture did not start"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        let repo = temp.path().join("client");
-        fs::create_dir(&repo).unwrap();
-        git(&repo, &["init", "--quiet"], false, 4096).unwrap();
-        let url = format!("https://127.0.0.1:{}/missing", address.port());
-        let error = git(
-            &repo,
-            &[
-                "fetch",
-                "--no-tags",
-                "--no-recurse-submodules",
-                "--depth=1",
-                "--",
-                &url,
-                "HEAD",
-            ],
-            true,
-            4096,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("plugin Git operation failed"));
-    }
-
-    #[test]
     fn https_package_acquisition_fetches_a_pinned_commit_with_a_trusted_local_ca() {
         use std::net::{SocketAddr, TcpStream};
 
@@ -1152,6 +1064,11 @@ server.serve_forever()
         };
         let stage = root.join("stage");
         fs::create_dir(&stage).unwrap();
+        let untrusted_stage = root.join("untrusted-stage");
+        fs::create_dir(&untrusted_stage).unwrap();
+        assert!(materialize(&untrusted_stage, &binding).is_err());
+        assert!(!untrusted_stage.join("package/ahu-plugin.md").exists());
+
         let acquired = materialize_with_ca(&stage, &binding, Some(&cert)).unwrap();
         assert_eq!(digest(&acquired).unwrap(), binding.source.sha256);
         assert_eq!(
