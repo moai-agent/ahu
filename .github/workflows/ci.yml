@@ -138,7 +138,10 @@ jobs:
           # source workspace, not a registry. Archives inspect each package's
           # file boundary; generating registry lockfiles requires publication.
           cargo package --workspace --locked --no-verify --exclude-lockfile
-          if cargo package --workspace --locked --no-verify --exclude-lockfile --list | grep -Eiq '(^|/)(\.ahu|\.env|.*\.(pem|key|log|trace|dump|sqlite|db)|credentials|secrets)(/|$)'; then
+          package_list="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ahu-package-list.XXXXXX")"
+          trap 'rm -f "$package_list"' EXIT
+          cargo package --workspace --locked --no-verify --exclude-lockfile --list > "$package_list"
+          if grep -Eiq '(^|/)(\.ahu|\.env|.*\.(pem|key|log|trace|dump|sqlite|db)|credentials|secrets)(/|$)' "$package_list"; then
             echo 'Release package contains a private-state or credential-like path' >&2
             exit 1
           fi
