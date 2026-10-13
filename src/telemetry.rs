@@ -156,6 +156,12 @@ fn initialize_named(
     // SDK detectors retain non-ahu resource configuration. Rebuild ahu identity
     // from one bounded source so an absent frozen field cannot fall through to
     // an ambient value (including on independently launched MCP servers).
+    let headless_attempt = service_name == "ahu"
+        && identity.as_ref().is_some_and(|attributes| {
+            attributes
+                .iter()
+                .any(|(key, value)| *key == "ahu.execution.mode" && value == "headless")
+        });
     let attributes = identity.unwrap_or_else(|| {
         if service_name == "ahu-mcp" {
             std::env::var("AHU_MCP_RESOURCE_ATTRIBUTES")
@@ -166,15 +172,36 @@ fn initialize_named(
             ahu_resource_attributes()
         }
     });
-    let resource = identity_resource(service_name, attributes);
+    let resource = if headless_attempt {
+        // Headless invocation evidence has no ambient resource payload. Keep
+        // paths, arbitrary labels and credentials out of Ahu-owned exports.
+        Resource::builder_empty()
+            .with_service_name(service_name)
+            .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+            .with_attributes(
+                attributes
+                    .into_iter()
+                    .map(|(key, value)| KeyValue::new(key, value)),
+            )
+            .build()
+    } else {
+        identity_resource(service_name, attributes)
+    };
     // Keep export asynchronous and bounded, and override OTEL_BSP_* values so
     // an inherited environment cannot turn a local ahu process into an
     // unbounded queue or stall task execution. Full queues drop telemetry.
     let processor = bounded_span_processor(exporter);
-    let provider = SdkTracerProvider::builder()
+    let mut builder = SdkTracerProvider::builder()
         .with_resource(resource)
-        .with_span_processor(processor)
-        .build();
+        .with_span_processor(processor);
+    if headless_attempt {
+        // Every owned attempt needs a terminal observation, even if an ambient
+        // SDK sampler or attribute limit would otherwise erase that evidence.
+        builder = builder
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .with_span_limits(opentelemetry_sdk::trace::SpanLimits::default());
+    }
+    let provider = builder.build();
     global::set_tracer_provider(provider.clone());
     *provider_slot().lock().expect("telemetry mutex poisoned") = Some(provider);
     Ok(())

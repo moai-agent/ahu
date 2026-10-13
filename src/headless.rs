@@ -3,6 +3,8 @@
 mod accounting;
 mod admission;
 pub(crate) mod identity;
+#[cfg(test)]
+mod invocation_tests;
 mod journal;
 mod kiro;
 pub(crate) mod review;
@@ -2536,7 +2538,11 @@ fn supervise_authorized(dir: &Path, expected: &str) -> Result<i32> {
         bail!("attempt already started; implicit replay refused");
     }
     let mut phase = "frozen_execution_validation";
-    let outcome = run_attempt(dir, &attempt, &spec, &mut phase);
+    let outcome = task::load(dir).and_then(|record| {
+        observe_attempt(&record, &spec, &mut phase, |span, phase| {
+            run_attempt(dir, &attempt, &spec, phase, span)
+        })
+    });
     if let Err(error) = &outcome {
         let _ = durable_json(
             &attempt.join("result.json"),
@@ -2548,7 +2554,45 @@ fn supervise_authorized(dir: &Path, expected: &str) -> Result<i32> {
     outcome
 }
 
-fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str) -> Result<i32> {
+// Own telemetry at the same boundary as the terminal supervisor result. Frozen
+// integrity, exclusive ownership and replay checks precede this observation;
+// all execution validation and result persistence happen inside it.
+fn observe_attempt(
+    record: &task::TaskRecord,
+    spec: &Spec,
+    phase: &mut &'static str,
+    run: impl FnOnce(&mut crate::telemetry::SpanGuard, &mut &'static str) -> Result<&'static str>,
+) -> Result<i32> {
+    // An unreadable policy must still fail execution validation. It cannot
+    // authorize export; only an independently configured eval endpoint can.
+    let telemetry = crate::config::load(&record.worktree)
+        .ok()
+        .flatten()
+        .map(|loaded| loaded.config.telemetry)
+        .unwrap_or_default();
+    crate::telemetry::initialize_task(&telemetry, record, Some(spec))?;
+    let mut span = crate::telemetry::task_span("ahu.harness.run", [], spec);
+    crate::telemetry::task_span_attributes(&mut span, record, Some(spec));
+    let outcome = run(&mut span, phase);
+    // Write exactly one terminal status, after persistence has succeeded. The
+    // SDK can retain repeated attribute keys rather than replacing their values.
+    span.set_string(
+        "ahu.status",
+        outcome.as_ref().copied().unwrap_or("supervisor_error"),
+    );
+    if outcome.is_err() {
+        span.set_string("ahu.failure.phase", *phase);
+    }
+    outcome.map(|status| if status == "succeeded" { 0 } else { 5 })
+}
+
+fn run_attempt(
+    dir: &Path,
+    attempt: &Path,
+    spec: &Spec,
+    phase: &mut &'static str,
+    telemetry_span: &mut crate::telemetry::SpanGuard,
+) -> Result<&'static str> {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     let (record, rebuilt, executable) = crate::launch::verify_task(dir, Some(spec))?;
     if record.delivery.layout_version != 3 {
@@ -2606,13 +2650,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     let telemetry = crate::config::load(&record.worktree)?
         .map(|loaded| loaded.config.telemetry)
         .unwrap_or_default();
-    crate::telemetry::initialize_task(&telemetry, &record, Some(spec))?;
-    let mut telemetry_span = crate::telemetry::task_span(
-        "ahu.harness.run",
-        [("ahu.model.requested", record.identity.model.clone())],
-        spec,
-    );
-    crate::telemetry::task_span_attributes(&mut telemetry_span, &record, Some(spec));
+    telemetry_span.set_string("ahu.model.requested", &record.identity.model);
     for (key, value) in
         identity::requested_attributes(&record.identity.harness, &record.identity.model)
     {
@@ -2641,7 +2679,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
         .env_remove("AHU_RUNTIME_DIR")
         .env_remove("AHU_TASK_INDEX_DIR");
     let mut broker = crate::broker::Broker::new(&dir.join("requests"), &record, spec)?;
-    broker.set_parent_span(&telemetry_span);
+    broker.set_parent_span(telemetry_span);
     broker.configure_worker(&mut command);
     command.env_remove("AHU_STRUCTURED_RESULT");
     if spec.contract.output.is_some() {
@@ -3009,8 +3047,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
     for (key, value) in events.reported_model_attributes() {
         telemetry_span.set_string(key, &value);
     }
-    telemetry_span.set_string("ahu.status", outcome);
-    accounting::Projection::from_events(&events).export(&mut telemetry_span);
+    accounting::Projection::from_events(&events).export(telemetry_span);
     if let Some(completeness) = &native_completeness {
         telemetry_span.set_bool("ahu.events.native_helpers_complete", completeness.complete);
     }
@@ -3106,7 +3143,7 @@ fn run_attempt(dir: &Path, attempt: &Path, spec: &Spec, phase: &mut &'static str
             task::TaskState::Failed
         },
     )?;
-    Ok(if outcome == "succeeded" { 0 } else { 5 })
+    Ok(outcome)
 }
 
 /// Return only the opt-in, bounded numeric projections for completed headless
