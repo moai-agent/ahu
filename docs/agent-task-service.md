@@ -67,7 +67,7 @@ resume, owner transfer, provider fallback, or identity mutation. Further
 execution after a terminal or indeterminate attempt requires deliberate core
 recovery and, if appropriate, a newly admitted task.
 
-## Optional tracker foundation: scoped task listing
+## Optional tracker foundation for scoped task listing
 
 An optional tracker adapter can consume task metadata through `TaskService`
 without discovering task directories or obtaining repository-wide access.
@@ -75,7 +75,7 @@ without discovering task directories or obtaining repository-wide access.
 task grants. The core-minted plugin read session grants `List`, `Read` and
 `Replay`. A custom session must grant `List` explicitly; `Read` alone does not
 authorize listing, and `List` alone does not authorize other operations.
-Plugin installation, enablement, terminal grants and a task ID do not mint a
+Plugin installation, enabled state, terminal grants and a task ID do not mint a
 task session. The trusted core caller must select the plugin identity and scope.
 
 The limit is between 1 and `MAX_PAGE_SIZE` (128), inclusive. Start with `None`;
@@ -281,8 +281,9 @@ grant. Repeat `--allow-task` for each exact canonical UUID; absent grants mean
 empty scope. The CLI validates every operation/cursor before reading only the
 requested indexed task records. It never enumerates tasks or creates coordination
 state/locks, and plugin response JSON cannot request effects or mutations.
-Only current primary-owned schema-2 index entries are supported; unindexed tasks
-and legacy external stores require separate inspection, with no automatic recovery.
+Only current primary-owned schema-2 index entries are supported; tasks absent from
+the index and legacy external stores require separate inspection, with no automatic
+recovery.
 Durable V1 identity/replay checks remain in force. Synthesized revision-1 replay
 is meaningful only within this invocation. See [executable plugins](executable-plugins.md#foreground-cli-invocation)
 for input/output limits, fixed errors, deadlines, and the same-user trust boundary.

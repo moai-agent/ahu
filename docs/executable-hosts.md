@@ -28,8 +28,8 @@ Executable task focus and cleanup require the recorded workspace, group, and
 window identifiers; missing identifiers do not prove absence. If creation is
 uncertain, a later terminal supervisor outcome still retains the task inputs and
 package. An in-flight cancellation reports missing workspace ownership as unknown,
-and automated removal refuses until ownership is reconciled. There is no automatic
-ownership recovery from a lost creation reply.
+and automated removal refuses until ownership is reconciled. `ahu` does not recover
+ownership automatically after a lost creation reply.
 
 Updating a binding retains old installations and existing tasks keep their exact
 version. The binding's enabled state and grants in the launching checkout still

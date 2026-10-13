@@ -16,14 +16,14 @@ The declarative-source inventory is broader than these two migrated files:
 
 | Source | Owner and migration treatment |
 | --- | --- |
-| `.agents/ahu/agents/*.md` | Ahu agent identities and optional nested input/output schemas; existing OKF `ahu:agent` schema stays compatible |
-| `ahu-plugin.md` | Ahu package declaration, already OKF `ahu:plugin`; its existing flat schema stays compatible |
-| `evals/**` case and suite Markdown | Ahu evaluation definitions, already `ahu:eval-case` / `ahu:eval-suite`; no implicit schema conversion |
+| `.agents/ahu/agents/*.md` | `ahu` agent identities and optional nested input/output schemas; existing OKF `ahu:agent` schema stays compatible |
+| `ahu-plugin.md` | `ahu` package declaration, already OKF `ahu:plugin`; its existing flat schema stays compatible |
+| `evals/**` case and suite Markdown | `ahu` evaluation definitions, already `ahu:eval-case` / `ahu:eval-suite`; no implicit schema conversion |
 | `.agents/skills/*/SKILL.md`, `docs/knowledge/*.md` | Skill and knowledge Markdown with their existing frontmatter conventions; migration never rewrites instructions |
 | `src/catalog.rs` | Compiled compatibility catalog; `ahu.catalog_version` selects its revision, with no independent TOML source |
 | Evaluation reference, freeze and manifest JSON | Experiment inputs and provenance, outside project launch policy and lock migration |
 | Native harness settings, MCP registrations, native agents and hooks | Harness-owned TOML, JSON, JSONC, Markdown or scripts, retained at native paths |
-| `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `deny.toml`, workflow YAML | Cargo, toolchain, dependency-check and CI formats; not Ahu project policy |
+| `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `deny.toml`, workflow YAML | Cargo manifests, Rust version, dependency checks and CI settings; not `ahu` project policy |
 | Task, attempt, plugin-install and migration JSON | Local runtime records; existing formats and frozen task inputs remain exact |
 | Auth bindings, credentials, private context acceptance | Private host storage; never promoted into shared OKF documents |
 
