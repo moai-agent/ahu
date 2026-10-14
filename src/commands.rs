@@ -2570,7 +2570,7 @@ pub fn launch_cmd(
     prompt: &str,
     output_json: bool,
     dry_run: bool,
-    _allow_widened_approvals: bool,
+    allow_widened_approvals: bool,
     display: &launch::DisplayMetadata,
 ) -> Result<i32> {
     let loaded = config::load(&repo.root)?.ok_or_else(|| {
@@ -2581,9 +2581,18 @@ pub fn launch_cmd(
     })?;
     crate::telemetry::initialize(&loaded.config.telemetry)?;
     let (resolved, pair) = resolve_identity(repo, &loaded, Some(agent))?;
-    // The committed agent manifest is the explicit, reviewable permission
-    // choice for scripted launches. Requiring a second CLI flag made Ahu's own
-    // worktree agents stop before they could do unattended work.
+    if resolved.as_ref().is_some_and(|agent| {
+        agent.manifest.permissions.widens_defaults() && !allow_widened_approvals
+    }) {
+        let agent = resolved
+            .as_ref()
+            .expect("widening requires a resolved agent");
+        bail!(
+            "agent @{} declares permissions = {}; pass --allow-widened-approvals to authorize this launch",
+            agent.manifest.name,
+            agent.manifest.permissions.as_str()
+        );
+    }
     submit(
         console,
         repo,

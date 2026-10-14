@@ -246,8 +246,8 @@ agent assignment options:
                         supplies the default; this flag overrides it.
   --dry-run             Show the preview and create nothing
   --allow-widened-approvals
-                        Legacy compatibility flag; registered agent manifests
-                        explicitly declare their tool approval mode
+                        Explicitly authorize an agent manifest that widens tool
+                        approvals (permissions = auto or accept-edits)
 
 Exit codes:
   0 success; 1 cancelled; 2 usage error; 3 unknown agent;

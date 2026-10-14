@@ -36,6 +36,9 @@ For each assignment, write its complete task to a UTF-8 file, then run:
 That command starts the session without an interactive confirmation. The
 agent's committed manifest declares whether its tools prompt, auto-approve edits,
 or run unattended; Ahu applies that mode inside the child's task worktree.
+If the agent declares permissions = auto or accept-edits, include
+--allow-widened-approvals in that command. This explicit opt-in authorizes the
+manifest's wider approval boundary; the manifest alone is not launch approval.
 Use --dry-run to inspect a launch first.
 Run from your task worktree so the child's base is your HEAD and its configuration
 comes from this checkout. Children get fresh worktrees; uncommitted source edits

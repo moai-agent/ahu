@@ -388,7 +388,7 @@ provider availability, or full native-helper lifecycle validation.
 ### Trusting native OpenCode state
 
 OpenCode can keep provider credentials and account-managed configuration in
-native state outside the project. Ahu does not read those credentials or account
+native state outside the project. ahu does not read those credentials or account
 database contents. By default, an opaque OpenCode account/authentication store
 blocks headless admission because it may select remote configuration, including
 executable plugins. A project that intentionally relies on that native setup can
@@ -400,9 +400,9 @@ ahu:
     trust_opencode_native_state: true
 ```
 
-This applies only to headless OpenCode tasks. Ahu records the trust in the
+This applies only to headless OpenCode tasks. ahu records the trust in the
 frozen task controls and discloses that the store may activate remote
-configuration and plugins. Ahu does not inspect, disable, or constrain them;
+configuration and plugins. ahu does not inspect, disable, or constrain them;
 review that native state through OpenCode. The setting does not bypass other
 unresolved integration findings, approval policy, or harness checks.
 
