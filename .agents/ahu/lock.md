@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 566e5aed81d278542327084094bd556f07b797bf6a7445d4412cba5dba7e6394
+  digest: c969ab190f8bd783b958870a9b65c03d1419d18408c1b1ac0c08b84d759aa544
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -43,7 +43,7 @@ ahu:
     executable: false
     path: .agents/ahu/agents/dev-astra.md
   - bytes: 6339
-    digest: 1af878e3393fa3c82efcbc94cc31ce0d1e7bad72656a4654f644e688c09686cc
+    digest: 31fc7c8b63432027b9d26ed26f405cb772da1f692609ca88ff934b39d0eea5a6
     executable: false
     path: .agents/ahu/agents/dev-glm.md
   - bytes: 1262
