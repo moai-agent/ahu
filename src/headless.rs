@@ -1976,13 +1976,15 @@ impl Events {
             // event is `{type, timestamp, sessionID, part}`; the work of a turn
             // is a sequence of steps, and only the reason on a step's finish
             // says whether the turn ended or another step follows.
-            ("opencode", "step_start") => (),
+            ("opencode", "step_start") => self.terminal = false,
             ("opencode", "text") => {
+                self.terminal = false;
                 if let Some(text) = event.pointer("/part/text").and_then(Value::as_str) {
                     self.summary = text.into();
                 }
             }
             ("opencode", "tool_use") => {
+                self.terminal = false;
                 // A refused tool call is reported as an ordinary tool error:
                 // `state.status: "error"` with the refusal as `state.error`.
                 // Observed with a `write` call on a launch that passed no
@@ -2012,21 +2014,23 @@ impl Events {
                     // The model is about to run tools and another step follows.
                     // Treating this as terminal would score an assignment
                     // complete at its first tool call.
-                    Some("tool-calls") | None => (),
+                    Some("tool-calls") | None => self.terminal = false,
                     // Anything else — a token ceiling, an abort — ends the turn
                     // without the model having said it is done. Recorded as a
                     // terminal failure rather than left to look like silence.
                     Some(_) => {
                         self.blockers
                             .push("harness ended the step without a stop reason".into());
-                        self.finish(true);
+                        self.terminal = true;
+                        self.failed = true;
                     }
                 }
             }
+            ("opencode", "user") => self.terminal = false,
             (
                 _,
-                "assistant" | "user" | "step_update" | "turn.started" | "item.started"
-                | "item.updated" | "stream_event",
+                "assistant" | "step_update" | "turn.started" | "item.started" | "item.updated"
+                | "stream_event",
             ) => (),
             _ => self.unknown_events += 1,
         }

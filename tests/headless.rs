@@ -2433,6 +2433,14 @@ fn the_opencode_event_stream_is_terminal_only_when_a_step_stops() {
     );
     assert_eq!(multi_message.summary, "the actual final answer");
 
+    // An earlier stop must not survive a later step that ends at a tool-call
+    // boundary; otherwise a zero exit could turn an incomplete run into a pass.
+    let unfinished_after_stop = observe(&[&stop, &step_start, &tool_step]);
+    assert!(
+        !unfinished_after_stop.terminal,
+        "a later tool-call step supersedes an earlier stop: {unfinished_after_stop:?}"
+    );
+
     // A tool-call boundary is where the model pauses to run tools; another step
     // follows it. Treating it as terminal would score an assignment complete at
     // its first tool call.
