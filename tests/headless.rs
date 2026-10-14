@@ -2400,6 +2400,39 @@ fn the_opencode_event_stream_is_terminal_only_when_a_step_stops() {
     assert_eq!(complete.summary, "the final answer");
     assert_eq!(complete.unknown_events, 0, "the stream is fully recognized");
 
+    // `stop` closes an assistant message/step in OpenCode, not necessarily
+    // the whole run. A tool result can be followed by another assistant
+    // message that also ends with `stop` before the final response.
+    let intermediate_stop = format!(
+        r#"{{"type":"step_finish","timestamp":4,"sessionID":"{SESSION}","part":{{"type":"step-finish","reason":"stop"}}}}"#
+    );
+    let later_tool_step = format!(
+        r#"{{"type":"step_finish","timestamp":5,"sessionID":"{SESSION}","part":{{"type":"step-finish","reason":"tool-calls"}}}}"#
+    );
+    let final_text = format!(
+        r#"{{"type":"text","timestamp":6,"sessionID":"{SESSION}","part":{{"type":"text","text":"the actual final answer"}}}}"#
+    );
+    let final_stop = format!(
+        r#"{{"type":"step_finish","timestamp":7,"sessionID":"{SESSION}","part":{{"type":"step-finish","reason":"stop"}}}}"#
+    );
+    let multi_message = observe(&[
+        &step_start,
+        &intermediate_stop,
+        &later_tool_step,
+        &final_text,
+        &final_stop,
+    ]);
+    assert!(multi_message.terminal);
+    assert!(!multi_message.failed, "{:?}", multi_message.blockers);
+    assert!(
+        !multi_message
+            .blockers
+            .iter()
+            .any(|b| b.contains("multiple terminal events")),
+        "OpenCode stop boundaries are not duplicate task results"
+    );
+    assert_eq!(multi_message.summary, "the actual final answer");
+
     // A tool-call boundary is where the model pauses to run tools; another step
     // follows it. Treating it as terminal would score an assignment complete at
     // its first tool call.

@@ -2004,7 +2004,11 @@ impl Events {
             (_, "tool_use") | ("antigravity", "tool_result") => (),
             ("opencode", "step_finish") => {
                 match event.pointer("/part/reason").and_then(Value::as_str) {
-                    Some("stop") => self.finish(false),
+                    // OpenCode may finish several assistant messages with
+                    // `stop` during one `run` (for example, after a tool
+                    // result and again after the final answer). These are
+                    // step boundaries, not duplicate task-level results.
+                    Some("stop") => self.terminal = true,
                     // The model is about to run tools and another step follows.
                     // Treating this as terminal would score an assignment
                     // complete at its first tool call.
