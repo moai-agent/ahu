@@ -385,6 +385,27 @@ the interactive one, so `permissions = "accept-edits"` is refused here too. See
 provider setup. Recorded compatibility does not establish authentication,
 provider availability, or full native-helper lifecycle validation.
 
+### Trusting native OpenCode state
+
+OpenCode can keep provider credentials and account-managed configuration in
+native state outside the project. Ahu does not read those credentials or account
+database contents. By default, an opaque OpenCode account/authentication store
+blocks headless admission because it may select remote configuration, including
+executable plugins. A project that intentionally relies on that native setup can
+make the trust decision explicit in `.agents/ahu/config.md`:
+
+```yaml
+ahu:
+  headless:
+    trust_opencode_native_state: true
+```
+
+This applies only to headless OpenCode tasks. Ahu records the trust in the
+frozen task controls and discloses that the store may activate remote
+configuration and plugins. Ahu does not inspect, disable, or constrain them;
+review that native state through OpenCode. The setting does not bypass other
+unresolved integration findings, approval policy, or harness checks.
+
 Codex 0.157.1 and 0.160.0 use strict configuration validation, enable inspected hooks, turn off
 optional plugins and remote plugin loading, and clear the legacy notify command
 for this invocation. Before launch and resume, ahu asks a separate native metadata

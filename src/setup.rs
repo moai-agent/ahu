@@ -2353,6 +2353,7 @@ esac
                 vec![crate::catalog::models_for("codex")[0].model.into()],
             )]),
             knowledge: Default::default(),
+            headless: Default::default(),
             telemetry: Default::default(),
         }
     }

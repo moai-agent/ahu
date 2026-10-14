@@ -52,6 +52,23 @@ pub struct TelemetryConfig {
     pub endpoint: String,
 }
 
+/// Native harness state that the project explicitly accepts for unattended
+/// execution. These stores can select provider authentication and remote
+/// configuration which ahu cannot inspect without reading credentials.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HeadlessConfig {
+    /// Trust OpenCode's native account/auth stores for headless runs. This can
+    /// activate remote configuration and executable plugins; ahu records the
+    /// boundary but does not inspect or constrain that configuration.
+    pub trust_opencode_native_state: bool,
+}
+impl HeadlessConfig {
+    fn is_default(&self) -> bool {
+        !self.trust_opencode_native_state
+    }
+}
+
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
@@ -82,6 +99,9 @@ pub struct ProjectConfig {
     pub model_rankings: std::collections::BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub knowledge: Knowledge,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "HeadlessConfig::is_default")]
+    pub headless: HeadlessConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 }
@@ -276,6 +296,14 @@ fn validate(config: &ProjectConfig, path: &Path) -> Result<()> {
                 );
             }
         }
+    }
+    if config.headless.trust_opencode_native_state
+        && !catalog::supports("opencode", catalog::Feature::HeadlessLaunch)
+    {
+        bail!(
+            "{}: headless.trust_opencode_native_state requires an ahu build with the OpenCode headless adapter.",
+            path.display()
+        );
     }
     for (harness_id, version) in &config.harness_version_pins {
         if catalog::harness(harness_id).is_none() {

@@ -1034,6 +1034,15 @@ pub fn launch(
     ]);
     let profile = build_native_profile(&plan.pair.harness, &plan.pair.model, &spec)?;
     spec.native_controls = profile.control_ids();
+    let trust_opencode_native_state =
+        loaded.config.headless.trust_opencode_native_state && plan.pair.harness == "opencode";
+    if trust_opencode_native_state {
+        spec.native_controls
+            .push("opencode.native-account-state=project-trusted".into());
+        spec.gaps.push(
+            "Project policy trusts OpenCode native account/authentication state for this headless task. It may select authenticated remote configuration and executable plugins; ahu does not inspect, disable, or constrain that state. Credentials and database contents remain unread.".into(),
+        );
+    }
     if let Some(isolation) =
         crate::harness::isolation::profile(&plan.pair.harness, &spec.harness_version)
     {
@@ -1055,6 +1064,7 @@ pub fn launch(
         &plan.pair.harness,
         &spec.harness_version,
         &plan.harness_executable,
+        trust_opencode_native_state,
     )?;
     crate::selection::check_launch_compatibility_with_policy(
         &plan.harness_executable,
@@ -1269,6 +1279,7 @@ fn validate_environment(
     harness: &str,
     version: &str,
     executable: &Path,
+    trust_opencode_native_state: bool,
 ) -> Result<crate::cmux::integration::Status> {
     for variable in [
         "HOME",
@@ -1310,7 +1321,13 @@ fn validate_environment(
             .get(harness)
             .map(String::as_str),
     )?;
-    crate::cmux::integration::enforce_headless_executable(config_root, harness, version, executable)
+    crate::cmux::integration::enforce_headless_executable_with_opencode_state(
+        config_root,
+        harness,
+        version,
+        executable,
+        trust_opencode_native_state,
+    )
 }
 
 pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
@@ -2614,6 +2631,9 @@ fn run_attempt(
         &record.identity.harness,
         &spec.harness_version,
         &real,
+        spec.native_controls
+            .iter()
+            .any(|control| control == "opencode.native-account-state=project-trusted"),
     )?;
     crate::selection::check_launch_compatibility_with_policy(
         &real,
@@ -3637,6 +3657,9 @@ pub fn control(
                 &record.identity.harness,
                 &version,
                 &real,
+                spec.native_controls
+                    .iter()
+                    .any(|control| control == "opencode.native-account-state=project-trusted"),
             )?;
             // Keep the finished attempt's provenance immutable. A floating
             // project may resume with a newer installed CLI after the same

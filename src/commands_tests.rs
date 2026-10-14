@@ -1,5 +1,6 @@
 //! Command behavior with isolated repositories and scripted terminal input.
 use super::*;
+use std::collections::BTreeMap;
 use std::process::Command;
 
 fn git(root: &Path, args: &[&str]) {
@@ -48,6 +49,7 @@ fn configured(repo: &Repo) {
             harness_version_pins: Default::default(),
             model_rankings: BTreeMap::from([("claude-code".into(), vec!["claude-opus-5".into()])]),
             knowledge: Default::default(),
+            headless: Default::default(),
             telemetry: Default::default(),
         },
     )

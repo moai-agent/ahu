@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 94359cf1f17bb02cc7058bb158fa87016f7480f9f5d507033674bd6c9746d51f
+  digest: 566e5aed81d278542327084094bd556f07b797bf6a7445d4412cba5dba7e6394
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -94,8 +94,8 @@ ahu:
     digest: b8d4ffe8b00869990867ed05ac289781b12ff76bba303687f45b06a179ed7cc8
     executable: false
     path: .agents/ahu/agents/test-kiro.md
-  - bytes: 664
-    digest: ffde5d7ea664c260e1e2324ef1edcecbd2db6c70221507c19ff74d39942a9106
+  - bytes: 714
+    digest: e6a4ab9ee9bfeea7deff7e5f54d7d101c26e6e497bda96cf0d86836f46a51e6f
     executable: false
     path: .agents/ahu/config.md
   - bytes: 117
@@ -106,8 +106,8 @@ ahu:
     digest: b2f7e3285be8231d3329e77e455b0bbb0ea74e35ed5c76f95c9358d9485a3659
     executable: false
     path: .agents/skills/ahu-agent-context-critic/SKILL.md
-  - bytes: 25061
-    digest: d9df23a191934222f0767f9553a97f2402ab77a799ce6da19d8199be4fc7784d
+  - bytes: 25190
+    digest: c2bad194b00ec2cd5578b02799fa0faf25153e75ec1d89dba6013ea65a97c07e
     executable: false
     path: .agents/skills/ahu-architecture/SKILL.md
   - bytes: 12568

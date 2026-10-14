@@ -1542,17 +1542,98 @@ pub fn enforce_headless_executable(
     version: &str,
     executable: &Path,
 ) -> Result<Status> {
+    enforce_headless_executable_with_opencode_state(repo, harness, version, executable, false)
+}
+
+/// Inspect headless native configuration, optionally honoring the project's
+/// explicit trust decision for OpenCode's opaque account/authentication state.
+/// The accepted state remains visible in `gaps`; no credential or database
+/// content is read.
+pub fn enforce_headless_executable_with_opencode_state(
+    repo: &Path,
+    harness: &str,
+    version: &str,
+    executable: &Path,
+    trust_opencode_native_state: bool,
+) -> Result<Status> {
     if harness != "codex" || crate::harness::isolation::profile(harness, version).is_none() {
-        return enforce_headless(repo, harness, version);
+        let mut status = headless_status(inspect(repo, harness), version);
+        if harness == "opencode"
+            && trust_opencode_native_state
+            && trust_only_opencode_account_state(
+                &mut status,
+                &std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_default(),
+            )
+        {
+            return Ok(status);
+        }
+        if !status.headless.allowed {
+            return Err(Error::new(format!(
+                "headless native integration admission is unverified for {harness}:\n{}\n{}",
+                status.headless.reasons.join("\n"),
+                status.next_action
+            )));
+        }
+        return Ok(status);
     }
     let status = inspect_codex_effective(repo, executable, version)?.with_version(Some(version));
     if !status.headless.allowed {
         return Err(Error::new(format!(
-            "headless cmux isolation is unverified for codex:\n{}",
+            "headless native integration admission is unverified for codex:\n{}",
             status.headless.reasons.join("\n")
         )));
     }
     Ok(status)
+}
+
+fn trust_only_opencode_account_state(status: &mut Status, home: &Path) -> bool {
+    let unresolved = status
+        .components
+        .iter()
+        .filter(|component| matches!(component.isolation, Isolation::Unknown | Isolation::Unsafe))
+        .collect::<Vec<_>>();
+    if unresolved.is_empty()
+        || unresolved.iter().any(|component| {
+            !matches!(
+                component.name.as_str(),
+                "authenticated account config" | "authenticated remote config"
+            ) || component.evidence.len() != 1
+                || !matches!(
+                    component.evidence[0].scope.as_str(),
+                    "native account database" | "user native authentication"
+                )
+                || component.evidence[0].method != "metadata only; contents not read"
+                || !opencode_auth_path(home, &component.evidence[0].path)
+        })
+    {
+        return false;
+    }
+    status.headless.allowed = true;
+    status.headless.reasons.clear();
+    status.gaps.push(
+        "Project policy explicitly trusts OpenCode native account/authentication state for headless execution. It may select authenticated remote configuration and executable plugins; ahu does not inspect, disable, or constrain that state. Credentials and database contents remain unread.".into(),
+    );
+    status.next_action =
+        "OpenCode native account/authentication state is explicitly trusted by project policy; review it with OpenCode's native controls.".into();
+    true
+}
+
+fn opencode_auth_path(home: &Path, path: &Path) -> bool {
+    let root = home.join(".local/share/opencode");
+    if !path.starts_with(&root) {
+        return false;
+    }
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let native_name = name == "auth.json"
+        || (name.starts_with("opencode")
+            && [".db", ".db-wal", ".db-shm"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix)));
+    native_name
+        && std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
 /// Compatibility probes use the same version-specific invocation controls as
@@ -1687,7 +1768,7 @@ pub fn codex_effective_status(
     let status = finish("codex", components, gaps);
     if !status.headless.allowed {
         return Err(Error::new(format!(
-            "headless cmux isolation is unverified for codex:\n{}",
+            "headless native integration admission is unverified for codex:\n{}",
             status.headless.reasons.join("\n")
         )));
     }
@@ -1703,7 +1784,7 @@ pub fn enforce_headless(repo: &Path, harness: &str, version: &str) -> Result<Sta
     let status = headless_status(inspect(repo, harness), version);
     if !status.headless.allowed {
         return Err(Error::new(format!(
-            "headless cmux isolation is unverified for {harness}:\n{}\n{}",
+            "headless native integration admission is unverified for {harness}:\n{}\n{}",
             status.headless.reasons.join("\n"),
             status.next_action
         )));
@@ -1715,7 +1796,7 @@ pub fn enforce(repo: &Path, harness: &str) -> Result<Status> {
     let status = inspect(repo, harness);
     if !status.headless.allowed {
         return Err(Error::new(format!(
-            "headless cmux isolation is unverified for {harness}:\n{}\n{}",
+            "headless native integration admission is unverified for {harness}:\n{}\n{}",
             status.headless.reasons.join("\n"),
             status.next_action
         )));
@@ -2027,4 +2108,105 @@ pub fn install_command(repo: &Path, harness: &str, dry_run: bool) -> Result<i32>
     // Rescan even after a failed/partial native operation. No inferred success.
     eprint!("{}", render(&inspect(repo, harness)));
     Ok(code)
+}
+
+#[cfg(test)]
+mod trusted_opencode_state_tests {
+    use super::*;
+
+    fn status(name: &str, scope: &str, path: &Path) -> Status {
+        let component = Component {
+            name: name.into(),
+            registration: Registration::Unknown,
+            activation: Activation::Unknown,
+            isolation: Isolation::Unknown,
+            conformance: Conformance::Untested,
+            evidence: vec![Evidence {
+                path: path.to_path_buf(),
+                scope: scope.into(),
+                method: "metadata only; contents not read".into(),
+                digest: None,
+            }],
+            detail: "opaque state".into(),
+        };
+        Status {
+            harness: "opencode".into(),
+            native_agent: None,
+            profile: None,
+            cli_version: Some("1.18.32".into()),
+            version_checked: true,
+            components: vec![component],
+            gaps: vec![],
+            conformance: "locally_inspected; live_untested".into(),
+            headless: HeadlessPolicy {
+                allowed: false,
+                disable_variable: None,
+                reasons: vec!["opaque state".into()],
+                evidence_digest: "fixture".into(),
+            },
+            next_action: "interactive".into(),
+        }
+    }
+
+    #[test]
+    fn project_trust_accepts_only_native_opencode_authentication_stores() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        for (name, scope, file) in [
+            (
+                "authenticated account config",
+                "native account database",
+                "opencode.db-wal",
+            ),
+            (
+                "authenticated remote config",
+                "user native authentication",
+                "auth.json",
+            ),
+        ] {
+            let path = home.join(".local/share/opencode").join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"opaque fixture").unwrap();
+            let mut status = status(name, scope, &path);
+            assert!(trust_only_opencode_account_state(&mut status, home));
+            assert!(status.headless.allowed);
+            assert!(status.headless.reasons.is_empty());
+            assert!(
+                status
+                    .gaps
+                    .iter()
+                    .any(|gap| gap.contains("executable plugins"))
+            );
+        }
+    }
+
+    #[test]
+    fn project_trust_does_not_accept_project_plugins_or_other_unknown_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let path = home.join(".config/opencode/config.json");
+        let mut status = status("user defaults", "user", &path);
+        assert!(!trust_only_opencode_account_state(&mut status, home));
+        assert!(!status.headless.allowed);
+        assert_eq!(status.headless.reasons, ["opaque state"]);
+    }
+
+    #[test]
+    fn project_trust_does_not_accept_symlinked_native_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let directory = home.join(".local/share/opencode");
+        std::fs::create_dir_all(&directory).unwrap();
+        let target = home.join("outside.db");
+        std::fs::write(&target, b"opaque fixture").unwrap();
+        let path = directory.join("opencode.db");
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        let mut status = status(
+            "authenticated account config",
+            "native account database",
+            &path,
+        );
+        assert!(!trust_only_opencode_account_state(&mut status, home));
+        assert!(!status.headless.allowed);
+    }
 }

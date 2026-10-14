@@ -16,6 +16,7 @@ fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
         harness_version_pins: Default::default(),
         model_rankings: [("codex".into(), vec!["gpt-6".into()])].into(),
         knowledge: Default::default(),
+        headless: Default::default(),
         telemetry: Default::default(),
     };
     let loaded = LoadedConfig {

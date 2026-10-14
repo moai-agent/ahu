@@ -442,6 +442,7 @@ fn run_setup_using(
         // Setup asks nothing about knowledge bundles: a new project has none to
         // name yet, and an empty list makes `ahu knowledge lint` say so.
         knowledge: crate::config::Knowledge::default(),
+        headless: crate::config::HeadlessConfig::default(),
         telemetry: crate::config::TelemetryConfig::default(),
     };
 

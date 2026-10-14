@@ -6,7 +6,8 @@ description: ahu architecture and workflow explanation
 
 ahu is cross-harness configuration management for agent sessions. It launches
 agents that a repository defines into separate Git worktrees
-and runs interactive sessions in cmux or unattended headless attempts.
+and runs interactive sessions through the selected host (cmux by default),
+the current terminal, or unattended headless attempts.
 
 ahu is not an agent harness. Claude Code, Codex, the Antigravity CLI, OpenCode and Kiro CLI
 run the agent loop and own the conversation. ahu chooses the configured harness, model, instructions and
@@ -23,7 +24,8 @@ configuration or it fails.
 Outside ahu, sub-agents and fan out use the current harness's native
 sub-agent features. Inside ahu, registered assignments use registered ahu
 agents, each using its configured harness and model in a separate worktree.
-Headless children inherit that backend; interactive children use cmux.
+Headless children inherit that backend; interactive children use the selected
+session host or current terminal.
 Use `ahu @name 'assignment text'` for a direct launch, or
 `ahu @name --prompt-file /path/to/task.txt` for a file-backed assignment.
 The direct form also accepts `--prompt`; without a prompt, `ahu @name` opens
@@ -38,7 +40,8 @@ harness or its shell tools from starting other processes.
 
 ## What ahu needs
 
-- **cmux**, required for interactive task sessions; headless execution needs no cmux.
+- **cmux**, the default optional interactive session host. Current-terminal and
+  headless execution need no cmux.
 - **A supported harness**, installed and signed in by you: Claude Code, Codex, the Antigravity CLI, OpenCode, or Kiro CLI (V3).
 - **Git**: every task gets its own branch and worktree.
 

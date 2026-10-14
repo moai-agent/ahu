@@ -145,6 +145,7 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
             .into_iter()
             .collect(),
         knowledge: config::Knowledge::default(),
+        headless: config::HeadlessConfig::default(),
         telemetry: config::TelemetryConfig::default(),
     };
     let path = config::write_new(repo.path(), &new_config).expect("first write");
@@ -199,10 +200,31 @@ fn rendered_config_round_trips() {
             fail_on_warnings: true,
         },
         telemetry: config::TelemetryConfig::default(),
+        headless: config::HeadlessConfig::default(),
     };
     config::write_new(repo.path(), &original).unwrap();
     let loaded = config::load(repo.path()).unwrap().unwrap();
     assert_eq!(loaded.config, original);
+}
+
+#[test]
+fn headless_opencode_native_state_trust_is_explicit_and_round_trips() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    let mut config = config::load(repo.path()).unwrap().unwrap().config;
+    config.headless.trust_opencode_native_state = true;
+    let rendered = config::try_render(&config).unwrap();
+    assert!(rendered.contains("trust_opencode_native_state: true"));
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    repo.write(config::CONFIG_RELATIVE_PATH, &rendered);
+    assert_eq!(config::load(repo.path()).unwrap().unwrap().config, config);
+
+    config.headless.trust_opencode_native_state = false;
+    assert!(
+        !config::try_render(&config)
+            .unwrap()
+            .contains("trust_opencode_native_state")
+    );
 }
 
 #[test]
