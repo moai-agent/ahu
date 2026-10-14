@@ -47,7 +47,7 @@ fn skill_completion_matrix_retains_only_bounded_metadata() {
             // Only correlated, separate reports have a measured receipt interval.
             assert_eq!(skill["elapsed_ms"].is_u64(), harness != "opencode");
             assert_eq!(events.skills.len(), 1);
-            assert_eq!(events.unknown_events, 0);
+            assert_eq!(events.unknown_events, 0, "{harness}, failed={failed}");
             assert!(events.skills[0].source.is_none());
             let serialized = metadata.to_string();
             assert!(!serialized.contains("PRIVATE"));

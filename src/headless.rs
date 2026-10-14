@@ -2029,8 +2029,8 @@ impl Events {
             ("opencode", "user") => self.terminal = false,
             (
                 _,
-                "assistant" | "step_update" | "turn.started" | "item.started" | "item.updated"
-                | "stream_event",
+                "assistant" | "user" | "step_update" | "turn.started" | "item.started"
+                | "item.updated" | "stream_event",
             ) => (),
             _ => self.unknown_events += 1,
         }
