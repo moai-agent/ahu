@@ -312,66 +312,98 @@ fn inspection_preserves_durable_owner_identity_effects_and_replay_boundaries() {
 
 #[test]
 #[cfg(unix)]
-fn read_only_listing_preserves_records_and_observes_cross_window_liveness() {
-    use std::os::unix::fs::PermissionsExt;
-    for case in ["live", "closed", "unreadable", "malformed"] {
+fn task_state_uses_process_ownership_not_terminal_workspace_presence() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    for case in ["live", "closed", "unreadable"] {
         let repo = TestRepo::new();
-        let dir = record(&repo, "crosswindow");
-        let path = dir.join("task.json");
-        let mut saved: ahu::task::TaskRecord =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        saved.cmux_workspace_id = Some("task-in-b".into());
-        saved.cmux_window_id = Some("window-b".into());
-        ahu::state::write_json(&path, &saved).unwrap();
-        let cmux = repo.state_path().join("cmux");
-        std::fs::write(&cmux, r#"#!/usr/bin/env python3
-import json,os,sys
-if sys.argv[1] == 'ping': print('PONG'); sys.exit(0)
-method,params = sys.argv[2],json.loads(sys.argv[3])
-case = os.environ['AHU_TEST_WINDOW_CASE']
-if method == 'window.list': print(json.dumps({'windows':[{'id':'window-a'},{'id':'window-b'}]}))
-elif method == 'workspace.list':
- if params['window_id'] == 'window-b' and case == 'unreadable': sys.exit(1)
- if params['window_id'] == 'window-b' and case == 'malformed': print('{}')
- else: print(json.dumps({'workspaces':[{'id':'task-in-b','current_directory':'/tmp'}] if params['window_id']=='window-b' and case=='live' else []}))
-else: raise AssertionError(method)
-"#).unwrap();
-        std::fs::set_permissions(&cmux, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let run = |args: &[&str]| {
-            common::ahu()
-                .args(args)
-                .current_dir(repo.path())
-                .env("CMUX_WORKSPACE_ID", "caller-in-a")
-                .env("AHU_CMUX_BIN", &cmux)
-                .env("AHU_TEST_WINDOW_CASE", case)
-                .output()
-                .unwrap()
+        let dir = record(&repo, "ownercheck");
+        let owner_path = dir.join("owner.lock");
+        let held = if case == "unreadable" {
+            let target = repo.state_path().join("owner-target");
+            std::fs::write(&target, b"not an owner lock").unwrap();
+            std::os::unix::fs::symlink(target, &owner_path).unwrap();
+            None
+        } else {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(&owner_path)
+                .unwrap();
+            if case == "live" {
+                // SAFETY: file retains a valid descriptor until it is dropped.
+                assert_eq!(
+                    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                    0
+                );
+                Some(file)
+            } else {
+                drop(file);
+                None
+            }
         };
-        let listed = run(&["tasks"]);
-        assert!(
-            listed.status.success(),
-            "{}",
-            String::from_utf8_lossy(&listed.stderr)
-        );
-        let persisted: ahu::task::TaskRecord =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(persisted.state, ahu::task::TaskState::Running);
-        let detail = run(&["task", "crosswindow", "--output", "json"]);
-        assert!(
-            detail.status.success(),
-            "{}",
-            String::from_utf8_lossy(&detail.stderr)
-        );
+        let detail = run(&repo, &["task", "ownercheck", "--output", "json"]);
+        assert!(detail.status.success(), "{:?}", detail);
         let value: serde_json::Value = serde_json::from_slice(&detail.stdout).unwrap();
         assert_eq!(
-            value["liveness"],
+            value["session_state"],
             match case {
-                "live" => "live",
-                "closed" => "stale",
+                "live" => "running",
+                "closed" => "exited",
                 _ => "unknown",
             }
         );
+        let persisted: ahu::task::TaskRecord =
+            serde_json::from_slice(&std::fs::read(dir.join("task.json")).unwrap()).unwrap();
+        assert_eq!(
+            persisted.state,
+            if case == "closed" {
+                ahu::task::TaskState::Exited
+            } else {
+                ahu::task::TaskState::Running
+            }
+        );
+        drop(held);
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn current_terminal_task_is_running_only_while_its_owner_lock_is_held() {
+    use std::os::fd::AsRawFd;
+    let repo = TestRepo::new();
+    let dir = record(&repo, "foreground");
+    let owner_path = dir.join("owner.lock");
+    use std::os::unix::fs::OpenOptionsExt;
+    let owner = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(&owner_path)
+        .unwrap();
+    // SAFETY: owner retains a valid descriptor until the lock is dropped.
+    assert_eq!(
+        unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let active = run(&repo, &["task", "foreground", "--output", "json"]);
+    assert!(active.status.success(), "{:?}", active);
+    let active: serde_json::Value = serde_json::from_slice(&active.stdout).unwrap();
+    assert_eq!(active["session_state"], "running");
+
+    drop(owner);
+    let stale = run(&repo, &["task", "foreground", "--output", "json"]);
+    assert!(stale.status.success(), "{:?}", stale);
+    let stale: serde_json::Value = serde_json::from_slice(&stale.stdout).unwrap();
+    assert_eq!(stale["session_state"], "exited");
+    let persisted: ahu::task::TaskRecord =
+        serde_json::from_slice(&std::fs::read(dir.join("task.json")).unwrap()).unwrap();
+    assert_eq!(persisted.state, ahu::task::TaskState::Exited);
 }
 
 fn record(repo: &TestRepo, id: &str) -> std::path::PathBuf {
@@ -453,7 +485,7 @@ fn run(repo: &TestRepo, args: &[&str]) -> Output {
 }
 
 #[test]
-#[cfg(unix)]
+#[cfg(all(unix, feature = "cmux-plugin"))]
 fn focus_by_handle_selects_the_bound_workspace_and_json_keeps_canonical_identity() {
     use std::os::unix::fs::PermissionsExt;
     let repo = TestRepo::new();
@@ -541,9 +573,10 @@ fn task_json_is_small_unstyled_and_available_without_cmux_or_worktree() {
     assert!(output.stderr.is_empty());
     assert!(!output.stdout.contains(&0x1b));
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["schema_version"], 1);
-    assert_eq!(json["session_state"], "running");
-    assert_eq!(json["state_source"], "record");
+    assert_eq!(json["schema_version"], 2);
+    assert_eq!(json["session_state"], "unknown");
+    assert!(json.get("state_source").is_none());
+    assert!(json.get("liveness").is_none());
     assert_eq!(json["completion_verified"], false);
     assert_eq!(json["worktree_exists"], false);
     assert_eq!(json["branch"], value["branch"]);
@@ -556,7 +589,7 @@ fn task_json_is_small_unstyled_and_available_without_cmux_or_worktree() {
     assert!(
         String::from_utf8(human.stdout)
             .unwrap()
-            .contains("[session running]")
+            .contains("[session unknown]")
     );
 }
 
@@ -714,11 +747,11 @@ fn task_discloses_recorded_writes_outside_the_worktree() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(!text.contains("outside the task"), "{text}");
 
-    // The JSON contract is unchanged; the disclosure is a human-output line.
+    // The versioned JSON summary reports the reconciled session state.
     let out = run_with_runtime(&repo, runtime.path(), &["task", "abc1", "--output", "json"]);
     assert!(out.status.success(), "{:?}", out);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert!(value.get("writes_outside_worktree").is_none(), "{value}");
 }
 
@@ -851,6 +884,7 @@ fn interactive_cancel_record_read_failure_preserves_workspace() {
 }
 
 #[test]
+#[cfg(feature = "cmux-plugin")]
 fn interactive_cancel_acknowledgement_closes_only_its_workspace() {
     interactive_cancel_case("confirmed");
 }

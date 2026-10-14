@@ -894,6 +894,92 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
 }
 
 #[test]
+fn current_terminal_backend_runs_foreground_without_cmux() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    const CASE: &str = "AHU_LAUNCH_TERMINAL_FIXTURE";
+    let Ok(_) = std::env::var(CASE) else {
+        let scratch = tempfile::tempdir().unwrap();
+        symlink(
+            crate::selection::resolve_utility("git").unwrap(),
+            scratch.path().join("git"),
+        )
+        .unwrap();
+        let executable = scratch.path().join("codex");
+        std::fs::write(
+            &executable,
+            r##"#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'codex-cli 0.160.0'; exit 0; fi
+if [ "$1" = "app-server" ]; then
+  printf '%s\n' '{"id":1,"result":{}}' '{"id":2,"result":{"account":{"type":"chatgpt","email":"fixture@example.invalid"}}}'
+  while read -r line; do :; done
+  exit 0
+fi
+printf foreground > "$AHU_TEST_TERMINAL_MARKER"
+exit 0
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let marker = scratch.path().join("foreground-ran");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launch::launch_contract_tests::current_terminal_backend_runs_foreground_without_cmux",
+                "--nocapture",
+            ])
+            .env(CASE, "run")
+            .env("AHU_INTERACTIVE_PLUGIN", "terminal")
+            .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
+            .env("AHU_TEST_TERMINAL_BIN", &executable)
+            .env("AHU_TEST_TERMINAL_MARKER", &marker)
+            .env("PATH", scratch.path())
+            .env("HOME", scratch.path())
+            .current_dir(scratch.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "foreground");
+        return;
+    };
+
+    let (_temp, repo, loaded, mut plan) = fixture();
+    git::run_ok(
+        &repo.root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+    )
+    .unwrap();
+    plan.base_commit = Some(
+        git::run_ok(&repo.root, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .into(),
+    );
+    plan.harness_executable = std::env::var("AHU_TEST_TERMINAL_BIN").unwrap().into();
+    let launched = execute(&repo, &loaded, &plan, PROMPT, false).unwrap();
+    assert_eq!(launched.record.state, TaskState::Exited);
+    assert!(launched.record.cmux_workspace_id.is_none());
+    assert!(launched.record.session_host.is_none());
+    assert!(std::path::Path::new(&std::env::var("AHU_TEST_TERMINAL_MARKER").unwrap()).exists());
+}
+
+#[test]
 fn verification_resolves_workspace_path_without_executing_or_trusting_record_path() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     const CASE: &str = "AHU_LAUNCH_VERIFY_FIXTURE";

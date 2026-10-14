@@ -887,11 +887,10 @@ fn candidate_routing_status(
 
 fn tasks(repo: &Repo) -> Result<Value> {
     let listing = crate::agent_task::inspection::list(repo)?;
-    let workspaces = crate::commands::liveness_workspaces(&listing.records);
     let rows = listing
         .records
         .iter()
-        .map(|(dir, record)| crate::commands::task_summary(dir, record, workspaces.as_ref()))
+        .map(|(dir, record)| crate::commands::task_summary(dir, record))
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({
         "schema_version":1,
@@ -908,8 +907,7 @@ fn task_get(repo: &Repo, arguments: &Value) -> Result<Value> {
         .and_then(Value::as_str)
         .ok_or_else(|| Error::new("ahu_task_get requires arguments.task"))?;
     let (dir, record) = crate::commands::inspect_task(repo, input)?;
-    let workspaces = crate::commands::liveness_workspaces(&[(dir.clone(), record.clone())]);
-    crate::commands::task_summary(&dir, &record, workspaces.as_ref())
+    crate::commands::task_summary(&dir, &record)
 }
 
 #[cfg(test)]

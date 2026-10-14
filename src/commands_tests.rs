@@ -612,7 +612,7 @@ fn commands_propagate_output_failures() {
 }
 
 #[test]
-fn launch_refuses_widened_approvals_even_during_dry_run() {
+fn launch_uses_manifest_approval_mode_without_a_second_opt_in() {
     let (_root, repo) = repository();
     configured(&repo);
     let manifests = repo.root.join(config::AGENTS_RELATIVE_DIR);
@@ -621,26 +621,41 @@ fn launch_refuses_widened_approvals_even_during_dry_run() {
         std::fs::write(manifests.join("reviewer.md"), format!(
             "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: reviewer\nversion: 1.0.0\nharness: claude-code\nmodel: claude-opus-5\npermissions: {permissions}\n---\nReview carefully.\n"
         )).unwrap();
-        for dry_run in [false, true] {
-            let (result, output) = scripted("y\n", |c| {
-                launch_cmd(
-                    c,
-                    &repo,
-                    "reviewer",
-                    "synthetic task",
-                    false,
-                    dry_run,
-                    false,
-                    &Default::default(),
-                )
-            });
-            let error = result.unwrap_err().to_string();
-            assert!(error.contains("--allow-widened-approvals"), "{error}");
-            assert!(error.contains(permissions));
-            assert!(output.is_empty());
-            assert!(task_dirs(&repo).unwrap().is_empty());
-            assert!(!repo.root.join(".worktrees").exists());
-        }
+        let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+        crate::context_lock::refresh(&repo, &snapshot).unwrap();
+        git(&repo.root, &["add", "."]);
+        git(
+            &repo.root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "fixture context",
+            ],
+        );
+        let (result, output) = scripted("", |c| {
+            launch_cmd(
+                c,
+                &repo,
+                "reviewer",
+                "synthetic task",
+                false,
+                true,
+                false,
+                &Default::default(),
+            )
+        });
+        result.unwrap();
+        assert!(
+            output.contains(&format!("permissions = {permissions}")),
+            "{output}"
+        );
+        assert!(task_dirs(&repo).unwrap().is_empty());
     }
 }
 

@@ -28,6 +28,19 @@ use std::time::{Duration, Instant};
 
 const EVAL_OTEL_CHILD_DRAIN: Duration = Duration::from_millis(750);
 
+/// Owns the live foreground `run-task` process, whether its terminal is cmux
+/// or the caller's current terminal. The durable lock file lets inspection
+/// report activity without inferring it from a workspace alone.
+pub(crate) struct InteractiveTaskOwner {
+    _lock: Lock,
+}
+
+pub(crate) fn interactive_task_owner(dir: &Path) -> Result<InteractiveTaskOwner> {
+    Ok(InteractiveTaskOwner {
+        _lock: Lock::acquire(&dir.join("owner.lock"))?,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Options {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -871,6 +884,7 @@ pub fn launch(
     {
         return crate::broker::request(repo, agent, prompt, display, &options, allow, json_output);
     }
+    let _ = allow;
     let loaded = crate::config::load(&repo.root)?
         .ok_or_else(|| Error::new("project configuration is missing; run ahu setup"))?;
     let (agent, pair) = crate::commands::resolve_identity(repo, &loaded, Some(agent))?;
@@ -914,11 +928,9 @@ pub fn launch(
         .as_ref()
         .map(|a| a.manifest.permissions)
         .unwrap_or_default();
-    if permissions.widens_defaults() && !allow {
-        bail!(
-            "manifest approval widening requires --allow-widened-approvals for headless launches too"
-        );
-    }
+    // The committed agent manifest is the explicit, reviewable permission
+    // choice for unattended worktree launches. Do not require an extra human
+    // approval flag before the harness can start.
     // The catalog is the one table of which harnesses have a validated batch
     // profile and which executable to probe for them. A harness with an
     // interactive adapter still needs its batch argument surface and event

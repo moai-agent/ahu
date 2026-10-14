@@ -552,7 +552,7 @@ fn task_listing_fits_the_terminal_and_keeps_handles_whole() {
     });
     assert!(!wide.contains('…'), "{wide}");
     for header in [
-        "HANDLE", "TITLE", "STATE", "AGENT", "MODE", "LIVE", "RUNTIME", "BRANCH",
+        "HANDLE", "TITLE", "STATE", "AGENT", "MODE", "RUNTIME", "BRANCH",
     ] {
         assert!(wide.contains(header), "{header}: {wide}");
     }
@@ -592,7 +592,7 @@ fn a_title_its_handle_already_carries_does_not_take_a_column() {
         // What the handles do not say is what the row is for.
         for whole in [
             "@fix-flaky-test",
-            "running",
+            "unknown",
             "chris@1.0.0",
             "claude-code / claude-opus-5",
         ] {
@@ -644,7 +644,7 @@ fn only_the_rows_whose_titles_add_something_fill_the_title_column() {
     // The blank title cell leaves the handle and the state adjacent, separated
     // by the column's own width and nothing else.
     assert!(row.contains("@fix-flaky-test  "), "{row:?}");
-    assert!(row.contains("running"), "{row:?}");
+    assert!(row.contains("unknown"), "{row:?}");
 }
 
 /// The table is a human surface. Nothing about how it is laid out or painted
@@ -701,6 +701,11 @@ fn task_listing_paints_its_roles_only_when_color_is_in_effect() {
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
     repo.commit("fixture");
     let branch = listed(&repo, "storage-cleanup", "a current task");
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let mut listing = ahu::task::list(&discovered).unwrap();
+    let (dir, mut record) = listing.records.remove(0);
+    record.state = ahu::task::TaskState::Running;
+    ahu::state::write_json(&dir.join("task.json"), &record).unwrap();
 
     let run = |color: &str, no_color: Option<&str>| {
         let mut command = common::ahu();
@@ -735,7 +740,7 @@ fn task_listing_paints_its_roles_only_when_color_is_in_effect() {
         painted.contains("\x1b[1;36mchris@1.0.0\x1b[0m"),
         "{painted:?}"
     );
-    assert!(painted.contains("\x1b[2mexited\x1b[0m"), "{painted:?}");
+    assert!(painted.contains("\x1b[2munknown\x1b[0m"), "{painted:?}");
     assert!(
         painted.contains("\x1b[36mclaude-code / claude-opus-5\x1b[0m"),
         "{painted:?}"
@@ -744,8 +749,7 @@ fn task_listing_paints_its_roles_only_when_color_is_in_effect() {
         painted.contains(&format!("\x1b[2m{}\x1b[0m", short_branch(&branch))),
         "{painted:?}"
     );
-    // Liveness ahu could not read is dimmed rather than asserted.
-    assert!(painted.contains("\x1b[2munknown\x1b[0m"), "{painted:?}");
+    // Unknown activity is dimmed rather than asserted as running.
     assert!(painted.contains("\x1b[1mHANDLE\x1b[0m"), "{painted:?}");
     // Padding is never inside a styled span, so a colour never bleeds across
     // a column boundary.
@@ -1028,15 +1032,9 @@ fn a_launch_says_when_drift_could_not_read_earlier_records() {
     assert!(text.contains("drift was"), "{text}");
 }
 
-/// Spare width belongs to the compact branch before it belongs to the two
-/// columns a reader can infer from the rest of the row.
-///
-/// At 96 to 100 columns the layout used to keep MODE and LIVE and pay for them
-/// out of the branch, printing `ahu/chris/01a0df…`: a name that matches nothing
-/// the reader can look up. The branch column is worth its full compact width or
-/// nothing at all.
+/// The activity signal is folded into STATE instead of spending another column.
 #[test]
-fn the_compact_branch_is_whole_before_mode_and_liveness_are_shown() {
+fn the_compact_branch_is_whole_before_mode_and_title_are_shown() {
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
@@ -1044,9 +1042,8 @@ fn the_compact_branch_is_whole_before_mode_and_liveness_are_shown() {
     let branches = listed_short(&repo);
     let discovered = ahu::git::discover(repo.path()).unwrap();
 
-    // 100 is one column short of the whole table, so MODE leaves rather than the
-    // branch giving up the digits that identify it; 104 has room for both.
-    for width in [100usize, 104] {
+    // A narrow table drops MODE before cutting the branch; a wider table keeps both.
+    for width in [88usize, 104] {
         let (code, text) = scripted(&repo, |console| {
             ahu::commands::tasks_at(console, &discovered, width)
         });
@@ -1063,7 +1060,7 @@ fn the_compact_branch_is_whole_before_mode_and_liveness_are_shown() {
             assert!(!text.contains(branch), "{width}: {branch}\n{text}");
         }
         // Nothing the reader cannot get elsewhere was traded for it either.
-        for whole in ["@fix-flaky-test", "running", "chris@1.0.0"] {
+        for whole in ["@fix-flaky-test", "unknown", "chris@1.0.0"] {
             assert!(text.contains(whole), "{width}: {whole}\n{text}");
         }
         assert!(
@@ -1073,13 +1070,13 @@ fn the_compact_branch_is_whole_before_mode_and_liveness_are_shown() {
     }
 
     let (_, narrow) = scripted(&repo, |console| {
-        ahu::commands::tasks_at(console, &discovered, 100)
+        ahu::commands::tasks_at(console, &discovered, 88)
     });
     assert!(!narrow.contains("MODE"), "{narrow}");
-    assert!(narrow.contains("LIVE"), "{narrow}");
+    assert!(!narrow.contains("LIVE"), "{narrow}");
     let (_, roomy) = scripted(&repo, |console| {
         ahu::commands::tasks_at(console, &discovered, 104)
     });
     assert!(roomy.contains("MODE"), "{roomy}");
-    assert!(roomy.contains("LIVE"), "{roomy}");
+    assert!(!roomy.contains("LIVE"), "{roomy}");
 }

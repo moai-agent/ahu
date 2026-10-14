@@ -1323,9 +1323,9 @@ fn task_service_inspection_jobs_preserve_schema_and_job_ownership() {
     let job = alice.create("ahu_task_get", json!({"task":task_id}));
     let completed = alice.until(&job, "completed");
     let metadata = &completed["result"]["structuredContent"];
-    assert_eq!(metadata["schema_version"], 1);
+    assert_eq!(metadata["schema_version"], 2);
     assert_eq!(metadata["task_id"], task_id);
-    assert_eq!(metadata["session_state"], "running");
+    assert_eq!(metadata["session_state"], "unknown");
     assert!(!completed.to_string().contains("secret prompt"));
     let mut bob = Client::new(&repo, "bob");
     assert_eq!(bob.task("tasks/get", &job)["error"]["code"], -32602);

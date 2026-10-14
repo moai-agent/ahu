@@ -14,6 +14,8 @@ use std::path::Path;
 
 pub mod binding;
 
+pub(crate) type LaunchHost = (Option<Box<dyn v1::Host>>, Option<binding::FrozenHost>);
+
 /// Selection intent only: no package reads, authority checks, or host execution.
 pub(crate) struct Selection {
     pub id: String,
@@ -66,7 +68,12 @@ pub(crate) fn selection(repo: Option<&crate::git::Repo>) -> Result<Selection> {
         }
     }
     Ok(Selection {
-        id: "cmux".into(),
+        id: if cfg!(feature = "cmux-plugin") {
+            "cmux"
+        } else {
+            "terminal"
+        }
+        .into(),
         source: "build-default",
     })
 }
@@ -90,17 +97,16 @@ fn compiled() -> Result<Box<dyn v1::Host>> {
     }
 }
 
-pub fn discover_for_launch(
-    repo: &crate::git::Repo,
-) -> Result<(Box<dyn v1::Host>, Option<binding::FrozenHost>)> {
+pub fn discover_for_launch(repo: &crate::git::Repo) -> Result<LaunchHost> {
     match selection(Some(repo))?.id.as_str() {
-        "cmux" => Ok((compiled()?, None)),
+        "cmux" => Ok((Some(compiled()?), None)),
+        "terminal" => Ok((None, None)),
         "none" => Err(crate::util::Error::new("session hosting is disabled")
             .with_kind(crate::util::ErrorKind::Prerequisite)),
         id => {
             let (status, frozen) = binding::select(repo, id)?;
             let host = external::ExternalHost::connect_bound(&status, &frozen)?;
-            Ok((Box::new(host), Some(frozen)))
+            Ok((Some(Box::new(host)), Some(frozen)))
         }
     }
 }
@@ -109,12 +115,21 @@ pub fn discover_for_launch(
 pub fn discover() -> Result<Box<dyn v1::Host>> {
     let repo = crate::git::discover(&std::env::current_dir()?);
     match selection(repo.as_ref().ok())?.id.as_str() {
-        "cmux" | "none" => compiled(),
+        "cmux" => compiled(),
+        "terminal" | "none" => Err(crate::util::Error::new(
+            "no session-host plugin is selected for this operation",
+        )
+        .with_kind(crate::util::ErrorKind::Prerequisite)),
         _ => discover_for_launch(&repo.map_err(|_| {
             crate::util::Error::new("session host requires a committed project binding")
                 .with_kind(crate::util::ErrorKind::Prerequisite)
         })?)
-        .map(|(host, _)| host),
+        .and_then(|(host, _)| {
+            host.ok_or_else(|| {
+                crate::util::Error::new("no session-host plugin is selected for this operation")
+                    .with_kind(crate::util::ErrorKind::Prerequisite)
+            })
+        }),
     }
 }
 
@@ -160,7 +175,10 @@ pub fn discover_for_coordinator() -> Result<Option<Box<dyn v1::Host>>> {
     {
         return Ok(None);
     }
-    if std::env::var("AHU_INTERACTIVE_PLUGIN").as_deref() == Ok("none") {
+    if matches!(
+        std::env::var("AHU_INTERACTIVE_PLUGIN").as_deref(),
+        Ok("none" | "terminal")
+    ) {
         return Ok(None);
     }
     discover().map(Some)

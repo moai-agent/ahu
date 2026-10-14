@@ -1466,14 +1466,17 @@ ahu task "$task_id" --output json
 
 Task commands accept a full task ID or an unambiguous prefix. `ahu focus`
 uses the newest record matching its prefix without checking ambiguity; use
-a full ID when focusing a task. Inspection reads the saved record and headless
-attempt metadata without updating state. Interactive inspection may query cmux
-for observed ownership; headless inspection probes `owner.lock`. JSON schema
-version 1 includes `task_id`, `agent`, `harness`, `model`, `branch`, `base_commit`,
-`worktree`, `worktree_exists`, `record_path`, `cmux_workspace_id`, and
-`cmux_window_id`. `session_state` is the recorded `starting`, `running`,
-`exited`, or `failed` state; `state_source` is `record` and
-`completion_verified` is always `false`. Headless records also include an
+a full ID when focusing a task. Inspection reads the saved record and
+attempt metadata, then checks the recorded session-owner signal. A confirmed
+missing owner reconciles a live record to `exited` under its task-state lock;
+an unreadable or unavailable signal reports `unknown` and does not mark the task
+running. Interactive runner processes hold `owner.lock`; older tasks without that
+proof remain `unknown`, even when their terminal workspace still exists. JSON schema version 2 includes `task_id`, `agent`,
+`harness`, `model`, `branch`, `base_commit`, `worktree`, `worktree_exists`,
+`record_path`, `cmux_workspace_id`, and `cmux_window_id`. `session_state` is the
+effective `starting`, `running`, `waiting-for-approval`, `exited`, `failed`,
+`cancelled`, or `unknown` state; `completion_verified` is always `false`.
+Headless records also include an
 `attempt` projection with outcome, ownership observation, blockers, session
 provenance, and review paths. Missing optional values are JSON null.
 JSON remains unstyled even with `--color=always` and omits prompt text and titles.
@@ -1503,27 +1506,27 @@ when there is room left over. Handles are generated from titles, so a short titl
 comes through its handle word for word; such a title is left out of its row, and
 a title column with nothing in any row leaves the table entirely.
 
-Whole columns leave the table in this order as the terminal narrows: `MODE`, then
-`LIVE`, then `TITLE`, then `BRANCH`, then `AGENT`, and `RUNTIME` last. Before a
-column leaves, the title and the branch are cut with an ellipsis. Whatever the
-surviving columns do not need goes to the branch until it is whole, and then to
-the title.
+The `STATE` column includes verified activity, so there is no separate `LIVE`
+column. Unknown ownership never appears as `running`. Whole columns leave the
+table in this order as the terminal narrows: `MODE`, then `TITLE`, then
+`BRANCH`, then `AGENT`, and `RUNTIME` last. Before a column leaves, the title
+and the branch are cut with an ellipsis. Whatever the surviving columns do not
+need goes to the branch until it is whole, and then to the title.
 
 | Column | What it holds |
 | --- | --- |
 | `HANDLE` | The task's `@name`, or the task id when it has none |
 | `TITLE` | The recorded task title, when it adds something the handle does not |
-| `STATE` | The recorded session state |
+| `STATE` | The reconciled session state or `unknown` when activity cannot be verified |
 | `AGENT` | The agent and its version |
-| `MODE` | `cmux` or `headless` |
-| `LIVE` | The liveness observed at this moment: `live`, `stale`, or `unknown` |
+| `MODE` | `cmux`, `plugin`, `terminal`, or `headless` |
 | `RUNTIME` | The pinned harness and model |
 | `BRANCH` | The task's branch, prefix and the first eight characters of the task id |
 
 Color, when stdout is a terminal and `NO_COLOR` is unset, carries meaning and
 nothing else: handles and agents are agent-colored, the state is colored by
-what it means for the reader, liveness ahu could not confirm is dimmed rather
-than asserted, the runtime is runtime-colored, and the branch is dim. `ahu
+what it means for the reader, `unknown` is dimmed rather than asserted, the
+runtime is runtime-colored, and the branch is dim. `ahu
 tasks --output json` is unaffected by width and by color alike.
 
 ahu has no diff command. A task is an ordinary branch in an ordinary checkout,
@@ -1735,11 +1738,15 @@ Actual cmux activation resolves the executable with the existing core checks,
 then the package pings cmux. Task launch checks capabilities before creating a
 worktree. No harness, model, or backend substitution occurs.
 
-Without the package, or with `none`, headless tasks and local inspection remain
-available. Coordinators (`ahu codex`, etc.) stay in the current terminal, even
-inside cmux, without grouping or sidebar updates. Explicit selection of an absent
-cmux package refuses coordinator startup. Task launches, focus, Markdown opening,
-and removal requiring a recorded cmux workspace return an actionable error.
+Without the package, builds that omit default features select the built-in
+`terminal` backend. Interactive tasks then run in the caller's foreground
+terminal, with the same task worktree, frozen launch identity, process
+supervision, and cancellation path. `ahu plugins` reports this selection without
+probing cmux. Set `AHU_INTERACTIVE_PLUGIN=terminal` to choose it in a default
+build; `none` explicitly disables interactive task launch. Headless execution,
+coordinators (`ahu codex`, etc.), and local inspection need no session plugin.
+Focus, Markdown opening, and cleanup requiring a recorded cmux workspace still
+need the cmux plugin.
 Unavailable inventory remains unknown; records are not marked stale or deleted
 on that evidence. Re-enable/rebuild the plugin to inspect or clean up recorded
 cmux resources. Disabling it does not close existing sessions. Cancellation still

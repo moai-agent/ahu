@@ -207,10 +207,12 @@ erases the operation history.
 
 `agent_task::inspection` routes `ahu tasks` (human and JSON), `ahu task`, and
 the approved MCP tools `ahu_tasks_list` and `ahu_task_get` through the same
-core-minted `Session::get` authorization. Their existing JSON schemas and legacy
-task IDs remain unchanged. Exact IDs, unique prefixes, handles and validated
-repository index pointers resolve through the same core lookup. Human task
-listing observes liveness without reconciling or rewriting task records.
+core-minted `Session::get` authorization. TaskService schemas and legacy task
+IDs remain unchanged; the CLI/MCP task summary is schema version 2 because it
+folds verified owner activity into `session_state`. Exact IDs, unique prefixes,
+handles and validated repository index pointers resolve through the same core lookup. CLI/MCP task
+summaries report `unknown` when activity cannot be verified and persist
+`exited` under the task-state lock when the recorded owner is confirmed gone.
 The local CLI and stdio MCP inspection entrypoints retain repository read access;
 JSON arguments cannot supply a principal or grants. MCP Tasks extension jobs
 retain their separate caller ownership, cancellation and subscription protocol;

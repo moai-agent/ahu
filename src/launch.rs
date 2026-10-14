@@ -1,4 +1,4 @@
-//! The launch pipeline: validate, snapshot, worktree, cmux, record.
+//! The launch pipeline: validate, snapshot, worktree, selected session, record.
 //!
 //! Every step is ordered so that nothing irreversible happens before the launch
 //! is known to be valid, and so that a failure part-way leaves either nothing
@@ -650,7 +650,9 @@ pub fn execute(
     // cmux never leaves a worktree behind.
     let (session_host, frozen_host) = interactive::discover_for_launch(repo)
         .map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
-    session_host.check_capabilities()?;
+    if let Some(host) = &session_host {
+        host.check_capabilities()?;
+    }
 
     if git::branch_exists(repo, &plan.branch)? {
         bail!(
@@ -703,29 +705,41 @@ pub fn execute(
         return Err(rollback_worktree(repo, plan, e));
     }
 
-    let executable = std::env::current_exe()
-        .map_err(|e| Error::new(format!("cannot locate the ahu executable: {e}")))?;
-    let startup = interactive::startup_command(&executable, &plan.task_dir);
-    let title = interactive::workspace_title(&plan.agent_label(), &plan.title);
-    let manager = interactive::repository::RepositoryManager::new(session_host.as_ref(), repo);
-    let placement = match manager.create_task_workspace(
-        &title,
-        &plan.summary,
-        &plan.worktree,
-        &startup,
-        focus,
-        &mut notes,
-    ) {
-        Ok(placement) => placement,
-        Err(e) => return Err(workspace_creation_failed(repo, plan, e)),
-    };
-    finish_workspace_launch(
-        &plan.task_dir,
-        &mut record,
-        &manager,
-        &placement,
-        &mut notes,
-    );
+    if let Some(session_host) = session_host {
+        let executable = std::env::current_exe()
+            .map_err(|e| Error::new(format!("cannot locate the ahu executable: {e}")))?;
+        let startup = interactive::startup_command(&executable, &plan.task_dir);
+        let title = interactive::workspace_title(&plan.agent_label(), &plan.title);
+        let manager = interactive::repository::RepositoryManager::new(session_host.as_ref(), repo);
+        let placement = match manager.create_task_workspace(
+            &title,
+            &plan.summary,
+            &plan.worktree,
+            &startup,
+            focus,
+            &mut notes,
+        ) {
+            Ok(placement) => placement,
+            Err(e) => return Err(workspace_creation_failed(repo, plan, e)),
+        };
+        finish_workspace_launch(
+            &plan.task_dir,
+            &mut record,
+            &manager,
+            &placement,
+            &mut notes,
+        );
+    } else {
+        match run_task(&plan.task_dir)? {
+            HarnessOutcome::Exited(status) if !status.success() => {
+                bail!(
+                    "the harness exited unsuccessfully ({status}); the task worktree and record are retained."
+                );
+            }
+            HarnessOutcome::Exited(_) | HarnessOutcome::Cancelled => {}
+        }
+        record = task::load(&plan.task_dir)?;
+    }
 
     Ok(Launched {
         record,
@@ -818,19 +832,17 @@ pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
     Ok(tasks)
 }
 
-/// Run a task inside its cmux workspace.
+/// Run a task under supervision in its selected terminal session.
 ///
-/// This is the fixed entrypoint that cmux's shell-interpreted startup command
-/// invokes. It receives only a directory path; the prompt is read from a file
-/// and handed to the harness as one argument, so shell syntax in the prompt is
-/// never interpreted.
+/// A session host's startup command invokes this fixed entrypoint. It receives
+/// only a directory path; the prompt is read from a file and handed to the
+/// harness as one argument, so shell syntax in the prompt is never interpreted.
 pub(crate) fn verify_task(
     task_dir: &Path,
     batch: Option<&crate::headless::Spec>,
 ) -> Result<(TaskRecord, LaunchCommand, PathBuf)> {
-    // A refused record is read here inside a live cmux pane, where the user has
-    // no other context, so the error says what to do next rather than only what
-    // went wrong.
+    // A refused record is read inside the task's terminal, where the user has
+    // no other context, so the error says what to do next as well as what failed.
     let record = task::load(task_dir).map_err(|e| {
         Error::new(format!(
             "{e}\n\
@@ -1222,6 +1234,10 @@ fn terminate_group(child: &mut std::process::Child) -> Result<()> {
 
 pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     // Do not mutate a task path until its frozen execution record is verified.
+    let _ = verify_task(task_dir, None)?;
+    let _owner = crate::headless::interactive_task_owner(task_dir)?;
+    // Removal and another run may have raced the first validation. Re-read the
+    // frozen inputs while holding the same owner lock used by task inspection.
     let (record, rebuilt, executable) = verify_task(task_dir, None)?;
     let mut started = false;
     run_verified_task(task_dir, record, rebuilt, executable, &mut started)
@@ -1314,7 +1330,8 @@ fn run_verified_task(
     // Nested commands discover the checkout the session edits.
     state::ensure_checkout_state(&record.worktree)?;
     task::set_state(task_dir, TaskState::Running)?;
-    if let Ok(repo) = git::discover(&record.worktree)
+    if record.cmux_workspace_id.is_some()
+        && let Ok(repo) = git::discover(&record.worktree)
         && let Ok(client) = interactive::discover_for_record(&repo, &record)
     {
         let _ = interactive::repository::RepositoryManager::new(client.as_ref(), &repo)
@@ -1362,7 +1379,14 @@ fn run_verified_task(
         command
             .args(&rebuilt.args)
             .env("AHU_BIN", std::env::current_exe()?)
-            .env("AHU_WORKER_SESSION", "cmux")
+            .env(
+                "AHU_WORKER_SESSION",
+                if record.cmux_workspace_id.is_some() {
+                    "cmux"
+                } else {
+                    "terminal"
+                },
+            )
             .env("AHU_TASK_ID", &record.task_id)
             .env("AHU_TASK_DIR", task_dir)
             .current_dir(&record.worktree);
