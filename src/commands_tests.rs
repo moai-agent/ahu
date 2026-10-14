@@ -612,7 +612,7 @@ fn commands_propagate_output_failures() {
 }
 
 #[test]
-fn launch_uses_manifest_approval_mode_without_a_second_opt_in() {
+fn launch_requires_explicit_opt_in_for_widened_manifest_permissions() {
     let (_root, repo) = repository();
     configured(&repo);
     let manifests = repo.root.join(config::AGENTS_RELATIVE_DIR);
@@ -638,7 +638,7 @@ fn launch_uses_manifest_approval_mode_without_a_second_opt_in() {
                 "fixture context",
             ],
         );
-        let (result, output) = scripted("", |c| {
+        let (result, _) = scripted("", |c| {
             launch_cmd(
                 c,
                 &repo,
@@ -650,12 +650,16 @@ fn launch_uses_manifest_approval_mode_without_a_second_opt_in() {
                 &Default::default(),
             )
         });
-        result.unwrap();
         assert!(
-            output.contains(&format!("permissions = {permissions}")),
-            "{output}"
+            result
+                .unwrap_err()
+                .to_string()
+                .contains(&format!("permissions = {permissions}")),
+            "{permissions} must be refused without explicit opt-in"
         );
+        // Refusal happens before task state, branches, or worktrees are made.
         assert!(task_dirs(&repo).unwrap().is_empty());
+        assert!(!repo.root.join(".worktrees").exists());
     }
 }
 
