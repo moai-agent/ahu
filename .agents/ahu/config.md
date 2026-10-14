@@ -5,6 +5,8 @@ ahu:
   - antigravity
   - codex
   harness_version_pins: {}
+  headless:
+    trust_opencode_native_state: true
   knowledge:
     bundles:
     - docs/knowledge
