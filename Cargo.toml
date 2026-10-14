@@ -6,6 +6,7 @@ description = "The moai-agent command-line interface"
 repository = "https://github.com/moai-agent/ahu"
 license = "MIT"
 publish = false
+exclude = [".agents/ahu/config.md", ".agents/ahu/lock.md"]
 
 [[bin]]
 name = "ahu"
