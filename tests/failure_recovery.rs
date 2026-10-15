@@ -51,6 +51,7 @@ fn with_state<T>(_repo: &TestRepo, f: impl FnOnce() -> T) -> T {
 }
 
 #[test]
+#[cfg(feature = "cmux-plugin")]
 fn a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record() {
     if !common::in_harness_fixture(
         "a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record",

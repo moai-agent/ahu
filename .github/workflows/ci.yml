@@ -59,6 +59,10 @@ jobs:
           cargo clippy --no-default-features --all-targets --locked -- -D warnings
           cargo test --no-default-features --locked --test plugins --test cmux_facade --test task_remove --test utility_resolution
           cargo test --no-default-features --locked --test headless foreground_keeps_primary_coordination_and_identity_without_native_copies
+      - name: Check optional cmux coordinator compatibility
+        run: cargo test --features cmux-plugin --locked --test codex_session --test exit_codes --test failure_recovery --test gates --test terminal_output --test utility_resolution
+      - name: Check optional cmux dispatch from a headless-refused project
+        run: cargo test --features cmux-plugin --locked --test headless headless_isolation_refusal_does_not_gate_real_interactive_cmux_dispatch -- --exact
       - name: Install synthetic harness executables
         run: |
           set -euo pipefail

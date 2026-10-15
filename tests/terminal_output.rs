@@ -117,12 +117,24 @@ fn normal_harness_capabilities_are_not_warnings_but_failures_still_surface() {
             assert!(!text.contains("Reliability warning"), "{text}");
         }
         if args[0] == "doctor" {
-            assert!(
-                !output.status.success(),
-                "missing cmux must still fail doctor"
-            );
-            assert!(stdout.contains("cmux"), "{stdout}");
-            assert!(!stdout.contains("in-session model switching"), "{stdout}");
+            #[cfg(feature = "cmux-plugin")]
+            {
+                assert!(
+                    !output.status.success(),
+                    "missing cmux must still fail doctor"
+                );
+                assert!(stdout.contains("cmux"), "{stdout}");
+                assert!(!stdout.contains("in-session model switching"), "{stdout}");
+            }
+            #[cfg(not(feature = "cmux-plugin"))]
+            {
+                assert!(
+                    output.status.success(),
+                    "optional cmux must not block the provider-free build: {stdout}"
+                );
+                assert!(stdout.contains("session host terminal"), "{stdout}");
+                assert!(stdout.contains("native cmux  unavailable"), "{stdout}");
+            }
         } else {
             assert!(output.status.success(), "{stderr}");
             let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();

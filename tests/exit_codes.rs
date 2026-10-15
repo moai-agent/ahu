@@ -76,7 +76,7 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
     let malformed = TestRepo::new();
     malformed.write(".agents/ahu/config.toml", "not valid TOML");
     let bin = common::fake_harness(repo.state_path(), &repo.state_path().join("argv"));
-    let cases: &[(&str, &std::path::Path, &[&str], &str, i32)] = &[
+    let cases: Vec<(&str, &std::path::Path, &[&str], &str, i32)> = vec![
         ("success", repo.path(), &["help"], "", 0),
         ("cancelled", repo.path(), &[], "@reviewer\n.cancel\n", 1),
         ("usage", repo.path(), &["not-a-command"], "", 2),
@@ -89,13 +89,6 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
         ),
         ("missing repository", outside.path(), &["agents"], "", 4),
         (
-            "missing cmux",
-            repo.path(),
-            &["@reviewer", "--prompt-file", "assignment.txt"],
-            "",
-            4,
-        ),
-        (
             "invalid configuration",
             malformed.path(),
             &["@reviewer", "--prompt", "Review", "--dry-run"],
@@ -103,10 +96,22 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
             5,
         ),
     ];
+    #[cfg(feature = "cmux-plugin")]
+    let cases = {
+        let mut cases = cases;
+        cases.push((
+            "missing cmux",
+            repo.path(),
+            &["@reviewer", "--prompt-file", "assignment.txt"],
+            "",
+            4,
+        ));
+        cases
+    };
     for (label, cwd, args, input, expected) in cases {
         let mut child = common::ahu()
             .current_dir(cwd)
-            .args(*args)
+            .args(args)
             .env("NO_COLOR", "1")
             .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .env(
@@ -127,12 +132,12 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
         let output = child.wait_with_output().unwrap();
         assert_eq!(
             output.status.code(),
-            Some(*expected),
+            Some(expected),
             "{label}: stdout={} stderr={}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        if *expected >= 2 {
+        if expected >= 2 {
             assert!(!output.stderr.is_empty(), "{label} needs a diagnostic");
         }
     }

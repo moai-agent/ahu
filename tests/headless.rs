@@ -3632,6 +3632,7 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
 }
 
 #[test]
+#[cfg(feature = "cmux-plugin")]
 fn headless_isolation_refusal_does_not_gate_real_interactive_cmux_dispatch() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();

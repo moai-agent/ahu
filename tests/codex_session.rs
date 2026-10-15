@@ -27,6 +27,7 @@ fn rank_all_harnesses(repo: &common::TestRepo) {
 
 #[test]
 #[cfg(unix)]
+#[cfg(feature = "cmux-plugin")]
 fn coordinator_shortcuts_group_the_caller_before_starting_and_refuse_failed_grouping() {
     use std::os::unix::fs::PermissionsExt;
     for (shortcut, program) in [
@@ -119,8 +120,9 @@ else: raise AssertionError(method)
             assert_eq!(
                 scratch.path().join("started").exists(),
                 failure == "none",
-                "{shortcut}/{failure}: {}",
-                String::from_utf8_lossy(&result.stderr)
+                "{shortcut}/{failure}: stdout={} stderr={}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr),
             );
             if failure == "none" {
                 assert_eq!(result.status.code(), Some(7));

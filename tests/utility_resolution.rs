@@ -127,8 +127,15 @@ fn repository_utilities_are_excluded_before_discovery_and_launch() {
                 .unwrap();
             fixture.assert_unexecuted(&result);
             assert!(fixture.outside.path().join("external-git-ran").exists());
-            if args == ["agents"] || args.contains(&"--dry-run") {
+            if args == ["agents"]
+                || args.contains(&"--dry-run")
+                || (!cfg!(feature = "cmux-plugin") && args == ["doctor"])
+                || (!cfg!(feature = "cmux-plugin") && args.first() == Some(&"@sable"))
+            {
                 assert!(result.status.success(), "{args:?}: {result:?}");
+                if args.first() == Some(&"@sable") && !args.contains(&"--dry-run") {
+                    assert!(fixture.outside.path().join("harness-argv").exists());
+                }
             } else {
                 assert!(!result.status.success(), "{args:?}: {result:?}");
                 let marker = fixture.outside.path().join("external-cmux-ran");
@@ -190,7 +197,7 @@ fn utility_resolution_fails_closed_without_an_external_installation() {
             text.contains(if cfg!(feature = "cmux-plugin") {
                 "cmux was not found"
             } else {
-                "cmux session plugin is not included"
+                "native cmux  unavailable: compiled adapter not included"
             }),
             "{result:?}"
         );
@@ -198,6 +205,7 @@ fn utility_resolution_fails_closed_without_an_external_installation() {
 }
 
 #[test]
+#[cfg(feature = "cmux-plugin")]
 fn explicit_cmux_overrides_retain_user_selected_command_semantics() {
     let fixture = Fixture::new();
     let path = format!(
@@ -303,8 +311,9 @@ fn utility_candidates_in_primary_and_sibling_worktrees_are_never_bootstrap_tools
                     if command == "agents" {
                         assert!(result.status.success(), "{result:?}");
                     } else {
-                        assert!(
+                        assert_eq!(
                             fixture.outside.path().join("external-cmux-ran").exists(),
+                            cfg!(feature = "cmux-plugin") || command == "doctor",
                             "{result:?}"
                         );
                         std::fs::remove_file(fixture.outside.path().join("external-cmux-ran"))
