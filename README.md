@@ -33,22 +33,25 @@ authenticated: Claude Code (`claude`), Codex (`codex`), Antigravity CLI (`agy`),
 OpenCode (`opencode`), or Kiro CLI (`kiro-cli`, V3 interactive and headless). An OpenCode agent also needs the model's provider
 configured in your own OpenCode configuration; see
 [OpenCode with Ollama-hosted models](docs/reference.md#opencode-with-ollama-hosted-models).
-Interactive sessions also require cmux. Headless tasks need no cmux connection.
+Interactive tasks run in the current terminal by default. cmux is an optional
+session-host plugin; enable it only for projects that want cmux workspaces.
+Headless tasks need no session host.
 Projects that configure knowledge bundles also require the `okf` binary for
-[knowledge checks](docs/reference.md#knowledge-checks). Repository agents use
-the GitHub CLI (`gh`) for issue tracking; ahu itself never invokes it.
+[knowledge checks](docs/reference.md#knowledge-checks). Projects can enable a
+provider plugin for issue tracking; core ahu does not require GitHub or the
+GitHub CLI (`gh`).
 ahu installs none of these; harness authentication remains with each harness.
 The optional Jev tool reads its separately configured API key only when called.
 Read-only help and
-launch previews do not require a cmux connection. Git and default cmux lookup
-require executables outside Git working trees; see the
+launch previews do not require a session-host connection. Git and explicit
+cmux operations require executables outside Git working trees; see the
 [lookup rules](docs/reference.md#utility-lookup).
 
 See [Kiro setup and limits](docs/reference.md#kiro-cli) for installation, model selection, and supported features.
 
 ## Everyday use
 
-From a Git checkout in a cmux terminal:
+From any Git checkout:
 
 ```sh
 ahu doctor

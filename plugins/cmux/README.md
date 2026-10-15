@@ -13,7 +13,10 @@ It owns cmux CLI/RPC transport, capability checks, and surface mechanics.
 Core selects the executable and owns identity, permissions, worktrees, records,
 repository associations, supervision, cancellation confirmation, and outcomes.
 
-Build/install from the complete ahu source workspace using its root lockfile:
+This older compiled adapter is an opt-in compatibility path. The normal ahu
+build uses the current terminal and does not include or require cmux. To build
+the compatibility adapter from the complete ahu source workspace, use its root
+lockfile:
 
 ```sh
 cargo build --locked --features cmux-plugin
@@ -21,11 +24,11 @@ cargo install --path . --locked --features cmux-plugin
 ahu plugins --output json
 ```
 
-The default build includes this package for compatibility. Build ahu with
-`--no-default-features` to omit it. `AHU_INTERACTIVE_PLUGIN=cmux` explicitly
-selects it; `AHU_INTERACTIVE_PLUGIN=none` disables session operations for that
-process. Inventory never executes package code or activates it. Activation pings
-cmux; task launch then checks capabilities. No other backend is selected.
+Builds with `--features cmux-plugin` include this package. The default build
+omits it. `AHU_INTERACTIVE_PLUGIN=cmux` explicitly selects it;
+`AHU_INTERACTIVE_PLUGIN=none` disables session operations for that process.
+Inventory never executes package code or activates it. Activation pings cmux;
+task launch then checks capabilities. No other backend is selected.
 
 The included `ahu-plugin.md` uses OKF 0.2 YAML frontmatter with `type: ahu:plugin`
 and exposes this source package to local metadata

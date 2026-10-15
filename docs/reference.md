@@ -1718,7 +1718,7 @@ cargo install --path . --locked --features cmux-plugin
 cargo build --locked --no-default-features
 ```
 
-The default Cargo feature includes cmux for existing users. `ahu plugins`
+The default build uses the current terminal and has no cmux dependency. `ahu plugins`
 (or `--output json`) reports compiled packages, committed bindings, and explicitly
 supplied local packages, declared Host API version, and selection. It reads
 committed binding policy and available installed metadata without executing plugin
@@ -1738,12 +1738,12 @@ Actual cmux activation resolves the executable with the existing core checks,
 then the package pings cmux. Task launch checks capabilities before creating a
 worktree. No harness, model, or backend substitution occurs.
 
-Without the package, builds that omit default features select the built-in
-`terminal` backend. Interactive tasks then run in the caller's foreground
+Without an enabled session-host binding, the built-in `terminal` backend is
+selected. Interactive tasks run in the caller's foreground
 terminal, with the same task worktree, frozen launch identity, process
 supervision, and cancellation path. `ahu plugins` reports this selection without
-probing cmux. Set `AHU_INTERACTIVE_PLUGIN=terminal` to choose it in a default
-build; `none` explicitly disables interactive task launch. Headless execution,
+probing cmux. Set `AHU_INTERACTIVE_PLUGIN=terminal` to choose it explicitly;
+`none` disables interactive task launch. Headless execution,
 coordinators (`ahu codex`, etc.), and local inspection need no session plugin.
 Focus, Markdown opening, and cleanup requiring a recorded cmux workspace still
 need the cmux plugin.
@@ -2026,15 +2026,15 @@ Packages with an `executable` frontmatter mapping can be activated explicitly wi
 [executable host protocol](executable-hosts.md) specifies process resolution,
 framing bounds, version and capability negotiation, deadlines, cancellation,
 path protections, and partial-start outcomes. Ordinary discovery never executes
-the package. Compiled cmux is the default when no enabled binding or environment
-selector exists, and headless execution does not
-consult this inventory.
+the package. The current terminal is the default when no enabled binding or
+environment selector exists, and headless execution does not consult this
+inventory.
 
 Executable task launch, focus, reconciliation, cancellation cleanup and removal
 use the task's frozen `session_host` identity. Current committed grants still
-apply. Old records without that field retain compiled cmux semantics. Group
-mappings are separate for each exact external package identity; `cmux.json` is
-reserved for compiled cmux. Headless tasks do not activate a session host, and
+apply. Old records without that field retain legacy cmux semantics. Group
+mappings are separate for each exact external package identity; legacy
+`cmux.json` mappings remain readable. Headless tasks do not activate a session host, and
 current-terminal coordinators do not require cmux.
 
 `ahu doctor` identifies the selected session host ID and package and reports its
@@ -2290,14 +2290,14 @@ and restores the caller’s foreground afterward, including error paths. The
 run-task owner holds a lock and supervises its child; cancellation uses an owned
 process, not an unverified saved PID. A request before startup is honored.
 Cancellation retains the task record, worktree, and branch. Only confirmed
-cancellation closes the recorded cmux workspace. An already-terminal task, an
+cancellation closes the task's recorded session-host workspace. An already-terminal task, an
 unconfirmed request, or a task that finishes on its own leaves the workspace open.
 A workspace-close failure is reported separately from confirmed process
 termination. A terminal outcome is recorded even if foreground restoration fails.
 
 ### Utility lookup
 
-Git and default cmux lookup skip empty and relative `PATH` entries. Candidates
+Git and explicit cmux lookup skip empty and relative `PATH` entries. Candidates
 must be executable, canonicalize to an absolute path, and be outside registered
 repository roots and Git working trees. The resolver inspects each canonical
 candidate's parent ancestry for `.git` with filesystem metadata, without running
@@ -2333,8 +2333,9 @@ ahu does not reinterpret their digests or delete their worktrees.
 
 Outside ahu, delegation belongs to the current harness. Registered assignments
 inside ahu use registered ahu agents running their configured
-harnesses and models in separate worktrees. Interactive tasks use cmux workspaces;
-headless descendants inherit the execution mode and primary-owned coordination scope.
+harnesses and models in separate worktrees. Interactive tasks use the current
+terminal by default or an explicitly selected session-host plugin; headless
+descendants inherit the execution mode and primary-owned coordination scope.
 Headless child grants and bounded native helpers follow the preceding policies.
 The supplied delegation contract uses the canonical
 `ahu @name --prompt-file assignment.txt` form so saved deliveries can

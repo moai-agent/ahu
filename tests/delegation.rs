@@ -3,6 +3,15 @@ mod common;
 use common::{HOSTILE_PROMPT, TestRepo};
 
 fn launch(repo: &TestRepo, name: &str, dry_run: bool) -> std::process::Output {
+    launch_with_host(repo, name, dry_run, None)
+}
+
+fn launch_with_host(
+    repo: &TestRepo,
+    name: &str,
+    dry_run: bool,
+    host: Option<&str>,
+) -> std::process::Output {
     let temp = repo.state_path();
     let bin = common::fake_harness(temp, &temp.join("argv"));
     let home = temp.join("home");
@@ -11,6 +20,7 @@ fn launch(repo: &TestRepo, name: &str, dry_run: bool) -> std::process::Output {
     cmd.current_dir(repo.path())
         .env("HOME", &home)
         .env_remove("OTEL_RESOURCE_ATTRIBUTES")
+        .env_remove("AHU_INTERACTIVE_PLUGIN")
         .args([name, "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
@@ -18,6 +28,9 @@ fn launch(repo: &TestRepo, name: &str, dry_run: bool) -> std::process::Output {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         );
+    if let Some(host) = host {
+        cmd.env("AHU_INTERACTIVE_PLUGIN", host);
+    }
     if dry_run {
         cmd.arg("--dry-run");
     }
@@ -36,7 +49,7 @@ fn actual_launch_uses_a_short_preview_while_dry_run_keeps_audit_details() {
     repo.add_agent("sable", "1.0.0", "claude-sonnet-5");
     repo.write("assignment.txt", "Review the CLI\u{1b}[2J");
     repo.commit("fixture");
-    let output = launch(&repo, "@sable", false);
+    let output = launch_with_host(&repo, "@sable", false, Some("cmux"));
     // The fixture intentionally has no cmux, so this never creates a session.
     assert!(!output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
@@ -144,7 +157,7 @@ fn failed_assignment_never_falls_back_to_the_coordinator_or_leaves_a_branch() {
     repo.commit("fixture");
     let missing = launch(&repo, "@unknown", false);
     assert!(!missing.status.success());
-    let unavailable = launch(&repo, "@sable", false);
+    let unavailable = launch_with_host(&repo, "@sable", false, Some("cmux"));
     assert!(!unavailable.status.success());
     assert!(String::from_utf8_lossy(&unavailable.stderr).contains("cmux"));
     assert_eq!(common::git(repo.path(), &["branch", "--list", "ahu/*"]), "");

@@ -42,5 +42,5 @@ toml = "0.9"
 members = ["crates/ahu-host-api", "plugins/cmux"]
 
 [features]
-default = ["cmux-plugin"]
+default = []
 cmux-plugin = ["dep:ahu-cmux-plugin"]

@@ -22,11 +22,13 @@ use crate::bail;
 use crate::util::{Error, ErrorKind, Result, digest_bytes};
 
 pub const INSTRUCTIONS: &str = r#"ahu delegation contract (v1)
-You are running an ahu-assigned task in a cmux workspace.
+You are running an ahu-assigned task in its own task worktree. The current
+terminal is the default interactive host; cmux is optional and must be enabled
+as a session-host plugin by the project.
 Delegation is scoped to the entrypoint: outside ahu, a request for sub-agents or
 fan out belongs to that harness's own natively supported sub-agent features and
 stays inside that harness. Inside THIS ahu task, "sub-agents" and "fan out" mean
-ONLY registered ahu agents, each in its own cmux workspace with its configured
+ONLY registered ahu agents, each in its own task worktree with its configured
 harness and model. Use ahu for ALL delegated work, including parallel reviews or
 named specialists. Native harness sub-agents are not valid ahu child agents.
 Run "$AHU_BIN" agents to discover the registered agents. Their manifests specify
@@ -45,9 +47,11 @@ comes from this checkout. Children get fresh worktrees; uncommitted source edits
 are NOT copied. For a review of uncommitted work, explicitly include the absolute
 source checkout path and revision/diff scope in the assignment. Tell reviewers
 where to write their findings so you can read and compare their actual reports.
-Record each returned task id, worktree, and cmux workspace. Use "$AHU_BIN" tasks
-and cmux read-screen --workspace <workspace-id> --scrollback to inspect progress.
-A session launch or process exit does not prove completion; read the findings.
+Record each returned task id and worktree. Use "$AHU_BIN" tasks and
+"$AHU_BIN" task <task-id> to inspect lifecycle and available results. Interactive
+screen inspection is host-specific; use it only when the selected session-host
+plugin provides that capability. Do not assume cmux is installed. A session
+launch or process exit does not prove completion; read the findings.
 Never read an agent definition and impersonate it using this harness's built-in
 Agent, Task, team, spawn_agent, or similar delegation tools. Never launch a
 replacement harness yourself. Never replace a configured harness or model with

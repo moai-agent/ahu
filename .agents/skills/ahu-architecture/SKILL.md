@@ -6,8 +6,8 @@ description: ahu architecture and workflow explanation
 
 ahu is cross-harness configuration management for agent sessions. It launches
 agents that a repository defines into separate Git worktrees
-and runs interactive sessions through the selected host (cmux by default),
-the current terminal, or unattended headless attempts.
+and runs interactive sessions in the current terminal by default, through an
+explicitly selected session-host plugin, or as unattended headless attempts.
 
 ahu is not an agent harness. Claude Code, Codex, the Antigravity CLI, OpenCode and Kiro CLI
 run the agent loop and own the conversation. ahu chooses the configured harness, model, instructions and
@@ -40,19 +40,20 @@ harness or its shell tools from starting other processes.
 
 ## What ahu needs
 
-- **cmux**, the default optional interactive session host. Current-terminal and
-  headless execution need no cmux.
+- **A session host**, optional. Interactive work defaults to the current
+  terminal; cmux is available through an explicitly enabled plugin. Headless
+  execution needs no session host.
 - **A supported harness**, installed and signed in by you: Claude Code, Codex, the Antigravity CLI, OpenCode, or Kiro CLI (V3).
 - **Git**: every task gets its own branch and worktree.
 
-ahu creates the repository group and the per-task workspace through cmux, and
-interactive sessions require that connection. Headless tasks and local inspection do
-not. The harness is what actually runs the
+When selected, the cmux plugin creates repository groups and per-task workspaces.
+Without a session-host plugin, interactive tasks run in the current terminal.
+Headless tasks and local inspection need no terminal plugin. The harness is what actually runs the
 agent. `ahu setup` detects installed harnesses, offers available models,
 registers development agents and installs supported skills/MCP configuration.
 Harness installation and sign-in remain separate; ahu does not ship a harness
 or manage its agent-model API key.
-Git and default cmux lookup skip empty and relative PATH entries and use
+Git and explicit cmux lookup skip empty and relative PATH entries and use
 canonical executables outside Git working trees. Candidate ancestry is
 inspected without running candidate Git. Explicit AHU_CMUX_BIN retains
 user-selected command semantics; these checks are not OS isolation.

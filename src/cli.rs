@@ -7,8 +7,8 @@ use crate::util::Result;
 
 pub const HELP_ALL: &str = "ahu - The moai-agent command-line interface
 
-Launch repository-defined agents in fresh Git worktrees and run them through
-the selected session host (cmux by default) or in the current terminal. Use
+Launch repository-defined agents in fresh Git worktrees and run them in the
+current terminal or through an explicitly selected session-host plugin. Use
 --headless for unattended execution with primary-owned coordination.
 
 Usage: ahu [--repo <path>] [COMMAND]
@@ -228,7 +228,7 @@ agent assignment options:
   --output json        Emit a versioned plan or headless launch/result envelope.
                         JSON goes to stdout, diagnostics to stderr.
   --input-file <path>   Bounded JSON input for an agent input_schema; requires --headless
-  --headless            Run without cmux; descendants inherit this backend
+  --headless            Run unattended without an interactive session host
   --allow-child @name   Grant this exact registered child identity (repeatable)
   --allow-child-widened @name
                         Grant a child whose manifest widens approvals. Frozen at
