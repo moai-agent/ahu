@@ -138,15 +138,19 @@ pub(super) fn validate_result(value: &Value, id: &str, attempt: u32) -> Result<(
 }
 
 /// The plain Git command that shows what this task changed, when the record
-/// names both a checkout and a launch base. The checkout path is
-/// repository-controlled and the reader is expected to paste the line, so it
-/// is quoted as one shell word.
+/// names both a checkout and a launch base. Quote both values and accept only
+/// a full object ID for the base because the reader is expected to paste this
+/// line into a shell.
 fn review_command(dir: &Path) -> Option<String> {
     let record: crate::task::TaskRecord = read(&dir.join("task.json")).ok()?;
     let base = record.base_commit?;
+    if !crate::git::is_full_object_id(&base) {
+        return None;
+    }
     Some(format!(
-        "git -C {} diff {base}",
-        crate::util::shell_single_quote(&record.worktree.to_string_lossy())
+        "git -C {} diff --no-ext-diff --no-textconv {} --",
+        crate::util::shell_single_quote(&record.worktree.to_string_lossy()),
+        crate::util::shell_single_quote(&base)
     ))
 }
 

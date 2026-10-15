@@ -25,6 +25,16 @@ pub struct Repo {
     pub head: Option<String>,
 }
 
+/// Whether a recorded revision is a full SHA-1 or SHA-256 Git object ID.
+/// Task review commands accept only these values; refs and option-like text
+/// are not safe to interpolate into a command intended for a user's shell.
+pub(crate) fn is_full_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 impl Repo {
     /// Every checkout sharing this repository's Git common directory.
     fn worktree_roots(&self) -> Result<Vec<PathBuf>> {

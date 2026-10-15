@@ -170,6 +170,29 @@ fn headless_controls_share_task_references_and_reconcile_missing_owners() {
 }
 
 #[test]
+fn headless_inspection_omits_review_command_for_untrusted_base_text() {
+    let f = Fixture::new();
+    let path = f.dir.join("task.json");
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["base_commit"] = "HEAD; printf AHU_REVIEW_SENTINEL".into();
+    write_json(&path, &value);
+
+    let inspection = f.json("result");
+    let commands = inspection["review"]["commands"].as_array().unwrap();
+    assert!(commands.iter().all(|command| {
+        !command
+            .as_str()
+            .unwrap_or_default()
+            .contains("AHU_REVIEW_SENTINEL")
+    }));
+    assert!(
+        commands
+            .iter()
+            .all(|command| { !command.as_str().unwrap_or_default().contains(" diff ") })
+    );
+}
+
+#[test]
 fn running_and_interrupted_follow_owner_liveness_and_reconcile_stale_state() {
     use std::os::fd::AsRawFd;
     let f = Fixture::new();

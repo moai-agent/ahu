@@ -1740,11 +1740,16 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
 ///
 /// ahu has no diff of its own: the task's own checkout and its recorded launch
 /// base are everything Git needs, and a reader who can see the command can
-/// also vary it. Quoted because a checkout path is repository-controlled.
+/// also vary it. Both the checkout and validated base are quoted for safe
+/// shell pasting.
 fn review_command(record: &task::TaskRecord) -> String {
     let worktree = crate::util::shell_single_quote(&record.worktree.to_string_lossy());
     match record.base_commit.as_deref() {
-        Some(base) => display_safe(&format!("git -C {worktree} diff {base}")),
+        Some(base) if crate::git::is_full_object_id(base) => display_safe(&format!(
+            "git -C {worktree} diff --no-ext-diff --no-textconv {} --",
+            crate::util::shell_single_quote(base)
+        )),
+        Some(_) => "review unavailable: recorded base commit is invalid".into(),
         // Without a base there is nothing to diff against; the branch is still
         // where the work is.
         None => display_safe(&format!(
@@ -1916,16 +1921,12 @@ fn deliver_inbox_message(dir: &Path, text: &str) -> Result<usize> {
 /// `ahu tasks`: the question.md line for one task, when one is on record.
 fn question_excerpt(dir: &Path) -> Option<String> {
     let path = dir.join("question.md");
-    if !path.exists() {
-        return None;
-    }
-    let body = match std::fs::read(&path) {
-        Ok(body) => body,
-        Err(_) => return Some("present, unreadable".to_string()),
+    let body = match read_bounded_artifact(&path, TASK_ARTIFACT_LIMIT) {
+        BoundedArtifact::Missing => return None,
+        BoundedArtifact::Oversized => return Some("present, larger than the display bound".into()),
+        BoundedArtifact::Unreadable => return Some("present, unreadable".into()),
+        BoundedArtifact::Content(body) => body,
     };
-    if body.len() as u64 > TASK_ARTIFACT_LIMIT {
-        return Some("present, larger than the display bound".to_string());
-    }
     let text = String::from_utf8_lossy(&body);
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -1946,19 +1947,57 @@ enum ArtifactBody {
     Unreadable,
 }
 
+enum BoundedArtifact {
+    Missing,
+    Content(Vec<u8>),
+    Oversized,
+    Unreadable,
+}
+
+/// Read task-authored artifacts through the same pinned-directory, no-follow,
+/// nonblocking descriptor checks as headless metadata, with a strict byte cap.
+fn read_bounded_artifact(path: &std::path::Path, limit: u64) -> BoundedArtifact {
+    match crate::state::confine_file(path) {
+        Ok(None) => return BoundedArtifact::Missing,
+        Err(_) => return BoundedArtifact::Unreadable,
+        Ok(Some(metadata)) if metadata.len() > limit => return BoundedArtifact::Oversized,
+        Ok(Some(_)) => {}
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(_) => return BoundedArtifact::Unreadable,
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return BoundedArtifact::Unreadable,
+    };
+    if crate::storage::validate_owned_metadata(&metadata, false).is_err() {
+        return BoundedArtifact::Unreadable;
+    }
+    if metadata.len() > limit {
+        return BoundedArtifact::Oversized;
+    }
+    match crate::util::read_limited(&mut file, limit) {
+        Ok(bytes) => BoundedArtifact::Content(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => BoundedArtifact::Oversized,
+        Err(_) => BoundedArtifact::Unreadable,
+    }
+}
+
 /// Read result.md or question.md under the display bound, never trusting it.
 fn read_artifact(dir: &Path, file: &str) -> Option<ArtifactBody> {
     let path = dir.join(file);
-    if !path.exists() {
-        return None;
-    }
-    let body = match std::fs::read(&path) {
-        Ok(body) => body,
-        Err(_) => return Some(ArtifactBody::Unreadable),
+    let body = match read_bounded_artifact(&path, TASK_ARTIFACT_LIMIT) {
+        BoundedArtifact::Missing => return None,
+        BoundedArtifact::Oversized => return Some(ArtifactBody::Oversized),
+        BoundedArtifact::Unreadable => return Some(ArtifactBody::Unreadable),
+        BoundedArtifact::Content(body) => body,
     };
-    if body.len() as u64 > TASK_ARTIFACT_LIMIT {
-        return Some(ArtifactBody::Oversized);
-    }
     Some(ArtifactBody::Content(display_safe_block(
         &String::from_utf8_lossy(&body),
     )))
@@ -3357,6 +3396,45 @@ mod artifact_and_inbox_tests {
             read_artifact(root.path(), "result.md"),
             Some(ArtifactBody::Oversized)
         ));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(outside.path(), "outside-artifact-sentinel").unwrap();
+            std::fs::remove_file(root.path().join("result.md")).unwrap();
+            std::fs::remove_file(root.path().join("question.md")).unwrap();
+            symlink(outside.path(), root.path().join("result.md")).unwrap();
+            assert!(matches!(
+                read_artifact(root.path(), "result.md"),
+                Some(ArtifactBody::Unreadable)
+            ));
+            symlink(outside.path(), root.path().join("question.md")).unwrap();
+            assert_eq!(
+                question_excerpt(root.path()).as_deref(),
+                Some("present, unreadable")
+            );
+            assert!(!read_artifact(root.path(), "result.md")
+                .is_some_and(|body| matches!(body, ArtifactBody::Content(text) if text.contains("outside-artifact-sentinel"))));
+            std::fs::remove_file(root.path().join("result.md")).unwrap();
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let fifo = root.path().join("result.md");
+            let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            // SAFETY: name is a NUL-terminated path to a new test entry.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            assert!(matches!(
+                read_artifact(root.path(), "result.md"),
+                Some(ArtifactBody::Unreadable)
+            ));
+            assert_eq!(
+                question_excerpt(root.path()).as_deref(),
+                Some("present, unreadable")
+            );
+        }
     }
 
     #[test]

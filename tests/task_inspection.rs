@@ -621,12 +621,21 @@ fn diff_is_not_a_command_and_task_offers_the_git_command_instead() {
     let text = String::from_utf8(run(&repo, &["task", "abc1"]).stdout).unwrap();
     assert!(
         text.contains(&format!(
-            "review    git -C '{}' diff {}",
+            "review    git -C '{}' diff --no-ext-diff --no-textconv '{}' --",
             saved.worktree.display(),
             saved.base_commit.as_deref().unwrap()
         )),
         "{text}"
     );
+
+    let path = dir.join("task.json");
+    let mut altered: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    altered["base_commit"] = "HEAD; printf AHU_REVIEW_SENTINEL".into();
+    std::fs::write(&path, serde_json::to_vec(&altered).unwrap()).unwrap();
+    let text = String::from_utf8(run(&repo, &["task", "abc1"]).stdout).unwrap();
+    assert!(text.contains("review unavailable: recorded base commit is invalid"));
+    assert!(!text.contains("git -C "));
 }
 
 #[test]
