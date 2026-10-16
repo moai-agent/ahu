@@ -501,6 +501,45 @@ fn task_observation_provider_data_is_forwarded_without_expanding_task_grants() {
 }
 
 #[test]
+fn non_github_plugin_fixture_consumes_the_provider_neutral_task_contract() {
+    let fixture = Fixture::new("normal");
+    fixture.install();
+    let repo = ahu::git::discover(&fixture.root).unwrap();
+    let core = task_core(&repo, false);
+    let grant = task_grant(&repo, &core, &[TASK_A]);
+    let provider_data = json!({
+        "provider": "synthetic-tracker",
+        "external_item": "fixture-42",
+        "action": "report-progress"
+    });
+    let observed = observe_with_data(
+        &repo,
+        &grant,
+        json!([{"operation":"read","task":TASK_A}]),
+        provider_data.clone(),
+    )
+    .unwrap();
+
+    // The fixture is an ordinary discovered executable package. It consumes
+    // the same provider-neutral envelope and synthetic provider data; no
+    // GitHub-specific branch or core change is needed to invoke it.
+    let forwarded = fixture
+        .invoke(
+            &serde_json::to_vec(&observed["input"]).unwrap(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(forwarded["input"], observed["input"]);
+    assert_eq!(forwarded["input"]["kind"], "ahu.task-observations");
+    assert_eq!(
+        forwarded["input"]["observations"][0]["snapshot"]["task"],
+        TASK_A
+    );
+    assert_eq!(forwarded["input"]["data"], provider_data);
+    fixture.stopped();
+}
+
+#[test]
 fn task_observations_deny_ungranted_ids_cursors_and_authority_injection() {
     let fixture = Fixture::new("normal");
     fixture.install();
