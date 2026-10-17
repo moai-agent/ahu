@@ -4398,6 +4398,132 @@ mod write_tracking_tests {
     }
 
     #[test]
+    fn opencode_zero_exit_requires_a_terminal_part_in_drained_stdout() {
+        // Synthetic stdout fixtures, checked against the JSON event filter in
+        // the installed OpenCode 2.0.32 bundle. Its post-wait message catch-up
+        // can emit a completed tool without forwarding the assistant's finish
+        // reason or successful idle outcome. Native session success therefore
+        // cannot substitute for a stdout stop part.
+        // This models the contract; it does not replay a live provider run.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repo = crate::git::discover(dir.path()).unwrap();
+        let store = crate::storage::HeadlessStore::for_repo(&repo).unwrap();
+        let tool = json!({
+            "type":"tool_use", "timestamp":3, "sessionID":"ses_synthetic",
+            "part":{
+                "sessionID":"ses_synthetic", "messageID":"msg_synthetic",
+                "partID":"prt_synthetic_tool-call_synthetic", "type":"tool",
+                "id":"call_synthetic", "tool":"ahu_ahu_tasks",
+                "state":{
+                    "status":"completed", "input":{}, "output":"synthetic result",
+                    "title":"ahu_ahu_tasks",
+                    "metadata":{"metadata":{}, "content":[{"type":"text", "text":"synthetic result"}]},
+                    "time":{"start":1, "end":2}
+                }
+            }
+        });
+        let finish = |reason| {
+            json!({
+                "type":"step_finish", "timestamp":2, "sessionID":"ses_synthetic",
+                "part":{
+                    "sessionID":"ses_synthetic", "messageID":"msg_synthetic",
+                    "id":"part_finish", "type":"step-finish", "reason":reason
+                }
+            })
+        };
+        let stop = finish("stop");
+        let tool_calls = finish("tool-calls");
+        let mut large_tool = tool.clone();
+        // Cross multiple pipe-reader chunks without approaching the line bound.
+        large_tool["part"]["state"]["output"] = json!("x".repeat(32768));
+        for (name, parts, terminal, failed) in [
+            ("tool_only", vec![tool.clone()], false, false),
+            (
+                "tool_call_boundary",
+                vec![tool.clone(), tool_calls.clone()],
+                false,
+                false,
+            ),
+            (
+                "explicit_stop",
+                vec![tool.clone(), tool_calls.clone(), stop.clone()],
+                true,
+                false,
+            ),
+            (
+                "large_tool_then_stop",
+                vec![large_tool, stop.clone()],
+                true,
+                false,
+            ),
+            (
+                "tool_after_stop",
+                vec![stop.clone(), tool.clone()],
+                false,
+                false,
+            ),
+            (
+                "tool_call_boundary_after_stop",
+                vec![stop, tool_calls],
+                false,
+                false,
+            ),
+            ("length_limit", vec![tool, finish("length")], true, true),
+        ] {
+            let stream = parts
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            // Arguments carry the fixture literally; no event payload is shell code.
+            let mut child = std::process::Command::new("/bin/sh")
+                .args(["-c", "printf '%s\\n' \"$1\"", "synthetic-opencode", &stream])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let shared = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
+            let (tx, rx) = std::sync::mpsc::channel();
+            capture(
+                child.stdout.take().unwrap(),
+                store.directory.join(format!("{name}/session.json")),
+                dir.path().to_path_buf(),
+                Some(SessionOwner {
+                    task_id: name.into(),
+                    attempt: 1,
+                    harness: "opencode".into(),
+                }),
+                shared.clone(),
+                tx,
+            );
+            assert_eq!(child.wait().unwrap().code(), Some(0), "{name}");
+            rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+            let events = shared.lock().unwrap();
+            assert_eq!(events.terminal, terminal, "{name}: {events:?}");
+            assert_eq!(events.failed, failed, "{name}: {events:?}");
+            assert_eq!(events.session.as_deref(), Some("ses_synthetic"), "{name}");
+            assert_eq!(events.unknown_events, 0, "{name}");
+            assert_eq!(
+                events.trajectory.observation.completed_tool_calls,
+                Some(
+                    parts
+                        .iter()
+                        .filter(|part| part["type"] == "tool_use")
+                        .count() as u64
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn stderr_capture_keeps_only_categories_or_a_count() {
         let dir = tempfile::tempdir().unwrap();
         let events = std::sync::Arc::new(std::sync::Mutex::new(Events::default()));
