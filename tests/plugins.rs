@@ -374,7 +374,7 @@ fn disabled_plugin_keeps_actual_coordinators_in_the_current_terminal() {
         });
         std::fs::write(
             bin.join(program),
-            "#!/bin/sh\ntouch \"$COORDINATOR_STARTED\"\nexit 7\n",
+            "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '  -m, --model MODEL\\n  --prompt PROMPT\\n  --auto\\n'; exit 0; fi\ntouch \"$COORDINATOR_STARTED\"\nexit 7\n",
         )
         .unwrap();
         let output = fixture_command(scratch.path())

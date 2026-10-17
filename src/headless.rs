@@ -98,6 +98,19 @@ pub struct Spec {
     pub gaps: Vec<String>,
 }
 
+fn validate_child_grants_within_parent(
+    requested: &[crate::broker::ChildGrant],
+    frozen: &[crate::broker::ChildGrant],
+) -> Result<()> {
+    let mut agents = std::collections::HashSet::new();
+    for grant in requested {
+        if !agents.insert(&grant.agent) || !frozen.iter().any(|allowed| allowed == grant) {
+            bail!("a child cannot expand the host delegation grant");
+        }
+    }
+    Ok(())
+}
+
 fn structured_result_path(dir: &Path, attempt: u32) -> PathBuf {
     dir.join("requests")
         .join(format!("structured-result-{attempt}.json"))
@@ -963,9 +976,11 @@ pub fn launch(
     crate::catalog::check_headless_version(&plan.pair.harness, &version)?;
     let parent_task = std::env::var("AHU_PARENT_TASK").ok();
     let mut parent_release = None;
+    let mut frozen_parent_spec = None;
     let depth = if let Some(parent) = &parent_task {
         let parent_dir = lookup(repo, parent)?;
         let parent_spec: Spec = read_json(&parent_dir.join("headless.json"))?;
+        frozen_parent_spec = Some(parent_spec.clone());
         let parent_record = task::load(&parent_dir)?;
         validate_frozen_configuration(&parent_record)?;
         parent_release = Some(parent_record.identity.release_id.clone());
@@ -986,10 +1001,15 @@ pub fn launch(
         if !options.child_agents.is_empty() || !options.child_widened.is_empty() {
             bail!("a child cannot expand the host delegation grant");
         }
-        serde_json::from_str(
+        let grants: Vec<crate::broker::ChildGrant> = serde_json::from_str(
             &std::env::var("AHU_FROZEN_CHILD_GRANTS").unwrap_or_else(|_| "[]".into()),
         )
-        .map_err(|e| Error::new(e.to_string()))?
+        .map_err(|e| Error::new(e.to_string()))?;
+        let frozen = frozen_parent_spec
+            .as_ref()
+            .ok_or_else(|| Error::new("parent task specification is unavailable"))?;
+        validate_child_grants_within_parent(&grants, &frozen.child_grants)?;
+        grants
     } else {
         crate::broker::freeze_grants(repo, &options.child_agents, &options.child_widened)?
     };
@@ -4073,6 +4093,54 @@ mod ownership_tests {
         }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
         assert!(!Lock::is_owned(&path).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod child_grant_tests {
+    use super::validate_child_grants_within_parent;
+    use crate::agent::Permissions;
+    use crate::broker::ChildGrant;
+
+    fn grant(agent: &str, permissions: Permissions, native_helpers: &str) -> ChildGrant {
+        ChildGrant {
+            agent: agent.into(),
+            identity_digest: format!("{agent}-identity"),
+            permissions,
+            hooks_digest: format!("{agent}-hooks"),
+            native_helpers: native_helpers.into(),
+            contract: crate::structured::Contract::default(),
+        }
+    }
+
+    #[test]
+    fn environment_grants_must_be_a_frozen_subset() {
+        let frozen = vec![
+            grant("reader", Permissions::Prompt, "disabled"),
+            grant("writer", Permissions::AcceptEdits, "bounded"),
+        ];
+        assert!(validate_child_grants_within_parent(&frozen[..1], &frozen).is_ok());
+        assert!(validate_child_grants_within_parent(&[], &frozen).is_ok());
+        assert!(
+            validate_child_grants_within_parent(
+                &[grant("unknown", Permissions::Prompt, "disabled")],
+                &frozen
+            )
+            .is_err()
+        );
+
+        let mut widened_permissions = frozen[0].clone();
+        widened_permissions.permissions = Permissions::Auto;
+        assert!(validate_child_grants_within_parent(&[widened_permissions], &frozen).is_err());
+
+        let mut widened_helpers = frozen[0].clone();
+        widened_helpers.native_helpers = "bounded".into();
+        assert!(validate_child_grants_within_parent(&[widened_helpers], &frozen).is_err());
+
+        assert!(
+            validate_child_grants_within_parent(&[frozen[0].clone(), frozen[0].clone()], &frozen)
+                .is_err()
+        );
     }
 }
 

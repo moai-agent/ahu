@@ -3519,7 +3519,7 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
                         ahu::catalog::version_token(entry.verified_versions).unwrap()
                     })
             };
-            std::fs::write(&stub, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{observed}'; exit 0; fi\ntouch \"$HOME/worker-started\"\nexit 97\n")).unwrap();
+            std::fs::write(&stub, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{observed}'; exit 0; fi\nif [ \"$1\" = --help ]; then printf '  -m, --model MODEL\\n  --prompt PROMPT\\n  --auto\\n'; exit 0; fi\ntouch \"$HOME/worker-started\"\nexit 97\n")).unwrap();
             std::fs::set_permissions(stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let home = f.external.path().join("home");
