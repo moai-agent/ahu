@@ -219,11 +219,13 @@ pub fn fake_harnesses(
             format!(
                 "#!/bin/sh\n\
                  if [ \"$1\" = \"--version\" ]; then printf '1.2.3\\n'; exit 0; fi\n\
+                 if [ \"$1\" = \"--help\" ] && [ {program} = opencode ]; then printf '%s\\n' '  -m, --model  model' '      --prompt  prompt' '      --auto  auto-approve'; exit 0; fi\n\
                  record={record}\n\
                  : > \"$record\"\n\
                  for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$record\"; done\n\
                  exit 0\n",
-                record = shell_quoted(&record.to_string_lossy())
+                record = shell_quoted(&record.to_string_lossy()),
+                program = shell_quoted(program)
             ),
         )
         .expect("write fake harness");

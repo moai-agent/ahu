@@ -130,6 +130,12 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
         ))
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
+    selection::check_interactive_cli(
+        std::path::Path::new(&executable),
+        harness,
+        &args,
+        &repo.root,
+    )?;
     if let Some(ranked) = &ranked {
         selection::check_launch_compatibility(
             std::path::Path::new(&executable),
@@ -2669,6 +2675,12 @@ fn submit(
     }
     crate::telemetry::initialize(&loaded.config.telemetry)?;
     let mut plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
+    selection::check_interactive_cli(
+        &plan.harness_executable,
+        &plan.pair.harness,
+        &plan.command.args,
+        &repo.root,
+    )?;
     let mut _span = crate::telemetry::span(
         "ahu.launch",
         [

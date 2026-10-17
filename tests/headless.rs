@@ -2276,6 +2276,13 @@ scenario=os.environ"#);
 /// session, and this path never passes it.
 #[test]
 fn the_opencode_batch_profile_pins_the_model_and_ends_the_option_list() {
+    // v2 help retains these batch options; this checks argv, not live inference.
+    for version in ["1.18.30", "1.18.34", "1.19.0", "opencode v2.0.32"] {
+        assert_opencode_batch_profile(version);
+    }
+}
+
+fn assert_opencode_batch_profile(version: &str) {
     use ahu::agent::Permissions;
     use ahu::harness::LaunchRequest;
     use ahu::headless::{Options, Spec};
@@ -2283,7 +2290,7 @@ fn the_opencode_batch_profile_pins_the_model_and_ends_the_option_list() {
     let spec = |session: Option<&str>| Spec {
         schema_version: 1,
         options: Options::default(),
-        harness_version: "1.18.30".into(),
+        harness_version: version.into(),
         executable_digest: "0".repeat(64),
         parent_task: None,
         parent_attempt: None,

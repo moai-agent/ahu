@@ -636,6 +636,12 @@ pub fn execute(
 ) -> Result<Launched> {
     // Interactive admission runs in the submitting checkout. Headless callers
     // perform their native probe only after their isolation policy is admitted.
+    crate::selection::check_interactive_cli(
+        &plan.harness_executable,
+        &plan.pair.harness,
+        &plan.command.args,
+        &repo.root,
+    )?;
     crate::selection::check_launch_compatibility(
         &plan.harness_executable,
         &plan.pair.harness,
@@ -1366,6 +1372,12 @@ fn run_verified_task(
     // workspace starts and pin this task immediately before starting an
     // interactive harness, so a changed native login cannot inherit the task.
     let repo = git::discover(&record.repo_root)?;
+    crate::selection::check_interactive_cli(
+        &executable,
+        &record.identity.harness,
+        &rebuilt.args,
+        &record.worktree,
+    )?;
     crate::selection::check_launch_compatibility(
         &executable,
         &record.identity.harness,

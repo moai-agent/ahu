@@ -202,7 +202,7 @@ does not prove print-mode discovery failed. The setup handshake verifies the
 ahu server itself, not authenticated interactive client discovery.
 
 Before task submission and execution, ahu checks OpenCode's exact selected
-model against `opencode models <provider>` in the applicable checkout. A missing
+model against `opencode models` in the applicable checkout. A missing
 model, failed listing, or timeout refuses the run without selecting another
 model. The [native listing](https://opencode.ai/docs/cli/#models) establishes
 configured availability, not account entitlement or successful inference.
@@ -1291,6 +1291,21 @@ opencode --version
 `type -a opencode` (bash or zsh) lists every match in `PATH` order. Compare the
 first match against the path in the preview: ahu runs the installation its own
 resolution picks and reports it, and it does not go looking for a different one.
+
+Interactive launches (including `ahu opencode` and interactive dry runs) also
+check that this executable's top-level `--help` declares the model, prompt, and
+approval flags the command needs. OpenCode 2.0.32 lacks top-level `--model`, so
+ahu refuses model-pinned interactive launches with a compatibility diagnostic.
+It does not drop the model pin or substitute `run`, which is a one-shot command.
+The v2 `mini` interface advertises `--model` and `--prompt` but no `--auto`; ahu
+does not substitute that interface either. The existing default interactive
+shape remains available on compatible 1.x CLIs.
+
+Explicit `--headless` tasks retain `opencode run --format json --model ...`
+with a positional message and `--auto` only for automatic approvals. The
+2.0.32 run help advertises those options, but help inspection alone does not
+establish event-stream, resume, or native isolation compatibility; the separate
+headless admission checks still apply. No live v2 inference is claimed here.
 
 ### Configure the Ollama provider in OpenCode
 

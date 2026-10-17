@@ -2,6 +2,36 @@ use super::*;
 
 const PROMPT: &str = "Inspect café\n$(touch never-executed)";
 
+#[test]
+fn interactive_execute_rechecks_opencode_cli_before_creating_a_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, repo, loaded, mut plan) = fixture();
+    let native = tempfile::tempdir().unwrap();
+    let exe = native.path().join("opencode");
+    let help = include_str!("../tests/fixtures/opencode/2.0.32-help.txt");
+    std::fs::write(
+        &exe,
+        format!("#!/bin/sh\ntest \"$1\" = --help && test $# -eq 1 || exit 91\ncat <<'HELP'\n{help}HELP\n"),
+    ).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    plan.harness_executable = exe;
+    plan.pair.harness = "opencode".into();
+    plan.pair.model = "provider/model".into();
+    plan.command = harness::adapter_for("opencode")
+        .unwrap()
+        .launch_command(&LaunchRequest {
+            model: &plan.pair.model,
+            prompt: PROMPT,
+            cwd: &plan.worktree,
+            permissions: plan.permissions,
+        })
+        .unwrap();
+    let error = execute(&repo, &loaded, &plan, PROMPT, false).unwrap_err();
+    assert!(error.to_string().contains("top-level --model"), "{error}");
+    assert!(!plan.worktree.exists());
+    assert!(!plan.task_dir.exists());
+}
+
 // Construct the frozen boundary directly: no installed harness, user
 // configuration, cmux session or additional Git worktree is needed.
 fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {

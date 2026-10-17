@@ -24,6 +24,12 @@
 //! resolved, through the same `crate::selection` path a launch uses, so an
 //! enforcement report cannot describe a different binary than the one that runs.
 //!
+//! OpenCode 2.0.32 removed --model from the default interactive command.
+//! Its `run` command still accepts it, but exits after the message; `mini`
+//! advertises --model and --prompt, but no --auto. Neither is an equivalent
+//! replacement for this adapter. Interactive admission checks the resolved
+//! binary's top-level help before preview/submission and again before execution.
+//!
 //! What it cannot enforce:
 //!
 //! **An agent identity.** `--agent <name>` is accepted but not validated:
@@ -54,6 +60,33 @@ use crate::bail;
 use crate::util::Result;
 
 pub struct OpenCode;
+
+/// Check only option declarations, not mentions in prose or subcommand help.
+/// OpenCode 1.x uses `-m, --model`; 2.x uses `--model, -m string`.
+pub(crate) fn check_interactive_help(help: &str, args: &[String]) -> Result<()> {
+    for flag in ["--model", "--prompt", "--auto"] {
+        if !args.iter().any(|arg| arg == flag) {
+            continue;
+        }
+        let declared = help.lines().any(|line| {
+            line.split_whitespace()
+                .take_while(|word| word.starts_with('-'))
+                .any(|word| word.trim_end_matches(',') == flag)
+        });
+        if !declared {
+            bail!(
+                "OpenCode interactive CLI is incompatible: the resolved executable's \
+                 `opencode --help` does not advertise top-level {flag}, which this launch \
+                 requires. ahu will not drop the exact model or approval controls, or \
+                 replace a persistent interactive session with one-shot `opencode run`. \
+                 Check which opencode is on PATH and use an interactive CLI supporting \
+                 these flags. For a batch task, explicitly request --headless instead; \
+                 its separate compatibility and isolation checks still apply."
+            );
+        }
+    }
+    Ok(())
+}
 
 impl Adapter for OpenCode {
     fn id(&self) -> &'static str {
@@ -158,5 +191,35 @@ fn permission_control(permissions: Permissions) -> String {
              which auto-approves every permission OpenCode does not explicitly deny; it \
              passes no --pure; {tail}"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interactive_help_requires_each_requested_flag_as_a_declaration() {
+        let args: Vec<_> = ["--model", "provider/model", "--auto", "--prompt", "task"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let help = include_str!("../../tests/fixtures/opencode/1.x-help.txt");
+        check_interactive_help(help, &args).unwrap();
+        for flag in ["--model", "--auto", "--prompt"] {
+            let missing = help
+                .lines()
+                .filter(|line| !line.contains(flag))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let misleading = format!(
+                "{missing}\nUse {flag} with run instead\n  {flag}-other  unrelated option\n"
+            );
+            let error = check_interactive_help(&misleading, &args).unwrap_err();
+            assert!(error.to_string().contains(&format!("top-level {flag}")));
+        }
+        // Prompt approvals do not require --auto; a coordinator has no prompt.
+        check_interactive_help("  --model, -m string  Model", &args[..2]).unwrap();
+        assert!(check_interactive_help("", &args).is_err());
     }
 }

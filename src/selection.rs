@@ -335,6 +335,36 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// Verify the interactive command surface separately from model availability.
+/// Headless planning also builds an interactive-shaped plan before replacing
+/// its argv, so this check belongs at interactive entrypoints, not in `plan`.
+pub fn check_interactive_cli(
+    executable: &Path,
+    harness: &str,
+    args: &[String],
+    cwd: &Path,
+) -> Result<()> {
+    if harness != "opencode" {
+        return Ok(());
+    }
+    if !executable.is_absolute() || is_excluded(executable) {
+        bail!("compatibility probe requires a resolved harness outside the repository");
+    }
+    let before = crate::snapshot::collect(cwd)?.digest();
+    let mut command = std::process::Command::new(executable);
+    command.arg("--help").current_dir(cwd);
+    let help = bounded_config_probe(&mut command, true, std::time::Duration::from_secs(8));
+    if crate::snapshot::collect(cwd)?.digest() != before {
+        bail!(
+            "OpenCode help inspection changed project agent context; review it and refresh the committed context lock before retrying"
+        );
+    }
+    let help = help.ok_or_else(|| {
+        Error::new("OpenCode interactive CLI compatibility could not be verified: the bounded `opencode --help` probe failed or timed out. Native diagnostics are withheld; check the resolved CLI before retrying. ahu will not substitute one-shot `opencode run`.")
+    })?;
+    crate::harness::opencode::check_interactive_help(&help, args)
+}
+
 /// Check native configuration without inference or changing the selected model.
 /// Call on the submitting checkout, then again on the materialized worktree
 /// immediately before execution: provider configuration and Codex trust are
@@ -446,7 +476,7 @@ pub(crate) fn check_launch_compatibility_with_policy(
 
 /// Bound elapsed time, captured bytes and pipe lifetime. Config diagnostics can
 /// contain secrets, so stderr is never captured and callers never echo stdout.
-/// The Codex check discards stdout too; only the OpenCode model list is read.
+/// The Codex check discards stdout too; OpenCode checks read help or model IDs.
 pub(crate) fn bounded_config_probe(
     command: &mut std::process::Command,
     capture: bool,
