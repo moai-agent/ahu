@@ -2564,8 +2564,9 @@ fn a_registered_opencode_agent_runs_headless_and_records_its_session() {
 import sys,os,json
 if '--version' in sys.argv:
  print('1.18.30'); sys.exit(0)
-if sys.argv[1:] == ['models', 'ollama']:
- print('ollama/glm-5.3:cloud'); sys.exit(0)
+if sys.argv[1:] == ['models']:
+ print('opencode/big-pickle'); print('ollama/glm-5.3:cloud'); sys.exit(0)
+assert sys.argv[1] != 'models', sys.argv
 a=sys.argv[1:]
 assert a[0]=='run', a
 assert a[a.index('--format')+1]=='json', a
@@ -3884,7 +3885,10 @@ fn opencode_preflight_refuses_missing_model_before_creating_a_worktree() {
     let stub = f.bin.join("opencode");
     std::fs::write(
         &stub,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.18.34; exit 0; fi\nif [ \"$1\" = models ] && [ \"$2\" = ollama ]; then printf '%s\\n' \"$SYNTHETIC_AVAILABLE_MODEL\"; exit 0; fi\nexit 91\n",
+        // `opencode models` takes no positional provider; a stub that required
+        // one could not tell a reintroduced provider argument from a broken
+        // provider configuration.
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.18.34; exit 0; fi\nif [ \"$1\" = models ] && [ $# -eq 1 ]; then printf '%s\\n' \"$SYNTHETIC_AVAILABLE_MODEL\"; exit 0; fi\nexit 91\n",
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();

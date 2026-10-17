@@ -73,9 +73,11 @@ import json, os, subprocess, sys
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
-if sys.argv[1:] == ['models', 'ollama']:
+if sys.argv[1:] == ['models']:
+    print('opencode/big-pickle')
     print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
+assert sys.argv[1] != 'models', sys.argv
 prompt = sys.argv[-1]
 if 'Score this candidate output' in prompt:
     with open('score.json', 'w', encoding='utf-8') as score:
@@ -368,9 +370,11 @@ import json, os, subprocess, sys, time
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
-if sys.argv[1:] == ['models', 'ollama']:
+if sys.argv[1:] == ['models']:
+    print('opencode/big-pickle')
     print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
+assert sys.argv[1] != 'models', sys.argv
 mode = os.environ['AHU_TEST_ANSWER']
 if mode == 'launch_failed':
     raise SystemExit(1)
@@ -713,9 +717,11 @@ import json, os, subprocess, sys
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
-if sys.argv[1:] == ['models', 'ollama']:
+if sys.argv[1:] == ['models']:
+    print('opencode/big-pickle')
     print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
+assert sys.argv[1] != 'models', sys.argv
 rows = [
  {'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
  {'jsonrpc':'2.0','method':'notifications/initialized'},
@@ -873,9 +879,11 @@ import json, os, subprocess, sys
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
-if sys.argv[1:] == ['models', 'ollama']:
+if sys.argv[1:] == ['models']:
+    print('opencode/big-pickle')
     print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
+assert sys.argv[1] != 'models', sys.argv
 with open('answer.json', 'w') as f: json.dump({'route':'billing'}, f)
 rows = [{'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
         {'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}}]
@@ -1079,9 +1087,11 @@ import json, os, sys
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
-if sys.argv[1:] == ['models', 'ollama']:
+if sys.argv[1:] == ['models']:
+    print('opencode/big-pickle')
     print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
+assert sys.argv[1] != 'models', sys.argv
 with open('answer.json', 'w', encoding='utf-8') as answer:
     json.dump({'route':'billing'}, answer)
 mode = os.environ['AHU_TEST_TRAJECTORY_MODE']

@@ -1604,6 +1604,31 @@ pub fn shutdown() {
     }
 }
 
+/// Run ordinary-collector assertions without inheriting eval capture or mutating
+/// the environment shared by parallel tests. Return true in the parent process.
+#[cfg(test)]
+pub(crate) fn test_without_eval_endpoint(test_name: &str) -> bool {
+    const CHILD: &str = "AHU_TEST_WITHOUT_EVAL_ENDPOINT";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        assert!(std::env::var_os("AHU_EVAL_OTEL_ENDPOINT").is_none());
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+        .env(CHILD, test_name)
+        .args(["--exact", test_name, "--nocapture"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+        "{test_name}: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1616,6 +1641,11 @@ mod tests {
 
     #[test]
     fn local_metrics_are_opt_in_numeric_and_do_not_infer_totals() {
+        if super::test_without_eval_endpoint(
+            "telemetry::tests::local_metrics_are_opt_in_numeric_and_do_not_infer_totals",
+        ) {
+            return;
+        }
         let mut events = crate::headless::Events::default();
         events.observe("codex", br#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":7,"cached_tokens":"private-marker","total_tokens":-1,"tracker_url":"private-marker"},"prompt":"private-marker","model":"private-marker"}"#);
         let mut config = TelemetryConfig::default();
@@ -1780,6 +1810,11 @@ mod tests {
 
     #[test]
     fn child_environment_invalid_endpoint_no_export() {
+        if super::test_without_eval_endpoint(
+            "telemetry::tests::child_environment_invalid_endpoint_no_export",
+        ) {
+            return;
+        }
         for endpoint in [
             "https://127.0.0.1:4318",
             "http://example.com:4318",
@@ -1841,6 +1876,11 @@ mod tests {
 
     #[test]
     fn child_environment_is_only_changed_when_enabled() {
+        if super::test_without_eval_endpoint(
+            "telemetry::tests::child_environment_is_only_changed_when_enabled",
+        ) {
+            return;
+        }
         let mut disabled = std::process::Command::new("true");
         configure_child(
             &mut disabled,
@@ -1909,6 +1949,11 @@ mod tests {
 
     #[test]
     fn child_environment_enables_otlp_for_all_signals() {
+        if super::test_without_eval_endpoint(
+            "telemetry::tests::child_environment_enables_otlp_for_all_signals",
+        ) {
+            return;
+        }
         let enabled = TelemetryConfig {
             enabled: true,
             ..TelemetryConfig::default()
@@ -2745,6 +2790,11 @@ mod causal_context_tests {
 
     #[test]
     fn disabled_child_cannot_reuse_inherited_context() {
+        if super::test_without_eval_endpoint(
+            "telemetry::causal_context_tests::disabled_child_cannot_reuse_inherited_context",
+        ) {
+            return;
+        }
         let provider = SdkTracerProvider::builder()
             .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
             .build();
@@ -2818,6 +2868,9 @@ mod primary_export_tests {
                 assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.id=synthetic-task"));
                 assert!(super::eval_endpoint_override().is_some());
             } else {
+                let expected_endpoint =
+                    super::eval_endpoint_override().unwrap_or_else(|| config.endpoint.clone());
+                assert_eq!(env["OTEL_EXPORTER_OTLP_ENDPOINT"], expected_endpoint);
                 assert_eq!(env["OTEL_TRACES_EXPORTER"], "otlp");
                 assert_eq!(env["OTEL_METRICS_EXPORTER"], expected);
                 assert_eq!(env["OTEL_LOGS_EXPORTER"], expected);

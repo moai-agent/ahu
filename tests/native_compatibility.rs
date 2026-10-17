@@ -14,7 +14,9 @@ fn interactive_and_coordinator_refuse_an_unlisted_opencode_model() {
     let bin = home.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let exe = bin.join("opencode");
-    std::fs::write(&exe, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.18.34; exit 0; fi\nif [ \"$1\" = models ]; then echo ollama/other; exit 0; fi\nexit 91\n").unwrap();
+    // The listing command takes no positional provider and answers with
+    // provider-qualified identifiers; none of them is the requested model.
+    std::fs::write(&exe, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.18.34; exit 0; fi\nif [ \"$1\" = models ] && [ $# -eq 1 ]; then printf 'ollama/other\\nopencode/big-pickle\\n'; exit 0; fi\nexit 91\n").unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
     for args in [
         vec!["@smoke", "--prompt", "inspect synthetic data"],

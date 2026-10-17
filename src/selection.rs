@@ -382,10 +382,15 @@ pub(crate) fn check_launch_compatibility_with_policy(
             (crate::harness::codex::auto_mcp_probe_args(), false)
         }
         "opencode" => {
-            // Validate before using the provider as a positional CLI argument.
+            // `opencode models` takes no positional provider: it prints every
+            // provider-qualified identifier the native configuration resolves,
+            // one per line. Passing a provider makes the CLI exit nonzero with
+            // "Unexpected positional argument", which the probe cannot tell
+            // apart from a broken provider configuration. Validate the model
+            // shape here so an unqualified or option-shaped identifier is
+            // refused before the probe rather than silently unmatched.
             crate::harness::model_args(harness, model)?;
-            let provider = model.split_once('/').expect("validated model").0;
-            (vec!["models".into(), provider.into()], true)
+            (vec!["models".into()], true)
         }
         _ => return Ok(()),
     };
@@ -422,8 +427,8 @@ pub(crate) fn check_launch_compatibility_with_policy(
     } else {
         let Some(output) = output else {
             bail!(
-                "OpenCode model availability could not be verified: the bounded `opencode models \
-                 <provider>` probe failed or timed out. Run it in this checkout and repair native \
+                "OpenCode model availability could not be verified: the bounded `opencode models` \
+                 probe failed or timed out. Run it in this checkout and repair native \
                  provider configuration before retrying; ahu refuses a possible model fallback. \
                  Native diagnostics are withheld."
             );
@@ -431,8 +436,8 @@ pub(crate) fn check_launch_compatibility_with_policy(
         if !output.lines().any(|line| line.trim() == model) {
             bail!(
                 "OpenCode did not list the exact requested model {model:?} in this checkout. \
-                 Configure and enable that provider/model in OpenCode, verify it with \
-                 `opencode models <provider>`, then retry. ahu refuses a possible model fallback."
+                 Configure and enable that provider/model in OpenCode, verify it is listed by \
+                 `opencode models`, then retry. ahu refuses a possible model fallback."
             );
         }
     }
@@ -549,26 +554,60 @@ mod compatibility_tests {
         file
     }
 
+    /// `opencode models` accepts no positional provider: OpenCode 2.0.32 exits
+    /// 1 with `Unexpected positional argument` when one is passed. This stub
+    /// refuses any extra argument so a reintroduced provider positional fails
+    /// here instead of only against the installed CLI.
+    fn opencode_models_stub(root: &Path, listing: &Path, argv: &Path) -> PathBuf {
+        fake(
+            root,
+            &format!(
+                "printf '%s\\n' \"$@\" > {argv}\n\
+                 test \"$1\" = models || exit 2\n\
+                 test $# -eq 1 || exit 1\n\
+                 cat {listing}",
+                argv = argv.display(),
+                listing = listing.display()
+            ),
+        )
+    }
+
     #[test]
-    fn opencode_requires_exact_available_model_and_uses_project_directory() {
+    fn opencode_probes_models_without_a_provider_argument() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
         std::fs::create_dir(&project).unwrap();
-        std::fs::write(project.join("models.txt"), "ollama/glm-5.3:cloud\n").unwrap();
-        let exe = fake(
-            root.path(),
-            "test \"$1\" = models && test \"$2\" = ollama || exit 2\ncat models.txt",
-        );
-        let check = || {
-            check_launch_compatibility(
-                &exe,
-                "opencode",
-                "ollama/glm-5.3:cloud",
-                Permissions::Prompt,
-                &project,
-            )
+        let listing = root.path().join("models.txt");
+        // Every line the real CLI prints is provider-qualified, across the
+        // providers the native configuration resolves.
+        std::fs::write(
+            &listing,
+            "opencode/big-pickle\nollama/glm-5.3:cloud\nopencode/beam-free\n",
+        )
+        .unwrap();
+        let argv = root.path().join("argv.txt");
+        let exe = opencode_models_stub(root.path(), &listing, &argv);
+        let check = |model| {
+            check_launch_compatibility(&exe, "opencode", model, Permissions::Prompt, &project)
         };
-        check().unwrap();
+        check("ollama/glm-5.3:cloud").unwrap();
+        assert_eq!(std::fs::read_to_string(&argv).unwrap(), "models\n");
+        check("opencode/beam-free").unwrap();
+        // Prefix, suffix and decorated near-misses are not the exact model.
+        for missing in [
+            "ollama/glm-5.3",
+            "ollama/glm-5.3:cloud-other",
+            "ollama/other",
+            "opencode/beam",
+        ] {
+            assert!(
+                check(missing)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("refuses a possible model fallback"),
+                "{missing} was accepted"
+            );
+        }
         for unavailable in [
             "opencode/big-pickle\n",
             "ollama/glm-5.3:cloud-other\n",
@@ -576,35 +615,46 @@ mod compatibility_tests {
             "ollama/other\n",
             "",
         ] {
-            std::fs::write(project.join("models.txt"), unavailable).unwrap();
+            std::fs::write(&listing, unavailable).unwrap();
             assert!(
-                check()
+                check("ollama/glm-5.3:cloud")
                     .unwrap_err()
                     .to_string()
                     .contains("refuses a possible model fallback")
             );
         }
-        let exe = fake(root.path(), "printf 'ollama/glm-5.3:cloud\\n'; exit 1");
-        assert!(
-            check_launch_compatibility(
-                &exe,
-                "opencode",
-                "ollama/glm-5.3:cloud",
-                Permissions::Auto,
-                &project
-            )
-            .is_err()
-        );
-        assert!(
-            check_launch_compatibility(
-                &exe,
-                "opencode",
-                "--help/model",
-                Permissions::Prompt,
-                &project
-            )
-            .is_err()
-        );
+    }
+
+    #[test]
+    fn opencode_refuses_launch_when_the_model_probe_fails_or_times_out() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let check = |exe: &Path, model, permissions| {
+            check_launch_compatibility(exe, "opencode", model, permissions, &project)
+        };
+        // A listing printed alongside a nonzero exit is not an availability
+        // answer, and neither is one that never finishes.
+        for body in [
+            "printf 'ollama/glm-5.3:cloud\\n'; exit 1",
+            "exit 1",
+            "printf 'ollama/glm-5.3:cloud\\n'; sleep 30",
+        ] {
+            let exe = fake(root.path(), body);
+            let error = check(&exe, "ollama/glm-5.3:cloud", Permissions::Auto)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("probe failed or timed out"), "{error}");
+            assert!(
+                error.contains("refuses a possible model fallback"),
+                "{error}"
+            );
+            assert!(!error.contains("<provider>"), "{error}");
+        }
+        // An option-shaped or unqualified identifier is refused before probing.
+        let exe = fake(root.path(), "printf 'ollama/glm-5.3:cloud\\n'");
+        assert!(check(&exe, "--help/model", Permissions::Prompt).is_err());
+        assert!(check(&exe, "glm-5.3", Permissions::Prompt).is_err());
     }
 
     #[test]

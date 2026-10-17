@@ -540,6 +540,11 @@ mod coordinator_environment_tests {
 
     #[test]
     fn relocated_coordinator_shell_applies_export_configuration_and_removals() {
+        if crate::telemetry::test_without_eval_endpoint(
+            "interactive::repository::coordinator_environment_tests::relocated_coordinator_shell_applies_export_configuration_and_removals",
+        ) {
+            return;
+        }
         let mut command = std::process::Command::new("/bin/sh");
         command.args(["-c", r#"test -z "${OTEL_EXPORTER_OTLP_HEADERS+x}" && test -z "${HTTP_PROXY+x}" && printf '%s\n' "$OTEL_EXPORTER_OTLP_ENDPOINT" "$OTEL_SERVICE_NAME" "$AHU_MCP_RESOURCE_ATTRIBUTES" "$1" "${UNRELATED_PRIVATE+x}""#, "fixture", "literal ' $(false)"]);
         crate::telemetry::configure_coordinator(
