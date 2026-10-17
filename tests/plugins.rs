@@ -320,6 +320,9 @@ fn compiled_host_runtime_activation_and_failure_paths() {
         let output = common::run_child_case(CASE, |command| {
             command
                 .env_clear()
+                .envs(
+                    std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)),
+                )
                 .env(common::CHILD_CASE, CASE)
                 .env("PATH", "/usr/bin:/bin")
                 .env("HOME", root.path())
