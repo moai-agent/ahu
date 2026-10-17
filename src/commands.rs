@@ -2964,7 +2964,7 @@ pub fn render_preview(
         plan.release_id.as_deref().unwrap_or("unlabeled")
     ));
     out.push_str(
-        "  delegation All assigned agents must launch through ahu in separate cmux sessions.\n",
+        "  delegation Run Ahu-assigned agents through ahu in their own task worktrees; the current terminal and installed session-host plugins are optional.\n",
     );
     out.push_str("  guidance   ahu supplies its delegation contract and this agent's instructions as prompt text.\n");
     out.push_str(&format!(

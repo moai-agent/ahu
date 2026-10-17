@@ -647,6 +647,14 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
             );
         }
         let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+        assert!(
+            preview.contains("current terminal and installed session-host plugins are optional"),
+            "agent assignment must not require cmux: {preview}"
+        );
+        assert!(
+            !preview.contains("separate cmux sessions"),
+            "agent assignment must not imply cmux is required: {preview}"
+        );
         assert!(!preview.contains(harness::RELIABILITY_WARNING), "{preview}");
         assert!(
             !preview.contains("no harness enforces this agent's identity"),

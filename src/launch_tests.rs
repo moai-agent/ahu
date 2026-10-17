@@ -905,6 +905,7 @@ fn current_terminal_backend_runs_foreground_without_cmux() {
         )
         .unwrap();
         let executable = scratch.path().join("codex");
+        let python = crate::selection::resolve_utility("python3").unwrap();
         std::fs::write(
             &executable,
             r##"#!/bin/sh
@@ -914,6 +915,15 @@ if [ "$1" = "app-server" ]; then
   while read -r line; do :; done
   exit 0
 fi
+"$AHU_TEST_PYTHON" -c 'import fcntl, os, sys
+lock = open(os.environ["AHU_TEST_LAUNCH_LOCK_PATH"], "r+")
+try:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(17)
+open(os.environ["AHU_TEST_LAUNCH_LOCK_RESULT"], "w").write("released")'
+probe_status=$?
+[ "$probe_status" -eq 0 ] || exit "$probe_status"
 printf foreground > "$AHU_TEST_TERMINAL_MARKER"
 exit 0
 "##,
@@ -921,6 +931,7 @@ exit 0
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let marker = scratch.path().join("foreground-ran");
+        let lock_result = scratch.path().join("launch-lock-result");
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -932,6 +943,8 @@ exit 0
             .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
             .env("AHU_TEST_TERMINAL_BIN", &executable)
             .env("AHU_TEST_TERMINAL_MARKER", &marker)
+            .env("AHU_TEST_PYTHON", python)
+            .env("AHU_TEST_LAUNCH_LOCK_RESULT", &lock_result)
             .env("PATH", scratch.path())
             .env("HOME", scratch.path())
             .current_dir(scratch.path())
@@ -972,11 +985,18 @@ exit 0
             .into(),
     );
     plan.harness_executable = std::env::var("AHU_TEST_TERMINAL_BIN").unwrap().into();
+    let launch_lock = state::coordination_dir(&repo).unwrap().join("launch.lock");
+    unsafe { std::env::set_var("AHU_TEST_LAUNCH_LOCK_PATH", launch_lock) };
     let launched = execute(&repo, &loaded, &plan, PROMPT, false).unwrap();
     assert_eq!(launched.record.state, TaskState::Exited);
     assert!(launched.record.cmux_workspace_id.is_none());
     assert!(launched.record.session_host.is_none());
     assert!(std::path::Path::new(&std::env::var("AHU_TEST_TERMINAL_MARKER").unwrap()).exists());
+    assert_eq!(
+        std::fs::read_to_string(std::env::var("AHU_TEST_LAUNCH_LOCK_RESULT").unwrap()).unwrap(),
+        "released",
+        "the repository launch lock must be released before interactive work begins"
+    );
 }
 
 #[test]

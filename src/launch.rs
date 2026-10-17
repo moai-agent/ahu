@@ -729,7 +729,15 @@ pub fn execute(
             &placement,
             &mut notes,
         );
+        // A session host starts the task in a separate workspace process. The
+        // repository lock protects worktree and workspace creation only; the
+        // agent's lifetime must not block the next assignment.
+        drop(_lock);
     } else {
+        // The current-terminal backend runs the harness in this process. Drop
+        // the coordination lock before waiting for the interactive session so
+        // another agent can be launched while this one is working.
+        drop(_lock);
         match run_task(&plan.task_dir)? {
             HarnessOutcome::Exited(status) if !status.success() => {
                 bail!(
