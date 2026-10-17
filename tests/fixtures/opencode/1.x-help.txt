@@ -1,0 +1,9 @@
+Commands:
+  opencode [project]           start opencode tui [default]
+  opencode run [message..]     run opencode with a message
+
+Options:
+  -h, --help          show help [boolean]
+  -m, --model         model to use in the format of provider/model [string]
+      --prompt        prompt to use [string]
+      --auto          auto-approve permissions that are not explicitly denied (dangerous!) [boolean]
