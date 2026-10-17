@@ -90,7 +90,7 @@ else: raise AssertionError(method)
             let bin = common::fake_harnesses(scratch.path(), &[program], |_| {
                 scratch.path().join("unused")
             });
-            std::fs::write(bin.join(program), "#!/bin/sh\ntest -f \"$AHU_TEST_COORDINATOR/expanded\" || exit 99\ntouch \"$AHU_TEST_COORDINATOR/started\"\nexit 7\n").unwrap();
+            std::fs::write(bin.join(program), "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '  -m, --model MODEL\\n  --prompt PROMPT\\n  --auto\\n'; exit 0; fi\ntest -f \"$AHU_TEST_COORDINATOR/expanded\" || exit 99\ntouch \"$AHU_TEST_COORDINATOR/started\"\nexit 7\n").unwrap();
             let mapping = ahu::state::coordination_dir(&repo)
                 .unwrap()
                 .join("cmux.json");
