@@ -129,6 +129,29 @@ fn a_linked_checkout_never_probes_a_harness_from_the_primary_checkout() {
     );
 }
 
+#[test]
+fn repository_commands_ignore_inherited_git_repository_selectors() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.commit("isolated git environment fixture");
+    let output = common::ahu()
+        .args(["tasks", "--output", "json"])
+        .current_dir(repo.path())
+        .env("GIT_DIR", "/")
+        .env("GIT_WORK_TREE", "/")
+        .env("GIT_COMMON_DIR", "/")
+        .env("GIT_INDEX_FILE", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["tasks"].as_array().unwrap().len(), 0);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_non_utf8_sibling_worktree_harness_is_excluded_through_a_utf8_symlink() {

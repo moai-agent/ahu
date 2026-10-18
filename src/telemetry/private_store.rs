@@ -68,7 +68,7 @@ fn base_dir() -> Result<PathBuf> {
 }
 
 fn ensure_private_tree(path: &Path, repo_root: &Path) -> Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::MetadataExt;
     if !path.is_absolute() {
         return Err(Error::new("host state directory must be absolute"));
     }
@@ -102,12 +102,11 @@ fn ensure_private_tree(path: &Path, repo_root: &Path) -> Result<()> {
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        std::fs::create_dir(&cursor)?;
                         if private_zone {
-                            std::fs::set_permissions(
-                                &cursor,
-                                std::fs::Permissions::from_mode(0o700),
-                            )?;
+                            use std::os::unix::fs::DirBuilderExt;
+                            std::fs::DirBuilder::new().mode(0o700).create(&cursor)?;
+                        } else {
+                            std::fs::create_dir(&cursor)?;
                         }
                     }
                     Err(error) => return Err(error.into()),

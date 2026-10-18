@@ -62,12 +62,17 @@ fn package(repo: &Repo, binding: &Binding, discovered: Option<&PathBuf>) -> Resu
     super::plugins::local::read_package(&root)
 }
 
-fn executable_digest(status: &PluginStatus) -> Result<String> {
-    let mut file = super::plugins::local::executable_file(status)?;
-    Ok(crate::util::digest_bytes(&crate::util::read_limited(
-        &mut file,
-        64 * 1024 * 1024,
-    )?))
+fn executable_digest(status: &PluginStatus, binding: &Binding) -> Result<String> {
+    let root = status
+        .manifest
+        .as_ref()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| refused("session host package has no manifest root"))?;
+    let executable = status
+        .executable
+        .as_ref()
+        .ok_or_else(|| refused("session host package has no executable"))?;
+    crate::plugin_install::verified_file_digest(root, binding, &executable.path)
 }
 
 pub(crate) fn select(repo: &Repo, id: &str) -> Result<(PluginStatus, FrozenHost)> {
@@ -89,6 +94,7 @@ pub(crate) fn select(repo: &Repo, id: &str) -> Result<(PluginStatus, FrozenHost)
         .executable
         .clone()
         .ok_or_else(|| refused("package has no executable host declaration"))?;
+    let executable_sha256 = executable_digest(&status, &binding)?;
     let frozen = FrozenHost {
         binding,
         policy_revision: inventory
@@ -96,7 +102,7 @@ pub(crate) fn select(repo: &Repo, id: &str) -> Result<(PluginStatus, FrozenHost)
             .ok_or_else(|| refused("session host requires a committed project binding"))?,
         package: status.package.clone(),
         executable,
-        executable_sha256: executable_digest(&status)?,
+        executable_sha256,
         discovered_root,
     };
     Ok((status, frozen))
@@ -126,7 +132,7 @@ pub(crate) fn verify(repo: &Repo, frozen: &FrozenHost) -> Result<PluginStatus> {
     let status = package(repo, &frozen.binding, frozen.discovered_root.as_ref())?;
     if status.package != frozen.package
         || status.executable.as_ref() != Some(&frozen.executable)
-        || executable_digest(&status)? != frozen.executable_sha256
+        || executable_digest(&status, &frozen.binding)? != frozen.executable_sha256
     {
         return Err(refused(
             "recorded session host executable identity mismatch",

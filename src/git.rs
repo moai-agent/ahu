@@ -96,6 +96,21 @@ impl Repo {
 
 pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
     Command::new(crate::selection::resolve_utility("git")?)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "--no-pager",
+            "--no-replace-objects",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
         .args(args)
         .current_dir(dir)
         .output()
@@ -122,6 +137,17 @@ fn run_ok_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
 
 /// Find the repository containing `start`.
 pub fn discover(start: &Path) -> Result<Repo> {
+    discover_with_exclusions(start, true)
+}
+
+/// Discover a host-reported directory without registering its repositories as
+/// process-wide harness exclusions. The caller must compare the result to its
+/// own repository before using it for coordination.
+pub(crate) fn discover_untrusted(start: &Path) -> Result<Repo> {
+    discover_with_exclusions(start, false)
+}
+
+fn discover_with_exclusions(start: &Path, register_exclusions: bool) -> Result<Repo> {
     let probe = run(start, &["rev-parse", "--is-inside-work-tree"])?;
     if !probe.status.success() {
         bail!(
@@ -157,8 +183,10 @@ pub fn discover(start: &Path) -> Result<Repo> {
     };
     // Harnesses must never resolve from any checkout that shares this Git
     // repository, not just the one from which this process was invoked.
-    for worktree in repo.worktree_roots()? {
-        crate::selection::exclude_root(&worktree);
+    if register_exclusions {
+        for worktree in repo.worktree_roots()? {
+            crate::selection::exclude_root(&worktree);
+        }
     }
     Ok(repo)
 }
@@ -340,6 +368,16 @@ pub fn branches_matching(repo: &Repo, pattern: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untrusted_discovery_does_not_register_global_harness_exclusions() {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "--quiet"]);
+
+        let repo = discover_untrusted(root.path()).unwrap();
+        assert_eq!(repo.root, root.path().canonicalize().unwrap());
+        assert!(!crate::selection::is_excluded(root.path()));
+    }
 
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git")

@@ -346,14 +346,11 @@ pub fn batch_command(
             // background service, whose post-wait event catch-up can omit the
             // terminal step from the JSON stream. Ahu requires that explicit
             // terminal evidence before accepting a headless result.
-            add(&[
-                "run",
-                "--standalone",
-                "--format",
-                "json",
-                "--model",
-                request.model,
-            ]);
+            add(&["run"]);
+            if crate::harness::opencode::supports_standalone_run(&spec.harness_version) {
+                add(&["--standalone"]);
+            }
+            add(&["--format", "json", "--model", request.model]);
             match request.permissions {
                 // As in the interactive adapter: OpenCode's permission actions
                 // are static configuration, its only permission flag widens,
@@ -2562,7 +2559,9 @@ pub(crate) fn child_exited(pid: u32) -> std::io::Result<bool> {
 pub(crate) fn signal_group(pid: u32, signal: i32) {
     // The caller owns a live/reaped child in this fresh process group. No PID
     // from a persisted record is ever used as signal authority.
-    if let Ok(pid) = i32::try_from(pid) {
+    if let Ok(pid) = i32::try_from(pid)
+        && pid > 1
+    {
         // SAFETY: negative child PID selects the group this supervisor created.
         unsafe {
             libc::kill(-pid, signal);

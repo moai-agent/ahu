@@ -50,7 +50,7 @@ fn interactive_and_coordinator_refuse_an_unlisted_opencode_model() {
 /// 1.x preserves the previously verified 1.18 shape (also checked on 1.19.0);
 /// 2.0.32 has --model only on run/mini, never the default command.
 #[test]
-fn opencode_v2_refuses_interactive_dry_runs_and_coordinators_before_launch() {
+fn opencode_v2_uses_mini_for_persistent_interactive_launches() {
     let repo = TestRepo::new();
     repo.write(".agents/ahu/config.toml", &format!(
         "schema_version = 1\nharness_preferences = [\"opencode\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = \"{}\"\n[model_rankings]\nopencode = [\"ollama/glm-5.3:cloud\"]\n", ahu::catalog::CATALOG_VERSION));
@@ -69,52 +69,43 @@ fn opencode_v2_refuses_interactive_dry_runs_and_coordinators_before_launch() {
     std::fs::create_dir(&bin).unwrap();
     let exe = bin.join("opencode");
     std::fs::write(&exe, format!(
-        "#!/bin/sh\ncase \"$1\" in\n--version) echo 'opencode v2.0.32';;\n--help) printf '%s\\n' {};;\n*) echo 'unexpected native invocation' >&2; exit 91;;\nesac\n",
-        common::shell_quoted(include_str!("fixtures/opencode/2.0.32-help.txt"))
+        "#!/bin/sh\ncase \"$1\" in\n--version) echo 'opencode v2.0.32';;\n--help) printf '%s\\n' {};;\nmini) test \"$2\" = --help || exit 91; printf '%s\\n' {};;\nmodels) printf 'ollama/glm-5.3:cloud\\n';;\n*) echo 'unexpected native invocation' >&2; exit 91;;\nesac\n",
+        common::shell_quoted(include_str!("fixtures/opencode/2.0.32-help.txt")),
+        common::shell_quoted(include_str!("fixtures/opencode/2.0.32-mini-help.txt"))
     )).unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
-    for args in [
-        vec!["@smoke", "--prompt", "inspect synthetic data", "--dry-run"],
-        vec!["@smoke", "--prompt", "inspect synthetic data"],
-        vec![
-            "@auto",
+    let result = common::ahu()
+        .args([
+            "@smoke",
             "--prompt",
             "inspect synthetic data",
-            "--allow-widened-approvals",
-        ],
-        vec!["opencode"],
-    ] {
-        let result = common::ahu()
-            .args(args)
-            .current_dir(repo.path())
-            .env("HOME", home.path())
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .env("AHU_CMUX_BIN", home.path().join("no-cmux"))
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(
-            !result.status.success(),
-            "must refuse incompatible CLI before preview"
-        );
-        assert!(
-            stderr.contains("OpenCode interactive CLI is incompatible"),
-            "{stderr}"
-        );
-        assert!(stderr.contains("top-level --model"), "{stderr}");
-        assert!(
-            stderr.contains("persistent interactive session"),
-            "{stderr}"
-        );
-        assert!(stderr.contains("--headless"), "{stderr}");
-        assert_eq!(
-            common::git(repo.path(), &["worktree", "list", "--porcelain"])
-                .lines()
-                .filter(|line| line.starts_with("worktree "))
-                .count(),
-            1
-        );
-    }
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("AHU_CMUX_BIN", home.path().join("no-cmux"))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let preview: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let command = preview["argv"].as_array().unwrap();
+    assert_eq!(command[1], "mini");
+    assert!(command.iter().any(|arg| arg == "--model"), "{preview}");
+    assert!(command.iter().any(|arg| arg == "--prompt"), "{preview}");
+    assert_eq!(
+        common::git(repo.path(), &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -133,22 +124,32 @@ fn opencode_interactive_help_is_checked_on_the_resolved_executable_each_time() {
     .into_iter()
     .map(str::to_owned)
     .collect();
-    let check = || ahu::selection::check_interactive_cli(&exe, "opencode", &args, &project);
-    for (help, compatible) in [
-        (include_str!("fixtures/opencode/1.x-help.txt"), true),
-        (include_str!("fixtures/opencode/2.0.32-help.txt"), false),
-        (include_str!("fixtures/opencode/1.x-help.txt"), true),
+    for (help, mini_help, expected_mini) in [
+        (include_str!("fixtures/opencode/1.x-help.txt"), "", false),
+        (
+            include_str!("fixtures/opencode/2.0.32-help.txt"),
+            include_str!("fixtures/opencode/2.0.32-mini-help.txt"),
+            true,
+        ),
+        (include_str!("fixtures/opencode/1.x-help.txt"), "", false),
     ] {
         std::fs::write(
             &exe,
             format!(
-                "#!/bin/sh\ntest $# -eq 1 && test \"$1\" = --help || exit 91\nprintf '%s\\n' {}\n",
-                common::shell_quoted(help)
+                "#!/bin/sh\nif [ \"$1\" = --help ] && [ $# -eq 1 ]; then printf '%s\\n' {}; exit 0; fi\nif [ \"$1\" = mini ] && [ \"$2\" = --help ] && [ $# -eq 2 ]; then printf '%s\\n' {}; exit 0; fi\nexit 91\n",
+                common::shell_quoted(help),
+                common::shell_quoted(mini_help)
             ),
         )
         .unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(check().is_ok(), compatible);
+        let mut launch_args = args.clone();
+        ahu::selection::check_interactive_cli(&exe, "opencode", &mut launch_args, &project)
+            .unwrap();
+        assert_eq!(
+            launch_args.first().is_some_and(|arg| arg == "mini"),
+            expected_mini
+        );
     }
     // Successful-looking output with a failed probe is never admission evidence.
     std::fs::write(
@@ -157,7 +158,7 @@ fn opencode_interactive_help_is_checked_on_the_resolved_executable_each_time() {
     )
     .unwrap();
     assert!(
-        check()
+        ahu::selection::check_interactive_cli(&exe, "opencode", &mut args.clone(), &project)
             .unwrap_err()
             .to_string()
             .contains("probe failed or timed out")

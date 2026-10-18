@@ -25,10 +25,12 @@
 //! enforcement report cannot describe a different binary than the one that runs.
 //!
 //! OpenCode 2.0.32 removed --model from the default interactive command.
-//! Its `run` command still accepts it, but exits after the message; `mini`
-//! advertises --model and --prompt, but no --auto. Neither is an equivalent
-//! replacement for this adapter. Interactive admission checks the resolved
-//! binary's top-level help before preview/submission and again before execution.
+//! Its `run` command still accepts it, but exits after the message. The `mini`
+//! subcommand provides the persistent interactive interface with --model and
+//! --prompt; --auto is inherited from the top-level global flags. Interactive
+//! admission selects that subcommand only when the default command lacks a
+//! requested flag, then verifies the resolved binary's help before submission
+//! and again before execution.
 //!
 //! What it cannot enforce:
 //!
@@ -59,21 +61,32 @@ use crate::agent::Permissions;
 use crate::bail;
 use crate::util::Result;
 
+/// OpenCode 2.x has the isolated `run --standalone` mode; 1.x does not.
+pub(crate) fn supports_standalone_run(version: &str) -> bool {
+    crate::catalog::version_token(version)
+        .and_then(|version| version.split('.').next())
+        .and_then(|major| major.parse::<u64>().ok())
+        .is_some_and(|major| major == 2)
+}
+
 pub struct OpenCode;
 
 /// Check only option declarations, not mentions in prose or subcommand help.
 /// OpenCode 1.x uses `-m, --model`; 2.x uses `--model, -m string`.
+fn declares_flag(help: &str, flag: &str) -> bool {
+    help.lines().any(|line| {
+        line.split_whitespace()
+            .take_while(|word| word.starts_with('-'))
+            .any(|word| word.trim_end_matches(',') == flag)
+    })
+}
+
 pub(crate) fn check_interactive_help(help: &str, args: &[String]) -> Result<()> {
     for flag in ["--model", "--prompt", "--auto"] {
         if !args.iter().any(|arg| arg == flag) {
             continue;
         }
-        let declared = help.lines().any(|line| {
-            line.split_whitespace()
-                .take_while(|word| word.starts_with('-'))
-                .any(|word| word.trim_end_matches(',') == flag)
-        });
-        if !declared {
+        if !declares_flag(help, flag) {
             bail!(
                 "OpenCode interactive CLI is incompatible: the resolved executable's \
                  `opencode --help` does not advertise top-level {flag}, which this launch \
@@ -84,6 +97,30 @@ pub(crate) fn check_interactive_help(help: &str, args: &[String]) -> Result<()> 
                  its separate compatibility and isolation checks still apply."
             );
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn check_mini_interactive_help(
+    top_level_help: &str,
+    mini_help: &str,
+    args: &[String],
+) -> Result<()> {
+    for flag in ["--model", "--prompt"] {
+        if args.iter().any(|arg| arg == flag) && !declares_flag(mini_help, flag) {
+            bail!(
+                "OpenCode mini interactive CLI is incompatible: `opencode mini --help` does not \
+                 advertise {flag}, which this launch requires. ahu will not drop the exact \
+                 model or prompt."
+            );
+        }
+    }
+    if args.iter().any(|arg| arg == "--auto") && !declares_flag(top_level_help, "--auto") {
+        bail!(
+            "OpenCode mini interactive CLI is incompatible: the top-level `opencode --help` \
+             does not advertise global --auto, which this launch requires. ahu will not drop \
+             the configured approval control."
+        );
     }
     Ok(())
 }
@@ -221,5 +258,24 @@ mod tests {
         // Prompt approvals do not require --auto; a coordinator has no prompt.
         check_interactive_help("  --model, -m string  Model", &args[..2]).unwrap();
         assert!(check_interactive_help("", &args).is_err());
+    }
+
+    #[test]
+    fn mini_interactive_help_pins_model_prompt_and_global_auto() {
+        let top = include_str!("../../tests/fixtures/opencode/2.0.32-help.txt");
+        let mini = include_str!("../../tests/fixtures/opencode/2.0.32-mini-help.txt");
+        let args: Vec<_> = [
+            "--model",
+            "ollama/glm-5.3:cloud",
+            "--auto",
+            "--prompt",
+            "task",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        check_mini_interactive_help(top, mini, &args).unwrap();
+        assert!(check_mini_interactive_help(top, "Usage: opencode mini", &args).is_err());
+        assert!(check_mini_interactive_help("", mini, &args).is_err());
     }
 }

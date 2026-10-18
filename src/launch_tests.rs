@@ -3,7 +3,7 @@ use super::*;
 const PROMPT: &str = "Inspect café\n$(touch never-executed)";
 
 #[test]
-fn interactive_execute_rechecks_opencode_cli_before_creating_a_worktree() {
+fn interactive_execute_refuses_unverified_opencode_mini_before_creating_a_worktree() {
     use std::os::unix::fs::PermissionsExt;
     let (_temp, repo, loaded, mut plan) = fixture();
     let native = tempfile::tempdir().unwrap();
@@ -27,7 +27,10 @@ fn interactive_execute_rechecks_opencode_cli_before_creating_a_worktree() {
         })
         .unwrap();
     let error = execute(&repo, &loaded, &plan, PROMPT, false).unwrap_err();
-    assert!(error.to_string().contains("top-level --model"), "{error}");
+    assert!(
+        error.to_string().contains("opencode mini --help"),
+        "{error}"
+    );
     assert!(!plan.worktree.exists());
     assert!(!plan.task_dir.exists());
 }

@@ -192,6 +192,17 @@ pub fn invoke(
             .ok_or_else(|| crate::util::Error::new("no entrypoint"))?;
         let mut source = local::entrypoint_file(&status)?;
         let bytes = crate::util::read_limited(&mut source, 64 * 1024 * 1024)?;
+        if crate::util::digest_bytes(&bytes)
+            != crate::plugin_install::verified_file_digest(
+                &installation.join("package"),
+                &binding,
+                &spec.path,
+            )?
+        {
+            return Err(crate::util::Error::new(
+                "plugin entrypoint changed after its package pin was verified",
+            ));
+        }
         let base = std::env::temp_dir().canonicalize()?;
         crate::interactive::external::validate_snapshot_base(&base)?;
         let snapshot = tempfile::Builder::new()

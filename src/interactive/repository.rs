@@ -359,7 +359,7 @@ fn ensure_group(client: &dyn Host, repo: &Repo, notes: &mut Vec<String>) -> Resu
     let workspaces = client.workspaces_in_window(current_window.as_deref())?;
     let candidates = repository_group_candidates(&groups, &repo.display_name(), |id| {
         workspaces.get(id).is_some_and(|workspace| {
-            git::discover(Path::new(&workspace.directory))
+            git::discover_untrusted(Path::new(&workspace.directory))
                 .is_ok_and(|found| found.identity() == repo.identity())
         })
     });

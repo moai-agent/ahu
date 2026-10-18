@@ -341,7 +341,7 @@ fn is_executable(path: &Path) -> bool {
 pub fn check_interactive_cli(
     executable: &Path,
     harness: &str,
-    args: &[String],
+    args: &mut Vec<String>,
     cwd: &Path,
 ) -> Result<()> {
     if harness != "opencode" {
@@ -362,7 +362,46 @@ pub fn check_interactive_cli(
     let help = help.ok_or_else(|| {
         Error::new("OpenCode interactive CLI compatibility could not be verified: the bounded `opencode --help` probe failed or timed out. Native diagnostics are withheld; check the resolved CLI before retrying. ahu will not substitute one-shot `opencode run`.")
     })?;
-    crate::harness::opencode::check_interactive_help(&help, args)
+    let already_mini = args.first().is_some_and(|arg| arg == "mini");
+    if !already_mini && crate::harness::opencode::check_interactive_help(&help, args).is_ok() {
+        return Ok(());
+    }
+
+    let mut command = std::process::Command::new(executable);
+    command.args(["mini", "--help"]).current_dir(cwd);
+    let mini_help = bounded_config_probe(&mut command, true, std::time::Duration::from_secs(8));
+    if crate::snapshot::collect(cwd)?.digest() != before {
+        bail!(
+            "OpenCode mini help inspection changed project agent context; review it and refresh the committed context lock before retrying"
+        );
+    }
+    let mini_help = mini_help.ok_or_else(|| {
+        Error::new("OpenCode interactive CLI compatibility could not be verified: the bounded `opencode mini --help` probe failed or timed out. Native diagnostics are withheld; check the resolved CLI before retrying.")
+    })?;
+    crate::harness::opencode::check_mini_interactive_help(&help, &mini_help, args)?;
+    if !already_mini {
+        args.insert(0, "mini".to_string());
+    }
+    Ok(())
+}
+
+/// Validate and adapt an interactive command while keeping its redacted prompt
+/// index aligned if OpenCode 2.x requires the `mini` subcommand prefix.
+pub fn check_interactive_command(
+    executable: &Path,
+    harness: &str,
+    command: &mut crate::harness::LaunchCommand,
+    cwd: &Path,
+) -> Result<()> {
+    let already_mini = command.args.first().is_some_and(|arg| arg == "mini");
+    check_interactive_cli(executable, harness, &mut command.args, cwd)?;
+    if !already_mini
+        && command.args.first().is_some_and(|arg| arg == "mini")
+        && let Some(prompt_arg) = &mut command.prompt_arg
+    {
+        *prompt_arg += 1;
+    }
+    Ok(())
 }
 
 /// Check native configuration without inference or changing the selected model.

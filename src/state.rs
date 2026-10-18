@@ -613,7 +613,8 @@ fn confine_dir(base: &Path, dir: &Path, create: bool) -> Result<()> {
 
 /// Create exactly one directory, re-inspecting if it appeared meanwhile.
 fn create_one_dir(path: &Path) -> Result<()> {
-    match std::fs::create_dir(path) {
+    use std::os::unix::fs::DirBuilderExt;
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             match std::fs::symlink_metadata(path) {

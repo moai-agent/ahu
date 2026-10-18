@@ -133,7 +133,7 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
     selection::check_interactive_cli(
         std::path::Path::new(&executable),
         harness,
-        &args,
+        &mut args,
         &repo.root,
     )?;
     if let Some(ranked) = &ranked {
@@ -2675,10 +2675,10 @@ fn submit(
     }
     crate::telemetry::initialize(&loaded.config.telemetry)?;
     let mut plan = launch::plan(repo, resolved.clone(), pair.clone(), prompt)?;
-    selection::check_interactive_cli(
+    selection::check_interactive_command(
         &plan.harness_executable,
         &plan.pair.harness,
-        &plan.command.args,
+        &mut plan.command,
         &repo.root,
     )?;
     let mut _span = crate::telemetry::span(

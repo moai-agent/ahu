@@ -2264,7 +2264,8 @@ scenario=os.environ"#);
     );
 }
 
-/// OpenCode's batch profile is `opencode run --standalone --format json`, and every part of
+/// OpenCode 2.x's batch profile is `opencode run --standalone --format json`; 1.x omits
+/// `--standalone` because that CLI does not support it. Every part of
 /// it was read off the running CLI rather than inferred from the interactive
 /// adapter.
 ///
@@ -2276,8 +2277,14 @@ scenario=os.environ"#);
 /// session, and this path never passes it.
 #[test]
 fn the_opencode_batch_profile_uses_a_private_server_pins_the_model_and_ends_the_option_list() {
-    // v2 help retains these batch options; this checks argv, not live inference.
-    for version in ["1.18.30", "1.18.34", "1.19.0", "opencode v2.0.32"] {
+    // This checks argv across supported CLI generations, not live inference.
+    for version in [
+        "1.18.30",
+        "1.18.34",
+        "1.19.0",
+        "opencode v2.0.32",
+        "opencode v3.0.0",
+    ] {
         assert_opencode_batch_profile(version);
     }
 }
@@ -2317,19 +2324,20 @@ fn assert_opencode_batch_profile(version: &str) {
         ahu::headless::batch_command("opencode", &request(Permissions::Prompt), &spec(None))
             .expect("a prompting opencode batch launch");
     assert_eq!(prompting.program, "opencode");
-    assert_eq!(
-        prompting.args,
-        [
-            "run",
-            "--standalone",
-            "--format",
-            "json",
-            "--model",
-            "ollama/glm-5.3:cloud",
-            "--",
-            "do the thing"
-        ]
-    );
+    let standalone = version.starts_with("opencode v2");
+    let mut expected: Vec<&str> = vec!["run"];
+    if standalone {
+        expected.push("--standalone");
+    }
+    expected.extend([
+        "--format",
+        "json",
+        "--model",
+        "ollama/glm-5.3:cloud",
+        "--",
+        "do the thing",
+    ]);
+    assert_eq!(prompting.args, expected);
     // The prompt is one argv element, and the stored command redacts exactly it.
     assert_eq!(prompting.prompt_arg, Some(prompting.args.len() - 1));
     assert!(

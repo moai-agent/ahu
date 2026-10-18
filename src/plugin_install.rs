@@ -290,14 +290,40 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
 }
 
 pub fn digest(root: &Path) -> Result<String> {
+    digest_with_file(root, None).map(|(tree, _)| tree)
+}
+
+/// Verify a package pin and hash one file during the very same bounded tree
+/// read. The returned file digest therefore describes bytes covered by the
+/// package digest, rather than a later pathname read.
+pub(crate) fn verified_file_digest(
+    root: &Path,
+    binding: &Binding,
+    relative: &str,
+) -> Result<String> {
+    if !plugin_binding::plain_relative(relative) {
+        bail!("unsafe plugin executable path");
+    }
+    let (tree_digest, file_digest) = digest_with_file(root, Some(relative))?;
+    if tree_digest != binding.source.sha256 {
+        bail!("plugin content SHA-256 pin mismatch");
+    }
+    file_digest.ok_or_else(|| Error::new("plugin executable is absent from the pinned package"))
+}
+
+fn digest_with_file(root: &Path, tracked: Option<&str>) -> Result<(String, Option<String>)> {
     directory(root)?;
     let mut hash = Sha256::new();
     hash.update(b"ahu-plugin-tree-v1\0");
     let mut total = 0;
+    let mut file_digest = None;
     for name in files(root)? {
         let mut file = regular(&root.join(&name))?;
         let executable = file.metadata()?.permissions().mode() & 0o111 != 0;
         let bytes = crate::util::read_limited(&mut file, MAX_FILE)?;
+        if tracked == Some(name.as_str()) {
+            file_digest = Some(crate::util::digest_bytes(&bytes));
+        }
         total += bytes.len() as u64;
         if total > MAX_PACKAGE {
             bail!("plugin tree exceeds 128 MiB");
@@ -308,7 +334,7 @@ pub fn digest(root: &Path) -> Result<String> {
         hash.update((bytes.len() as u64).to_be_bytes());
         hash.update(bytes);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok((format!("{:x}", hash.finalize()), file_digest))
 }
 
 pub(crate) fn verify(root: &Path, binding: &Binding) -> Result<()> {
@@ -788,7 +814,7 @@ pub fn list(root: &Path, output_json: bool) -> Result<()> {
                     metadata.executable.is_some() || metadata.entrypoint.is_some();
                 rows.push(serde_json::json!({
                     "id": binding.id, "version": binding.version, "source": binding.source,
-                    "installation": path, "source_verified": true,
+                    "installation": path.to_string_lossy(), "source_verified": true,
                     "matches_committed_binding": matches,
                     "enabled": matches && current.is_some_and(|s| s.binding.enabled),
                     "activation_supported": activation_supported,
@@ -829,6 +855,38 @@ pub fn list(root: &Path, output_json: bool) -> Result<()> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn verified_file_digest_binds_executable_bytes_to_the_package_tree_pin() {
+        let base = std::env::temp_dir().canonicalize().unwrap();
+        let root = tempfile::tempdir_in(base).unwrap();
+        fs::write(root.path().join("host.bin"), b"pinned executable").unwrap();
+        let binding = Binding {
+            schema_version: 1,
+            id: "fixture".into(),
+            version: "1.0.0".into(),
+            source: crate::plugin_binding::Source {
+                repository: "/fixture".into(),
+                revision: "a".repeat(40),
+                sha256: digest(root.path()).unwrap(),
+                subdirectory: None,
+                kind: SourceKind::Local,
+            },
+            compatibility: crate::plugin_binding::Compatibility {
+                ahu: env!("CARGO_PKG_VERSION").into(),
+                host_api: 1,
+            },
+            enabled: true,
+            grants: vec![],
+        };
+
+        assert_eq!(
+            verified_file_digest(root.path(), &binding, "host.bin").unwrap(),
+            crate::util::digest_bytes(b"pinned executable")
+        );
+        fs::write(root.path().join("host.bin"), b"replaced executable").unwrap();
+        assert!(verified_file_digest(root.path(), &binding, "host.bin").is_err());
+    }
 
     // stderr is a separate lifetime probe: EOF proves every fixture descendant
     // holding it was stopped, without kill(pid, 0) races or zombie assumptions.

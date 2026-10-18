@@ -634,12 +634,13 @@ pub fn execute(
     prompt: &str,
     focus: bool,
 ) -> Result<Launched> {
+    let mut plan = plan.clone();
     // Interactive admission runs in the submitting checkout. Headless callers
     // perform their native probe only after their isolation policy is admitted.
-    crate::selection::check_interactive_cli(
+    crate::selection::check_interactive_command(
         &plan.harness_executable,
         &plan.pair.harness,
-        &plan.command.args,
+        &mut plan.command,
         &repo.root,
     )?;
     crate::selection::check_launch_compatibility(
@@ -680,13 +681,13 @@ pub fn execute(
     // while no session could have started in it.
     let materialize = match snapshot::materialize(&repo.root, &plan.snapshot, &plan.worktree) {
         Ok(report) => report,
-        Err(e) => return Err(rollback_worktree(repo, plan, e)),
+        Err(e) => return Err(rollback_worktree(repo, &plan, e)),
     };
     // The task's own state directory, created now that its worktree exists. A
     // repository that committed a link at `.ahu` or `.ahu/state` is refused
     // here, before a record or a prompt is written through it.
     if let Err(e) = state::ensure_checkout_state(&plan.worktree) {
-        return Err(rollback_worktree(repo, plan, e));
+        return Err(rollback_worktree(repo, &plan, e));
     }
     if !materialize.concurrently_modified.is_empty() {
         notes.push(format!(
@@ -696,11 +697,11 @@ pub fn execute(
         ));
     }
 
-    let mut record = prepared_record(repo, loaded, plan, prompt, materialize);
+    let mut record = prepared_record(repo, loaded, &plan, prompt, materialize);
     record.session_host = frozen_host;
 
     if let Err(e) = task::save(&plan.task_dir, &record, prompt) {
-        return Err(rollback_worktree(repo, plan, e));
+        return Err(rollback_worktree(repo, &plan, e));
     }
     if let Err(e) = crate::task_index::register(
         &repo.identity(),
@@ -708,7 +709,7 @@ pub fn execute(
         &plan.worktree,
         crate::task_index::StoreKind::Worktree,
     ) {
-        return Err(rollback_worktree(repo, plan, e));
+        return Err(rollback_worktree(repo, &plan, e));
     }
 
     if let Some(session_host) = session_host {
@@ -726,7 +727,7 @@ pub fn execute(
             &mut notes,
         ) {
             Ok(placement) => placement,
-            Err(e) => return Err(workspace_creation_failed(repo, plan, e)),
+            Err(e) => return Err(workspace_creation_failed(repo, &plan, e)),
         };
         finish_workspace_launch(
             &plan.task_dir,
@@ -1003,11 +1004,29 @@ pub(crate) fn verify_task(
         cwd: &record.worktree,
         permissions: record.identity.permissions,
     };
-    let rebuilt = if let Some(spec) = batch {
+    let mut rebuilt = if let Some(spec) = batch {
         crate::headless::batch_command(&record.identity.harness, &request, spec)?
     } else {
         adapter.launch_command(&request)?
     };
+    let executable = crate::selection::resolve_executable(&rebuilt.program)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            Error::new(format!(
+                "{} is not on PATH in this workspace, so task {} cannot start.\n\
+                 ahu will not fall back to a different harness.",
+                rebuilt.program, record.task_id
+            ))
+            .with_kind(crate::util::ErrorKind::Prerequisite)
+        })?;
+    if batch.is_none() {
+        crate::selection::check_interactive_command(
+            &executable,
+            &record.identity.harness,
+            &mut rebuilt,
+            &record.worktree,
+        )?;
+    }
     if rebuilt.redacted() != record.launch_command {
         bail!(
             "the recorded launch command for task {} does not match what its configuration \
@@ -1027,16 +1046,6 @@ pub(crate) fn verify_task(
     // between the shell that submitted the task and the workspace shell that
     // runs it. The plan-time resolution is recorded for disclosure, and the
     // preview says the workspace may resolve a different wrapper.
-    let executable = crate::selection::resolve_executable(&rebuilt.program)
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| {
-            Error::new(format!(
-                "{} is not on PATH in this workspace, so task {} cannot start.\n\
-                 ahu will not fall back to a different harness.",
-                rebuilt.program, record.task_id
-            ))
-            .with_kind(crate::util::ErrorKind::Prerequisite)
-        })?;
     // The resolved executable must be absolute and outside the repository and
     // task worktree, including when reached through a symlink.
     if !executable.is_absolute() {
@@ -1194,7 +1203,7 @@ impl Drop for Foreground {
 /// Only for a fresh group whose unreaped child this supervisor owns.
 fn signal_owned_group(pid: u32, signal: i32) -> Result<()> {
     let pid = i32::try_from(pid).map_err(|_| Error::new("invalid owned process group"))?;
-    if pid <= 0 {
+    if pid <= 1 {
         bail!("invalid owned process group");
     }
     if unsafe { libc::kill(-pid, signal) } != 0 {
@@ -1288,7 +1297,7 @@ fn record_startup_error(task_dir: &Path, started: bool, error: Error) -> Error {
 fn run_verified_task(
     task_dir: &Path,
     mut record: TaskRecord,
-    rebuilt: LaunchCommand,
+    mut rebuilt: LaunchCommand,
     executable: PathBuf,
     started: &mut bool,
 ) -> Result<HarnessOutcome> {
@@ -1372,10 +1381,10 @@ fn run_verified_task(
     // workspace starts and pin this task immediately before starting an
     // interactive harness, so a changed native login cannot inherit the task.
     let repo = git::discover(&record.repo_root)?;
-    crate::selection::check_interactive_cli(
+    crate::selection::check_interactive_command(
         &executable,
         &record.identity.harness,
-        &rebuilt.args,
+        &mut rebuilt,
         &record.worktree,
     )?;
     crate::selection::check_launch_compatibility(
