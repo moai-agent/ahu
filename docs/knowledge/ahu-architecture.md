@@ -43,7 +43,7 @@ sources:
 
 # ahu system architecture
 
-The [core agent-task service V1](../agent-task-service.md) defines an opt-in,
+The core agent-task service V1, documented in `../agent-task-service.md`, defines an opt-in,
 provider-neutral task lifecycle interface for core-issued scoped sessions. Its
 in-memory and local implementations retain admission and execution control in
 core. It is independent of the terminal Host V1 API and adds no remote agent
@@ -148,8 +148,8 @@ plugins. Missing local Git objects fail with all Git transports denied. Committe
 symlinks and non-file bindings are refused; metadata reads are bounded.
 Project plugin bindings remain declarations, with source verification and activation
 reported as unsupported. The separate local-package inventory and explicit
-executable probe retain their existing selection boundary. See the
-[CLI reference](../reference.md#committed-project-plugin-bindings) for output,
+executable probe retain their existing selection boundary. See the CLI reference
+section `Committed project plugin bindings` for output,
 bounds and limitations.
 
 [^main]: CLI routing in src/main.rs.

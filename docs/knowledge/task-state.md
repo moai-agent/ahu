@@ -167,7 +167,7 @@ command reconstruction, and repository/worktree identity. A writer able to alter
 records and digests can alter both; these checks are not authentication or OS
 isolation.[^state][^launch]
 
-The opt-in [core agent-task service V1](../agent-task-service.md) keeps scoped
+The opt-in core agent-task service V1, documented in `../agent-task-service.md`, keeps scoped
 ownership, monotonic revisions, operation receipts and one-shot effect claims in
 primary-owned `agent-tasks-v1/` coordination. It reuses the existing state and
 record-discovery helpers without rewriting task records or importing native
