@@ -2060,6 +2060,11 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
 /// cancellation, not a removal, and a dirty worktree or a branch holding
 /// unmerged commits keeps its work for review.
 pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i32> {
+    // Interactive tasks can outlive their CMUX workspace record. Reconcile
+    // verifiably absent workspaces before applying the terminal-state gate;
+    // this still preserves tasks whose host cannot be queried or whose
+    // workspace remains present.
+    let _ = crate::launch::reconcile(repo)?;
     let (record_dir, record, owner_identity, via_index, gate_discovered) =
         match resolve_task(repo, task_id)? {
             Located::Listing(dir, record) => (dir, record, repo.identity(), false, None),

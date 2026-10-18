@@ -229,6 +229,48 @@ fn remove_refuses_a_live_task_and_points_at_cancel() {
     );
 }
 
+/// A task whose CMUX workspace has disappeared is terminal even when its old
+/// record still says running. Removal reconciles that evidence first, then
+/// still applies the clean-worktree and merged-branch gates.
+#[cfg(all(feature = "cmux-plugin", unix))]
+#[test]
+fn remove_reconciles_a_missing_cmux_workspace_before_terminal_gate() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = fixture();
+    let id = task::new_task_id().unwrap();
+    let record_dir = prepare_task_in_state(&repo, &id, task::TaskState::Running);
+    let worktree = worktree_of(&repo, &id);
+    let mut record = task::load(&record_dir).unwrap();
+    record.cmux_workspace_id = Some("stale-workspace".into());
+    record.cmux_group_id = Some("stale-group".into());
+    record.cmux_window_id = Some("stale-window".into());
+    task::save(&record_dir, &record, "current work").unwrap();
+
+    let cmux = tempfile::tempdir().unwrap();
+    let executable = cmux.path().join("cmux");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\n[ \"$1\" = ping ] && exit 0\ncase \"$2\" in\n  window.list) printf '%s\\n' '{\"windows\":[{\"id\":\"stale-window\"}]}' ;;\n  workspace.list) printf '%s\\n' '{\"workspaces\":[]}' ;;\n  *) exit 41 ;;\nesac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let output = common::ahu()
+        .args(["remove", &id])
+        .current_dir(repo.path())
+        .env_remove("AHU_STATE_DIR")
+        .env_remove("AHU_INTERACTIVE_PLUGIN")
+        .env("AHU_CMUX_BIN", &executable)
+        .output()
+        .expect("ahu runs");
+    let text = text_of(&output);
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert!(text.contains(&format!("removed task {id}")), "{text}");
+    assert!(!worktree.exists(), "the stale task worktree remains");
+    assert!(!record_dir.exists(), "the stale task record remains");
+}
+
 /// Uncommitted changes are reviewable work; removal waits until they are gone.
 #[test]
 fn remove_refuses_a_dirty_worktree_until_it_is_clean() {
