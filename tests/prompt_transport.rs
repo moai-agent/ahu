@@ -908,7 +908,7 @@ fn approval_widening_is_opt_in_and_harness_native() {
 }
 
 #[test]
-fn codex_auto_approves_local_ahu_tools_and_checkpoint_request() {
+fn codex_auto_approves_local_ahu_tools_in_project_config() {
     use ahu::agent::Permissions;
 
     let command = harness::adapter_for("codex")
@@ -920,15 +920,15 @@ fn codex_auto_approves_local_ahu_tools_and_checkpoint_request() {
             permissions: Permissions::Auto,
         })
         .unwrap();
-    for tool in [
-        "ahu_agents_list",
-        "ahu_tasks_list",
-        "ahu_task_get",
-        "ahu_request_approval",
-    ] {
-        let config = format!("mcp_servers.ahu.tools.{tool}.approval_mode=\"approve\"");
-        assert!(command.args.contains(&config), "missing {config:?}");
-    }
+    // Per-tool approvals live in the project Codex config. Passing them as
+    // interactive CLI overrides breaks Codex's TUI bootstrap.
+    assert!(
+        !command
+            .args
+            .iter()
+            .any(|arg| arg.contains("mcp_servers.ahu.tools.")),
+        "Codex MCP approvals must come from project config, not CLI overrides"
+    );
     for tool in ["ahu_typed_decide", "ahu_skills_suggest"] {
         assert!(
             !command.args.iter().any(|arg| arg.contains(tool)),
