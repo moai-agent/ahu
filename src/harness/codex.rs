@@ -175,6 +175,12 @@ mod permission_tests {
                 .iter()
                 .any(|arg| arg.contains("dangerously-bypass") || arg == "--add-dir")
         );
+        assert!(
+            !command
+                .args
+                .iter()
+                .any(|arg| arg.starts_with("mcp_servers.ahu.tools."))
+        );
         let disclosure = permission_control(Permissions::Auto);
         assert!(disclosure.contains("protected context directories and shared Git metadata"));
         assert!(disclosure.contains("coordinator-applied patch"));
