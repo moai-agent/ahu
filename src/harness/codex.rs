@@ -26,12 +26,11 @@ use crate::util::Result;
 
 pub struct Codex;
 
-/// MCP's approval gate is separate from Codex's shell approval policy. When
-/// an agent explicitly declares `permissions = auto`, let it use ahu's local
-/// repository tools and request an operator checkpoint in headless runs. The
-/// checkpoint tool only pauses and records bounded metadata; it cannot perform
-/// the requested operation. Provider-backed calls stay approval-gated because
-/// their arguments can be sent outside the machine.
+/// MCP's approval gate is separate from Codex's shell approval policy. These
+/// local tools are approved in the project MCP config so interactive Codex can
+/// load them without per-invocation `-c` overlays (Codex CLI 0.163.0 fails its
+/// TUI bootstrap when those overlays are present). The checkpoint tool only
+/// pauses and records bounded metadata; provider-backed calls stay gated.
 pub(crate) const AUTO_LOCAL_MCP_TOOLS: &[&str] = &[
     "ahu_agents_list",
     "ahu_tasks_list",
@@ -39,21 +38,10 @@ pub(crate) const AUTO_LOCAL_MCP_TOOLS: &[&str] = &[
     "ahu_request_approval",
 ];
 
-pub(crate) fn auto_local_mcp_config(tool: &str) -> String {
-    format!("mcp_servers.ahu.tools.{tool}.approval_mode=\"approve\"")
-}
-
-/// Load native config with the same overrides as an auto launch, without
-/// connecting to servers or making a model request. Codex ignores untrusted
-/// project layers; tool-only overrides then create an invalid transport.
+/// Confirm that the project-configured Ahu MCP transport is visible without
+/// connecting to servers or making a model request.
 pub(crate) fn auto_mcp_probe_args() -> Vec<String> {
-    let mut args = Vec::new();
-    for tool in AUTO_LOCAL_MCP_TOOLS {
-        args.push("-c".into());
-        args.push(auto_local_mcp_config(tool));
-    }
-    args.extend(["mcp".into(), "list".into()]);
-    args
+    vec!["mcp".into(), "list".into()]
 }
 
 impl Adapter for Codex {
@@ -78,10 +66,6 @@ impl Adapter for Codex {
                 args.push("never".to_string());
                 args.push("--sandbox".to_string());
                 args.push("workspace-write".to_string());
-                for tool in AUTO_LOCAL_MCP_TOOLS {
-                    args.push("-c".to_string());
-                    args.push(auto_local_mcp_config(tool));
-                }
             }
         }
         args.push("--".to_string());

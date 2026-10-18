@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 6492895256fd975bcc5dd0baa63d7fdd0da82f0e56410b5bd210b29facc7bccb
+  digest: e31a0c6741519958fa1cd831fbb2469f96237b73b624da8d88a442be35895fb2
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -130,8 +130,8 @@ ahu:
     digest: 129931849a0b6dc263b21b2e52f56f19e96d412088cd4c4f3a94aae39ed1f609
     executable: false
     path: .agents/skills/discover-requirements/SKILL.md
-  - bytes: 217
-    digest: 375dd7fa25b370d223946f5daf2f0c33165bd022f6a13d23fbe02975ef79d82c
+  - bytes: 486
+    digest: 4c5e0cc6960067f52b1dbc6d522a6e1c13e1f9746956f36f9f62fafcb2621c78
     executable: false
     path: .codex/config.toml
   - bytes: 434

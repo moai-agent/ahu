@@ -493,12 +493,12 @@ pub(crate) fn check_launch_compatibility_with_policy(
     if harness == "codex" {
         if output.is_none() {
             bail!(
-                "Codex cannot load its effective MCP configuration with ahu's auto tool approvals. \
-                 An untrusted project may hide .codex/config.toml, leaving an ahu server with tools \
-                 but no transport. Review project trust in Codex directly in this checkout and verify \
+                "Codex cannot load its effective project MCP configuration. An untrusted project \
+                 may hide .codex/config.toml, leaving the ahu server unavailable. Review project \
+                 trust in Codex directly in this checkout and verify \
                  `codex mcp list` recognizes the intended ahu server, then retry. A trusted project \
                  transport is sufficient; global registration is not required. ahu will not \
-                 grant trust, copy a project command into CLI overrides, or remove MCP approval gates. \
+                 grant project trust or copy a project command into CLI overrides. \
                  The native config probe failed or timed out; its output is withheld."
             );
         }
@@ -736,13 +736,10 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn codex_auto_checks_transport_without_changing_trust_or_provider_approvals() {
+    fn codex_auto_checks_project_transport_without_changing_trust() {
         let root = tempfile::tempdir().unwrap();
         let args = crate::harness::codex::auto_mcp_probe_args();
-        assert_eq!(&args[args.len() - 2..], ["mcp", "list"]);
-        for tool in crate::harness::codex::AUTO_LOCAL_MCP_TOOLS {
-            assert!(args.contains(&crate::harness::codex::auto_local_mcp_config(tool)));
-        }
+        assert_eq!(args, ["mcp", "list"]);
         assert!(!args.iter().any(|arg| arg.contains("trust")
             || arg.contains("command=")
             || arg.contains("ahu_typed_decide")
@@ -753,7 +750,7 @@ mod compatibility_tests {
         };
         let error = check(Permissions::Auto).unwrap_err().to_string();
         assert!(error.contains("Review project trust"));
-        assert!(error.contains("no transport"));
+        assert!(error.contains("server unavailable"));
         check(Permissions::Prompt).unwrap();
         check(Permissions::AcceptEdits).unwrap();
         std::fs::write(root.path().join("transport-present"), "").unwrap();

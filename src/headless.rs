@@ -221,15 +221,9 @@ pub fn batch_command(
                 Permissions::Prompt => add(&["-c", "sandbox_mode=\"read-only\""]),
                 Permissions::Auto => {
                     add(&["-c", "sandbox_mode=\"workspace-write\""]);
-                    // `approval_policy="never"` prevents interactive prompts;
-                    // Codex separately denies MCP tools that still require
-                    // approval. Auto agents may use only ahu's local,
-                    // read-only tools unattended. Provider-backed tools remain
-                    // approval-gated and require an eval-specific opt-in.
-                    for tool in crate::harness::codex::AUTO_LOCAL_MCP_TOOLS {
-                        let config = crate::harness::codex::auto_local_mcp_config(tool);
-                        add(&["-c", config.as_str()]);
-                    }
+                    // The project's Codex MCP config approves only ahu's
+                    // bounded local coordination tools. Provider-backed
+                    // tools remain approval-gated and require eval opt-in.
                 }
                 Permissions::AcceptEdits if spec.session.is_none() => add(&["--approve-for-me"]),
                 Permissions::AcceptEdits => bail!(
@@ -5760,10 +5754,12 @@ mod profile_and_metadata_tests {
                 ..sample_spec()
             };
             let command = batch_command("codex", &request, &spec).unwrap();
-            for tool in crate::harness::codex::AUTO_LOCAL_MCP_TOOLS {
-                let config = crate::harness::codex::auto_local_mcp_config(tool);
-                assert!(command.args.contains(&config), "missing {config:?}");
-            }
+            assert!(
+                !command
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("mcp_servers.ahu.tools."))
+            );
             for tool in ["ahu_typed_decide", "ahu_skills_suggest"] {
                 assert!(
                     !command.args.iter().any(|arg| arg.contains(tool)),
