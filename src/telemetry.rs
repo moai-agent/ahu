@@ -3338,6 +3338,7 @@ pub(crate) fn export_eval_selection(
     run_id: &str,
     selection_id: &str,
     selection: &crate::skill_selection::Selection,
+    release_id: Option<&str>,
 ) -> bool {
     use opentelemetry_proto::tonic::{
         collector::trace::v1::ExportTraceServiceRequest,
@@ -3418,16 +3419,20 @@ pub(crate) fn export_eval_selection(
         .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64);
     // Construct the wire resource explicitly: SDK Resource::builder and the
     // default OTLP exporter both import unrelated inherited environment data.
+    let mut resource_attributes = vec![
+        string("service.name", "ahu-eval"),
+        string("ahu.eval.run_id", run_id),
+        string("ahu.eval.stage", "skill_selection"),
+        string("ahu.task.id", selection_id),
+        string("ahu.task.attempt", "1"),
+    ];
+    if let Some(release_id) = release_id {
+        resource_attributes.push(string("ahu.release.id", release_id));
+    }
     let message = ExportTraceServiceRequest {
         resource_spans: vec![ResourceSpans {
             resource: Some(ProtoResource {
-                attributes: vec![
-                    string("service.name", "ahu-eval"),
-                    string("ahu.eval.run_id", run_id),
-                    string("ahu.eval.stage", "skill_selection"),
-                    string("ahu.task.id", selection_id),
-                    string("ahu.task.attempt", "1"),
-                ],
+                attributes: resource_attributes,
                 ..Default::default()
             }),
             scope_spans: vec![ScopeSpans {
@@ -3497,7 +3502,8 @@ mod selection_tests {
             &endpoint,
             "wire-run",
             "wire-selection",
-            &selection
+            &selection,
+            Some("release-fixture")
         ));
     }
 
@@ -3622,6 +3628,12 @@ mod selection_tests {
         ] {
             assert!(!body.windows(sentinel.len()).any(|w| w == sentinel));
         }
+        if !decision {
+            assert!(
+                body.windows(b"release-fixture".len())
+                    .any(|w| w == b"release-fixture")
+            );
+        }
         assert!(matches!(proxy.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
     }
     #[test]
@@ -3640,7 +3652,8 @@ mod selection_tests {
             receiver.endpoint(),
             "selection-run",
             "selector-1",
-            &selection
+            &selection,
+            Some("release-fixture")
         ));
         let observed = receiver.task("selector-1", 1).unwrap();
         assert_eq!(observed.selection_observations, 1);
@@ -3666,7 +3679,8 @@ mod selection_tests {
                 endpoint,
                 "selection-run",
                 "selector-1",
-                &selection
+                &selection,
+                None
             ));
         }
     }

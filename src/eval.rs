@@ -2028,6 +2028,7 @@ pub fn run(
     repo: &crate::git::Repo,
     request: &RunRequest<'_>,
 ) -> Result<i32> {
+    let release_id = crate::telemetry::release_id_for_launch()?;
     if request.decision_evaluator
         && (request.evaluator.is_some() || request.evaluator_repo.is_some())
     {
@@ -2222,6 +2223,7 @@ pub fn run(
             &run_id,
             &selection_id,
             &selection,
+            release_id.as_deref(),
         );
         let selection_observed = selection_exported
             && receiver
@@ -2244,6 +2246,7 @@ pub fn run(
             request.timeout_seconds,
             request.allow_widened_approvals,
             receiver.endpoint(),
+            release_id.as_deref(),
         );
         let total_elapsed_ms = trial_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let candidate_result = match launch.result {
@@ -2274,7 +2277,12 @@ pub fn run(
                     _ => "candidate_launch_failed",
                 };
                 let mut record = print.record_fields();
-                record.extend(base_fields(&run_id, trial, "candidate"));
+                record.extend(base_fields(
+                    &run_id,
+                    trial,
+                    "candidate",
+                    release_id.as_deref(),
+                ));
                 record.extend(outcome_fields(status, Some("candidate_run_failed")));
                 record.insert("launch_elapsed_ms".into(), launch.elapsed_ms.into());
                 insert_selection_fields(
@@ -2397,7 +2405,12 @@ pub fn run(
                     "candidate_answer_invalid"
                 };
                 let mut record = print.record_fields();
-                record.extend(base_fields(&run_id, trial, "candidate"));
+                record.extend(base_fields(
+                    &run_id,
+                    trial,
+                    "candidate",
+                    release_id.as_deref(),
+                ));
                 record.extend(outcome_fields(status, Some("candidate_answer_invalid")));
                 record.insert("task_id".into(), candidate_task.into());
                 record.insert("attempt".into(), attempt.into());
@@ -2500,6 +2513,7 @@ pub fn run(
                 request.timeout_seconds,
                 request.allow_widened_approvals,
                 receiver.endpoint(),
+                release_id.as_deref(),
             );
             let envelope = evaluator_launch
                 .result
@@ -2572,7 +2586,12 @@ pub fn run(
         let (score, passed, score_source) = (Some(answer_score), answer_passed, "deterministic");
 
         let mut record = print.record_fields();
-        record.extend(base_fields(&run_id, trial, "candidate"));
+        record.extend(base_fields(
+            &run_id,
+            trial,
+            "candidate",
+            release_id.as_deref(),
+        ));
         record.extend(outcome_fields(
             if judge_status == "failed" {
                 "candidate_scored_judge_failed"
@@ -2813,6 +2832,7 @@ pub fn run(
         "trajectory_guard_exit_code": exit_code,
         "schema_version": RECORD_SCHEMA_VERSION,
         "run_id": run_id,
+        "release_id": release_id,
         "suite_id": suite_identity.as_ref().map(|suite| suite.id.clone()),
         "cases": cases.iter().map(|entry| entry.case.id.clone()).collect::<Vec<_>>(),
         "candidates": candidates.iter().map(|agent| agent.label()).collect::<Vec<_>>(),
@@ -2884,6 +2904,7 @@ fn base_fields(
     run_id: &str,
     trial: &Trial,
     stage: &str,
+    release_id: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
     fields.insert("schema_version".into(), RECORD_SCHEMA_VERSION.into());
@@ -2893,6 +2914,9 @@ fn base_fields(
         fields.insert("observed_at_unix_seconds".into(), age.as_secs().into());
     }
     fields.insert("run_id".into(), run_id.into());
+    if let Some(release_id) = release_id {
+        fields.insert("release_id".into(), release_id.into());
+    }
     fields.insert("stage".into(), stage.into());
     fields.insert("trial_index".into(), trial.index.into());
     fields.insert("case_index".into(), (trial.case_index + 1).into());
@@ -3205,6 +3229,7 @@ fn launch_eval_agent(
     timeout_seconds: u64,
     allow_widened: bool,
     otel_endpoint: &str,
+    release_id: Option<&str>,
 ) -> LaunchOutcome {
     let started = std::time::Instant::now();
     let mut envelope = None;
@@ -3219,6 +3244,7 @@ fn launch_eval_agent(
         timeout_seconds,
         allow_widened,
         otel_endpoint,
+        release_id,
         &mut envelope,
     );
     LaunchOutcome {
@@ -3240,6 +3266,7 @@ fn launch_eval_agent_inner(
     timeout_seconds: u64,
     allow_widened: bool,
     otel_endpoint: &str,
+    release_id: Option<&str>,
     envelope: &mut Option<serde_json::Value>,
 ) -> Result<serde_json::Value> {
     create_private_dir(output_dir)?;
@@ -3247,9 +3274,12 @@ fn launch_eval_agent_inner(
     write_private_file(&prompt_path, prompt.as_bytes())?;
     let case_id = &case.id;
     let corpus = &case.corpus_version;
-    let resource_attrs = format!(
+    let mut resource_attrs = format!(
         "ahu.eval.run_id={run_id},ahu.eval.case_id={case_id},ahu.eval.corpus_version={corpus},ahu.eval.stage={stage}"
     );
+    if let Some(release_id) = release_id {
+        resource_attrs.push_str(&format!(",ahu.release.id={release_id}"));
+    }
     if resource_attrs.len() > 512 {
         bail!("evaluation telemetry identity exceeds its bound");
     }

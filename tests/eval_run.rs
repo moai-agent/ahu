@@ -70,6 +70,8 @@ fn eval_run_defaults_to_ignored_primary_records_and_keeps_raw_artifacts_external
         &harness,
         r#"#!/usr/bin/env python3
 import json, os, subprocess, sys
+attrs = dict(pair.split('=',1) for pair in os.environ['OTEL_RESOURCE_ATTRIBUTES'].split(',') if '=' in pair)
+assert attrs['ahu.release.id'] == 'release-eval-test', attrs
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
@@ -141,6 +143,10 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
         .env("PATH", path)
         .env_remove("XDG_STATE_HOME")
         .env("HOME", &home)
+        .env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "ahu.release.id=release-eval-test",
+        )
         .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
@@ -166,6 +172,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     // rather than a pass by absence.
     assert_eq!(trial["tool_expectation_status"], "not_applicable");
     assert_eq!(summary["evaluator"], "@judge");
+    assert_eq!(summary["release_id"], "release-eval-test");
     assert_eq!(summary["planned_trials"], 1);
     assert_eq!(summary["planned_launches"], 2);
     assert_eq!(summary["blinding"], "prompt_only");
@@ -184,6 +191,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
         .collect();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["schema_version"], 2);
+    assert_eq!(rows[0]["release_id"], "release-eval-test");
     assert_eq!(rows[0]["mcp_tool_call_count"], 1);
     assert_eq!(rows[0]["mcp_tools"]["ahu_agents_list"], 1);
     assert_eq!(rows[0]["evaluator"], "judge");

@@ -1049,7 +1049,7 @@ mod tests {
             agent_index: 0,
             run_index: 1,
         };
-        let fields = super::super::base_fields("fixture-run", &trial, "candidate");
+        let fields = super::super::base_fields("fixture-run", &trial, "candidate", None);
         assert!(fields["observed_at_unix_seconds"].as_u64().unwrap() > 0);
         for source in [
             "opencode_step_finish_sum",
