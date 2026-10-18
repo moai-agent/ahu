@@ -416,7 +416,7 @@ native. This inspection cannot prevent configuration changes between inspection
 and execution. A trusted project and explicit tool approvals are still required
 for unattended MCP calls.
 
-Claude Code 2.1.283, 2.1.288 and 2.1.289 receive
+Claude Code 2.1.283, 2.1.288, 2.1.289 and 2.1.302 receive
 `--settings '{"disableAllHooks":true}'` for headless launch and resume. This
 invocation setting disables non-managed hooks without replacing native settings,
 account selection, skills, or direct MCP configuration. Parsed hooks can be
@@ -436,6 +436,13 @@ and local SessionStart, UserPromptSubmit and Stop hooks ran in the control case
 and were suppressed by the invocation setting. The exact requested model and a
 direct user MCP server remained available. These synthetic checks do not extend
 the authenticated headless verification records.
+
+The 2.1.302 profile is based on installed CLI help advertising `--settings`,
+the vendor's per-run hook control documentation, and synthetic admission and
+launch/resume argument tests. No authenticated headless task or native hook
+execution was observed for this version; its live verification records remain
+unchanged. The profile applies only to that exact version, with the same
+managed-source and plugin refusals.
 
 OpenCode's `--pure` flag disables external plugins, but does not establish the
 contents of authenticated remote configuration. Native configuration can also
@@ -457,7 +464,7 @@ other launch checks.
 | --- | --- |
 | Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Versions 0.157.1 and 0.160.0 additionally require native effective metadata inspection with no warnings or managed requirements, and turn off optional plugins for the invocation. Other versions retain unresolved plugin, cloud, and managed-source checks. |
 | OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; authentication/account stores, declared modules, and substitutions remain unresolved. |
-| Claude Code | Direct executable avoids the cmux wrapper. Versions 2.1.283, 2.1.288 and 2.1.289 turn off parsed non-managed hooks for the invocation. Enabled plugins, malformed settings, and unresolved managed sources still refuse admission. |
+| Claude Code | Direct executable avoids the cmux wrapper. Versions 2.1.283, 2.1.288, 2.1.289 and 2.1.302 turn off parsed non-managed hooks for the invocation. Enabled plugins, malformed settings, and unresolved managed sources still refuse admission. |
 | Antigravity | Absent inspected hooks. Custom hooks, extensions, and overrides remain unverified. |
 
 Unknown or unsafe integrations have no operator bypass, including with

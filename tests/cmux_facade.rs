@@ -551,7 +551,7 @@ fn headless_dry_run_uses_the_same_status_and_refuses_unknown_registration() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(!Path::new(preview["worktree"].as_str().unwrap()).exists());
-    for version in ["2.1.283", "2.1.288", "2.1.289"] {
+    for version in ["2.1.283", "2.1.288", "2.1.289", "2.1.302"] {
         f.write(
             &executable,
             format!(
@@ -1002,7 +1002,15 @@ fn claude_invocation_isolation_covers_only_parsed_nonmanaged_hooks() {
                 && c.isolation == Isolation::VerifiedDisable
                 && c.registration == Registration::Unknown)
     );
-    for version in ["2.1.270", "2.1.284", ""] {
+    for version in [
+        "2.1.270",
+        "2.1.284",
+        "2.1.301",
+        "2.1.303",
+        "2.1.302-beta.1",
+        "2.1.302+build.1",
+        "",
+    ] {
         assert!(
             !integration::headless_status(f.inspect("claude-code"), version)
                 .headless
@@ -1037,7 +1045,11 @@ fn claude_invocation_isolation_covers_only_parsed_nonmanaged_hooks() {
 
 #[test]
 fn current_claude_isolates_hooks_without_admitting_plugins_or_managed_sources() {
-    for version in ["2.1.288 (Claude Code)", "2.1.289 (Claude Code)"] {
+    for version in [
+        "2.1.288 (Claude Code)",
+        "2.1.289 (Claude Code)",
+        "2.1.302 (Claude Code)",
+    ] {
         let f = Fixture::new();
         let settings = f.home.join(".claude/settings.json");
         let hook = br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch synthetic-marker"}]}]}}"#;

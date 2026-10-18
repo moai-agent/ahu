@@ -5636,6 +5636,7 @@ mod profile_and_metadata_tests {
             ("codex", "0.157.1", "0.160.0"),
             ("claude-code", "2.1.283", "2.1.288"),
             ("claude-code", "2.1.288", "2.1.289"),
+            ("claude-code", "2.1.289", "2.1.302"),
         ] {
             let mut spec = sample_spec();
             spec.harness_version = old.into();

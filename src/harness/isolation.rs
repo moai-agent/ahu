@@ -3,6 +3,8 @@
 //! https://code.claude.com/docs/en/hooks#disable-or-remove-hooks
 //! Verified on 2.1.283, 2.1.288 and 2.1.289 with synthetic
 //! SessionStart/UserPromptSubmit/Stop markers. Homes and authentication stay native.
+//! 2.1.302: installed CLI help and vendor hook controls reviewed; synthetic
+//! admission/argv tests only, without authenticated headless verification.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Profile {
@@ -41,6 +43,10 @@ pub fn profile(harness: &str, version: &str) -> Option<Profile> {
         }),
         ("claude-code", "2.1.289") => Some(Profile {
             id: "claude-2.1.289-nonmanaged-hooks-disabled-v1",
+            args: CLAUDE_ARGS,
+        }),
+        ("claude-code", "2.1.302") => Some(Profile {
+            id: "claude-2.1.302-nonmanaged-hooks-disabled-v1",
             args: CLAUDE_ARGS,
         }),
         ("codex", "0.157.1") => Some(Profile {
