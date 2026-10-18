@@ -345,6 +345,16 @@ pub fn batch_command(
                 add(&["--standalone"]);
             }
             add(&["--format", "json", "--model", request.model]);
+            // OpenCode resolves a git-worktree cwd to its registered project
+            // and can place the session in a previously-used project directory
+            // instead of the process cwd, so `--dir` pins the session to the
+            // task worktree. Verified on OpenCode 1.18.5 on 2026-10-14:
+            // without it a worktree launch recorded directory=<repo root>;
+            // with it the session recorded directory=<worktree>.
+            let Some(dir) = request.cwd.to_str() else {
+                bail!("OpenCode requires a UTF-8 task worktree path for --dir");
+            };
+            add(&["--dir", dir]);
             match request.permissions {
                 // As in the interactive adapter: OpenCode's permission actions
                 // are static configuration, its only permission flag widens,

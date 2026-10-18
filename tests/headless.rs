@@ -2273,8 +2273,10 @@ scenario=os.environ"#);
 /// positional argument, `--format json` emits one JSON event per line, `--`
 /// ends the option list (`run --format json -m <model> -- --version` sent
 /// `--version` to the model instead of printing the version), and `--session`
-/// continues a recorded session. `-i/--interactive` is what would make `run` a
-/// session, and this path never passes it.
+/// continues a recorded session. Verified on OpenCode 1.18.5 on 2026-10-14:
+/// `--dir` pins the session's directory to the task worktree, which a
+/// git-worktree cwd alone did not do. `-i/--interactive` is what would make
+/// `run` a session, and this path never passes it.
 #[test]
 fn the_opencode_batch_profile_uses_a_private_server_pins_the_model_and_ends_the_option_list() {
     // This checks argv across supported CLI generations, not live inference.
@@ -2334,6 +2336,8 @@ fn assert_opencode_batch_profile(version: &str) {
         "json",
         "--model",
         "ollama/glm-5.3:cloud",
+        "--dir",
+        "/tmp",
         "--",
         "do the thing",
     ]);
