@@ -6,10 +6,16 @@ description: Coordinate repository work through registered ahu agents and task r
 
 Use this skill when coordinating work inside an ahu task. Registered agents are
 launched through ahu, with their configured harness, model, permissions, and
-fresh worktree. Do not impersonate an agent with native harness delegation or
-silently substitute another harness. The workflow is tracker- and terminal-
-neutral. GitHub and cmux are supported integrations, not assumptions every
-project or machine must satisfy.
+task worktree. A worktree is a Git working directory and branch, not a sandbox:
+same-user processes can access files outside it unless an OS or container
+policy separately restricts them. Do not claim that Git worktrees or harness
+approval settings confine filesystem or process access. Agents must keep their
+changes inside the assigned worktree; this is an instruction, not enforcement.
+See `docs/agent-git-workflow.md` for the shared branch and release flow. Do not
+impersonate an agent with native harness delegation or silently substitute
+another harness. The workflow is tracker- and terminal-neutral. GitHub and cmux
+are supported integrations, not assumptions every project or machine must
+satisfy.
 
 ## Assign work
 
@@ -90,6 +96,13 @@ Children inherit the parent's current HEAD, not uncommitted source edits. For a
 review of local changes, name the source checkout and exact revision or diff in
 the assignment. Keep issue updates with the coordinator responsible for the
 parent work, and do not push unless explicitly authorized.
+
+During release work, the coordinator's checkout is on the release branch.
+Task branches inherit that release checkout's current commit. The coordinator
+reviews and integrates accepted commits into the release branch and validates
+the integrated candidate. Keep `main` unchanged until release gates pass; the
+release branch is merged to `main` as part of completing the release. Task
+agents do not independently merge to `main` or publish branches or tags.
 
 ## Long-running work and tracker records
 

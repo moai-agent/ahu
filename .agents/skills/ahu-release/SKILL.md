@@ -38,8 +38,14 @@ Codex or OpenCode.
 
 Read the repository's `AGENTS.md` and the current release notes before changing
 anything. Start from a clean checkout and record the exact base commit. Keep
-release work on `release/vX.Y.Z` (or the repository's documented equivalent),
-and make a separate post-release branch from updated `main` for improvements to
+release work on `release/vX.Y.Z` (or the repository's documented equivalent).
+The coordinator integrates reviewed task commits into that release branch and
+runs checks on the integrated candidate. Keep `main` unchanged while the
+candidate is stabilizing; merge the stable release branch to `main` only as
+part of completing the release. Task worktrees are Git working directories,
+not security sandboxes; do not describe them or harness approval settings as
+filesystem confinement. Follow the shared `docs/agent-git-workflow.md` contract.
+Make a separate post-release branch from updated `main` for improvements to
 this workflow or its skill. Do not mix that follow-up work into the release PR.
 
 Establish publication scope from the user's existing instructions. Honor an

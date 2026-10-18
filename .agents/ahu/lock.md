@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: ac7a404dbbba1ccf1524776fee35903d5037e12f96a9540d0970ec5e814efd64
+  digest: 6492895256fd975bcc5dd0baa63d7fdd0da82f0e56410b5bd210b29facc7bccb
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -110,16 +110,16 @@ ahu:
     digest: 8aa075a3f3a2996007bbd14018d3a401267fe1119beeb7d49eb2373952eaa396
     executable: false
     path: .agents/skills/ahu-architecture/SKILL.md
-  - bytes: 12568
-    digest: 9fa8bff8ce2ebf1fb07bc8350c2d1ea77db626c14ab5516f0082bb0e9d13e23a
+  - bytes: 13470
+    digest: 951de65d8c2fa5082f0f2dd026cfd139c1033b7648ae2cba205a4f581f75f0ec
     executable: false
     path: .agents/skills/ahu-direct-agents/SKILL.md
   - bytes: 4833
     digest: 4e6604b08eb811d2f957e19251426d8f8d0a9af0c10406e69696c2990c1c4abc
     executable: false
     path: .agents/skills/ahu-harness-upgrade/SKILL.md
-  - bytes: 14572
-    digest: 02dfe29c4da94e5103b1f42e4f4eefd6c23e5d88bea872b98a226a1cd011e8fd
+  - bytes: 15029
+    digest: c41d7da74835e284e123282495da80b25e81b90aa3355cecf5b1ae88825f837b
     executable: false
     path: .agents/skills/ahu-release/SKILL.md
   - bytes: 6771
@@ -158,8 +158,8 @@ ahu:
     digest: 40205d3d13c2c9e314a5c9a6500c731acbf34b46f3b9d5ad0f2d023ee653fe06
     executable: false
     path: .mcp.json
-  - bytes: 4712
-    digest: a5c64efee054e8d85ca9636b4496ffbfb8351814bc8bb36235649140cf41dd40
+  - bytes: 6230
+    digest: 6e85a25ff3ea19c292ce828cab84de8793413cec5ccf7b2a48068d8251cd33b0
     executable: false
     path: AGENTS.md
   - bytes: 646
