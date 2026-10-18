@@ -604,7 +604,7 @@ impl TaskService for Session {
                 .first()
                 .ok_or_else(|| storage("missing replay state"))?
                 .revision;
-            if after < oldest - 1 {
+            if after < oldest.saturating_sub(1) {
                 return Err(Error::ReplayExpired { oldest });
             }
             Ok(Replay {

@@ -379,8 +379,17 @@ pub fn check_interactive_cli(
         Error::new("OpenCode interactive CLI compatibility could not be verified: the bounded `opencode mini --help` probe failed or timed out. Native diagnostics are withheld; check the resolved CLI before retrying.")
     })?;
     crate::harness::opencode::check_mini_interactive_help(&help, &mini_help, args)?;
+    // OpenCode 2 declares --auto on the root command, not on `mini`. Keep this
+    // approval control before the subcommand so the root parser consumes it.
+    let has_auto = if let Some(index) = args.iter().position(|arg| arg == "--auto") {
+        let auto = args.remove(index);
+        args.insert(0, auto);
+        true
+    } else {
+        false
+    };
     if !already_mini {
-        args.insert(0, "mini".to_string());
+        args.insert(usize::from(has_auto), "mini".to_string());
     }
     Ok(())
 }
@@ -396,7 +405,7 @@ pub fn check_interactive_command(
     let already_mini = command.args.first().is_some_and(|arg| arg == "mini");
     check_interactive_cli(executable, harness, &mut command.args, cwd)?;
     if !already_mini
-        && command.args.first().is_some_and(|arg| arg == "mini")
+        && command.args.iter().take(2).any(|arg| arg == "mini")
         && let Some(prompt_arg) = &mut command.prompt_arg
     {
         *prompt_arg += 1;

@@ -16,7 +16,11 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new(mode: &str) -> Self {
-        Self::with_timeout(mode, 500)
+        // Python startup can exceed 500 ms when the full integration suite is
+        // running in parallel. Keep the production timeout behavior covered by
+        // the explicit timeout tests below, while giving normal fixtures enough
+        // room to start reliably on loaded CI workers.
+        Self::with_timeout(mode, 2_000)
     }
     pub fn with_timeout(mode: &str, timeout_ms: u64) -> Self {
         let temp = tempfile::tempdir().unwrap();

@@ -15,3 +15,11 @@ FLAGS
   --model, -m string        Model to use in the format provider/model
   --agent string            Agent to use
   --prompt string           Prompt to use
+
+GLOBAL FLAGS
+  --help, -h                                                          Show help information
+  --version, -v                                                       Show version information
+  --wizard                                                            Start wizard mode for a command
+  --completions <bash|zsh|fish|sh>                                    Print shell completion script (choices: bash, zsh, fish, sh)
+  --log-level <all|trace|debug|info|warn|warning|error|fatal|none>    Sets the minimum log level
+  --print-logs                                                        Print logs to stderr

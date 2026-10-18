@@ -2264,7 +2264,7 @@ scenario=os.environ"#);
     );
 }
 
-/// OpenCode 2.x's batch profile is `opencode run --standalone --format json`; 1.x omits
+/// OpenCode 2.x uses `opencode run --standalone --format json`; 1.x omits
 /// `--standalone` because that CLI does not support it. Every part of
 /// it was read off the running CLI rather than inferred from the interactive
 /// adapter.

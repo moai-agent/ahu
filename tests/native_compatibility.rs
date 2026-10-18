@@ -99,6 +99,40 @@ fn opencode_v2_uses_mini_for_persistent_interactive_launches() {
     assert_eq!(command[1], "mini");
     assert!(command.iter().any(|arg| arg == "--model"), "{preview}");
     assert!(command.iter().any(|arg| arg == "--prompt"), "{preview}");
+
+    let auto_result = common::ahu()
+        .args([
+            "@auto",
+            "--prompt",
+            "inspect synthetic data",
+            "--allow-widened-approvals",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("AHU_CMUX_BIN", home.path().join("no-cmux"))
+        .output()
+        .unwrap();
+    assert!(
+        auto_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&auto_result.stderr)
+    );
+    let auto_preview: serde_json::Value = serde_json::from_slice(&auto_result.stdout).unwrap();
+    let auto_command = auto_preview["argv"].as_array().unwrap();
+    assert_eq!(auto_command[1], "--auto", "{auto_preview}");
+    assert_eq!(auto_command[2], "mini", "{auto_preview}");
+    assert!(
+        auto_command.iter().any(|arg| arg == "--model"),
+        "{auto_preview}"
+    );
+    assert!(
+        auto_command.iter().any(|arg| arg == "--prompt"),
+        "{auto_preview}"
+    );
     assert_eq!(
         common::git(repo.path(), &["worktree", "list", "--porcelain"])
             .lines()
@@ -147,9 +181,13 @@ fn opencode_interactive_help_is_checked_on_the_resolved_executable_each_time() {
         ahu::selection::check_interactive_cli(&exe, "opencode", &mut launch_args, &project)
             .unwrap();
         assert_eq!(
-            launch_args.first().is_some_and(|arg| arg == "mini"),
+            launch_args.iter().take(2).any(|arg| arg == "mini"),
             expected_mini
         );
+        if expected_mini {
+            assert_eq!(launch_args[0], "--auto");
+            assert_eq!(launch_args[1], "mini");
+        }
     }
     // Successful-looking output with a failed probe is never admission evidence.
     std::fs::write(

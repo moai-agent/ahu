@@ -27,7 +27,8 @@
 //! OpenCode 2.0.32 removed --model from the default interactive command.
 //! Its `run` command still accepts it, but exits after the message. The `mini`
 //! subcommand provides the persistent interactive interface with --model and
-//! --prompt; --auto is inherited from the top-level global flags. Interactive
+//! --prompt; --auto must stay before the subcommand because it is a root-command
+//! flag, not a `mini` flag. Interactive
 //! admission selects that subcommand only when the default command lacks a
 //! requested flag, then verifies the resolved binary's help before submission
 //! and again before execution.
@@ -118,7 +119,7 @@ pub(crate) fn check_mini_interactive_help(
     if args.iter().any(|arg| arg == "--auto") && !declares_flag(top_level_help, "--auto") {
         bail!(
             "OpenCode mini interactive CLI is incompatible: the top-level `opencode --help` \
-             does not advertise global --auto, which this launch requires. ahu will not drop \
+             does not advertise root-level --auto, which this launch requires. ahu will not drop \
              the configured approval control."
         );
     }
@@ -264,6 +265,8 @@ mod tests {
     fn mini_interactive_help_pins_model_prompt_and_global_auto() {
         let top = include_str!("../../tests/fixtures/opencode/2.0.32-help.txt");
         let mini = include_str!("../../tests/fixtures/opencode/2.0.32-mini-help.txt");
+        assert!(declares_flag(top, "--auto"));
+        assert!(!declares_flag(mini, "--auto"));
         let args: Vec<_> = [
             "--model",
             "ollama/glm-5.3:cloud",
