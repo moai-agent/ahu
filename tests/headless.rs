@@ -2264,7 +2264,7 @@ scenario=os.environ"#);
     );
 }
 
-/// OpenCode's batch profile is `opencode run --format json`, and every part of
+/// OpenCode's batch profile is `opencode run --standalone --format json`, and every part of
 /// it was read off the running CLI rather than inferred from the interactive
 /// adapter.
 ///
@@ -2275,7 +2275,7 @@ scenario=os.environ"#);
 /// continues a recorded session. `-i/--interactive` is what would make `run` a
 /// session, and this path never passes it.
 #[test]
-fn the_opencode_batch_profile_pins_the_model_and_ends_the_option_list() {
+fn the_opencode_batch_profile_uses_a_private_server_pins_the_model_and_ends_the_option_list() {
     // v2 help retains these batch options; this checks argv, not live inference.
     for version in ["1.18.30", "1.18.34", "1.19.0", "opencode v2.0.32"] {
         assert_opencode_batch_profile(version);
@@ -2321,6 +2321,7 @@ fn assert_opencode_batch_profile(version: &str) {
         prompting.args,
         [
             "run",
+            "--standalone",
             "--format",
             "json",
             "--model",

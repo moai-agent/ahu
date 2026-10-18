@@ -342,7 +342,18 @@ pub fn batch_command(
             "kiro-cli"
         }
         "opencode" => {
-            add(&["run", "--format", "json", "--model", request.model]);
+            // A private server avoids attaching the task to OpenCode's shared
+            // background service, whose post-wait event catch-up can omit the
+            // terminal step from the JSON stream. Ahu requires that explicit
+            // terminal evidence before accepting a headless result.
+            add(&[
+                "run",
+                "--standalone",
+                "--format",
+                "json",
+                "--model",
+                request.model,
+            ]);
             match request.permissions {
                 // As in the interactive adapter: OpenCode's permission actions
                 // are static configuration, its only permission flag widens,
