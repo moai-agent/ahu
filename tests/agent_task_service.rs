@@ -844,8 +844,17 @@ fn existing_record_attachment_preserves_legacy_state_and_never_restarts() {
         .track_existing(&discovered, &id, "fixture", owner(), true)
         .unwrap();
     assert_eq!(tracked.lifecycle, Lifecycle::OutcomeUnknown);
+    let core = f.reconnect();
+    let client = session(&core, &id);
+    assert_eq!(
+        client.effects(VERSION, &id).unwrap().start,
+        DeliveryState::Unknown
+    );
     let mut adapter = Adapter::default();
-    f.core.dispatch_start(&id, &mut adapter).unwrap();
+    assert_eq!(
+        core.dispatch_start(&id, &mut adapter),
+        Err(Error::OutcomeUnknown)
+    );
     assert_eq!(adapter.starts.load(Ordering::SeqCst), 0);
     assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
     assert_eq!(task::load_prompt(&dir).unwrap(), "keep prompt");
@@ -853,7 +862,11 @@ fn existing_record_attachment_preserves_legacy_state_and_never_restarts() {
     f.core
         .register_admitted(&record, "fixture", owner(), true)
         .unwrap();
-    f.core.dispatch_start(&id, &mut adapter).unwrap();
+    assert_eq!(
+        f.core.dispatch_start(&id, &mut adapter),
+        Err(Error::OutcomeUnknown)
+    );
+    assert_eq!(client.get(VERSION, &id).unwrap(), tracked);
     assert_eq!(adapter.starts.load(Ordering::SeqCst), 0);
 }
 

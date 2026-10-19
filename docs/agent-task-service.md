@@ -198,7 +198,11 @@ ancestry or altering the records and their digests.
 `track_existing` attaches records found by the existing repository task discovery
 and ownership checks. It never rewrites `task.json`, moves a legacy record,
 imports native history, or infers permission to start an existing task again.
-An existing `Starting` record becomes `OutcomeUnknown` for inspection. Further
+An existing `Starting` record becomes `OutcomeUnknown` with `Unknown` startup
+delivery: attachment supplies no startup acknowledgement. `dispatch_start`
+returns `OutcomeUnknown` without invoking the adapter, including after reconnect
+or identical re-registration. Existing V1 entries retain their recorded evidence;
+attachment does not migrate or reinterpret previously stored delivery states. Further
 observations must come through explicit core `reconcile` calls. Service receipts
 stay in primary-owned coordination when a worktree is removed; cleanup never
 erases the operation history.

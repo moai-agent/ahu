@@ -265,14 +265,15 @@ impl Controller {
             .find(|(_, r)| r.task_id == id)
             .ok_or(Error::NotFound)?;
         let lifecycle = observed_lifecycle(record.state);
-        self.register(
-            &record,
-            provider,
-            owner,
-            supports_input,
-            lifecycle,
-            Delivery::Confirmed,
-        )
+        // A legacy Starting record proves neither startup nor non-execution.
+        // Preserve that uncertainty in effects as well as lifecycle; attachment
+        // is not a provider acknowledgement or permission to invoke it again.
+        let start = if record.state == crate::task::TaskState::Starting {
+            Delivery::Unknown
+        } else {
+            Delivery::Confirmed
+        };
+        self.register(&record, provider, owner, supports_input, lifecycle, start)
     }
 
     fn register(
