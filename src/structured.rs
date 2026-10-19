@@ -24,12 +24,19 @@ pub struct Contract {
 
 impl<'de> Deserialize<'de> for Contract {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        fn present_schema<'de, D: serde::Deserializer<'de>>(
+            d: D,
+        ) -> std::result::Result<Option<Box<serde_json::value::RawValue>>, D::Error> {
+            // Only an omitted field means no contract. Preserve explicit null
+            // so schema checking rejects it instead of disabling validation.
+            Box::<serde_json::value::RawValue>::deserialize(d).map(Some)
+        }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Fields {
-            #[serde(default)]
+            #[serde(default, deserialize_with = "present_schema")]
             input: Option<Box<serde_json::value::RawValue>>,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "present_schema")]
             output: Option<Box<serde_json::value::RawValue>>,
         }
         let fields = Fields::deserialize(d)?;
@@ -769,6 +776,29 @@ mod tests {
         let nested = format!("{}0{}", "[".repeat(8192), "]".repeat(8192));
         let contract = format!("{{\"output\":{{\"const\":{nested}}}}}");
         assert!(serde_json::from_str::<Contract>(&contract).is_err());
+    }
+
+    #[test]
+    fn structured_frozen_contract_rejects_null_schemas_without_disabling_validation() {
+        // Missing schemas preserve prompt-only records; a present null is an
+        // invalid schema, just as it is in manifest frontmatter.
+        for raw in [
+            r#"{"input":null}"#,
+            r#"{"output":null}"#,
+            r#"{"input":true,"output":null}"#,
+            r#"{"input":null,"output":false}"#,
+        ] {
+            assert!(serde_json::from_str::<Contract>(raw).is_err(), "{raw}");
+        }
+        let legacy: Contract = serde_json::from_str("{}").unwrap();
+        assert!(legacy.is_empty());
+        let frozen: Contract = serde_json::from_str(r#"{"input":true,"output":false}"#).unwrap();
+        frozen.validate_input(Some("null")).unwrap();
+        assert_eq!(frozen.output, Some(json!(false)));
+        assert_eq!(
+            serde_json::from_str::<Contract>(&serde_json::to_string(&frozen).unwrap()).unwrap(),
+            frozen
+        );
     }
 
     #[test]
