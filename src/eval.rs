@@ -3339,10 +3339,13 @@ fn launch_eval_agent_inner(
     write_private_file(&output_dir.join("agent-stderr.log"), &stderr)?;
     let result: serde_json::Value = serde_json::from_slice(&stdout).map_err(|_| {
         let _ = write_private_file(&output_dir.join("agent-stdout.log"), &stdout);
+        // The external artifact root is printed once in the run summary. Name
+        // the stage rather than interpolating an absolute host path here: this
+        // message is also the record's failure reason, and records live in the
+        // repository.
         Error::new(format!(
-            "eval agent {agent} returned no valid JSON result (exit {}); bounded stderr and stdout were saved under the external run artifacts at {}",
-            status.code().unwrap_or(128),
-            display_path(output_dir)
+            "eval agent {agent} returned no valid JSON result (exit {}); its bounded {stage} stderr and stdout were saved under this run's external artifacts",
+            status.code().unwrap_or(128)
         ))
     })?;
     // Kept before the success check: the caller records what this launch
