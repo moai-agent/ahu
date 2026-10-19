@@ -30,6 +30,10 @@ omits it. `AHU_INTERACTIVE_PLUGIN=cmux` explicitly selects it;
 Inventory never executes package code or activates it. Activation pings cmux;
 task launch then checks capabilities. No other backend is selected.
 
+Window-scoped group queries preserve their scope on failure. A failed query,
+including a build that rejects the window filter, is reported as an error;
+ahu does not retry against the current window to infer task ownership or absence.
+
 The included `ahu-plugin.md` uses OKF 0.2 YAML frontmatter with `type: ahu:plugin`
 and exposes this source package to local metadata
 discovery under the distinct ID `cmux-local`. From the physical workspace root:

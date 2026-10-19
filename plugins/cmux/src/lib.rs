@@ -145,15 +145,9 @@ impl Cmux {
             Some(window) => serde_json::json!({ "window_id": window }),
             None => serde_json::json!({}),
         };
-        let value = match self.rpc("workspace.group.list", params) {
-            Ok(value) => value,
-            // Older builds may not accept a window filter; fall back rather than
-            // failing the launch.
-            Err(_) if window_id.is_some() => {
-                self.rpc("workspace.group.list", serde_json::json!({}))?
-            }
-            Err(e) => return Err(e),
-        };
+        // An unscoped retry can query a different window and turn unavailable
+        // ownership evidence into apparent absence or permission to mutate.
+        let value = self.rpc("workspace.group.list", params)?;
         let items = value
             .get("groups")
             .and_then(|g| g.as_array())
@@ -713,20 +707,28 @@ mod presentation_tests {
 
     #[cfg(unix)]
     #[test]
-    fn group_listing_falls_back_from_window_filter_and_validates_rpc_json() {
+    fn group_listing_preserves_scope_and_validates_rpc_json() {
         let root = tempfile::tempdir().unwrap();
-        let marker = root.path().join("first-call");
-        let script = format!(
-            "if [ \\\"$2\\\" = workspace.group.list ] && [ ! -f {} ]; then touch {}; echo unsupported >&2; exit 1; fi\nprintf '%s\\n' '{{\"groups\":[{{\"id\":\"g\",\"anchor_workspace_id\":\"a\"}}]}}'",
-            shell_single_quote(&marker.to_string_lossy()),
-            shell_single_quote(&marker.to_string_lossy())
+        let client = fake_cmux(
+            root.path(),
+            r#"test "$1" = rpc && test "$2" = workspace.group.list || exit 9
+case "$3" in
+  '{"window_id":"window"}') printf '%s\n' '{"groups":[{"id":"g","anchor_workspace_id":"a"}]}' ;;
+  '{}') printf '%s\n' '{"groups":[]}' ;;
+  *) exit 8 ;;
+esac"#,
         );
-        let client = fake_cmux(root.path(), &script);
         assert_eq!(
             client.find_group("g", Some("window")).unwrap().unwrap().id,
             "g"
         );
-        assert!(client.find_group("missing", None).unwrap().is_none());
+        assert!(
+            client
+                .find_group("missing", Some("window"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(client.list_groups(None).unwrap().is_empty());
 
         let malformed = fake_cmux(root.path(), "echo not-json");
         assert!(
@@ -744,6 +746,35 @@ mod presentation_tests {
                 .to_string()
                 .contains("no `groups` array")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_group_query_errors_never_fall_back_to_the_current_window() {
+        for response in ["echo scoped-query-failed >&2; exit 7", "echo not-json"] {
+            let root = tempfile::tempdir().unwrap();
+            let fallback = root.path().join("unscoped-query");
+            let client = fake_cmux(
+                root.path(),
+                &format!(
+                    r#"test "$1" = rpc && test "$2" = workspace.group.list || exit 9
+if [ "$3" = '{{"window_id":"recorded-window"}}' ]; then
+  {response}
+else
+  touch {fallback}
+  printf '%s\n' '{{"groups":[]}}'
+fi"#,
+                    fallback = shell_single_quote(&fallback.to_string_lossy()),
+                ),
+            );
+            let host: &dyn Host = &client;
+            let result = host.find_group("recorded-group", Some("recorded-window"));
+            assert!(
+                result.is_err(),
+                "scoped query failure became absence: {result:?}"
+            );
+            assert!(!fallback.exists());
+        }
     }
 
     #[cfg(unix)]
