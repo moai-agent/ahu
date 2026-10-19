@@ -96,6 +96,26 @@ struct Fact {
     coverage_source: Value,
 }
 
+/// Read derived facts through the same storage boundary as bounded eval records.
+pub fn verify_facts_file(
+    repo: &crate::git::Repo,
+    report: &Report,
+    path: &std::path::Path,
+) -> Result<Vec<String>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = super::storage::results_path(repo, path)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    crate::storage::validate_owned_metadata(&file.metadata()?, false)?;
+    let mut text = String::new();
+    file.take(64 * 1024 + 1).read_to_string(&mut text)?;
+    verify_facts(report, &text)
+}
+
 /// Verify a bounded selection of facts against freshly computed evidence.
 /// The returned prose is generated locally. Arbitrary narrative is never
 /// accepted as verified, even when trajectory and model evidence are present.

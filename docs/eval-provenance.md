@@ -35,6 +35,10 @@ Each fact carries the table's `group_fingerprint` and `input_fingerprint`, the
 and `coverage_source`. Keep this bounded derived file in ignored, untracked
 primary `.ahu/evals/` or external storage. `eval verify` defaults its records input
 to primary `.ahu/evals/runs.jsonl`; `--records` explicitly overrides that path.
+The facts file follows the same storage checks as records: tracked or unignored
+repository paths, leaf symlinks, redirected repository directories, hard links
+and special files are refused. Verification reads both inputs without creating
+or changing local storage.
 
 ```sh
 ahu eval verify --records /external/runs.jsonl --facts /external/facts.json

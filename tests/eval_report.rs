@@ -160,6 +160,85 @@ fn verify_cli_binds_facts_to_current_records_and_refuses_forged_values() {
     assert!(cli::parse(["eval", "verify", "--unknown", "x"]).is_err());
 }
 
+#[test]
+fn verify_facts_obey_the_results_storage_boundary() {
+    use std::os::unix::fs::symlink;
+
+    let repo = TestRepo::new();
+    let outside = TempDir::new().unwrap();
+    let records = records_outside(outside.path(), &[]);
+    let report = ahu::eval::report(&ahu::git::discover(repo.path()).unwrap(), &records).unwrap();
+    let evidence = ahu::eval::comparison::evidence(&report);
+    let claims = serde_json::json!({
+        "schema_version": 1,
+        "comparison_fingerprint": evidence["comparison_fingerprint"],
+        "records_fingerprint": evidence["records_fingerprint"],
+        "facts": []
+    })
+    .to_string();
+    let verify = |facts: &Path| {
+        common::ahu()
+            .current_dir(repo.path())
+            .args(["eval", "verify", "--records"])
+            .arg(&records)
+            .arg("--facts")
+            .arg(facts)
+            .output()
+            .unwrap()
+    };
+    let external = outside.path().join("facts.json");
+    std::fs::write(&external, &claims).unwrap();
+    assert!(verify(&external).status.success());
+
+    // Facts are bounded derived results, with the same local exception as records.
+    repo.write(".gitignore", "/.ahu/evals/\n");
+    let local = repo.write(".ahu/evals/facts.json", &claims);
+    assert!(verify(&local).status.success());
+    let unignored = repo.write("facts.json", &claims);
+    let linked = outside.path().join("linked.json");
+    symlink(&external, &linked).unwrap();
+    let hardlinked = outside.path().join("hardlinked.json");
+    std::fs::hard_link(&external, &hardlinked).unwrap();
+    common::git(repo.path(), &["add", "-f", "--", ".ahu/evals/facts.json"]);
+    for path in [&local, &unignored, &linked, &hardlinked] {
+        let output = verify(path);
+        assert!(
+            !output.status.success(),
+            "unsafe facts path accepted: {}",
+            path.display()
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), claims);
+    }
+
+    let fifo = outside.path().join("facts.fifo");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: name is a valid NUL-terminated pathname in the temporary directory.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let mut child = common::ahu()
+        .current_dir(repo.path())
+        .args(["eval", "verify", "--records"])
+        .arg(&records)
+        .arg("--facts")
+        .arg(&fifo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(!status.success(), "FIFO facts must be refused");
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("verification blocked waiting for a FIFO writer");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Run `ahu eval report` from `repo` with a clean, harness-free environment.
 fn run(repo: &TestRepo, args: &[&str]) -> std::process::Output {
     run_at(repo, args, Some("80"), true)

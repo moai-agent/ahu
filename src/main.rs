@@ -225,15 +225,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         }
         // Discover before resolving defaults and validating the eval storage boundary.
         Command::EvalVerify { records, facts } => {
-            use std::io::Read;
             let repo = ahu::git::discover(&std::env::current_dir()?)?;
             let records = ahu::eval::storage::resolve_records(&repo, records.as_deref())?;
             let report = ahu::eval::report(&repo, &records)?;
-            let mut text = String::new();
-            std::fs::File::open(facts)?
-                .take(64 * 1024 + 1)
-                .read_to_string(&mut text)?;
-            let verified = ahu::eval::comparison::verify_facts(&report, &text)?;
+            let verified = ahu::eval::comparison::verify_facts_file(&repo, &report, &facts)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(

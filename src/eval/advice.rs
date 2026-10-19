@@ -1,4 +1,4 @@
-//! Read-only advice over an explicit external record file and fixed case pool.
+//! Read-only advice over an explicit bounded result file and fixed case pool.
 //! Evidence is locally editable, not identity attestation or provider billing.
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;

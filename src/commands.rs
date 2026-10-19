@@ -2342,8 +2342,8 @@ pub fn knowledge_lint(console: &mut Console<'_>, repo: &Repo, json: bool) -> Res
 
 /// `ahu eval report --records <path>` — compare local evaluation runs.
 ///
-/// Read-only, and only outside the checkout: the records are run evidence, and
-/// `evals/README.md` keeps that in a user-owned directory. Like every other
+/// Read-only bounded results from external storage or the primary checkout's
+/// ignored, untracked `.ahu/evals/` directory. Like every other
 /// `--output json` command, the machine contract owns stdout and the readable
 /// report goes to stderr when JSON was asked for.
 pub fn eval_report(
