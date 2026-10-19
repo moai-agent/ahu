@@ -197,6 +197,63 @@ pub fn is_dirty(repo: &Repo) -> Result<bool> {
     Ok(!out.is_empty())
 }
 
+/// What `git status` reports in a working tree, split so a caller can account
+/// for untracked paths separately from tracked content.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeChanges {
+    /// Untracked paths, named file by file. `--untracked-files=all` keeps Git
+    /// from collapsing a wholly untracked directory into its directory name,
+    /// so each file can be matched against what ahu knows it put there.
+    pub untracked: Vec<String>,
+    /// At least one untracked path was not valid UTF-8 and therefore cannot
+    /// safely be matched against the UTF-8 configuration snapshot.
+    pub non_utf8_untracked: bool,
+    /// Paths of everything that is not untracked: staged, modified, deleted,
+    /// renamed, copied or unmerged tracked content.
+    pub tracked: Vec<String>,
+}
+
+/// Read a working tree's status, file by file.
+///
+/// ahu runs Git with no user, global, or system configuration, so this sees
+/// untracked files that the user's own `git status` hides behind a global
+/// ignore rule. That is deliberate — the caller must account for each path
+/// rather than inherit whatever the ambient configuration chose to hide.
+pub fn changes(repo: &Repo) -> Result<WorktreeChanges> {
+    let out = run_ok_bytes(
+        &repo.root,
+        &["status", "--porcelain", "-z", "--untracked-files=all"],
+    )?;
+    let mut fields = out.split(|byte| *byte == 0).filter(|f| !f.is_empty());
+    let mut changes = WorktreeChanges::default();
+    while let Some(field) = fields.next() {
+        // `XY<space><path>`: two status letters, a separator, and a path of at
+        // least one byte.
+        if field.len() < 4 || field[2] != b' ' {
+            bail!(
+                "cannot read `git status` output for {}",
+                repo.root.display()
+            );
+        }
+        let (code, path) = field.split_at(3);
+        // A rename or copy carries its source path in a field of its own.
+        if code[..2].iter().any(|c| *c == b'R' || *c == b'C') && fields.next().is_none() {
+            bail!("`git status` for {} ended mid-record", repo.root.display());
+        }
+        if code.starts_with(b"??") {
+            match std::str::from_utf8(path) {
+                Ok(path) => changes.untracked.push(path.to_string()),
+                Err(_) => changes.non_utf8_untracked = true,
+            }
+        } else {
+            changes
+                .tracked
+                .push(String::from_utf8_lossy(path).into_owned());
+        }
+    }
+    Ok(changes)
+}
+
 /// Create a worktree at `path` on a new branch `branch`, based on `base`.
 pub fn add_worktree(repo: &Repo, path: &Path, branch: &str, base: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -405,6 +462,54 @@ mod tests {
         git(root.path(), &["add", "README.md"]);
         git(root.path(), &["commit", "-q", "-m", "base"]);
         root
+    }
+
+    /// `changes` names every untracked file rather than a directory, keeps
+    /// tracked and untracked apart, and survives a rename's second field.
+    #[test]
+    fn changes_names_untracked_files_separately_from_tracked_content() {
+        let root = committed_repo();
+        let repo = discover(root.path()).unwrap();
+        assert_eq!(changes(&repo).unwrap(), WorktreeChanges::default());
+
+        // A wholly untracked directory: plain `--porcelain` would collapse
+        // this into `?? config/`, which names no file to account for.
+        std::fs::create_dir(root.path().join("config")).unwrap();
+        std::fs::write(root.path().join("config/one.json"), "1\n").unwrap();
+        std::fs::write(root.path().join("config/two.json"), "2\n").unwrap();
+        git(root.path(), &["mv", "README.md", "GUIDE.md"]);
+
+        let reported = changes(&repo).unwrap();
+        assert_eq!(
+            reported.untracked,
+            vec!["config/one.json".to_string(), "config/two.json".to_string()]
+        );
+        assert_eq!(reported.tracked, vec!["GUIDE.md".to_string()]);
+
+        std::fs::write(root.path().join("GUIDE.md"), "edited\n").unwrap();
+        git(root.path(), &["add", "config/one.json"]);
+        let reported = changes(&repo).unwrap();
+        assert_eq!(reported.untracked, vec!["config/two.json".to_string()]);
+        assert_eq!(
+            reported.tracked,
+            vec!["GUIDE.md".to_string(), "config/one.json".to_string()]
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn changes_refuses_to_match_non_utf8_untracked_paths_lossily() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = committed_repo();
+        let repo = discover(root.path()).unwrap();
+        let invalid = std::ffi::OsStr::from_bytes(b"bad-\xff-name");
+        std::fs::write(root.path().join(invalid), "untracked\n").unwrap();
+        // A lossy conversion of the invalid name could collide with a real
+        // filename containing U+FFFD, so the parser reports it separately.
+        let reported = changes(&repo).unwrap();
+        assert!(reported.non_utf8_untracked);
+        assert!(reported.untracked.is_empty());
     }
 
     #[test]
