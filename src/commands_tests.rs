@@ -693,7 +693,7 @@ fn agents_distinguish_drift_from_unreadable_history() {
 }
 
 #[test]
-fn removal_reports_partial_cleanup_when_a_worktree_is_locked() {
+fn removal_preserves_task_state_when_a_worktree_is_locked() {
     let (_root, repo) = repository();
     let (dir, mut record) = saved(&repo, "locked01");
     record.worktree = repo.root.join(".worktrees/locked01");
@@ -716,24 +716,27 @@ fn removal_reports_partial_cleanup_when_a_worktree_is_locked() {
 
     let (result, output) = scripted("", |c| remove_cmd(c, &repo, &record.task_id));
     let error = result.unwrap_err().to_string();
-    assert!(error.contains("was only partly removed"), "{error}");
-    assert!(error.contains("Completed:\n  record    removed"), "{error}");
-    assert!(error.contains("Not removed:\n  worktree"), "{error}");
-    assert!(error.contains("branch"));
-    assert!(error.contains("Delete the branch yourself"));
+    assert!(error.contains("could not remove task worktree"), "{error}");
+    assert!(
+        error.contains("Task record and branch were preserved"),
+        "{error}"
+    );
     assert!(output.is_empty());
-    assert!(!dir.exists());
+    assert!(
+        dir.exists(),
+        "the record was removed after the worktree refusal"
+    );
     assert!(record.worktree.join(".git").exists());
     assert!(git::branch_exists(&repo, &record.branch).unwrap());
     git(
         &repo.root,
         &["worktree", "unlock", record.worktree.to_str().unwrap()],
     );
-    git(
-        &repo.root,
-        &["worktree", "remove", record.worktree.to_str().unwrap()],
-    );
-    git(&repo.root, &["branch", "-d", &record.branch]);
+    let (result, _) = scripted("", |c| remove_cmd(c, &repo, &record.task_id));
+    assert_eq!(result.unwrap(), 0);
+    assert!(!dir.exists());
+    assert!(!record.worktree.exists());
+    assert!(!git::branch_exists(&repo, &record.branch).unwrap());
 }
 
 #[test]

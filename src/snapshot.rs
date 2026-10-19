@@ -584,7 +584,22 @@ pub fn classify_untracked(
     let written: std::collections::BTreeSet<&str> =
         materialized.written.iter().map(String::as_str).collect();
     let mut split = UntrackedConfig::default();
-    for path in untracked {
+    // A copied configuration file can itself contain ignore rules. Git may
+    // hide a later copied file (or task-authored file) from status until the
+    // ignore file is removed. Inspect every written copy that still exists,
+    // in addition to paths Git reports, so cleanup cannot expose one copy only
+    // after it has started deleting another.
+    let mut candidates: std::collections::BTreeSet<String> = untracked.iter().cloned().collect();
+    for path in &materialized.written {
+        if crate::util::resolve_existing_within(worktree_root, path)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            candidates.insert(path.clone());
+        }
+    }
+    for path in &candidates {
         match recorded.get(path.as_str()) {
             Some(entry)
                 if written.contains(path.as_str()) && is_unchanged_copy(worktree_root, entry) =>
@@ -692,7 +707,11 @@ mod classification_tests {
             &report,
             &["notes.md".to_string()],
         );
-        assert!(split.unchanged_copies.is_empty());
+        assert_eq!(
+            split.unchanged_copies,
+            vec![".claude/settings.local.json"],
+            "known copies are included even when Git hides them"
+        );
         assert_eq!(split.changed, vec!["notes.md"]);
     }
 

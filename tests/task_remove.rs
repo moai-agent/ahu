@@ -781,3 +781,80 @@ fn remove_keeps_a_worktree_whose_copied_config_changed_or_holds_extra_files() {
     assert!(!worktree.exists(), "the clean worktree was kept");
     assert!(!record_dir.exists(), "the clean worktree's record was kept");
 }
+
+/// An inherited ignore file can hide another copied config file from Git's
+/// status output. The removal gate must still account for every copy recorded
+/// at launch before it starts deleting them.
+#[test]
+fn remove_accounts_for_copies_hidden_by_an_inherited_ignore_file() {
+    let repo = fixture();
+    repo.write(".claude/.gitignore", "settings.local.json\n");
+    repo.write(LOCAL_CONFIG, "{\"permissions\":{}}\n");
+    let id = "006aa50000000000c3";
+    let (record_dir, worktree) = prepare_task_with_copied_config(&repo, id);
+    let branch = branch_of(id);
+
+    let discovered = git::discover(&worktree).unwrap();
+    let changes = git::changes(&discovered).unwrap();
+    assert!(
+        !changes.untracked.iter().any(|path| path == LOCAL_CONFIG),
+        "fixture must hide the copied settings file from ordinary untracked status: {changes:?}"
+    );
+
+    let out = ahu_in(repo.path(), &["remove", id]);
+    let text = text_of(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(!worktree.exists(), "the worktree outlived removal");
+    assert!(!record_dir.exists(), "the record outlived removal");
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", &branch]),
+        "",
+        "the branch outlived removal"
+    );
+    assert_eq!(repo.read(LOCAL_CONFIG), "{\"permissions\":{}}\n");
+    assert_eq!(repo.read(".claude/.gitignore"), "settings.local.json\n");
+}
+
+/// If another ignored file prevents Git from removing the worktree after
+/// copied configuration is discarded, keep the task record and branch so the
+/// operator can inspect and retry the partial cleanup.
+#[test]
+fn remove_preserves_task_record_and_branch_when_git_refuses_worktree_cleanup() {
+    let repo = fixture();
+    repo.write(".claude/.gitignore", "settings.local.json\nnotes.md\n");
+    repo.write(LOCAL_CONFIG, "{\"permissions\":{}}\n");
+    let id = "006aa50000000000c4";
+    let (record_dir, worktree) = prepare_task_with_copied_config(&repo, id);
+    let branch = branch_of(id);
+    std::fs::write(worktree.join(".claude/notes.md"), "task work\n").unwrap();
+
+    let out = ahu_in(repo.path(), &["remove", id]);
+    let text = text_of(&out);
+    assert_eq!(out.status.code(), Some(5), "{text}");
+    assert!(
+        text.contains("Task record and branch were preserved"),
+        "{text}"
+    );
+    assert!(
+        worktree.is_dir(),
+        "the refused worktree removal deleted its checkout"
+    );
+    assert!(
+        record_dir.is_dir(),
+        "a failed cleanup deleted its task record"
+    );
+    assert!(worktree.join(".claude/notes.md").is_file());
+    assert!(
+        git::branch_exists(&git::discover(repo.path()).unwrap(), &branch).unwrap(),
+        "a failed cleanup deleted its branch"
+    );
+
+    // Once the task's ignored artifact is removed, the exposed status is
+    // reviewable and must be handled before cleanup can finish.
+    std::fs::remove_file(worktree.join(".claude/notes.md")).unwrap();
+    let out = ahu_in(repo.path(), &["remove", id]);
+    let text = text_of(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(!worktree.exists());
+    assert!(!record_dir.exists());
+}

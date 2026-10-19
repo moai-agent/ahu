@@ -2242,12 +2242,11 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
                 completed.push(("worktree", "removed".to_string()));
                 worktree_removed = true;
             }
-            Err(e) if _removal_owner.is_some() => {
+            Err(e) => {
                 bail!(
                     "could not remove task worktree: {e}\nTask record and branch were preserved; workspace {cmux_status}."
                 );
             }
-            Err(e) => not_removed.push(("worktree", format!("{e}"))),
         }
     } else {
         completed.push(("worktree", "already absent".to_string()));
