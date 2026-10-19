@@ -1389,6 +1389,37 @@ ahu refuses interactive `auto` launches without dropping the requested approval
 control or substituting one-shot `run`. The existing default interactive shape
 remains available with compatible 1.x command-line versions.
 
+#### OpenCode 2.0.32 interactive automatic approvals
+
+An offline review on 2026-10-19 did not establish a supported way to combine
+`mini`'s exact model and persistent session with automatic approval of requests
+that native policy has not denied. The refusal above remains intentional; this
+is version-specific evidence, not a claim about every future OpenCode 2 release.
+
+| Candidate | Evidence from the installed 2.0.32 CLI and bundled source |
+| --- | --- |
+| `mini --auto` or `--auto mini` | Both exit 1 with an unrecognized-option error. The command declaration includes `--model` and `--prompt`, but omits the approval options shared by the default TUI and `run`. The hidden aliases `--yolo` and `--dangerously-skip-permissions` also fail on `mini`. |
+| `OPENCODE_PERMISSION` | No reader or declaration was found in the installed bundle. The server's explicit environment-to-config mapping reads `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, and `OPENCODE_CONFIG_CONTENT`, but provides no permission override through this variable. Setting it is not a verified approval control on this version. |
+| `OPENCODE_CLI_CONFIG_CONTENT` with `session.permissions = "autoaccept"` | The bundled CLI guide documents merging inline JSON over global CLI settings. The full TUI implements this preference by replying to pending requests. Mini's inspected session transport instead displays pending permissions and its frontend sends replies from the permission interaction; no equivalent automatic approval behavior was found. A setting accepted by the CLI schema is not evidence that Mini applies it. |
+| Replacing native permission rules through inline server configuration | This supplies configuration, not a deny-preserving approval mode. No supported transformation was established that approves all otherwise-asked requests while preserving existing user, project, agent, and managed policy. A blanket allow overlay is not a substitute for native `--auto`. |
+
+The packaged changelog also describes per-project settings that automatically
+accept permissions. ahu does not change those persisted settings, replace
+existing environment configuration, select a different native agent, or install a permission plugin
+to work around this gap. `prompt` continues to inherit native policy;
+`accept-edits` remains unsupported. An operator choosing a different manifest
+permission mode must make that change explicitly.
+
+Evidence was limited to local help, option-parser failures in fresh temporary
+homes and XDG directories, and static inspection of the shipped bundle and
+packaged documentation. No native user configuration, credentials, project
+bindings, or approval settings were inspected or changed. No server, inference
+session, or network probe was used; deny preservation through a live Mini
+session remains unverified. Existing synthetic admission tests cover the
+refusal without creating a task worktree. Revisit this mapping only with
+version-specific evidence for exact model selection, persistence, conversion
+of asks to approvals, and preservation of native denies and configuration.
+
 Explicit `--headless` tasks retain `opencode run --format json --model ...`
 with a positional message and `--auto` only for automatic approvals. The
 2.0.32 run help advertises those options, but help inspection alone does not
