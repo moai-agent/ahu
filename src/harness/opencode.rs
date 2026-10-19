@@ -27,11 +27,12 @@
 //! OpenCode 2.0.32 removed --model from the default interactive command.
 //! Its `run` command still accepts it, but exits after the message. The `mini`
 //! subcommand provides the persistent interactive interface with --model and
-//! --prompt; --auto must stay before the subcommand because it is a root-command
-//! flag, not a `mini` flag. Interactive
-//! admission selects that subcommand only when the default command lacks a
-//! requested flag, then verifies the resolved binary's help before submission
-//! and again before execution.
+//! --prompt, but rejects --auto even when it appears before the subcommand.
+//! Ahu therefore supports prompt-permission interactive sessions on v2 and
+//! refuses auto-permission sessions before creating a task. Interactive
+//! admission selects `mini` only when the default command lacks a requested
+//! flag, then verifies the resolved binary's help before submission and again
+//! before execution.
 //!
 //! What it cannot enforce:
 //!
@@ -45,9 +46,9 @@
 //! instead, identically to every other harness — see `crate::orchestration`.
 //!
 //! **An approval boundary.** OpenCode's permission actions are `allow`, `ask`
-//! and `deny`, set statically in configuration or agent frontmatter, and the
-//! built-in agents resolve to `*: allow` with only a few narrower entries. The
-//! one permission-affecting CLI flag is `--auto`, which widens. There is no
+//! and `deny`, set statically in configuration or agent frontmatter. The
+//! interactive permission flag `--auto` is accepted by supported 1.x CLIs but
+//! not by v2's persistent `mini` command. There is no
 //! accept-edits flag, so `permissions = "accept-edits"` is refused rather than
 //! approximated: `--auto` would be a widening and silence would be a
 //! misdescription.
@@ -103,7 +104,7 @@ pub(crate) fn check_interactive_help(help: &str, args: &[String]) -> Result<()> 
 }
 
 pub(crate) fn check_mini_interactive_help(
-    top_level_help: &str,
+    _top_level_help: &str,
     mini_help: &str,
     args: &[String],
 ) -> Result<()> {
@@ -116,11 +117,13 @@ pub(crate) fn check_mini_interactive_help(
             );
         }
     }
-    if args.iter().any(|arg| arg == "--auto") && !declares_flag(top_level_help, "--auto") {
+    if args.iter().any(|arg| arg == "--auto") {
         bail!(
-            "OpenCode mini interactive CLI is incompatible: the top-level `opencode --help` \
-             does not advertise root-level --auto, which this launch requires. ahu will not drop \
-             the configured approval control."
+            "OpenCode 2's persistent `mini` interface does not accept `--auto` (OpenCode rejects \
+             it even when placed before `mini`). ahu will not silently weaken the requested \
+             automatic-approval setting. Use `permissions = \"prompt\"` for an interactive \
+             OpenCode 2 session, or use a compatible OpenCode 1.x CLI; headless OpenCode uses its \
+             separately checked `run` interface."
         );
     }
     Ok(())
@@ -225,9 +228,9 @@ fn permission_control(permissions: Permissions) -> String {
              rather than widen it to --auto or pass nothing; {tail}"
         ),
         Permissions::Auto => format!(
-            "ahu passes --auto because this agent's manifest declares permissions = auto, \
-             which auto-approves every permission OpenCode does not explicitly deny; it \
-             passes no --pure; {tail}"
+            "ahu passes --auto for supported OpenCode 1.x interactive sessions; OpenCode 2's \
+             persistent mini interface rejects --auto, so ahu refuses this interactive launch. \
+             Headless OpenCode is checked separately; {tail}"
         ),
     }
 }
@@ -262,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn mini_interactive_help_pins_model_prompt_and_global_auto() {
+    fn mini_interactive_help_pins_model_and_prompt_but_rejects_auto() {
         let top = include_str!("../../tests/fixtures/opencode/2.0.32-help.txt");
         let mini = include_str!("../../tests/fixtures/opencode/2.0.32-mini-help.txt");
         assert!(declares_flag(top, "--auto"));
@@ -277,7 +280,8 @@ mod tests {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        check_mini_interactive_help(top, mini, &args).unwrap();
+        let error = check_mini_interactive_help(top, mini, &args).unwrap_err();
+        assert!(error.to_string().contains("does not accept `--auto`"));
         assert!(check_mini_interactive_help(top, "Usage: opencode mini", &args).is_err());
         assert!(check_mini_interactive_help("", mini, &args).is_err());
     }

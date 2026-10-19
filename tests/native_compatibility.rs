@@ -116,22 +116,11 @@ fn opencode_v2_uses_mini_for_persistent_interactive_launches() {
         .env("AHU_CMUX_BIN", home.path().join("no-cmux"))
         .output()
         .unwrap();
+    let auto_error = String::from_utf8_lossy(&auto_result.stderr);
+    assert!(!auto_result.status.success());
     assert!(
-        auto_result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&auto_result.stderr)
-    );
-    let auto_preview: serde_json::Value = serde_json::from_slice(&auto_result.stdout).unwrap();
-    let auto_command = auto_preview["argv"].as_array().unwrap();
-    assert_eq!(auto_command[1], "--auto", "{auto_preview}");
-    assert_eq!(auto_command[2], "mini", "{auto_preview}");
-    assert!(
-        auto_command.iter().any(|arg| arg == "--model"),
-        "{auto_preview}"
-    );
-    assert!(
-        auto_command.iter().any(|arg| arg == "--prompt"),
-        "{auto_preview}"
+        auto_error.contains("OpenCode 2's persistent `mini` interface does not accept `--auto`"),
+        "{auto_error}"
     );
     assert_eq!(
         common::git(repo.path(), &["worktree", "list", "--porcelain"])
@@ -148,16 +137,10 @@ fn opencode_interactive_help_is_checked_on_the_resolved_executable_each_time() {
     let project = root.path().join("project");
     std::fs::create_dir(&project).unwrap();
     let exe = root.path().join("opencode");
-    let args: Vec<String> = [
-        "--model",
-        "ollama/glm-5.3:cloud",
-        "--auto",
-        "--prompt",
-        "task",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
+    let args: Vec<String> = ["--model", "ollama/glm-5.3:cloud", "--prompt", "task"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     for (help, mini_help, expected_mini) in [
         (include_str!("fixtures/opencode/1.x-help.txt"), "", false),
         (
@@ -185,14 +168,13 @@ fn opencode_interactive_help_is_checked_on_the_resolved_executable_each_time() {
             expected_mini
         );
         if expected_mini {
-            assert_eq!(launch_args[0], "--auto");
-            assert_eq!(launch_args[1], "mini");
+            assert_eq!(launch_args[0], "mini");
         }
     }
     // Successful-looking output with a failed probe is never admission evidence.
     std::fs::write(
         &exe,
-        "#!/bin/sh\nprintf '%s\\n' '--model' '--auto' '--prompt'\nexit 1\n",
+        "#!/bin/sh\nprintf '%s\\n' '--model' '--prompt'\nexit 1\n",
     )
     .unwrap();
     assert!(
@@ -201,4 +183,48 @@ fn opencode_interactive_help_is_checked_on_the_resolved_executable_each_time() {
             .to_string()
             .contains("probe failed or timed out")
     );
+}
+
+#[test]
+fn opencode_v2_launch_normalization_is_idempotent() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let exe = root.path().join("opencode");
+    std::fs::write(
+        &exe,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' {}; exit 0; fi\nif [ \"$1\" = mini ] && [ \"$2\" = --help ]; then printf '%s\\n' {}; exit 0; fi\nexit 91\n",
+            common::shell_quoted(include_str!("fixtures/opencode/2.0.32-help.txt")),
+            common::shell_quoted(include_str!("fixtures/opencode/2.0.32-mini-help.txt")),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = ahu::harness::LaunchCommand {
+        program: "opencode".into(),
+        args: ["--model", "ollama/glm-5.3:cloud", "--prompt", "task"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        prompt_arg: Some(3),
+    };
+
+    for _ in 0..2 {
+        ahu::selection::check_interactive_command(&exe, "opencode", &mut command, &project)
+            .unwrap();
+    }
+
+    assert_eq!(
+        command.args,
+        [
+            "mini",
+            "--model",
+            "ollama/glm-5.3:cloud",
+            "--prompt",
+            "task",
+        ]
+    );
+    assert_eq!(command.prompt_arg, Some(4));
+    assert_eq!(command.redacted().args[4], ahu::harness::REDACTED_PROMPT);
 }

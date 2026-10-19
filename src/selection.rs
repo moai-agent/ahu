@@ -362,7 +362,7 @@ pub fn check_interactive_cli(
     let help = help.ok_or_else(|| {
         Error::new("OpenCode interactive CLI compatibility could not be verified: the bounded `opencode --help` probe failed or timed out. Native diagnostics are withheld; check the resolved CLI before retrying. ahu will not substitute one-shot `opencode run`.")
     })?;
-    let already_mini = args.first().is_some_and(|arg| arg == "mini");
+    let already_mini = opencode_mini_index(args).is_some();
     if !already_mini && crate::harness::opencode::check_interactive_help(&help, args).is_ok() {
         return Ok(());
     }
@@ -379,19 +379,20 @@ pub fn check_interactive_cli(
         Error::new("OpenCode interactive CLI compatibility could not be verified: the bounded `opencode mini --help` probe failed or timed out. Native diagnostics are withheld; check the resolved CLI before retrying.")
     })?;
     crate::harness::opencode::check_mini_interactive_help(&help, &mini_help, args)?;
-    // OpenCode 2 declares --auto on the root command, not on `mini`. Keep this
-    // approval control before the subcommand so the root parser consumes it.
-    let has_auto = if let Some(index) = args.iter().position(|arg| arg == "--auto") {
-        let auto = args.remove(index);
-        args.insert(0, auto);
-        true
-    } else {
-        false
-    };
     if !already_mini {
-        args.insert(usize::from(has_auto), "mini".to_string());
+        args.insert(0, "mini".to_string());
     }
     Ok(())
+}
+
+/// Return the subcommand position when an OpenCode 2 interactive command has
+/// already been normalized.
+fn opencode_mini_index(args: &[String]) -> Option<usize> {
+    if args.first().is_some_and(|arg| arg == "mini") {
+        Some(0)
+    } else {
+        None
+    }
 }
 
 /// Validate and adapt an interactive command while keeping its redacted prompt
@@ -402,10 +403,10 @@ pub fn check_interactive_command(
     command: &mut crate::harness::LaunchCommand,
     cwd: &Path,
 ) -> Result<()> {
-    let already_mini = command.args.first().is_some_and(|arg| arg == "mini");
+    let already_mini = opencode_mini_index(&command.args).is_some();
     check_interactive_cli(executable, harness, &mut command.args, cwd)?;
     if !already_mini
-        && command.args.iter().take(2).any(|arg| arg == "mini")
+        && opencode_mini_index(&command.args).is_some()
         && let Some(prompt_arg) = &mut command.prompt_arg
     {
         *prompt_arg += 1;
