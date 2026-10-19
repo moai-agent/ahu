@@ -1940,12 +1940,18 @@ fn recorded_failure_reasons_drop_host_paths_and_stay_bounded() {
     let reason = bounded_failure_reason(
         "eval agent @triage returned no valid JSON result (exit 2); bounded stderr and stdout were saved under the external run artifacts at /Users/fixture/.local/state/ahu/eval-artifacts/0123456789abcdef/ahu-eval-case-1/run-000/candidate",
     );
-    assert!(!reason.contains('/'), "{reason}");
-    assert!(!reason.contains("fixture"), "{reason}");
-    assert!(reason.ends_with("artifacts at <path>"), "{reason}");
-    assert!(
-        reason.contains("returned no valid JSON result (exit 2)"),
-        "{reason}"
+    assert_eq!(reason, "Evaluation failed; a host path was redacted.");
+
+    // Spaces and punctuation in an absolute path must not leave suffix fragments.
+    assert_eq!(
+        bounded_failure_reason(
+            "could not write (/Users/Fixture User/Private Runs/current/result.json); retry later"
+        ),
+        "Evaluation failed; a host path was redacted."
+    );
+    assert_eq!(
+        bounded_failure_reason(r"could not write C:\\Users\\Fixture User\\Runs\\result.json"),
+        "Evaluation failed; a host path was redacted."
     );
 
     // Diagnostics that name no path keep their wording, so the row stays useful.

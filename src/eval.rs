@@ -3397,29 +3397,23 @@ fn safe_artifact(worktree: &Path, name: &str) -> Result<PathBuf> {
     Ok(actual)
 }
 
-/// A bounded, path-free restatement of a launch diagnostic for an eval record.
+/// A bounded, path-free projection of a launch diagnostic for an eval record.
 ///
-/// Records default to the primary checkout's ignored `.ahu/evals/`, and every
-/// other field in them is a typed projection. A launch diagnostic is the one
-/// free-text value that reaches a record, and it names the external artifact
-/// directory, so storing it raw writes the operator's home path and the layout
-/// of the out-of-repository artifact store into a file inside the repository.
-/// The console output and the saved artifacts keep the full message; the record
-/// keeps a bounded reason with absolute paths replaced.
+/// Records default to the primary checkout's ignored `.ahu/evals/`. A launch
+/// diagnostic is the one free-text value that reaches a record, and it can name
+/// the operator's external artifact directory. Paths may contain spaces or
+/// punctuation, so token-level redaction can leave part of one behind. When a
+/// diagnostic contains a path separator, keep a fixed summary instead. The
+/// console output and saved artifacts retain the full message outside the
+/// record; the record remains bounded and path-free.
 fn bounded_failure_reason(message: &str) -> String {
     const MAX_REASON_BYTES: usize = 256;
-    let mut reason = String::with_capacity(message.len().min(MAX_REASON_BYTES));
-    for (index, token) in message.split(' ').enumerate() {
-        if index > 0 {
-            reason.push(' ');
-        }
-        if token.starts_with('/') {
-            reason.push_str("<path>");
-        } else {
-            reason.push_str(token);
-        }
-    }
-    let mut reason = display_safe(&reason);
+    let projected = if message.contains(['/', '\\']) {
+        "Evaluation failed; a host path was redacted."
+    } else {
+        message
+    };
+    let mut reason = display_safe(projected);
     if reason.len() > MAX_REASON_BYTES {
         let mut end = MAX_REASON_BYTES;
         while !reason.is_char_boundary(end) {
