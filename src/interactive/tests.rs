@@ -338,6 +338,52 @@ fn host_boundary_distinguishes_missing_workspace_from_failed_inventory() {
     assert!(host.mutations.borrow().is_empty());
 }
 
+#[cfg(all(unix, feature = "cmux-plugin"))]
+#[test]
+fn cmux_duplicate_workspace_inventory_blocks_every_task_mutation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (temp, repo, loaded, plan) = fixture();
+    let mut record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+    record.cmux_workspace_id = Some("task-workspace".into());
+    record.cmux_group_id = Some("group".into());
+    record.cmux_window_id = Some("window".into());
+    let executable = temp.path().join("fake-cmux");
+    let mutation = temp.path().join("mutated");
+    std::fs::write(
+        &executable,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = ping ]; then exit 0; fi
+case "$2" in
+  window.list) printf '%s\n' '{{"windows":[{{"id":"window"}},{{"id":"other-window"}}]}}' ;;
+  workspace.list) printf '%s\n' '{{"workspaces":[{{"id":"task-workspace"}}]}}' ;;
+  workspace.group.list) printf '%s\n' '{{"groups":[{{"id":"group","anchor_workspace_id":"anchor","member_workspace_ids":["task-workspace"]}}]}}' ;;
+  system.identify) printf '%s\n' '{{"caller":{{"window_id":"window"}}}}' ;;
+  *) touch {mutation}; printf '%s\n' '{{}}' ;;
+esac
+"#,
+            mutation = crate::util::shell_single_quote(&mutation.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let host = ahu_cmux_plugin::Cmux::connect(executable).unwrap();
+    let manager = RepositoryManager::new(&host, &repo);
+    for result in [
+        manager.select_task_workspace(&record),
+        manager.close_task_workspace(&record).map(|_| ()),
+        manager.set_task_status(&record, "waiting"),
+        manager.expand_task_group(&record),
+    ] {
+        assert!(
+            result.is_err(),
+            "ambiguous inventory permitted mutation: {result:?}"
+        );
+    }
+    assert!(!mutation.exists());
+}
+
 #[test]
 fn host_boundary_keeps_creation_routing_and_preserves_inconsistent_workspace() {
     let (_temp, repo, _, plan) = fixture();
