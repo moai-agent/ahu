@@ -2081,6 +2081,22 @@ impl Events {
         self.terminal = true;
         self.failed |= failed;
     }
+
+    /// Called after stdout drain; process success cannot supply a missing result.
+    fn require_terminal_result(&mut self, harness: &str) {
+        if !self.terminal {
+            self.failed = true;
+            self.blockers.push("no terminal harness result".into());
+            if harness == "opencode" {
+                self.blockers.push(
+                    "OpenCode stdout has no final stop step; completed tool calls and a zero exit \
+                     do not establish completion. Review task changes before explicitly resuming \
+                     or retrying."
+                        .into(),
+                );
+            }
+        }
+    }
 }
 
 const STREAM_EVALUATION_LIMIT: u64 = 64 * 1024 * 1024;
@@ -2997,10 +3013,7 @@ fn run_attempt(
             .blockers
             .push("stderr contained unclassified diagnostics; effect on completion unknown".into());
     }
-    if !events.terminal {
-        events.failed = true;
-        events.blockers.push("no terminal harness result".into());
-    }
+    events.require_terminal_result(&record.identity.harness);
     if events.session.is_none() {
         events
             .blockers
@@ -4536,8 +4549,16 @@ mod write_tracking_tests {
         let mut large_tool = tool.clone();
         // Cross multiple pipe-reader chunks without approaching the line bound.
         large_tool["part"]["state"]["output"] = json!("x".repeat(32768));
+        let many_tools = (0..32)
+            .map(|i| {
+                let mut part = tool.clone();
+                part["part"]["id"] = json!(format!("call_synthetic_{i}"));
+                part
+            })
+            .collect();
         for (name, parts, terminal, failed) in [
             ("tool_only", vec![tool.clone()], false, false),
+            ("many_completed_tools", many_tools, false, false),
             (
                 "tool_call_boundary",
                 vec![tool.clone(), tool_calls.clone()],
@@ -4597,7 +4618,7 @@ mod write_tracking_tests {
             );
             assert_eq!(child.wait().unwrap().code(), Some(0), "{name}");
             rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
-            let events = shared.lock().unwrap();
+            let mut events = shared.lock().unwrap();
             assert_eq!(events.terminal, terminal, "{name}: {events:?}");
             assert_eq!(events.failed, failed, "{name}: {events:?}");
             assert_eq!(events.session.as_deref(), Some("ses_synthetic"), "{name}");
@@ -4611,6 +4632,26 @@ mod write_tracking_tests {
                         .count() as u64
                 ),
                 "{name}"
+            );
+            // Apply the same post-drain requirement as the supervisor, after
+            // observing a real zero exit from the synthetic stream producer.
+            events.require_terminal_result("opencode");
+            assert_eq!(events.failed, failed || !terminal, "{name}: {events:?}");
+            assert_eq!(
+                events
+                    .blockers
+                    .contains(&"no terminal harness result".into()),
+                !terminal,
+                "{name}"
+            );
+            assert_eq!(
+                events.blockers.iter().any(|blocker| {
+                    blocker.starts_with("OpenCode stdout has no final stop step;")
+                        && blocker.contains("Review task changes")
+                }),
+                !terminal,
+                "{name}: {:?}",
+                events.blockers
             );
         }
     }
