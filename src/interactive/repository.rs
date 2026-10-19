@@ -98,7 +98,12 @@ impl<'a> RepositoryManager<'a> {
             startup_command,
             focus,
         })?;
-        if workspace.group_id.as_deref() != Some(group.id.as_str())
+        // An empty identifier is recorded as the task's durable ownership and
+        // can never match a later group/window check, which would strand the
+        // workspace beyond focus, status, cancellation and removal.
+        if workspace.workspace_id.is_empty()
+            || workspace.window_id.is_empty()
+            || workspace.group_id.as_deref() != Some(group.id.as_str())
             || mapping
                 .window_id
                 .as_deref()
