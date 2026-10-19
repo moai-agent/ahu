@@ -196,7 +196,7 @@ must retain task inputs and work on that outcome. Other mutating methods return
 errors without implying rollback. Killing the transport is not proof of
 cancelling an already-started task.
 
-## Fixture and remaining cmux work
+## Fixture and external cmux status
 
 `tests/fixtures/external-host.py` is a complete synthetic peer used by offline
 integration tests. It models groups and workspaces in memory, exercises the real
@@ -205,9 +205,15 @@ is not a replacement terminal host. Tests cover creation, metadata, inventory,
 selection/close, protocol mismatch, malformed/partial frames, blocked pipe writes,
 indeterminate startup, deadlines, cancellation, cleanup, and executable paths.
 
-The compiled cmux adapter is unchanged. Its local source manifest lacks an
-executable entry, and its Rust API is not an executable server. Converting it
-requires a reviewed server wrapper. cmux's socket/environment requirements also
-need an explicit reviewed process contract. Merely adding an executable entry
-would not solve those compatibility requirements. Executable task lifecycle is
-covered with synthetic peers; external cmux activation is not provided.
+The compiled cmux adapter's local source manifest lacks an executable entry, and
+its Rust API is not an executable server. A separately maintained cmux companion
+package implements the Host V1 executable contract; it is not included in this
+source checkout or bundled with core. Its existence does not establish release
+status or activate it for a project. Project activation requires the enabled,
+committed binding, grants, and compatibility checks described in this guide.
+
+Executable task lifecycle is covered here with synthetic peers. The companion
+package has not undergone live lifecycle verification here, including cmux's
+socket and environment requirements under the executable process contract.
+Package existence and project activation do not establish successful live
+lifecycle behavior or live compatibility.
