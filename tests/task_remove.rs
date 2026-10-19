@@ -659,3 +659,125 @@ fn remove_headless_refuses_uncertain_metadata_without_side_effects() {
     let out = ahu_in(repo.path(), &["remove", id]);
     assert!(out.status.success(), "{}", text_of(&out));
 }
+
+/// A configuration file the parent working tree holds but never committed.
+/// A user's global ignore rule commonly hides exactly this from their own
+/// `git status`; ahu reads Git with no global configuration and sees it.
+const LOCAL_CONFIG: &str = ".claude/settings.local.json";
+
+/// A finished task whose worktree holds the configuration ahu copied out of
+/// the parent working tree, recorded the way a launch records it.
+fn prepare_task_with_copied_config(repo: &TestRepo, task_id: &str) -> (PathBuf, PathBuf) {
+    let discovered = git::discover(repo.path()).unwrap();
+    state::ensure_worktrees_root(&discovered.root).unwrap();
+    let worktree = state::worktree_dir(&discovered.root, task_id).unwrap();
+    git::add_worktree(&discovered, &worktree, &branch_of(task_id), "HEAD").unwrap();
+    state::ensure_checkout_state(&worktree).unwrap();
+
+    let snapshot = ahu::snapshot::collect(&discovered.root).unwrap();
+    let materialized = ahu::snapshot::materialize(&discovered.root, &snapshot, &worktree).unwrap();
+    assert!(
+        materialized.written.iter().any(|p| p == LOCAL_CONFIG),
+        "the fixture did not copy the uncommitted parent configuration: {materialized:?}"
+    );
+    assert!(
+        worktree.join(LOCAL_CONFIG).is_file(),
+        "the copied configuration is missing from the task worktree"
+    );
+
+    let identity = discovered.identity();
+    let dir = state::worktree_task_dir(&worktree, &identity, task_id);
+    let mut record = record_for(repo, task_id, &worktree);
+    record.config_snapshot_digest = snapshot.digest();
+    record.config_snapshot = snapshot;
+    record.materialize = materialized;
+    task::save(&dir, &record, "current work").unwrap();
+    (dir, worktree)
+}
+
+/// Configuration ahu copied in and nobody touched is not the task's work.
+///
+/// The copy is untracked in the task worktree for the whole life of the task,
+/// and ahu reads Git with no global configuration, so it is reported even
+/// where the user's own ignore rules hide the same file in the parent. A task
+/// that changed nothing must still be removable.
+#[test]
+fn remove_takes_a_worktree_holding_only_unchanged_copied_config() {
+    let repo = fixture();
+    repo.write(LOCAL_CONFIG, "{\"permissions\":{}}\n");
+    let id = "006aa50000000000c1";
+    let (record_dir, worktree) = prepare_task_with_copied_config(&repo, id);
+    let branch = branch_of(id);
+
+    let out = ahu_in(repo.path(), &["remove", id]);
+    let text = text_of(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("  worktree  removed\n"), "{text}");
+    assert!(!worktree.exists(), "the worktree outlived removal");
+    assert!(!record_dir.exists(), "the record outlived removal");
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", &branch]),
+        "",
+        "the branch outlived removal"
+    );
+    // Removal reads the parent; it never writes to it.
+    assert_eq!(
+        repo.read(LOCAL_CONFIG),
+        "{\"permissions\":{}}\n",
+        "removal disturbed the parent checkout's configuration"
+    );
+}
+
+/// A copied configuration file the task edited is reviewable work, and so is
+/// an untracked file no snapshot accounts for. Neither is removed, and the
+/// refusal names them.
+#[test]
+fn remove_keeps_a_worktree_whose_copied_config_changed_or_holds_extra_files() {
+    let repo = fixture();
+    repo.write(LOCAL_CONFIG, "{\"permissions\":{}}\n");
+    let id = "006aa50000000000c2";
+    let (record_dir, worktree) = prepare_task_with_copied_config(&repo, id);
+    let branch = branch_of(id);
+
+    // The task changed the copy it inherited.
+    std::fs::write(
+        worktree.join(LOCAL_CONFIG),
+        "{\"permissions\":{\"allow\":[]}}\n",
+    )
+    .unwrap();
+    let out = ahu_in(repo.path(), &["remove", id]);
+    let text = text_of(&out);
+    assert_eq!(out.status.code(), Some(5), "{text}");
+    assert!(text.contains("has uncommitted changes"), "{text}");
+    assert!(text.contains(LOCAL_CONFIG), "{text}");
+    assert!(worktree.is_dir(), "changed configuration was removed");
+    assert!(record_dir.is_dir(), "changed configuration lost its record");
+    assert!(
+        git::branch_exists(&git::discover(repo.path()).unwrap(), &branch).unwrap(),
+        "changed configuration lost its branch"
+    );
+
+    // Restored to what ahu copied, the worktree is removable again -- except
+    // for an untracked file of the task's own that nothing accounts for.
+    std::fs::write(worktree.join(LOCAL_CONFIG), "{\"permissions\":{}}\n").unwrap();
+    std::fs::create_dir_all(worktree.join(".claude/notes")).unwrap();
+    std::fs::write(worktree.join(".claude/notes/scratch.md"), "findings\n").unwrap();
+    let out = ahu_in(repo.path(), &["remove", id]);
+    let text = text_of(&out);
+    assert_eq!(out.status.code(), Some(5), "{text}");
+    assert!(text.contains("has uncommitted changes"), "{text}");
+    assert!(text.contains(".claude/notes/scratch.md"), "{text}");
+    assert!(
+        worktree.join(LOCAL_CONFIG).is_file(),
+        "a refused removal deleted the copied configuration"
+    );
+    assert!(worktree.is_dir(), "an untracked file was removed");
+    assert!(record_dir.is_dir(), "an untracked file lost its record");
+
+    std::fs::remove_dir_all(worktree.join(".claude/notes")).unwrap();
+    let out = ahu_in(repo.path(), &["remove", id]);
+    let text = text_of(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(!worktree.exists(), "the clean worktree was kept");
+    assert!(!record_dir.exists(), "the clean worktree's record was kept");
+}

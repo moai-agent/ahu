@@ -2053,6 +2053,22 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
     Ok(0)
 }
 
+/// Name what is holding a task worktree back, so the refusal points at files
+/// rather than leaving the reader to run `git status` with ahu's own
+/// environment to find them.
+fn changed_listing(tracked: &[String], untracked: &[String]) -> String {
+    const SHOWN: usize = 10;
+    let all: Vec<&String> = tracked.iter().chain(untracked).collect();
+    let mut listing = String::from("\nChanged:");
+    for path in all.iter().take(SHOWN) {
+        listing.push_str(&format!("\n  {}", display_safe(path)));
+    }
+    if all.len() > SHOWN {
+        listing.push_str(&format!("\n  … and {} more", all.len() - SHOWN));
+    }
+    listing
+}
+
 /// `ahu remove <task-id>`
 ///
 /// Removes a terminal task's record, worktree, and branch in one explicit
@@ -2101,6 +2117,10 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     };
     let worktree_present = record.worktree.is_dir();
     let branch_present = git::branch_exists(gate, &record.branch)?;
+    // Untracked configuration ahu itself copied in, verified unchanged. Git
+    // refuses to remove a worktree that still holds it, so these copies are
+    // deleted immediately before the removal and nowhere else.
+    let mut config_copies: Vec<String> = Vec::new();
     if worktree_present {
         let discovered = git::discover(&record.worktree).map_err(|e| {
             Error::new(format!(
@@ -2126,23 +2146,50 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
                 display_safe(task_id)
             );
         }
-        if let Err(e) = git::is_dirty(&discovered) {
-            bail!(
+        let changes = match git::changes(&discovered) {
+            Ok(changes) => changes,
+            Err(e) => bail!(
                 "cannot tell whether the worktree for task {} is clean: {e}\n\
                  Nothing was removed.",
                 display_safe(task_id)
-            );
-        }
-        if git::is_dirty(&discovered)? {
+            ),
+        };
+        // ahu copies the parent's working-tree configuration into every task
+        // worktree, so configuration the parent never committed is untracked
+        // there for the life of the task. ahu reads Git with no global
+        // configuration, so it sees those copies even where the user's own
+        // global ignore rules hide them -- they are not the task's work, and
+        // holding a worktree hostage to them would make it unremovable.
+        let untracked = crate::snapshot::classify_untracked(
+            &record.worktree,
+            &record.config_snapshot,
+            &record.materialize,
+            &changes.untracked,
+        );
+        if changes.non_utf8_untracked
+            || !changes.tracked.is_empty()
+            || !untracked.changed.is_empty()
+        {
+            if changes.non_utf8_untracked {
+                bail!(
+                    "the worktree for task {} has an untracked filename that is not valid UTF-8; \
+                     nothing was removed. Inspect {}, rename or remove that file, then run `ahu remove {}` again.",
+                    display_safe(task_id),
+                    display_path(&record.worktree),
+                    display_safe(task_id)
+                );
+            }
             bail!(
                 "the worktree for task {} has uncommitted changes; nothing was removed.\n\
                  Uncommitted changes are reviewable work. Inspect {}, commit or discard what you \
-                 find there, then run `ahu remove {}` again.",
+                 find there, then run `ahu remove {}` again.{}",
                 display_safe(task_id),
                 display_path(&record.worktree),
-                display_safe(task_id)
+                display_safe(task_id),
+                changed_listing(&changes.tracked, &untracked.changed)
             );
         }
+        config_copies = untracked.unchanged_copies;
     }
     if branch_present && !git::branch_merged_into_primary_head(gate, &record.branch)? {
         bail!(
@@ -2184,7 +2231,13 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     let mut not_removed: Vec<(&str, String)> = Vec::new();
     let mut worktree_removed = false;
     if worktree_present {
-        match git::remove_task_worktree(gate, &record.worktree) {
+        let removal = crate::snapshot::discard_unchanged_copies(
+            &record.worktree,
+            &record.config_snapshot,
+            &config_copies,
+        )
+        .and_then(|()| git::remove_task_worktree(gate, &record.worktree));
+        match removal {
             Ok(()) => {
                 completed.push(("worktree", "removed".to_string()));
                 worktree_removed = true;
