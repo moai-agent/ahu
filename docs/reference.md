@@ -2682,11 +2682,13 @@ email before the prompt. ahu captures that startup display in a bounded
 pseudo-terminal and terminates it without submitting a prompt. The probe sets
 `NO_COLOR=1` for that capture only, because terminal color escape sequences
 split the email apart and defeat extraction. After the email appears, ahu keeps
-capturing until a recognized auth-mode marker arrives or the output has been
-quiet for 500 ms; the overall probe remains bounded to 12 seconds. This avoids
-classifying a fragmented later `Agent Platform` or API-key marker from only the
-first PTY write. This check is version-sensitive to the visible banner; if the
-account email is absent, the startup format changes, or no account line arrives
+capturing until the output has been quiet for 500 ms, even if a recognized
+auth-mode marker has arrived; the overall probe remains bounded to 12 seconds.
+This allows fragmented email, auth-mode, and GCP project fields to arrive before
+fingerprinting. The quiet interval is a heuristic, not a native startup-complete
+signal: fields delayed longer than that can still be missed. This check is
+version-sensitive to the visible banner; if the account email is absent, the
+startup format changes, or no account line arrives
 within 12 seconds, ahu reports readiness as unavailable and refuses to bind or
 resume. A startup that reports an API key rather than a signed-in account is
 refused as well: an API key exposes no user principal to bind. Turning color
