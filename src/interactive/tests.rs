@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 struct SyntheticHost {
+    coordinator: Option<(String, Vec<Group>)>,
     groups: Vec<Group>,
     groups_for_window: Option<Vec<Group>>,
     window: String,
@@ -25,6 +26,7 @@ struct SyntheticHost {
 impl SyntheticHost {
     fn new(repo: &Repo) -> Self {
         Self {
+            coordinator: None,
             groups: vec![Group {
                 id: "group".into(),
                 name: repo.display_name(),
@@ -60,14 +62,22 @@ impl SyntheticHost {
 // Unexpected operations fail the test, rather than silently simulating success.
 impl Host for SyntheticHost {
     fn inherited_workspace(&self) -> Option<String> {
-        None
+        self.coordinator.as_ref().map(|_| "caller".into())
     }
     fn check_capabilities(&self) -> Result<Vec<String>> {
+        if self.coordinator.is_some() {
+            return Ok(Vec::new());
+        }
         panic!("unexpected capability probe")
     }
     fn list_groups(&self, window: Option<&str>) -> Result<Vec<Group>> {
         if self.groups_error {
             bail!("synthetic group query failed");
+        }
+        if let Some((source_window, groups)) = &self.coordinator
+            && window == Some(source_window.as_str())
+        {
+            return Ok(groups.clone());
         }
         if window == Some(self.window.as_str())
             && let Some(groups) = &self.groups_for_window
@@ -83,14 +93,22 @@ impl Host for SyntheticHost {
             .find(|group| group.id == id))
     }
     fn current_window(&self) -> Result<Option<String>> {
+        if let Some((window, _)) = &self.coordinator {
+            return Ok(Some(window.clone()));
+        }
         Ok(Some(self.window.clone()))
     }
     fn current_workspace(&self) -> Result<Option<String>> {
-        Ok(None)
+        Ok(self.inherited_workspace())
     }
-    fn window_for_workspace(&self, _: &str) -> Result<String> {
+    fn window_for_workspace(&self, workspace: &str) -> Result<String> {
         if self.window_error {
             bail!("synthetic window query failed");
+        }
+        if workspace == "caller"
+            && let Some((window, _)) = &self.coordinator
+        {
+            return Ok(window.clone());
         }
         Ok(self.window.clone())
     }
@@ -137,7 +155,13 @@ impl Host for SyntheticHost {
         self.mutations.borrow_mut().push(format!("expand:{id}"));
         Ok(())
     }
-    fn add_workspace_to_group(&self, _: &str, _: &str, _: &str) -> Result<()> {
+    fn add_workspace_to_group(&self, group: &str, workspace: &str, window: &str) -> Result<()> {
+        if self.coordinator.is_some() {
+            self.mutations
+                .borrow_mut()
+                .push(format!("move:{workspace}:{group}:{window}"));
+            return Ok(());
+        }
         panic!("unexpected move")
     }
     fn create_anchor_workspace(&self, _: &str, _: &str, _: &Path) -> Result<String> {
@@ -152,7 +176,13 @@ impl Host for SyntheticHost {
     fn open_markdown(&self, _: &Path, _: bool) -> Result<String> {
         panic!("unexpected document open")
     }
-    fn set_agent_metadata(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
+    fn set_agent_metadata(&self, workspace: &str, _: &str, _: &str, _: &str) -> Result<()> {
+        if self.coordinator.is_some() {
+            self.mutations
+                .borrow_mut()
+                .push(format!("metadata:{workspace}"));
+            return Ok(());
+        }
         panic!("unexpected metadata")
     }
 }
@@ -369,6 +399,63 @@ fn coordinator_without_inherited_workspace_does_not_probe_or_mutate_host() {
     assert!(placement.notes.is_empty());
     assert!(host.mutations.borrow().is_empty());
     assert!(host.requests.borrow().is_empty());
+}
+
+#[test]
+fn coordinator_preserves_other_groups_in_the_callers_window() {
+    let (_temp, repo, _, _) = fixture();
+    state::write_json(
+        &mapping_path(&repo).unwrap(),
+        &GroupMapping {
+            group_id: Some("group".into()),
+            window_id: Some("window".into()),
+            anchor_workspace_id: Some("anchor".into()),
+        },
+    )
+    .unwrap();
+    for source_window in ["window", "other-window"] {
+        for grouped in [true, false] {
+            let mut host = SyntheticHost::new(&repo);
+            let mut source_groups = if source_window == "window" {
+                host.groups.clone()
+            } else {
+                Vec::new()
+            };
+            if grouped {
+                source_groups.push(Group {
+                    id: "unrelated-group".into(),
+                    name: "unrelated repository".into(),
+                    anchor_workspace_id: "caller".into(),
+                    member_workspace_ids: vec!["caller".into(), "unrelated-session".into()],
+                    is_collapsed: false,
+                });
+            }
+            host.coordinator = Some((source_window.into(), source_groups));
+            let placement = RepositoryManager::new(&host, &repo)
+                .group_coordinator("/usr/bin/true", "synthetic", "codex", "fixture", &[])
+                .unwrap();
+            assert_eq!(
+                placement.opened_workspace,
+                grouped,
+                "{source_window}, grouped={grouped}: {:?}",
+                host.mutations.borrow()
+            );
+            if grouped {
+                assert_eq!(*host.mutations.borrow(), ["metadata:new-workspace"]);
+                assert_eq!(host.requests.borrow().len(), 1);
+            } else {
+                assert_eq!(
+                    *host.mutations.borrow(),
+                    [
+                        "move:caller:group:window",
+                        "metadata:caller",
+                        "expand:group"
+                    ]
+                );
+                assert!(host.requests.borrow().is_empty());
+            }
+        }
+    }
 }
 
 #[test]
