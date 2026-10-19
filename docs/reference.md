@@ -369,7 +369,7 @@ and controls for those modes. The catalog's recorded versions are:
 | Harness | Interactive evidence | Headless evidence | Limits and refusals |
 | --- | --- | --- | --- |
 | Codex | 0.154.0, 0.157.1, 0.160.0 | 0.154.0, 0.155.1, 0.157.1, 0.160.0 | Fresh runs and native resume have separate argument mappings. Headless `accept-edits` resume is refused. Versions 0.157.1 and 0.160.0 require native metadata inspection. |
-| Claude Code | 2.1.269, 2.1.283, 2.1.288 | 2.1.269, 2.1.270, 2.1.283 | Hook-control profiles also exist for 2.1.288, 2.1.289, and 2.1.302; these do not extend authenticated headless evidence. Bounded native helpers require 2.1.270. |
+| Claude Code | 2.1.269, 2.1.283, 2.1.288 | 2.1.269, 2.1.270, 2.1.283 | Hook-control profiles also exist for 2.1.288, 2.1.289, and 2.1.302; these do not extend authenticated headless evidence. No committed profile covers a version later than 2.1.302. Bounded native helpers require 2.1.270. |
 | Antigravity CLI | 1.2.2, 1.2.16, 1.4.2 | 1.2.2, 1.2.16 | The 1.4.2 record covers help, model discovery, and interactive startup; headless behavior on that version remains unverified. Unresolved hooks/extensions refuse headless admission. |
 | OpenCode | 1.18.29, 1.18.30, 1.18.31, 1.18.32, 1.18.34, 2.0.32 | 1.18.29, 1.18.30, 1.18.31, 1.18.32 | The 2.0.32 record covers `mini` help and interactive startup with `prompt` permissions. Interactive `auto` is refused on that interface; `accept-edits` is refused in both modes. Headless 2.0.32 remains unverified. |
 | Kiro CLI V3 | 2.28.0 | 2.28.0, 2.29.0 | The 2.29.0 catalog entry covers headless and native configuration, not interactive verification. Headless configuration inspection refuses versions other than these two. `accept-edits` and bounded native helpers are refused. |
@@ -391,13 +391,19 @@ current adapters. Three ahu-assigned Codex audit tasks executed local shell and
 file tools and produced changes, but were stopped before returning terminal
 reports; this is not evidence of successful task completion. Catalog observations
 from other versions remain separate. Help confirms option declarations, not
-admission, authentication, tool execution, or task acceptance. "Not observed"
-means this audit did not establish the result, not that the capability is absent.
+admission, authentication, tool execution, or task acceptance. `ahu doctor`
+reports executable discovery, account-binding status, and TCP reachability for a
+configured local telemetry endpoint; a ready or matching line establishes no
+completed task, no live MCP tool call, and no observed OTel export. Installed
+CLI versions also move between audits, so a version named in a row below is the
+version checked on the audit date, not necessarily the one installed now.
+"Not observed" means this audit did not establish the result, not that the
+capability is absent.
 
 | Harness and mode | Locally checked invocation | Task/tool completion evidence | Approval/autonomy mapping | OTel export evidence |
 | --- | --- | --- | --- | --- |
-| Claude Code interactive | 2.1.302 `claude --help`; no session launched | No current-version task or tool completion observed | `prompt` adds no approval flag; `accept-edits` uses `--permission-mode acceptEdits`; `auto` uses `--permission-mode auto` | Not observed |
-| Claude Code headless | 2.1.302 help advertises print, stream JSON, and permission controls; synthetic invocation profile only | No authenticated 2.1.302 completion observed; the catalog records prompt completion/usage on 2.1.283 | Same permission modes, plus `--permission-prompts none`; non-managed hooks turned off by the exact-version profile | Not observed |
+| Claude Code interactive | 2.1.302 `claude --help`; no session launched. `ahu doctor` in this checkout now reports installed 2.1.304, which has no recorded help or startup check | No task or tool completion observed on either version | `prompt` adds no approval flag; `accept-edits` uses `--permission-mode acceptEdits`; `auto` uses `--permission-mode auto` | Not observed |
+| Claude Code headless | 2.1.302 help advertises print, stream JSON, and permission controls; synthetic invocation profile only. The installed 2.1.304 CLI is unchecked here | No authenticated completion observed on 2.1.302 or 2.1.304; the catalog records prompt completion/usage on 2.1.283 | Same permission modes, plus `--permission-prompts none`. This checkout's exact-version hook profiles stop at 2.1.302, so a 2.1.304 launch passes no hook-control setting and non-managed hooks keep their native behavior | Not observed |
 | Codex interactive | 0.163.0 help and three ahu audit task sessions with `gpt-6-astra` | Instructions were received and local shell/file tools ran, but the sessions were stopped before a terminal task result | `auto` passes `--ask-for-approval never --sandbox workspace-write`; `accept-edits` uses `--approve-for-me`; `prompt` retains native policy | Collector receipt not inspected |
 | Codex headless | 0.163.0 `codex exec --help`; no batch session launched | No 0.163.0 batch completion observed; 0.160.0 has recorded live MCP decision/answer completion | `approval_policy="never"`; `prompt` uses read-only, `auto` workspace-write; fresh `accept-edits` uses `--approve-for-me`, resume refuses it | Not observed on 0.163.0; catalog records collector export on 0.160.0 |
 | Antigravity interactive | 1.4.2 `agy --help`; catalog separately records startup on 1.4.2 | Startup evidence does not establish a completed task or successful tool call | `prompt` retains native policy; `accept-edits` uses `--mode accept-edits`; `auto` uses `--dangerously-skip-permissions` | Not observed |
@@ -500,6 +506,8 @@ invocation setting disables non-managed hooks without replacing native settings,
 account selection, skills, or direct MCP configuration. Parsed hooks can be
 isolated this way; malformed settings, enabled plugins, and unresolved managed
 sources still refuse admission. Managed hooks retain their native precedence.
+A version without a reviewed profile launches without this setting; the Claude
+Code CLI installed in this checkout is 2.1.304, which has no such profile.
 See Claude's [hook controls](https://code.claude.com/docs/en/hooks#disable-or-remove-hooks).
 
 The 0.160.0 Codex and 2.1.288 Claude invocation controls were checked with local
