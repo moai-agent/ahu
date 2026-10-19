@@ -224,6 +224,44 @@ fn repeat_operation_is_idempotent_even_with_stale_expected_revision() {
 }
 
 #[test]
+fn replay_revalidates_write_scope_before_returning_a_receipt() {
+    let github = Github::new();
+    github.install();
+    for action in ["comment", "close"] {
+        let mut data = base_input(action, "op-1");
+        let first = github.invoke(&serde_json::to_vec(&data).unwrap()).unwrap();
+        assert_eq!(first["outcome"], "applied");
+        data["state"] = first["state"].clone();
+        data["scopes"] = json!([]);
+        let value = github.invoke(&serde_json::to_vec(&data).unwrap()).unwrap();
+        assert_eq!(value["outcome"], "refused", "{action}");
+        assert_eq!(value["reason"], "missing-scope");
+        assert!(value["reference"].is_null());
+        assert_eq!(value["state"], first["state"]);
+    }
+}
+
+#[test]
+fn replay_revalidates_visibility_before_returning_a_receipt() {
+    let github = Github::new();
+    github.install();
+    for action in ["comment", "close"] {
+        let mut data = base_input(action, "op-1");
+        data["tracker_visibility"] = json!("public");
+        data["issue"]["visibility"] = json!("public");
+        let first = github.invoke(&serde_json::to_vec(&data).unwrap()).unwrap();
+        assert_eq!(first["outcome"], "applied");
+        data["state"] = first["state"].clone();
+        data["tracker_visibility"] = json!("private");
+        let value = github.invoke(&serde_json::to_vec(&data).unwrap()).unwrap();
+        assert_eq!(value["outcome"], "refused", "{action}");
+        assert_eq!(value["reason"], "visibility-mismatch");
+        assert!(value["reference"].is_null());
+        assert_eq!(value["state"], first["state"]);
+    }
+}
+
+#[test]
 fn duplicate_operation_with_different_body_is_refused() {
     let github = Github::new();
     github.install();

@@ -41,18 +41,22 @@ synthetic issue state carried in the request itself.
 
 The provider applies the first matching decision, in order:
 
-1. If `applied` maps `operation_id` to the digest of this exact operation, the
-   outcome is `idempotent` and the state is returned unchanged.
-2. If `applied` maps `operation_id` to a different digest, the outcome is
-   `refused` with reason `duplicate-ambiguous`.
-3. If `scopes` does not include `issues:write`, the outcome is `refused` with
+1. If `scopes` does not include `issues:write`, the outcome is `refused` with
    reason `missing-scope`.
-4. If `tracker_visibility` is `private` and the issue `visibility` is
+2. If `tracker_visibility` is `private` and the issue `visibility` is
    `public`, the outcome is `refused` with reason `visibility-mismatch`.
+3. If `applied` maps `operation_id` to the digest of this exact operation, the
+   outcome is `idempotent` and the state is returned unchanged.
+4. If `applied` maps `operation_id` to a different digest, the outcome is
+   `refused` with reason `duplicate-ambiguous`.
 5. If `expected_revision` differs from the state `revision`, the outcome is
    `refused` with reason `stale-revision`.
 6. Otherwise the outcome is `applied`, and the state revision advances by one
    with the operation digest recorded under `operation_id`.
+
+Scope and visibility checks apply to every request, including retries with a
+matching receipt. Refusal leaves the supplied state unchanged. These checks
+use synthetic input values; they do not verify live permissions or visibility.
 
 ## Result
 
