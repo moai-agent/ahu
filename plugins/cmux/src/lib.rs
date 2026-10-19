@@ -550,7 +550,13 @@ impl Cmux {
                 .get("id")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| Error::new("cmux window.list returned a window without an id"))?;
-            found.extend(self.workspaces_in_window(Some(id))?);
+            for (workspace_id, workspace) in self.workspaces_in_window(Some(id))? {
+                // A workspace moving during inventory is also ambiguous: callers
+                // must retry rather than infer ownership from the last window.
+                if found.insert(workspace_id, workspace).is_some() {
+                    bail!("cmux inventory returned a duplicate workspace id across windows");
+                }
+            }
         }
         Ok(found)
     }
@@ -570,6 +576,9 @@ impl Cmux {
             let id = item.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
                 Error::new("cmux workspace.list returned a workspace without an id")
             })?;
+            if found.contains_key(id) {
+                bail!("cmux workspace.list returned a duplicate workspace id");
+            }
             found.insert(
                 id.to_string(),
                 WorkspaceInfo {
@@ -778,6 +787,72 @@ fi"#,
     }
 
     #[cfg(unix)]
+    #[test]
+    fn workspace_inventory_rejects_duplicate_ids_within_and_across_windows() {
+        for across_windows in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let windows = if across_windows {
+                r#"{"windows":[{"id":"one"},{"id":"two"}]}"#
+            } else {
+                r#"{"windows":[{"id":"one"}]}"#
+            };
+            let rows = if across_windows {
+                r#"{"workspaces":[{"id":"task","current_directory":"/synthetic/task"}]}"#
+            } else {
+                r#"{"workspaces":[{"id":"task","current_directory":"/synthetic/other"},{"id":"task","current_directory":"/synthetic/task"}]}"#
+            };
+            let client = fake_cmux(
+                root.path(),
+                &format!(
+                    r#"test "$1" = rpc || exit 9
+case "$2" in
+  window.list) printf '%s\n' '{windows}' ;;
+  workspace.list) printf '%s\n' '{rows}' ;;
+  *) exit 8 ;;
+esac"#,
+                ),
+            );
+            let host: &dyn Host = &client;
+            let error = host
+                .workspaces()
+                .expect_err("duplicate identity is ambiguous");
+            assert!(
+                error.to_string().contains("duplicate workspace id"),
+                "{error}"
+            );
+            if !across_windows {
+                assert!(host.workspaces_in_window(Some("one")).is_err());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_inventory_preserves_distinct_windows_and_empty_results() {
+        let root = tempfile::tempdir().unwrap();
+        let client = fake_cmux(
+            root.path(),
+            r#"test "$1" = rpc || exit 9
+case "$2:$3" in
+  'window.list:{}') printf '%s\n' '{"windows":[{"id":"one"},{"id":"two"},{"id":"empty"}]}' ;;
+  'workspace.list:{"window_id":"one"}') printf '%s\n' '{"workspaces":[{"id":"first","current_directory":"/synthetic/first"}]}' ;;
+  'workspace.list:{"window_id":"two"}') printf '%s\n' '{"workspaces":[{"id":"second","current_directory":"/synthetic/second"}]}' ;;
+  'workspace.list:{"window_id":"empty"}') printf '%s\n' '{"workspaces":[]}' ;;
+  *) exit 8 ;;
+esac"#,
+        );
+        let host: &dyn Host = &client;
+        let inventory = host.workspaces().unwrap();
+        assert_eq!(inventory.len(), 2);
+        assert_eq!(inventory["first"].directory, "/synthetic/first");
+        assert_eq!(inventory["second"].directory, "/synthetic/second");
+        assert!(host.workspaces_in_window(Some("empty")).unwrap().is_empty());
+
+        let empty = fake_cmux(root.path(), r#"printf '%s\n' '{"windows":[]}'"#);
+        assert!(Host::workspaces(&empty).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
     fn creation_fixture(root: &Path, mode: &str) -> Cmux {
         use std::os::unix::fs::PermissionsExt;
         let executable = root.join("cmux");
@@ -810,6 +885,8 @@ elif method == 'workspace.list':
  other = str(root) if mode == 'duplicate-match' else str(root/'unrelated')
  rows = [{{'id':'other','current_directory':other}},{{'id':'mine','current_directory':str(root)}}]
  if mode == 'missing-directory': rows = [{{'id':'other'}}]
+ if mode == 'duplicate-id': rows = [{{'id':'other','current_directory':str(root/'unrelated')}},{{'id':'other','current_directory':str(root)}}]
+ if mode == 'duplicate-id-reversed': rows = [{{'id':'other','current_directory':str(root)}},{{'id':'other','current_directory':str(root/'unrelated')}}]
  print(json.dumps({{'workspaces':rows}}))
 else:
  (root/'unexpected-mutation').touch()
@@ -830,6 +907,8 @@ else:
             "no-candidate",
             "missing-directory",
             "duplicate-match",
+            "duplicate-id",
+            "duplicate-id-reversed",
             "lookup-failure",
             "malformed-lookup",
             "group-failure",
@@ -880,6 +959,8 @@ else:
             "spawn-failure",
             "command-failure",
             "command-signal",
+            "duplicate-id",
+            "duplicate-id-reversed",
             "group-failure",
             "lookup-failure",
             "malformed-lookup",
