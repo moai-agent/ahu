@@ -98,19 +98,20 @@ def main():
     outcome = "applied"
     reason = None
     reference = {"issue": number, "project": project}
-    if applied.get(operation_id) == operation_digest:
-        outcome = "idempotent"
-    elif operation_id in applied:
-        outcome = "refused"
-        reason = "duplicate-ambiguous"
-        reference = None
-    elif "issues:write" not in scopes:
+    # A receipt is evidence of a previous action, never current authority.
+    if "issues:write" not in scopes:
         outcome = "refused"
         reason = "missing-scope"
         reference = None
     elif data["tracker_visibility"] == "private" and issue["visibility"] == "public":
         outcome = "refused"
         reason = "visibility-mismatch"
+        reference = None
+    elif applied.get(operation_id) == operation_digest:
+        outcome = "idempotent"
+    elif operation_id in applied:
+        outcome = "refused"
+        reason = "duplicate-ambiguous"
         reference = None
     elif expected_revision != revision:
         outcome = "refused"
