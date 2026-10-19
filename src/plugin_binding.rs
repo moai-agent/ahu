@@ -203,6 +203,27 @@ mod tests {
             .unwrap()
     }
     #[test]
+    fn version_pins_reject_leading_zero_numeric_prereleases() {
+        for version in ["1.0.0-01", "1.0.0-rc.01", "1.0.0-00+build.01"] {
+            for compatibility in [false, true] {
+                let mut binding = binding();
+                if compatibility {
+                    binding.compatibility.ahu = version.into();
+                } else {
+                    binding.version = version.into();
+                }
+                let error = parse(&render(&binding), "fixture").unwrap_err();
+                assert!(error.to_string().contains("exact semantic versions"));
+            }
+        }
+        for version in ["1.0.0-0", "1.0.0-rc.0", "1.0.0-01a", "1.0.0+01"] {
+            let mut binding = binding();
+            binding.version = version.into();
+            binding.compatibility.ahu = version.into();
+            assert_eq!(parse(&render(&binding), "fixture").unwrap().0, binding);
+        }
+    }
+    #[test]
     fn strict_identity_pins_and_grants_with_inert_metadata() {
         let binding = binding();
         let text = render(&binding);

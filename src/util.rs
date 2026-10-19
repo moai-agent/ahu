@@ -216,6 +216,17 @@ pub fn is_semver(value: &str) -> bool {
             }
         }
     }
+    // Numeric prerelease identifiers cannot have leading zeros. Build metadata
+    // and prerelease identifiers containing non-digits may still start with zero.
+    if pre_release.is_some_and(|section| {
+        section.split('.').any(|identifier| {
+            identifier.len() > 1
+                && identifier.starts_with('0')
+                && identifier.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    }) {
+        return false;
+    }
     true
 }
 
@@ -487,7 +498,13 @@ mod behavior_tests {
         ] {
             assert!(!is_safe_name(value), "{value:?}");
         }
-        for value in ["0.1.0", "1.2.3-rc.1+build.5", "1.2.3-alpha-beta"] {
+        for value in [
+            "0.1.0",
+            "1.2.3-rc.1+build.5",
+            "1.2.3-alpha-beta",
+            "1.2.3-0.01a.00-0+01",
+            "1.2.3+00.01",
+        ] {
             assert!(is_semver(value), "{value}");
         }
         for value in [
@@ -498,6 +515,8 @@ mod behavior_tests {
             "1.2.3-",
             "1.2.3+",
             "1.2.3-a..b",
+            "1.2.3-01",
+            "1.2.3-rc.00+01",
             "1.2.3-\u{001b}",
         ] {
             assert!(!is_semver(value), "{value:?}");
