@@ -13,6 +13,7 @@ struct SyntheticHost {
     groups: Vec<Group>,
     groups_for_window: Option<Vec<Group>>,
     window: String,
+    expected_window: Option<String>,
     workspaces: BTreeMap<String, WorkspaceInfo>,
     inventory_error: bool,
     close_error: bool,
@@ -36,6 +37,7 @@ impl SyntheticHost {
             }],
             groups_for_window: None,
             window: "window".into(),
+            expected_window: Some("window".into()),
             workspaces: BTreeMap::from([(
                 "task-workspace".into(),
                 WorkspaceInfo {
@@ -126,7 +128,7 @@ impl Host for SyntheticHost {
         request: &WorkspaceRequest<'_>,
     ) -> WorkspaceCreationResult<CreatedWorkspace> {
         assert_eq!(request.group_id, "group");
-        assert_eq!(request.window_id, Some("window"));
+        assert_eq!(request.window_id, self.expected_window.as_deref());
         self.requests.borrow_mut().push((
             request.summary.into(),
             request.startup_command.into(),
@@ -432,6 +434,69 @@ fn host_boundary_keeps_creation_routing_and_preserves_inconsistent_workspace() {
             assert!(host.mutations.borrow().is_empty());
         }
     }
+}
+
+#[test]
+fn unrecorded_window_never_persists_an_unusable_task_ownership_identifier() {
+    // A repository mapping without a window is normal when ahu is invoked
+    // outside the session host. The host must still name the window its new
+    // workspace landed in: a blank identifier is recorded as the task's owner
+    // and then fails every later ownership check, so the workspace could never
+    // be focused, cancelled or removed through ahu.
+    let (_temp, repo, loaded, plan) = fixture();
+    state::write_json(
+        &mapping_path(&repo).unwrap(),
+        &GroupMapping {
+            group_id: Some("group".into()),
+            window_id: None,
+            anchor_workspace_id: Some("anchor".into()),
+        },
+    )
+    .unwrap();
+    let startup = interactive::startup_command(Path::new("/synthetic/ahu"), &plan.task_dir);
+    for blank in ["window", "workspace"] {
+        let mut host = SyntheticHost::new(&repo);
+        host.expected_window = None;
+        match blank {
+            "window" => host.created.window_id = String::new(),
+            _ => host.created.workspace_id = String::new(),
+        }
+        let manager = RepositoryManager::new(&host, &repo);
+        let result = manager.create_task_workspace(
+            "title",
+            "summary",
+            &plan.worktree,
+            &startup,
+            false,
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(interactive::v1::WorkspaceCreationError::OutcomeUnknown(_))
+            ),
+            "{blank}: {result:?}"
+        );
+        assert!(host.mutations.borrow().is_empty(), "{blank}");
+    }
+
+    // A record that already carries a blank window is the stranded state the
+    // refusal above prevents: every task mutation fails closed.
+    let mut record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+    record.cmux_workspace_id = Some("task-workspace".into());
+    record.cmux_group_id = Some("group".into());
+    record.cmux_window_id = Some(String::new());
+    let host = SyntheticHost::new(&repo);
+    let manager = RepositoryManager::new(&host, &repo);
+    for result in [
+        manager.select_task_workspace(&record),
+        manager.close_task_workspace(&record).map(|_| ()),
+        manager.set_task_status(&record, "waiting"),
+        manager.expand_task_group(&record),
+    ] {
+        assert!(result.is_err(), "{result:?}");
+    }
+    assert!(host.mutations.borrow().is_empty());
 }
 
 #[test]

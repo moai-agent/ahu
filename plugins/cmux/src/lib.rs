@@ -424,9 +424,17 @@ impl Cmux {
                     })
                     .collect();
                 if mine.len() == 1 {
+                    // An unscoped request still lands in a real window, and the
+                    // caller records this value as the workspace's owning
+                    // window. Resolve it rather than reporting an empty id that
+                    // can never match a later ownership check.
+                    let window_id = match window_id {
+                        Some(window) => window.to_string(),
+                        None => self.window_for_workspace(mine[0])?,
+                    };
                     return Ok(CreatedWorkspace {
                         workspace_id: mine[0].clone(),
-                        window_id: window_id.unwrap_or_default().to_string(),
+                        window_id,
                         group_id: Some(group_id.to_string()),
                     });
                 }
@@ -1030,6 +1038,55 @@ else: raise AssertionError(method)
             .unwrap();
         assert_eq!(created.workspace_id, "mine");
         assert_eq!(created.window_id, "window-b");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creation_without_a_recorded_window_reports_the_workspaces_real_window() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("cmux");
+        let marker = temp.path().join("created");
+        std::fs::write(&executable, format!(r#"#!/usr/bin/env python3
+import json,sys
+from pathlib import Path
+marker = Path({marker})
+if sys.argv[1] == 'new-workspace':
+ assert '--window' not in sys.argv
+ marker.touch(); sys.exit(0)
+method,params = sys.argv[2],json.loads(sys.argv[3])
+if method == 'workspace.group.list':
+ assert params == {{}}, params
+ print(json.dumps({{'groups':[{{'id':'group','anchor_workspace_id':'anchor','member_workspace_ids':['anchor']+(['mine'] if marker.exists() else [])}}]}}))
+elif method == 'workspace.list':
+ assert params == {{'window_id':None}}, params
+ print(json.dumps({{'workspaces':[{{'id':'mine','current_directory':{cwd}}}]}}))
+elif method == 'system.identify':
+ assert params == {{'caller':{{'workspace_id':'mine'}}}}, params
+ print(json.dumps({{'caller':{{'window_id':'window-one'}}}}))
+else: raise AssertionError(method)
+"#, marker=serde_json::to_string(&marker).unwrap(), cwd=serde_json::to_string(temp.path()).unwrap())).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let client = Cmux {
+            executable,
+            socket_path: None,
+        };
+        let host: &dyn Host = &client;
+        let created = host
+            .create_task_workspace(&WorkspaceRequest {
+                group_id: "group",
+                window_id: None,
+                title: "Task",
+                summary: "",
+                cwd: temp.path(),
+                startup_command: "true",
+                focus: false,
+            })
+            .unwrap();
+        assert_eq!(created.workspace_id, "mine");
+        // An empty window id would be recorded as the task's owning window and
+        // then never match `window_for_workspace`, stranding the workspace.
+        assert_eq!(created.window_id, "window-one");
     }
 
     #[cfg(unix)]
