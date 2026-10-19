@@ -250,7 +250,7 @@ impl<'a> RepositoryManager<'a> {
             });
         };
         self.client.check_capabilities()?;
-        self.client.window_for_workspace(&workspace)?;
+        let caller_window = self.client.window_for_workspace(&workspace)?;
         let _lock =
             LaunchLock::acquire_at(state::coordination_dir(self.repo)?.join("launch.lock"))?;
         let mut notes = Vec::new();
@@ -260,17 +260,19 @@ impl<'a> RepositoryManager<'a> {
             .window_id
             .ok_or_else(|| Error::new("cmux repository group has no known window"))?;
         if !group.member_workspace_ids.contains(&workspace) {
-            let belongs_to_other_group =
-                self.client
-                    .list_groups(Some(&window))?
-                    .into_iter()
-                    .any(|candidate| {
-                        candidate.id != group.id
-                            && candidate
-                                .member_workspace_ids
-                                .iter()
-                                .any(|member| member == &workspace)
-                    });
+            // The repository mapping may point into a different window. Query
+            // the caller's window before allowing a move into the target group.
+            let belongs_to_other_group = self
+                .client
+                .list_groups(Some(&caller_window))?
+                .into_iter()
+                .any(|candidate| {
+                    candidate.id != group.id
+                        && candidate
+                            .member_workspace_ids
+                            .iter()
+                            .any(|member| member == &workspace)
+                });
             if belongs_to_other_group {
                 let telemetry = crate::config::load(&self.repo.root)?
                     .map(|loaded| loaded.config.telemetry)
