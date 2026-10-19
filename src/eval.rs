@@ -2291,7 +2291,10 @@ pub fn run(
                     selection_observed,
                     total_elapsed_ms,
                 )?;
-                record.insert("failure_reason".into(), error.to_string().into());
+                record.insert(
+                    "failure_reason".into(),
+                    bounded_failure_reason(&error.to_string()).into(),
+                );
                 if let Some(harness_outcome) = harness_outcome {
                     record.insert("outcome".into(), harness_outcome.into());
                 }
@@ -2422,7 +2425,10 @@ pub fn run(
                     selection_observed,
                     total_elapsed_ms,
                 )?;
-                record.insert("failure_reason".into(), error.to_string().into());
+                record.insert(
+                    "failure_reason".into(),
+                    bounded_failure_reason(&error.to_string()).into(),
+                );
                 let telemetry = receiver.task(candidate_task, attempt);
                 insert_telemetry_fields(&mut record, telemetry.as_ref())?;
                 if let Some(tokens) = reported_tokens(Some(&candidate_result), telemetry.as_ref()) {
@@ -3389,6 +3395,40 @@ fn safe_artifact(worktree: &Path, name: &str) -> Result<PathBuf> {
         bail!("{name} resolves outside the task worktree");
     }
     Ok(actual)
+}
+
+/// A bounded, path-free restatement of a launch diagnostic for an eval record.
+///
+/// Records default to the primary checkout's ignored `.ahu/evals/`, and every
+/// other field in them is a typed projection. A launch diagnostic is the one
+/// free-text value that reaches a record, and it names the external artifact
+/// directory, so storing it raw writes the operator's home path and the layout
+/// of the out-of-repository artifact store into a file inside the repository.
+/// The console output and the saved artifacts keep the full message; the record
+/// keeps a bounded reason with absolute paths replaced.
+fn bounded_failure_reason(message: &str) -> String {
+    const MAX_REASON_BYTES: usize = 256;
+    let mut reason = String::with_capacity(message.len().min(MAX_REASON_BYTES));
+    for (index, token) in message.split(' ').enumerate() {
+        if index > 0 {
+            reason.push(' ');
+        }
+        if token.starts_with('/') {
+            reason.push_str("<path>");
+        } else {
+            reason.push_str(token);
+        }
+    }
+    let mut reason = display_safe(&reason);
+    if reason.len() > MAX_REASON_BYTES {
+        let mut end = MAX_REASON_BYTES;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+        reason.push_str("...");
+    }
+    reason
 }
 
 /// The harness version the launch reported, or `None` when it reported none.
