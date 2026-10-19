@@ -1931,3 +1931,45 @@ fn comparison_fingerprints_bind_identity_and_preserve_missing_model_evidence() {
         .is_err()
     );
 }
+
+#[test]
+fn recorded_failure_reasons_drop_host_paths_and_stay_bounded() {
+    // The reachable launch diagnostic: the child ahu printed no usable JSON and
+    // the message names the external artifact directory, which is an absolute
+    // host path under the operator's home.
+    let reason = bounded_failure_reason(
+        "eval agent @triage returned no valid JSON result (exit 2); bounded stderr and stdout were saved under the external run artifacts at /Users/fixture/.local/state/ahu/eval-artifacts/0123456789abcdef/ahu-eval-case-1/run-000/candidate",
+    );
+    assert!(!reason.contains('/'), "{reason}");
+    assert!(!reason.contains("fixture"), "{reason}");
+    assert!(reason.ends_with("artifacts at <path>"), "{reason}");
+    assert!(
+        reason.contains("returned no valid JSON result (exit 2)"),
+        "{reason}"
+    );
+
+    // Diagnostics that name no path keep their wording, so the row stays useful.
+    let outcome = bounded_failure_reason(
+        "eval agent @triage did not complete successfully (timed_out); inspect the external run result for its task outcome",
+    );
+    assert_eq!(
+        outcome,
+        "eval agent @triage did not complete successfully (timed_out); inspect the external run result for its task outcome"
+    );
+
+    // An unbounded diagnostic cannot grow a record without limit.
+    let bounded =
+        bounded_failure_reason(&format!("could not start eval agent: {}", "x".repeat(8192)));
+    assert!(bounded.len() <= 259, "{} bytes", bounded.len());
+    assert!(bounded.ends_with("..."), "{bounded}");
+
+    // Terminal-hostile bytes are escaped exactly as every other printed value.
+    assert_eq!(
+        bounded_failure_reason("could not start eval agent \u{1b}[2K@triage"),
+        display_safe("could not start eval agent \u{1b}[2K@triage")
+    );
+
+    // Truncation never splits a multi-byte character.
+    let wide = bounded_failure_reason(&"é".repeat(400));
+    assert!(wide.is_char_boundary(wide.len() - 3), "{}", wide.len());
+}

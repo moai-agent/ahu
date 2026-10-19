@@ -489,14 +489,25 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
         );
         let summary: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(summary["trials"][0]["terminal_status"], status);
-        let row: Value = std::fs::read_to_string(records)
+        let line = std::fs::read_to_string(records)
             .unwrap()
             .lines()
             .next()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .unwrap();
+            .unwrap()
+            .to_owned();
+        let row: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(row["terminal_status"], status);
         assert_eq!(row["failure_category"], category);
+        // Records live in the repository by default. A failed trial states why
+        // it failed without writing the operator's home directory or the layout
+        // of the out-of-repository artifact store into that file.
+        assert!(
+            !line.contains("eval-artifacts") && !line.contains(home.to_str().unwrap()),
+            "{mode} leaked a host artifact path into its record: {line}"
+        );
+        if let Some(reason) = row["failure_reason"].as_str() {
+            assert!(!reason.contains('/'), "{mode}: {reason}");
+        }
         // The harness's own outcome survives when it reported one, so a run that
         // ran out of time is not filed as a generic failure.
         assert_eq!(
