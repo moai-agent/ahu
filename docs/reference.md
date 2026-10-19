@@ -384,6 +384,45 @@ Configuration alone establishes neither a live MCP call nor OTel export;
 record actual tool outcomes and collector observations separately for the
 exact version, model, and execution mode tested.
 
+### Local invocation and completion evidence
+
+The 2026-10-19 documentation audit checked installed CLI versions/help and the
+current adapters. Three ahu-assigned Codex audit tasks executed local shell and
+file tools and produced changes, but were stopped before returning terminal
+reports; this is not evidence of successful task completion. Catalog observations
+from other versions remain separate. Help confirms option declarations, not
+admission, authentication, tool execution, or task acceptance. "Not observed"
+means this audit did not establish the result, not that the capability is absent.
+
+| Harness and mode | Locally checked invocation | Task/tool completion evidence | Approval/autonomy mapping | OTel export evidence |
+| --- | --- | --- | --- | --- |
+| Claude Code interactive | 2.1.302 `claude --help`; no session launched | No current-version task or tool completion observed | `prompt` adds no approval flag; `accept-edits` uses `--permission-mode acceptEdits`; `auto` uses `--permission-mode auto` | Not observed |
+| Claude Code headless | 2.1.302 help advertises print, stream JSON, and permission controls; synthetic invocation profile only | No authenticated 2.1.302 completion observed; the catalog records prompt completion/usage on 2.1.283 | Same permission modes, plus `--permission-prompts none`; non-managed hooks turned off by the exact-version profile | Not observed |
+| Codex interactive | 0.163.0 help and three ahu audit task sessions with `gpt-6-astra` | Instructions were received and local shell/file tools ran, but the sessions were stopped before a terminal task result | `auto` passes `--ask-for-approval never --sandbox workspace-write`; `accept-edits` uses `--approve-for-me`; `prompt` retains native policy | Collector receipt not inspected |
+| Codex headless | 0.163.0 `codex exec --help`; no batch session launched | No 0.163.0 batch completion observed; 0.160.0 has recorded live MCP decision/answer completion | `approval_policy="never"`; `prompt` uses read-only, `auto` workspace-write; fresh `accept-edits` uses `--approve-for-me`, resume refuses it | Not observed on 0.163.0; catalog records collector export on 0.160.0 |
+| Antigravity interactive | 1.4.2 `agy --help`; catalog separately records startup on 1.4.2 | Startup evidence does not establish a completed task or successful tool call | `prompt` retains native policy; `accept-edits` uses `--mode accept-edits`; `auto` uses `--dangerously-skip-permissions` | Not observed |
+| Antigravity headless | 1.4.2 help advertises `--print`, stream JSON, and print timeout; no batch session launched | 1.4.2 task/tool completion remains unverified | Same permission flags; unresolved hooks/extensions can refuse admission | Not observed |
+| OpenCode interactive | Coordinator inspected installed 2.0.32 `mini --help` and its task-directory routine; no session launched | No fresh completion observed; prior 2.0.32 startup uses `prompt` | 2.x `mini` refuses `auto`; both modes refuse `accept-edits`; `prompt` retains native policy | Not observed |
+| OpenCode headless | Coordinator inspected installed 2.0.32 `run --help`; argument and working-directory selection covered by fixtures | No fresh batch completion observed; catalog batch evidence remains on 1.x | `auto` adds `--auto`; 2.x uses `--standalone`, with task directory pinned through the working directory and `PWD`; native-state admission remains separate | Not observed |
+| Kiro interactive | 2.32.0 version and `chat --v3 --help`; no session launched | No 2.32.0 task/tool completion observed; catalog interactive evidence remains on 2.28.0 | `prompt` retains native policy; `auto` adds `--trust-all-tools`; `accept-edits` refused | Not observed |
+| Kiro headless | 2.32.0 help advertises batch flags, but this checkout's configuration inspection admits only 2.28.0/2.29.0 | No 2.32.0 task/tool completion observed; help does not override the version refusal | `--no-interactive --output-format stream-json --require-mcp-startup`; same permission mapping, subject to admission | Not observed; native Kiro export is separate from ahu/MCP attribution |
+
+These mappings describe ahu's arguments, not the effective permissions of every
+tool. Native settings still apply. Manifest-requested widening requires ahu's
+explicit opt-in; it does not resolve headless isolation refusals. A successful
+shell command does not prove MCP access, and neither proves collector receipt.
+The [release telemetry guide](otel-release-report.md) describes separate
+task/attempt-attributed export checks. Adapter and loopback transport fixtures
+exercise synthetic events, not authenticated provider completion.
+
+Readiness and budget observations are local and time-sensitive, so this public
+reference does not publish account identities, binding states, or capacity
+figures. Use `ahu auth readiness` and `ahu auth budget --output json` for current
+secret-free status. Unsupported capacity signals remain unknown; these checks
+do not establish model entitlement or live task success. No native account,
+configuration, or approval settings were changed to obtain the observations in
+this audit.
+
 Git worktrees provide a branch and working directory, not OS confinement.
 Approval settings and headless native-configuration checks are separate from
 filesystem, process, and network restrictions. Follow the
@@ -1114,6 +1153,7 @@ amount can be incomplete. See the [Claude Code usage and limits guide](https://s
 | Claude Code | Result token usage and `total_cost_usd` for the headless invocation; API-request events have request scope. | Headless `--output-format stream-json`; result is fresh at invocation completion, request usage when its event arrives. | Documented result/usage and monitoring interfaces; adapter covered by protocol fixtures. | USD is harness-reported and may differ from account billing. Subscription/account quota is unknown to ahu; interactive `/usage` is not ingested. |
 | Antigravity CLI | `step_update` usage is per event; terminal `result.usage` is invocation-scoped. Cost is unavailable. | Headless `--output-format stream-json`; observed as steps arrive and, when present, at the terminal result. | Documented NDJSON schema; adapter covered by protocol fixtures. | Cost and quota are unknown to ahu. Interactive `/usage` and `/credits` are not ingested. A missing terminal result leaves task completion evidence incomplete even when step usage was observed. The documented interactive `statusLine` callback provides quota fractions and reset fields, alongside email, workspace and transcript metadata. ahu has no reviewed opt-in bridge binding those callbacks to the active account, project and observation lifetime. Raw callback payloads must not be retained or exported, and existing callbacks must not be overwritten. Antigravity quota remains unsupported; this does not establish that a safe future bridge is impossible. |
 | OpenCode | `step_finish` token usage and `cost`, per model step. | Headless `opencode run --format json`; fresh when each step event arrives. | Documented JSON run events; adapter covered by protocol fixtures. | Cost is an engine/provider-model amount, not billing proof; a missing final event can make the sum incomplete. Quota is unknown; `opencode stats` may include other sessions and is not ingested. |
+| Kiro CLI V3 | Session-info prompt-completion credits/elapsed time and context-window percentages; partial current-attempt observations. | Headless `chat --v3 --no-interactive --output-format stream-json`; live markers exclude replay from accounting. | Session-event parser and deduplication covered by protocol fixtures; see [Kiro metering](#kiro-cli). | Credits are not tokens or USD, and context percentage is not account quota. Missing values, full session/helper usage, USD, and remaining quota stay unknown. |
 
 This matrix describes documented, machine-readable information that ahu can
 collect without scraping a terminal UI, reading harness databases, or deriving
