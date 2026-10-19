@@ -708,13 +708,14 @@ fn a_proposed_manifest_round_trips_through_the_loader() {
 /// Updating a verified harness version moves the catalog revision, and a
 /// project pinned to the previous one stops rather than being upgraded for free.
 ///
-/// That is the point of the pin: catalog `2026-10-09` adds the Kiro 2.28.0
+/// That is the point of the pin: catalog `2026-10-19` adds current harness
+/// compatibility evidence while preserving project selection behavior.
 /// headless compatibility check. Changing which catalog a project uses is a
 /// project decision, made by editing `catalog_version`, not a side effect of
 /// installing a newer ahu.
 #[test]
 fn a_project_pinned_to_the_previous_catalog_is_stopped_not_upgraded() {
-    assert_eq!(catalog::CATALOG_VERSION, "2026-10-09");
+    assert_eq!(catalog::CATALOG_VERSION, "2026-10-19");
 
     let error = catalog::require_version("2026-09-27")
         .expect_err("a superseded pin must not be silently accepted")

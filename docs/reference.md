@@ -379,6 +379,11 @@ required; version-specific isolation controls and native-helper policies remain
 separate checks. Unknown native integrations can still prevent launch or resume.
 No failure selects a fallback harness or model.
 
+Interactive compatibility is tracked separately: Ahu inspects the installed
+OpenCode CLI and uses `opencode mini` on 2.0.32 to keep the session persistent
+with the exact model and prompt. That version is not included among the
+validated OpenCode batch versions above.
+
 OpenCode's batch form is `opencode run --format json`; its permission mapping is
 the interactive one, so `permissions = "accept-edits"` is refused here too. See
 [OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models) for
@@ -2342,7 +2347,7 @@ compatibility evidence, not an allowlist or a claim that newer versions or
 account entitlements were tested. Where multiple harness installations exist,
 ahu uses the one its own resolution picks; it does not search for a version that
 matches the catalog. An exact project pin can make that choice reproducible.
-Project configuration pins catalog `2026-10-09`; a mismatch is an error.
+Project configuration pins catalog `2026-10-19`; a mismatch is an error.
 
 Persisted task records use schema 5, including the frozen `session_host` binding
 and `waiting-for-approval` state, with hyphenated `UUID v7` IDs. Schemas 3 and 4

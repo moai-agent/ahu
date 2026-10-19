@@ -1,9 +1,9 @@
 //! The OpenCode adapter.
 //!
-//! Verified against OpenCode 1.18.29 and 1.18.30 on 2026-09-13 using the
-//! installed CLI's own `--help`, `opencode agent list`, `opencode models`, and
-//! live probes. The install replaced itself in place between those two
-//! versions during verification, which is why the catalog entry names both.
+//! OpenCode 1.x behavior was live-probed on 1.18.29 and 1.18.30. On 2026-10-19,
+//! 2.0.32 help and interactive startup were checked against the installed CLI.
+//! Headless behavior remains verified only for the 1.x versions listed in the
+//! compatibility catalog.
 //!
 //! Native conventions this adapter defers to:
 //!   - the model is selected with `--model <provider>/<model>`, and OpenCode

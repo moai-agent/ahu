@@ -12,7 +12,7 @@ use crate::bail;
 use crate::util::Result;
 
 /// The catalog revision shipped with this ahu build.
-pub const CATALOG_VERSION: &str = "2026-10-09";
+pub const CATALOG_VERSION: &str = "2026-10-19";
 
 /// One capability a harness adapter has actually been validated to deliver.
 ///
@@ -307,9 +307,12 @@ pub const HARNESSES: &[HarnessEntry] = &[
         display_name: "Antigravity CLI",
         adapter_available: true,
         executable: "agy",
-        verified_versions: "1.2.2, 1.2.16",
+        verified_versions: "1.2.2, 1.2.16, 1.4.2",
         // 1.2.16: live headless implementation and decision eval tasks
         // completed with actual MCP calls and collector export on 2026-10-03.
+        // 1.4.2: installed CLI help, model discovery, and interactive startup
+        // checked on 2026-10-19. Headless behavior is not newly claimed; it
+        // remains verified only through 1.2.16.
         headless_verified_versions: &["1.2.2", "1.2.16"],
         enforces_model_for_session: false,
         features: &[
@@ -331,9 +334,10 @@ pub const HARNESSES: &[HarnessEntry] = &[
         display_name: "OpenCode",
         adapter_available: true,
         executable: "opencode",
-        // Both were checked on 2026-09-13; the install updated itself in place
-        // between the two probe runs, which is why the entry lists a pair.
-        verified_versions: "1.18.29, 1.18.30, 1.18.31, 1.18.32, 1.18.34",
+        // 1.x versions were checked on 2026-09-13 and later dates. OpenCode
+        // 2.0.32 `mini` help and interactive startup were checked on 2026-10-19;
+        // headless behavior is still claimed only for the listed 1.x versions.
+        verified_versions: "1.18.29, 1.18.30, 1.18.31, 1.18.32, 1.18.34, 2.0.32",
         // The batch surface was inspected on 1.18.30; 1.18.29 carries the same
         // `run` options and is the other version the catalog entry names.
         // 1.18.31 was live-probed on 2026-09-15: a fresh `run --format json`

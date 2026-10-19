@@ -388,7 +388,9 @@ fn observed_versions_are_evidence_not_an_allowlist() {
         .collect();
     assert_eq!(
         verified,
-        vec!["1.18.29", "1.18.30", "1.18.31", "1.18.32", "1.18.34"]
+        vec![
+            "1.18.29", "1.18.30", "1.18.31", "1.18.32", "1.18.34", "2.0.32",
+        ]
     );
 
     // The current installed CLI floats by default. Only a missing or
@@ -406,7 +408,7 @@ fn observed_versions_are_evidence_not_an_allowlist() {
     for (harness, expected) in [
         ("claude-code", vec!["2.1.269", "2.1.283", "2.1.288"]),
         ("codex", vec!["0.154.0", "0.157.1", "0.160.0"]),
-        ("antigravity", vec!["1.2.2", "1.2.16"]),
+        ("antigravity", vec!["1.2.2", "1.2.16", "1.4.2"]),
     ] {
         let entry = ahu::catalog::harness(harness).expect("catalog entry");
         let versions: Vec<&str> = entry
