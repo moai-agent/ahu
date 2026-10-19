@@ -2268,9 +2268,8 @@ pub fn run(
                         .with_harness_version(harness_version(envelope));
                     print.skill_digest = skill_digest(envelope);
                 }
-                let harness_outcome = envelope
-                    .and_then(|value| value.get("outcome"))
-                    .and_then(serde_json::Value::as_str);
+                let harness_outcome =
+                    projected_outcome(envelope.and_then(|value| value.get("outcome")));
                 let status = match harness_outcome {
                     Some("timed_out") => "candidate_timed_out",
                     Some("cancelled") => "candidate_cancelled",
@@ -2621,10 +2620,9 @@ pub fn run(
         put("answer_status", "scored".into());
         put(
             "outcome",
-            candidate_result
-                .get("outcome")
-                .cloned()
-                .unwrap_or_else(|| "unknown".into()),
+            projected_outcome(candidate_result.get("outcome"))
+                .unwrap_or("unknown")
+                .into(),
         );
         put("score", score.map_or(serde_json::Value::Null, number));
         put("passed", passed.into());
@@ -2929,6 +2927,42 @@ fn base_fields(
     fields.insert("agent_index".into(), (trial.agent_index + 1).into());
     fields.insert("run_index".into(), trial.run_index.into());
     fields
+}
+
+/// The terminal outcomes a headless attempt result can report.
+///
+/// The same set `headless::review::validate_result` accepts. A non-terminal
+/// label such as `running` or `interrupted` is not a result outcome and is not
+/// projected onto a record as one.
+const HEADLESS_OUTCOMES: [&str; 7] = [
+    "succeeded",
+    "failed",
+    "cancelled",
+    "timed_out",
+    "capture_failed",
+    "boundary_violation",
+    "supervisor_error",
+];
+
+/// The attempt outcome an envelope reported, as one of the strings a record may
+/// carry, or `None` when it reported none.
+///
+/// An envelope is harness-shaped input, and its outcome is the one short label
+/// copied from it onto a record. A value that is not a recognized outcome is
+/// reported as `"unknown"` rather than copied, so no free-form string -- a host
+/// path among them -- reaches a record through this field.
+fn projected_outcome(value: Option<&serde_json::Value>) -> Option<&'static str> {
+    let value = value.filter(|value| !value.is_null())?;
+    Some(
+        value
+            .as_str()
+            .and_then(|outcome| {
+                HEADLESS_OUTCOMES
+                    .into_iter()
+                    .find(|known| *known == outcome)
+            })
+            .unwrap_or("unknown"),
+    )
 }
 
 /// How a trial ended, and why, when it did not end cleanly.
@@ -3356,12 +3390,7 @@ fn launch_eval_agent_inner(
     {
         bail!(
             "eval agent {agent} did not complete successfully ({}); inspect the external run result for its task outcome",
-            display_safe(
-                result
-                    .get("outcome")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("no outcome reported")
-            )
+            projected_outcome(result.get("outcome")).unwrap_or("no outcome reported")
         );
     }
     Ok(result)
@@ -3500,6 +3529,65 @@ fn insert_trajectory_fields(
     Ok(())
 }
 
+/// The metric names a launch envelope may contribute to a record.
+///
+/// ahu's own local-metrics projection writes exactly these; the envelope is
+/// otherwise harness-shaped input whose remaining keys and values are free form.
+/// Records default to the primary checkout's ignored `.ahu/evals/`, so an
+/// unrecognized name is dropped rather than copied there.
+const ENVELOPE_METRICS: [&str; 7] = [
+    "ahu.tokens.input",
+    "ahu.tokens.output",
+    "ahu.tokens.cached",
+    "ahu.tokens.cache_write",
+    "ahu.tokens.reasoning",
+    "ahu.tokens.total",
+    "ahu.cost.harness_reported_usd",
+];
+
+/// One envelope metric, rebuilt from the bounded shapes a record may hold.
+///
+/// `{"kind": "observed", "value": n}` is the local-metrics measurement,
+/// `{"kind": "unavailable"}` is a field the harness named but never measured,
+/// and a bare number is the bare-amount form a projecting helper writes. Each
+/// is rebuilt from what it stated rather than cloned, so a sibling key on the
+/// object never reaches the record.
+///
+/// The amount a name may carry is the one its recorder writes: a token count is
+/// a non-negative integer, and only the harness-reported cost is a finite,
+/// non-negative float, under `observed_float`. Anything else is not that
+/// measurement and is dropped.
+fn envelope_metric(name: &str, value: &serde_json::Value) -> Option<serde_json::Value> {
+    let cost = name.starts_with("ahu.cost.");
+    let amount = |value: Option<&serde_json::Value>| {
+        let value = value?;
+        let valid = if cost {
+            value
+                .as_f64()
+                .is_some_and(|amount| amount.is_finite() && amount >= 0.0)
+        } else {
+            value.as_u64().is_some()
+        };
+        valid.then(|| value.clone())
+    };
+    match value {
+        serde_json::Value::Number(_) => amount(Some(value)),
+        serde_json::Value::Object(fields) => match fields.get("kind")?.as_str()? {
+            "observed_float" if cost => Some(serde_json::json!({
+                "kind": "observed_float",
+                "value": amount(fields.get("value"))?,
+            })),
+            "observed" => Some(serde_json::json!({
+                "kind": "observed",
+                "value": amount(fields.get("value"))?,
+            })),
+            "unavailable" => Some(serde_json::json!({"kind": "unavailable"})),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Everything one attempt reported about token usage, from both of its sources.
 ///
 /// The harness's own counters come from the launch envelope; the decision
@@ -3512,11 +3600,20 @@ fn reported_tokens(
     envelope: Option<&serde_json::Value>,
     telemetry: Option<&crate::eval_otel::TaskTelemetry>,
 ) -> Option<serde_json::Value> {
-    let mut tokens = envelope
+    let mut tokens = serde_json::Map::new();
+    if let Some(values) = envelope
         .and_then(|value| value.pointer("/metrics/values"))
         .and_then(serde_json::Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    {
+        for name in ENVELOPE_METRICS {
+            if let Some(metric) = values
+                .get(name)
+                .and_then(|value| envelope_metric(name, value))
+            {
+                tokens.insert(name.to_owned(), metric);
+            }
+        }
+    }
     if let Some(amount) = envelope
         .and_then(|value| value.pointer("/harness/cost/usd"))
         .and_then(serde_json::Value::as_f64)

@@ -1350,7 +1350,7 @@ fn evaluator_agent_joins_only_its_owned_task_and_attempt_including_failures() {
         &decision
     ));
     let mut observation = decision::Observation::new("agent");
-    let mut envelope = serde_json::json!({"task_id":"judge-task", "attempt":2, "outcome":"failed", "metrics":{"values":{"input":{"kind":"observed", "value":42}, "output":{"kind":"unavailable"}}}});
+    let mut envelope = serde_json::json!({"task_id":"judge-task", "attempt":2, "outcome":"failed", "metrics":{"values":{"ahu.tokens.input":{"kind":"observed", "value":42}, "ahu.tokens.output":{"kind":"unavailable"}}}});
     observe_evaluator_agent(&mut observation, &envelope, &receiver).unwrap();
     assert_eq!(observation.task_id.as_deref(), Some("judge-task"));
     assert_eq!(observation.attempt, Some(2));
@@ -1362,10 +1362,14 @@ fn evaluator_agent_joins_only_its_owned_task_and_attempt_including_failures() {
         observation.telemetry.as_ref().unwrap()["evaluator_decision_errors"],
         1
     );
-    assert_eq!(observation.reported_tokens["input"]["value"], 42);
+    assert_eq!(observation.reported_tokens["ahu.tokens.input"]["value"], 42);
     let summary = decision::Summary::collect([(Some(&observation), Some(100.0))].into_iter());
-    assert_eq!(summary.means["evaluator_agent.input"], 42.0);
-    assert!(!summary.means.contains_key("evaluator_agent.output"));
+    assert_eq!(summary.means["evaluator_agent.ahu.tokens.input"], 42.0);
+    assert!(
+        !summary
+            .means
+            .contains_key("evaluator_agent.ahu.tokens.output")
+    );
     assert!(observation.validate());
 }
 
@@ -1978,4 +1982,187 @@ fn recorded_failure_reasons_drop_host_paths_and_stay_bounded() {
     // Truncation never splits a multi-byte character.
     let wide = bounded_failure_reason(&"é".repeat(400));
     assert!(wide.is_char_boundary(wide.len() - 3), "{}", wide.len());
+}
+
+#[test]
+fn envelope_metrics_are_projected_by_name_and_shape() {
+    let envelope = serde_json::json!({
+        "metrics": {"values": {
+            // Supported names and shapes, including a sibling key the record
+            // must not inherit from the envelope's object.
+            "ahu.tokens.input":
+                {"kind": "observed", "value": 120, "note": "/Users/fixture/eval-artifacts"},
+            "ahu.tokens.output": 40,
+            "ahu.tokens.total": {"kind": "unavailable"},
+            "ahu.cost.harness_reported_usd": {"kind": "observed_float", "value": 0.0125},
+            // Unrecognized names, whatever they carry.
+            "artifact_dir": "/Users/fixture/eval-artifacts/run-1",
+            "ahu.tokens.input_tokens": {"kind": "observed", "value": 7},
+            "harness.notes": {"path": "/Users/fixture/home"},
+            // Recognized names whose values are not the measurement the name
+            // carries: a token count is a non-negative integer, and only the
+            // harness-reported cost is a float.
+            "ahu.tokens.cached": {"kind": "observed", "value": "/Users/fixture/run"},
+            "ahu.tokens.cache_write": {"kind": "spoofed", "value": 7},
+            "ahu.tokens.reasoning": -3,
+        }},
+    });
+    let projected = super::reported_tokens(Some(&envelope), None).expect("projects its metrics");
+    assert_eq!(
+        projected,
+        serde_json::json!({
+            "ahu.tokens.input": {"kind": "observed", "value": 120},
+            "ahu.tokens.output": 40,
+            "ahu.tokens.total": {"kind": "unavailable"},
+            "ahu.cost.harness_reported_usd": {"kind": "observed_float", "value": 0.0125},
+        })
+    );
+    let text = projected.to_string();
+    assert!(
+        !text.contains("eval-artifacts") && !text.contains('/'),
+        "{text}"
+    );
+
+    // A token count that is not a non-negative integer is not a count, whether
+    // it arrived bare or under a measurement kind, and a float-kinded token is
+    // not a shape any recorder writes.
+    for value in [
+        serde_json::json!(1.5),
+        serde_json::json!(-3),
+        serde_json::json!({"kind": "observed", "value": 1.5}),
+        serde_json::json!({"kind": "observed", "value": -3}),
+        serde_json::json!({"kind": "observed_float", "value": 7.0}),
+        serde_json::json!({"kind": "observed_float", "value": 7}),
+        serde_json::json!({"kind": "observed"}),
+        serde_json::json!("12"),
+    ] {
+        assert!(
+            super::reported_tokens(
+                Some(&serde_json::json!({"metrics": {"values": {"ahu.tokens.total": value}}})),
+                None,
+            )
+            .is_none(),
+            "{value}"
+        );
+    }
+
+    // The harness-reported cost is the one float amount, and it is still finite
+    // and non-negative.
+    assert_eq!(
+        super::reported_tokens(
+            Some(&serde_json::json!({"metrics": {"values": {
+                "ahu.cost.harness_reported_usd": {"kind": "observed_float", "value": 0.0075},
+            }}})),
+            None,
+        )
+        .expect("projects the cost")["ahu.cost.harness_reported_usd"],
+        serde_json::json!({"kind": "observed_float", "value": 0.0075})
+    );
+    for value in [
+        serde_json::json!({"kind": "observed_float", "value": -0.01}),
+        serde_json::json!({"kind": "observed_float", "value": "0.01"}),
+        serde_json::json!(-0.01),
+    ] {
+        assert!(
+            super::reported_tokens(
+                Some(&serde_json::json!({"metrics": {"values": {
+                    "ahu.cost.harness_reported_usd": value,
+                }}})),
+                None,
+            )
+            .is_none(),
+            "{value}"
+        );
+    }
+
+    // An envelope that reported nothing recognizable reports nothing at all,
+    // rather than a record field holding its unrecognized keys.
+    assert!(
+        super::reported_tokens(
+            Some(&serde_json::json!({
+                "metrics": {"values": {"artifact_dir": "/Users/fixture/eval-artifacts"}},
+            })),
+            None,
+        )
+        .is_none()
+    );
+    assert!(
+        super::reported_tokens(
+            Some(&serde_json::json!({"metrics": {"values": "/Users/fixture"}})),
+            None,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn decision_service_usage_survives_envelope_metric_projection() {
+    let telemetry = crate::eval_otel::TaskTelemetry {
+        decision_input_tokens: Some(120),
+        decision_output_tokens: Some(20),
+        selection_input_tokens: Some(9),
+        selection_output_tokens: Some(3),
+        ..Default::default()
+    };
+    let envelope = serde_json::json!({
+        "metrics": {"values": {"ahu.tokens.total": {"kind": "observed", "value": 800}}},
+        "harness": {"cost": {"usd": 0.004}},
+    });
+    let projected =
+        super::reported_tokens(Some(&envelope), Some(&telemetry)).expect("projects both sources");
+    assert_eq!(
+        projected,
+        serde_json::json!({
+            "ahu.tokens.total": {"kind": "observed", "value": 800},
+            "ahu.cost.harness_reported_usd": {"kind": "observed_float", "value": 0.004},
+            "decision_service.input": 120,
+            "decision_service.output": 20,
+            "skill_selection_service.input_known": 9,
+            "skill_selection_service.output_known": 3,
+        })
+    );
+
+    // The service's own usage is still recorded for an attempt whose harness
+    // reported no metrics at all.
+    assert_eq!(
+        super::reported_tokens(None, Some(&telemetry)).expect("projects service usage")["decision_service.input"],
+        120
+    );
+}
+
+#[test]
+fn only_known_headless_outcomes_reach_a_record() {
+    for outcome in super::HEADLESS_OUTCOMES {
+        assert_eq!(
+            super::projected_outcome(Some(&serde_json::Value::from(outcome))),
+            Some(outcome),
+            "{outcome}"
+        );
+    }
+    for reported in [
+        // Non-terminal lifecycle labels are not result outcomes.
+        serde_json::json!("running"),
+        serde_json::json!("interrupted"),
+        serde_json::json!("started"),
+        serde_json::json!("/Users/fixture/eval-artifacts/run-1"),
+        serde_json::json!("succeeded\u{1b}[2K"),
+        serde_json::json!(""),
+        serde_json::json!(7),
+        serde_json::json!({"outcome": "succeeded"}),
+        serde_json::json!(["succeeded"]),
+    ] {
+        assert_eq!(
+            super::projected_outcome(Some(&reported)),
+            Some("unknown"),
+            "{reported}"
+        );
+    }
+
+    // An envelope that reported no outcome is not an envelope that reported an
+    // unknown one: the caller keeps whatever its own terminal status stated.
+    assert_eq!(super::projected_outcome(None), None);
+    assert_eq!(
+        super::projected_outcome(Some(&serde_json::Value::Null)),
+        None
+    );
 }

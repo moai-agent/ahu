@@ -505,9 +505,15 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
             !line.contains("eval-artifacts") && !line.contains(home.to_str().unwrap()),
             "{mode} leaked a host artifact path into its record: {line}"
         );
-        if let Some(reason) = row["failure_reason"].as_str() {
-            assert!(!reason.contains('/'), "{mode}: {reason}");
-        }
+        // Every failing path records why it failed, so this check is never
+        // satisfied by an absent field.
+        let reason = row["failure_reason"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{mode} did not record a string failure reason: {row}"));
+        assert!(
+            !reason.contains('/') && !reason.contains('\\'),
+            "{mode}: {reason}"
+        );
         // The harness's own outcome survives when it reported one, so a run that
         // ran out of time is not filed as a generic failure.
         assert_eq!(
