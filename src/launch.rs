@@ -1417,8 +1417,8 @@ fn run_verified_task(
                 },
             )
             .env("AHU_TASK_ID", &record.task_id)
-            .env("AHU_TASK_DIR", task_dir)
-            .current_dir(&record.worktree);
+            .env("AHU_TASK_DIR", task_dir);
+        harness::configure_task_directory(&mut command, &record.identity.harness, &record.worktree);
         crate::telemetry::configure_child(
             &mut command,
             &telemetry,

@@ -413,10 +413,12 @@ OpenCode CLI and uses `opencode mini` on 2.0.32 to keep the session persistent
 with the exact model and prompt. That version is not included among the
 validated OpenCode batch versions above.
 
-OpenCode's batch form uses `opencode run --format json --model <provider/model>
---dir <task-worktree>`. The adapter also adds `--standalone` on 2.x to request a
-private server; this argument mapping does not establish live 2.x batch
-compatibility. Batch `auto` adds `--auto`; `permissions = "accept-edits"` is
+OpenCode's batch form uses `opencode run --format json --model <provider/model>`.
+The 1.x adapter adds `--dir <task-worktree>`. On 2.x it omits the removed `--dir`
+option and adds `--standalone` to request a private server. OpenCode task launches
+set both the process working directory and `PWD` to the task worktree because
+2.x prefers `PWD` in both `mini` and `run`. This argument mapping does not establish
+live 2.x batch compatibility. Batch `auto` adds `--auto`; `permissions = "accept-edits"` is
 refused. These checks are separate from interactive `mini` admission. See
 [OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models) for
 provider setup. Recorded compatibility does not establish authentication,
@@ -1341,11 +1343,11 @@ resolution picks and reports it, and it does not go looking for a different one.
 Interactive launches (including `ahu opencode` and interactive dry runs) also
 check top-level `--help` output from the resolved program for the model, prompt,
 and approval flags the command needs. OpenCode 2.0.32 lacks top-level `--model`, so
-ahu refuses model-pinned interactive launches with a compatibility diagnostic.
-It does not drop the model pin or substitute `run`, which is a one-shot command.
-The v2 `mini` interface advertises `--model` and `--prompt` but no `--auto`; ahu
-does not substitute that interface either. The existing default interactive
-shape remains available with compatible 1.x command-line versions.
+ahu checks `mini --help` and uses that persistent interface for `prompt` permissions.
+The v2 `mini` interface advertises `--model` and `--prompt` but rejects `--auto`;
+ahu refuses interactive `auto` launches without dropping the requested approval
+control or substituting one-shot `run`. The existing default interactive shape
+remains available with compatible 1.x command-line versions.
 
 Explicit `--headless` tasks retain `opencode run --format json --model ...`
 with a positional message and `--auto` only for automatic approvals. The
