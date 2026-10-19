@@ -359,6 +359,38 @@ Commands return these exit codes:
 | `4` | Missing prerequisite, such as Git repository, harness, or cmux. |
 | `5` | Run failure, including invalid persisted configuration. |
 
+## Harness compatibility by execution mode
+
+All five harnesses have interactive and headless adapters. The
+[catalog](../src/catalog.rs), [interactive adapters](../src/harness/mod.rs),
+and [batch command builder](../src/headless.rs) describe different evidence
+and controls for those modes. The catalog's recorded versions are:
+
+| Harness | Interactive evidence | Headless evidence | Limits and refusals |
+| --- | --- | --- | --- |
+| Codex | 0.154.0, 0.157.1, 0.160.0 | 0.154.0, 0.155.1, 0.157.1, 0.160.0 | Fresh runs and native resume have separate argument mappings. Headless `accept-edits` resume is refused. Versions 0.157.1 and 0.160.0 require native metadata inspection. |
+| Claude Code | 2.1.269, 2.1.283, 2.1.288 | 2.1.269, 2.1.270, 2.1.283 | Hook-control profiles also exist for 2.1.288, 2.1.289, and 2.1.302; these do not extend authenticated headless evidence. Bounded native helpers require 2.1.270. |
+| Antigravity CLI | 1.2.2, 1.2.16, 1.4.2 | 1.2.2, 1.2.16 | The 1.4.2 record covers help, model discovery, and interactive startup; headless behavior on that version remains unverified. Unresolved hooks/extensions refuse headless admission. |
+| OpenCode | 1.18.29, 1.18.30, 1.18.31, 1.18.32, 1.18.34, 2.0.32 | 1.18.29, 1.18.30, 1.18.31, 1.18.32 | The 2.0.32 record covers `mini` help and interactive startup with `prompt` permissions. Interactive `auto` is refused on that interface; `accept-edits` is refused in both modes. Headless 2.0.32 remains unverified. |
+| Kiro CLI V3 | 2.28.0 | 2.28.0, 2.29.0 | The 2.29.0 catalog entry covers headless and native configuration, not interactive verification. Headless configuration inspection refuses versions other than these two. `accept-edits` and bounded native helpers are refused. |
+
+These records are scoped observations, not proof of every permission mode,
+tool, skill, model entitlement, or integration. In particular, interactive
+startup does not establish task completion. A raw harness probe does not
+establish admission through ahu. See the [skill verification notes](skill-verification.md)
+for separate discovery and invocation evidence, and the
+[conformance evidence](#conformance-evidence) for inspection and fixture limits.
+Configuration alone establishes neither a live MCP call nor OTel export;
+record actual tool outcomes and collector observations separately for the
+exact version, model, and execution mode tested.
+
+Git worktrees provide a branch and working directory, not OS confinement.
+Approval settings and headless native-configuration checks are separate from
+filesystem, process, and network restrictions. Follow the
+[agent Git workflow](agent-git-workflow.md) for worktree limits and release
+integration: task commits go through coordinator review into the release
+branch before the validated candidate is merged to `main`.
+
 ## Headless execution
 
 `ahu @agent --headless` runs the selected harness in batch mode without cmux, a PTY,
@@ -370,22 +402,22 @@ identity, capabilities, gaps, timeout, and coordination path without launching.
 Known cmux wrappers are refused; use the actual harness executable on `PATH`.
 
 Installed CLI versions float by default; `[harness_version_pins]` can require
-an exact version. The catalog records verified batch versions: Codex
-0.154.0/0.155.1/0.157.1/0.160.0, Claude Code 2.1.269/2.1.270/2.1.283,
-Antigravity CLI 1.2.2/1.2.16, and OpenCode
-1.18.29/1.18.30/1.18.31/1.18.32. These are evidence records,
-not an allowlist. A supported adapter and a readable semantic version are
+an exact version. The [recorded batch versions](#harness-compatibility-by-execution-mode)
+are evidence records, not an allowlist. A supported adapter and a readable semantic version are
 required; version-specific isolation controls and native-helper policies remain
 separate checks. Unknown native integrations can still prevent launch or resume.
 No failure selects a fallback harness or model.
 
-Interactive compatibility is tracked separately: Ahu inspects the installed
+Interactive compatibility is tracked separately: ahu inspects the installed
 OpenCode CLI and uses `opencode mini` on 2.0.32 to keep the session persistent
 with the exact model and prompt. That version is not included among the
 validated OpenCode batch versions above.
 
-OpenCode's batch form is `opencode run --format json`; its permission mapping is
-the interactive one, so `permissions = "accept-edits"` is refused here too. See
+OpenCode's batch form uses `opencode run --format json --model <provider/model>
+--dir <task-worktree>`. The adapter also adds `--standalone` on 2.x to request a
+private server; this argument mapping does not establish live 2.x batch
+compatibility. Batch `auto` adds `--auto`; `permissions = "accept-edits"` is
+refused. These checks are separate from interactive `mini` admission. See
 [OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models) for
 provider setup. Recorded compatibility does not establish authentication,
 provider availability, or full native-helper lifecycle validation.
@@ -468,13 +500,15 @@ other launch checks.
 | Harness | Required native isolation evidence |
 | --- | --- |
 | Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Versions 0.157.1 and 0.160.0 additionally require native effective metadata inspection with no warnings or managed requirements, and turn off optional plugins for the invocation. Other versions retain unresolved plugin, cloud, and managed-source checks. |
-| OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; authentication/account stores, declared modules, and substitutions remain unresolved. |
+| OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; declared modules and substitutions remain unresolved. Opaque authentication/account stores refuse admission unless the project explicitly trusts native state as described above. |
 | Claude Code | Direct executable avoids the cmux wrapper. Versions 2.1.283, 2.1.288, 2.1.289 and 2.1.302 turn off parsed non-managed hooks for the invocation. Enabled plugins, malformed settings, and unresolved managed sources still refuse admission. |
 | Antigravity | Absent inspected hooks. Custom hooks, extensions, and overrides remain unverified. |
+| Kiro | V3 2.28.0/2.29.0 and the inspected subset of native agents and CLI preferences. Unknown formats/fields, nonempty hooks, extensions, Powers, workflows, cloud configuration, and environment indirection are refused. See [Kiro CLI](#kiro-cli). |
 
-Unknown or unsafe integrations have no operator bypass, including with
-`--allow-widened-approvals`. Use interactive cmux execution while resolving native
-sources with their owner; it retains the normal approval and launch checks.
+Apart from the explicit OpenCode native-state trust setting, unknown or unsafe
+integrations have no operator bypass, including with
+`--allow-widened-approvals`. Interactive execution uses the current terminal or
+an explicitly selected session host and retains normal approval and launch checks.
 ahu does not remove credentials, rewrite native settings, or treat interactive
 availability as headless isolation. New compatibility claims require validation
 before the catalog records a version as verified. Evidence is bounded local
@@ -2142,12 +2176,12 @@ remain tied to their reviewed versions.
 | --- | --- | --- |
 | Native artifact/source inspection | Exact command/plugin fingerprints, declared settings, guards, and installer arguments | Effective trust, actual hook activation, native event delivery, and unknown builds |
 | Synthetic fixtures | Parser, refusal, environment filtering, and fixed-argv behavior under controlled inputs | Actual native harness behavior |
-| Real PTY tests | Terminal ownership, stdin/signal handling, restoration, and cancellation with test processes | Four-harness terminal interface/session conformance |
-| Live cmux plumbing tests | Group/workspace operations and focus behavior with harmless startup processes | Native hooks or four-harness provider sessions |
+| Real PTY tests | Terminal ownership, stdin/signal handling, restoration, and cancellation with test processes | Live harness terminal interface/session conformance |
+| Live cmux plumbing tests | Group/workspace operations and focus behavior with harmless startup processes | Native hooks or harness provider sessions |
 | Scoped native Codex hook no-op probes | Reviewed hook behavior under the probed hook-off/absent-surface conditions | A live Codex conversation or equivalence with the other harnesses |
 
 The status report deliberately labels its evidence `locally_inspected;
-live_untested`. Do not infer four-harness live conformance from installation,
+live_untested`. Do not infer live harness conformance from installation,
 static inspection, PTY coverage, or cmux plumbing.
 
 ## Committed agent context and evaluation
@@ -2415,7 +2449,7 @@ happens next is the harness's own default, and the harnesses do not agree:
 | Manifest `permissions` | OpenCode | Effect |
 | --- | --- | --- |
 | `prompt` | no flag passed | OpenCode's own permission configuration decides. Its defaults allow most tools outright, so an OpenCode agent can edit files and run commands without asking. The built-in `build` agent's only `deny` rules are `question`, `plan_enter` and `plan_exit`; reads of `*.env` and `*.env.*` default to `ask`, not `deny`, and so do `doom_loop` and `external_directory`. |
-| `auto` | `--auto` | Approves every permission that is not explicitly denied. An `ask` rule is not a denial, so `--auto` approves it silently: with OpenCode's defaults that includes reading `*.env` and `*.env.*`, and reaching outside the project directory. If you need those refused rather than merely prompted, write a `deny` rule in your own OpenCode `permission` configuration; ahu does not add one. Still requires `--allow-widened-approvals`. |
+| `auto` | `--auto` on supported 1.x interactive versions; refused on 2.0.32 `mini` | Where supported, approves every permission that is not explicitly denied. An `ask` rule is not a denial, so `--auto` approves it silently: with OpenCode's defaults that includes reading `*.env` and `*.env.*`, and reaching outside the project directory. If you need those refused rather than merely prompted, write a `deny` rule in your own OpenCode `permission` configuration; ahu does not add one. Still requires `--allow-widened-approvals`. |
 | `accept-edits` | rejected | OpenCode has no accept-edits flag and its permission actions are static configuration, so ahu refuses the manifest instead of approximating the mode. No fallback to `prompt` or `auto` exists. |
 
 Readers arriving from Claude Code or Codex should not carry over the assumption
@@ -2748,9 +2782,11 @@ python3 scripts/check-kiro-compatibility.py \
 
 This consumes model credits and authorizes automatic tool approvals only for
 fixture agents that request them. The script creates an external repository
-under `/tmp`, exercises fresh execution with a real MCP call and observed export,
-resume, tool-error recovery, permission denial, timeout and cancellation, and
-writes its report outside the source checkout. It retains the fixture for
+under `/tmp` and attempts fresh execution, resume, tool-error recovery,
+permission denial, timeout and cancellation. The fresh-run row requires a
+successful `ahu_agents_list` MCP observation, captured MCP spans, a correct
+answer, and Kiro metering; merely starting the script or configuring MCP/OTel
+does not pass it. The script writes its report outside the source checkout and retains the fixture for
 inspection and attempts to stop its owned running tasks. A native profile in
 the fixture checks configuration admission; that row does not certify native
 helper invocation or isolation. Global native configuration and provider state
