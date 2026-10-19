@@ -240,6 +240,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn opencode_task_directory_overrides_stale_pwd_for_mini_and_run() {
+        // Static inspection of 2.0.32: both mini's iQd and run's gQd
+        // prefer process.env.PWD to process.cwd(), then chdir to that path.
+        // A Python fixture preserves the inherited PWD (a shell may repair it).
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("task directory");
+        std::fs::create_dir(&worktree).unwrap();
+        for interface in ["mini", "run"] {
+            for inherited in [root.path().to_path_buf(), root.path().join("missing")] {
+                let mut command = std::process::Command::new("python3");
+                command
+                    .args([
+                        "-c",
+                        "import os,sys; os.chdir(os.environ.get('PWD', os.getcwd())); assert os.path.samefile(os.getcwd(), sys.argv[2]), sys.argv[1]",
+                        interface,
+                    ])
+                    .arg(&worktree)
+                    .env("PWD", inherited);
+                crate::harness::configure_task_directory(&mut command, "opencode", &worktree);
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{interface}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn interactive_help_requires_each_requested_flag_as_a_declaration() {
         let args: Vec<_> = ["--model", "provider/model", "--auto", "--prompt", "task"]
             .into_iter()

@@ -2327,20 +2327,43 @@ fn assert_opencode_batch_profile(version: &str) {
             .expect("a prompting opencode batch launch");
     assert_eq!(prompting.program, "opencode");
     let standalone = version.starts_with("opencode v2");
+    if standalone {
+        // Synthetic CLI grammar from static inspection of 2.0.32's run
+        // declaration. Unlike 1.x, run has no --dir option. This executes no
+        // native OpenCode session and does not inspect native configuration.
+        let output = Command::new("python3")
+            .args([
+                "-c",
+                r#"import argparse, sys
+p = argparse.ArgumentParser()
+p.add_argument('command', choices=['run'])
+p.add_argument('--standalone', action='store_true')
+p.add_argument('--format', choices=['json'])
+p.add_argument('--model')
+p.add_argument('--auto', action='store_true')
+p.add_argument('--session')
+p.add_argument('message')
+p.parse_args()
+"#,
+            ])
+            .args(&prompting.args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "synthetic v2 CLI refused argv: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let mut expected: Vec<&str> = vec!["run"];
     if standalone {
         expected.push("--standalone");
     }
-    expected.extend([
-        "--format",
-        "json",
-        "--model",
-        "ollama/glm-5.3:cloud",
-        "--dir",
-        "/tmp",
-        "--",
-        "do the thing",
-    ]);
+    expected.extend(["--format", "json", "--model", "ollama/glm-5.3:cloud"]);
+    if !standalone {
+        expected.extend(["--dir", "/tmp"]);
+    }
+    expected.extend(["--", "do the thing"]);
     assert_eq!(prompting.args, expected);
     // The prompt is one argv element, and the stored command redacts exactly it.
     assert_eq!(prompting.prompt_arg, Some(prompting.args.len() - 1));

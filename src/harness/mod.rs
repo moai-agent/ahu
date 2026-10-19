@@ -61,6 +61,20 @@ pub struct LaunchCommand {
 /// Placeholder standing in for the prompt in a stored command.
 pub const REDACTED_PROMPT: &str = "<prompt: see prompt.txt>";
 
+/// Set the native task directory when launching a harness process.
+pub(crate) fn configure_task_directory(
+    command: &mut std::process::Command,
+    harness: &str,
+    cwd: &std::path::Path,
+) {
+    command.current_dir(cwd);
+    if harness == "opencode" {
+        // OpenCode 2's mini and run prefer PWD over process.cwd() and chdir
+        // there. Command::current_dir alone leaves the parent's PWD intact.
+        command.env("PWD", cwd);
+    }
+}
+
 impl LaunchCommand {
     /// The command with the prompt replaced by a placeholder, for storage and
     /// for display.

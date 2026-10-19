@@ -341,7 +341,9 @@ pub fn batch_command(
             // terminal step from the JSON stream. Ahu requires that explicit
             // terminal evidence before accepting a headless result.
             add(&["run"]);
-            if crate::harness::opencode::supports_standalone_run(&spec.harness_version) {
+            let standalone =
+                crate::harness::opencode::supports_standalone_run(&spec.harness_version);
+            if standalone {
                 add(&["--standalone"]);
             }
             add(&["--format", "json", "--model", request.model]);
@@ -351,10 +353,14 @@ pub fn batch_command(
             // task worktree. Verified on OpenCode 1.18.5 on 2026-10-14:
             // without it a worktree launch recorded directory=<repo root>;
             // with it the session recorded directory=<worktree>.
-            let Some(dir) = request.cwd.to_str() else {
-                bail!("OpenCode requires a UTF-8 task worktree path for --dir");
-            };
-            add(&["--dir", dir]);
+            // The 2.0.32 run declaration removed --dir. Its directory comes
+            // from PWD, pinned alongside cwd by configure_task_directory.
+            if !standalone {
+                let Some(dir) = request.cwd.to_str() else {
+                    bail!("OpenCode requires a UTF-8 task worktree path for --dir");
+                };
+                add(&["--dir", dir]);
+            }
             match request.permissions {
                 // As in the interactive adapter: OpenCode's permission actions
                 // are static configuration, its only permission flag widens,
@@ -2715,11 +2721,15 @@ fn run_attempt(
     let mut command = Command::new(&real);
     command
         .args(&rebuilt.args)
-        .current_dir(&record.worktree)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    crate::harness::configure_task_directory(
+        &mut command,
+        &record.identity.harness,
+        &record.worktree,
+    );
     sanitize(&mut command, Some(&cmux_integration.headless));
     let telemetry = crate::config::load(&record.worktree)?
         .map(|loaded| loaded.config.telemetry)
