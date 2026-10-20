@@ -1621,6 +1621,24 @@ context limits, or the identity used by a later inference request.
 | Manifest declares `accept-edits` | The manifest's `permissions` value | Refuses the manifest with an error and offers no substitute mode, interactively and headless alike. Declare `prompt` or `auto`. |
 | A headless launch reports no terminal event | The bounded result metadata and harness-owned session history | Scores a run only on OpenCode's own terminal step, never on its exit status: a refused tool call ends the run with exit 0. |
 
+OpenCode 2.0.32's bundled `run` implementation also has a completion-evidence
+gap for successful tools. After its session wait returns, the event consumer
+filters out events other than session execution events. Its message catch-up
+can emit completed tools and text, but does not emit `step_finish`; the
+execution-success event itself returns without emitting a JSON completion
+event. Consequently, a step-finish event not consumed before that filter takes
+effect can be absent from stdout even when catch-up reports completed work.
+This is a local source finding, not a reproduction of a particular provider
+run or proof of which timing occurred in it.
+
+Ahu requires a final `step_finish` with `part.reason = "stop"` after draining
+stdout. Completed tools, written files, native session success, and exit 0
+cannot replace that evidence. Synthetic pipe fixtures cover tool-only output,
+tool-call boundaries, explicit stops, and large tool payloads followed by a
+stop. Missing completion evidence remains a failed attempt; inspect the
+changes before explicitly resuming or retrying, since work may already have
+been performed. Successful headless completion on 2.0.32 remains unverified.
+
 ahu refuses its own failed preflight checks; provider failures surface through
 the harness. It never silently selects another model, provider, or harness,
 and a failed session does not remove the task's branch, worktree, or record.
