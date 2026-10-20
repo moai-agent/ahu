@@ -148,6 +148,158 @@ fn commit_binding(root: &Path) {
     );
 }
 
+fn offline_cli(root: &Path, args: &[&str]) -> Output {
+    common::ahu()
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("OTEL_SDK_DISABLED", "true")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn inert_git_source(marker: &Path) -> tempfile::TempDir {
+    let source = source();
+    let package = source.path().join("packages/fixture");
+    let manifest = package.join("ahu-plugin.md");
+    fs::write(
+        &manifest,
+        fs::read_to_string(&manifest).unwrap().replace(
+            "cargo_manifest: Cargo.toml\n",
+            "cargo_manifest: Cargo.toml\nentrypoint:\n  path: entry\n  protocol_version: 1\n  timeout_ms: 500\n",
+        ),
+    )
+    .unwrap();
+    write(
+        &package,
+        "entry",
+        &format!(
+            "#!/bin/sh\n: > {}\nexit 1\n",
+            common::shell_quoted(marker.to_str().unwrap())
+        ),
+    );
+    fs::set_permissions(package.join("entry"), fs::Permissions::from_mode(0o755)).unwrap();
+    commit(source.path());
+    source
+}
+
+#[test]
+fn local_git_cli_selects_exact_revision_and_subdirectory_and_inspects_offline() {
+    let markers = temp();
+    let marker = markers.path().join("executed");
+    let source = inert_git_source(&marker);
+    // Same-identity packages at the repository root and a sibling must not win.
+    package(source.path());
+    package(&source.path().join("packages/other"));
+    write(source.path(), "packages/fixture/selected", "pinned package");
+    commit(source.path());
+    let binding = binding(source.path());
+    let repo = project(&binding);
+    let cli = |args: &[&str]| offline_cli(repo.path(), args);
+    let pin = success(cli(&[
+        "plugins",
+        "digest",
+        source.path().join("packages/fixture").to_str().unwrap(),
+    ]));
+    assert_eq!(pin.trim(), binding.source.sha256);
+
+    // Neither a later commit nor dirty source bytes may replace the exact pin.
+    write(source.path(), "packages/fixture/selected", "new HEAD");
+    assert_ne!(commit(source.path()), binding.source.revision);
+    write(source.path(), "packages/fixture/selected", "dirty checkout");
+    // A different local repository in the policy worktree is not authority.
+    let decoy = self::source();
+    let mut uncommitted = binding.clone();
+    uncommitted.source = self::binding(decoy.path()).source;
+    save(repo.path(), &uncommitted);
+
+    let declared: serde_json::Value =
+        serde_json::from_str(&success(cli(&["plugins", "--project", "--output", "json"]))).unwrap();
+    assert_eq!(
+        declared["bindings"][0]["binding"]["source"],
+        serde_json::to_value(&binding.source).unwrap()
+    );
+    success(cli(&["plugins", "install", "fixture"]));
+    let paths = versions(repo.path());
+    assert_eq!(paths.len(), 1);
+    let installed = paths[0].join("package");
+    assert_eq!(
+        fs::read_to_string(installed.join("selected")).unwrap(),
+        "pinned package"
+    );
+    assert_eq!(
+        ahu::plugin_install::digest(&installed).unwrap(),
+        binding.source.sha256
+    );
+    assert!(!installed.join("packages").exists());
+    assert!(!paths[0].join("git").exists());
+    assert!(!marker.exists());
+
+    source.close().unwrap();
+    decoy.close().unwrap();
+    let inventory: serde_json::Value =
+        serde_json::from_str(&success(cli(&["plugins", "installed", "--output", "json"]))).unwrap();
+    let rows = inventory["installations"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["source"],
+        serde_json::to_value(&binding.source).unwrap()
+    );
+    assert_eq!(rows[0]["source_verified"], true);
+    assert_eq!(rows[0]["matches_committed_binding"], true);
+    assert_eq!(rows[0]["activation_supported"], true);
+    assert_eq!(rows[0]["enabled"], false);
+    assert!(!marker.exists());
+    assert!(!repo.path().join("never-executed").exists());
+}
+
+#[test]
+fn local_git_cli_rejects_pin_only_changes_without_execution_or_publication() {
+    let markers = temp();
+    let marker = markers.path().join("executed");
+    let source = inert_git_source(&marker);
+    let original = binding(source.path());
+    let mut changed = original.clone();
+    changed.source.sha256 = "0".repeat(64);
+    assert_ne!(changed.source.sha256, original.source.sha256);
+    let repo = project(&changed);
+    let cli = |args: &[&str]| offline_cli(repo.path(), args);
+    failure(cli(&["plugins", "install", "fixture"]), "pin mismatch");
+    assert!(versions(repo.path()).is_empty());
+    assert!(!marker.exists());
+
+    save(repo.path(), &original);
+    commit_binding(repo.path());
+    success(cli(&["plugins", "install", "fixture"]));
+    let before = versions(repo.path());
+    assert_eq!(before.len(), 1);
+    let receipt = fs::read(before[0].join("receipt.json")).unwrap();
+    save(repo.path(), &changed);
+    commit_binding(repo.path());
+    failure(cli(&["plugins", "update", "fixture"]), "pin mismatch");
+    assert_eq!(versions(repo.path()), before);
+    assert_eq!(fs::read(before[0].join("receipt.json")).unwrap(), receipt);
+    assert_eq!(
+        ahu::plugin_install::digest(&before[0].join("package")).unwrap(),
+        original.source.sha256
+    );
+    source.close().unwrap();
+    let inventory: serde_json::Value =
+        serde_json::from_str(&success(cli(&["plugins", "installed", "--output", "json"]))).unwrap();
+    assert_eq!(inventory["installations"].as_array().unwrap().len(), 1);
+    assert_eq!(inventory["installations"][0]["source_verified"], true);
+    assert_eq!(
+        inventory["installations"][0]["matches_committed_binding"],
+        false
+    );
+    assert!(!marker.exists());
+    assert!(!repo.path().join("never-executed").exists());
+}
+
 #[test]
 fn git_install_is_verified_private_inert_and_idempotent() {
     let source = source();
