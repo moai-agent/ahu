@@ -899,6 +899,68 @@ fn interactive_cancel_acknowledgement_closes_only_its_workspace() {
 }
 
 #[test]
+#[cfg(feature = "cmux-plugin")]
+fn legacy_compiled_cmux_record_survives_lost_cleanup_connection() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let repo = TestRepo::new();
+    let dir = record(&repo, "legacy-cmux-cancel");
+    let mut saved = ahu::task::load(&dir).unwrap();
+    saved.schema_version = 4;
+    saved.session_host = None;
+    saved.cmux_group_id = Some("owned-fixture-group".into());
+    saved.cmux_workspace_id = Some("owned-fixture".into());
+    saved.cmux_window_id = Some("window".into());
+    ahu::task::save(&dir, &saved, "synthetic input").unwrap();
+
+    let cmux = repo.state_path().join("cmux");
+    let calls = repo.state_path().join("calls");
+    std::fs::write(&cmux, r##"#!/usr/bin/env python3
+import json,os,sys
+if sys.argv[1] == 'ping': print('PONG'); sys.exit(0)
+method,params = sys.argv[2],json.loads(sys.argv[3])
+if method == 'system.identify': print(json.dumps({'caller':{'window_id':'window'}}))
+elif method == 'window.list': print(json.dumps({'windows':[{'id':'window'}]}))
+elif method == 'workspace.list': print(json.dumps({'workspaces':[{'id':'owned-fixture','current_directory':'/tmp'}]}))
+elif method == 'workspace.group.list': print(json.dumps({'groups':[{'id':'owned-fixture-group','name':'fixture','anchor_workspace_id':'anchor','member_workspace_ids':['anchor','owned-fixture']}]}))
+elif method == 'workspace.close':
+ open(os.environ['AHU_TEST_CMUX_CALLS'],'a').write(method+' '+json.dumps(params)+'\\n')
+ print('connection lost during cleanup', file=sys.stderr)
+ sys.exit(7)
+else: raise AssertionError(method)
+"##).unwrap();
+    std::fs::set_permissions(&cmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let dir_for_supervisor = dir.clone();
+    let supervisor = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !dir_for_supervisor.join("cancel.json").exists() {
+            assert!(Instant::now() < deadline, "cancel request never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        ahu::task::set_state(&dir_for_supervisor, ahu::task::TaskState::Cancelled).unwrap();
+    });
+    let output = common::ahu()
+        .args(["cancel", "legacy-cmux-cancel", "--output", "json"])
+        .current_dir(repo.path())
+        .env("AHU_CMUX_BIN", &cmux)
+        .env("AHU_TEST_CMUX_CALLS", &calls)
+        .output()
+        .unwrap();
+    supervisor.join().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("cancellation confirmed, but cmux workspace close failed"));
+    assert!(error.contains("connection lost"));
+    assert!(
+        std::fs::read_to_string(calls)
+            .unwrap()
+            .contains("workspace.close")
+    );
+    assert_eq!(ahu::task::load(&dir).unwrap().schema_version, 4);
+}
+
+#[test]
 fn interactive_cancel_natural_exit_preserves_workspace() {
     interactive_cancel_case("finished");
 }
