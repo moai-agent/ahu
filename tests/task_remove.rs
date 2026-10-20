@@ -660,6 +660,50 @@ fn remove_headless_refuses_uncertain_metadata_without_side_effects() {
     assert!(out.status.success(), "{}", text_of(&out));
 }
 
+#[test]
+fn remove_headless_cleans_up_a_proven_prelaunch_failure() {
+    let repo = fixture();
+    let id = "00000000-0000-7000-8000-000000000006";
+    let dir = prepare_headless_task(&repo, id);
+    let worktree = worktree_of(&repo, id);
+    let mut result: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("attempt-1/result.json")).unwrap()).unwrap();
+    result["outcome"] = "supervisor_error".into();
+    result["failure_phase"] = "frozen_execution_validation".into();
+    state::write_json(&dir.join("attempt-1/result.json"), &result).unwrap();
+    task::set_state(&dir, task::TaskState::Failed).unwrap();
+
+    let out = ahu_in(repo.path(), &["remove", id]);
+    let text = text_of(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(!worktree.exists(), "the proven prelaunch worktree remains");
+    assert!(!dir.exists(), "the proven prelaunch task record remains");
+    assert!(!git::branch_exists(&git::discover(repo.path()).unwrap(), &branch_of(id)).unwrap());
+}
+
+#[test]
+fn remove_headless_keeps_prelaunch_failure_with_spawn_evidence() {
+    let repo = fixture();
+    let id = "00000000-0000-7000-8000-000000000007";
+    let dir = prepare_headless_task(&repo, id);
+    let mut result: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("attempt-1/result.json")).unwrap()).unwrap();
+    result["outcome"] = "supervisor_error".into();
+    result["failure_phase"] = "frozen_execution_validation".into();
+    state::write_json(&dir.join("attempt-1/result.json"), &result).unwrap();
+    state::write_json(
+        &dir.join("attempt-1/spawn-intent.json"),
+        &serde_json::json!({"attempt":1}),
+    )
+    .unwrap();
+    task::set_state(&dir, task::TaskState::Failed).unwrap();
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+
+    let out = ahu_in(repo.path(), &["remove", id]);
+    assert!(!out.status.success(), "{}", text_of(&out));
+    assert_task_preserved(&repo, id, &dir, &before);
+}
+
 /// A configuration file the parent working tree holds but never committed.
 /// A user's global ignore rule commonly hides exactly this from their own
 /// `git status`; ahu reads Git with no global configuration and sees it.

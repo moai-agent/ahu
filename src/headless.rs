@@ -520,17 +520,7 @@ pub(crate) fn removal_guard(
     )?;
     review::validate_result(&result, &current.task_id, spec.attempt)?;
     if result["schema_version"] != spec.schema_version
-        || !matches!(
-            result["outcome"].as_str(),
-            Some(
-                "succeeded"
-                    | "failed"
-                    | "cancelled"
-                    | "timed_out"
-                    | "capture_failed"
-                    | "boundary_violation"
-            )
-        )
+        || !known_terminal_for_cleanup(&result, &attempt_dir(dir, &spec))
     {
         bail!("task process ownership is uncertain; nothing was removed");
     }
@@ -538,6 +528,27 @@ pub(crate) fn removal_guard(
         _owner: owner,
         dir: dir.to_path_buf(),
     })
+}
+
+/// A supervisor error during frozen execution validation is the one failed
+/// result that proves the harness was never launched. Every later phase may
+/// have created a native session or started a process, so it still requires a
+/// normal terminal result before cleanup can remove its worktree.
+fn known_terminal_for_cleanup(result: &Value, attempt: &Path) -> bool {
+    matches!(
+        result["outcome"].as_str(),
+        Some(
+            "succeeded"
+                | "failed"
+                | "cancelled"
+                | "timed_out"
+                | "capture_failed"
+                | "boundary_violation"
+        )
+    ) || (result["outcome"] == "supervisor_error"
+        && result["failure_phase"] == "frozen_execution_validation"
+        && !attempt.join("started.json").exists()
+        && !attempt.join("spawn-intent.json").exists())
 }
 
 impl RemovalGuard {
@@ -3581,17 +3592,8 @@ pub fn control(
         "cleanup" => {
             let _owner = Lock::acquire(&dir.join("owner.lock"))?;
             let current = result(&dir)?;
-            if !matches!(
-                current["outcome"].as_str(),
-                Some(
-                    "succeeded"
-                        | "failed"
-                        | "cancelled"
-                        | "timed_out"
-                        | "capture_failed"
-                        | "boundary_violation"
-                )
-            ) {
+            let spec: Spec = read_json(&dir.join("headless.json"))?;
+            if !known_terminal_for_cleanup(&current, &attempt_dir(&dir, &spec)) {
                 bail!(
                     "cleanup requires a known terminal attempt; unknown/interrupted ownership must be resolved first"
                 );
