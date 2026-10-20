@@ -203,13 +203,18 @@ selection/close, protocol mismatch, malformed/partial frames, blocked pipe write
 indeterminate startup, deadlines, cancellation, cleanup, and executable paths.
 
 Session providers are separate repositories and are installed through the standard
-plugin package and committed binding workflow. Core keeps only the Host V1
-contract and cross-provider task lifecycle. Plugins execute with the user's OS
-permissions; the protocol and ownership checks do not sandbox them.
+plugin package and committed binding workflow. Core keeps the Host V1 contract,
+cross-provider task lifecycle, and harness safety checks that must be enforced
+before launching a process. It does not contain a cmux session adapter. Plugins
+execute with the user's OS permissions; the protocol and ownership checks do not
+sandbox them.
 
 Package tests exercise the server and every V1 method with a fake native CLI,
 including creation outcome preservation and strict framed input/output. Core
-lifecycle tests use synthetic Host V1 peers. End-to-end activation of the cmux
-binary through core and live cmux lifecycle verification remain integration gaps,
-including default socket discovery under core's cleared environment. Package
-existence and project activation do not establish live compatibility.
+lifecycle tests use synthetic Host V1 peers. The external cmux package has also
+been installed and activated through Ahu's real package lifecycle, then negotiated
+and probed against a running cmux service; this read-only probe verified default
+socket discovery with Ahu's cleared environment and read the workspace inventory.
+Live task-workspace creation and close have not been exercised as part of that
+smoke test. Package existence and project activation alone do not establish live
+compatibility, so repeat the read-only probe after changing either side.
