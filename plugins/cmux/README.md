@@ -16,15 +16,36 @@ repository associations, supervision, cancellation confirmation, and outcomes.
 
 ## Executable server
 
-Build the executable independently of the core CLI, from the workspace root:
+Build and stage the executable independently of the core CLI, from the workspace
+root (Python 3.11+ and the repository's Rust toolchain are required):
 
 ```sh
-cargo build --locked --release -p ahu-cmux-plugin --bin ahu-cmux-host
-cargo test --locked -p ahu-cmux-plugin
+cmux_build_root="$(mktemp -d /tmp/ahu-cmux.XXXXXX)"
+cmux_build_root="$(cd "$cmux_build_root" && pwd -P)"
+python3 scripts/stage-cmux.py \
+  --output "$cmux_build_root/package" \
+  --target-dir "$cmux_build_root/target"
 ```
 
-The binary is `target/release/ahu-cmux-host` (or under `CARGO_TARGET_DIR` when
-set). Invoke it with exactly `--ahu-host-protocol=1` and exchange binary frames
+The command runs `cargo build --locked --release -p ahu-cmux-plugin --bin
+ahu-cmux-host`, with explicit manifest and output paths. It prints the completed
+package's absolute path. Both directory arguments are required and must be
+absolute, outside Git checkouts, and non-overlapping; symlinks are resolved before
+checking. The package directory must not exist. Repeat with a new package path;
+the Cargo target directory can be reused. Build errors and invalid arguments
+return nonzero, and a failed build never exposes a partial package. Cargo's
+reported artifact path is used, including when a target triple is configured.
+The output is platform-specific; this command does not cross-compile by default.
+
+The package contains `bin/ahu-cmux-host`, executable Host V1 metadata in
+`ahu-plugin.md`, and a minimal `Cargo.toml` carrying the source package's identity
+and version for Ahu's discovery/install checks. That Cargo file is distribution
+metadata, not a buildable source crate. The source manifest in `plugins/cmux`
+is unchanged. Cargo final and intermediate artifacts go under `--target-dir`;
+temporary staging goes beside `--output`. No package is installed, activated,
+published, or pushed by this command.
+
+Invoke `bin/ahu-cmux-host` with exactly `--ahu-host-protocol=1` and exchange binary frames
 on stdin/stdout as described in [the protocol guide](../../docs/executable-hosts.md).
 It is not a line-oriented command or interactive terminal. It requires a first
 `hello` with ID 1, Host API 1, protocol 1, and plugin ID `cmux-local`. After
@@ -51,9 +72,8 @@ contract. Live socket discovery and lifecycle behavior in that environment have
 not been verified here.
 
 The checked-in discovery manifest remains source-only because no built binary is
-shipped in this directory. For an executable distribution, stage the built binary
-as `bin/ahu-cmux-host` beside a copy of the package metadata, keep ID `cmux-local`,
-and add this frontmatter mapping to the staged `ahu-plugin.md`:
+shipped in this directory. The staging command keeps ID `cmux-local` and adds
+this frontmatter mapping to the distribution's `ahu-plugin.md`:
 
 ```yaml
 executable:
@@ -65,7 +85,7 @@ executable:
 Project activation additionally requires the committed binding, compatibility,
 digest, and `interactive-backend` grant documented in the protocol guide.
 Building the server neither installs a package nor selects a session host.
-Distribution automation and live lifecycle verification remain separate work.
+Publishing and live lifecycle verification remain separate work.
 
 The server delegates creation to the existing cmux implementation: failure
 before dispatch can report `not_created`; failure after dispatch remains
@@ -81,6 +101,38 @@ but cannot guarantee a response from a blocked native CLI.
 Offline tests exercise the actual server with a fake cmux executable. They cover
 every method, strict decoding, frame limits, complete inventories, and creation
 outcomes without a live cmux app or execution of supplied startup commands.
+Run the staging checks and server tests with outputs outside the checkout:
+
+```sh
+python3 -B scripts/test_stage_cmux.py
+CARGO_TARGET_DIR="$cmux_build_root/target" \
+  CARGO_BUILD_BUILD_DIR="$cmux_build_root/target/build" \
+  TMPDIR="$cmux_build_root" cargo test --locked -p ahu-cmux-plugin
+```
+
+With an Ahu CLI built from this checkout, inspect the staged manifest without
+executing it, keeping project state outside the source repository:
+
+```sh
+mkdir "$cmux_build_root/project"
+git -C "$cmux_build_root/project" init -q
+AHU_PLUGIN_PATH="$cmux_build_root/package" AHU_INTERACTIVE_PLUGIN=none \
+  OTEL_SDK_DISABLED=true ahu --repo "$cmux_build_root/project" plugins --output json
+ahu --repo "$cmux_build_root/project" plugins digest "$cmux_build_root/package"
+```
+
+For installation, use that digest as both `revision` and `sha256` in a committed
+`kind: local` binding with this package path, version from its `Cargo.toml`, and
+exact Ahu compatibility. See the [binding reference](../../docs/reference.md#committed-project-plugin-bindings).
+`ahu plugins install cmux-local` verifies and copies the package without running
+it. A committed enabled binding with `interactive-backend` permits
+`ahu plugins --probe`: this negotiates Host V1 and reads inventory without
+creating tasks or changing workspaces. Core activation uses its fixed cmux
+lookup described above; setting `AHU_CMUX_BIN` in the parent does not redirect
+that probe to a fake. Use the direct server protocol with an explicit fake path
+for offline tests, or run the core probe only with an intended read-only native
+cmux connection. Keep its temporary project and any captured output outside the
+source repository.
 
 ## Compiled compatibility adapter
 
