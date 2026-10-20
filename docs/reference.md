@@ -364,14 +364,18 @@ Commands return these exit codes:
 All five harnesses have interactive and headless adapters. The
 [catalog](../src/catalog.rs), [interactive adapters](../src/harness/mod.rs),
 and [batch command builder](../src/headless.rs) describe different evidence
-and controls for those modes. The catalog's recorded versions are:
+and controls for those modes. The catalog's recorded versions are listed below.
+Native-configuration admission limits in this table apply to ordinary headless
+execution; [work mode](#work-mode) skips that admission. The separate
+[work-mode smoke evidence](#headless-work-mode-smoke-evidence) does not extend
+the catalog's validation scope.
 
 | Harness | Interactive evidence | Headless evidence | Limits and refusals |
 | --- | --- | --- | --- |
 | Codex | 0.154.0, 0.157.1, 0.160.0 | 0.154.0, 0.155.1, 0.157.1, 0.160.0 | Fresh runs and native resume have separate argument mappings. Headless `accept-edits` resume is refused. Versions 0.157.1 and 0.160.0 require native metadata inspection. |
 | Claude Code | 2.1.269, 2.1.283, 2.1.288 | 2.1.269, 2.1.270, 2.1.283 | Hook-control profiles also exist for 2.1.288, 2.1.289, and 2.1.302; these do not extend authenticated headless evidence. No committed profile covers a version later than 2.1.302. Bounded native helpers require 2.1.270. |
 | Antigravity CLI | 1.2.2, 1.2.16, 1.4.2 | 1.2.2, 1.2.16 | The 1.4.2 record covers help, model discovery, and interactive startup; headless behavior on that version remains unverified. Unresolved hooks/extensions refuse headless admission. |
-| OpenCode | 1.18.29, 1.18.30, 1.18.31, 1.18.32, 1.18.34, 2.0.32 | 1.18.29, 1.18.30, 1.18.31, 1.18.32 | The 2.0.32 record covers `mini` help and interactive startup with `prompt` permissions. Interactive `auto` is refused on that interface; `accept-edits` is refused in both modes. Headless 2.0.32 remains unverified. |
+| OpenCode | 1.18.29, 1.18.30, 1.18.31, 1.18.32, 1.18.34, 2.0.32 | 1.18.29, 1.18.30, 1.18.31, 1.18.32 | The 2.0.32 catalog record covers `mini` help and interactive startup with `prompt` permissions. Interactive `auto` is refused on that interface; `accept-edits` is refused in both modes. The separate 2.0.32 work-mode smoke had mixed completion results. |
 | Kiro CLI V3 | 2.28.0 | 2.28.0, 2.29.0 | The 2.29.0 catalog entry covers headless and native configuration, not interactive verification. Headless configuration inspection refuses versions other than these two. `accept-edits` and bounded native helpers are refused. |
 
 These records are scoped observations, not proof of every permission mode,
@@ -383,6 +387,41 @@ for separate discovery and invocation evidence, and the
 Configuration alone establishes neither a live MCP call nor OTel export;
 record actual tool outcomes and collector observations separately for the
 exact version, model, and execution mode tested.
+
+### Headless work-mode smoke evidence
+
+A coordinator-reported smoke run on 2026-10-20 tested all 23 registered agents
+through `--work-mode` on the local ahu 0.11.0 build at source revision
+`4484697023f7d827669521b58b0fc3481e4547dd`. Each task attempted one bounded
+file-marker write. The coordinator checked the exact marker, ahu task outcome,
+process result, and terminal harness event evidence, then removed the smoke
+files. These are bounded observations for the versions and models below,
+not blanket compatibility certification.
+
+| Harness / CLI version | Exact model | Headless invocations | Exact markers | Process / terminal-event evidence | ahu task outcomes |
+| --- | --- | --- | --- | --- | --- |
+| Codex CLI 0.163.0 | `gpt-6-astra` | 7 of 7 agents | 7 of 7 | All exited 0 with a terminal event | 7 succeeded |
+| Claude Code 2.1.304 | `claude-opus-5` | 4 of 4 agents | 4 of 4 | All exited 0 with a terminal event | 4 succeeded |
+| Antigravity CLI 1.4.3 | `gemini-3.1-pro-high` | 5 of 5 agents | 5 of 5 | All exited 0 with a terminal event | 5 succeeded |
+| OpenCode 2.0.32 | `ollama/glm-5.3:cloud` | 4 of 4 agents | 4 of 4 | All exited 0; only 1 had an observed terminal event | 1 succeeded; 3 failed |
+| Kiro CLI 2.32.0 | `claude-sonnet-4.5` | 3 of 3 agents | 0 of 3 | All exited 1 during prompt execution with a terminal event | 3 failed |
+
+All runs requested the adapter's automatic/no-ask permission setting through
+work mode; the [requested controls](#work-mode) differ by harness. Invocation
+establishes that ahu attempted the harness; an exact marker provides evidence
+of the requested file write. Neither alone establishes task completion.
+OpenCode's three failed attempts wrote their markers and exited 0 but lacked
+the terminal harness event that ahu requires. They are not complete; see the
+[completion-evidence limitation](#troubleshooting). Kiro's failures do not
+establish a quota or authentication cause.
+
+This matrix covers headless work-mode marker checks only. It does not test
+interactive execution, native resume, live MCP calls, or observed OTel
+collector exports. No MCP or collector-export claim follows from the marker
+writes or configured integrations. Work mode leaves native hooks, plugins,
+settings, and delegation to the harness; this smoke does not validate their
+behavior or establish filesystem confinement. A Git worktree manages a branch
+and working directory, not a sandbox.
 
 ### Local invocation and completion evidence
 
@@ -397,12 +436,14 @@ configured local telemetry endpoint; a ready or matching line establishes no
 completed task, no live MCP tool call, and no observed OTel export. Installed
 CLI versions also move between audits, so a version named in a row below is the
 version checked on the audit date, not necessarily the one installed now.
-"Not observed" means this audit did not establish the result, not that the
-capability is absent.
+"Not observed" in this historical audit means that audit did not establish the
+result, not that the capability is absent. The subsequent work-mode smoke
+provides separate headless evidence and does not extend the interactive,
+MCP, or OTel observations below.
 
 | Harness and mode | Locally checked invocation | Task/tool completion evidence | Approval/autonomy mapping | OTel export evidence |
 | --- | --- | --- | --- | --- |
-| Claude Code interactive | 2.1.302 `claude --help`; no session launched. `ahu doctor` in this checkout now reports installed 2.1.304, which has no recorded help or startup check | No task or tool completion observed on either version | `prompt` adds no approval flag; `accept-edits` uses `--permission-mode acceptEdits`; `auto` uses `--permission-mode auto` | Not observed |
+| Claude Code interactive | 2.1.302 `claude --help`; no session launched. The audit's `ahu doctor` check reported installed 2.1.304, without a help or startup check | No task or tool completion observed on either version in this audit | `prompt` adds no approval flag; `accept-edits` uses `--permission-mode acceptEdits`; `auto` uses `--permission-mode auto` | Not observed |
 | Claude Code headless | 2.1.302 help advertises print, stream JSON, and permission controls; synthetic invocation profile only. The installed 2.1.304 CLI is unchecked here | No authenticated completion observed on 2.1.302 or 2.1.304; the catalog records prompt completion/usage on 2.1.283 | Same permission modes, plus `--permission-prompts none`. This checkout's exact-version hook profiles stop at 2.1.302, so a 2.1.304 launch passes no hook-control setting and non-managed hooks keep their native behavior | Not observed |
 | Codex interactive | 0.163.0 help and three ahu audit task sessions with `gpt-6-astra` | Instructions were received and local shell/file tools ran, but the sessions were stopped before a terminal task result | `auto` passes `--ask-for-approval never --sandbox workspace-write`; `accept-edits` uses `--approve-for-me`; `prompt` retains native policy | Collector receipt not inspected |
 | Codex headless | 0.163.0 `codex exec --help`; no batch session launched | No 0.163.0 batch completion observed; 0.160.0 has recorded live MCP decision/answer completion | `approval_policy="never"`; `prompt` uses read-only, `auto` workspace-write; fresh `accept-edits` uses `--approve-for-me`, resume refuses it | Not observed on 0.163.0; catalog records collector export on 0.160.0 |
@@ -415,7 +456,9 @@ capability is absent.
 
 These mappings describe ahu's arguments, not the effective permissions of every
 tool. Native settings still apply. Manifest-requested widening requires ahu's
-explicit opt-in; it does not resolve headless isolation refusals. A successful
+explicit opt-in outside work mode; that opt-in does not resolve ordinary
+headless isolation refusals. Work mode explicitly requests automatic permissions
+and skips native-configuration admission. A successful
 shell command does not prove MCP access, and neither proves collector receipt.
 The [release telemetry guide](otel-release-report.md) describes separate
 task/attempt-attributed export checks. Adapter and loopback transport fixtures
@@ -453,11 +496,11 @@ required; version-specific isolation controls and native-helper policies remain
 separate checks. Unknown native integrations can still prevent launch or resume.
 No failure selects a fallback harness or model.
 
-For assigned work that should not wait on Ahu's native-configuration compatibility
+For assigned work that should not wait on ahu's native-configuration compatibility
 checks, pass `--work-mode`. This implies headless execution, requests the
 harness's automatic/no-ask permission mode, and records known compatibility
 differences and unverified native state in the task result instead of refusing
-the launch. Ahu still requires a known headless adapter, an executable and
+the launch. ahu still requires a known headless adapter, an executable and
 readable CLI version, a valid task/worktree, and its normal completion evidence.
 The selected harness may still block on its own authentication, hooks, plugins,
 or provider behavior; work mode records that boundary and does not claim to
@@ -468,15 +511,30 @@ sandbox the harness. See [work mode](#work-mode) for the recorded controls.
 `ahu @agent --work-mode --prompt "..."` is the assigned-work path for a
 configured headless agent that should proceed in automatic/no-ask mode. The
 option implies `--headless`; it does not require the separate
-`--allow-widened-approvals` flag. Ahu requests the harness-specific automatic
-permission setting and does not apply Ahu's native helper-disabling or
+`--allow-widened-approvals` flag. ahu requests the harness-specific automatic
+permission setting and does not apply ahu's native helper-disabling or
 configuration-isolation profiles. It records these control differences, the
 unverified native configuration and authentication identity, and the fact that
 the Git worktree is not an OS sandbox.
 
-Work mode does not promise that native harness behavior exactly matches Ahu's
+The [batch command builder](../src/headless.rs) requests these controls:
+
+| Harness | Work-mode permission controls | Native boundary |
+| --- | --- | --- |
+| Codex | `-c 'approval_policy="never"' -c 'sandbox_mode="workspace-write"'` | Suppresses approval prompts while retaining the native workspace-write sandbox; protected paths and tool-specific approval gates can still block work. |
+| Claude Code | `--permission-prompts none --permission-mode auto` | Requests native automatic decisions; those decisions can deny tools. This is not the bypass-permissions mode. |
+| Antigravity CLI | `--dangerously-skip-permissions` | Bypasses native permission checks; ahu passes no sandbox flag. |
+| OpenCode | `--auto` | Approves permissions that are not explicitly denied; native `deny` rules still apply. The 2.x batch command also uses `--standalone`. |
+| Kiro CLI | `--no-interactive --trust-all-tools` | Requests execution without interaction and trusts all tools, including hook confirmation requests. |
+
+Work mode records project version-pin differences without enforcing the pin.
+It skips account-identity and provider/model-availability preflight, passing the
+exact selected model to the harness. These controls describe the requested
+invocation; they do not establish that every tool can execute.
+
+Work mode does not promise that native harness behavior exactly matches ahu's
 permission model. The harness can still ask, deny, or fail because of native
-settings, sign-in, plugins, hooks, or provider limits. Ahu does not silently
+settings, sign-in, plugins, hooks, or provider limits. ahu does not silently
 switch harnesses or models. It continues to enforce task identity, worktree
 integrity, explicit child-task grants, and authoritative completion checks. Use
 `--dry-run` first to inspect the requested harness command and recorded gaps.
@@ -490,8 +548,9 @@ OpenCode's batch form uses `opencode run --format json --model <provider/model>`
 The 1.x adapter adds `--dir <task-worktree>`. On 2.x it omits the removed `--dir`
 option and adds `--standalone` to request a private server. OpenCode task launches
 set both the process working directory and `PWD` to the task worktree because
-2.x prefers `PWD` in both `mini` and `run`. This argument mapping does not establish
-live 2.x batch compatibility. Batch `auto` adds `--auto`; `permissions = "accept-edits"` is
+2.x prefers `PWD` in both `mini` and `run`. This argument mapping alone does not
+establish live 2.x batch compatibility; the separate work-mode smoke recorded
+one successful task and three failures on 2.0.32. Batch `auto` adds `--auto`; `permissions = "accept-edits"` is
 refused. These checks are separate from interactive `mini` admission. See
 [OpenCode with Ollama-hosted models](#opencode-with-ollama-hosted-models) for
 provider setup. Recorded compatibility does not establish authentication,
@@ -582,9 +641,11 @@ other launch checks.
 | Antigravity | Absent inspected hooks. Custom hooks, extensions, and overrides remain unverified. |
 | Kiro | V3 2.28.0/2.29.0 and the inspected subset of native agents and CLI preferences. Unknown formats/fields, nonempty hooks, extensions, Powers, workflows, cloud configuration, and environment indirection are refused. See [Kiro CLI](#kiro-cli). |
 
-Apart from the explicit OpenCode native-state trust setting, unknown or unsafe
-integrations have no operator bypass, including with
-`--allow-widened-approvals`. Interactive execution uses the current terminal or
+Outside work mode, apart from the explicit OpenCode native-state trust setting,
+unknown or unsafe integrations have no operator bypass, including with
+`--allow-widened-approvals`. Work mode skips these native-configuration checks
+and records the unverified state; it does not establish isolation.
+Interactive execution uses the current terminal or
 an explicitly selected session host and retains normal approval and launch checks.
 ahu does not remove credentials, rewrite native settings, or treat interactive
 availability as headless isolation. New compatibility claims require validation
@@ -1631,13 +1692,16 @@ effect can be absent from stdout even when catch-up reports completed work.
 This is a local source finding, not a reproduction of a particular provider
 run or proof of which timing occurred in it.
 
-Ahu requires a final `step_finish` with `part.reason = "stop"` after draining
+ahu requires a final `step_finish` with `part.reason = "stop"` after draining
 stdout. Completed tools, written files, native session success, and exit 0
 cannot replace that evidence. Synthetic pipe fixtures cover tool-only output,
 tool-call boundaries, explicit stops, and large tool payloads followed by a
 stop. Missing completion evidence remains a failed attempt; inspect the
 changes before explicitly resuming or retrying, since work may already have
-been performed. Successful headless completion on 2.0.32 remains unverified.
+been performed. The [work-mode smoke](#headless-work-mode-smoke-evidence) observed
+one successful task and three marker-writing, exit-0 attempts without terminal
+events on 2.0.32. That mixed result does not establish which event timing caused
+the missing evidence or resolve the limitation.
 
 ahu refuses its own failed preflight checks; provider failures surface through
 the harness. It never silently selects another model, provider, or harness,
@@ -2818,8 +2882,8 @@ Accept-edits is refused because ahu has no validated equivalent. The adapter
 passes instructions and the assignment as one positional argument. It omits
 `--` because Kiro 2.28.0 V3 dropped the initial prompt after that separator in
 live verification; empty or option-shaped composed prompts are refused.
-ahu checks that Kiro lists the exact requested model before launch, with no
-fallback to `auto` or another model. Model listing can initiate login in Kiro,
+Outside work mode, ahu checks that Kiro lists the exact requested model before
+launch, with no fallback to `auto` or another model. Model listing can initiate login in Kiro,
 so ahu checks native sign-in first and bounds both probes.
 
 `ahu setup` detects `kiro-cli`, adds the ahu MCP server to
@@ -2864,8 +2928,8 @@ observed native resource does not carry ahu task-and-attempt attribution.
 Shared ahu supervision supplies foreground/background execution, timeout,
 cancellation, result records, and resume. Histories remain in Kiro's native home.
 
-Headless admission inspects native JSON and Markdown agent profiles in project,
-user and ancestor scopes. Ordinary prompts, tools, models, file/skill resources,
+Ordinary headless admission inspects native JSON and Markdown agent profiles
+in project, user and ancestor scopes. Ordinary prompts, tools, models, file/skill resources,
 permissions and inspected MCP fields are accepted without rewriting the profiles.
 Markdown requires YAML frontmatter; JSONC, unknown fields, nonempty hooks,
 Powers activation and knowledge-base resource objects remain unreviewed.
@@ -2882,6 +2946,10 @@ other than 2.28.0 or 2.29.0 produce a refusal; ahu does not delete or rewrite th
 This is bounded configuration inspection, not a sandbox. Native cmux hook
 installation, detailed hook inventory and bounded helpers remain unsupported;
 `--native-helpers disabled` is a prompt instruction, not a native tool restriction.
+Work mode skips this inspection and its version restriction. The separate
+2.32.0 work-mode smoke reached prompt execution on all three registered Kiro
+agents, but each failed without writing a marker; it does not validate the
+native configuration or establish successful completion.
 
 This repository registers `@dev-kiro` for implementation, `@review-kiro` for
 read-only review, and `@test-kiro` for reproduction and regression tests. All pin
