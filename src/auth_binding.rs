@@ -1160,9 +1160,11 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
     let deadline = Instant::now() + Duration::from_secs(12);
     // The startup TUI can split the email, auth mode, and GCP project across
     // PTY writes. A recognized mode does not mean the fingerprint is complete:
-    // always wait for a quiet window, including after "Agent Platform".
-    // This does not extend the overall probe deadline.
-    let identity_settle = Duration::from_millis(500);
+    // wait for a bounded quiet window, including after "Agent Platform". The
+    // CLI exposes no explicit identity-complete event, so this reduces late
+    // field races without claiming that silence proves completeness. This does
+    // not extend the overall probe deadline.
+    let identity_settle = Duration::from_millis(2_500);
     let mut output = Vec::new();
     let mut last_output_at: Option<Instant> = None;
     let mut buffer = [0u8; 4096];
@@ -2170,7 +2172,7 @@ mod profile_tests {
             std::fs::write(
                 &executable,
                 format!(
-                    "#!/bin/sh\nprintf '%s' '{first}'\n/bin/sleep 0.2\nprintf '%s' '{rest}'\n/bin/sleep 2\n"
+                    "#!/bin/sh\nprintf '%s' '{first}'\n/bin/sleep 0.2\nprintf '%s' '{rest}'\n/bin/sleep 4\n"
                 ),
             )
             .unwrap();
@@ -2190,12 +2192,12 @@ mod profile_tests {
         let fixtures = [
             (
                 "agy-platform",
-                "printf 'Signed in as work@example.invalid\\n'\n/bin/sleep 0.2\nprintf 'Connected to Agent Platform\\n'\n/bin/sleep 2\n",
+                "printf 'Signed in as work@example.invalid\\n'\n/bin/sleep 2\nprintf 'Connected to Agent Platform\\n'\n/bin/sleep 4\n",
                 Some("agent-platform"),
             ),
             (
                 "agy-api-key",
-                "printf 'Signed in as work@example.invalid\\n'\n/bin/sleep 0.2\nprintf 'Using Gemini API key\\n'\n/bin/sleep 2\n",
+                "printf 'Signed in as work@example.invalid\\n'\n/bin/sleep 2\nprintf 'Using Gemini API key\\n'\n/bin/sleep 4\n",
                 None,
             ),
         ];
@@ -2223,7 +2225,7 @@ mod profile_tests {
         let account = temp.path().join("agy-account");
         std::fs::write(
             &account,
-            "#!/bin/sh\nprintf 'Signed in as work@example.invalid\\n'\n/bin/sleep 3\n",
+            "#!/bin/sh\nprintf 'Signed in as work@example.invalid\\n'\n/bin/sleep 4\n",
         )
         .unwrap();
         std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2233,6 +2235,7 @@ mod profile_tests {
             parse_antigravity_identity(&output).unwrap().identity_kind,
             "antigravity-account"
         );
-        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        assert!(start.elapsed() >= std::time::Duration::from_millis(2_500));
+        assert!(start.elapsed() < std::time::Duration::from_secs(4));
     }
 }
