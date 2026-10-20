@@ -2127,6 +2127,9 @@ impl Events {
             // is a sequence of steps, and only the reason on a step's finish
             // says whether the turn ended or another step follows.
             ("opencode", "step_start") => self.terminal = false,
+            // OpenCode 2.0.32 also streams reasoning. It is nonterminal
+            // metadata; never retain its text as an answer or native payload.
+            ("opencode", "reasoning") => self.terminal = false,
             ("opencode", "text") => {
                 self.terminal = false;
                 if let Some(text) = event.pointer("/part/text").and_then(Value::as_str) {
@@ -4767,6 +4770,48 @@ mod write_tracking_tests {
     const RECORDED_SESSION: &str = "ses_f5cc153b6ffeNq1dwHoZGMECKw";
     const RECORDED_START: u64 = 1_760_000_000_000;
 
+    fn reasoning_event() -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "type": "reasoning", "timestamp": 3, "sessionID": RECORDED_SESSION,
+            "part": {"type": "reasoning", "text": "synthetic reasoning payload"}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn opencode_reasoning_is_nonterminal_metadata_without_retaining_text() {
+        for terminal in [false, true] {
+            let mut events = Events {
+                terminal,
+                summary: "existing answer".into(),
+                unknown_events: 2,
+                ..Default::default()
+            };
+            events.observe("opencode", &reasoning_event());
+            assert_eq!(events.unknown_events, 2);
+            assert!(!events.terminal);
+            assert!(!events.failed);
+            assert!(events.blockers.is_empty());
+            assert_eq!(events.terminal_evidence, None);
+            assert_eq!(events.summary, "existing answer");
+            assert!(!format!("{events:?}").contains("synthetic reasoning payload"));
+            assert!(
+                !serde_json::to_string(&events)
+                    .unwrap()
+                    .contains("synthetic reasoning payload")
+            );
+        }
+        for kind in ["reasoning_delta", "reasoning.completed", "unknown"] {
+            let mut events = Events::default();
+            events.observe(
+                "opencode",
+                &serde_json::to_vec(&json!({"type": kind})).unwrap(),
+            );
+            assert_eq!(events.unknown_events, 1, "{kind}");
+            assert!(!events.terminal, "{kind}");
+        }
+    }
+
     /// A stand-in `opencode` whose `session export` prints `body` after
     /// `preamble` shell. It records its own argv so a test can prove the exact
     /// read ahu asked for, and prove it never ran at all when the attempt was
@@ -4895,6 +4940,26 @@ mod write_tracking_tests {
         assert!(!encoded.contains("msg_turn"), "{encoded}");
     }
 
+    #[test]
+    fn an_opencode_recorded_session_can_recover_after_reasoning() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = fake_opencode(root.path(), "", &completed_export());
+        let mut events = tool_only_events();
+        events.observe("opencode", &reasoning_event());
+        assert!(!events.terminal);
+        recover_opencode_terminal_result(
+            &mut events,
+            &attempt(&executable, root.path(), Duration::from_secs(20)),
+        );
+        assert!(events.terminal, "{:?}", events.blockers);
+        assert!(!events.failed, "{:?}", events.blockers);
+        assert_eq!(events.unknown_events, 0);
+        assert_eq!(
+            events.terminal_evidence.as_deref(),
+            Some("opencode recorded session export")
+        );
+    }
+
     /// Every way the read itself can fail leaves the attempt without a result.
     #[test]
     fn a_failed_oversized_or_slow_recorded_session_read_is_not_completion() {
@@ -5015,7 +5080,9 @@ mod write_tracking_tests {
                 "an unknown event on the stream",
                 {
                     let mut events = tool_only_events();
-                    events.unknown_events = 1;
+                    events.observe("opencode", &reasoning_event());
+                    events.observe("opencode", br#"{"type":"unknown"}"#);
+                    assert_eq!(events.unknown_events, 1);
                     events
                 },
                 |_| (),
