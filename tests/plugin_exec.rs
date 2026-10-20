@@ -16,6 +16,74 @@ use std::time::{Duration, Instant};
 use common::plugin::Fixture;
 
 #[test]
+fn github_environment_and_write_intent_require_explicit_binding_grants() {
+    let mut fixture = Fixture::new("github_env");
+    fixture.install();
+    fs::write(fixture.root.join("input.json"), "null").unwrap();
+    for grants in [
+        vec![],
+        vec![Grant::GithubCli],
+        vec![Grant::GithubCliWrite],
+        vec![Grant::GithubCli, Grant::GithubCliWrite],
+    ] {
+        let auth = !grants.is_empty();
+        let write = grants.contains(&Grant::GithubCliWrite);
+        fixture.binding.grants = vec![Grant::Execute];
+        fixture.binding.grants.extend(grants);
+        fixture.save(true);
+        for with_auth_environment in [false, true] {
+            let mut command = common::ahu();
+            command
+                .env_clear()
+                .env("TMPDIR", std::env::temp_dir())
+                .env("PATH", "/usr/bin:/bin")
+                // Ambient capability markers must never bypass binding policy.
+                .env("AHU_GITHUB_CLI", "ambient")
+                .env("AHU_GITHUB_WRITE", "ambient")
+                .env("AHU_GITHUB_PATH", "/untrusted/ambient/path")
+                .env("UNRELATED_SECRET", "synthetic-secret")
+                .env("GH_HOST", "example.invalid")
+                .current_dir(&fixture.root)
+                .args(["plugins", "invoke", "fixture", "--input-file", "input.json"]);
+            let mut expected = json!({"PATH": "/usr/bin:/bin"});
+            if auth {
+                expected["AHU_GITHUB_CLI"] = json!("1");
+                expected["AHU_GITHUB_PATH"] = json!("/usr/bin:/bin");
+            }
+            if write {
+                expected["AHU_GITHUB_WRITE"] = json!("1");
+            }
+            if with_auth_environment {
+                for (key, value) in [
+                    ("HOME", "/synthetic/home"),
+                    ("XDG_CONFIG_HOME", "/synthetic/config"),
+                    ("GH_CONFIG_DIR", "/synthetic/gh"),
+                    ("GH_TOKEN", "synthetic-token"),
+                    ("GITHUB_TOKEN", "synthetic-fallback"),
+                ] {
+                    command.env(key, value);
+                    if auth {
+                        expected[key] = json!(value);
+                    }
+                }
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stderr.is_empty());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"],
+                expected
+            );
+            fixture.stopped();
+        }
+    }
+}
+
+#[test]
 fn installed_entrypoint_is_inert_until_host_authorized_invocation() {
     for mode in ["normal", "stderr", "exact_limit"] {
         let fixture = Fixture::new(mode);
@@ -50,6 +118,8 @@ fn installed_entrypoint_is_inert_until_host_authorized_invocation() {
 #[test]
 fn disabled_missing_grant_uncommitted_policy_and_tampering_never_start() {
     let mut fixture = Fixture::new("normal");
+    fixture.binding.grants.push(Grant::GithubCliWrite);
+    fixture.save(true);
     fixture.install();
     fixture.binding.enabled = false;
     fixture.save(true);
@@ -73,7 +143,7 @@ fn disabled_missing_grant_uncommitted_policy_and_tampering_never_start() {
             .code,
         Code::Denied
     );
-    fixture.binding.grants = vec![Grant::InteractiveBackend];
+    fixture.binding.grants = vec![Grant::InteractiveBackend, Grant::GithubCliWrite];
     fixture.save(true);
     assert_eq!(
         fixture
@@ -82,7 +152,7 @@ fn disabled_missing_grant_uncommitted_policy_and_tampering_never_start() {
             .code,
         Code::Denied
     );
-    fixture.binding.grants = vec![Grant::Execute];
+    fixture.binding.grants = vec![Grant::Execute, Grant::GithubCliWrite];
     fixture.save(true);
     assert_eq!(
         fixture

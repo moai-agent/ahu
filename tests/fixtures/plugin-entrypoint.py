@@ -14,8 +14,13 @@ os.replace(MARKER + ".tmp", MARKER)
 assert sys.argv[1:] == ["--ahu-plugin-protocol=1"]
 # Python and the macOS system interpreter shim add runtime/toolchain variables.
 # None of these are ahu credentials or inherited host configuration.
-assert set(os.environ) <= {"PATH", "LC_CTYPE", "CPATH", "LIBRARY_PATH",
-                           "MANPATH", "SDKROOT", "__CF_USER_TEXT_ENCODING"}
+allowed_env = {"PATH", "LC_CTYPE", "CPATH", "LIBRARY_PATH",
+               "MANPATH", "SDKROOT", "__CF_USER_TEXT_ENCODING"}
+github_env = {"HOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR", "GH_TOKEN",
+              "GITHUB_TOKEN", "AHU_GITHUB_CLI", "AHU_GITHUB_WRITE", "AHU_GITHUB_PATH"}
+if MODE == "github_env":
+    allowed_env |= github_env
+assert set(os.environ) <= allowed_env
 if MODE in ("hang", "never_read"):
     time.sleep(30)
 if MODE == "early_output":
@@ -31,7 +36,11 @@ if MODE == "stderr":
 if MODE == "inherited_pipe" and os.fork() == 0:
     time.sleep(30)
     os._exit(0)
-if MODE == "exact_limit":
+if MODE == "github_env":
+    json.dump({"status": "ok", "protocol_version": 1,
+               "result": {key: os.environ[key] for key in github_env | {"PATH"}
+                          if key in os.environ}}, sys.stdout)
+elif MODE == "exact_limit":
     response = json.dumps({"status": "ok", "protocol_version": 1,
                            "result": {"input": request["input"], "context": request["context"]}})
     sys.stdout.write(response + " " * (65536 - len(response.encode())))

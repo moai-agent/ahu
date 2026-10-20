@@ -28,7 +28,8 @@ with `enabled: true` and `grants: [execute, github-cli]`. Updating from 1.0.0
 requires updating the version and source digest pins and reinstalling. Neither
 installation nor inventory looks for `gh` or authenticates. Disabled, missing,
 and uninstalled bindings cannot execute the provider. No core workflow requires
-GitHub. A V2 request without the `github-cli` grant returns `github_cli_denied`.
+GitHub. A V2 request without either `github-cli` or `github-cli-write` returns
+`github_cli_denied`.
 
 The `github-cli` grant explicitly permits the trusted package to receive the
 host's `HOME`, `XDG_CONFIG_HOME`, `GH_CONFIG_DIR`, `GH_TOKEN`, and `GITHUB_TOKEN`
@@ -37,6 +38,14 @@ forwarded only after binding authorization and installed-package verification;
 core does not read credentials or resolve `gh`. This is native authentication
 access, not a read-only credential scope or an OS sandbox. Grant it only to a
 reviewed, pinned package. The package makes only the fixed GET calls below.
+
+The distinct `github-cli-write` binding grant also permits inspection and forwards
+the same native auth environment with `AHU_GITHUB_CLI=1`, while additionally
+setting `AHU_GITHUB_WRITE=1`. `github-cli` alone never sets the write marker.
+With neither grant, the host forwards no GitHub auth environment or capability
+markers. The write marker is an explicit trust/intent signal to same-user package
+code, not OS or network enforcement; Ahu does not narrow the underlying token
+scopes. This package still implements no live write action.
 
 Write this exact shape to an input file, then invoke it explicitly:
 

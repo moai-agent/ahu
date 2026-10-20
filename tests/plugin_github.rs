@@ -610,6 +610,7 @@ if mode == 'nonzero_valid':
         .unwrap();
         common::ahu()
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.temp.path().display()),
@@ -622,6 +623,7 @@ if mode == 'nonzero_valid':
             .env("GH_HOST", "example.invalid")
             .env("UNRELATED_SECRET", "synthetic-secret")
             .env("AHU_GITHUB_CLI", "1")
+            .env("AHU_GITHUB_WRITE", "1")
             .env("AHU_GITHUB_PATH", "/untrusted/ambient/path")
             .current_dir(&github.root)
             .args(["plugins", "invoke", "github", "--input-file", "input.json"])
@@ -648,6 +650,23 @@ fn real_github_fixture() -> Github {
     github.save(true);
     github.install();
     github
+}
+
+#[test]
+fn write_grant_also_permits_read_only_inspection() {
+    let mut github = Github::new();
+    github.binding.grants.push(Grant::GithubCliWrite);
+    github.save(true);
+    github.install();
+    let fake = FakeGh::new();
+    assert_eq!(fake.result(&github, &inspect_input())["outcome"], "read");
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls
+            .iter()
+            .all(|args| args[3] == "--method" && args[4] == "GET")
+    );
 }
 
 #[test]

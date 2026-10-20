@@ -74,6 +74,8 @@ pub enum Grant {
     Execute,
     /// Opt in to the user's GitHub CLI lookup and native authentication environment.
     GithubCli,
+    /// Also signal explicit write intent to the package; does not narrow token scopes.
+    GithubCliWrite,
     ReadProjectContext,
 }
 
@@ -203,6 +205,53 @@ mod tests {
             .unwrap()
             .render()
             .unwrap()
+    }
+    #[test]
+    fn github_grants_roundtrip_and_reject_duplicates_and_unknown_variants() {
+        for grants in [
+            vec![],
+            vec![Grant::GithubCli],
+            vec![Grant::GithubCliWrite],
+            vec![Grant::GithubCli, Grant::GithubCliWrite],
+        ] {
+            let mut binding = binding();
+            binding.grants = grants;
+            let text = render(&binding);
+            let (actual, document) = parse(&text, "fixture").unwrap();
+            assert_eq!(actual, binding);
+            assert_eq!(document.render().unwrap(), text);
+            assert_eq!(
+                document.fields["ahu"]["grants"],
+                serde_json::Value::Array(
+                    binding
+                        .grants
+                        .iter()
+                        .map(|grant| match grant {
+                            Grant::GithubCli => "github-cli".into(),
+                            Grant::GithubCliWrite => "github-cli-write".into(),
+                            _ => unreachable!(),
+                        })
+                        .collect()
+                )
+            );
+        }
+        for grant in [Grant::GithubCli, Grant::GithubCliWrite] {
+            let mut binding = binding();
+            binding.grants = vec![grant.clone(), grant];
+            assert!(
+                parse(&render(&binding), "fixture")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("duplicate plugin capability grant")
+            );
+        }
+        for unknown in ["github-write", "github-cli-writes", "GithubCliWrite"] {
+            let mut document =
+                crate::okf::Document::new("ahu:plugin-binding", &binding(), "").unwrap();
+            document.fields.get_mut("ahu").unwrap()["grants"] =
+                serde_json::json!(["github-cli-write", unknown]);
+            assert!(parse(&document.render().unwrap(), "fixture").is_err());
+        }
     }
     #[test]
     fn version_pins_reject_leading_zero_numeric_prereleases() {

@@ -239,8 +239,14 @@ pub fn invoke(
     // Keep the interpreter PATH fixed; the package resolves gh separately. The host
     // does not inspect credential contents or call the provider, but it forwards the
     // explicitly granted auth environment so gh can use the user's existing login.
-    if binding.grants.contains(&Grant::GithubCli) {
+    let github_write = binding.grants.contains(&Grant::GithubCliWrite);
+    if binding.grants.contains(&Grant::GithubCli) || github_write {
         command.env("AHU_GITHUB_CLI", "1");
+        // Explicit package trust/intent only: same-user code retains the native
+        // token scopes, and this marker does not enforce OS or network policy.
+        if github_write {
+            command.env("AHU_GITHUB_WRITE", "1");
+        }
         if let Some(path) = std::env::var_os("PATH") {
             command.env("AHU_GITHUB_PATH", path);
         }
