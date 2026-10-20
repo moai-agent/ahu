@@ -242,7 +242,6 @@ fn doctor_reports_account_changes_without_disclosing_identity_or_mutating_bindin
             .current_dir(repo.path())
             .args(args)
             .env("PATH", &path)
-            .env("AHU_CMUX_BIN", scratch.path().join("absent-cmux"))
             .env(
                 "AHU_TEST_IDENTITY",
                 serde_json::json!({

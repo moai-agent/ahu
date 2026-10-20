@@ -89,15 +89,15 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 print!("{}", ahu::explain::mermaid_only());
                 Ok(0)
             }
-            ExplainFormat::OpenInCmux => {
-                // The document is written either way, so a machine without cmux
-                // still ends up with something it can open.
+            ExplainFormat::OpenInSessionHost => {
                 let path = ahu::explain::write_document()?;
                 println!("Wrote {}", path.display());
-                match ahu::explain::open_in_cmux(&path, true) {
+                match ahu::explain::open_in_session_host(&path, true) {
                     Ok(surface) => {
-                        println!("Opened in cmux's Markdown viewer (surface {surface}).");
-                        println!("Diagrams render there; the file also renders on GitHub.");
+                        println!(
+                            "Opened through the selected session-host plugin (surface {surface})."
+                        );
+                        println!("Rendering support depends on the selected plugin.");
                         Ok(0)
                     }
                     Err(e) => {
@@ -286,16 +286,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             commands::with_stdio_output(output_json, |console| {
                 ahu::eval::run(console, &repo, &request)
             })
-        }
-        Command::CmuxStatus { output_json } => {
-            let cwd = std::env::current_dir()?;
-            let root = commands::repo_from_cwd().map(|r| r.root).unwrap_or(cwd);
-            ahu::cmux::integration::status_command(&root, output_json)
-        }
-        Command::CmuxInstall { harness, dry_run } => {
-            let cwd = std::env::current_dir()?;
-            let root = commands::repo_from_cwd().map(|r| r.root).unwrap_or(cwd);
-            ahu::cmux::integration::install_command(&root, &harness, dry_run)
         }
         Command::McpServe => {
             let repo = commands::repo_from_cwd()?;
@@ -504,8 +494,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Version
                 | Command::Explain { .. }
                 | Command::Doctor { .. }
-                | Command::CmuxStatus { .. }
-                | Command::CmuxInstall { .. }
                 | Command::McpServe
                 | Command::Auth { .. }
                 | Command::Telemetry { .. }

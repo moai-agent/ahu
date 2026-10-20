@@ -1091,11 +1091,10 @@ pub(crate) fn verify_task(
     // Resolving by name and checking the name is what the adapter asked for
     // removes that surface instead of trying to validate it.
     //
-    // The path is deliberately not pinned across sessions: cmux installs a
-    // per-surface shim directory, so the absolute path of `claude` differs
-    // between the shell that submitted the task and the workspace shell that
-    // runs it. The plan-time resolution is recorded for disclosure, and the
-    // preview says the workspace may resolve a different wrapper.
+    // The path is deliberately not pinned across sessions: the external session
+    // host may install per-session shim directories, so executable lookup can
+    // differ between the submitting shell and the task workspace. The plan-time
+    // resolution is recorded for disclosure, and the preview describes this.
     // The resolved executable must be absolute and outside the repository and
     // task worktree, including when reached through a symlink.
     if !executable.is_absolute() {

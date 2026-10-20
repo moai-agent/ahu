@@ -1365,7 +1365,6 @@ fn durable_mcp_approval_is_resolved_by_operator_cli() {
         let inspect = common::ahu()
             .current_dir(repo.path())
             .args(["task", &id, "--output", "json"])
-            .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .output()
             .unwrap();
         assert!(
@@ -1383,7 +1382,6 @@ fn durable_mcp_approval_is_resolved_by_operator_cli() {
                 "--output",
                 "json",
             ])
-            .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .output()
             .unwrap();
         assert!(

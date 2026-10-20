@@ -278,7 +278,6 @@ const TEST_CONTEXT_ENV: &[&str] = &[
     "AHU_RUNTIME_DIR",
     "AHU_BIN",
     "AHU_STATE_DIR",
-    "AHU_CMUX_BIN",
     "AHU_WORKER_SESSION",
     "AHU_TASK_ID",
     "AHU_TASK_DIR",
@@ -371,7 +370,7 @@ pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy", "opencode"];
 ///
 /// The child gets fake harness executables ahead of everything else on `PATH`,
 /// a private `HOME` so no developer's `~/.claude` is read, a throwaway checkout
-/// for local state, and an `AHU_CMUX_BIN` that is not there. `configure` runs last.
+/// for local state. `configure` runs last.
 ///
 /// Returns `true` in the child, where the body should run, and `false` in the
 /// parent, which has by then run the child and asserted it passed.
@@ -398,8 +397,7 @@ pub fn in_child_fixture(test_name: &str, configure: impl FnOnce(&mut Command)) -
         command
             .env("PATH", &path)
             .env("HOME", &home)
-            .current_dir(checkout.path())
-            .env("AHU_CMUX_BIN", fixtures.path().join("no-such-cmux"));
+            .current_dir(checkout.path());
         configure(command);
     });
     assert_child_passed(test_name, &output);

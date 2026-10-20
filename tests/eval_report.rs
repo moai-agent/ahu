@@ -262,7 +262,6 @@ fn run_at(
         .args(args)
         .env_remove("COLUMNS")
         .env_remove("NO_COLOR")
-        .env("AHU_CMUX_BIN", repo.state.path().join("missing-cmux"))
         .stdin(Stdio::null());
     if let Some(width) = width {
         command.env("COLUMNS", width);

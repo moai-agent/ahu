@@ -11,7 +11,6 @@ struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
     home: PathBuf,
-    bin: PathBuf,
 }
 impl Fixture {
     fn new() -> Self {
@@ -19,12 +18,10 @@ impl Fixture {
         let root = temp.path().canonicalize().unwrap();
         let home = root.join("home");
         std::fs::create_dir(&home).unwrap();
-        let bin = root.join("native ; $literal");
         Self {
             _temp: temp,
             root,
             home,
-            bin,
         }
     }
     fn write(&self, path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) {
@@ -41,29 +38,10 @@ impl Fixture {
     fn inspect(&self, harness: &str) -> integration::Status {
         integration::inspect_in(&self.root, harness, &self.locations())
     }
-    fn native(&self, code: i32, version: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        self.write(
-            &self.bin,
-            format!(
-                r#"#!/bin/sh
-if [ "$1" = --version ]; then printf '%s\n' '{}'; exit 0; fi
-printf '%s\n' "$@" > "$HOME/argv"
-printf 'native confirmation preserved\n' >&2
-read reply
-printf '%s' "$reply" > "$HOME/reply"
-exit {code}
-"#,
-                version
-            ),
-        );
-        std::fs::set_permissions(&self.bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
     fn command(&self) -> Command {
         let mut command = common::ahu();
         command
             .current_dir(&self.root)
-            .env("AHU_CMUX_BIN", &self.bin)
             .env("HOME", &self.home)
             .env("PATH", "/usr/bin:/bin");
         for key in [
@@ -244,108 +222,16 @@ fn native_trust_data_does_not_imply_activation_and_profile_notify_is_unknown() {
 }
 
 #[test]
-fn native_installer_receives_fixed_argv_and_preserves_confirmation_and_exit() {
-    use std::io::Write;
-    use std::process::Stdio;
+fn cmux_cli_management_is_not_part_of_core() {
     let f = Fixture::new();
-    f.native(23, "cmux 0.64.22 (102) [ddd4a01bc]");
-    let mut child = f
-        .command()
-        .args(["cmux", "install", "--harness", "opencode"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"native yes\n")
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(23),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        std::fs::read_to_string(f.home.join("argv")).unwrap(),
-        "hooks\nopencode\ninstall\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(f.home.join("reply")).unwrap(),
-        "native yes"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Native operation:"));
-    assert!(stderr.contains("native confirmation preserved"));
-    assert!(stderr.contains("cmux integration opencode"));
-}
-
-#[test]
-fn dry_run_claude_guidance_unknown_version_and_parser_never_install() {
-    let f = Fixture::new();
-    f.native(0, "0.64.22 (102) [ddd4a01bc]");
-    let output = f
-        .command()
-        .args(["cmux", "install", "--harness", "codex", "--dry-run"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(plan["argv"], json!(["hooks", "codex", "install"]));
-    assert_eq!(plan["available"], true);
-    let output = f
-        .command()
-        .args(["cmux", "install", "--harness", "claude-code"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("wrapper-managed"));
-    f.native(0, "0.64.220 (102) [ddd4a01bc]");
-    let output = f
-        .command()
-        .args(["cmux", "install", "--harness", "codex"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
     for args in [
-        vec!["cmux", "install", "--harness", "codex; false"],
-        vec!["cmux", "install", "--harness", "codex", "--yes"],
-        vec!["cmux", "install", "--harness", "codex", "--project"],
-        vec!["cmux", "status", "--output", "text"],
+        vec!["cmux", "status"],
+        vec!["cmux", "install", "--harness", "codex"],
     ] {
-        assert!(!f.command().args(args).output().unwrap().status.success());
+        let output = f.command().args(args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unknown command"));
     }
-    assert!(!f.home.join("argv").exists());
-}
-
-#[test]
-fn human_json_status_agree_without_socket_or_mutation() {
-    let f = Fixture::new();
-    f.native(0, "0.64.22 (102) [ddd4a01bc]");
-    let output = f
-        .command()
-        .args(["cmux", "status", "--output", "json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["integrations"].as_array().unwrap().len(), 5);
-    assert_eq!(value["installation_plans"].as_array().unwrap().len(), 4);
-    let human = f.command().args(["cmux", "status"]).output().unwrap();
-    let text = String::from_utf8(human.stdout).unwrap();
-    for status in value["integrations"].as_array().unwrap() {
-        assert!(text.contains(&format!(
-            "cmux integration {}:",
-            status["harness"].as_str().unwrap()
-        )));
-    }
-    assert!(!f.home.join("argv").exists());
-    assert!(!f.home.join(".codex").exists());
-    assert!(!f.home.join(".config").exists());
 }
 
 #[test]
@@ -412,58 +298,6 @@ fn ancestor_project_hooks_are_not_mistaken_for_a_clean_leaf() {
             .iter()
             .any(|c| c.registration == Registration::Unknown
                 && c.evidence[0].scope == "project ancestor")
-    );
-}
-
-#[test]
-fn unsupported_install_scope_and_missing_cli_have_reviewable_plans() {
-    let f = Fixture::new();
-    let cli = integration::NativeCli {
-        executable: Some(f.bin.clone()),
-        version: Some("0.64.22 (102) [ddd4a01bc]".into()),
-        installer_supported: true,
-        detail: "synthetic".into(),
-    };
-    let mut locations = f.locations();
-    locations.overrides.insert(
-        "CODEX_HOME".into(),
-        f.root.join("custom").display().to_string(),
-    );
-    let plan = integration::installation_plan_in("codex", &cli, &locations).unwrap();
-    assert!(!plan.available);
-    assert_eq!(plan.unresolved_overrides, ["CODEX_HOME"]);
-    let plan = integration::installation_plan_in("codex", &cli, &f.locations()).unwrap();
-    assert_eq!(
-        plan.affected_paths,
-        [
-            f.home.join(".codex/hooks.json"),
-            f.home.join(".codex/config.toml"),
-            f.home.join(".cmux/hooks")
-        ]
-    );
-    let output = f
-        .command()
-        .args(["cmux", "status", "--output", "json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(status["cli"]["installer_supported"], false);
-}
-
-#[test]
-fn native_cancellation_status_is_not_replaced_with_success() {
-    let f = Fixture::new();
-    f.native(130, "0.64.22 (102) [ddd4a01bc]");
-    let output = f
-        .command()
-        .args(["cmux", "install", "--harness", "antigravity"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(130));
-    assert_eq!(
-        std::fs::read_to_string(f.home.join("argv")).unwrap(),
-        "hooks\nantigravity\ninstall\n"
     );
 }
 

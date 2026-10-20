@@ -560,7 +560,6 @@ fn planning_freezes_registered_identity_and_discloses_repository_inputs() {
                     .env("PATH", &bin)
                     .env("XDG_CONFIG_HOME", external.path().join("config"))
                     .env("XDG_DATA_HOME", external.path().join("data"))
-                    .env("AHU_CMUX_BIN", external.path().join("absent-cmux"))
                     .current_dir(external.path())
                     .output().unwrap();
             assert!(
@@ -822,7 +821,6 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
                     .args(["--exact", "launch::launch_contract_tests::run_task_preserves_work_on_cancellation_exit_and_spawn_failure", "--nocapture"])
                     .env(CASE, case)
                     .env("PATH", bin.path())
-                    .env("AHU_CMUX_BIN", bin.path().join("absent-cmux"))
                     .current_dir(bin.path())
                     .stdin(std::process::Stdio::null())
                     .output()
@@ -973,7 +971,6 @@ exit 0
             ])
             .env(CASE, "run")
             .env("AHU_INTERACTIVE_PLUGIN", "terminal")
-            .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
             .env("AHU_TEST_TERMINAL_BIN", &executable)
             .env("AHU_TEST_TERMINAL_MARKER", &marker)
             .env("AHU_TEST_PYTHON", python)

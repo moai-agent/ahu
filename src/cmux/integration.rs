@@ -1,18 +1,15 @@
-//! Bounded evidence about native integrations, plus the gated entry points
-//! that act on it. Inspection and status evidence collection is read-only: it
-//! reads at most LIMIT bytes per file, considers at most MAX_ENTRIES entries,
-//! and no hook bodies are persisted, interpreted, installed, or copied by
+//! Bounded, read-only evidence about native hook integrations. Inspection
+//! reads at most LIMIT bytes per file and considers at most MAX_ENTRIES entries.
+//! No hook bodies are persisted, interpreted, installed, or copied by
 //! inspection.
 //!
-//! Mutation is narrow and individually gated: `sanitize` runs only after
-//! admission, removing `CMUX_*` routing variables from a child command and
-//! restoring reviewed disable controls; `execute_install` runs the native
-//! installer only after the installation plan is inspected and verified
-//! (`plan.available` and the exact `["hooks", agent, "install"]` argv check).
+//! `sanitize` runs only after admission, removing `CMUX_*` routing variables
+//! from a child command and restoring reviewed disable controls. This module
+//! never invokes the cmux CLI or installs native configuration.
 //! The `enforce*` family are pure gate predicates over inspection results:
 //! they read and decide, never mutate.
 //!
-//! Native command generation reviewed against cmux ddd4a01bc:
+//! Native hook fingerprints reviewed against cmux ddd4a01bc:
 //! <https://github.com/manaflow-ai/cmux/blob/ddd4a01bc/CLI/CMUXCLI%2BAgentHookDefinitions.swift>.
 //! OpenCode and Claude fingerprints identify inspected native artifacts, not
 //! implementations maintained by ahu. A changed fingerprint is unknown.
@@ -24,11 +21,10 @@ use std::process::Command;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::util::{Error, Result, digest_bytes, display_safe, shell_single_quote};
+use crate::util::{Error, Result, digest_bytes, display_safe};
 
 const LIMIT: u64 = 1024 * 1024;
 const MAX_ENTRIES: usize = 256;
-const REVIEWED_VERSION: &str = "0.64.22 (102) [ddd4a01bc]";
 const FEED_DIGEST: &str = "aae76d0577a008d89e96932abb3b7c61d83b0086ca5e08b7622aac0aa8d76b9c";
 const SESSION_DIGEST: &str = "a9664ca1aff28fc5aa194efdfb2ed41b2584ee4569e91503e9388b3035a625b7";
 const WRAPPER_DIGEST: &str = "e930666189e326972d4b4ed36ca7bd955260845953a779b3049be44677c175d4";
@@ -978,7 +974,7 @@ fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) 
         next_action: match harness {
             "claude-code" => "Use interactive execution while independent hooks/plugins or managed settings are unresolved. Review those sources with their native owner, then inspect again. cmux Settings > Automation controls only the Claude wrapper; no native Claude installer is exposed.".into(),
             "opencode" => "Use interactive execution for unresolved native configuration/authentication sources; credentials and account databases are not read. Native --pure disables external plugins but does not resolve authenticated remote configuration. Changing native homes or hiding account stores can change provider/model resolution and is not an isolation repair. For unguarded Feed, explicit native removal is `cmux hooks opencode uninstall`, then inspect again. Reinstalling the same Feed does not provide isolation.".into(),
-            _ => "Inspect unknown components and native scope; use interactive execution until isolation is verified. Installation is explicit: ahu cmux install --harness ID --dry-run.".into(),
+            _ => "Inspect unknown components and native scope; use interactive execution until isolation is verified. Review native configuration with its owner, then inspect again.".into(),
         } }
 }
 
@@ -1832,7 +1828,7 @@ pub fn render_summary(status: &Status) -> String {
         .filter(|c| c.registration == Registration::Unknown)
         .count();
     format!(
-        "  cmux       {installed} verified component(s), {unknown} unknown; activation/live delivery unverified; headless {}. Details: ahu cmux status\n",
+        "  native     {installed} verified component(s), {unknown} unknown; activation/live delivery unverified; headless {}. Details are included in the launch review.\n",
         if status.headless.allowed {
             if status.conformance == "unverified; explicit work mode" {
                 "work mode; native compatibility unverified"
@@ -1847,7 +1843,7 @@ pub fn render_summary(status: &Status) -> String {
 
 pub fn render(status: &Status) -> String {
     let mut text = format!(
-        "cmux integration {}: headless {}\n",
+        "native integration {}: headless {}\n",
         display_safe(&status.harness),
         if status.headless.allowed {
             if status.conformance == "unverified; explicit work mode" {
@@ -1860,7 +1856,7 @@ pub fn render(status: &Status) -> String {
         }
     );
     text.push_str(&format!(
-        "  CLI version: {} ({}); approval, executable and launch checks still apply\n",
+        "  harness CLI version: {} ({}); approval, executable and launch checks still apply\n",
         display_safe(status.cli_version.as_deref().unwrap_or("unknown")),
         if status.version_checked {
             "checked"
@@ -1918,244 +1914,6 @@ pub fn render(status: &Status) -> String {
         text.push_str(&format!("  gap: {}\n", display_safe(gap)));
     }
     text
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct NativeCli {
-    pub executable: Option<PathBuf>,
-    pub version: Option<String>,
-    pub installer_supported: bool,
-    pub detail: String,
-}
-impl NativeCli {
-    pub fn discover() -> Self {
-        let executable = resolve_native_cli();
-        let version = executable.as_ref().and_then(|path| {
-            if std::env::var_os("AHU_CMUX_BIN").is_some() {
-                crate::selection::probe_explicit_utility_version(path)
-            } else {
-                path.to_str().and_then(crate::selection::probe_version)
-            }
-        });
-        let installer_supported = version
-            .as_deref()
-            .is_some_and(|v| v.strip_prefix("cmux ").unwrap_or(v) == REVIEWED_VERSION);
-        Self { executable, version, installer_supported,
-            detail: "CLI probe independent of socket reachability. Installer mapping reviewed only for cmux 0.64.22 (102) [ddd4a01bc]; other builds remain unknown.".into() }
-    }
-}
-
-fn resolve_native_cli() -> Option<PathBuf> {
-    match std::env::var_os("AHU_CMUX_BIN") {
-        Some(value) => {
-            let path = PathBuf::from(value);
-            if path.is_absolute() {
-                return Some(path.canonicalize().unwrap_or(path));
-            }
-            if path.as_os_str().as_encoded_bytes().contains(&b'/') {
-                let path = std::env::current_dir().ok()?.join(path);
-                return Some(path.canonicalize().unwrap_or(path));
-            }
-            resolve_explicit_name(&path)
-        }
-        None => crate::selection::resolve_utility("cmux").ok(),
-    }
-}
-
-fn resolve_explicit_name(name: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let cwd = std::env::current_dir().ok()?;
-    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
-    for directory in std::env::split_paths(&path) {
-        let candidate = cwd.join(directory).join(name);
-        if std::fs::metadata(&candidate)
-            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        {
-            return candidate.canonicalize().ok();
-        }
-    }
-    None
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct InstallationPlan {
-    pub harness: String,
-    pub executable: Option<PathBuf>,
-    pub argv: Vec<String>,
-    pub available: bool,
-    pub scope: String,
-    pub affected_paths: Vec<PathBuf>,
-    pub unresolved_overrides: Vec<String>,
-    pub detail: String,
-}
-pub fn installation_plan(harness: &str, cli: &NativeCli) -> Result<InstallationPlan> {
-    installation_plan_in(harness, cli, &Locations::detect())
-}
-pub fn installation_plan_in(
-    harness: &str,
-    cli: &NativeCli,
-    locations: &Locations,
-) -> Result<InstallationPlan> {
-    let agent = native_agent(harness).ok_or_else(|| {
-        Error::new("unsupported harness; use claude-code, codex, opencode, or antigravity")
-    })?;
-    let wrapper = agent == "claude";
-    let relevant: &[&str] = match harness {
-        "codex" => &["CODEX_HOME"],
-        "opencode" => &[
-            "XDG_CONFIG_HOME",
-            "OPENCODE_CONFIG",
-            "OPENCODE_CONFIG_DIR",
-            "OPENCODE_CONFIG_CONTENT",
-        ],
-        "antigravity" => &["GEMINI_CLI_HOME", "AGY_CONFIG_DIR"],
-        _ => &[],
-    };
-    let unresolved_overrides: Vec<String> = relevant
-        .iter()
-        .filter(|k| locations.overrides.contains_key(**k))
-        .map(|k| (*k).into())
-        .collect();
-    let affected_paths = locations
-        .home
-        .as_ref()
-        .map(|home| {
-            let files: &[&str] = match harness {
-                "codex" => &[".codex/hooks.json", ".codex/config.toml", ".cmux/hooks"],
-                "opencode" => &[
-                    ".config/opencode/plugins/cmux-feed.js",
-                    ".config/opencode/plugins/cmux-session.js",
-                ],
-                "antigravity" => &[".gemini/config/hooks.json"],
-                _ => &[],
-            };
-            files.iter().map(|f| home.join(f)).collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let scope_known = unresolved_overrides.is_empty()
-        && locations
-            .home
-            .as_ref()
-            .is_some_and(|p| check_path(p).is_ok());
-    Ok(InstallationPlan { harness: harness.into(), executable: cli.executable.clone(),
-        argv: if wrapper { vec![] } else { vec!["hooks".into(), agent.into(), "install".into()] },
-        available: !wrapper && cli.installer_supported && cli.executable.is_some() && scope_known,
-        scope: "native default user scope; custom configuration overrides require separate native review; no project or bulk installation requested".into(),
-        affected_paths,
-        unresolved_overrides,
-        detail: if wrapper { "Claude is wrapper-managed: use cmux Settings > Automation. There is no supported `hooks claude install` operation.".into() }
-            else { "Native cmux owns hooks/scripts and associated activation/trust settings. Native confirmations and exit status are preserved. Success does not prove activation or live conformance.".into() },
-    })
-}
-/// Inherit terminal streams; never insert --yes or evaluate shell input.
-pub fn execute_install(plan: &InstallationPlan) -> Result<i32> {
-    if !plan.available {
-        return Err(Error::new(
-            "native installer unavailable or unverified; inspect the installation plan",
-        ));
-    }
-    let expected = native_agent(&plan.harness)
-        .filter(|v| *v != "claude")
-        .ok_or_else(|| Error::new("unsupported native installer"))?;
-    if plan.argv != ["hooks", expected, "install"] {
-        return Err(Error::new("invalid native installation operation"));
-    }
-    let executable = plan
-        .executable
-        .as_ref()
-        .ok_or_else(|| Error::new("cmux executable unavailable"))?;
-    let status = Command::new(executable).args(&plan.argv).status()?;
-    use std::os::unix::process::ExitStatusExt;
-    Ok(status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)))
-}
-pub fn status_command(repo: &Path, json: bool) -> Result<i32> {
-    let cli = NativeCli::discover();
-    let statuses: Vec<_> = ["claude-code", "codex", "opencode", "antigravity", "kiro"]
-        .into_iter()
-        .map(|h| {
-            let version = crate::catalog::harness(h)
-                .and_then(|entry| crate::selection::installed_version(entry.executable));
-            inspect(repo, h).with_version(version.as_deref())
-        })
-        .collect();
-    let plans = statuses
-        .iter()
-        .filter(|s| s.harness != "kiro")
-        .map(|s| installation_plan(&s.harness, &cli))
-        .collect::<Result<Vec<_>>>()?;
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string(
-                &serde_json::json!({"schema_version":1,"cli":cli,"integrations":statuses,"installation_plans":plans})
-            )?
-        );
-    } else {
-        println!(
-            "cmux CLI: {} ({})",
-            cli.executable
-                .as_ref()
-                .map(|p| display_safe(&p.display().to_string()))
-                .unwrap_or_else(|| "unavailable".into()),
-            display_safe(cli.version.as_deref().unwrap_or("version unknown"))
-        );
-        for status in &statuses {
-            print!("{}", render(status));
-        }
-        for plan in &plans {
-            println!(
-                "installer {}: {} — {}",
-                plan.harness,
-                if plan.available {
-                    "available"
-                } else {
-                    "unavailable/unknown"
-                },
-                plan.detail
-            );
-        }
-    }
-    Ok(0)
-}
-pub fn install_command(repo: &Path, harness: &str, dry_run: bool) -> Result<i32> {
-    let cli = NativeCli::discover();
-    let plan = installation_plan(harness, &cli)?;
-    eprintln!("{}\nScope: {}", plan.detail, plan.scope);
-    for path in &plan.affected_paths {
-        eprintln!("  {}", display_safe(&path.display().to_string()));
-    }
-    if !plan.unresolved_overrides.is_empty() {
-        eprintln!(
-            "Unresolved scope overrides: {}",
-            plan.unresolved_overrides.join(", ")
-        );
-    }
-
-    if !plan.argv.is_empty()
-        && let Some(executable) = &plan.executable
-    {
-        eprintln!(
-            "Native operation: {} {}",
-            display_safe(&shell_single_quote(&executable.to_string_lossy())),
-            plan.argv
-                .iter()
-                .map(|s| shell_single_quote(s))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-    }
-    if dry_run {
-        println!("{}", serde_json::to_string(&plan)?);
-        return Ok(0);
-    }
-    if harness == "claude-code" {
-        return Ok(0);
-    }
-    let code = execute_install(&plan)?;
-    // Rescan even after a failed/partial native operation. No inferred success.
-    eprint!("{}", render(&inspect(repo, harness)));
-    Ok(code)
 }
 
 #[cfg(test)]

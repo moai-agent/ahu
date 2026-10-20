@@ -406,7 +406,6 @@ fn launch_displays_a_prominent_drift_warning() {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&output.stdout);
@@ -668,7 +667,6 @@ fn task_listing_json_is_unaffected_by_width_and_color() {
             .current_dir(repo.path())
             .env("COLUMNS", columns)
             .env_remove("NO_COLOR")
-            .env("AHU_CMUX_BIN", repo.state_path().join("absent-cmux"))
             .output()
             .unwrap();
         assert!(
@@ -713,8 +711,7 @@ fn task_listing_paints_its_roles_only_when_color_is_in_effect() {
             .arg(color)
             .arg("tasks")
             .current_dir(repo.path())
-            .env("COLUMNS", "240")
-            .env("AHU_CMUX_BIN", repo.state_path().join("absent-cmux"));
+            .env("COLUMNS", "240");
         match no_color {
             Some(value) => command.env("NO_COLOR", value),
             None => command.env_remove("NO_COLOR"),
@@ -1012,7 +1009,6 @@ fn a_launch_says_when_drift_could_not_read_earlier_records() {
         .args(["@chris", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .arg("--dry-run")
-        .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),

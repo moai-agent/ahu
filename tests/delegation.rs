@@ -23,7 +23,6 @@ fn launch_with_host(
         .env_remove("AHU_INTERACTIVE_PLUGIN")
         .args([name, "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
-        .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -388,7 +387,6 @@ fn inline_and_piped_prompts_produce_clean_json_without_cmux() {
         command
             .current_dir(repo.path())
             .args(["--color=always", "@sable", "--dry-run", "--output", "json"])
-            .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .env(
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),

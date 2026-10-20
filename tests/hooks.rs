@@ -62,7 +62,6 @@ fn doctor_separates_project_hook_inventory_from_all_harness_integration_status()
             .args(["doctor", "--verbose"])
             .current_dir(repo.path())
             .env("HOME", home.path())
-            .env("AHU_CMUX_BIN", home.path().join("missing-cmux"))
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&output.stdout);

@@ -782,18 +782,11 @@ pub fn doctor_with_verbosity(
         .as_ref()
         .map(|r| r.root.clone())
         .unwrap_or(std::env::current_dir()?);
-    let native_cli = cmux::integration::NativeCli::discover();
-    console.say(&format!(
-        "cmux CLI     {}\n",
-        display_safe(
-            native_cli
-                .version
-                .as_deref()
-                .unwrap_or("unavailable or version unknown")
-        )
-    ))?;
     for harness in ["claude-code", "codex", "opencode", "antigravity"] {
-        let status = cmux::integration::inspect(&integration_root, harness);
+        let version = crate::catalog::harness(harness)
+            .and_then(|entry| crate::selection::installed_version(entry.executable));
+        let status =
+            cmux::integration::inspect(&integration_root, harness).with_version(version.as_deref());
         if status
             .components
             .iter()
@@ -802,7 +795,7 @@ pub fn doctor_with_verbosity(
             warnings += 1;
         }
         if verbose {
-            console.say(&format!("cmux integration {}:\n", display_safe(harness)))?;
+            console.say(&format!("native safety {}:\n", display_safe(harness)))?;
             console.say(&cmux::integration::render_summary(&status))?;
         } else {
             let verified = status
@@ -814,7 +807,7 @@ pub fn doctor_with_verbosity(
                 .count();
             let unknown = status.components.len().saturating_sub(verified);
             console.say(&format!(
-                "cmux         {}: {verified} verified, {unknown} unknown; headless {}\n",
+                "native       {}: {verified} verified, {unknown} unknown; headless {}\n",
                 display_safe(harness),
                 if status.headless.allowed {
                     "ready"
@@ -830,18 +823,6 @@ pub fn doctor_with_verbosity(
                 shown.push('…');
             }
             console.say(&format!("  headless   {shown}\n"))?;
-        }
-        if verbose {
-            let installer = cmux::integration::installation_plan(harness, &native_cli)?;
-            console.say(&format!(
-                "  installer  {}; inspect: ahu cmux install --harness {} --dry-run\n",
-                if installer.available {
-                    "available"
-                } else {
-                    "unavailable/unknown"
-                },
-                display_safe(harness)
-            ))?;
         }
     }
 

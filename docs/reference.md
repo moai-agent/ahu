@@ -319,9 +319,10 @@ rejected. Accepted prompt text retains its original bytes, including leading
 and trailing newlines.
 
 `--dry-run --output json` writes one JSON object to stdout and human-readable
-preview information to stderr. Previewing requires Git, valid project settings,
-and the selected harness, but no cmux session. It launches no task. Actual
-interactive execution requires cmux; `--headless` uses a separate supervisor.
+preview information to stderr. Previewing requires Git, valid project settings, and the selected harness, but
+no session-host plugin. It launches no task. Interactive execution uses the
+current terminal by default or an explicitly selected plugin; `--headless` uses a
+separate supervisor.
 Manifests that widen approvals require the
 explicit `--allow-widened-approvals` flag for both previews and execution, as in
 the preceding examples. Interactive launch JSON requires `--dry-run`; headless
@@ -356,7 +357,7 @@ Commands return these exit codes:
 | `1` | Cancelled by the user. |
 | `2` | Invalid command usage. |
 | `3` | Unknown or unregistered agent. |
-| `4` | Missing prerequisite, such as Git repository, harness, or cmux. |
+| `4` | Missing prerequisite, such as Git repository, harness, or another selected session-host plugin. |
 | `5` | Run failure, including invalid persisted configuration. |
 
 ## Harness compatibility by execution mode
@@ -627,11 +628,7 @@ owner or use interactive execution; see OpenCode's
 Claude's `--bare` similarly changes authentication resolution and is not used.
 Antigravity has no reviewed invocation override for unresolved hooks/extensions.
 
-`ahu cmux status` (also `--output json`) checks installed CLI versions and
-reports the same isolation profile used by launch previews. Inspection alone
-without a version observation reports component compatibility only. An admitted
-version and inspected components do not replace executable, approval, model, or
-other launch checks.
+The launch preview and `ahu doctor --verbose` report the read-only native hook safety inspection used for headless admission. This inspection does not invoke cmux or manage session hosting. An admitted version and inspected components do not replace executable, approval, model, or other launch checks.
 
 | Harness | Required native isolation evidence |
 | --- | --- |
@@ -1639,7 +1636,8 @@ ahu @glm-reviewer --prompt-file assignment.txt
 
 This manifest declares `prompt`, so no approval-widening flag is needed. A
 manifest declaring `auto` requires `--allow-widened-approvals` on previews and
-launches alike. Interactive launches need cmux. The same agent runs unattended
+launches alike. Interactive launches use the current terminal or selected session-host plugin.
+The same agent runs unattended
 with `--headless`, which builds `opencode run --format json` instead and needs
 no cmux; see [headless execution](#headless-execution).
 
@@ -1907,10 +1905,9 @@ under skipped paths still arrive through Git; local edits there are not copied.
 
 Hooks run on harness lifecycle events and can affect tool calls or context.
 ahu inspects Claude Code hook settings; general hook coverage for the other
-harnesses remains incomplete. The separate cmux integration inspection recognizes
-exact reviewed native components. Ordinary launch and inspection do not install
-or edit hooks. The explicit [cmux installer](#cmux-native-integration) delegates
-changes to the native command.
+harnesses remains incomplete. The bounded native hook safety inspection recognizes exact reviewed components.
+Ordinary launch and inspection do not install or edit hooks. Session-host lifecycle
+operations are provided through the selected external plugin.
 
 Only a hook's program is shown, never its arguments, and only its digest is
 stored in the task record—hook commands routinely carry tokens, and a report
@@ -1954,59 +1951,13 @@ the task record freezes its package identity for later focus and cleanup. Ahu
 contains no compiled cmux session adapter. Providers run with the user's OS
 permissions; plugin separation is an integration boundary, not a sandbox.
 
-## cmux native integration
+## Native hook safety inspection
 
-`ahu cmux status [--output json]` inspects bounded local configuration and native
-artifact fingerprints without installing hooks or contacting a provider. It
-reports CLI availability/version separately from socket reachability,
-registration separately from activation, and isolation separately from live
-conformance. `ahu doctor` gives compact summaries and an initial refusal reason;
-the status command retains full provenance. Launch disclosures use the same
-inspection. Verified absence is reported as missing. Unreadable, redirected,
-unsupported, or indirect evidence stays unknown; a filename or matching fragment
-of a command does not prove a reviewed component.
+Ahu performs bounded, read-only inspection of native hook configuration that can affect headless launches. It does not invoke the cmux CLI, install native hooks, or manage session hosting. Session creation, inventory, focus, and cleanup use the selected external session-host plugin through Host V1.
 
-The native installer mapping is reviewed only for cmux
-`0.64.22 (102) [ddd4a01bc]`. Other builds remain unknown. Preview the exact
-operation and affected paths before explicit installation:
+Headless admission is checked before execution and rechecked by the supervisor. The child environment removes inherited `CMUX_*` routing variables and restores only a reviewed process-local control when the evidence requires one. Current verified guards use `CMUX_CODEX_HOOKS_DISABLED` or `CMUX_OPENCODE_HOOKS_DISABLED`. Claude’s reviewed wrapper requires a direct executable; registered Claude and Antigravity hook commands remain unknown. A variable name alone is not proof of isolation. Unsafe or unknown components refuse admission. Ahu leaves native homes and settings in place. Arbitrary shell commands, hooks, remote plugins, and concurrent same-user changes remain outside these controls. A successful static inspection does not launch or validate a native session.
 
-```sh
-ahu cmux status --output json
-ahu cmux install --harness codex --dry-run
-```
-
-Without `--dry-run`, ahu runs only the fixed native arguments shown below,
-with inherited terminal streams, native confirmations, and native exit status.
-It adds no `--yes`, shell evaluation, project scope, or bulk installation.
-Native cmux owns its scripts, hooks, and activation/trust settings. Installation
-success does not establish activation or live delivery; ahu inspects again afterward,
-even after a failed native operation. Custom native configuration overrides make
-the default-scope installer unavailable until separately reviewed.
-
-| Harness ID | Native operation and scope | Inspected integration and headless admission |
-| --- | --- | --- |
-| `codex` | `cmux hooks codex install`; default user hooks, configuration, and cmux hook scripts | Exact reviewed commands check the hook-off variable and absent surface. Configuration activation is reported separately. Unknown commands or scopes refuse headless admission. |
-| `claude-code` | No installer arguments; use cmux Settings > Automation | The reviewed bundled wrapper is recognized, but invocation/injection is unobserved. Headless requires the direct harness executable; separately configured hooks need their own evidence. |
-| `opencode` | `cmux hooks opencode install`; default user Session and Feed plugins | The reviewed Session bytes check the hook-off variable and surface. Reviewed Feed bytes lack both and can use a fallback socket: installed Feed refuses headless coexistence. Reinstalling the same bytes does not fix isolation. |
-| `antigravity` | `cmux hooks antigravity install`; default user Gemini hooks configuration | Configured commands have no fingerprint verifier and remain unknown, refusing headless admission. Custom formats and extension scopes remain unverified; specialized native helper version eligibility is separate. |
-
-Headless admission is checked before execution and rechecked by the supervisor.
-The child environment removes inherited `CMUX_*` routing variables and restores
-only a reviewed process-local control when the evidence requires one. Current
-verified guards use `CMUX_CODEX_HOOKS_DISABLED` or
-`CMUX_OPENCODE_HOOKS_DISABLED`. Claude’s reviewed wrapper requires a direct
-executable; registered Claude and Antigravity hook commands remain unknown.
-A variable name alone is not proof of isolation. Unsafe or unknown components
-refuse admission. ahu leaves native homes and settings in place. Arbitrary shell
-commands, hooks, remote plugins, and concurrent same-user changes remain outside
-these controls. A successful static inspection does not launch or validate a
-native session.
-
-Native authentication stores, account databases, managed preferences, and plugin
-sources can select additional executable configuration. ahu checks their presence
-without reading credentials or fetching remote context. Present or unresolved
-opaque sources refuse headless admission, even for a legitimate setup. Inspect
-the reported source with `ahu cmux status`; interactive execution remains available.
+Native authentication stores, account databases, managed preferences, and plugin sources can select additional executable configuration. Ahu checks their presence without reading credentials or fetching remote context. Present or unresolved opaque sources refuse headless admission, even for a legitimate setup. Interactive execution remains available.
 
 ### Conformance evidence
 
@@ -2073,7 +2024,7 @@ candidate checkout are not secret merely because the prompt omits their answers.
 
 Headless tasks use primary-owned coordination; interactive tasks use their own
 worktree-local records. `tasks` and `task` include compatible legacy records as
-well. `focus` is for interactive cmux sessions.
+well. `focus` uses the task’s recorded session-host plugin.
 
 ### Interactive cmux ownership
 
@@ -2135,7 +2086,7 @@ does not prove non-creation. ahu retains the task record, index, worktree and
 branch, reports the task identity and inspection paths, and does not invent a
 terminal outcome. Every new workspace candidate must match the requested
 worktree directory, even when only one candidate appears. Unrelated or ambiguous
-workspaces are preserved. Inspect the task and cmux session before retrying;
+workspaces are preserved. Inspect the task and recorded session-host state before retrying;
 confirm termination before cleanup. `ahu remove` requires a terminal record. If
 the record remains `starting` and manual inspection confirms no session uses the
 checkout, use non-forced Git worktree and branch removal rather than fabricating
@@ -2202,7 +2153,7 @@ termination. A terminal outcome is recorded even if foreground restoration fails
 
 ### Utility lookup
 
-Git and explicit cmux lookup skip empty and relative `PATH` entries. Candidates
+Git lookup skips empty and relative `PATH` entries. Candidates
 must be executable, canonicalize to an absolute path, and be outside registered
 repository roots and Git working trees. The resolver inspects each canonical
 candidate's parent ancestry for `.git` with filesystem metadata, without running
@@ -2212,12 +2163,7 @@ rejects the candidate. This also excludes executables in unopened sibling or
 unrelated working trees. Symlinked installations outside working trees remain
 usable; aliases resolving into a working tree do not.
 
-The selected canonical Git path is used for that Git invocation; cmux
-keeps its selected canonical path across calls on the discovered client. `AHU_CMUX_BIN`
-is a deliberate user selection and retains normal command semantics: a bare name
-uses command lookup, and relative or absolute paths are accepted without the
-default working-tree exclusion. These are executable selection checks, not a
-sandbox, and they do not prevent later replacement by a host process.
+The selected canonical Git path is used for each Git invocation. These are executable selection checks, not a sandbox, and they do not prevent later replacement by a host process. Ahu does not resolve or invoke a cmux executable; session-host operations use the committed external plugin binding.
 
 The catalog in `src/catalog.rs` records, per adapter, the CLI versions whose
 behavior was checked and the enforcement gaps ahu discloses for it. These are

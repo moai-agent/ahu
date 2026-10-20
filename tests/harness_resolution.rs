@@ -75,7 +75,6 @@ fn run(fixture: &PlantedRepo, path: &str, args: &[&str]) -> std::process::Output
     common::ahu()
         .args(args)
         .current_dir(fixture.repo.path())
-        .env("AHU_CMUX_BIN", fixture.outside.path().join("missing-cmux"))
         // A throwaway home, so the developer's own settings cannot change this.
         .env("HOME", fixture.outside.path())
         .env("PATH", path)
@@ -107,7 +106,6 @@ fn a_linked_checkout_never_probes_a_harness_from_the_primary_checkout() {
     let output = common::ahu()
         .args(["doctor"])
         .current_dir(&linked)
-        .env("AHU_CMUX_BIN", fixture.outside.path().join("missing-cmux"))
         .env("HOME", fixture.outside.path())
         .env("PATH", path)
         .output()
@@ -222,7 +220,6 @@ fn a_non_utf8_sibling_worktree_harness_is_excluded_through_a_utf8_symlink() {
     let output = common::ahu()
         .args(["doctor"])
         .current_dir(repo.path())
-        .env("AHU_CMUX_BIN", outside.path().join("missing-cmux"))
         .env("HOME", outside.path())
         .env("PATH", path)
         .output()

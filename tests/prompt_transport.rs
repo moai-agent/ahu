@@ -286,7 +286,6 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
         // Point cmux discovery at nothing so the test never touches a real session.
-        .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .expect("ahu runs");
     assert!(
@@ -371,7 +370,6 @@ fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .expect("ahu runs");
     assert!(!output.status.success());

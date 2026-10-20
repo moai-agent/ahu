@@ -103,7 +103,6 @@ impl Fixture {
             .args(args)
             .current_dir(self.repo.path())
             .env("AHU_RUNTIME_DIR", self.runtime.path())
-            .env("AHU_CMUX_BIN", self.runtime.path().join("no-cmux"))
             .env("AHU_EXECUTION_BACKEND", "headless")
             .output()
             .unwrap()

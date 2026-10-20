@@ -471,7 +471,6 @@ fn headless_planning_does_not_activate_the_selected_session_host() {
             .command()
             .env("AHU_INTERACTIVE_PLUGIN", selection)
             .env_remove("AHU_PLUGIN_PATH")
-            .env("AHU_CMUX_BIN", f.bin.join("cmux"))
             .env("HOST_ACTIVATION_MARKER", &marker)
             .args([
                 "@worker",
@@ -3507,7 +3506,7 @@ fn ordinary_event_subtypes_do_not_consume_helper_budget() {
 }
 
 #[test]
-fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux() {
+fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_launch() {
     use std::os::unix::fs::PermissionsExt;
     for (harness, model, executable, version, source, body, reason) in [
         (
@@ -3564,38 +3563,6 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, body).unwrap();
         }
-        let status = f
-            .command()
-            .args(["cmux", "status", "--output", "json"])
-            .output()
-            .unwrap();
-        assert!(
-            status.status.success(),
-            "{}",
-            String::from_utf8_lossy(&status.stderr)
-        );
-        let status = Fixture::value(&status);
-        let status = status["integrations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|v| v["harness"] == harness)
-            .unwrap();
-        assert_eq!(status["headless"]["allowed"], false, "{status}");
-        assert_eq!(status["cli_version"], version);
-        assert!(
-            status["headless"]["reasons"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v.as_str().unwrap().contains(reason)),
-            "{status}"
-        );
-        let human = f.command().args(["cmux", "status"]).output().unwrap();
-        let human = String::from_utf8(human.stdout).unwrap();
-        assert!(human.contains(reason), "{human}");
-        assert!(human.contains(status["next_action"].as_str().unwrap()));
-
         let interactive = f
             .command()
             .args([
@@ -3615,6 +3582,14 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
         );
         let preview = Fixture::value(&interactive);
         assert_eq!(preview["cmux_integration"]["headless"]["allowed"], false);
+        assert_eq!(preview["cmux_integration"]["cli_version"], version);
+        assert!(
+            preview["cmux_integration"]["headless"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str().unwrap().contains(reason))
+        );
         assert_eq!(
             preview["cmux_integration"]["profile"]["interactive_supported"],
             true
@@ -3671,7 +3646,7 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             assert_eq!(Fixture::value(&listed)["tasks"], serde_json::json!([]));
         }
         assert_eq!(preview["executed"], false);
-        assert!(!status.to_string().contains("SYNTHETIC_OPAQUE_SENTINEL"));
+        assert!(!preview.to_string().contains("SYNTHETIC_OPAQUE_SENTINEL"));
     }
 }
 

@@ -147,7 +147,6 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
             "OTEL_RESOURCE_ATTRIBUTES",
             "ahu.release.id=release-eval-test",
         )
-        .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .output()
@@ -476,7 +475,6 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
             .env("PATH", &path)
             .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
-            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
             .env("AHU_TEST_ANSWER", mode)
             .env("NO_COLOR", "1")
             .stdin(Stdio::null())
@@ -843,7 +841,6 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
             .env("HOME", home)
             .env("AHU_DECISION_URL", endpoint)
             .env("FIXTURE_WRITE_ANSWER", if answer { "yes" } else { "no" })
-            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -1030,7 +1027,6 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
             .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
             .env("AHU_DECISION_URL", &endpoint)
-            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -1187,7 +1183,6 @@ else:
             .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
             .env("AHU_TEST_TRAJECTORY_MODE", mode)
-            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
             .stdin(Stdio::null())
             .output()
             .unwrap();

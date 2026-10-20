@@ -540,7 +540,6 @@ fn installed_command(root: &Path) -> std::process::Command {
         .current_dir(root)
         .env_remove("AHU_PLUGIN_PATH")
         .env("AHU_INTERACTIVE_PLUGIN", "fixture")
-        .env("AHU_CMUX_BIN", root.join("no-cmux"))
         .env("OTEL_SDK_DISABLED", "true");
     command
 }

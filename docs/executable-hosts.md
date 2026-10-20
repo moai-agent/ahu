@@ -193,7 +193,7 @@ must retain task inputs and work on that outcome. Other mutating methods return
 errors without implying rollback. Killing the transport is not proof of
 cancelling an already-started task.
 
-## Fixture and external cmux status
+## Fixture and external host status
 
 `tests/fixtures/external-host.py` is a complete synthetic peer used by offline
 integration tests. It models groups and workspaces in memory, exercises the real

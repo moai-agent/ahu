@@ -35,7 +35,6 @@ fn ahu_in(dir: &Path, args: &[&str]) -> std::process::Output {
         // tests are about what is on disk, so they are pointed at a cmux that
         // is not there: neither a developer's real session nor another test's
         // stub can change what they see.
-        .env("AHU_CMUX_BIN", dir.join("no-such-cmux"))
         .output()
         .expect("ahu runs")
 }
@@ -50,7 +49,6 @@ fn worker_in(dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env_remove("AHU_STATE_DIR")
-        .env("AHU_CMUX_BIN", dir.join("no-such-cmux"))
         .env("AHU_WORKER_SESSION", "cmux");
     command.output().expect("ahu runs")
 }
@@ -499,7 +497,6 @@ fn approval_commands_refuse_task_callers_before_lookup_or_mutation() {
                 let out = common::ahu()
                     .current_dir(repo.path())
                     .args([action, target, "--output", "json"])
-                    .env("AHU_CMUX_BIN", repo.path().join("no-such-cmux"))
                     .env(marker, value)
                     .output()
                     .unwrap();

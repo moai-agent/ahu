@@ -63,20 +63,16 @@ Commands:
                                   and bounded requests; retain results and native sessions,
                                   branches and worktrees
   cancel <task-id>                Request cancellation of the task and ahu descendants;
-                                  confirmed interactive cancellation closes its cmux workspace,
+                                  confirmed interactive cancellation closes its session-host workspace,
                                   while the worktree, branch and record are kept
   resume <task-id> --prompt-file PATH [--output json]
                                   Resume a root task from the host using its recorded native session;
                                   child/worker resume unsupported: submit a new registered assignment
-  focus <task-id>       Bring a task's cmux session to the front
+  focus <task-id>       Focus a task through its recorded session-host plugin
   remove <task-id>      Remove a terminal task's record, worktree, and branch
   message <task-id> <text>
                         Append an operator message; subsequent flags are literal text
   plugins [--project|--probe] [--output json] Inspect packages/bindings or invoke an installed JSON entrypoint; --probe executes the selected host
-  cmux status [--output json]
-                        Inspect native integration evidence and headless isolation
-  cmux install --harness ID [--dry-run]
-                        Preview or explicitly delegate a native cmux installation
   auth status --harness ID [--profile NAME]
                         Check this checkout's current harness account binding
   auth readiness --harness ID [--model MODEL]
@@ -96,7 +92,7 @@ Commands:
   telemetry report --key KEY [--output json]
                         Report opted-in local headless measurements
   mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
-  doctor [--verbose]    Check repository, configuration, harness, and cmux
+  doctor [--verbose]    Check repository, configuration, harness, and plugins
   agy                   Open the Antigravity CLI here on this project's
                         top-ranked Antigravity model, in YOLO mode
                         (--dangerously-skip-permissions)
@@ -110,7 +106,7 @@ Commands:
                         model, auto-approving every permission it does not deny
                         (--auto; ahu passes no --pure)
   kiro                  Open Kiro V3 here with the ranked model and --trust-all-tools
-  run-task              Internal: run a prepared task (used by cmux)
+  run-task              Internal: run a prepared task (used by the session host)
   supervise --task-dir PATH
                         Internal: supervise a detached headless task
 
@@ -136,7 +132,7 @@ Options:
 explain options:
   --markdown            Print the overview as a Markdown document
   --mermaid             Print only the diagrams, as fenced Mermaid blocks
-  --open                Render it in cmux's Markdown viewer, diagrams and all
+  --open                Write the overview and open it through the selected session-host plugin
 
 onboard options:
   --register <name>     Register a previewed native definition
@@ -214,7 +210,7 @@ tasks options:
   --output json         Emit the complete task list as JSON; cannot be combined with --limit/--all
 
 doctor options:
-  --verbose             Show component-level cmux, hook, drift, and context-lock details
+  --verbose             Show component-level native safety, drift, and context-lock details
 
 agent assignment options:
   Scripted assignments already leave focus unchanged; omit --no-focus.
@@ -281,7 +277,6 @@ Commands:
   migrate               Preview/apply the explicit shared-policy format migration
   knowledge lint        Check configured OKF bundles
   plugins               Inspect session packages or committed project bindings
-  cmux status|install   Inspect or install native cmux integration
   auth profiles|status|readiness|budget|bind|select
                         Check or manage local project auth profiles
   mcp serve             Serve repository tools over stdio MCP
@@ -323,8 +318,6 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "migrate" => "Usage: ahu migrate [--preview|--apply|--rollback]\n\nPreview is read-only and shows deterministic OKF targets and typed-policy parity. Apply refuses managed task worktrees and duplicate formats, supports mixed policy/lock formats while preserving canonical policy bytes and lock annotations, preserves exact source backups in .ahu/migrations/project-okf-v1/journal.json, and checks concurrent edits. Rollback explicitly recovers an interrupted transaction. No task, native, auth, or local-acceptance files are migrated. Review and commit the resulting shared files and source removals.\n".to_string(),
         "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes .agents/ahu/lock.md and accepts local context in owner-only host state; review and commit .agents/ahu/lock.md only when shared context changed.\n".to_string(),
         "plugins" | "plugins invoke" => "Usage: ahu plugins [--project|--probe] [--output json]\n       ahu plugins installed [--output json]\n       ahu plugins install|update|enable|disable|remove ID\n       ahu plugins digest /absolute/package/path\n       ahu plugins invoke ID --input-file PATH|- [--task-observations [--allow-task UUID ...]]\n\nInspect external session plugins, committed bindings, and host selection without executing plugins.\nAHU_PLUGIN_PATH lists absolute package directories containing ahu-plugin.md (OKF 0.2 YAML frontmatter, type ahu:plugin; Cargo.toml remains TOML).\nSelect terminal, none, or an installed/discovered binding id with AHU_INTERACTIVE_PLUGIN. `terminal` runs the interactive harness in the caller's terminal; it is the default. Source-only packages cannot be activated. --project reads only committed OKF bindings in .agents/ahu/plugins from local HEAD; source pins and grants remain unverified declarations. It excludes index/worktree edits, fetches nothing, activates nothing, and cannot be combined with --probe. Explicit install/update verifies committed source pins and copies data into ignored project state without executing package code. Git sources allow credential-free HTTPS or absolute local repository paths; kind: local uses a SHA-256 content revision. installed inspects retained verified packages offline; digest hashes a local package offline. enable/disable edit the working OKF binding for review and commit; commit enabled: true and the interactive-backend grant before activation. A single enabled session binding is the launch default; multiple session bindings require explicit selection. Generic entrypoint packages use committed execute grants and plugins invoke ID --input-file PATH|-; execute-only bindings do not become session defaults, and --probe never invokes their generic entrypoint. disable/remove refuse live/uncertain tasks and terminal tasks that still need this package for recorded workspace cleanup; run ahu remove TASK first, even for already-closed workspaces. remove also requires disabled or absent bindings. Invocation is foreground, operator-only, strict JSON with a 64 KiB input and complete output limit; stdin requires explicit - and has a 30-second intake deadline. Relative input paths resolve in the selected --repo checkout. Task observations grant only repeated exact canonical UUIDs (maximum 128); no grants means empty scope. Only current indexed tasks are supported, with no discovery fallback or mutations. Runtime errors are fixed JSON; see docs/executable-plugins.md. Updates retain all old versions. --probe verifies committed policy and package pins, executes the selected host, negotiates its protocol, and reads its inventory; it never launches a task.\n".to_string(),
-        "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
-        "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
         "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth budget [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics. `auth budget` reports verified provider rate-limit windows for the active profile. These are percentages and reset periods, not literal token counts; agents sharing one account share its capacity. Unsupported providers remain unknown.\n\nIdentity probes: codex, claude-code, antigravity, kiro (GitHub social login), and ollama. Use --harness ollama to check the loopback daemon selected by OLLAMA_HOST (default 127.0.0.1:11434). OpenCode readiness requires --model with an Ollama cloud model; other OpenCode providers remain unsupported. Readiness checks account identity and project binding only: it does not verify OpenCode's configured provider endpoint, model availability, or inference access.\n".to_string(),
         "telemetry" => "Usage: ahu telemetry report --otlp FILE --selection FILE --release ID [--output json]\n       ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nThe OTLP report reads local collector JSONL and an explicit task/attempt selection, writes no state, and reports unknown usage as null. Repeat --otlp for rotated files. See docs/otel-release-report.md.\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
@@ -336,11 +329,11 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "resume" => "Usage: ahu resume TASK --prompt-file PATH [--output json]\n\nResume a root headless task using its recorded native session.\n".to_string(),
         "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after headless termination is known. Interactive tasks have no headless captures; use ahu remove after reviewing and integrating their work.\n".to_string(),
         "remove" => "Usage: ahu remove TASK\n\nRemove a completed task's record, worktree, and branch when safe.\n".to_string(),
-        "focus" => "Usage: ahu focus TASK\n\nBring an interactive task's cmux session to the front.\n".to_string(),
+        "focus" => "Usage: ahu focus TASK\n\nBring an interactive task to the front through its recorded session-host plugin.\n".to_string(),
         "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
         "run-task" => "Usage: ahu run-task --task-dir PATH\n\nInternal worker command started by ahu's task supervisor.\n".to_string(),
         "supervise" => "Usage: ahu supervise --task-dir PATH\n\nInternal supervisor command for detached headless tasks.\n".to_string(),
-        "agents" | "eval" | "knowledge" | "cmux" | "mcp" | "agy" | "claude" | "codex" | "opencode" | "kiro" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
+        "agents" | "eval" | "knowledge" | "mcp" | "agy" | "claude" | "codex" | "opencode" | "kiro" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
         other => return Err(crate::util::Error::new(format!("unknown help topic {other:?}; run `ahu help` for commands."))),
     };
     Ok(help)
@@ -369,7 +362,6 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "lock" => "ahu lock — check committed agent context",
         "eval" => "ahu eval — run, compare or verify evaluations",
         "knowledge" => "ahu knowledge lint — validate configured knowledge bundles",
-        "cmux" => "ahu cmux — inspect or install cmux integration",
         "mcp" => "ahu mcp serve — start the MCP server",
         "auth" => "ahu auth — check or bind local harness accounts",
         "telemetry" => "ahu telemetry — link private records and report local measurements",
@@ -397,8 +389,8 @@ pub enum ExplainFormat {
     Markdown,
     /// Only the diagrams, as fenced Mermaid blocks.
     Mermaid,
-    /// Written to ahu's state directory and opened in cmux's Markdown viewer.
-    OpenInCmux,
+    /// Written to ahu's state directory and opened through the selected session host.
+    OpenInSessionHost,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -509,13 +501,6 @@ pub enum Command {
     PluginLifecycle {
         action: String,
         id: String,
-    },
-    CmuxStatus {
-        output_json: bool,
-    },
-    CmuxInstall {
-        harness: String,
-        dry_run: bool,
     },
     McpServe,
     Auth {
@@ -631,7 +616,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 None => ExplainFormat::Terminal,
                 Some("--markdown") => ExplainFormat::Markdown,
                 Some("--mermaid") => ExplainFormat::Mermaid,
-                Some("--open") => ExplainFormat::OpenInCmux,
+                Some("--open") => ExplainFormat::OpenInSessionHost,
                 Some(other) => bail!("unknown option {other:?} for `ahu explain`."),
             };
             if format != ExplainFormat::Terminal {
@@ -788,7 +773,6 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 "expected ahu plugins [--project|--probe] [--output json] or plugins install|update|enable|disable|remove ID or plugins digest PATH"
             ),
         },
-        "cmux" => parse_cmux(&args[1..]),
         "mcp" => match args.get(1).map(String::as_str) {
             Some("serve") if args.len() == 2 => Ok(Command::McpServe),
             _ => bail!("expected ahu mcp serve"),
@@ -1050,7 +1034,7 @@ fn help_request(args: &[String]) -> Result<Option<Command>> {
     let Some(first) = before_help.first() else {
         return Ok(Some(Command::Help { topic: None }));
     };
-    let count = if matches!(first.as_str(), "eval" | "knowledge" | "cmux" | "mcp") {
+    let count = if matches!(first.as_str(), "eval" | "knowledge" | "mcp") {
         before_help.len().min(2)
     } else {
         1
@@ -1750,43 +1734,6 @@ fn parse_telemetry(args: &[String]) -> Result<Command> {
     })
 }
 
-fn parse_cmux(args: &[String]) -> Result<Command> {
-    match args.first().map(String::as_str) {
-        Some("status") => {
-            let output_json = match &args[1..] {
-                [] => false,
-                [flag, value] if flag == "--output" && value == "json" => true,
-                _ => bail!("expected ahu cmux status [--output json]"),
-            };
-            Ok(Command::CmuxStatus { output_json })
-        }
-        Some("install") => {
-            let mut harness = None;
-            let mut dry_run = false;
-            let mut index = 1;
-            while index < args.len() {
-                match args[index].as_str() {
-                    "--harness" if harness.is_none() => {
-                        harness = Some(value_for("--harness", args, &mut index)?.to_string());
-                    }
-                    "--dry-run" if !dry_run => dry_run = true,
-                    _ => bail!("expected ahu cmux install --harness ID [--dry-run]"),
-                }
-                index += 1;
-            }
-            let harness =
-                harness.ok_or_else(|| crate::util::Error::new("--harness ID required"))?;
-            if !["claude-code", "codex", "opencode", "antigravity"].contains(&harness.as_str()) {
-                bail!("unsupported harness; use claude-code, codex, opencode, or antigravity");
-            }
-            Ok(Command::CmuxInstall { harness, dry_run })
-        }
-        _ => bail!(
-            "expected ahu cmux status [--output json] or ahu cmux install --harness ID [--dry-run]"
-        ),
-    }
-}
-
 #[cfg(test)]
 mod parser_tests {
     use super::*;
@@ -2106,56 +2053,6 @@ mod parser_tests {
             vec!["supervise", "--task-dir", "directory", "extra"],
         ] {
             assert_usage(&args, "supervise requires --task-dir PATH");
-        }
-    }
-
-    #[test]
-    fn cmux_install_validates_harness_and_singleton_options() {
-        for harness in ["claude-code", "codex", "opencode", "antigravity"] {
-            for dry_run in [false, true] {
-                let mut args = vec!["cmux", "install"];
-                if dry_run {
-                    args.push("--dry-run");
-                }
-                args.extend(["--harness", harness]);
-                assert_eq!(
-                    parse(args).unwrap(),
-                    Command::CmuxInstall {
-                        harness: harness.into(),
-                        dry_run,
-                    }
-                );
-            }
-        }
-        assert_usage(&["cmux", "install"], "--harness ID required");
-        assert_usage(&["cmux", "install", "--harness"], "--harness needs a value");
-        assert_usage(
-            &["cmux", "install", "--harness", "unknown"],
-            "unsupported harness",
-        );
-        for args in [
-            vec![
-                "cmux",
-                "install",
-                "--harness",
-                "codex",
-                "--harness",
-                "opencode",
-            ],
-            vec![
-                "cmux",
-                "install",
-                "--harness",
-                "codex",
-                "--dry-run",
-                "--dry-run",
-            ],
-            vec!["cmux", "install", "--unknown"],
-            vec!["cmux", "status", "--output", "yaml"],
-            vec!["cmux"],
-            vec!["cmux", "unknown"],
-        ] {
-            assert_usage(&args, "expected ahu cmux");
         }
     }
 
@@ -2822,7 +2719,6 @@ mod focused_help_tests {
             "focus",
             "remove",
             "message",
-            "cmux",
             "auth",
             "telemetry",
             "mcp",
@@ -2903,8 +2799,6 @@ mod focused_help_tests {
         for (topic, expected) in [
             ("setup", "Detect installed harnesses"),
             ("lock", "--update refreshes .agents/ahu/lock.md"),
-            ("cmux status", "native integration evidence"),
-            ("cmux install", "Preview or delegate"),
             ("mcp serve", "stdio MCP"),
             ("resume", "recorded native session"),
             ("run-task", "Internal worker"),

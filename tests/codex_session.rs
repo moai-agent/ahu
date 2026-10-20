@@ -72,7 +72,6 @@ exit 7
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
         .env("AHU_STATE_DIR", scratch.path().join("parent-state"))
-        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .env("AHU_TEST_ARGS", scratch.path().join("args"))
         .env("AHU_TEST_CWD", scratch.path().join("cwd"))
         .env("AHU_TEST_STATE", scratch.path().join("state"))
@@ -158,7 +157,6 @@ exit 7
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
         .env("AHU_STATE_DIR", scratch.path().join("parent-state"))
-        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .env("AHU_TEST_ARGS", scratch.path().join("args"))
         .env("AHU_TEST_CWD", scratch.path().join("cwd"))
         .env("AHU_TEST_STATE", scratch.path().join("state"))
@@ -244,7 +242,6 @@ exit 7
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
         .env("AHU_STATE_DIR", scratch.path().join("parent-state"))
-        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .env("AHU_TEST_ARGS", scratch.path().join("args"))
         .env("AHU_TEST_CWD", scratch.path().join("cwd"))
         .env("AHU_TEST_STATE", scratch.path().join("state"))
@@ -332,7 +329,6 @@ exit 7
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
         .env("AHU_STATE_DIR", scratch.path().join("parent-state"))
-        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .env("AHU_TEST_ARGS", scratch.path().join("args"))
         .env("AHU_TEST_CWD", scratch.path().join("cwd"))
         .env("AHU_TEST_STATE", scratch.path().join("state"))
@@ -418,7 +414,6 @@ exit 7
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
         .env("AHU_STATE_DIR", scratch.path().join("parent-state"))
-        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .env("AHU_TEST_ARGS", scratch.path().join("args"))
         .env("AHU_RUNTIME_DIR", scratch.path().join("runtime"))
         .output()

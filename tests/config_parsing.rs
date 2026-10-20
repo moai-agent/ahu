@@ -591,7 +591,6 @@ fn a_relative_path_entry_never_resolves_a_harness() {
         .current_dir(repo.path())
         .env("PATH", format!(":{}:", bin.display()))
         .env("HOME", scratch.path().canonicalize().unwrap())
-        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .output()
         .expect("ahu runs");
     let combined = String::from_utf8_lossy(&output.stdout).to_string();

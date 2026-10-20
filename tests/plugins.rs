@@ -14,7 +14,6 @@ fn fixture_command(root: &std::path::Path) -> Command {
     let mut command = common::ahu();
     command
         .current_dir(root)
-        .env("AHU_CMUX_BIN", executable)
         .env("PLUGIN_EXECUTED", root.join("executed"))
         .env_remove("AHU_PLUGIN_PATH")
         .env_remove("AHU_INTERACTIVE_PLUGIN");
@@ -322,8 +321,8 @@ fn local_metadata_discovery_is_sorted_and_selection_never_executes() {
 }
 
 #[test]
-fn local_selection_refuses_activation_without_cmux_or_terminal_fallback() {
-    const CASE: &str = "local_selection_refuses_activation_without_cmux_or_terminal_fallback";
+fn local_selection_refuses_activation_without_plugin_or_terminal_fallback() {
+    const CASE: &str = "local_selection_refuses_activation_without_plugin_or_terminal_fallback";
     if common::is_child_case(CASE) {
         let error = ahu::interactive::discover().err().unwrap();
         assert_eq!(error.kind(), ahu::util::ErrorKind::Prerequisite);
@@ -344,7 +343,6 @@ fn local_selection_refuses_activation_without_cmux_or_terminal_fallback() {
             command
                 .env("AHU_PLUGIN_PATH", &package)
                 .env("AHU_INTERACTIVE_PLUGIN", "fixture")
-                .env("AHU_CMUX_BIN", root.path().join("cmux"))
                 .env("PLUGIN_EXECUTED", root.path().join("executed"))
                 .env_remove("CMUX_WORKSPACE_ID");
             if inside {

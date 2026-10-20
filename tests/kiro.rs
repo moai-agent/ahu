@@ -59,7 +59,6 @@ exit 7
             .arg("kiro")
             .current_dir(repo.path())
             .env_remove("CMUX_WORKSPACE_ID")
-            .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
             .env(
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),

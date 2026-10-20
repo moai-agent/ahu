@@ -5,7 +5,7 @@
 //! ways, so the terminal text and the Markdown can never drift apart.
 //!
 //! The Markdown form carries the diagrams as ```` ```mermaid ```` fences, which
-//! render unchanged on GitHub and in cmux's own Markdown viewer.
+//! render unchanged on GitHub and can be opened by a selected session-host plugin.
 
 use std::path::{Path, PathBuf};
 
@@ -166,7 +166,7 @@ pub fn overview() -> String {
 
     out.push_str(
         "Run `ahu explain --markdown` for the same document as Markdown, `--mermaid` for the\n\
-         diagrams alone, or `--open` to render it in cmux's Markdown viewer.\n\
+         diagrams alone, or `--open` to open it through the selected session-host plugin.\n\
          Run `ahu help` for commands, and `ahu doctor` for this machine.\n",
     );
     out
@@ -206,7 +206,7 @@ pub fn write_document() -> Result<PathBuf> {
     Ok(path)
 }
 
-pub fn open_in_cmux(path: &Path, focus: bool) -> Result<String> {
+pub fn open_in_session_host(path: &Path, focus: bool) -> Result<String> {
     let client = crate::interactive::discover()?;
     client.open_markdown(path, focus)
 }

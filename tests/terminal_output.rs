@@ -25,7 +25,6 @@ fn doctor_shows_project_harness_readiness_without_executable_paths() {
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
         .env_remove("AHU_STATE_DIR")
-        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&output.stdout);
@@ -54,11 +53,9 @@ fn doctor_reports_context_lock_telemetry_and_verified_skills_in_one_place() {
         std::fs::write(path, content).unwrap();
     }
 
-    let scratch = tempfile::tempdir().unwrap();
     let output = common::ahu()
         .arg("doctor")
         .current_dir(repo.path())
-        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .env_remove("AHU_STATE_DIR")
         .output()
         .unwrap();
@@ -107,7 +104,6 @@ fn normal_harness_capabilities_are_not_warnings_but_failures_still_surface() {
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
             )
-            .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -436,7 +432,6 @@ fn redirected_commands_match_explicit_plain_output() {
                 .arg(color)
                 .args(*args)
                 .current_dir(repo.path())
-                .env("AHU_CMUX_BIN", repo.state_path().join("absent-cmux"))
                 .env("PATH", "/usr/bin:/bin")
                 .env("TERM", "xterm-256color")
                 .env_remove("NO_COLOR")

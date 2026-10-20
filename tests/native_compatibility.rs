@@ -27,7 +27,6 @@ fn interactive_and_coordinator_refuse_an_unlisted_opencode_model() {
             .current_dir(repo.path())
             .env("HOME", home.path())
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .env("AHU_CMUX_BIN", home.path().join("no-cmux"))
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&result.stderr);
@@ -86,7 +85,6 @@ fn opencode_v2_uses_mini_for_persistent_interactive_launches() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-        .env("AHU_CMUX_BIN", home.path().join("no-cmux"))
         .output()
         .unwrap();
     assert!(
@@ -113,7 +111,6 @@ fn opencode_v2_uses_mini_for_persistent_interactive_launches() {
         .current_dir(repo.path())
         .env("HOME", home.path())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-        .env("AHU_CMUX_BIN", home.path().join("no-cmux"))
         .output()
         .unwrap();
     let auto_error = String::from_utf8_lossy(&auto_result.stderr);

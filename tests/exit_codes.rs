@@ -101,7 +101,6 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
             .current_dir(cwd)
             .args(args)
             .env("NO_COLOR", "1")
-            .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .env(
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),

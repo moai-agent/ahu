@@ -101,7 +101,6 @@ fn ahu_at(scenario: &Scenario, dir: &Path, args: &[&str]) -> std::process::Outpu
         .env("AHU_TASK_INDEX_DIR", &scenario.index)
         .env("AHU_RUNTIME_DIR", &scenario.runtime)
         // Nothing here is about cmux; no reachable session may leak in.
-        .env("AHU_CMUX_BIN", dir.join("no-such-cmux"))
         .output()
         .expect("ahu runs")
 }

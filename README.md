@@ -1,7 +1,7 @@
 # ahu
 
 Launch repository-defined coding agents in fresh Git worktrees, interactively
-in cmux or unattended in headless mode. Agent manifests pin the harness and
+in the current terminal or an optional session-host plugin, or unattended in headless mode. Agent manifests pin the harness and
 model; ahu previews the configuration, delivers instructions, and records the launch.
 
 ## Install
@@ -44,7 +44,7 @@ ahu installs none of these; harness authentication remains with each harness.
 The optional Jev tool reads its separately configured API key only when called.
 Read-only help and
 launch previews do not require a session-host connection. Git and explicit
-cmux operations require executables outside Git working trees; see the
+cmux plugin operations require its executable outside Git working trees; see the
 [lookup rules](docs/reference.md#utility-lookup).
 
 See [Kiro setup and limits](docs/reference.md#kiro-cli) for installation, model selection, and supported features.
@@ -140,7 +140,7 @@ ahu tasks
 task_id=abc123  # replace with a full task ID from ahu tasks
 ahu task "$task_id"
 ahu result "$task_id"  # headless tasks
-ahu focus "$task_id"  # interactive cmux tasks
+ahu focus "$task_id"  # interactive session-host tasks
 ```
 
 Reviewing the changes is plain Git. `ahu task` prints the task's branch,
@@ -226,8 +226,7 @@ assignment in nonce-bearing sections with raw bodies. This is prompt text,
 not an enforced system prompt. The harness controls the running session,
 including model changes, approvals, and context loading. ahu reports visible
 settings and gaps without claiming to know everything the harness loads.
-Ordinary launches do not alter native hooks or settings. Explicit `ahu cmux install` delegates a
-reviewable native installation to cmux.
+Ordinary launches do not alter native hooks or settings. cmux session hosting is provided by the selected external plugin; Ahu does not invoke cmux to install or inspect session-host configuration.
 Private tracker material stays out of public files and reports; remote pushes
 require explicit user permission.
 
@@ -245,13 +244,11 @@ require explicit user permission.
 | `ahu lock --update` | Fingerprint current recognized context into `.agents/ahu/lock.md` for review and commit |
 | `ahu agents` | List registered agents and detected drift |
 | `ahu tasks` | List the 20 most recent tasks; use `--limit N` or `--all` to change the range |
-| `ahu cmux status` | Inspect native integration evidence and headless isolation |
-| `ahu cmux install --harness codex --dry-run` | Preview an explicit native installation |
 | `ahu help [COMMAND]` | Compact command list or focused help; use `ahu help all` for the full option reference |
 | `ahu onboard` | Read-only preview of native definitions available for registration |
 | `ahu knowledge lint` | Validate and lint configured OKF bundles with installed `okf` |
 | `ahu explain` | Built-in architecture overview |
-| `ahu explain --open` | Open the overview in cmux's Markdown viewer |
+| `ahu explain --open` | Open the overview through the selected session-host plugin |
 | `ahu agy` | Open a coordinating Antigravity CLI session in the current terminal |
 | `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
@@ -372,7 +369,7 @@ cargo run --locked -- explain --mermaid > /tmp/ahu-diagrams.md
 
 The explanation tests check diagram structure, not rendering. Full validation
 requires parsing the emitted blocks with Mermaid; `ahu explain --open` displays
-them in cmux.
+them through the selected session-host plugin.
 
 ### Prose linting
 

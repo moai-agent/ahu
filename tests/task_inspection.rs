@@ -7,7 +7,6 @@ fn mcp_read(repo: &TestRepo, name: &str, arguments: serde_json::Value) -> serde_
     let mut child = common::ahu()
         .args(["mcp", "serve"])
         .current_dir(repo.path())
-        .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -479,7 +478,6 @@ fn run(repo: &TestRepo, args: &[&str]) -> Output {
     common::ahu()
         .args(args)
         .current_dir(repo.path())
-        .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
         .output()
         .unwrap()
 }
@@ -493,7 +491,6 @@ fn run_with_runtime(repo: &TestRepo, runtime: &std::path::Path, args: &[&str]) -
     common::ahu()
         .args(args)
         .current_dir(repo.path())
-        .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
         .output()
         .unwrap()
 }
@@ -779,7 +776,6 @@ else: raise AssertionError(method)
     let output = common::ahu()
         .args(["cancel", "cancel-fixture", "--output", "json"])
         .current_dir(repo.path())
-        .env("AHU_CMUX_BIN", &cmux)
         .env("AHU_TEST_CMUX_CALLS", &calls)
         .output()
         .unwrap();

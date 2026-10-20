@@ -49,7 +49,6 @@ fn ahu_in(dir: &Path, args: &[&str]) -> std::process::Output {
         // are about what is on disk, so they are pointed at a cmux that is not
         // there: neither a developer's real session nor another test's stub can
         // change what they see.
-        .env("AHU_CMUX_BIN", dir.join("no-such-cmux"))
         .output()
         .expect("ahu runs")
 }
