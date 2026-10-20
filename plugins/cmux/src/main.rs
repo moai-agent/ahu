@@ -51,8 +51,7 @@ fn implicit_candidate(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path = path.canonicalize().ok()?;
     let metadata = path.metadata().ok()?;
-    let mode = metadata.permissions().mode();
-    if !metadata.is_file() || mode & 0o111 == 0 || mode & 0o6000 != 0 {
+    if !metadata.is_file() || !acceptable_mode(metadata.permissions().mode()) {
         return None;
     }
     // Match core's implicit utility boundary without invoking candidate Git or
@@ -67,6 +66,10 @@ fn implicit_candidate(path: &Path) -> Option<PathBuf> {
         }
     }
     Some(path)
+}
+
+fn acceptable_mode(mode: u32) -> bool {
+    mode & 0o111 != 0 && mode & 0o6000 == 0
 }
 
 #[cfg(test)]
@@ -95,9 +98,12 @@ mod tests {
         let cli = temp.path().join("cmux");
         std::fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
 
-        for mode in [0o4700, 0o2700, 0o6700] {
-            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(mode)).unwrap();
-            assert!(implicit_candidate(&cli).is_none(), "accepted mode {mode:o}");
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o4700)).unwrap();
+        assert!(implicit_candidate(&cli).is_none());
+        // Some filesystems clear setgid on chmod for unprivileged callers, so
+        // exercise those mode bits against the exact predicate independently.
+        for mode in [0o2700, 0o6700] {
+            assert!(!acceptable_mode(mode), "accepted mode {mode:o}");
         }
     }
 }
