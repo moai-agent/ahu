@@ -24,7 +24,7 @@ fn fixture_command(root: &std::path::Path) -> Command {
 #[test]
 fn inventory_never_executes_plugins_or_requires_a_repository() {
     let root = tempfile::tempdir().unwrap();
-    for selection in [None, Some("none"), Some("cmux"), Some("terminal")] {
+    for selection in [None, Some("none"), Some("terminal")] {
         let mut command = fixture_command(root.path());
         if let Some(value) = selection {
             command.env("AHU_INTERACTIVE_PLUGIN", value);
@@ -35,21 +35,21 @@ fn inventory_never_executes_plugins_or_requires_a_repository() {
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let plugin = &value["plugins"][0];
-        assert_eq!(plugin["compiled"], cfg!(feature = "cmux-plugin"));
-        assert_eq!(
-            plugin["selected"],
-            selection.map_or(cfg!(feature = "cmux-plugin"), |v| v == "cmux")
-        );
-        assert_eq!(plugin["host_api"], 1);
+        let plugin = value["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|plugin| plugin["id"] == "terminal")
+            .unwrap();
+        assert_eq!(plugin["selected"], selection != Some("none"));
+        assert_eq!(plugin["host_api"], 0);
         assert!(!root.path().join("executed").exists());
         assert!(!root.path().join(".ahu").exists());
     }
 }
 
-#[cfg(not(feature = "cmux-plugin"))]
 #[test]
-fn build_without_cmux_selects_the_current_terminal_backend() {
+fn default_build_selects_the_current_terminal_backend() {
     let root = tempfile::tempdir().unwrap();
     let output = common::ahu()
         .current_dir(root.path())
@@ -66,9 +66,6 @@ fn build_without_cmux_selects_the_current_terminal_backend() {
             .iter()
             .any(|plugin| { plugin["id"] == "terminal" && plugin["selected"] == true })
     );
-    assert!(plugins.iter().any(|plugin| {
-        plugin["id"] == "cmux" && plugin["compiled"] == false && plugin["selected"] == false
-    }));
     assert!(!root.path().join(".ahu").exists());
 }
 
@@ -83,7 +80,7 @@ fn unborn_inventory_and_activation_share_selection() {
         "invalid",
     )
     .unwrap();
-    for selection in [None, Some("none"), Some("cmux"), Some("terminal")] {
+    for selection in [None, Some("none"), Some("terminal")] {
         let mut command = fixture_command(root.path());
         if let Some(value) = selection {
             command.env("AHU_INTERACTIVE_PLUGIN", value);
@@ -95,20 +92,12 @@ fn unborn_inventory_and_activation_share_selection() {
         assert!(output.status.success(), "{selection:?}: {output:?}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let plugins = value["plugins"].as_array().unwrap();
-        let terminal_selected = selection == Some("terminal")
-            || (selection.is_none() && !cfg!(feature = "cmux-plugin"));
-        assert_eq!(plugins.len(), if terminal_selected { 2 } else { 1 });
-        assert_eq!(
-            plugins[0]["selected"],
-            selection.map_or(cfg!(feature = "cmux-plugin"), |v| v == "cmux")
-        );
-        if terminal_selected {
-            let terminal = plugins
-                .iter()
-                .find(|plugin| plugin["id"] == "terminal")
-                .unwrap();
-            assert_eq!(terminal["selected"], true);
-        }
+        assert_eq!(plugins.len(), 1);
+        let terminal = plugins
+            .iter()
+            .find(|plugin| plugin["id"] == "terminal")
+            .unwrap();
+        assert_eq!(terminal["selected"], selection != Some("none"));
         assert!(!root.path().join("executed").exists());
 
         let mut probe = fixture_command(root.path());
@@ -127,9 +116,7 @@ fn unborn_inventory_and_activation_share_selection() {
             .args(["plugins", "--probe", "--output", "json"])
             .output()
             .unwrap();
-        let active = cfg!(feature = "cmux-plugin")
-            && selection != Some("none")
-            && selection != Some("terminal");
+        let active = false;
         assert_eq!(output.status.success(), active, "{selection:?}: {output:?}");
         assert_eq!(root.path().join("pinged").exists(), active);
         if active {
@@ -150,197 +137,33 @@ fn unknown_or_empty_selection_fails_without_execution() {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2));
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("must be cmux, terminal, or none")
-        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("must be terminal, none"));
         assert!(!root.path().join("executed").exists());
     }
 }
 
 #[test]
-fn activation_and_coordinator_selection() {
-    if common::is_child_case("activation_and_coordinator_selection") {
-        let case = std::env::var("PLUGIN_CASE").unwrap();
-        let result = ahu::interactive::discover_for_coordinator();
-        match case.as_str() {
-            "disabled" | "outside" => assert!(result.unwrap().is_none()),
-            "default-inside" if !cfg!(feature = "cmux-plugin") => {
-                assert!(result.unwrap().is_none())
-            }
-            _ if !cfg!(feature = "cmux-plugin") => assert!(
-                result
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("--features cmux-plugin")
-            ),
-            _ => assert!(result.unwrap().is_some()),
-        }
-        let activated = std::path::Path::new(&std::env::var("PLUGIN_EXECUTED").unwrap()).exists();
-        assert_eq!(
-            activated,
-            cfg!(feature = "cmux-plugin")
-                && matches!(case.as_str(), "default-inside" | "explicit-inside")
-        );
-        if case == "disabled" || !cfg!(feature = "cmux-plugin") {
-            let error = ahu::interactive::discover().err().unwrap();
-            assert_eq!(error.kind(), ahu::util::ErrorKind::Prerequisite);
-            assert!(!std::path::Path::new(&std::env::var("PLUGIN_EXECUTED").unwrap()).exists());
-        }
-        return;
-    }
-    for case in ["disabled", "outside", "default-inside", "explicit-inside"] {
+fn terminal_default_and_explicit_none_never_activate_a_provider() {
+    for selection in [None, Some("none"), Some("cmux")] {
         let root = tempfile::tempdir().unwrap();
-        let _ = fixture_command(root.path());
-        let output = common::run_child_case("activation_and_coordinator_selection", |command| {
-            command
-                .env("PLUGIN_CASE", case)
-                .env("AHU_CMUX_BIN", root.path().join("cmux"))
-                .env("PLUGIN_EXECUTED", root.path().join("executed"))
-                .env_remove("AHU_INTERACTIVE_PLUGIN")
-                .env_remove("AHU_PLUGIN_PATH")
-                .env_remove("CMUX_WORKSPACE_ID");
-            if case != "outside" {
-                command.env("CMUX_WORKSPACE_ID", "inherited");
-            }
-            if case == "disabled" {
-                command.env("AHU_INTERACTIVE_PLUGIN", "none");
-            }
-            if case == "explicit-inside" {
-                command.env("AHU_INTERACTIVE_PLUGIN", "cmux");
-            }
-        });
-        assert!(output.status.success(), "{case}: {output:?}");
-        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
-    }
-}
-
-#[test]
-fn compiled_host_runtime_activation_and_failure_paths() {
-    const CASE: &str = "compiled_host_runtime_activation_and_failure_paths";
-    if common::is_child_case(CASE) {
-        let mode = std::env::var("HOST_MODE").unwrap();
-        let root = std::path::PathBuf::from(std::env::var_os("HOST_ROOT").unwrap());
-        let result = ahu::interactive::discover_for_tasks();
-        if mode == "disabled" || !cfg!(feature = "cmux-plugin") || mode == "unavailable" {
-            let error = result.err().expect("activation must refuse");
-            assert_eq!(error.kind(), ahu::util::ErrorKind::Prerequisite);
-            assert_eq!(
-                root.join("pinged").exists(),
-                mode == "unavailable" && cfg!(feature = "cmux-plugin")
-            );
-            assert!(!root.join("state.json").exists());
-            return;
+        let mut command = common::ahu();
+        command
+            .current_dir(root.path())
+            .args(["plugins", "--output", "json"])
+            .env_remove("AHU_PLUGIN_PATH")
+            .env_remove("AHU_INTERACTIVE_PLUGIN");
+        if let Some(selection) = selection {
+            command.env("AHU_INTERACTIVE_PLUGIN", selection);
         }
-        // Exercise the public package contract returned by actual runtime
-        // selection, rather than directly constructing a compatibility client.
-        let host: Box<dyn ahu_host_api::v1::Host> = result.unwrap();
-        assert!(root.join("pinged").exists());
-        host.check_persistence().unwrap();
-        if mode == "capability-failure" {
-            assert!(host.check_capabilities().is_err());
-            assert!(!root.join("state.json").exists());
-            return;
+        let output = command.output().unwrap();
+        if selection == Some("cmux") {
+            assert!(!output.status.success());
+        } else {
+            assert!(output.status.success(), "{output:?}");
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["plugins"][0]["id"], "terminal");
+            assert_eq!(value["plugins"][0]["selected"], selection != Some("none"));
         }
-        host.check_capabilities().unwrap();
-        if mode == "inventory-failure" {
-            assert!(host.workspaces().is_err());
-            return;
-        }
-        let before = host.workspaces().unwrap();
-        assert_eq!(before.len(), 1);
-        let group = host.create_group("fixture", &root).unwrap();
-        let request = ahu_host_api::v1::WorkspaceRequest {
-            group_id: &group.id,
-            window_id: Some("window"),
-            title: "literal $(not-executed)",
-            summary: "fixture session",
-            cwd: &root,
-            startup_command: "'synthetic ahu' run-task --task-dir '/synthetic/task'",
-            focus: false,
-        };
-        let created = host.create_task_workspace(&request);
-        if mode == "creation-failure" {
-            assert!(matches!(
-                created,
-                Err(ahu_host_api::v1::WorkspaceCreationError::OutcomeUnknown(_))
-            ));
-            // A failed command after dispatch may already have created a
-            // workspace. Neither it nor unrelated work is closed implicitly.
-            let live = host.workspaces().unwrap();
-            assert!(live.contains_key("task"));
-            assert_eq!(live["unrelated"], before["unrelated"]);
-            return;
-        }
-        let created = created.unwrap();
-        assert_eq!(created.workspace_id, "task");
-        assert_eq!(created.group_id.as_deref(), Some(group.id.as_str()));
-        assert_eq!(created.window_id, "window");
-        if mode == "focus-failure" || mode == "close-failure" {
-            let result = if mode == "focus-failure" {
-                host.select_workspace(&created.workspace_id)
-            } else {
-                host.close_workspace(&created.workspace_id)
-            };
-            assert!(result.is_err());
-            let live = host.workspaces().unwrap();
-            assert!(live.contains_key("task"));
-            assert_eq!(live["unrelated"], before["unrelated"]);
-            return;
-        }
-        host.select_workspace(&created.workspace_id).unwrap();
-        host.close_workspace(&created.workspace_id).unwrap();
-        let after = host.workspaces().unwrap();
-        assert!(!after.contains_key("task"));
-        assert_eq!(after["unrelated"], before["unrelated"]);
-        assert!(after.contains_key("anchor"));
-        let state: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(root.join("state.json")).unwrap()).unwrap();
-        assert_eq!(state["selected"], "task");
-        assert_eq!(state["closed"], serde_json::json!(["task"]));
-        assert_eq!(state["startup_command"], request.startup_command);
-        assert_eq!(state["title"], request.title);
-        return;
-    }
-    for mode in [
-        "enabled",
-        "legacy-external-selection",
-        "disabled",
-        "unavailable",
-        "capability-failure",
-        "creation-failure",
-        "inventory-failure",
-        "focus-failure",
-        "close-failure",
-    ] {
-        let root = tempfile::tempdir().unwrap();
-        let executable = root.path().join("cmux");
-        std::fs::write(&executable, include_str!("fixtures/cmux-host.py")).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let output = common::run_child_case(CASE, |command| {
-            command
-                .env_clear()
-                .envs(
-                    std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)),
-                )
-                .env(common::CHILD_CASE, CASE)
-                .env("PATH", "/usr/bin:/bin")
-                .env("HOME", root.path())
-                .env("HOST_ROOT", root.path())
-                .env("HOST_MODE", mode)
-                .env("AHU_CMUX_BIN", &executable)
-                .env(
-                    "AHU_INTERACTIVE_PLUGIN",
-                    if mode == "disabled" {
-                        "none"
-                    } else if mode == "legacy-external-selection" {
-                        "unavailable-new-host"
-                    } else {
-                        "cmux"
-                    },
-                );
-        });
-        common::assert_child_passed(CASE, &output);
     }
 }
 
@@ -443,7 +266,7 @@ fn local_metadata_discovery_is_sorted_and_selection_never_executes() {
         "compile_error!(\"must not build during discovery\");",
     )
     .unwrap();
-    for selected in [None, Some("none"), Some("cmux"), Some("alpha")] {
+    for selected in [None, Some("none"), Some("alpha")] {
         let output = inventory(root.path(), &[&zeta, &alpha], selected);
         assert!(output.status.success(), "{output:?}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -452,32 +275,27 @@ fn local_metadata_discovery_is_sorted_and_selection_never_executes() {
             .iter()
             .map(|p| p["id"].as_str().unwrap())
             .collect::<Vec<_>>();
-        let expected = if selected.is_none() && !cfg!(feature = "cmux-plugin") {
-            vec!["cmux", "alpha", "terminal", "zeta"]
-        } else {
-            vec!["cmux", "alpha", "zeta"]
-        };
+        let expected = vec!["alpha", "terminal", "zeta"];
         assert_eq!(actual, expected);
+        let alpha_status = plugins.iter().find(|p| p["id"] == "alpha").unwrap();
+        assert_eq!(alpha_status["selected"], selected == Some("alpha"));
+        assert_eq!(alpha_status["origin"], "local-manifest");
+        assert_eq!(alpha_status["metadata"]["title"], "Fixture package");
         assert_eq!(
-            plugins[0]["selected"],
-            selected.map_or(cfg!(feature = "cmux-plugin"), |s| s == "cmux")
+            alpha_status["metadata"]["description"],
+            "Local test package"
         );
-        assert_eq!(plugins[1]["selected"], selected == Some("alpha"));
-        assert_eq!(plugins[1]["compiled"], false);
-        assert_eq!(plugins[1]["origin"], "local-manifest");
-        assert_eq!(plugins[1]["metadata"]["title"], "Fixture package");
-        assert_eq!(plugins[1]["metadata"]["description"], "Local test package");
-        assert_eq!(plugins[1]["metadata"]["tags"][0], "testing");
+        assert_eq!(alpha_status["metadata"]["tags"][0], "testing");
         assert_eq!(
-            plugins[1]["metadata"]["vendor_metadata"]["documentation"],
+            alpha_status["metadata"]["vendor_metadata"]["documentation"],
             "https://example.invalid/plugin"
         );
         assert_eq!(
-            plugins[1]["manifest"],
+            alpha_status["manifest"],
             alpha.join("ahu-plugin.md").to_str().unwrap()
         );
         assert!(
-            plugins[1]["activation_blocker"]
+            alpha_status["activation_blocker"]
                 .as_str()
                 .unwrap()
                 .contains("no executable host declaration")
@@ -551,7 +369,15 @@ fn malformed_or_incompatible_local_manifests_fail_closed() {
     let output = inventory(root.path(), &[&package], None);
     assert!(output.status.success(), "{output:?}");
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["plugins"][1]["metadata"]["execute"], "touch marker");
+    assert_eq!(
+        value["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "fixture")
+            .unwrap()["metadata"]["execute"],
+        "touch marker"
+    );
     assert!(!root.path().join("executed").exists());
     for invalid in [
         String::new(),
@@ -722,21 +548,6 @@ fn symlinks_and_nonregular_metadata_are_rejected_at_every_component() {
 }
 
 #[test]
-fn shipped_cmux_manifest_is_discoverable_but_not_implicitly_selected() {
-    let root = tempfile::tempdir().unwrap();
-    let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("plugins/cmux")
-        .canonicalize()
-        .unwrap();
-    let output = inventory(root.path(), &[&package], None);
-    assert!(output.status.success(), "{output:?}");
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["plugins"][1]["id"], "cmux-local");
-    assert_eq!(value["plugins"][1]["package"], "ahu-cmux-plugin");
-    assert_eq!(value["plugins"][1]["selected"], false);
-}
-
-#[test]
 fn metadata_bounds_apply_to_both_files_and_special_paths_stay_literal() {
     let root = tempfile::tempdir().unwrap();
     let package = local_package(root.path(), "space ; $literal", "fixture");
@@ -810,8 +621,24 @@ fn okf_plugin_frontmatter_accepts_line_endings_and_documentation_bodies() {
         let output = inventory(root.path(), &[&package], Some("fixture"));
         assert!(output.status.success(), "{output:?}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["plugins"][1]["id"], "fixture");
-        assert_eq!(value["plugins"][1]["selected"], true);
+        assert_eq!(
+            value["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["selected"] == true)
+                .unwrap()["id"],
+            "fixture"
+        );
+        assert_eq!(
+            value["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == "fixture")
+                .unwrap()["selected"],
+            true
+        );
         assert!(!root.path().join("executed").exists());
     }
 }

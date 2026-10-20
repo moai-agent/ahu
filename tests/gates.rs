@@ -131,24 +131,13 @@ fn launch_still_needs_no_opt_in_for_an_agent_that_widens_nothing() {
 fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
     let repo = repo_with_widened_agent("auto");
     let output = launch(&repo, &["--allow-widened-approvals"]);
-    #[cfg(feature = "cmux-plugin")]
-    {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !output.status.success() && stderr.contains("cmux"),
-            "the launch should get as far as cmux: {stderr}"
-        );
-    }
-    #[cfg(not(feature = "cmux-plugin"))]
-    {
-        assert!(
-            output.status.success(),
-            "provider-free terminal launch should start: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let argv = std::fs::read_to_string(repo.state_path().join("argv")).unwrap();
-        assert!(argv.contains("--permission-mode\nauto\n"), "{argv}");
-    }
+    assert!(
+        output.status.success(),
+        "terminal default must proceed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let argv = std::fs::read_to_string(repo.state_path().join("argv")).unwrap();
+    assert!(argv.contains("--permission-mode\nauto\n"), "{argv}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("permissions = auto"), "{stdout}");
     assert!(!stdout.contains("--permission-mode auto"), "{stdout}");

@@ -1,8 +1,6 @@
 //! Interactive session hosting, independent of harness execution.
 //!
-//! Host V1 has compiled adapters and a versioned executable wire protocol.
-//! The optional compiled cmux package supplies session mechanics; inventory is
-//! side-effect-free and activation is separate from executable discovery.
+//! Host V1 is an external plugin protocol for interactive session providers.
 
 pub mod external;
 pub mod plugins;
@@ -68,38 +66,13 @@ pub(crate) fn selection(repo: Option<&crate::git::Repo>) -> Result<Selection> {
         }
     }
     Ok(Selection {
-        id: if cfg!(feature = "cmux-plugin") {
-            "cmux"
-        } else {
-            "terminal"
-        }
-        .into(),
+        id: "terminal".into(),
         source: "build-default",
     })
 }
 
-fn compiled() -> Result<Box<dyn v1::Host>> {
-    #[cfg(feature = "cmux-plugin")]
-    {
-        if std::env::var("AHU_INTERACTIVE_PLUGIN").as_deref() == Ok("none") {
-            return Err(crate::util::Error::new(
-                "cmux session plugin is disabled by AHU_INTERACTIVE_PLUGIN=none. Set AHU_INTERACTIVE_PLUGIN=cmux for this operation. No backend was substituted.",
-            ).with_kind(crate::util::ErrorKind::Prerequisite));
-        }
-        Ok(Box::new(crate::cmux::Cmux::connect_recorded()?))
-    }
-    #[cfg(not(feature = "cmux-plugin"))]
-    {
-        Err(
-            crate::util::Error::new("cmux session plugin is not included in this build; rebuild with --features cmux-plugin")
-                .with_kind(crate::util::ErrorKind::Prerequisite),
-        )
-    }
-}
-
 pub fn discover_for_launch(repo: &crate::git::Repo) -> Result<LaunchHost> {
     match selection(Some(repo))?.id.as_str() {
-        "cmux" => Ok((Some(compiled()?), None)),
         "terminal" => Ok((None, None)),
         "none" => Err(crate::util::Error::new("session hosting is disabled")
             .with_kind(crate::util::ErrorKind::Prerequisite)),
@@ -115,7 +88,6 @@ pub fn discover_for_launch(repo: &crate::git::Repo) -> Result<LaunchHost> {
 pub fn discover() -> Result<Box<dyn v1::Host>> {
     let repo = crate::git::discover(&std::env::current_dir()?);
     match selection(repo.as_ref().ok())?.id.as_str() {
-        "cmux" => compiled(),
         "terminal" | "none" => Err(crate::util::Error::new(
             "no session-host plugin is selected for this operation",
         )
@@ -133,9 +105,12 @@ pub fn discover() -> Result<Box<dyn v1::Host>> {
     }
 }
 
-/// Legacy records belong to compiled cmux regardless of a newer host selection.
+/// Legacy records have no frozen plugin identity and cannot safely activate a host.
 pub fn discover_for_tasks() -> Result<Box<dyn v1::Host>> {
-    compiled()
+    Err(crate::util::Error::new(
+        "legacy task has no recorded external session-host binding; refusing to guess a provider",
+    )
+    .with_kind(crate::util::ErrorKind::Prerequisite))
 }
 
 pub fn discover_for_record(
@@ -143,7 +118,9 @@ pub fn discover_for_record(
     record: &crate::task::TaskRecord,
 ) -> Result<Box<dyn v1::Host>> {
     match &record.session_host {
-        None => compiled(),
+        None => Err(crate::util::Error::new(
+            "legacy task has no recorded external session-host binding; refusing to guess a provider",
+        ).with_kind(crate::util::ErrorKind::Prerequisite)),
         Some(frozen) => {
             if std::env::var("AHU_INTERACTIVE_PLUGIN").as_deref() == Ok("none") {
                 return Err(crate::util::Error::new("session hosting is disabled"));
@@ -165,7 +142,7 @@ pub fn discover_for_record(
 
 /// No host is needed by a coordinator in its current terminal.
 pub fn discover_for_coordinator() -> Result<Option<Box<dyn v1::Host>>> {
-    if !cfg!(feature = "cmux-plugin") && std::env::var_os("AHU_INTERACTIVE_PLUGIN").is_none() {
+    if std::env::var_os("AHU_INTERACTIVE_PLUGIN").is_none() {
         return Ok(None);
     }
     if std::env::var("CMUX_WORKSPACE_ID")

@@ -195,7 +195,7 @@ pub struct TaskRecord {
     pub harness_executable: PathBuf,
     pub enforcement: EnforcementReport,
     pub reliability_warning: Option<String>,
-    /// Absent only for headless tasks and legacy compiled cmux sessions.
+    /// Absent for headless tasks and tasks created before external host identity was recorded.
     #[serde(default)]
     pub session_host: Option<crate::interactive::binding::FrozenHost>,
     pub cmux_group_id: Option<String>,

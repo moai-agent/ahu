@@ -96,18 +96,6 @@ fn command_exit_codes_distinguish_success_cancellation_and_failure_categories() 
             5,
         ),
     ];
-    #[cfg(feature = "cmux-plugin")]
-    let cases = {
-        let mut cases = cases;
-        cases.push((
-            "missing cmux",
-            repo.path(),
-            &["@reviewer", "--prompt-file", "assignment.txt"],
-            "",
-            4,
-        ));
-        cases
-    };
     for (label, cwd, args, input, expected) in cases {
         let mut child = common::ahu()
             .current_dir(cwd)

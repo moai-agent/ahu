@@ -1929,7 +1929,7 @@ pub struct NativeCli {
 }
 impl NativeCli {
     pub fn discover() -> Self {
-        let executable = super::resolve_executable().ok();
+        let executable = resolve_native_cli();
         let version = executable.as_ref().and_then(|path| {
             if std::env::var_os("AHU_CMUX_BIN").is_some() {
                 crate::selection::probe_explicit_utility_version(path)
@@ -1943,6 +1943,38 @@ impl NativeCli {
         Self { executable, version, installer_supported,
             detail: "CLI probe independent of socket reachability. Installer mapping reviewed only for cmux 0.64.22 (102) [ddd4a01bc]; other builds remain unknown.".into() }
     }
+}
+
+fn resolve_native_cli() -> Option<PathBuf> {
+    match std::env::var_os("AHU_CMUX_BIN") {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                return Some(path.canonicalize().unwrap_or(path));
+            }
+            if path.as_os_str().as_encoded_bytes().contains(&b'/') {
+                let path = std::env::current_dir().ok()?.join(path);
+                return Some(path.canonicalize().unwrap_or(path));
+            }
+            resolve_explicit_name(&path)
+        }
+        None => crate::selection::resolve_utility("cmux").ok(),
+    }
+}
+
+fn resolve_explicit_name(name: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let cwd = std::env::current_dir().ok()?;
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    for directory in std::env::split_paths(&path) {
+        let candidate = cwd.join(directory).join(name);
+        if std::fs::metadata(&candidate)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        {
+            return candidate.canonicalize().ok();
+        }
+    }
+    None
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct InstallationPlan {

@@ -11,8 +11,6 @@ use crate::agent::ResolvedAgent;
 use crate::bail;
 #[cfg(test)]
 use crate::cmux;
-#[cfg(all(test, feature = "cmux-plugin"))]
-use crate::cmux::Cmux;
 use crate::config::LoadedConfig;
 use crate::git::{self, Repo};
 use crate::harness::{self, EnforcementReport, LaunchCommand, LaunchRequest};
@@ -861,12 +859,6 @@ fn finish_workspace_launch(
     }
 }
 
-/// Compatibility wrapper for launch-local tests; policy lives in the shared manager.
-#[cfg(all(test, feature = "cmux-plugin"))]
-fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<cmux::Group> {
-    cmux::repository::RepositoryManager::new(client, repo).ensure_group(notes)
-}
-
 /// Reconcile recorded tasks against cmux, so sessions closed outside ahu do not
 /// linger as "running" forever.
 ///
@@ -1582,8 +1574,8 @@ fn record_harness_outcome(
 #[cfg(test)]
 mod group_recovery_tests {
     use super::*;
-    fn group(id: &str, member: &str) -> cmux::Group {
-        cmux::Group {
+    fn group(id: &str, member: &str) -> crate::interactive::v1::Group {
+        crate::interactive::v1::Group {
             id: id.into(),
             name: "ahu".into(),
             anchor_workspace_id: member.into(),

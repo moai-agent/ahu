@@ -4,8 +4,7 @@ For generic one-shot JSON processing without session-host methods, see
 [executable plugins](executable-plugins.md). The two declarations and grants are separate.
 
 ahu can explicitly activate a discovered local executable and speak Host V1 over
-its standard input and output. The current terminal is the default; cmux is an
-optional plugin. Discovery with
+its standard input and output. The current terminal is the default. Providers such as cmux are installed as external plugins. Discovery with
 `ahu plugins` reads metadata only. `ahu plugins --probe` executes the selected
 host, negotiates compatibility, reads its complete workspace inventory, then
 terminates the connection. Neither command creates an ahu task.
@@ -21,7 +20,7 @@ Before workspace startup, ahu persists `session_host` in a schema-5 task record
 original committed binding and revision, package name, executable declaration,
 executable SHA-256 and protocol version. Task operations use that frozen identity,
 not the current selection. Each package identity has a separate group mapping;
-old records without a binding and `cmux.json` still belong only to compiled cmux.
+task records without a frozen host identity cannot be resumed through a guessed provider.
 Focus and cleanup verify host identity, workspace directory, group and window.
 Core retains harness startup, supervision, approvals, cancellation confirmation,
 and worktree cleanup. Uncertain creation preserves task inputs and work.
@@ -59,9 +58,7 @@ symlinks. Discovery checks an executable regular file, at most 64 MiB, with an
 execute bit and without setuid/setgid bits. Activation uses no PATH lookup, manifest
 argument list, shell expansion, build, installation, or remote resolution.
 Unknown mapping fields and protocol versions are errors. `timeout_ms` defaults to
-5000 and must be 100–30000 inclusive. Source-only manifests remain discoverable
-and selectable but cannot activate. `plugins/cmux/ahu-plugin.md` intentionally
-remains source-only.
+5000 and must be 100–30000 inclusive. Source-only manifests remain discoverable and selectable but cannot activate.
 
 At activation ahu reopens the selected executable through pinned directory
 handles, reads at most 64 MiB, and copies those bytes to an owner-only temporary
@@ -205,15 +202,10 @@ is not a replacement terminal host. Tests cover creation, metadata, inventory,
 selection/close, protocol mismatch, malformed/partial frames, blocked pipe writes,
 indeterminate startup, deadlines, cancellation, cleanup, and executable paths.
 
-`plugins/cmux` now builds `ahu-cmux-host`, a standalone Host V1 server over the
-existing cmux implementation. Its hello identifies `cmux-local` and declares all
-V1 method capabilities after checking native prerequisites. The checked-in
-manifest remains source-only; the binary is not bundled with core or activated
-by building it. See the [cmux package instructions](../plugins/cmux/README.md)
-for standalone invocation, executable staging, and native CLI lookup. Project
-activation still requires the enabled committed binding, grants, and compatibility
-checks described in this guide. Default host selection and compiled cmux remain
-unchanged.
+Session providers are separate repositories and are installed through the standard
+plugin package and committed binding workflow. Core keeps only the Host V1
+contract and cross-provider task lifecycle. Plugins execute with the user's OS
+permissions; the protocol and ownership checks do not sandbox them.
 
 Package tests exercise the server and every V1 method with a fake native CLI,
 including creation outcome preservation and strict framed input/output. Core

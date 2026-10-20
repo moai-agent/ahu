@@ -1,4 +1,4 @@
-//! Compiled and local plugin inventory and per-process selection.
+//! External plugin inventory and per-process selection.
 //! Discovery reads metadata only; executable activation is explicitly separate.
 pub(crate) mod local;
 pub mod project;
@@ -14,7 +14,6 @@ pub struct PluginStatus {
     pub id: String,
     pub package: String,
     pub host_api: u32,
-    pub compiled: bool,
     pub selected: bool,
     pub selection_source: &'static str,
     pub origin: &'static str,
@@ -30,43 +29,21 @@ pub struct PluginStatus {
 pub fn inventory() -> Result<Vec<PluginStatus>> {
     let repo = crate::git::discover(&std::env::current_dir()?);
     let selection = super::selection(repo.as_ref().ok())?;
-    let compiled = cfg!(feature = "cmux-plugin");
-    let mut plugins = vec![PluginStatus {
-        id: "cmux".into(),
-        package: "ahu-cmux-plugin".into(),
-        host_api: 1,
-        compiled,
-        selected: compiled,
-        selection_source: "build-default",
-        origin: "compiled",
+    let mut plugins = Vec::new();
+    plugins.push(PluginStatus {
+        id: "terminal".into(),
+        package: "ahu-core".into(),
+        host_api: 0,
+        selected: selection.id == "terminal",
+        selection_source: "not-selected",
+        origin: "built-in",
         manifest: None,
         cargo_manifest: None,
         executable: None,
         entrypoint: None,
-        activation_blocker: if compiled {
-            None
-        } else {
-            Some("Rebuild ahu with --features cmux-plugin for cmux operations.")
-        },
+        activation_blocker: None,
         metadata: BTreeMap::new(),
-    }];
-    if selection.id == "terminal" {
-        plugins.push(PluginStatus {
-            id: "terminal".into(),
-            package: "ahu-core".into(),
-            host_api: 0,
-            compiled: true,
-            selected: false,
-            selection_source: "not-selected",
-            origin: "built-in",
-            manifest: None,
-            cargo_manifest: None,
-            executable: None,
-            entrypoint: None,
-            activation_blocker: None,
-            metadata: BTreeMap::new(),
-        });
-    }
+    });
     plugins.extend(local::discover()?);
     if let Ok(repo) = &repo {
         for status in project::inventory(&repo.root)?.bindings {
@@ -91,7 +68,6 @@ pub fn inventory() -> Result<Vec<PluginStatus>> {
                 id: binding.id,
                 package: "unknown".into(),
                 host_api: binding.compatibility.host_api,
-                compiled: false,
                 selected: false,
                 selection_source: "not-selected",
                 origin: "committed-binding",
@@ -108,44 +84,27 @@ pub fn inventory() -> Result<Vec<PluginStatus>> {
             plugins.push(plugin);
         }
     }
-    plugins[1..].sort_by(|a, b| a.id.cmp(&b.id));
+    plugins.sort_by(|a, b| a.id.cmp(&b.id));
     if selection.id != "none" && !plugins.iter().any(|p| p.id == selection.id) {
         return Err(Error::new(
-            "AHU_INTERACTIVE_PLUGIN must be cmux, terminal, or none, a committed binding id, or an id discovered through AHU_PLUGIN_PATH. No other backend was selected.",
+            "AHU_INTERACTIVE_PLUGIN must be terminal, none, a committed binding id, or an id discovered through AHU_PLUGIN_PATH. No other backend was selected.",
         ).with_kind(ErrorKind::Usage));
     }
     for plugin in &mut plugins {
-        plugin.selected = selection.id != "none"
-            && plugin.id == selection.id
-            && (selection.source != "build-default" || plugin.compiled);
+        plugin.selected = selection.id != "none" && plugin.id == selection.id;
         plugin.selection_source = selection.source;
     }
     Ok(plugins)
 }
 
-/// The selected package, or the unselected compiled entry when hosting is off.
+/// The selected package, if one exists.
 pub fn status() -> Result<PluginStatus> {
     let mut plugins = inventory()?;
-    let index = plugins.iter().position(|p| p.selected).unwrap_or(0);
+    let index = plugins
+        .iter()
+        .position(|p| p.selected)
+        .ok_or_else(|| Error::new("no external session host is selected"))?;
     Ok(plugins.remove(index))
-}
-
-pub fn require_cmux() -> Result<()> {
-    let status = status()?;
-    if status.id != "cmux" {
-        return Err(Error::new("The selected local package is not the compiled cmux host. Use AHU_INTERACTIVE_PLUGIN=cmux for this operation; no backend was substituted.").with_kind(ErrorKind::Prerequisite));
-    }
-    if !status.compiled {
-        return Err(Error::new(
-            "cmux session plugin is not included in this build. Rebuild ahu with --features cmux-plugin for cmux operations. Headless tasks and current-terminal coordinators remain available; no backend was substituted.",
-        ).with_kind(ErrorKind::Prerequisite));
-    }
-    if !status.selected {
-        return Err(Error::new(
-            "cmux session plugin is disabled by AHU_INTERACTIVE_PLUGIN=none. Set AHU_INTERACTIVE_PLUGIN=cmux for this operation. No backend was substituted.",
-        ).with_kind(ErrorKind::Prerequisite));
-    }
-    Ok(())
 }
 
 pub fn list(output_json: bool) -> Result<()> {
@@ -158,11 +117,10 @@ pub fn list(output_json: bool) -> Result<()> {
     } else {
         for status in plugins {
             println!(
-                "{} ({}, Host V{}): compiled={}, selected={} ({}, {})",
+                "{} ({}, Host V{}): selected={} ({}, {})",
                 status.id,
                 status.package,
                 status.host_api,
-                status.compiled,
                 status.selected,
                 status.selection_source,
                 status.origin
@@ -172,7 +130,7 @@ pub fn list(output_json: bool) -> Result<()> {
             }
         }
         println!(
-            "Selection: AHU_INTERACTIVE_PLUGIN=cmux|terminal|none|<binding-or-local-id>; otherwise a single enabled committed binding or the build default. `terminal` runs the task in the caller's terminal; `none` disables interactive launch. AHU_PLUGIN_PATH lists absolute local package directories. Inventory does not verify authority or sources, execute plugins, or probe cmux. Native hook integration is separate."
+            "Selection: AHU_INTERACTIVE_PLUGIN=terminal|none|<binding-or-local-id>; otherwise a single enabled committed binding or the current terminal. `terminal` runs the task in the caller's terminal; `none` disables interactive launch. AHU_PLUGIN_PATH lists absolute local package directories. Inventory does not verify authority or sources, execute plugins, or probe a provider."
         );
     }
     Ok(())

@@ -416,7 +416,6 @@ pub(crate) fn read_package(root: &Path) -> Result<PluginStatus> {
         id: manifest.id,
         package: manifest.package,
         host_api: manifest.host_api,
-        compiled: false,
         selected: false,
         selection_source: "not-selected",
         origin: "local-manifest",

@@ -348,7 +348,7 @@ fn selected_inventory(root: &Path, selection: Option<&str>) -> Output {
 
 #[test]
 fn reserved_committed_binding_ids_are_rejected() {
-    for id in ["none", "cmux"] {
+    for id in ["none", "terminal"] {
         for enabled in [true, false] {
             let root = tempfile::tempdir().unwrap();
             common::git(root.path(), &["init", "-q"]);

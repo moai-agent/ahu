@@ -888,24 +888,6 @@ pub fn doctor_with_verbosity(
         }
     }
 
-    // Native cmux integration is independent of an external Host V1 peer.
-    // Its absence is not a blocker for an otherwise ready external host.
-    #[cfg(feature = "cmux-plugin")]
-    match cmux::Cmux::connect_recorded() {
-        Ok(_) => console.say("native cmux  reachable\n")?,
-        Err(e) => {
-            warnings += 1;
-            console.say(&format!(
-                "native cmux  unavailable: {}\n",
-                display_safe_block(&e.to_string())
-            ))?;
-        }
-    }
-    #[cfg(not(feature = "cmux-plugin"))]
-    console.say(
-        "native cmux  unavailable: compiled adapter not included; reachability not checked\n",
-    )?;
-
     let state_root = match repo {
         Ok(repo) => crate::storage::CheckoutStorage::new(&repo.root).state_root()?,
         Err(_) => crate::state::root()?,

@@ -51,64 +51,6 @@ fn with_state<T>(_repo: &TestRepo, f: impl FnOnce() -> T) -> T {
 }
 
 #[test]
-#[cfg(feature = "cmux-plugin")]
-fn a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record() {
-    if !common::in_harness_fixture(
-        "a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record",
-    ) {
-        return;
-    }
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    repo.commit("fixture");
-
-    let discovered = git::discover(repo.path()).unwrap();
-    let loaded = config::load(repo.path()).unwrap().unwrap();
-    let agent = ahu::agent::find(repo.path(), "chris").unwrap();
-    let pair = selection::ResolvedPair {
-        harness: agent.manifest.harness.clone(),
-        model: agent.manifest.model.clone(),
-        basis: "named agent".to_string(),
-        policy_digest: loaded.digest.clone(),
-        catalog_version: loaded.config.catalog_version.clone(),
-    };
-    // The child fixture keeps state private and makes cmux unavailable, so
-    // this failure cannot touch a real session.
-    let (plan, error) = with_state(&repo, || {
-        let plan = launch::plan(&discovered, Some(agent), pair, "do the thing").unwrap();
-        let error = launch::execute(&discovered, &loaded, &plan, "do the thing", false)
-            .unwrap_err()
-            .to_string();
-        (plan, error)
-    });
-    assert!(
-        plan.worktree
-            .starts_with(discovered.root.join(".worktrees"))
-    );
-    assert!(error.contains("cmux"), "{error}");
-
-    assert!(
-        !plan.worktree.exists(),
-        "a failed launch left a worktree behind"
-    );
-    assert!(
-        !plan.task_dir.exists(),
-        "a failed launch left a task record behind"
-    );
-    assert!(
-        !git::branch_exists(&discovered, &plan.branch).unwrap(),
-        "a failed launch left branch {} behind",
-        plan.branch
-    );
-    // The invoking checkout is untouched.
-    assert_eq!(
-        common::git(repo.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "main"
-    );
-}
-
-#[test]
 fn an_empty_prompt_is_refused_before_anything_is_created() {
     if !common::in_harness_fixture("an_empty_prompt_is_refused_before_anything_is_created") {
         return;

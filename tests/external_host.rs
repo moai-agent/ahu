@@ -1198,16 +1198,8 @@ fn doctor_attributes_external_reachability_separately_from_native_cmux() {
     );
     assert!(stdout.contains("host         reachable"), "{output:?}");
     assert!(output.status.success(), "{output:?}");
-    let warning = if cfg!(feature = "cmux-plugin") {
-        "native cmux  unavailable: cmux executable was not found.\nNative cmux workspace, group, and integration operations are unavailable.\nInstall cmux, or set AHU_CMUX_BIN to its executable.\n"
-    } else {
-        "native cmux  unavailable: compiled adapter not included; reachability not checked\n"
-    };
-    assert!(stdout.contains(warning), "{output:?}");
-    // Account readiness, missing bundled skills, and four native integrations
-    // each warn; an unavailable compiled cmux adds one independent warning.
-    let warnings = if cfg!(feature = "cmux-plugin") { 7 } else { 6 };
-    assert!(stdout.contains(&format!("No general prerequisite failures found. Review {warnings} warning(s); some modes or account checks may still prevent launch.")), "{output:?}");
+    assert!(!stdout.contains("native cmux"), "{output:?}");
+    assert!(stdout.contains("Review 6 warning(s)"), "{output:?}");
     assert!(!stdout.contains("problem(s) would block"), "{output:?}");
     assert!(!stdout.contains("cmux         reachable"), "{output:?}");
 }
