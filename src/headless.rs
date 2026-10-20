@@ -1849,6 +1849,10 @@ pub struct Events {
     structured_result_target: Option<PathBuf>,
     pub session: Option<String>,
     pub terminal: bool,
+    /// Set only when the terminal result came from somewhere other than the
+    /// harness's own event stream, so a reader can tell the two apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_evidence: Option<String>,
     pub failed: bool,
     #[serde(skip_serializing)]
     pub summary: String,
@@ -2205,6 +2209,123 @@ impl Events {
             }
         }
     }
+}
+
+/// What the OpenCode recorded-session fallback needs from the finished attempt.
+struct RecordedCompletion<'a> {
+    harness: &'a str,
+    harness_version: &'a str,
+    executable: &'a Path,
+    expected_executable_digest: Option<&'a str>,
+    worktree: &'a Path,
+    policy: Option<&'a crate::cmux::integration::HeadlessPolicy>,
+    /// The attempt created this session itself: ahu passed no `--session`.
+    fresh_session: bool,
+    exited_zero: bool,
+    attempt_started_ms: u64,
+    timeout: std::time::Duration,
+}
+
+/// OpenCode 2's `run --format json` can finish a turn without emitting the
+/// final stop step: after its session wait returns, the event consumer filters
+/// out everything but session execution events, and the execution-success
+/// event itself emits no JSON completion event. The same completion is in
+/// OpenCode's own session projection, which `session export --sanitize` prints
+/// with transcript and file data redacted.
+///
+/// This consults that projection once, before the missing-terminal failure is
+/// finalized, and only where the recovered evidence can be unambiguous: the
+/// attempt created the session, the stream named exactly that session, nothing
+/// else about the attempt failed, and the process exited 0. An observed
+/// failure, permission denial, blocker, nonzero exit or resumed session is
+/// never rescued — the export is not consulted at all in those cases.
+fn recover_opencode_terminal_result(events: &mut Events, attempt: &RecordedCompletion<'_>) {
+    if attempt.harness != "opencode"
+        || events.terminal
+        || events.failed
+        // Anything already recorded about this attempt — a stderr diagnostic,
+        // an unclassified line, a drain that did not finish — leaves the run
+        // unexplained, and a recorded stop does not explain it.
+        || !events.blockers.is_empty()
+        || events.unknown_events > 0
+        || !attempt.exited_zero
+        || !attempt.fresh_session
+        || !crate::harness::opencode::supports_session_export_evidence(attempt.harness_version)
+    {
+        return;
+    }
+    let Some(session) = events.session.clone() else {
+        return;
+    };
+    match opencode_recorded_completion(attempt, &session) {
+        Ok(()) => {
+            events.terminal = true;
+            events.terminal_evidence = Some("opencode recorded session export".into());
+        }
+        Err(reason) => events
+            .blockers
+            .push(format!("OpenCode recorded session: {reason}")),
+    }
+}
+
+/// Read the sanitized projection for exactly `session` and decide whether it
+/// establishes completion. The subprocess is bounded in time and in captured
+/// bytes, its stdout is consumed in memory and dropped with this call, and
+/// only a fixed reason string can reach a record, a log or telemetry.
+fn opencode_recorded_completion(
+    attempt: &RecordedCompletion<'_>,
+    session: &str,
+) -> std::result::Result<(), String> {
+    use crate::harness::opencode;
+    if !opencode::valid_session_id(session) {
+        return Err("the stream's session identifier is not an OpenCode session id".into());
+    }
+    if let Some(expected) = attempt.expected_executable_digest {
+        let bytes = std::fs::read(attempt.executable)
+            .map_err(|_| "the OpenCode executable could not be rechecked")?;
+        if digest_bytes(&bytes) != expected {
+            return Err("the OpenCode executable changed during the attempt".into());
+        }
+    }
+    let mut command = Command::new(attempt.executable);
+    // `--standalone` reads through a private server, as the run itself did,
+    // instead of attaching to the user's background service. `--sanitize`
+    // redacts transcript and file data inside OpenCode, before any of it can
+    // reach this process.
+    // `opencode session export [flags] [<session>]`: the flags precede the
+    // positional, as its own usage line declares. The identifier was checked
+    // above, so it can never be read as an option.
+    command.args(["session", "export", "--sanitize", "--standalone", session]);
+    crate::harness::configure_task_directory(&mut command, "opencode", attempt.worktree);
+    sanitize(&mut command, attempt.policy);
+    // This process only verifies completion; it must not create a second
+    // Ahu or native telemetry observation using the supervisor's environment.
+    command
+        .env("OTEL_SDK_DISABLED", "true")
+        .env_remove("AHU_EVAL_OTEL_ENDPOINT")
+        .env_remove("AHU_MCP_RESOURCE_ATTRIBUTES")
+        .env_remove("AHU_BROKER_PARENT_ATTRIBUTES")
+        .env_remove("OTEL_RESOURCE_ATTRIBUTES")
+        .env_remove("OTEL_SERVICE_NAME")
+        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_HEADERS")
+        .env_remove("OTEL_EXPORTER_OTLP_LOGS_HEADERS")
+        .env_remove("OTEL_TRACES_EXPORTER")
+        .env_remove("OTEL_METRICS_EXPORTER")
+        .env_remove("OTEL_LOGS_EXPORTER");
+    let export = crate::selection::bounded_config_probe(&mut command, true, attempt.timeout)
+        .ok_or_else(|| {
+            "the bounded `opencode session export` read failed, timed out, exited nonzero, \
+             or passed its output bound"
+                .to_string()
+        })?;
+    opencode::export_establishes_completion(&export, session, attempt.attempt_started_ms)
+        .map_err(str::to_owned)
 }
 
 const STREAM_EVALUATION_LIMIT: u64 = 64 * 1024 * 1024;
@@ -2923,6 +3044,14 @@ fn run_attempt(
         &json!({"at":task::now_rfc3339(),"attempt":spec.attempt}),
     )?;
     *phase = "worker_spawn";
+    // OpenCode records its session creation time in epoch milliseconds. Taking
+    // this from the same clock immediately before the spawn is what lets a
+    // later recorded-session read prove the session is this attempt's.
+    let attempt_started_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(u64::MAX, |since| {
+            since.as_millis().min(u128::from(u64::MAX)) as u64
+        });
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -3128,6 +3257,21 @@ fn run_attempt(
             .blockers
             .push("stderr contained unclassified diagnostics; effect on completion unknown".into());
     }
+    recover_opencode_terminal_result(
+        &mut events,
+        &RecordedCompletion {
+            harness: &record.identity.harness,
+            harness_version: &spec.harness_version,
+            executable: &real,
+            expected_executable_digest: Some(&spec.executable_digest),
+            worktree: &record.worktree,
+            policy: Some(&cmux_integration.headless),
+            fresh_session: spec.session.is_none(),
+            exited_zero: status.success(),
+            attempt_started_ms,
+            timeout: crate::harness::opencode::EXPORT_TIMEOUT,
+        },
+    );
     events.require_terminal_result(&record.identity.harness);
     if events.session.is_none() {
         events
@@ -4618,6 +4762,284 @@ mod write_tracking_tests {
                 .blockers
                 .contains(&"unterminated event stream".into())
         );
+    }
+
+    const RECORDED_SESSION: &str = "ses_f5cc153b6ffeNq1dwHoZGMECKw";
+    const RECORDED_START: u64 = 1_760_000_000_000;
+
+    /// A stand-in `opencode` whose `session export` prints `body` after
+    /// `preamble` shell. It records its own argv so a test can prove the exact
+    /// read ahu asked for, and prove it never ran at all when the attempt was
+    /// not eligible.
+    fn fake_opencode(root: &Path, preamble: &str, body: &str) -> PathBuf {
+        let path = root.join("opencode");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {argv}\nprintf '%s|%s|%s\\n' \"${{OTEL_SDK_DISABLED-unset}}\" \"${{AHU_EVAL_OTEL_ENDPOINT-unset}}\" \"${{OTEL_EXPORTER_OTLP_ENDPOINT-unset}}\" >> {environment}\n{preamble}\ncat <<'EXPORT_BODY'\n{body}\nEXPORT_BODY\n",
+                argv = root.join("argv").display(),
+                environment = root.join("environment").display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    fn recorded_export(messages: Value) -> String {
+        json!({
+            "info": {
+                "id": RECORDED_SESSION,
+                "projectID": "prj_synthetic",
+                "outcome": "succeeded",
+                "cost": 0,
+                "tokens": {"input": 12, "output": 4, "reasoning": 0,
+                           "cache": {"read": 0, "write": 0}},
+                "time": {"created": RECORDED_START + 10, "updated": RECORDED_START + 900,
+                         "idle": RECORDED_START + 900},
+                "title": format!("[redacted:session-title:{RECORDED_SESSION}]"),
+                "location": {"directory": format!("/[redacted:session-directory:{RECORDED_SESSION}]")},
+            },
+            "messages": messages,
+        })
+        .to_string()
+    }
+
+    fn completed_export() -> String {
+        recorded_export(json!([
+            {"id":"msg_prompt","type":"user","text":"[redacted:text:msg_prompt]",
+             "time":{"created":RECORDED_START + 11}},
+            {"id":"msg_turn","type":"assistant","agent":"build",
+             "model":{"providerID":"ollama","modelID":"glm-5.3:cloud"},
+             "content":[{"type":"text","id":"prt_text","text":"[redacted:text:msg_turn]"}],
+             "finish":"stop",
+             "time":{"created":RECORDED_START + 12,"completed":RECORDED_START + 800}},
+            {"id":"msg_idle","type":"idle","outcome":"succeeded",
+             "time":{"created":RECORDED_START + 900}},
+        ]))
+    }
+
+    /// Tool-only stdout, exactly the gap this fallback covers: OpenCode 2
+    /// reported completed work and exited 0 without a final stop step.
+    fn tool_only_events() -> Events {
+        let mut events = Events::default();
+        for line in [
+            format!(
+                r#"{{"type":"step_start","timestamp":1,"sessionID":"{RECORDED_SESSION}","part":{{"type":"step-start"}}}}"#
+            ),
+            format!(
+                r#"{{"type":"tool_use","timestamp":2,"sessionID":"{RECORDED_SESSION}","part":{{"type":"tool","tool":"read","state":{{"status":"completed"}}}}}}"#
+            ),
+        ] {
+            events.observe("opencode", line.as_bytes());
+        }
+        assert!(!events.terminal && !events.failed);
+        events
+    }
+
+    fn attempt<'a>(
+        executable: &'a Path,
+        worktree: &'a Path,
+        timeout: Duration,
+    ) -> RecordedCompletion<'a> {
+        RecordedCompletion {
+            harness: "opencode",
+            harness_version: "2.0.32",
+            executable,
+            expected_executable_digest: None,
+            worktree,
+            policy: None,
+            fresh_session: true,
+            exited_zero: true,
+            attempt_started_ms: RECORDED_START,
+            timeout,
+        }
+    }
+
+    /// The recorded session can supply the stop the JSON stream omitted, and
+    /// only through the bounded read ahu asked for.
+    #[test]
+    fn an_opencode_recorded_session_can_supply_an_omitted_stop_step() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = fake_opencode(root.path(), "", &completed_export());
+        let mut events = tool_only_events();
+        recover_opencode_terminal_result(
+            &mut events,
+            &attempt(&executable, root.path(), Duration::from_secs(20)),
+        );
+        assert!(events.terminal, "{:?}", events.blockers);
+        assert!(!events.failed, "{:?}", events.blockers);
+        assert_eq!(
+            events.terminal_evidence.as_deref(),
+            Some("opencode recorded session export"),
+            "a recovered result is labelled as one"
+        );
+        let argv = std::fs::read_to_string(root.path().join("argv")).unwrap();
+        assert_eq!(
+            argv.trim(),
+            format!("session export --sanitize --standalone {RECORDED_SESSION}"),
+            "the read is sanitized, standalone and scoped to this attempt's session"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("environment"))
+                .unwrap()
+                .trim(),
+            "true|unset|unset",
+            "the read neither inherits an Ahu collector endpoint nor exports its own telemetry"
+        );
+        // The recovered evidence is a boolean: no transcript reaches the record.
+        let encoded = serde_json::to_string(&events).unwrap();
+        assert!(!encoded.contains("redacted"), "{encoded}");
+        assert!(!encoded.contains("msg_turn"), "{encoded}");
+    }
+
+    /// Every way the read itself can fail leaves the attempt without a result.
+    #[test]
+    fn a_failed_oversized_or_slow_recorded_session_read_is_not_completion() {
+        let unreadable: [(&str, &str, &str); 5] = [
+            ("a nonzero export exit", "exit 1", &completed_export()),
+            ("malformed output", "", "{\"info\": "),
+            (
+                "output past the capture bound",
+                "head -c 1100000 /dev/zero | tr '\\0' 'a'",
+                "{}",
+            ),
+            (
+                "an export of a different session",
+                "",
+                &completed_export().replace(RECORDED_SESSION, "ses_someoneElsesSession0001"),
+            ),
+            (
+                "an export with no final idle message",
+                "",
+                &recorded_export(json!([
+                    {"id":"msg_prompt","type":"user","text":"[redacted:text:msg_prompt]",
+                     "time":{"created":RECORDED_START + 11}},
+                    {"id":"msg_turn","type":"assistant","agent":"build",
+                     "model":{"providerID":"ollama","modelID":"glm-5.3:cloud"},
+                     "content":[], "finish":"stop",
+                     "time":{"created":RECORDED_START + 12,"completed":RECORDED_START + 800}},
+                ])),
+            ),
+        ];
+        for (case, preamble, body) in unreadable {
+            let root = tempfile::tempdir().unwrap();
+            let executable = fake_opencode(root.path(), preamble, body);
+            let mut events = tool_only_events();
+            recover_opencode_terminal_result(
+                &mut events,
+                &attempt(&executable, root.path(), Duration::from_secs(20)),
+            );
+            events.require_terminal_result("opencode");
+            assert!(!events.terminal, "{case}");
+            assert!(events.failed, "{case}");
+            assert_eq!(events.terminal_evidence, None, "{case}");
+            assert!(
+                events
+                    .blockers
+                    .iter()
+                    .any(|blocker| blocker.starts_with("OpenCode recorded session:")),
+                "{case}: {:?}",
+                events.blockers
+            );
+        }
+
+        // A read that outlives its bound is a failed read, and the deadline is
+        // the caller's, not the stand-in harness's.
+        let root = tempfile::tempdir().unwrap();
+        let executable = fake_opencode(root.path(), "sleep 30", &completed_export());
+        let mut events = tool_only_events();
+        let started = Instant::now();
+        recover_opencode_terminal_result(
+            &mut events,
+            &attempt(&executable, root.path(), Duration::from_millis(750)),
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the read is bounded in time"
+        );
+        assert!(!events.terminal);
+        assert_eq!(events.terminal_evidence, None);
+    }
+
+    /// The recorded session is never consulted for an attempt that already
+    /// reported something, and can never overturn it.
+    #[test]
+    fn an_observed_failure_or_ineligible_attempt_is_never_rescued_by_an_export() {
+        let denial = format!(
+            r#"{{"type":"tool_use","timestamp":3,"sessionID":"{RECORDED_SESSION}","part":{{"type":"tool","tool":"write","state":{{"status":"error","error":"The user rejected permission to use this specific tool call."}}}}}}"#
+        );
+        /// A case: what the attempt already observed, and how it was
+        /// ineligible for a recorded-session read.
+        type Ineligible = (&'static str, Events, fn(&mut RecordedCompletion<'_>));
+        let cases: Vec<Ineligible> = vec![
+            (
+                "a permission denial on the event stream",
+                {
+                    let mut events = Events::default();
+                    events.observe("opencode", denial.as_bytes());
+                    events
+                },
+                |_| (),
+            ),
+            (
+                "a blocker recorded before the terminal check",
+                {
+                    let mut events = tool_only_events();
+                    events
+                        .blockers
+                        .push("stderr contained unclassified diagnostics".into());
+                    events
+                },
+                |_| (),
+            ),
+            ("a nonzero harness exit", tool_only_events(), |attempt| {
+                attempt.exited_zero = false
+            }),
+            (
+                "a resumed session, whose history is not this attempt's",
+                tool_only_events(),
+                |attempt| attempt.fresh_session = false,
+            ),
+            (
+                "an OpenCode 1.x CLI, which has no such projection",
+                tool_only_events(),
+                |attempt| attempt.harness_version = "1.18.30",
+            ),
+            ("another harness entirely", tool_only_events(), |attempt| {
+                attempt.harness = "codex"
+            }),
+            (
+                "an unknown event on the stream",
+                {
+                    let mut events = tool_only_events();
+                    events.unknown_events = 1;
+                    events
+                },
+                |_| (),
+            ),
+            (
+                "a replaced OpenCode executable",
+                tool_only_events(),
+                |attempt| attempt.expected_executable_digest = Some("changed"),
+            ),
+        ];
+        for (case, mut events, adjust) in cases {
+            let root = tempfile::tempdir().unwrap();
+            // A stand-in that would report success if it were ever asked.
+            let executable = fake_opencode(root.path(), "", &completed_export());
+            let mut recorded = attempt(&executable, root.path(), Duration::from_secs(20));
+            adjust(&mut recorded);
+            recover_opencode_terminal_result(&mut events, &recorded);
+            assert!(!events.terminal, "{case}");
+            assert_eq!(events.terminal_evidence, None, "{case}");
+            assert!(
+                !root.path().join("argv").exists(),
+                "{case}: the export was not even invoked"
+            );
+        }
     }
 
     #[test]

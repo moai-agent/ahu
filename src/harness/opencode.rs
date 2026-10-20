@@ -235,6 +235,181 @@ fn permission_control(permissions: Permissions) -> String {
     }
 }
 
+/// The recorded-session projection and its sanitized export were verified
+/// against OpenCode 2.0.32. Do not extend this to another version until its
+/// export and sanitization semantics have been checked too.
+pub(crate) fn supports_session_export_evidence(version: &str) -> bool {
+    crate::catalog::version_token(version).is_some_and(|version| version == "2.0.32")
+}
+
+/// Bound the recorded-session read: a completed headless turn settles its
+/// projection before `run` exits, so a slow read is a failed read.
+pub(crate) const EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Bound the inspected projection. A turn that recorded more messages than
+/// this is not a shape this check claims to understand.
+const EXPORT_MESSAGE_LIMIT: usize = 4096;
+
+/// OpenCode mints session identifiers as `ses_` followed by its own
+/// alphanumeric id. Anything else is not an identifier this adapter will place
+/// on a command line or match an export against.
+pub(crate) fn valid_session_id(session: &str) -> bool {
+    session.len() >= 8
+        && session.len() <= 128
+        && session.starts_with("ses_")
+        && session[4..].chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Decide whether a sanitized `opencode session export` establishes that
+/// `session` completed the one turn this attempt started.
+///
+/// Statically verified against the 2.0.32 binary: `session export` prints
+/// `{"info": Session.Info, "messages": [Session.Message.Info]}`, the export
+/// drops assistant messages that have no `time.completed`, the projection
+/// appends an `idle` message carrying the execution outcome, and sanitization
+/// rewrites only text-bearing fields — `type`, `finish`, `outcome`, `status`
+/// and `time` survive it intact. Nothing here reads a transcript field.
+///
+/// Every unexpected shape is a failure. In particular this refuses any
+/// recorded tool call that is not `completed`: a refusal and a recovered tool
+/// error are the same `error` status in the projection, and ahu will not tell
+/// them apart from redacted text. A run that recovered from a tool error is
+/// therefore not rescued here; it is reported as missing completion evidence,
+/// which is what it was before this check existed.
+pub(crate) fn export_establishes_completion(
+    export: &str,
+    session: &str,
+    attempt_started_ms: u64,
+) -> std::result::Result<(), &'static str> {
+    use serde_json::Value;
+
+    if !valid_session_id(session) {
+        return Err("the attempt's session identifier is not an OpenCode session id");
+    }
+    let value: Value = serde_json::from_str(export).map_err(|_| "the export is not JSON")?;
+    let info = value
+        .get("info")
+        .and_then(Value::as_object)
+        .ok_or("the export carries no session info")?;
+    if info.get("id").and_then(Value::as_str) != Some(session) {
+        return Err("the export describes a different session");
+    }
+    if info.get("outcome").and_then(Value::as_str) != Some("succeeded") {
+        return Err("the recorded session did not end with a succeeded outcome");
+    }
+    let time = info
+        .get("time")
+        .and_then(Value::as_object)
+        .ok_or("the recorded session carries no timestamps")?;
+    if !time.get("idle").is_some_and(Value::is_number) {
+        return Err("the recorded session is not idle");
+    }
+    // The projection timestamps are epoch milliseconds. A session created
+    // before this attempt spawned is a different run's session, whatever its
+    // identifier says.
+    let created = time
+        .get("created")
+        .and_then(Value::as_u64)
+        .ok_or("the recorded session has no usable creation time")?;
+    if created < attempt_started_ms {
+        return Err("the recorded session predates this attempt");
+    }
+    let messages = value
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or("the export carries no messages")?;
+    if messages.is_empty() || messages.len() > EXPORT_MESSAGE_LIMIT {
+        return Err("the exported message count is empty or past the inspection bound");
+    }
+
+    let mut prompts = 0usize;
+    let mut last_assistant = None;
+    for (index, message) in messages.iter().enumerate() {
+        let message = message
+            .as_object()
+            .ok_or("an exported message is not an object")?;
+        match message
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or("an exported message has no type")?
+        {
+            "user" => prompts += 1,
+            "assistant" => {
+                if message.get("error").is_some_and(|error| !error.is_null()) {
+                    return Err("an assistant message recorded an error");
+                }
+                if !message
+                    .get("time")
+                    .and_then(|time| time.get("completed"))
+                    .is_some_and(Value::is_number)
+                {
+                    return Err("an assistant message never completed");
+                }
+                for part in message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .ok_or("an assistant message has no content")?
+                {
+                    if part.get("type").and_then(Value::as_str) == Some("tool")
+                        && part.pointer("/state/status").and_then(Value::as_str)
+                            != Some("completed")
+                    {
+                        return Err("a recorded tool call did not complete");
+                    }
+                }
+                last_assistant = Some(index);
+            }
+            "idle" => {
+                if index + 1 != messages.len() {
+                    return Err("the recorded session went idle before its last message");
+                }
+                if message.get("outcome").and_then(Value::as_str) != Some("succeeded") {
+                    return Err("the final idle message did not record success");
+                }
+                if message.get("error").is_some_and(|error| !error.is_null()) {
+                    return Err("the final idle message recorded an error");
+                }
+            }
+            // Turn bookkeeping that carries no completion claim. Everything
+            // else — a shell message, a compaction, a type added by a later
+            // OpenCode — leaves this check unable to describe the run.
+            "system" | "synthetic" | "skill" | "agent-switched" | "model-switched"
+            | "location-switched" => (),
+            _ => return Err("the export holds a message type this check does not recognize"),
+        }
+    }
+    // ahu passes no --session on the launch this fallback covers, so the
+    // session holds exactly one prompt: its own. More than one would mean the
+    // stop evidence could belong to an earlier turn.
+    if prompts != 1 {
+        return Err("the exported session does not hold exactly this attempt's one turn");
+    }
+    let last_assistant = last_assistant.ok_or("the exported session has no assistant message")?;
+    // The execution outcome lives in the idle message the projection appends,
+    // so a session that never recorded one never recorded an outcome.
+    if messages[messages.len() - 1]
+        .get("type")
+        .and_then(Value::as_str)
+        != Some("idle")
+    {
+        return Err("the exported session does not end with an idle message");
+    }
+    // That idle message is last, so the final assistant message must be the
+    // one immediately before it: anything in between is work the stop reason
+    // does not describe.
+    if last_assistant + 2 != messages.len() {
+        return Err("the exported session records work after its final assistant message");
+    }
+    if messages[last_assistant]
+        .get("finish")
+        .and_then(Value::as_str)
+        != Some("stop")
+    {
+        return Err("the final assistant message did not finish with stop");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +489,269 @@ mod tests {
         assert!(error.to_string().contains("does not accept `--auto`"));
         assert!(check_mini_interactive_help(top, "Usage: opencode mini", &args).is_err());
         assert!(check_mini_interactive_help("", mini, &args).is_err());
+    }
+
+    const SESSION: &str = "ses_f5cc153b6ffeNq1dwHoZGMECKw";
+    const STARTED: u64 = 1_760_000_000_000;
+
+    /// A synthetic sanitized export in the 2.0.32 shape: one prompt, one
+    /// assistant message that completed a tool call and stopped, and the
+    /// idle message the projection appends on execution success. Transcript
+    /// fields carry the redaction markers sanitization writes.
+    fn export(messages: serde_json::Value) -> String {
+        serde_json::json!({
+            "info": {
+                "id": SESSION,
+                "projectID": "prj_synthetic",
+                "outcome": "succeeded",
+                "cost": 0,
+                "tokens": {"input": 12, "output": 4, "reasoning": 0,
+                           "cache": {"read": 0, "write": 0}},
+                "time": {"created": STARTED + 10, "updated": STARTED + 900,
+                         "idle": STARTED + 900},
+                "title": format!("[redacted:session-title:{SESSION}]"),
+                "location": {"directory": format!("/[redacted:session-directory:{SESSION}]")},
+            },
+            "messages": messages,
+        })
+        .to_string()
+    }
+
+    fn prompt() -> serde_json::Value {
+        serde_json::json!({"id":"msg_prompt","type":"user","time":{"created":STARTED + 11},
+                           "text":"[redacted:text:msg_prompt]"})
+    }
+
+    fn assistant(id: &str, finish: &str, tool_status: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "type": "assistant", "agent": "build",
+            "model": {"providerID": "ollama", "modelID": "glm-5.3:cloud"},
+            "content": [
+                {"type":"tool","id":"prt_tool","tool":"write","callID":"call_synthetic",
+                 "state":{"status":tool_status,"input":{"redacted":format!("tool-input:{id}")}}},
+                {"type":"text","id":"prt_text","text":format!("[redacted:text:{id}]")},
+            ],
+            "finish": finish,
+            "time": {"created": STARTED + 12, "completed": STARTED + 800},
+        })
+    }
+
+    fn idle(outcome: &str) -> serde_json::Value {
+        serde_json::json!({"id":"msg_idle","type":"idle","outcome":outcome,
+                           "time":{"created":STARTED + 900}})
+    }
+
+    fn accepted() -> serde_json::Value {
+        serde_json::json!([
+            prompt(),
+            assistant("msg_turn", "stop", "completed"),
+            idle("succeeded")
+        ])
+    }
+
+    #[test]
+    fn a_sanitized_export_establishes_completion_only_for_this_attempts_finished_turn() {
+        export_establishes_completion(&export(accepted()), SESSION, STARTED).unwrap();
+
+        // Several steps: only the last one has to carry the stop.
+        let stepped = serde_json::json!([
+            prompt(),
+            assistant("msg_step", "tool-calls", "completed"),
+            assistant("msg_turn", "stop", "completed"),
+            idle("succeeded"),
+        ]);
+        export_establishes_completion(&export(stepped), SESSION, STARTED).unwrap();
+
+        let rejected: [(&str, String, &str); 14] = [
+            (
+                "a different session",
+                export(accepted()).replace(SESSION, "ses_someoneElsesSession0001"),
+                "different session",
+            ),
+            (
+                "an export of a session older than this attempt",
+                export(accepted()),
+                "predates this attempt",
+            ),
+            (
+                "a stop that is not the session's last word",
+                serde_json::to_string(&serde_json::json!({
+                    "info": serde_json::from_str::<serde_json::Value>(&export(accepted()))
+                        .unwrap()["info"],
+                    "messages": [prompt(), assistant("msg_turn", "stop", "completed"),
+                                 idle("succeeded"), assistant("msg_after", "stop", "completed")],
+                }))
+                .unwrap(),
+                "idle before its last message",
+            ),
+            (
+                "a later tool call after the final stop",
+                export(serde_json::json!([
+                    prompt(),
+                    assistant("msg_turn", "stop", "completed"),
+                    assistant("msg_after", "tool-calls", "completed"),
+                    idle("succeeded"),
+                ])),
+                "did not finish with stop",
+            ),
+            (
+                "a tool call that did not complete",
+                export(serde_json::json!([
+                    prompt(),
+                    assistant("msg_turn", "stop", "running"),
+                    idle("succeeded"),
+                ])),
+                "tool call did not complete",
+            ),
+            (
+                "a refused tool call, which the projection records as an error",
+                export(serde_json::json!([
+                    prompt(),
+                    assistant("msg_turn", "stop", "error"),
+                    idle("succeeded"),
+                ])),
+                "tool call did not complete",
+            ),
+            (
+                "an assistant error",
+                export(serde_json::json!([
+                    prompt(),
+                    {
+                        "id":"msg_turn","type":"assistant","agent":"build",
+                        "model":{"providerID":"ollama","modelID":"glm-5.3:cloud"},
+                        "content":[], "finish":"stop",
+                        "error":{"name":"ProviderError"},
+                        "time":{"created":STARTED + 12,"completed":STARTED + 800},
+                    },
+                    idle("succeeded"),
+                ])),
+                "recorded an error",
+            ),
+            (
+                "an interrupted run",
+                export(serde_json::json!([
+                    prompt(),
+                    assistant("msg_turn", "stop", "completed"),
+                    idle("interrupted"),
+                ])),
+                "did not record success",
+            ),
+            (
+                "a session carrying an earlier turn",
+                export(serde_json::json!([
+                    prompt(),
+                    assistant("msg_earlier", "stop", "completed"),
+                    prompt(),
+                    assistant("msg_turn", "stop", "completed"),
+                    idle("succeeded"),
+                ])),
+                "exactly this attempt's one turn",
+            ),
+            (
+                "a session that never recorded an execution outcome",
+                export(serde_json::json!([
+                    prompt(),
+                    assistant("msg_turn", "stop", "completed"),
+                    {"id":"msg_system","type":"system","text":"[redacted:system:msg_system]",
+                     "time":{"created":STARTED + 901}},
+                ])),
+                "does not end with an idle message",
+            ),
+            (
+                "a session with no assistant message at all",
+                export(serde_json::json!([prompt(), idle("succeeded")])),
+                "no assistant message",
+            ),
+            (
+                "a message type this check cannot describe",
+                export(serde_json::json!([
+                    prompt(),
+                    {"id":"msg_shell","type":"shell","shellID":"shl_1","status":"completed",
+                     "command":"[redacted:shell-command:msg_shell]",
+                     "time":{"created":STARTED + 13}},
+                    assistant("msg_turn", "stop", "completed"),
+                    idle("succeeded"),
+                ])),
+                "does not recognize",
+            ),
+            ("malformed output", "{\"info\": ".to_string(), "not JSON"),
+            (
+                "output that is JSON but not an export",
+                serde_json::json!({"data": {"info": {"id": SESSION}}}).to_string(),
+                "no session info",
+            ),
+        ];
+        for (case, body, expected) in rejected {
+            // The stale-session case is the only one that reuses the accepted
+            // body; it is rejected by the attempt window rather than by shape.
+            let started = if expected == "predates this attempt" {
+                STARTED + 1_000_000
+            } else {
+                STARTED
+            };
+            let error = export_establishes_completion(&body, SESSION, started).expect_err(case);
+            assert!(error.contains(expected), "{case}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_export_is_matched_only_against_a_well_formed_opencode_session_id() {
+        assert!(valid_session_id(SESSION));
+        for rejected in [
+            "",
+            "ses_",
+            "ses_short",
+            "msg_f5cc153b6ffeNq1dwHoZGMECKw",
+            "ses_f5cc153b6ffe;rm -rf /",
+            "ses_f5cc153b6ffe\nses_other",
+        ] {
+            if rejected == "ses_short" {
+                // Long enough and well shaped: the bound is on length, not on
+                // this adapter guessing OpenCode's id body.
+                assert!(valid_session_id(rejected));
+                continue;
+            }
+            assert!(!valid_session_id(rejected), "{rejected:?}");
+        }
+        assert!(!valid_session_id(&format!("ses_{}", "a".repeat(200))));
+        let error = export_establishes_completion(&export(accepted()), "not-a-session", STARTED)
+            .expect_err("a malformed identifier cannot be matched");
+        assert!(error.contains("not an OpenCode session id"), "{error}");
+    }
+
+    #[test]
+    fn recorded_session_evidence_is_gated_to_the_verified_version() {
+        for supported in ["2.0.32", "opencode 2.0.32"] {
+            assert!(supports_session_export_evidence(supported), "{supported}");
+        }
+        for unsupported in [
+            "1.18.30", "1.18.34", "2.0.33", "2.1.0", "3.0.0", "", "unknown",
+        ] {
+            assert!(
+                !supports_session_export_evidence(unsupported),
+                "{unsupported}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_export_is_bounded_before_its_shape_is_trusted() {
+        let mut messages = vec![prompt()];
+        for index in 0..5000 {
+            messages.push(assistant(
+                &format!("msg_{index}"),
+                "tool-calls",
+                "completed",
+            ));
+        }
+        messages.push(assistant("msg_turn", "stop", "completed"));
+        messages.push(idle("succeeded"));
+        let error = export_establishes_completion(
+            &export(serde_json::Value::Array(messages)),
+            SESSION,
+            STARTED,
+        )
+        .expect_err("a projection past the inspection bound is not evidence");
+        assert!(error.contains("inspection bound"), "{error}");
     }
 }
