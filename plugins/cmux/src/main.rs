@@ -51,7 +51,8 @@ fn implicit_candidate(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path = path.canonicalize().ok()?;
     let metadata = path.metadata().ok()?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+    let mode = metadata.permissions().mode();
+    if !metadata.is_file() || mode & 0o111 == 0 || mode & 0o6000 != 0 {
         return None;
     }
     // Match core's implicit utility boundary without invoking candidate Git or
@@ -86,5 +87,17 @@ mod tests {
         std::fs::write(temp.path().join(".git"), "gitdir: ignored").unwrap();
         assert!(implicit_candidate(&cli).is_none());
         assert!(implicit_candidate(&link).is_none());
+    }
+
+    #[test]
+    fn implicit_lookup_rejects_setuid_and_setgid_binaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let cli = temp.path().join("cmux");
+        std::fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
+
+        for mode in [0o4700, 0o2700, 0o6700] {
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(implicit_candidate(&cli).is_none(), "accepted mode {mode:o}");
+        }
     }
 }
