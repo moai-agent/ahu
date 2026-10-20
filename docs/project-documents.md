@@ -156,8 +156,11 @@ HTTPS or absolute local Git `repository`, full lowercase hexadecimal Git
 and `host_api: 1`. Numeric prerelease identifiers in either version pin cannot
 have leading zeros (`1.0.0-01` is invalid); build metadata such as `1.0.0+01` is allowed.
 `enabled` defaults to false; `grants` defaults to empty. The
-foundation recognizes `interactive-backend` and `read-project-context` grants;
-unknown or duplicate grants are errors. Grant settings remain inert data.
+schema recognizes `interactive-backend`, `execute`, `github-cli`, and
+`read-project-context` grants; unknown or duplicate grants are errors. Grant
+settings remain inert during inspection. `github-cli` opts an authorized generic
+invocation into the native GitHub authentication environment; see the
+[executable contract](executable-plugins.md) before granting it.
 Optional `source.subdirectory` selects a plain relative package directory.
 `source.kind` defaults to `git`; `local` instead selects an absolute directory
 snapshot and requires `revision` to equal `sha256`. See the

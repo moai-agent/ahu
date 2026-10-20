@@ -1,4 +1,4 @@
-//! Offline synthetic GitHub provider package. No network, credentials, or GitHub access.
+//! Synthetic V1 and fake-gh V2 coverage. No network, credentials, or GitHub access.
 
 mod common;
 
@@ -29,7 +29,7 @@ impl Github {
         let binding = Binding {
             schema_version: 1,
             id: "github".into(),
-            version: "1.0.0".into(),
+            version: "1.1.0".into(),
             source: Source {
                 repository: package.to_str().unwrap().into(),
                 revision: digest.clone(),
@@ -480,4 +480,404 @@ fn cli_denied_reports_exit_code_four() {
         output.stderr.iter().filter(|byte| **byte == b'\n').count(),
         1
     );
+}
+
+fn inspect_input() -> Value {
+    json!({"version": 2, "action": "inspect", "repository": "example/project",
+           "issue_number": 7, "expected_visibility": "private"})
+}
+
+struct FakeGh {
+    temp: tempfile::TempDir,
+}
+
+impl FakeGh {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("gh");
+        fs::write(
+            &executable,
+            r##"#!/usr/bin/python3
+import json, os, sys, time
+from pathlib import Path
+root = Path(__file__).parent
+with (root / 'calls').open('a') as log:
+    log.write(json.dumps(sys.argv[1:]) + '\n')
+# The fixture is self-contained and never reads credentials or uses a network.
+assert os.environ['GH_TOKEN'] == 'synthetic-token'
+assert os.environ['GITHUB_TOKEN'] == 'synthetic-fallback'
+assert os.environ['GH_PROMPT_DISABLED'] == '1'
+assert os.environ['GH_PAGER'] == 'cat'
+assert 'GH_HOST' not in os.environ
+assert 'UNRELATED_SECRET' not in os.environ
+assert 'AHU_GITHUB_PATH' not in os.environ
+assert sys.stdin.read() == ''
+mode = (root / 'mode').read_text()
+if mode == 'failure' or (mode == 'issue_failure' and '/issues/' in sys.argv[6]):
+    sys.stderr.write('synthetic-stderr-secret')
+    sys.stdout.write('synthetic-stdout-secret')
+    sys.exit(4)
+if mode == 'large' or (mode == 'issue_large' and '/issues/' in sys.argv[6]):
+    sys.stdout.write(' ' * 65537)
+    sys.exit(0)
+if mode == 'timeout':
+    time.sleep(4)
+    sys.exit(0)
+if mode == 'malformed':
+    sys.stdout.write('{not JSON: synthetic-secret}')
+    sys.exit(0)
+if mode == 'duplicate':
+    sys.stdout.write('{"full_name":"example/project","full_name":"other/project"}')
+    sys.exit(0)
+if mode == 'deep':
+    sys.stdout.write('[' * 2000 + '0' + ']' * 2000)
+    sys.exit(0)
+if mode == 'trailing':
+    sys.stdout.write('{} {}')
+    sys.exit(0)
+if mode == 'invalid_utf8':
+    sys.stdout.buffer.write(b'\xff')
+    sys.exit(0)
+name = 'example/project'
+if mode == 'case':
+    name = 'Example/Project'
+repo = {'full_name': name, 'html_url': 'https://github.com/' + name,
+        'visibility': 'private', 'private': True}
+issue = {'number': 7, 'html_url': 'https://github.com/' + name + '/issues/7',
+         'repository_url': 'https://api.github.com/repos/' + name,
+         'state': 'open', 'is_pull_request': False}
+if mode == 'public':
+    repo.update(visibility='public', private=False)
+if mode == 'repo_mismatch':
+    repo['full_name'] = 'other/project'
+if mode == 'repo_url':
+    repo['html_url'] = 'https://example.invalid/example/project'
+if mode == 'inconsistent_visibility':
+    repo['private'] = False
+if mode == 'issue_number':
+    issue['number'] = 8
+if mode == 'issue_repo':
+    issue['repository_url'] = 'https://api.github.com/repos/other/project'
+if mode == 'issue_url':
+    issue['html_url'] += '?secret'
+if mode == 'pull_request':
+    issue['is_pull_request'] = True
+if mode == 'bad_state':
+    issue['state'] = 'synthetic-secret'
+if mode == 'closed':
+    issue['state'] = 'closed'
+if mode == 'float_number':
+    issue['number'] = 7.0
+if mode == 'extra':
+    issue['body'] = 'synthetic-secret'
+if mode == 'missing':
+    del issue['number']
+if mode == 'max_output':
+    value = json.dumps(issue if '/issues/' in sys.argv[6] else repo)
+    sys.stdout.write(value + ' ' * (65536 - len(value)))
+else:
+    print(json.dumps(issue if '/issues/' in sys.argv[6] else repo))
+if mode == 'nonzero_valid':
+    sys.exit(4)
+"##,
+        )
+        .unwrap();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let fake = Self { temp };
+        fake.mode("valid");
+        fake
+    }
+
+    fn mode(&self, mode: &str) {
+        fs::write(self.temp.path().join("mode"), mode).unwrap();
+        let _ = fs::remove_file(self.temp.path().join("calls"));
+    }
+
+    fn calls(&self) -> Vec<Value> {
+        fs::read_to_string(self.temp.path().join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn invoke(&self, github: &Github, input: &Value) -> std::process::Output {
+        fs::write(
+            github.root.join("input.json"),
+            serde_json::to_vec(input).unwrap(),
+        )
+        .unwrap();
+        common::ahu()
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.temp.path().display()),
+            )
+            .env("HOME", self.temp.path())
+            .env("GH_CONFIG_DIR", self.temp.path())
+            .env("XDG_CONFIG_HOME", self.temp.path())
+            .env("GH_TOKEN", "synthetic-token")
+            .env("GITHUB_TOKEN", "synthetic-fallback")
+            .env("GH_HOST", "example.invalid")
+            .env("UNRELATED_SECRET", "synthetic-secret")
+            .env("AHU_GITHUB_CLI", "1")
+            .env("AHU_GITHUB_PATH", "/untrusted/ambient/path")
+            .current_dir(&github.root)
+            .args(["plugins", "invoke", "github", "--input-file", "input.json"])
+            .output()
+            .unwrap()
+    }
+
+    fn result(&self, github: &Github, input: &Value) -> Value {
+        let output = self.invoke(github, input);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.len() < 1024);
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"].clone()
+    }
+}
+
+fn real_github_fixture() -> Github {
+    let mut github = Github::new();
+    github.binding.grants.push(Grant::GithubCli);
+    github.save(true);
+    github.install();
+    github
+}
+
+#[test]
+fn inspection_reads_only_bounded_state_with_fixed_get_argv() {
+    let github = real_github_fixture();
+    let fake = FakeGh::new();
+    for mode in ["valid", "closed", "case", "public", "max_output"] {
+        fake.mode(mode);
+        let mut input = inspect_input();
+        if mode == "public" {
+            input["expected_visibility"] = json!("public");
+        }
+        let result = fake.result(&github, &input);
+        let repository = if mode == "case" {
+            "Example/Project"
+        } else {
+            "example/project"
+        };
+        assert_eq!(
+            result,
+            json!({"version": 2, "provider": "github", "outcome": "read",
+            "code": null, "reference": {"repository": repository, "issue_number": 7,
+            "url": format!("https://github.com/{repository}/issues/7")},
+            "state": {"status": if mode == "closed" { "closed" } else { "open" },
+            "visibility": input["expected_visibility"]}}),
+            "{mode}"
+        );
+        assert_eq!(
+            fake.calls(),
+            vec![
+                json!([
+                    "api",
+                    "--hostname",
+                    "github.com",
+                    "--method",
+                    "GET",
+                    "repos/example/project",
+                    "--jq",
+                    "{full_name, html_url, private, visibility}"
+                ]),
+                json!([
+                    "api",
+                    "--hostname",
+                    "github.com",
+                    "--method",
+                    "GET",
+                    format!("repos/{repository}/issues/7"),
+                    "--jq",
+                    "{number, html_url, repository_url, state, is_pull_request: has(\"pull_request\")}"
+                ])
+            ]
+        );
+    }
+}
+
+#[test]
+fn inspection_refuses_mismatches_and_provider_failures_without_disclosing_data() {
+    let github = real_github_fixture();
+    let fake = FakeGh::new();
+    for (mode, code, calls) in [
+        ("repo_mismatch", "repository_mismatch", 1),
+        ("repo_url", "repository_mismatch", 1),
+        ("public", "visibility_mismatch", 1),
+        ("inconsistent_visibility", "visibility_mismatch", 1),
+        ("issue_number", "issue_mismatch", 2),
+        ("issue_repo", "issue_mismatch", 2),
+        ("issue_url", "issue_mismatch", 2),
+        ("pull_request", "issue_mismatch", 2),
+        ("failure", "provider_failed", 1),
+        ("nonzero_valid", "provider_failed", 1),
+        ("issue_failure", "provider_failed", 2),
+        ("issue_large", "provider_output_limit", 2),
+        ("large", "provider_output_limit", 1),
+        ("timeout", "provider_timeout", 1),
+        ("malformed", "provider_malformed", 1),
+        ("duplicate", "provider_malformed", 1),
+        ("deep", "provider_malformed", 1),
+        ("trailing", "provider_malformed", 1),
+        ("invalid_utf8", "provider_malformed", 1),
+        ("bad_state", "provider_malformed", 2),
+        ("float_number", "provider_malformed", 2),
+        ("extra", "provider_malformed", 2),
+        ("missing", "provider_malformed", 2),
+    ] {
+        fake.mode(mode);
+        assert_eq!(
+            fake.result(&github, &inspect_input()),
+            json!({"version": 2,
+            "provider": "github", "outcome": "error", "code": code,
+            "reference": null, "state": null}),
+            "{mode}"
+        );
+        assert_eq!(fake.calls().len(), calls, "{mode}");
+    }
+    fake.mode("valid");
+    let mut input = inspect_input();
+    input["expected_visibility"] = json!("public");
+    assert_eq!(fake.result(&github, &input)["code"], "visibility_mismatch");
+    assert_eq!(fake.calls().len(), 1);
+}
+
+#[test]
+fn inspection_validates_input_before_any_gh_invocation() {
+    let github = real_github_fixture();
+    let fake = FakeGh::new();
+    for (key, value) in [
+        ("repository", json!("")),
+        ("repository", json!("owner")),
+        ("repository", json!("https://github.com/example/project")),
+        ("repository", json!("example/../project")),
+        ("repository", json!("example/..")),
+        ("repository", json!("-owner/project")),
+        ("repository", json!("owner/repo;echo secret")),
+        ("repository", json!("owner/repo\n")),
+        ("repository", json!("a".repeat(141))),
+        ("issue_number", json!(0)),
+        ("issue_number", json!(-1)),
+        ("issue_number", json!(true)),
+        ("issue_number", json!(7.0)),
+        ("issue_number", json!(2147483648_u64)),
+        ("issue_number", json!("7")),
+        ("expected_visibility", json!("any")),
+        ("action", json!("close")),
+        ("unexpected", json!("secret")),
+    ] {
+        let mut input = inspect_input();
+        input[key] = value;
+        assert_eq!(
+            fake.result(&github, &input)["code"],
+            "invalid_input",
+            "{input}"
+        );
+    }
+    for key in ["repository", "issue_number", "expected_visibility"] {
+        let mut input = inspect_input();
+        input.as_object_mut().unwrap().remove(key);
+        assert_eq!(fake.result(&github, &input)["code"], "invalid_input");
+    }
+    assert!(fake.calls().is_empty());
+}
+
+#[test]
+fn inspection_is_inert_without_grant_enablement_installation_or_binding() {
+    let mut github = real_github_fixture();
+    let fake = FakeGh::new();
+    github.binding.grants = vec![Grant::Execute];
+    github.save(true);
+    assert_eq!(
+        fake.result(&github, &inspect_input())["code"],
+        "github_cli_denied"
+    );
+    github.binding.grants.push(Grant::GithubCli);
+    github.binding.enabled = false;
+    github.save(true);
+    let output = fake.invoke(&github, &inspect_input());
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stderr).unwrap()["code"],
+        "denied"
+    );
+    github.binding.enabled = true;
+    github.save(true);
+    fs::remove_dir_all(github.root.join(".ahu/state/plugins")).unwrap();
+    let output = fake.invoke(&github, &inspect_input());
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stderr).unwrap()["code"],
+        "unavailable"
+    );
+    fs::remove_file(github.root.join(".agents/ahu/plugins/github.md")).unwrap();
+    common::git(&github.root, &["add", ".agents/ahu/plugins/github.md"]);
+    common::git(
+        &github.root,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "remove fixture binding",
+        ],
+    );
+    let output = fake.invoke(&github, &inspect_input());
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stderr).unwrap()["code"],
+        "denied"
+    );
+    assert!(fake.calls().is_empty());
+}
+
+#[test]
+fn inspection_missing_gh_and_unsafe_lookup_fail_closed() {
+    // Invoke the real entrypoint with an explicit fixture-only search path; no
+    // machine gh can be selected, even if it is installed in a system directory.
+    let fake = FakeGh::new();
+    for path in [
+        "".to_owned(),
+        ".".to_owned(),
+        fake.temp.path().display().to_string(),
+    ] {
+        fs::write(fake.temp.path().join(".git"), "synthetic checkout marker").unwrap();
+        let entrypoint = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/github/entrypoint");
+        let mut child = Command::new(entrypoint)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("AHU_GITHUB_CLI", "1")
+            .env("AHU_GITHUB_PATH", path)
+            .current_dir(fake.temp.path())
+            .arg("--ahu-plugin-protocol=1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        serde_json::to_writer(
+            child.stdin.take().unwrap(),
+            &json!({"protocol_version": 1,
+            "plugin_id": "github", "grant": {"operation": "invoke"}, "context": {},
+            "input": inspect_input()}),
+        )
+        .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"]["code"],
+            "gh_unavailable"
+        );
+    }
+    assert!(fake.calls().is_empty());
 }

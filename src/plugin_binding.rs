@@ -72,6 +72,8 @@ pub struct Compatibility {
 pub enum Grant {
     InteractiveBackend,
     Execute,
+    /// Opt in to the user's GitHub CLI lookup and native authentication environment.
+    GithubCli,
     ReadProjectContext,
 }
 

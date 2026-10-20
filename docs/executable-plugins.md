@@ -53,7 +53,9 @@ ahu plugins invoke example --task-observations \
 
 The package must already be installed and have a committed enabled binding with
 an exact ahu version and `execute` grant. This command runs once in the foreground;
-it does not install, fetch, probe, retry, load provider-specific configuration or authenticate.
+the host does not install, fetch, probe, retry, load provider-specific configuration or authenticate.
+An explicitly authorized package may call a provider; see the optional
+[GitHub issue inspection package](../plugins/github/ahu-plugin.md).
 When valid project telemetry is enabled, ahu also emits one local `ahu.plugin.invoke`
 span containing only the plugin ID, invocation mode, outcome and effect uncertainty.
 It does not include input, output, repository paths or credentials. Missing or invalid
@@ -309,7 +311,19 @@ directory outside repositories, then starts it with this fixed argument vector:
 The host does not construct a shell command, select an executable through PATH,
 extend the caller's argument vector, or probe. Working directory is the private snapshot directory.
 The environment is cleared, then `PATH=/usr/bin:/bin` is set; no auth/environment
-variables or repository configuration are forwarded. stderr goes to the null
+variables or repository configuration are forwarded by default. An explicit
+committed `github-cli` binding grant forwards the listed native auth environment
+without parsing it, so the trusted package and `gh` can use the user's existing
+login. This is a deliberate credential-access grant, not credential isolation.
+It additionally forwards `HOME`,
+`XDG_CONFIG_HOME`, `GH_CONFIG_DIR`, `GH_TOKEN`, and `GITHUB_TOKEN` when present,
+plus the caller PATH as `AHU_GITHUB_PATH` and the marker `AHU_GITHUB_CLI=1`.
+This occurs only after authorization and installed-package verification; the
+host never searches for `gh` or inspects the native credential store. Interpreter
+PATH stays fixed. This grant gives the trusted package native GitHub authentication
+access, not OS confinement or a read-only token scope. Disabled and uninstalled bindings
+receive nothing. See the [package contract](../plugins/github/ahu-plugin.md) for
+its bounded read-only calls and domain errors. stderr goes to the null
 device, and no execution trace is retained. Snapshot bytes and directory are
 removed on return. The binary must be self-contained apart from system runtime
 libraries/interpreters; package-relative assets are not copied.

@@ -225,7 +225,8 @@ pub fn invoke(
     let (snapshot, executable, timeout) = prepared;
     check_cancel()?;
     let deadline = Instant::now() + timeout;
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("--ahu-plugin-protocol=1")
         .current_dir(snapshot.path())
         .env_clear()
@@ -233,7 +234,29 @@ pub fn invoke(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0)
+        .process_group(0);
+    // Only an authorized, installed invocation can receive this opt-in environment.
+    // Keep the interpreter PATH fixed; the package resolves gh separately. The host
+    // does not inspect credential contents or call the provider, but it forwards the
+    // explicitly granted auth environment so gh can use the user's existing login.
+    if binding.grants.contains(&Grant::GithubCli) {
+        command.env("AHU_GITHUB_CLI", "1");
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env("AHU_GITHUB_PATH", path);
+        }
+        for key in [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "GH_CONFIG_DIR",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+    }
+    let child = command
         .spawn()
         .map_err(|_| Failure::before(Code::Unavailable))?;
     let mut process = Process { child: Some(child) };
