@@ -164,13 +164,11 @@ fn attribute<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a AttributeV
 fn plugin_invocation_exports_payload_free_release_attributed_span() {
     let repo = TestRepo::new();
     repo.init_config();
-    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("plugins")
-        .join("github");
+    let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/text-stats");
     let digest = ahu::plugin_install::digest(&package).unwrap();
     let binding = ahu::plugin_binding::Binding {
         schema_version: 1,
-        id: "github".into(),
+        id: "text-stats".into(),
         version: "1.0.0".into(),
         source: ahu::plugin_binding::Source {
             repository: package.to_str().unwrap().into(),
@@ -190,12 +188,12 @@ fn plugin_invocation_exports_payload_free_release_attributed_span() {
         .unwrap()
         .render()
         .unwrap();
-    repo.write(".agents/ahu/plugins/github.md", &document);
+    repo.write(".agents/ahu/plugins/text-stats.md", &document);
     repo.commit("synthetic plugin binding");
 
     let install = common::ahu()
         .current_dir(repo.path())
-        .args(["plugins", "install", "github"])
+        .args(["plugins", "install", "text-stats"])
         .output()
         .unwrap();
     assert!(
@@ -206,15 +204,7 @@ fn plugin_invocation_exports_payload_free_release_attributed_span() {
     let input = repo.write(
         "plugin-input.json",
         &serde_json::json!({
-            "version": 1,
-            "action": "comment",
-            "operation_id": "synthetic-otel",
-            "issue": {"project": "fixture/project", "number": 7, "visibility": "private"},
-            "tracker_visibility": "private",
-            "scopes": ["issues:write"],
-            "expected_revision": 0,
-            "state": {"revision": 0, "applied": {}},
-            "body": "synthetic payload must not be exported"
+            "text": "synthetic payload must not be exported"
         })
         .to_string(),
     );
@@ -226,7 +216,7 @@ fn plugin_invocation_exports_payload_free_release_attributed_span() {
         .args([
             "plugins",
             "invoke",
-            "github",
+            "text-stats",
             "--input-file",
             input.file_name().unwrap().to_str().unwrap(),
         ])
@@ -239,6 +229,10 @@ fn plugin_invocation_exports_payload_free_release_attributed_span() {
     );
     let result: serde_json::Value = serde_json::from_slice(&invocation.stdout).unwrap();
     assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["result"],
+        serde_json::json!({"characters": 38, "words": 6})
+    );
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let (resource_attributes, span_attributes, trace_id, parent_span_id) = loop {
@@ -254,7 +248,7 @@ fn plugin_invocation_exports_payload_free_release_attributed_span() {
     );
     assert_eq!(
         string_attribute(&span_attributes, "ahu.plugin.id").as_deref(),
-        Some("github")
+        Some("text-stats")
     );
     assert_eq!(
         string_attribute(&span_attributes, "ahu.plugin.mode").as_deref(),

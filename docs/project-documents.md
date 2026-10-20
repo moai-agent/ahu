@@ -156,15 +156,12 @@ HTTPS or absolute local Git `repository`, full lowercase hexadecimal Git
 and `host_api: 1`. Numeric prerelease identifiers in either version pin cannot
 have leading zeros (`1.0.0-01` is invalid); build metadata such as `1.0.0+01` is allowed.
 `enabled` defaults to false; `grants` defaults to empty. The
-schema recognizes `interactive-backend`, `execute`, `github-cli`,
-`github-cli-write`, and `read-project-context` grants; unknown or duplicate grants
-are errors. Grant settings remain inert during inspection. `github-cli` opts an authorized generic
-invocation into the native GitHub authentication environment. `github-cli-write`
-permits the same environment forwarding and read-only inspection and additionally
-sets `AHU_GITHUB_WRITE=1` as explicit write intent. The marker is a trust signal to
-same-user package code, not OS/network enforcement or a narrowing of native
-token scopes. Neither grant adds a live write action; see the
-[executable contract](executable-plugins.md) before granting it.
+schema recognizes `interactive-backend`, `execute`, and `read-project-context`
+grants; unknown or duplicate grants are errors. Grant settings remain inert during
+inspection. `execute` authorizes the generic entrypoint when the enabled,
+committed binding and installed package pass verification; it does not forward
+credentials or the caller's environment. See the
+[executable contract](executable-plugins.md) for invocation boundaries.
 Optional `source.subdirectory` selects a plain relative package directory.
 `source.kind` defaults to `git`; `local` instead selects an absolute directory
 snapshot and requires `revision` to equal `sha256`. See the

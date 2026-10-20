@@ -16,70 +16,48 @@ use std::time::{Duration, Instant};
 use common::plugin::Fixture;
 
 #[test]
-fn github_environment_and_write_intent_require_explicit_binding_grants() {
-    let mut fixture = Fixture::new("github_env");
+fn executable_grants_do_not_forward_ambient_environment() {
+    let mut fixture = Fixture::new("environment");
     fixture.install();
     fs::write(fixture.root.join("input.json"), "null").unwrap();
-    for grants in [
+    for extra_grants in [
         vec![],
-        vec![Grant::GithubCli],
-        vec![Grant::GithubCliWrite],
-        vec![Grant::GithubCli, Grant::GithubCliWrite],
+        vec![Grant::ReadProjectContext],
+        vec![Grant::InteractiveBackend],
+        vec![Grant::ReadProjectContext, Grant::InteractiveBackend],
     ] {
-        let auth = !grants.is_empty();
-        let write = grants.contains(&Grant::GithubCliWrite);
         fixture.binding.grants = vec![Grant::Execute];
-        fixture.binding.grants.extend(grants);
+        fixture.binding.grants.extend(extra_grants);
         fixture.save(true);
-        for with_auth_environment in [false, true] {
-            let mut command = common::ahu();
-            command
-                .env_clear()
-                .env("TMPDIR", std::env::temp_dir())
-                .env("PATH", "/usr/bin:/bin")
-                // Ambient capability markers must never bypass binding policy.
-                .env("AHU_GITHUB_CLI", "ambient")
-                .env("AHU_GITHUB_WRITE", "ambient")
-                .env("AHU_GITHUB_PATH", "/untrusted/ambient/path")
-                .env("UNRELATED_SECRET", "synthetic-secret")
-                .env("GH_HOST", "example.invalid")
-                .current_dir(&fixture.root)
-                .args(["plugins", "invoke", "fixture", "--input-file", "input.json"]);
-            let mut expected = json!({"PATH": "/usr/bin:/bin"});
-            if auth {
-                expected["AHU_GITHUB_CLI"] = json!("1");
-                expected["AHU_GITHUB_PATH"] = json!("/usr/bin:/bin");
-            }
-            if write {
-                expected["AHU_GITHUB_WRITE"] = json!("1");
-            }
-            if with_auth_environment {
-                for (key, value) in [
-                    ("HOME", "/synthetic/home"),
-                    ("XDG_CONFIG_HOME", "/synthetic/config"),
-                    ("GH_CONFIG_DIR", "/synthetic/gh"),
-                    ("GH_TOKEN", "synthetic-token"),
-                    ("GITHUB_TOKEN", "synthetic-fallback"),
-                ] {
-                    command.env(key, value);
-                    if auth {
-                        expected[key] = json!(value);
-                    }
-                }
-            }
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(output.stderr.is_empty());
-            assert_eq!(
-                serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"],
-                expected
-            );
-            fixture.stopped();
-        }
+        let output = common::ahu()
+            .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
+            .env("PATH", "/usr/bin:/bin:/synthetic/bin")
+            .env("HOME", "/synthetic/home")
+            .env("XDG_CONFIG_HOME", "/synthetic/config")
+            .env("UNRELATED_SECRET", "synthetic-secret")
+            // Provider markers, credentials, and paths have no special treatment.
+            .env("AHU_PROVIDER_READ", "1")
+            .env("AHU_PROVIDER_WRITE", "1")
+            .env("AHU_PROVIDER_PATH", "/synthetic/bin")
+            .env("PROVIDER_CONFIG_DIR", "/synthetic/config/provider")
+            .env("PROVIDER_TOKEN", "synthetic-token")
+            .env("PROVIDER_HOST", "example.invalid")
+            .current_dir(&fixture.root)
+            .args(["plugins", "invoke", "fixture", "--input-file", "input.json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"],
+            json!({"PATH": "/usr/bin:/bin"})
+        );
+        fixture.stopped();
     }
 }
 
@@ -118,7 +96,7 @@ fn installed_entrypoint_is_inert_until_host_authorized_invocation() {
 #[test]
 fn disabled_missing_grant_uncommitted_policy_and_tampering_never_start() {
     let mut fixture = Fixture::new("normal");
-    fixture.binding.grants.push(Grant::GithubCliWrite);
+    fixture.binding.grants.push(Grant::ReadProjectContext);
     fixture.save(true);
     fixture.install();
     fixture.binding.enabled = false;
@@ -143,7 +121,7 @@ fn disabled_missing_grant_uncommitted_policy_and_tampering_never_start() {
             .code,
         Code::Denied
     );
-    fixture.binding.grants = vec![Grant::InteractiveBackend, Grant::GithubCliWrite];
+    fixture.binding.grants = vec![Grant::InteractiveBackend, Grant::ReadProjectContext];
     fixture.save(true);
     assert_eq!(
         fixture
@@ -152,7 +130,7 @@ fn disabled_missing_grant_uncommitted_policy_and_tampering_never_start() {
             .code,
         Code::Denied
     );
-    fixture.binding.grants = vec![Grant::Execute, Grant::GithubCliWrite];
+    fixture.binding.grants = vec![Grant::Execute, Grant::ReadProjectContext];
     fixture.save(true);
     assert_eq!(
         fixture
@@ -571,7 +549,7 @@ fn task_observation_provider_data_is_forwarded_without_expanding_task_grants() {
 }
 
 #[test]
-fn non_github_plugin_fixture_consumes_the_provider_neutral_task_contract() {
+fn executable_plugin_fixture_consumes_the_provider_neutral_task_contract() {
     let fixture = Fixture::new("normal");
     fixture.install();
     let repo = ahu::git::discover(&fixture.root).unwrap();
@@ -591,8 +569,8 @@ fn non_github_plugin_fixture_consumes_the_provider_neutral_task_contract() {
     .unwrap();
 
     // The fixture is an ordinary discovered executable package. It consumes
-    // the same provider-neutral envelope and synthetic provider data; no
-    // GitHub-specific branch or core change is needed to invoke it.
+    // the provider-neutral envelope and synthetic provider data without
+    // requiring provider-specific host behavior.
     let forwarded = fixture
         .invoke(
             &serde_json::to_vec(&observed["input"]).unwrap(),

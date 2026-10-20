@@ -235,33 +235,6 @@ pub fn invoke(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    // Only an authorized, installed invocation can receive this opt-in environment.
-    // Keep the interpreter PATH fixed; the package resolves gh separately. The host
-    // does not inspect credential contents or call the provider, but it forwards the
-    // explicitly granted auth environment so gh can use the user's existing login.
-    let github_write = binding.grants.contains(&Grant::GithubCliWrite);
-    if binding.grants.contains(&Grant::GithubCli) || github_write {
-        command.env("AHU_GITHUB_CLI", "1");
-        // Explicit package trust/intent only: same-user code retains the native
-        // token scopes, and this marker does not enforce OS or network policy.
-        if github_write {
-            command.env("AHU_GITHUB_WRITE", "1");
-        }
-        if let Some(path) = std::env::var_os("PATH") {
-            command.env("AHU_GITHUB_PATH", path);
-        }
-        for key in [
-            "HOME",
-            "XDG_CONFIG_HOME",
-            "GH_CONFIG_DIR",
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-        ] {
-            if let Some(value) = std::env::var_os(key) {
-                command.env(key, value);
-            }
-        }
-    }
     let child = command
         .spawn()
         .map_err(|_| Failure::before(Code::Unavailable))?;

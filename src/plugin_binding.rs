@@ -72,10 +72,6 @@ pub struct Compatibility {
 pub enum Grant {
     InteractiveBackend,
     Execute,
-    /// Opt in to the user's GitHub CLI lookup and native authentication environment.
-    GithubCli,
-    /// Also signal explicit write intent to the package; does not narrow token scopes.
-    GithubCliWrite,
     ReadProjectContext,
 }
 
@@ -207,12 +203,17 @@ mod tests {
             .unwrap()
     }
     #[test]
-    fn github_grants_roundtrip_and_reject_duplicates_and_unknown_variants() {
+    fn grants_roundtrip_and_reject_duplicates_and_unknown_variants() {
         for grants in [
             vec![],
-            vec![Grant::GithubCli],
-            vec![Grant::GithubCliWrite],
-            vec![Grant::GithubCli, Grant::GithubCliWrite],
+            vec![Grant::Execute],
+            vec![Grant::InteractiveBackend],
+            vec![Grant::ReadProjectContext],
+            vec![
+                Grant::Execute,
+                Grant::InteractiveBackend,
+                Grant::ReadProjectContext,
+            ],
         ] {
             let mut binding = binding();
             binding.grants = grants;
@@ -227,15 +228,19 @@ mod tests {
                         .grants
                         .iter()
                         .map(|grant| match grant {
-                            Grant::GithubCli => "github-cli".into(),
-                            Grant::GithubCliWrite => "github-cli-write".into(),
-                            _ => unreachable!(),
+                            Grant::Execute => "execute".into(),
+                            Grant::InteractiveBackend => "interactive-backend".into(),
+                            Grant::ReadProjectContext => "read-project-context".into(),
                         })
                         .collect()
                 )
             );
         }
-        for grant in [Grant::GithubCli, Grant::GithubCliWrite] {
+        for grant in [
+            Grant::Execute,
+            Grant::InteractiveBackend,
+            Grant::ReadProjectContext,
+        ] {
             let mut binding = binding();
             binding.grants = vec![grant.clone(), grant];
             assert!(
@@ -245,11 +250,21 @@ mod tests {
                     .contains("duplicate plugin capability grant")
             );
         }
-        for unknown in ["github-write", "github-cli-writes", "GithubCliWrite"] {
+        for unknown in ["all", "executes", "Execute"] {
             let mut document =
                 crate::okf::Document::new("ahu:plugin-binding", &binding(), "").unwrap();
             document.fields.get_mut("ahu").unwrap()["grants"] =
-                serde_json::json!(["github-cli-write", unknown]);
+                serde_json::json!(["execute", unknown]);
+            assert!(parse(&document.render().unwrap(), "fixture").is_err());
+        }
+    }
+    #[test]
+    fn provider_specific_grants_are_rejected() {
+        for grant in ["vendor-cli", "vendor-cli-write"] {
+            let mut document =
+                crate::okf::Document::new("ahu:plugin-binding", &binding(), "").unwrap();
+            document.fields.get_mut("ahu").unwrap()["grants"] =
+                serde_json::json!(["execute", grant]);
             assert!(parse(&document.render().unwrap(), "fixture").is_err());
         }
     }
