@@ -2294,9 +2294,10 @@ reachability and group capabilities separately from native cmux reachability.
 An external host's success does not establish that native cmux is available;
 native cmux absence is a warning when the selected external host is ready.
 
-The supplied `cmux-local` package remains source-only: no executable cmux server
-or reviewed native environment contract is provided. Synthetic protocol fixtures
-exercise the lifecycle without starting real terminal sessions. Plugins run as
+The supplied `cmux-local` manifest remains source-only. The package now builds
+the `ahu-cmux-host` executable server; see its [build and staging instructions](../plugins/cmux/README.md).
+Live native socket discovery under core's cleared environment remains unverified.
+Synthetic protocol fixtures exercise the lifecycle without starting real terminal sessions. Plugins run as
 same-user executable code, without a manifest sandbox; ownership checks do not
 isolate hostile plugins or concurrent same-user mutation. Non-cmux topologies and
 dynamic compatibility negotiation remain unsupported.

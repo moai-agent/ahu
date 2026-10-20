@@ -205,15 +205,19 @@ is not a replacement terminal host. Tests cover creation, metadata, inventory,
 selection/close, protocol mismatch, malformed/partial frames, blocked pipe writes,
 indeterminate startup, deadlines, cancellation, cleanup, and executable paths.
 
-The compiled cmux adapter's local source manifest lacks an executable entry, and
-its Rust API is not an executable server. A separately maintained cmux companion
-package implements the Host V1 executable contract; it is not included in this
-source checkout or bundled with core. Its existence does not establish release
-status or activate it for a project. Project activation requires the enabled,
-committed binding, grants, and compatibility checks described in this guide.
+`plugins/cmux` now builds `ahu-cmux-host`, a standalone Host V1 server over the
+existing cmux implementation. Its hello identifies `cmux-local` and declares all
+V1 method capabilities after checking native prerequisites. The checked-in
+manifest remains source-only; the binary is not bundled with core or activated
+by building it. See the [cmux package instructions](../plugins/cmux/README.md)
+for standalone invocation, executable staging, and native CLI lookup. Project
+activation still requires the enabled committed binding, grants, and compatibility
+checks described in this guide. Default host selection and compiled cmux remain
+unchanged.
 
-Executable task lifecycle is covered here with synthetic peers. The companion
-package has not undergone live lifecycle verification here, including cmux's
-socket and environment requirements under the executable process contract.
-Package existence and project activation do not establish successful live
-lifecycle behavior or live compatibility.
+Package tests exercise the server and every V1 method with a fake native CLI,
+including creation outcome preservation and strict framed input/output. Core
+lifecycle tests use synthetic Host V1 peers. End-to-end activation of the cmux
+binary through core and live cmux lifecycle verification remain integration gaps,
+including default socket discovery under core's cleared environment. Package
+existence and project activation do not establish live compatibility.

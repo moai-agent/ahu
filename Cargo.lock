@@ -30,6 +30,7 @@ name = "ahu-cmux-plugin"
 version = "0.1.0"
 dependencies = [
  "ahu-host-api",
+ "serde",
  "serde_json",
  "tempfile",
 ]

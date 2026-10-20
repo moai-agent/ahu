@@ -3,12 +3,17 @@ name = "ahu-cmux-plugin"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Optional compiled cmux session plugin for ahu"
+description = "Compiled and executable cmux Host V1 plugin for ahu"
 repository = "https://github.com/moai-agent/ahu"
 publish = false
 
+[[bin]]
+name = "ahu-cmux-host"
+path = "src/main.rs"
+
 [dependencies]
 ahu-host-api = { version = "0.1.0", path = "../../crates/ahu-host-api" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
