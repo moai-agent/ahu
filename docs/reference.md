@@ -453,6 +453,34 @@ required; version-specific isolation controls and native-helper policies remain
 separate checks. Unknown native integrations can still prevent launch or resume.
 No failure selects a fallback harness or model.
 
+For assigned work that should not wait on Ahu's native-configuration compatibility
+checks, pass `--work-mode`. This implies headless execution, requests the
+harness's automatic/no-ask permission mode, and records known compatibility
+differences and unverified native state in the task result instead of refusing
+the launch. Ahu still requires a known headless adapter, an executable and
+readable CLI version, a valid task/worktree, and its normal completion evidence.
+The selected harness may still block on its own authentication, hooks, plugins,
+or provider behavior; work mode records that boundary and does not claim to
+sandbox the harness. See [work mode](#work-mode) for the recorded controls.
+
+### Work mode
+
+`ahu @agent --work-mode --prompt "..."` is the assigned-work path for a
+configured headless agent that should proceed in automatic/no-ask mode. The
+option implies `--headless`; it does not require the separate
+`--allow-widened-approvals` flag. Ahu requests the harness-specific automatic
+permission setting and does not apply Ahu's native helper-disabling or
+configuration-isolation profiles. It records these control differences, the
+unverified native configuration and authentication identity, and the fact that
+the Git worktree is not an OS sandbox.
+
+Work mode does not promise that native harness behavior exactly matches Ahu's
+permission model. The harness can still ask, deny, or fail because of native
+settings, sign-in, plugins, hooks, or provider limits. Ahu does not silently
+switch harnesses or models. It continues to enforce task identity, worktree
+integrity, explicit child-task grants, and authoritative completion checks. Use
+`--dry-run` first to inspect the requested harness command and recorded gaps.
+
 Interactive compatibility is tracked separately: ahu inspects the installed
 OpenCode CLI and uses `opencode mini` on 2.0.32 to keep the session persistent
 with the exact model and prompt. That version is not included among the

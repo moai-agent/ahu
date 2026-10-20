@@ -119,9 +119,13 @@ The first command waits in the foreground; the second returns after supervisor
 startup. Each launches a separate task. Headless coordination lives in the primary checkout’s private state; native
 histories stay in the harness’s own stores. See [headless execution](docs/reference.md#headless-execution) for
 supported CLI versions, result collection, resume, cancellation, and limits.
-Headless mode covers Claude Code, Codex, Antigravity, OpenCode, and Kiro CLI
-V3 (the verified Kiro 2.28.0/2.29.0 profiles); an agent on an unsupported
-harness/version is refused rather than run on another harness.
+Headless mode covers Claude Code, Codex, Antigravity, OpenCode, and Kiro CLI.
+An agent on a harness without a headless adapter is refused rather than run on
+another harness. `--work-mode` requests each harness's automatic/no-ask mode and
+continues when Ahu cannot verify native configuration compatibility, recording
+those differences in the task result. It does not make a Git worktree a sandbox
+or guarantee that harness-native hooks, plugins, or authentication will not
+block execution.
 Headless child launches need host grants (`--allow-child` or
 `--allow-child-widened`). Claude Code 2.1.270 also supports bounded native helpers
 for entirely read-only assignments; use a separate registered reviewer for that

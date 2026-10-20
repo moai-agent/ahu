@@ -25,12 +25,18 @@ pub fn freeze_grants(
     repo: &crate::git::Repo,
     ordinary: &[String],
     widened: &[String],
+    work_mode: bool,
 ) -> Result<Vec<ChildGrant>> {
     crate::config::load(&repo.root)?.ok_or_else(|| Error::new("configuration required"))?;
     let mut grants = Vec::new();
     for name in ordinary.iter().chain(widened) {
         let agent = crate::agent::find(&repo.root, name)?;
-        if agent.manifest.permissions.widens_defaults() && !widened.contains(name) {
+        let permissions = if work_mode {
+            crate::agent::Permissions::Auto
+        } else {
+            agent.manifest.permissions
+        };
+        if permissions.widens_defaults() && !widened.contains(name) {
             bail!(
                 "child @{name} requires explicit --allow-child-widened @{name} at host submission"
             );
@@ -48,7 +54,7 @@ pub fn freeze_grants(
             contract: agent.contract.clone(),
             agent: name.clone(),
             identity_digest: agent.identity_digest(),
-            permissions: agent.manifest.permissions,
+            permissions,
             hooks_digest: hooks.digest(),
             native_helpers: policy.into(),
         });
@@ -70,6 +76,8 @@ struct Request {
     summary: Option<String>,
     name: Option<String>,
     timeout_seconds: u64,
+    #[serde(default)]
+    work_mode: bool,
     native_helpers: Option<String>,
     allow_widened_approvals: bool,
 }
@@ -178,6 +186,7 @@ impl Broker {
             if request.schema_version != 1
                 || request.capability != self.token
                 || request.parent_task != self.owner.task_id
+                || request.work_mode != self.spec.options.work_mode
             {
                 headless::durable_json(&claim, &json!({"state":"refused"}))?;
                 headless::durable_json(
@@ -252,6 +261,9 @@ impl Broker {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if request.work_mode {
+                command.arg("--work-mode");
+            }
             if let Some(input) = &request.structured_input {
                 let artifact = self.private_dir.join(format!("{stem}.input.json"));
                 crate::state::write_private_file(&artifact, input.as_bytes())?;
@@ -342,6 +354,9 @@ pub fn request(
             "legacy dispatch is unsupported by this binary; use the original runner and its owning supervisor"
         );
     }
+    if options.work_mode && !spec.options.work_mode {
+        bail!("work mode must be selected by the host and cannot expand a frozen child grant");
+    }
     let record = task::load(&dir)?;
     if record.worktree.canonicalize()? != repo.root.canonicalize()? {
         bail!("broker request must originate in its owning worktree");
@@ -372,6 +387,7 @@ pub fn request(
         summary: display.summary.clone(),
         name: display.name.clone(),
         timeout_seconds: options.timeout_seconds,
+        work_mode: spec.options.work_mode,
         native_helpers: options
             .native_helpers_explicit
             .then(|| options.native_helpers.clone()),
@@ -679,6 +695,7 @@ mod tests {
             summary: None,
             name: None,
             timeout_seconds: 60,
+            work_mode: false,
             native_helpers: None,
             allow_widened_approvals: false,
         }
@@ -794,12 +811,12 @@ mod tests {
         );
         std::fs::write(&path, text).unwrap();
 
-        let first = freeze_grants(&repo, &["reviewer".into()], &[]).unwrap();
+        let first = freeze_grants(&repo, &["reviewer".into()], &[], false).unwrap();
         let text = std::fs::read_to_string(&path)
             .unwrap()
             .replace("  type: string", "  type: boolean");
         std::fs::write(&path, text).unwrap();
-        let second = freeze_grants(&repo, &["reviewer".into()], &[]).unwrap();
+        let second = freeze_grants(&repo, &["reviewer".into()], &[], false).unwrap();
         assert_eq!(first[0].contract.input, Some(json!({"type":"string"})));
         assert_ne!(first[0].identity_digest, second[0].identity_digest);
     }
@@ -809,7 +826,7 @@ mod tests {
         let (_dir, repo) = repo();
         write_config(&repo.root);
         write_agent(&repo.root, "reviewer", "prompt", None);
-        let grants = freeze_grants(&repo, &["reviewer".into()], &[]).unwrap();
+        let grants = freeze_grants(&repo, &["reviewer".into()], &[], false).unwrap();
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].agent, "reviewer");
         assert_eq!(grants[0].permissions, crate::agent::Permissions::Prompt);
@@ -827,15 +844,15 @@ mod tests {
         let (_dir, repo) = repo();
         write_config(&repo.root);
         write_agent(&repo.root, "writer", "auto", None);
-        let error = freeze_grants(&repo, &["writer".into()], &[])
+        let error = freeze_grants(&repo, &["writer".into()], &[], false)
             .expect_err("an unnamed widening child is refused")
             .to_string();
         assert!(error.contains("--allow-child-widened @writer"), "{error}");
-        let grants = freeze_grants(&repo, &[], &["writer".into()]).unwrap();
+        let grants = freeze_grants(&repo, &[], &["writer".into()], false).unwrap();
         assert_eq!(grants[0].permissions, crate::agent::Permissions::Auto);
         // Ordinary and widened children are frozen together, in that order.
         write_agent(&repo.root, "reviewer", "prompt", None);
-        let grants = freeze_grants(&repo, &["reviewer".into()], &["writer".into()]).unwrap();
+        let grants = freeze_grants(&repo, &["reviewer".into()], &["writer".into()], false).unwrap();
         assert_eq!(
             grants.iter().map(|g| g.agent.as_str()).collect::<Vec<_>>(),
             ["reviewer", "writer"]
@@ -843,11 +860,24 @@ mod tests {
     }
 
     #[test]
+    fn work_mode_requires_explicit_widened_child_grants() {
+        let (_dir, repo) = repo();
+        write_config(&repo.root);
+        write_agent(&repo.root, "reviewer", "prompt", None);
+        let error = freeze_grants(&repo, &["reviewer".into()], &[], true)
+            .expect_err("work mode must not auto-widen an ordinary child grant")
+            .to_string();
+        assert!(error.contains("--allow-child-widened @reviewer"), "{error}");
+        let grants = freeze_grants(&repo, &[], &["reviewer".into()], true).unwrap();
+        assert_eq!(grants[0].permissions, crate::agent::Permissions::Auto);
+    }
+
+    #[test]
     fn a_manifest_helper_policy_is_frozen_into_the_grant() {
         let (_dir, repo) = repo();
         write_config(&repo.root);
         write_agent(&repo.root, "reviewer", "prompt", Some("bounded"));
-        let grants = freeze_grants(&repo, &["reviewer".into()], &[]).unwrap();
+        let grants = freeze_grants(&repo, &["reviewer".into()], &[], false).unwrap();
         assert_eq!(grants[0].native_helpers, "bounded");
     }
 
@@ -855,12 +885,12 @@ mod tests {
     fn freezing_requires_project_configuration_and_a_registered_agent() {
         let (_dir, repo) = repo();
         write_agent(&repo.root, "reviewer", "prompt", None);
-        let error = freeze_grants(&repo, &["reviewer".into()], &[])
+        let error = freeze_grants(&repo, &["reviewer".into()], &[], false)
             .expect_err("a project without configuration cannot grant children")
             .to_string();
         assert!(error.contains("configuration required"), "{error}");
         write_config(&repo.root);
-        let error = freeze_grants(&repo, &["ghost".into()], &[])
+        let error = freeze_grants(&repo, &["ghost".into()], &[], false)
             .expect_err("an unregistered child is refused")
             .to_string();
         assert!(error.contains("no agent named \"ghost\""), "{error}");
@@ -1306,6 +1336,7 @@ mod tests {
             summary: None,
             name: None,
             timeout_seconds: 60,
+            work_mode: false,
             native_helpers: None,
             allow_widened_approvals: false,
         };

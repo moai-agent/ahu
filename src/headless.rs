@@ -9,6 +9,7 @@ mod journal;
 mod kiro;
 pub(crate) mod review;
 mod skills;
+pub(crate) mod work_mode;
 
 use crate::harness::{LaunchCommand, LaunchRequest};
 use crate::util::{Error, Result, digest_bytes};
@@ -43,6 +44,8 @@ pub(crate) fn interactive_task_owner(dir: &Path) -> Result<InteractiveTaskOwner>
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Options {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub work_mode: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_file: Option<PathBuf>,
     pub background: bool,
@@ -58,6 +61,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            work_mode: false,
             input_file: None,
             background: false,
             timeout_seconds: 1800,
@@ -177,15 +181,23 @@ pub fn batch_command(
     spec: &Spec,
 ) -> Result<LaunchCommand> {
     use crate::agent::Permissions;
+    if spec.options.work_mode && request.permissions != Permissions::Auto {
+        bail!("work mode requires frozen permissions=auto");
+    }
     if request.model.is_empty() || request.model.starts_with('-') {
         bail!("an exact model is required");
     }
-    if spec.options.native_helpers != "disabled" && spec.native_profile.is_none() {
+    if !spec.options.work_mode
+        && spec.options.native_helpers != "disabled"
+        && spec.native_profile.is_none()
+    {
         bail!(
             "bounded native helpers are unavailable: headless join, model/tool limits, and provider-owned cancellation have not been validated for this harness version. Use disabled or validate the adapter; ahu will not substitute a helper backend."
         );
     }
-    let native_profile = if let Some(frozen) = &spec.native_profile {
+    let native_profile = if spec.options.work_mode {
+        None
+    } else if let Some(frozen) = &spec.native_profile {
         let rebuilt = build_native_profile(harness, request.model, spec)?;
         if &rebuilt != frozen {
             bail!("native policy differs from the frozen profile");
@@ -194,7 +206,7 @@ pub fn batch_command(
     } else {
         None
     };
-    let isolation = crate::harness::isolation::profile(harness, &spec.harness_version);
+    let isolation = isolation_profile(harness, spec);
     if let Some(profile) = isolation
         && !spec.native_controls.iter().any(|id| id == profile.id)
     {
@@ -208,15 +220,11 @@ pub fn batch_command(
             if spec.session.is_some() {
                 add(&["resume"]);
             }
-            add(&[
-                "--model",
-                request.model,
-                "--json",
-                "-c",
-                "agents.enabled=false",
-                "-c",
-                "approval_policy=\"never\"",
-            ]);
+            add(&["--model", request.model, "--json"]);
+            if !spec.options.work_mode {
+                add(&["-c", "agents.enabled=false"]);
+            }
+            add(&["-c", "approval_policy=\"never\""]);
             match request.permissions {
                 Permissions::Prompt => add(&["-c", "sandbox_mode=\"read-only\""]),
                 Permissions::Auto => {
@@ -267,7 +275,7 @@ pub fn batch_command(
             }
             if let Some(profile) = &native_profile {
                 add(&profile.args.iter().map(String::as_str).collect::<Vec<_>>());
-            } else {
+            } else if !spec.options.work_mode {
                 add(&["--disallowedTools", "Agent,Task,TeamCreate,TeamDelete"]);
             }
             match request.permissions {
@@ -398,6 +406,14 @@ pub fn batch_command(
     })
 }
 
+fn isolation_profile(harness: &str, spec: &Spec) -> Option<crate::harness::isolation::Profile> {
+    if spec.options.work_mode {
+        None
+    } else {
+        crate::harness::isolation::profile(harness, &spec.harness_version)
+    }
+}
+
 fn build_native_profile(harness: &str, model: &str, spec: &Spec) -> Result<crate::native::Profile> {
     let version = spec
         .harness_version
@@ -426,7 +442,15 @@ fn refresh_resume_profile(
     model: &str,
     version: &str,
 ) -> Result<()> {
-    if let Some(previous) = crate::harness::isolation::profile(harness, &spec.harness_version)
+    if spec.options.work_mode {
+        let mut next = spec.clone();
+        next.harness_version = version.into();
+        next.native_controls.clear();
+        next.native_profile = None;
+        *spec = next;
+        return Ok(());
+    }
+    if let Some(previous) = isolation_profile(harness, spec)
         && !spec.native_controls.iter().any(|id| id == previous.id)
     {
         bail!(
@@ -446,7 +470,7 @@ fn refresh_resume_profile(
         );
     }
     next.native_controls = profile.control_ids();
-    if let Some(isolation) = crate::harness::isolation::profile(harness, version) {
+    if let Some(isolation) = isolation_profile(harness, &next) {
         next.native_controls.push(isolation.id.into());
     }
     next.native_profile = Some(profile);
@@ -954,6 +978,7 @@ pub fn launch(
     }
 
     if contract.output.is_some()
+        && !options.work_mode
         && pair.harness == "codex"
         && agent
             .as_ref()
@@ -963,13 +988,17 @@ pub fn launch(
             "structured output is unavailable with Codex read-only permissions; choose a registered agent already authorized to write results"
         );
     }
-    if contract.output.is_some() && options.native_helpers == "bounded" {
+    if contract.output.is_some() && options.native_helpers == "bounded" && !options.work_mode {
         bail!("structured output requires write tools; bounded native helpers are read-only");
     }
-    let permissions = agent
-        .as_ref()
-        .map(|a| a.manifest.permissions)
-        .unwrap_or_default();
+    let permissions = if options.work_mode {
+        crate::agent::Permissions::Auto
+    } else {
+        agent
+            .as_ref()
+            .map(|a| a.manifest.permissions)
+            .unwrap_or_default()
+    };
     // The committed agent manifest is the explicit, reviewable permission
     // choice for unattended worktree launches. Do not require an extra human
     // approval flag before the harness can start.
@@ -992,7 +1021,11 @@ pub fn launch(
         .ok_or_else(|| Error::new("harness executable unavailable"))?;
     validate_executable(Path::new(&candidate), repo)?;
     confined(&store(repo)?, false)?;
-    let mut plan = crate::launch::plan(repo, agent, pair, prompt)?;
+    let mut plan = if options.work_mode {
+        crate::launch::plan_work_mode(repo, agent, pair, prompt)?
+    } else {
+        crate::launch::plan(repo, agent, pair, prompt)?
+    };
     plan.apply_display(display)?;
     // cmux integration environment is removed before supervisor and worker execution.
     plan.hooks.wrapper_injected = false;
@@ -1001,6 +1034,7 @@ pub fn launch(
         .enforcement
         .harness_version
         .clone()
+        .or_else(|| options.work_mode.then(|| "unknown".into()))
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
     crate::catalog::check_headless_version(&plan.pair.harness, &version)?;
     let parent_task = std::env::var("AHU_PARENT_TASK").ok();
@@ -1009,9 +1043,12 @@ pub fn launch(
     let depth = if let Some(parent) = &parent_task {
         let parent_dir = lookup(repo, parent)?;
         let parent_spec: Spec = read_json(&parent_dir.join("headless.json"))?;
+        if options.work_mode && !parent_spec.options.work_mode {
+            bail!("work mode cannot expand a frozen parent task grant");
+        }
         frozen_parent_spec = Some(parent_spec.clone());
         let parent_record = task::load(&parent_dir)?;
-        validate_frozen_configuration(&parent_record)?;
+        validate_frozen_configuration(&parent_record, parent_spec.options.work_mode)?;
         parent_release = Some(parent_record.identity.release_id.clone());
         if parent_record.worktree.canonicalize()? != repo.root.canonicalize()? {
             bail!("child must launch from its owning task worktree");
@@ -1040,7 +1077,12 @@ pub fn launch(
         validate_child_grants_within_parent(&grants, &frozen.child_grants)?;
         grants
     } else {
-        crate::broker::freeze_grants(repo, &options.child_agents, &options.child_widened)?
+        crate::broker::freeze_grants(
+            repo,
+            &options.child_agents,
+            &options.child_widened,
+            options.work_mode,
+        )?
     };
     if let Ok(expected) = std::env::var("AHU_EXPECTED_CHILD_IDENTITY")
         && plan.agent.as_ref().map(|a| a.identity_digest()).as_deref() != Some(expected.as_str())
@@ -1093,10 +1135,22 @@ pub fn launch(
         "Broker scans at most 32 entries per tick, retains at most 256 consumed requests per attempt, and stops admission above 4096 entries per scan. Cleanup removes at most 4097 inbox entries per call while retaining private claims/responses; arbitrary worker filesystem writes require external disk quotas.".into(),
         "Child resume and worker-originated resume are unsupported: submit a new registered assignment through the broker or a new root from the host with explicit grants.".into(),
     ]);
-    let profile = build_native_profile(&plan.pair.harness, &plan.pair.model, &spec)?;
-    spec.native_controls = profile.control_ids();
-    let trust_opencode_native_state =
-        loaded.config.headless.trust_opencode_native_state && plan.pair.harness == "opencode";
+    let profile = if spec.options.work_mode {
+        None
+    } else {
+        Some(build_native_profile(
+            &plan.pair.harness,
+            &plan.pair.model,
+            &spec,
+        )?)
+    };
+    spec.native_controls = profile
+        .as_ref()
+        .map(crate::native::Profile::control_ids)
+        .unwrap_or_default();
+    let trust_opencode_native_state = !spec.options.work_mode
+        && loaded.config.headless.trust_opencode_native_state
+        && plan.pair.harness == "opencode";
     if trust_opencode_native_state {
         spec.native_controls
             .push("opencode.native-account-state=project-trusted".into());
@@ -1104,21 +1158,23 @@ pub fn launch(
             "Project policy trusts OpenCode native account/authentication state for this headless task. It may select authenticated remote configuration and executable plugins; ahu does not inspect, disable, or constrain that state. Credentials and database contents remain unread.".into(),
         );
     }
-    if let Some(isolation) =
-        crate::harness::isolation::profile(&plan.pair.harness, &spec.harness_version)
-    {
+    if let Some(isolation) = isolation_profile(&plan.pair.harness, &spec) {
         spec.native_controls.push(isolation.id.into());
     }
-    spec.gaps.extend(profile.gaps.clone());
-    spec.gaps.push("Native integration evidence is bounded; unsupported configuration and hooks are refused. ahu itself never invokes cmux in this backend; arbitrary shell commands remain outside integration inspection. Same-UID code is not isolated from supervisor state.".into());
+    if let Some(profile) = &profile {
+        spec.gaps.extend(profile.gaps.clone());
+    }
+    if !spec.options.work_mode {
+        spec.gaps.push("Native integration evidence is bounded; unsupported configuration and hooks are refused. ahu itself never invokes cmux in this backend; arbitrary shell commands remain outside integration inspection. Same-UID code is not isolated from supervisor state.".into());
+    }
     if !spec.child_grants.is_empty() {
         spec.gaps.push("Broker grants approve only frozen registered identities and profiles. Codex workspace-write receives the task's requests directory as a narrow additional write root; read-only Codex transport is refused. Limits: 128 tasks per root grant, depth 8, 16 active/interrupted tasks per repository, no hidden queue or global token cap.".into());
     }
 
-    if spec.options.native_helpers == "bounded" {
+    if spec.options.native_helpers == "bounded" && !spec.options.work_mode {
         spec.gaps.push("The ENTIRE assignment has a read-only MODEL TOOL ceiling: parent and helpers have no model tools for editing, building, shell commands or shell-launching registered children. Settings-defined hooks are outside that tool ceiling and their side effects are not proven read-only. MCP tools and slash commands are disabled; repository settings remain discoverable. Roles are requested/observed, not an allowlist; total helper count is not capped. Budget is 5 USD per attempt, concurrency 1, depth 1, helper model equals manifest model.".into());
     }
-    spec.native_profile = Some(profile);
+    spec.native_profile = profile;
     let cmux_integration = validate_environment(
         repo,
         &repo.root,
@@ -1126,22 +1182,34 @@ pub fn launch(
         &spec.harness_version,
         &plan.harness_executable,
         trust_opencode_native_state,
+        spec.options.work_mode,
     )?;
-    crate::selection::check_launch_compatibility_with_policy(
-        &plan.harness_executable,
-        &plan.pair.harness,
-        &plan.pair.model,
-        permissions,
-        &repo.root,
-        Some(&cmux_integration.headless),
-    )?;
+    if !spec.options.work_mode {
+        crate::selection::check_launch_compatibility_with_policy(
+            &plan.harness_executable,
+            &plan.pair.harness,
+            &plan.pair.model,
+            permissions,
+            &repo.root,
+            Some(&cmux_integration.headless),
+        )?;
+    }
     plan.cmux_integration = cmux_integration.clone();
-    spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", cmux_integration.headless.evidence_digest));
+    if spec.options.work_mode {
+        spec.gaps.extend(cmux_integration.gaps.clone());
+        plan.enforcement.gaps.extend(cmux_integration.gaps.clone());
+    } else {
+        spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", cmux_integration.headless.evidence_digest));
+    }
     let (delivered, delivery) = crate::orchestration::deliver_composed(
         plan.agent.as_ref().map(|a| a.instructions.as_str()),
         prompt,
         crate::orchestration::Composition {
-            mode: crate::orchestration::Mode::headless(&spec.options.native_helpers)?,
+            mode: if spec.options.work_mode {
+                crate::orchestration::Mode::headless_work()
+            } else {
+                crate::orchestration::Mode::headless(&spec.options.native_helpers)?
+            },
             metadata: Some(crate::orchestration::Metadata {
                 task_id: plan.task_id.clone(),
                 agent: plan.agent_label(),
@@ -1174,11 +1242,16 @@ pub fn launch(
         "release_id":parent_release.as_ref().unwrap_or(&plan.release_id),
         "task_handle_candidate":format!("@{}",plan.task_name.clone().unwrap_or_else(||crate::task_handles::generated_name(&plan.title))), "task_handle_reserved":false,
         "branch":plan.branch,"command":plan.command.redacted(),"executable":plan.harness_executable,"capabilities":spec,
-        "runtime":plan.task_dir,"identity": {"agent":plan.agent_label(),"harness":plan.pair.harness,"model":plan.pair.model},
+        "runtime":plan.task_dir,"identity": {"agent":plan.agent_label(),"harness":plan.pair.harness,"model":plan.pair.model,"permissions":permissions},
         "acceptance":"not assessed", "cmux_integration":cmux_integration});
     if dry_run {
         emit(&preview, json_output)?;
         return Ok(0);
+    }
+    if spec.options.work_mode {
+        for gap in &cmux_integration.gaps {
+            console.say(&format!("{gap}\n"))?;
+        }
     }
     console.say(&format!(
         "Headless {} on {} / {}; output {}\n",
@@ -1277,11 +1350,18 @@ pub fn launch(
     }
 }
 
-pub(crate) fn validate_frozen_configuration(record: &task::TaskRecord) -> Result<()> {
+pub(crate) fn validate_frozen_configuration(
+    record: &task::TaskRecord,
+    work_mode: bool,
+) -> Result<()> {
     let loaded = crate::config::load(&record.worktree)?
         .ok_or_else(|| Error::new("task configuration is missing"))?;
     let snapshot = crate::snapshot::collect(&record.worktree)?;
-    let mut hooks = crate::hooks::collect(&record.worktree, &record.identity.harness)?;
+    let mut hooks = if work_mode {
+        work_mode::hooks(&record.identity.harness)
+    } else {
+        crate::hooks::collect(&record.worktree, &record.identity.harness)?
+    };
     let mut expected_hooks = record.hooks.clone();
     if expected_hooks.digest() != record.hooks_digest {
         bail!("recorded hook inventory integrity mismatch");
@@ -1341,6 +1421,7 @@ fn validate_environment(
     version: &str,
     executable: &Path,
     trust_opencode_native_state: bool,
+    work_mode: bool,
 ) -> Result<crate::cmux::integration::Status> {
     for variable in [
         "HOME",
@@ -1373,7 +1454,12 @@ fn validate_environment(
     crate::catalog::check_headless_version(harness, version)?;
     let loaded = crate::config::load(config_root)?
         .ok_or_else(|| Error::new("missing project configuration"))?;
-    crate::catalog::check_harness_version(
+    let check_version = if work_mode {
+        work_mode::check_version
+    } else {
+        crate::catalog::check_harness_version
+    };
+    check_version(
         harness,
         version,
         loaded
@@ -1382,6 +1468,17 @@ fn validate_environment(
             .get(harness)
             .map(String::as_str),
     )?;
+    if work_mode {
+        return Ok(work_mode::integration(
+            harness,
+            Some(version),
+            loaded
+                .config
+                .harness_version_pins
+                .get(harness)
+                .map(String::as_str),
+        ));
+    }
     crate::cmux::integration::enforce_headless_executable_with_opencode_state(
         config_root,
         harness,
@@ -2711,7 +2808,7 @@ fn run_attempt(
     }
     crate::catalog::check_headless_version(&record.identity.harness, &spec.harness_version)?;
     validate_parent_attempt(&repo, spec)?;
-    validate_frozen_configuration(&record)?;
+    validate_frozen_configuration(&record, spec.options.work_mode)?;
     let cmux_integration = validate_environment(
         &repo,
         &record.worktree,
@@ -2721,21 +2818,28 @@ fn run_attempt(
         spec.native_controls
             .iter()
             .any(|control| control == "opencode.native-account-state=project-trusted"),
+        spec.options.work_mode,
     )?;
-    crate::selection::check_launch_compatibility_with_policy(
-        &real,
-        &record.identity.harness,
-        &record.identity.model,
-        record.identity.permissions,
-        &record.worktree,
-        Some(&cmux_integration.headless),
-    )?;
-    crate::auth_binding::capture_task_for_model(
-        &repo,
-        &record.identity.harness,
-        &record.identity.model,
-        dir,
-    )?;
+    if !spec.options.work_mode {
+        crate::selection::check_launch_compatibility_with_policy(
+            &real,
+            &record.identity.harness,
+            &record.identity.model,
+            record.identity.permissions,
+            &record.worktree,
+            Some(&cmux_integration.headless),
+        )?;
+    }
+    if spec.options.work_mode {
+        crate::auth_binding::capture_unverified_task(dir)?;
+    } else {
+        crate::auth_binding::capture_task_for_model(
+            &repo,
+            &record.identity.harness,
+            &record.identity.model,
+            dir,
+        )?;
+    }
     let eval_otel_capture = crate::telemetry::eval_endpoint_override().is_some();
     if let Some(parent) = &spec.parent_task {
         let parent_dir = lookup(&repo, parent)?;
@@ -3218,6 +3322,7 @@ fn run_attempt(
         "identity":record.identity,"worktree":record.worktree,"branch":record.branch,
         "outcome":outcome,"started_at":started,"finished_at":task::now_rfc3339(),
         "process":{"exit_code":status.code(),"signal":status.signal()},"harness":events,
+        "work_mode":spec.options.work_mode,"compatibility_gaps":spec.gaps,
         "skill_catalog":skill_catalog,
         "native_reference":{"session":events.session,"source":"harness event stream","harness":record.identity.harness,"harness_version":spec.harness_version,"data_location":null,"location_status":"unknown; harness-owned"},
         "native_helpers":helpers,"native_shell_tasks":events.native.shell_tasks(),"native_refusals":events.native.refusals(),"acceptance":"not assessed","completion_verified":false,
@@ -3663,12 +3768,14 @@ pub fn control(
             }
             let _owner = Lock::acquire(&dir.join("owner.lock"))?;
             let task_record = task::load(&dir)?;
-            crate::auth_binding::verify_task_resume_for_model(
-                repo,
-                &task_record.identity.harness,
-                &task_record.identity.model,
-                &dir,
-            )?;
+            if !frozen.options.work_mode {
+                crate::auth_binding::verify_task_resume_for_model(
+                    repo,
+                    &task_record.identity.harness,
+                    &task_record.identity.model,
+                    &dir,
+                )?;
+            }
             recover_resume(&dir)?;
             let previous = result(&dir)?;
             if !matches!(
@@ -3701,7 +3808,7 @@ pub fn control(
             {
                 bail!("task configuration changed; resume refused, submit a new assignment");
             }
-            validate_frozen_configuration(&record)?;
+            validate_frozen_configuration(&record, spec.options.work_mode)?;
             let (_, _, executable) = crate::launch::verify_task(&dir, Some(&spec))?;
             let real = validate_executable(&executable, repo)?;
             if real != record.harness_executable {
@@ -3723,7 +3830,11 @@ pub fn control(
                 .harness_version_pins
                 .get(&record.identity.harness)
                 .map(String::as_str);
-            crate::catalog::check_harness_version(&record.identity.harness, &version, pin)?;
+            if spec.options.work_mode {
+                work_mode::check_version(&record.identity.harness, &version, pin)?;
+            } else {
+                crate::catalog::check_harness_version(&record.identity.harness, &version, pin)?;
+            }
             let current_digest = digest_bytes(&std::fs::read(&real)?);
             if pin.is_some() && current_digest != spec.executable_digest {
                 bail!(
@@ -3739,6 +3850,7 @@ pub fn control(
                 spec.native_controls
                     .iter()
                     .any(|control| control == "opencode.native-account-state=project-trusted"),
+                spec.options.work_mode,
             )?;
             // Keep the finished attempt's provenance immutable. A floating
             // project may resume with a newer installed CLI after the same
@@ -3773,7 +3885,11 @@ pub fn control(
                 record.delivery.agent_instructions.as_deref(),
                 &prompt,
                 crate::orchestration::Composition {
-                    mode: crate::orchestration::Mode::headless(&spec.options.native_helpers)?,
+                    mode: if spec.options.work_mode {
+                        crate::orchestration::Mode::headless_work()
+                    } else {
+                        crate::orchestration::Mode::headless(&spec.options.native_helpers)?
+                    },
                     metadata: Some(crate::orchestration::Metadata {
                         task_id: record.task_id.clone(),
                         agent: record.agent_label(),
@@ -5143,6 +5259,96 @@ mod profile_and_metadata_tests {
                 .unwrap_err()
                 .to_string()
                 .contains("not validated")
+        );
+    }
+
+    #[test]
+    fn work_mode_passes_each_adapter_automatic_approval_flags_without_isolation_overrides() {
+        use crate::agent::Permissions;
+        let root = tempfile::tempdir().unwrap();
+        for (harness, version, model, required, forbidden) in [
+            (
+                "codex",
+                "0.163.0",
+                "gpt-6-astra",
+                vec![
+                    "approval_policy=\"never\"",
+                    "sandbox_mode=\"workspace-write\"",
+                ],
+                vec!["agents.enabled=false", "--strict-config"],
+            ),
+            (
+                "claude-code",
+                "2.1.304",
+                "claude-opus-5",
+                vec!["--permission-prompts", "none", "--permission-mode", "auto"],
+                vec!["--disallowedTools", "--settings"],
+            ),
+            (
+                "antigravity",
+                "1.4.2",
+                "gemini-3.1-pro-high",
+                vec!["--dangerously-skip-permissions"],
+                vec!["--strict-config"],
+            ),
+            (
+                "opencode",
+                "2.0.32",
+                "ollama/glm-5.3:cloud",
+                vec!["--auto", "--standalone"],
+                vec!["--dir", "--strict-config"],
+            ),
+            (
+                "kiro",
+                "2.32.0",
+                "claude-sonnet-4.5",
+                vec!["--no-interactive", "--trust-all-tools"],
+                vec!["--strict-config"],
+            ),
+        ] {
+            let request = LaunchRequest {
+                model,
+                prompt: "bounded work-mode check",
+                cwd: root.path(),
+                permissions: Permissions::Auto,
+            };
+            let mut spec = sample_spec();
+            spec.harness_version = version.into();
+            spec.options.work_mode = true;
+            // Work mode leaves harness-native settings and delegation tools to
+            // the harness instead of applying reviewed Ahu override profiles.
+            spec.options.native_helpers = "bounded".into();
+            spec.native_profile = None;
+            spec.native_controls.clear();
+            let command = batch_command(harness, &request, &spec).unwrap();
+            let args = command.args.join("\n");
+            for expected in required {
+                assert!(
+                    args.contains(expected),
+                    "{harness} did not receive {expected:?}: {args}"
+                );
+            }
+            for forbidden in forbidden {
+                assert!(
+                    !args.contains(forbidden),
+                    "{harness} unexpectedly received Ahu isolation override {forbidden:?}: {args}"
+                );
+            }
+        }
+
+        let request = LaunchRequest {
+            model: "gpt-6-astra",
+            prompt: "bounded work-mode check",
+            cwd: root.path(),
+            permissions: Permissions::Prompt,
+        };
+        let mut spec = sample_spec();
+        spec.options.work_mode = true;
+        assert!(
+            batch_command("codex", &request, &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("work mode requires frozen permissions=auto")
         );
     }
 

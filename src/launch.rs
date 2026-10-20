@@ -211,6 +211,26 @@ pub fn plan_with_state_home(
     prompt: &str,
     state_home: Option<&std::path::Path>,
 ) -> Result<LaunchPlan> {
+    plan_with_mode(repo, agent, pair, prompt, state_home, false)
+}
+
+pub(crate) fn plan_work_mode(
+    repo: &Repo,
+    agent: Option<ResolvedAgent>,
+    pair: ResolvedPair,
+    prompt: &str,
+) -> Result<LaunchPlan> {
+    plan_with_mode(repo, agent, pair, prompt, None, true)
+}
+
+fn plan_with_mode(
+    repo: &Repo,
+    agent: Option<ResolvedAgent>,
+    pair: ResolvedPair,
+    prompt: &str,
+    state_home: Option<&std::path::Path>,
+    work_mode: bool,
+) -> Result<LaunchPlan> {
     let release_id = crate::telemetry::release_id_for_launch()?;
     if prompt.trim().is_empty() {
         bail!(kind: crate::util::ErrorKind::Usage, "the task prompt is empty; nothing was launched.");
@@ -231,12 +251,18 @@ pub fn plan_with_state_home(
             context_lock.detail
         );
     }
-    crate::auth_binding::verify_launch(repo, &pair.harness, &pair.model)?;
+    if !work_mode {
+        crate::auth_binding::verify_launch(repo, &pair.harness, &pair.model)?;
+    }
     // Scanning for hooks is harness-specific: `hooks::collect` knows Claude
     // Code's settings files and nothing else, so it is told which harness this
     // launch is for and reports a coverage gap rather than "none found" when it
     // has no implementation for it.
-    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
+    let found_hooks = if work_mode {
+        crate::headless::work_mode::hooks(&pair.harness)
+    } else {
+        hooks::collect(&repo.root, &pair.harness)?
+    };
     let parent_dirty = git::is_dirty(repo)?;
     // Refuse early if `.worktrees` is a symlink, before anything is created.
 
@@ -254,10 +280,14 @@ pub fn plan_with_state_home(
     let task_dir = state::worktree_task_dir(&worktree, &repo_identity, &task_id);
     let title = crate::util::task_title_from_prompt(prompt);
 
-    let permissions = agent
-        .as_ref()
-        .map(|a| a.manifest.permissions)
-        .unwrap_or_default();
+    let permissions = if work_mode {
+        crate::agent::Permissions::Auto
+    } else {
+        agent
+            .as_ref()
+            .map(|a| a.manifest.permissions)
+            .unwrap_or_default()
+    };
     // Adapters transport the fully composed text literally. All rendered facts
     // are frozen now, rather than reconstructed from the runtime environment.
     let metadata = crate::orchestration::Metadata {
@@ -299,7 +329,12 @@ pub fn plan_with_state_home(
         .harness_version
         .as_deref()
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
-    crate::catalog::check_harness_version(
+    let check_version = if work_mode {
+        crate::headless::work_mode::check_version
+    } else {
+        crate::catalog::check_harness_version
+    };
+    check_version(
         &pair.harness,
         version,
         loaded
@@ -388,8 +423,26 @@ pub fn plan_with_state_home(
         enforcement.gaps.push(note);
     }
 
-    let cmux_integration = crate::cmux::integration::inspect(&repo.root, &pair.harness)
-        .with_version(enforcement.harness_version.as_deref());
+    let cmux_integration = if work_mode {
+        // Interactive permission disclosures may describe different argv and
+        // attribute the choice to the manifest. Work mode makes its own choice.
+        enforcement.applied_controls = vec![format!(
+            "explicit work mode selects permissions=auto: {}",
+            crate::headless::work_mode::permission_mapping(&pair.harness)
+        )];
+        crate::headless::work_mode::integration(
+            &pair.harness,
+            enforcement.harness_version.as_deref(),
+            loaded
+                .config
+                .harness_version_pins
+                .get(&pair.harness)
+                .map(String::as_str),
+        )
+    } else {
+        crate::cmux::integration::inspect(&repo.root, &pair.harness)
+            .with_version(enforcement.harness_version.as_deref())
+    };
     Ok(LaunchPlan {
         release_id,
         mode: if agent.is_some() {
@@ -905,6 +958,7 @@ pub(crate) fn verify_task(
     // the frozen delivery and refuses if its digest has moved.
     let expected_composition = crate::orchestration::Composition {
         mode: match batch {
+            Some(spec) if spec.options.work_mode => crate::orchestration::Mode::headless_work(),
             Some(spec) => crate::orchestration::Mode::headless(&spec.options.native_helpers)?,
             None => crate::orchestration::Mode::Interactive,
         },
@@ -919,11 +973,15 @@ pub(crate) fn verify_task(
     };
     record.delivery.verify_composition(&expected_composition)?;
     let delivered = if let Some(spec) = batch {
-        crate::orchestration::redeliver_headless_policy(
-            &record.delivery,
-            &prompt,
-            &spec.options.native_helpers,
-        )?
+        if spec.options.work_mode {
+            crate::orchestration::redeliver_headless_work(&record.delivery, &prompt)?
+        } else {
+            crate::orchestration::redeliver_headless_policy(
+                &record.delivery,
+                &prompt,
+                &spec.options.native_helpers,
+            )?
+        }
     } else {
         crate::orchestration::redeliver(&record.delivery, &prompt)?
     };

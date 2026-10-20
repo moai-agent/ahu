@@ -670,6 +670,25 @@ pub fn capture_task_for_model(
     capture_task_for(repo, binding_harness, task_dir)
 }
 
+/// Work mode deliberately leaves account selection to the native harness.
+/// Persist that uncertainty without probing, copying, or exposing credentials.
+pub fn capture_unverified_task(task_dir: &Path) -> Result<()> {
+    let pin_path = task_dir.join("auth-identity.json");
+    crate::state::confine_file(&pin_path)?;
+    let pin = StoredBinding {
+        fingerprint: "unverified".into(),
+        identity_kind: "work-mode-unverified-provider-identity".into(),
+        profile: None,
+    };
+    let bytes = serde_json::to_vec(&pin)?;
+    let _ = crate::private_io::atomic_create(
+        &pin_path,
+        &bytes,
+        crate::private_io::Durability::Durable,
+    )?;
+    Ok(())
+}
+
 /// Pin interactive task startup to the selected project profile when the
 /// project has opted into auth bindings. Projects without profiles retain the
 /// existing interactive behavior. Headless startup also checks bindings only

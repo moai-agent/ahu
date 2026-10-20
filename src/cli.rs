@@ -229,6 +229,7 @@ agent assignment options:
                         JSON goes to stdout, diagnostics to stderr.
   --input-file <path>   Bounded JSON input for an agent input_schema; requires --headless
   --headless            Run unattended without an interactive session host
+  --work-mode           Headless auto permissions; native compatibility remains unverified
   --allow-child @name   Grant this exact registered child identity (repeatable)
   --allow-child-widened @name
                         Grant a child whose manifest widens approvals. Frozen at
@@ -1379,7 +1380,12 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
         let flag = rest[i].as_str();
         if matches!(
             flag,
-            "--headless" | "--background" | "--timeout" | "--native-helpers" | "--input-file"
+            "--headless"
+                | "--work-mode"
+                | "--background"
+                | "--timeout"
+                | "--native-helpers"
+                | "--input-file"
         ) && !batch_flags.insert(flag)
         {
             bail!("repeated batch option {flag}");
@@ -1389,6 +1395,10 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
         }
         match flag {
             "--headless" => headless = true,
+            "--work-mode" => {
+                headless = true;
+                options.work_mode = true;
+            }
             "--background" => options.background = true,
             "--input-file" if options.input_file.is_none() => {
                 options.input_file = Some(PathBuf::from(value_for("--input-file", rest, &mut i)?));
@@ -2479,6 +2489,7 @@ mod parser_tests {
             assert_eq!(
                 options,
                 crate::headless::Options {
+                    work_mode: false,
                     input_file: None,
                     background: true,
                     timeout_seconds: 1,
@@ -2498,6 +2509,55 @@ mod parser_tests {
                     dry_run: false,
                     allow_widened_approvals: false,
                 }
+            );
+        }
+    }
+
+    #[test]
+    fn work_mode_selects_headless_auto_approval_without_a_second_widening_flag() {
+        let Command::HeadlessLaunch { launch, options } =
+            parse(["@fixture", "--work-mode", "--prompt", "write a marker"]).unwrap()
+        else {
+            panic!("expected headless work-mode launch")
+        };
+        assert!(options.work_mode);
+        assert_eq!(
+            options,
+            crate::headless::Options {
+                work_mode: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            *launch,
+            Command::Launch {
+                agent: "fixture".into(),
+                prompt: PromptSource::Inline("write a marker".into()),
+                display: crate::launch::DisplayMetadata::default(),
+                output_json: false,
+                dry_run: false,
+                allow_widened_approvals: false,
+            }
+        );
+        let Command::HeadlessLaunch { options, .. } =
+            parse(["@fixture", "--headless", "--work-mode", "--prompt", "write"]).unwrap()
+        else {
+            panic!("expected headless work-mode launch")
+        };
+        assert!(options.work_mode);
+        for args in [
+            vec![
+                "@fixture",
+                "--work-mode",
+                "--work-mode",
+                "--prompt",
+                "write",
+            ],
+            vec!["@fixture", "--headless", "--headless", "--prompt", "write"],
+        ] {
+            assert!(
+                parse(args).is_err(),
+                "repeated work-mode/headless options must be rejected"
             );
         }
     }

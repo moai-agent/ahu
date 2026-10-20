@@ -217,6 +217,7 @@ pub enum Mode {
     Interactive,
     HeadlessDisabled,
     HeadlessBounded,
+    HeadlessWork,
 }
 
 impl Mode {
@@ -228,11 +229,16 @@ impl Mode {
         }
     }
 
+    pub fn headless_work() -> Self {
+        Self::HeadlessWork
+    }
+
     fn contract(self) -> String {
         match self {
             Self::Interactive => INSTRUCTIONS.to_string(),
             Self::HeadlessDisabled => HEADLESS_INSTRUCTIONS.to_string(),
             Self::HeadlessBounded => BOUNDED_HEADLESS_INSTRUCTIONS.to_string(),
+            Self::HeadlessWork => WORK_MODE_HEADLESS_INSTRUCTIONS.to_string(),
         }
     }
 
@@ -241,9 +247,32 @@ impl Mode {
             Self::Interactive => LEGACY_INSTRUCTIONS,
             Self::HeadlessDisabled => LEGACY_HEADLESS_INSTRUCTIONS,
             Self::HeadlessBounded => LEGACY_BOUNDED_HEADLESS_INSTRUCTIONS,
+            Self::HeadlessWork => LEGACY_WORK_MODE_HEADLESS_INSTRUCTIONS,
         }
     }
 }
+
+const WORK_MODE_HEADLESS_INSTRUCTIONS: &str = r#"ahu delegation contract (v1, headless work mode)
+You are running an unattended ahu task. Ahu requested the harness's automatic
+permission mode; exact controls vary by harness. Native configuration, hooks,
+plugins, account identity, native delegation, and event compatibility were not
+verified and may deny, block, or change behavior. A Git worktree is not a
+sandbox. Use Ahu for registered child assignments where the host granted them;
+native harness helpers may also be available and are not supervised by Ahu.
+Do not claim work is complete until you return concrete findings; process exit
+is not proof of completion. Keep reports and traces out of checkouts.
+"#;
+
+const LEGACY_WORK_MODE_HEADLESS_INSTRUCTIONS: &str = r#"ahu delegation contract (v1, headless work mode)
+You are running an unattended ahu task. Ahu requested the harness's automatic
+permission mode; exact controls vary by harness. Native configuration, hooks,
+plugins, account identity, native delegation, and event compatibility were not
+verified and may deny, block, or change behavior. A Git worktree is not a
+sandbox. Use Ahu for registered child assignments where the host granted them;
+native harness helpers may also be available and are not supervised by Ahu.
+Do not claim work is complete until you return concrete findings; process exit
+is not proof of completion. Keep reports and traces out of checkouts.
+"#;
 
 /// Execution identity only; no environment reads or native data discovery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -610,6 +639,10 @@ pub fn redeliver_headless_policy(
     replay(delivery, prompt, Mode::headless(policy)?)
 }
 
+pub fn redeliver_headless_work(delivery: &Delivery, prompt: &str) -> Result<String> {
+    replay(delivery, prompt, Mode::headless_work())
+}
+
 /// One line naming what the harness's prompt slot actually contains.
 pub fn delivery_summary(nonce: &str, has_agent_instructions: bool) -> String {
     let sections = if has_agent_instructions {
@@ -623,6 +656,29 @@ pub fn delivery_summary(nonce: &str, has_agent_instructions: bool) -> String {
 #[cfg(test)]
 mod nonce_tests {
     use super::*;
+
+    #[test]
+    fn work_mode_delivery_replays_only_under_its_frozen_mode() {
+        let composition = Composition {
+            mode: Mode::headless_work(),
+            metadata: Some(Metadata {
+                task_id: "task-1".into(),
+                agent: "dev-astra@1.0.4".into(),
+                harness: "codex".into(),
+                model: "gpt-6-astra".into(),
+                permissions: crate::agent::Permissions::Auto,
+            }),
+            state: None,
+        };
+        let (delivered, frozen) =
+            deliver_composed(Some("agent instructions"), "smoke assignment", composition).unwrap();
+
+        assert_eq!(
+            redeliver_headless_work(&frozen, "smoke assignment").unwrap(),
+            delivered
+        );
+        assert!(redeliver_headless_policy(&frozen, "smoke assignment", "disabled").is_err());
+    }
 
     #[test]
     fn legacy_headless_layouts_replay_the_original_report_policy() {

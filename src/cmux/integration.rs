@@ -1834,7 +1834,11 @@ pub fn render_summary(status: &Status) -> String {
     format!(
         "  cmux       {installed} verified component(s), {unknown} unknown; activation/live delivery unverified; headless {}. Details: ahu cmux status\n",
         if status.headless.allowed {
-            "compatible with inspected components"
+            if status.conformance == "unverified; explicit work mode" {
+                "work mode; native compatibility unverified"
+            } else {
+                "compatible with inspected components"
+            }
         } else {
             "refused"
         }
@@ -1846,7 +1850,11 @@ pub fn render(status: &Status) -> String {
         "cmux integration {}: headless {}\n",
         display_safe(&status.harness),
         if status.headless.allowed {
-            "compatible with inspected components"
+            if status.conformance == "unverified; explicit work mode" {
+                "work mode; native compatibility unverified"
+            } else {
+                "compatible with inspected components"
+            }
         } else {
             "refused"
         }
@@ -1868,7 +1876,15 @@ pub fn render(status: &Status) -> String {
         ));
     }
     for reason in &status.headless.reasons {
-        text.push_str(&format!("  refusal: {}\n", display_safe(reason)));
+        text.push_str(&format!(
+            "  {}: {}\n",
+            if status.headless.allowed {
+                "note"
+            } else {
+                "refusal"
+            },
+            display_safe(reason)
+        ));
     }
     for c in &status.components {
         text.push_str(&format!(

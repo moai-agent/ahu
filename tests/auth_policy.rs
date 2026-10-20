@@ -293,3 +293,18 @@ fn doctor_reports_account_changes_without_disclosing_identity_or_mutating_bindin
         assert_eq!(std::fs::read(&binding).unwrap(), before);
     }
 }
+
+#[test]
+fn work_mode_records_unverified_auth_identity_without_probing_native_auth() {
+    let task_dir = tempfile::tempdir().unwrap();
+    ahu::auth_binding::capture_unverified_task(task_dir.path()).unwrap();
+    let pin: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(task_dir.path().join("auth-identity.json")).unwrap())
+            .unwrap();
+    assert_eq!(pin["fingerprint"], "unverified");
+    assert_eq!(
+        pin["identity_kind"],
+        "work-mode-unverified-provider-identity"
+    );
+    assert!(pin["profile"].is_null());
+}
