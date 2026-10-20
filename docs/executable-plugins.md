@@ -9,6 +9,10 @@ TaskService callbacks. It is suitable for
 an explicit host call to a trusted local package that processes supplied data.
 It does not implement an execution provider or grant task mutation rights.
 
+For a complete offline authoring example, see the independent
+[text statistics package](../examples/plugins/text-stats/README.md), including
+its executable, OKF manifest, local binding, and install/invoke/disable/remove flow.
+
 Add this field to the existing `ahu-plugin.md` frontmatter:
 
 ```yaml

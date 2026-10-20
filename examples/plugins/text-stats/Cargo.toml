@@ -1,0 +1,5 @@
+# Identity metadata required by Ahu; this Python package is never built by Cargo.
+[package]
+name = "ahu-example-text-stats"
+version = "1.0.0"
+publish = false
