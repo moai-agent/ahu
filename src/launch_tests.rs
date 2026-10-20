@@ -1457,6 +1457,41 @@ fn rollback_reports_retained_checkout_and_preserves_original_error_kind() {
 }
 
 #[test]
+fn unknown_creation_outcome_names_the_session_host_without_naming_a_plugin_ui() {
+    let (_temp, repo, _, plan) = fixture();
+    let error = workspace_creation_failed(
+        &repo,
+        &plan,
+        interactive::v1::WorkspaceCreationError::OutcomeUnknown(
+            Error::new("synthetic creation outcome unknown")
+                .with_kind(crate::util::ErrorKind::Prerequisite),
+        ),
+    );
+    assert_eq!(error.kind(), crate::util::ErrorKind::Prerequisite);
+    let message = error.to_string();
+    let record = plan.task_dir.join("task.json");
+    // The recovery path belongs to the session-host boundary, so it must stay
+    // accurate when a plugin other than cmux supplies the workspace.
+    assert!(message.contains("selected session host"), "{message}");
+    assert!(!message.contains("cmux"), "{message}");
+    // Identity, the no-success claim and conservative cleanup are unchanged.
+    for expected in [
+        "synthetic creation outcome unknown",
+        &plan.task_id,
+        record.to_str().unwrap(),
+        plan.worktree.to_str().unwrap(),
+        &plan.branch,
+        "may have started",
+        "No terminal outcome has been recorded",
+        "preserve the resources",
+        "git worktree remove",
+        "Do not invent a terminal task state",
+    ] {
+        assert!(message.contains(expected), "missing {expected}: {message}");
+    }
+}
+
+#[test]
 fn cleanup_removes_owned_state_but_refuses_symlinked_ancestors() {
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir().unwrap();

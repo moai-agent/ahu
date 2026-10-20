@@ -588,15 +588,15 @@ fn workspace_creation_failed(
                 "{cause}\n\n\
                  Task {} may have started. Its record, worktree and branch are retained:\n  \
                  record   {}\n  worktree {}\n  branch   {}\n\
-                 Inspect `ahu task {}` and the cmux sidebar for a workspace using this exact \
-                 worktree directory. No terminal outcome has been recorded by this failure. \
-                 Reconcile the session before retrying or cleaning up: if it is running, use \
-                 `ahu cancel {}` and verify termination. If ownership or termination cannot \
-                 be confirmed, preserve the resources. Only after confirming no session is \
-                 using the checkout, inspect its changes. Use `ahu remove {}` if the record \
-                 is terminal; if it remains starting with no session, remove the checkout \
-                 manually with non-forced `git worktree remove` and then its branch with \
-                 `git branch -d`. Do not invent a terminal task state to permit cleanup.",
+                 Inspect `ahu task {}` and the selected session host for a workspace using this \
+                 exact worktree directory. No terminal outcome has been recorded by this failure. \
+                 Reconcile the session before retrying or cleaning up: if it is running, use `ahu \
+                 cancel {}` and verify termination. If ownership or termination cannot be \
+                 confirmed, preserve the resources. Only after confirming no session is using the \
+                 checkout, inspect its changes. Use `ahu remove {}` if the record is terminal; if \
+                 it remains starting with no session, remove the checkout manually with non-forced \
+                 `git worktree remove` and then its branch with `git branch -d`. Do not invent a \
+                 terminal task state to permit cleanup.",
                 plan.task_id,
                 plan.task_dir.join("task.json").display(),
                 plan.worktree.display(),
