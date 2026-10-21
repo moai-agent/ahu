@@ -7,7 +7,7 @@ ahu can explicitly activate a discovered local executable and speak Host V2 over
 its standard input and output. The current terminal is the default. Providers such as cmux are installed as external plugins. Discovery with
 `ahu plugins` reads metadata only. `ahu plugins --probe` executes the selected
 host, negotiates compatibility, then terminates the connection. Neither command
-creates an Ahu task.
+creates an ahu task.
 
 Executable hosts require an enabled committed OKF binding with an
 `interactive-backend` grant and exact ahu compatibility. Discovery metadata and
@@ -15,7 +15,7 @@ manifest capabilities never grant execution. The selected package must match the
 binding's source digest, identity and version. Installations resolve by their
 content-addressed receipt; discovered packages are verified in place.
 
-Before session startup, Ahu persists `session_host` in the current task schema
+Before session startup, ahu persists `session_host` in the current task schema
 (schema 6). Older task schemas are refused. The record freezes the committed
 binding and revision, package name, executable declaration, executable SHA-256,
 and protocol version. It stores a single opaque `session_ref`; cmux group, window,
@@ -121,9 +121,9 @@ an empty successful inventory.
 ## Operations
 
 Methods correspond to `ahu_host_api::v2::Host`. cmux topology and identifiers
-are provider-private. Ahu stores only an opaque `session_ref` in the task record;
+are provider-private. ahu stores only an opaque `session_ref` in the task record;
 the provider verifies it against the repository identity and expected worktree
-before each mutation. Paths are absolute UTF-8 strings. Ahu still owns identity,
+before each mutation. Paths are absolute UTF-8 strings. ahu still owns identity,
 approvals, worktree creation, records, cancellation confirmation, and repository
 associations.
 
@@ -140,10 +140,10 @@ associations.
 | `open_markdown` | absolute path, focus | opaque opened-session reference |
 
 For creation, callers must persist all required task inputs before dispatching
-`startup_command`: the host may start it before replying. Ahu sends the command
+`startup_command`: the host may start it before replying. ahu sends the command
 as one JSON string; it performs no shell interpolation in this transport. The
 host must start it in the requested worktree.
-After a success reply Ahu records the opaque reference and asks the provider to
+After a success reply ahu records the opaque reference and asks the provider to
 verify it against the requested worktree. Failed verification never closes a
 session.
 
@@ -195,9 +195,9 @@ sandbox them.
 Package tests exercise the server and all nine V2 methods with a fake native CLI,
 including creation outcome preservation and strict framed input/output. Core
 lifecycle tests use synthetic Host V2 peers. The external cmux package has also
-been installed and activated through Ahu's real package lifecycle, then negotiated
+been installed and activated through ahu's real package lifecycle, then negotiated
 and probed against a running cmux service; this read-only probe verified default
-socket discovery with Ahu's cleared environment and read the workspace inventory.
+socket discovery with ahu's cleared environment and read the workspace inventory.
 Live task-workspace creation and close have not been exercised as part of that
 smoke test. Package existence and project activation alone do not establish live
 compatibility, so repeat the read-only probe after changing either side.
