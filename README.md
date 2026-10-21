@@ -122,7 +122,7 @@ supported CLI versions, result collection, resume, cancellation, and limits.
 Headless mode covers Claude Code, Codex, Antigravity, OpenCode, and Kiro CLI.
 An agent on a harness without a headless adapter is refused rather than run on
 another harness. `--work-mode` requests each harness's automatic/no-ask mode and
-continues when Ahu cannot verify native configuration compatibility, recording
+continues when ahu cannot verify native configuration compatibility, recording
 those differences in the task result. It does not make a Git worktree a sandbox
 or guarantee that harness-native hooks, plugins, or authentication will not
 block execution.
@@ -226,7 +226,7 @@ assignment in nonce-bearing sections with raw bodies. This is prompt text,
 not an enforced system prompt. The harness controls the running session,
 including model changes, approvals, and context loading. ahu reports visible
 settings and gaps without claiming to know everything the harness loads.
-Ordinary launches do not alter native hooks or settings. cmux session hosting is provided by the selected external plugin; Ahu does not invoke cmux to install or inspect session-host configuration.
+Ordinary launches do not alter native hooks or settings. cmux session hosting is provided by the selected external plugin; ahu does not invoke cmux to install or inspect session-host configuration.
 Private tracker material stays out of public files and reports; remote pushes
 require explicit user permission.
 

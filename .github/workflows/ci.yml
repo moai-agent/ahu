@@ -57,12 +57,12 @@ jobs:
       - name: Check optional session plugin absence
         run: |
           cargo clippy --no-default-features --all-targets --locked -- -D warnings
-          cargo test --no-default-features --locked --test plugins --test cmux_facade --test task_remove --test utility_resolution
+          cargo test --no-default-features --locked --test native_admission --test plugins --test task_remove --test utility_resolution
           cargo test --no-default-features --locked --test headless foreground_keeps_primary_coordination_and_identity_without_native_copies
-      - name: Check optional cmux coordinator compatibility
-        run: cargo test --features cmux-plugin --locked --test codex_session --test exit_codes --test failure_recovery --test gates --test terminal_output --test utility_resolution
-      - name: Check optional cmux dispatch from a headless-refused project
-        run: cargo test --features cmux-plugin --locked --test headless headless_isolation_refusal_does_not_gate_real_interactive_cmux_dispatch -- --exact
+      - name: Check provider-neutral session-plugin compatibility
+        run: cargo test --locked --test external_host --test plugins --test plugin_install --test plugin_invoke_cli --test task_remove --test utility_resolution
+      - name: Check headless operation without a session host
+        run: cargo test --no-default-features --locked --test headless headless_launch_and_result_work_without_cmux_or_a_session_host -- --exact
       - name: Install synthetic harness executables
         run: |
           set -euo pipefail
@@ -169,41 +169,9 @@ jobs:
               raise SystemExit(1)
           print(f'checked {len(files)} Markdown files')
 
-  cmux:
-    name: Live cmux (macOS)
-    runs-on: macos-14
-    timeout-minutes: 15
-    defaults:
-      run:
-        shell: bash
+  cmux-boundary:
+    name: cmux plugin boundary
+    runs-on: ubuntu-24.04
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Check whether live cmux is available
-        id: cmux
-        run: |
-          set -euo pipefail
-          if ! command -v cmux >/dev/null 2>&1; then
-            echo '::notice::GitHub-hosted macOS runner does not provide cmux; live probe skipped.'
-            echo 'available=false' >> "$GITHUB_OUTPUT"
-          elif ! cmux ping >/dev/null 2>&1; then
-            echo '::notice::cmux is installed but unreachable; live probe skipped.'
-            echo 'available=false' >> "$GITHUB_OUTPUT"
-          else
-            cmux --version
-            echo 'available=true' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Install pinned Rust and components
-        if: steps.cmux.outputs.available == 'true'
-        run: rustup toolchain install --no-self-update
-      - name: Run live cmux plumbing
-        if: steps.cmux.outputs.available == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v cmux >/dev/null 2>&1 || ! cmux ping >/dev/null 2>&1; then
-            echo '::error::cmux became unavailable after the initial probe.'
-            exit 1
-          fi
-          AHU_TEST_CMUX=1 cargo test --locked --test cmux_integration -- --test-threads=1
+      - name: Explain live integration coverage
+        run: echo '::notice::Ahu core has no compiled cmux adapter or live cmux test target. Generic session-host and plugin lifecycle tests run in the checks job; live provider conformance is not established by this repository.'

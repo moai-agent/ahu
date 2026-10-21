@@ -2273,45 +2273,78 @@ fn opencode_recorded_completion(
             return Err("the OpenCode executable changed during the attempt".into());
         }
     }
-    let mut command = Command::new(attempt.executable);
-    // `--standalone` reads through a private server, as the run itself did,
-    // instead of attaching to the user's background service. `--sanitize`
-    // redacts transcript and file data inside OpenCode, before any of it can
-    // reach this process.
-    // `opencode session export [flags] [<session>]`: the flags precede the
-    // positional, as its own usage line declares. The identifier was checked
-    // above, so it can never be read as an option.
-    command.args(["session", "export", "--sanitize", "--standalone", session]);
-    crate::harness::configure_task_directory(&mut command, "opencode", attempt.worktree);
-    sanitize(&mut command, attempt.policy);
-    // This process only verifies completion; it must not create a second
-    // Ahu or native telemetry observation using the supervisor's environment.
-    command
-        .env("OTEL_SDK_DISABLED", "true")
-        .env_remove("AHU_EVAL_OTEL_ENDPOINT")
-        .env_remove("AHU_MCP_RESOURCE_ATTRIBUTES")
-        .env_remove("AHU_BROKER_PARENT_ATTRIBUTES")
-        .env_remove("OTEL_RESOURCE_ATTRIBUTES")
-        .env_remove("OTEL_SERVICE_NAME")
-        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
-        .env_remove("OTEL_EXPORTER_OTLP_METRICS_HEADERS")
-        .env_remove("OTEL_EXPORTER_OTLP_LOGS_HEADERS")
-        .env_remove("OTEL_TRACES_EXPORTER")
-        .env_remove("OTEL_METRICS_EXPORTER")
-        .env_remove("OTEL_LOGS_EXPORTER");
-    let export = crate::selection::bounded_config_probe(&mut command, true, attempt.timeout)
-        .ok_or_else(|| {
-            "the bounded `opencode session export` read failed, timed out, exited nonzero, \
-             or passed its output bound"
-                .to_string()
-        })?;
-    opencode::export_establishes_completion(&export, session, attempt.attempt_started_ms)
-        .map_err(str::to_owned)
+    let deadline = Instant::now() + attempt.timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(
+                "the OpenCode session export did not become valid before its bounded retry deadline"
+                    .into(),
+            );
+        }
+
+        let mut command = Command::new(attempt.executable);
+        // `--standalone` reads through a private server, as the run itself did,
+        // instead of attaching to the user's background service. `--sanitize`
+        // redacts transcript and file data inside OpenCode, before any of it can
+        // reach this process.
+        // `opencode session export [flags] [<session>]`: the flags precede the
+        // positional, as its own usage line declares. The identifier was checked
+        // above, so it can never be read as an option.
+        command.args(["session", "export", "--sanitize", "--standalone", session]);
+        crate::harness::configure_task_directory(&mut command, "opencode", attempt.worktree);
+        sanitize(&mut command, attempt.policy);
+        // This process only verifies completion; it must not create a second
+        // Ahu or native telemetry observation using the supervisor's environment.
+        command
+            .env("OTEL_SDK_DISABLED", "true")
+            .env_remove("AHU_EVAL_OTEL_ENDPOINT")
+            .env_remove("AHU_MCP_RESOURCE_ATTRIBUTES")
+            .env_remove("AHU_BROKER_PARENT_ATTRIBUTES")
+            .env_remove("OTEL_RESOURCE_ATTRIBUTES")
+            .env_remove("OTEL_SERVICE_NAME")
+            .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+            .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+            .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+            .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
+            .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
+            .env_remove("OTEL_EXPORTER_OTLP_METRICS_HEADERS")
+            .env_remove("OTEL_EXPORTER_OTLP_LOGS_HEADERS")
+            .env_remove("OTEL_TRACES_EXPORTER")
+            .env_remove("OTEL_METRICS_EXPORTER")
+            .env_remove("OTEL_LOGS_EXPORTER");
+        let Some(export) = crate::selection::bounded_config_probe(&mut command, true, remaining)
+        else {
+            return Err(
+                "the bounded `opencode session export` read failed, timed out, exited nonzero, \
+                 or passed its output bound"
+                    .into(),
+            );
+        };
+
+        match opencode::export_establishes_completion(&export, session, attempt.attempt_started_ms)
+        {
+            Ok(()) => return Ok(()),
+            // OpenCode can return a successful process exit before its session
+            // projection is ready. Retry only the unparseable snapshot; every
+            // valid export, including one that proves a failure or mismatch, is
+            // evaluated once and remains authoritative.
+            Err("the export is not JSON") => {
+                let pause = deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(100));
+                if pause.is_zero() {
+                    return Err(
+                        "the OpenCode session export did not become valid before its bounded retry deadline"
+                            .into(),
+                    );
+                }
+                std::thread::sleep(pause);
+            }
+            Err(reason) => return Err(reason.into()),
+        }
+    }
 }
 
 const STREAM_EVALUATION_LIMIT: u64 = 64 * 1024 * 1024;
@@ -4924,6 +4957,42 @@ mod write_tracking_tests {
     }
 
     #[test]
+    fn an_opencode_recorded_session_retries_an_unready_export_until_it_is_valid() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("export-not-ready");
+        let preamble = format!(
+            "if [ ! -f '{}' ]; then touch '{}'; printf 'pending\\n'; exit 0; fi",
+            marker.display(),
+            marker.display()
+        );
+        let executable = fake_opencode(root.path(), &preamble, &completed_export());
+        let mut events = tool_only_events();
+
+        recover_opencode_terminal_result(
+            &mut events,
+            &attempt(&executable, root.path(), Duration::from_secs(2)),
+        );
+
+        assert!(events.terminal, "{:?}", events.blockers);
+        assert!(!events.failed, "{:?}", events.blockers);
+        assert_eq!(
+            events.terminal_evidence.as_deref(),
+            Some("opencode recorded session export")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("argv"))
+                .unwrap()
+                .lines()
+                .count(),
+            2,
+            "the export is retried only after an unparseable snapshot"
+        );
+        let encoded = serde_json::to_string(&events).unwrap();
+        assert!(!encoded.contains("pending"));
+        assert!(!encoded.contains("redacted"));
+    }
+
+    #[test]
     fn an_opencode_recorded_session_can_recover_after_reasoning() {
         let root = tempfile::tempdir().unwrap();
         let executable = fake_opencode(root.path(), "", &completed_export());
@@ -4976,9 +5045,17 @@ mod write_tracking_tests {
             let root = tempfile::tempdir().unwrap();
             let executable = fake_opencode(root.path(), preamble, body);
             let mut events = tool_only_events();
+            let timeout = if matches!(
+                case,
+                "a nonzero export exit" | "malformed output" | "output past the capture bound"
+            ) {
+                Duration::from_millis(150)
+            } else {
+                Duration::from_secs(20)
+            };
             recover_opencode_terminal_result(
                 &mut events,
-                &attempt(&executable, root.path(), Duration::from_secs(20)),
+                &attempt(&executable, root.path(), timeout),
             );
             events.require_terminal_result("opencode");
             assert!(!events.terminal, "{case}");
@@ -4988,7 +5065,11 @@ mod write_tracking_tests {
                 events
                     .blockers
                     .iter()
-                    .any(|blocker| blocker.starts_with("OpenCode recorded session:")),
+                    .any(|blocker| {
+                        blocker.starts_with("OpenCode recorded session:")
+                            || blocker
+                                == "the OpenCode session export did not become valid before its bounded retry deadline"
+                    }),
                 "{case}: {:?}",
                 events.blockers
             );

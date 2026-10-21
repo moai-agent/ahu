@@ -1963,21 +1963,21 @@ file that exists but cannot be parsed is reported as *unknown* hooks, never as
 ## Interactive host boundary
 
 Interactive session providers use the versioned external Host V2 protocol
-([details](executable-hosts.md)). Ahu owns cross-harness coordination, task
+([details](executable-hosts.md)). ahu owns cross-harness coordination, task
 lifecycle, worktree operations, and MCP; provider-specific session mechanics
 live in plugins. The current terminal is the default. An enabled committed
 binding with the `interactive-backend` grant selects an external provider, and
-the task record freezes its package identity for later focus and cleanup. Ahu
+the task record freezes its package identity for later focus and cleanup. ahu
 contains no compiled cmux session adapter. Providers run with the user's OS
 permissions; plugin separation is an integration boundary, not a sandbox.
 
 ## Native hook safety inspection
 
-Ahu performs bounded, read-only inspection of native hook configuration that can affect headless launches. It does not invoke the cmux CLI, install native hooks, or manage session hosting. Session creation, inventory, focus, and cleanup use the selected external session-host plugin through Host V2.
+ahu performs bounded, read-only inspection of native hook configuration that can affect headless launches. It does not invoke the cmux CLI, install native hooks, or manage session hosting. Session creation, inventory, focus, and cleanup use the selected external session-host plugin through Host V2.
 
-Headless admission is checked before execution and rechecked by the supervisor. The child environment removes inherited `CMUX_*` routing variables and restores only a reviewed process-local control when the evidence requires one. Current verified guards use `CMUX_CODEX_HOOKS_DISABLED` or `CMUX_OPENCODE_HOOKS_DISABLED`. Claude’s reviewed wrapper requires a direct executable; registered Claude and Antigravity hook commands remain unknown. A variable name alone is not proof of isolation. Unsafe or unknown components refuse admission. Ahu leaves native homes and settings in place. Arbitrary shell commands, hooks, remote plugins, and concurrent same-user changes remain outside these controls. A successful static inspection does not launch or validate a native session.
+Headless admission is checked before execution and rechecked by the supervisor. The child environment removes inherited `CMUX_*` routing variables and restores only a reviewed process-local control when the evidence requires one. Current verified guards use `CMUX_CODEX_HOOKS_DISABLED` or `CMUX_OPENCODE_HOOKS_DISABLED`. Claude’s reviewed wrapper requires a direct executable; registered Claude and Antigravity hook commands remain unknown. A variable name alone is not proof of isolation. Unsafe or unknown components refuse admission. ahu leaves native homes and settings in place. Arbitrary shell commands, hooks, remote plugins, and concurrent same-user changes remain outside these controls. A successful static inspection does not launch or validate a native session.
 
-Native authentication stores, account databases, managed preferences, and plugin sources can select additional executable configuration. Ahu checks their presence without reading credentials or fetching remote context. Present or unresolved opaque sources refuse headless admission, even for a legitimate setup. Interactive execution remains available.
+Native authentication stores, account databases, managed preferences, and plugin sources can select additional executable configuration. ahu checks their presence without reading credentials or fetching remote context. Present or unresolved opaque sources refuse headless admission, even for a legitimate setup. Interactive execution remains available.
 
 ### Conformance evidence
 
@@ -2048,7 +2048,7 @@ well. `focus` uses the task’s recorded session-host plugin.
 
 ### Interactive provider ownership
 
-Interactive session lifecycle uses the selected external Host V2 plugin. Ahu
+Interactive session lifecycle uses the selected external Host V2 plugin. ahu
 owns task records, worktree creation, cancellation confirmation, and cleanup
 decisions. The provider owns its native grouping and session identifiers and
 returns an opaque `session_ref`. Before focus, status updates, metadata changes,
@@ -2173,7 +2173,7 @@ rejects the candidate. This also excludes executables in unopened sibling or
 unrelated working trees. Symlinked installations outside working trees remain
 usable; aliases resolving into a working tree do not.
 
-The selected canonical Git path is used for each Git invocation. These are executable selection checks, not a sandbox, and they do not prevent later replacement by a host process. Ahu does not resolve or invoke a cmux executable; session-host operations use the committed external plugin binding.
+The selected canonical Git path is used for each Git invocation. These are executable selection checks, not a sandbox, and they do not prevent later replacement by a host process. ahu does not resolve or invoke a cmux executable; session-host operations use the committed external plugin binding.
 
 The catalog in `src/catalog.rs` records, per adapter, the CLI versions whose
 behavior was checked and the enforcement gaps ahu discloses for it. These are

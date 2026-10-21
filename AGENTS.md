@@ -80,7 +80,7 @@ filesystem, process, or network sandbox. An agent running as the same user may
 still access paths outside its worktree unless an operating-system or
 container-level policy separately confines it. Keep work inside the assigned
 worktree, use relative paths where practical, and report suspected outside
-writes. Treat Ahu's outside-write observations as detection with limited event
+writes. Treat ahu's outside-write observations as detection with limited event
 coverage, not prevention or proof of isolation. Harness approval modes also
 do not establish filesystem confinement.
 

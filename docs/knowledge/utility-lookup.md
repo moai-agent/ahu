@@ -28,7 +28,7 @@ has opened them.[^selection][^tests]
 
 Symlinked installations outside working trees remain supported; aliases into
 working trees are excluded. Git uses the selected canonical path for each
-invocation. Ahu does not resolve or invoke a cmux executable; session hosting
+invocation. ahu does not resolve or invoke a cmux executable; session hosting
 uses the selected external plugin.[^selection][^git][^tests]
 
 Executable selection is not OS isolation and cannot prevent concurrent

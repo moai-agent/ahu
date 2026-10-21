@@ -242,8 +242,8 @@ pub(crate) fn supports_session_export_evidence(version: &str) -> bool {
     crate::catalog::version_token(version).is_some_and(|version| version == "2.0.32")
 }
 
-/// Bound the recorded-session read: a completed headless turn settles its
-/// projection before `run` exits, so a slow read is a failed read.
+/// Bound retries while OpenCode makes the completed headless turn available
+/// through its sanitized recorded-session projection.
 pub(crate) const EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Bound the inspected projection. A turn that recorded more messages than

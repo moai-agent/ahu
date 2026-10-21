@@ -43,7 +43,7 @@ removal retains the binding to its original task ID. Human handles are lookup
 references, not a replacement for task identity or delivery authority.[^commands]
 
 Current task schema 6 stores opaque session references and frozen external host
-identity. Ahu reads only this task schema; older task records are reported as
+identity. ahu reads only this task schema; older task records are reported as
 unreadable and are never reinterpreted or migrated.[^task]
 
 The repository-scoped task index maps IDs to durable state. Each entry holds the

@@ -39,7 +39,7 @@ sources:
 
 Each interactive task's `task.json` and `prompt.txt` live under its own worktree at
 `.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Task directories are named by
-a version-7 universally unique identifier. Ahu reads only current task schema 6;
+a version-7 universally unique identifier. ahu reads only current task schema 6;
 older task records are reported as unreadable and are not migrated. Launch derives this path without an environment override, and
 registers the task in the cross-checkout index once durable state exists. Removing
 the worktree removes its local state; `ahu remove` also removes the index
