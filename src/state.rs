@@ -1,8 +1,8 @@
 //! ahu's local state directory.
 //!
 //! This module locates operational state: task records, task worktrees, the
-//! repository-to-cmux-group mapping. None of it
-//! is policy. Policy lives in the repository, the same for every user.
+//! task records and coordination locks. None of it is policy. Policy lives in
+//! the repository, the same for every user.
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -336,16 +336,15 @@ pub fn verify_worktree_inside_repo(repo_root: &Path, worktree: &Path) -> Result<
     Ok(())
 }
 
-/// Path of the lock that serialises find-or-create of a repository's cmux group
-/// and the allocation of task identifiers.
+/// Path of the lock that serialises task identifier allocation and launch setup.
 pub fn lock_path(repo_identity: &str) -> Result<PathBuf> {
     Ok(repo_dir(repo_identity)?.join("launch.lock"))
 }
 
 /// A cross-process lock built on the operating system's advisory file lock.
 ///
-/// Concurrent launches must not create two cmux groups for one repository or
-/// collide on a branch. The lock is held on a persistent file: it is released
+/// Concurrent launches must not collide on a branch or session setup. The lock
+/// is held on a persistent file: it is released
 /// when the holder closes the file or exits, so a killed launch can never
 /// wedge the repository, and no lock is ever reclaimed based on its age.
 /// The holder's PID is written for diagnostics only; the lock itself is
@@ -364,7 +363,7 @@ pub(crate) fn state_io_error(operation: &str, path: &Path, error: std::io::Error
             "\nCheck directory permissions and the calling process's sandbox. \
              Run ahu from a terminal with access to the state directory shown above. \
              State access does not grant \
-             permission to create Git worktrees or access cmux.",
+             permission to create Git worktrees or access session providers.",
         );
     }
     Error::new(message)

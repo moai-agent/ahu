@@ -1,4 +1,4 @@
-//! Executable host protocol V1. Frames are a big-endian u32 byte length followed
+//! Executable host protocol V2. Frames are a big-endian u32 byte length followed
 //! by exactly that many UTF-8 JSON bytes. There are no notifications or batches.
 use serde::de::{self, DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -6,27 +6,18 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const METHODS: &[&str] = &[
-    "list_groups",
-    "find_group",
-    "current_window",
-    "window_for_workspace",
-    "add_workspace_to_group",
-    "current_workspace",
-    "create_anchor_workspace",
-    "set_anchor",
-    "create_group",
-    "expand_group",
-    "create_task_workspace",
-    "open_markdown",
-    "select_workspace",
-    "close_workspace",
-    "set_status",
+    "create_task_session",
+    "verify_task_session",
+    "select_task_session",
+    "close_task_session",
+    "set_task_status",
+    "expand_task_session",
+    "place_coordinator",
     "set_agent_metadata",
-    "workspaces",
-    "workspaces_in_window",
+    "open_markdown",
 ];
 
 /// Decode a protocol frame only after checking that no JSON object repeats a

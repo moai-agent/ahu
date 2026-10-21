@@ -90,14 +90,14 @@ fn human_and_json_previews_share_the_planned_integration_evidence() {
     let before = ahu::commands::render_preview(&discovered, &plan, "review it", None);
     let json: serde_json::Value =
         serde_json::from_str(&launch::render_json(&plan, "review it").unwrap()).unwrap();
-    let expected = serde_json::to_value(&plan.cmux_integration).unwrap();
-    assert_eq!(json["cmux_integration"], expected);
+    let expected = serde_json::to_value(&plan.native_admission).unwrap();
+    assert_eq!(json["native_admission"], expected);
 
     // A later read must not silently replace one renderer's planned evidence.
     // Execution performs its own configuration and admission rechecks.
     repo.write(".claude/settings.json", "malformed settings");
     let live =
-        serde_json::to_value(ahu::cmux::integration::inspect(repo.path(), "claude-code")).unwrap();
+        serde_json::to_value(ahu::native_admission::inspect(repo.path(), "claude-code")).unwrap();
     assert_ne!(live, expected);
     assert_eq!(
         ahu::commands::render_preview(&discovered, &plan, "review it", None),
@@ -105,7 +105,7 @@ fn human_and_json_previews_share_the_planned_integration_evidence() {
     );
     let after: serde_json::Value =
         serde_json::from_str(&launch::render_json(&plan, "review it").unwrap()).unwrap();
-    assert_eq!(after["cmux_integration"], expected);
+    assert_eq!(after["native_admission"], expected);
 }
 
 /// `.claude/settings.json` decides the session's approval boundary, and ahu
@@ -804,9 +804,7 @@ fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: ahu::task::TaskState::Exited,
     }
 }
@@ -1109,31 +1107,28 @@ fn delivery_layout_and_nonce_changes_are_not_agent_version_drift() {
         .unwrap()
         .1;
     assert_ne!(record.delivery.digest, original);
-    for layout in [1, 2] {
-        record.delivery.layout_version = layout;
-        assert!(
-            ahu::drift::detect(
-                &record.agent_label(),
-                Some(ahu::drift::AgentIdentity {
-                    version: &agent.manifest.version,
-                    harness: &agent.manifest.harness,
-                    model: &agent.manifest.model,
-                    permissions: agent.manifest.permissions,
-                    instructions_source: Some(
-                        &agent.relative_source(&git::discover(repo.path()).unwrap().root)
-                    ),
-                    identity_digest: &agent.identity_digest(),
-                    source_digest: &agent.source_digest,
-                    instructions_digest: &agent.instructions_digest
-                }),
-                &record.config_snapshot_digest,
-                &record.policy_digest,
-                &record.hooks_digest,
-                &[(std::path::PathBuf::from("/nonexistent"), record.clone())],
-            )
-            .is_none()
-        );
-    }
+    assert!(
+        ahu::drift::detect(
+            &record.agent_label(),
+            Some(ahu::drift::AgentIdentity {
+                version: &agent.manifest.version,
+                harness: &agent.manifest.harness,
+                model: &agent.manifest.model,
+                permissions: agent.manifest.permissions,
+                instructions_source: Some(
+                    &agent.relative_source(&git::discover(repo.path()).unwrap().root)
+                ),
+                identity_digest: &agent.identity_digest(),
+                source_digest: &agent.source_digest,
+                instructions_digest: &agent.instructions_digest
+            }),
+            &record.config_snapshot_digest,
+            &record.policy_digest,
+            &record.hooks_digest,
+            &[(std::path::PathBuf::from("/nonexistent"), record.clone())],
+        )
+        .is_none()
+    );
 }
 
 #[test]

@@ -436,7 +436,7 @@ pub(crate) fn discover() -> Result<Vec<PluginStatus>> {
         return Err(invalid("AHU_PLUGIN_PATH exceeds 64 KiB"));
     }
     let mut packages = Vec::new();
-    let mut identities = BTreeSet::from(["cmux".to_string()]);
+    let mut identities = BTreeSet::new();
     for root in std::env::split_paths(&value) {
         if packages.len() == MAX_PACKAGES {
             return Err(invalid("AHU_PLUGIN_PATH exceeds 32 package directories"));
@@ -444,7 +444,7 @@ pub(crate) fn discover() -> Result<Vec<PluginStatus>> {
         let package = read_package(&root)?;
         if !identities.insert(package.id.clone()) {
             return Err(invalid(format!(
-                "duplicate plugin identity '{}' (cmux is reserved for the compiled package)",
+                "duplicate plugin identity '{}'",
                 package.id
             )));
         }

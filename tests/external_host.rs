@@ -1,13 +1,8 @@
 //! Offline peers exercise the actual selected executable, framing, and Host API.
 mod common;
-use ahu::interactive::{
-    self,
-    external::ExternalHost,
-    v1::{Host, WorkspaceCreationError, WorkspaceRequest},
-};
+use ahu::interactive::{self, external::ExternalHost};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 fn fixture(root: &Path, mode: &str) -> PathBuf {
@@ -18,7 +13,7 @@ fn fixture(root: &Path, mode: &str) -> PathBuf {
         "[package]\nname = \"fixture-host\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
-    std::fs::write(package.join("ahu-plugin.md"), "---\nokf_version: \"0.2\"\ntype: ahu:plugin\nschema_version: 1\nid: \"fixture\"\npackage: \"fixture-host\"\nhost_api: 1\ncargo_manifest: \"Cargo.toml\"\nexecutable:\n  path: \"bin/host\"\n  protocol_version: 1\n  timeout_ms: 1000\n---\n\n# Executable fixture\n").unwrap();
+    std::fs::write(package.join("ahu-plugin.md"), "---\nokf_version: \"0.2\"\ntype: ahu:plugin\nschema_version: 1\nid: \"fixture\"\npackage: \"fixture-host\"\nhost_api: 1\ncargo_manifest: \"Cargo.toml\"\nexecutable:\n  path: \"bin/host\"\n  protocol_version: 2\n  timeout_ms: 1000\n---\n\n# Executable fixture\n").unwrap();
     let script = include_str!("fixtures/external-host.py")
         .replace(
             "MODE = \"normal\"",
@@ -154,11 +149,11 @@ fn executable_discovery_never_runs_and_explicit_probe_negotiates() {
         assert!(output.status.success(), "{mode}: {output:?}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["plugin_id"], "fixture");
-        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["protocol_version"], 2);
         assert_eq!(value["persistent_sessions"], true);
         assert_eq!(
             marker(root.path())["argv"],
-            serde_json::json!(["--ahu-host-protocol=1"])
+            serde_json::json!(["--ahu-host-protocol=2"])
         );
         assert!(marker(root.path())["env"].get("SYNTHETIC_SECRET").is_none());
         assert!(!root.path().join(".ahu").exists());
@@ -229,139 +224,6 @@ fn host_snapshot_is_private_with_permissive_umask() {
 }
 
 #[test]
-fn host_operations_and_partial_start_classification() {
-    const CASE: &str = "host_operations_and_partial_start_classification";
-    if common::is_child_case(CASE) {
-        let mode = std::env::var("FIXTURE_MODE").unwrap();
-        let root = PathBuf::from(std::env::var_os("FIXTURE_ROOT").unwrap());
-        let selected = interactive::plugins::status().unwrap();
-        let host = ExternalHost::connect(&selected).unwrap();
-        assert!(host.check_persistence().is_ok());
-        if mode == "duplicate_workspace" {
-            assert!(host.workspaces().is_err());
-            drop(host);
-            assert_stopped(&root);
-            return;
-        }
-        if mode != "backpressure" {
-            host.create_group("fixture", &root).unwrap();
-        }
-        let startup = if matches!(mode.as_str(), "oversize_request" | "backpressure") {
-            "x".repeat(if mode == "oversize_request" {
-                1024 * 1024
-            } else {
-                800_000
-            })
-        } else {
-            "literal ' $(false)".into()
-        };
-        if mode == "cancel_before" {
-            host.cancel();
-        }
-        let cancel_thread = if mode == "cancel_create" {
-            let token = host.cancellation_token();
-            Some(std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(80));
-                token.store(true, Ordering::Relaxed);
-            }))
-        } else {
-            None
-        };
-        let started = Instant::now();
-        let result = host.create_task_workspace(&WorkspaceRequest {
-            group_id: "group",
-            window_id: Some("window"),
-            title: "task ' $literal",
-            summary: "summary",
-            cwd: &root,
-            startup_command: &startup,
-            focus: false,
-        });
-        assert!(started.elapsed() < Duration::from_secs(5));
-        match mode.as_str() {
-            "normal" => {
-                let created = result.unwrap();
-                assert_eq!(created.workspace_id, "workspace");
-                assert_eq!(
-                    host.workspaces().unwrap()["workspace"].title.as_deref(),
-                    Some("task ' $literal")
-                );
-                host.set_status("workspace", "working").unwrap();
-                host.set_agent_metadata("workspace", "fixture", "fixture", "fixture")
-                    .unwrap();
-                host.select_workspace("workspace").unwrap();
-                host.close_workspace("workspace").unwrap();
-                assert!(!host.workspaces().unwrap().contains_key("workspace"));
-                // Replacing the source after activation cannot replace the pinned process.
-                std::fs::write(
-                    selected
-                        .manifest
-                        .unwrap()
-                        .parent()
-                        .unwrap()
-                        .join("bin/host"),
-                    "not an executable",
-                )
-                .unwrap();
-                assert!(host.workspaces().is_ok());
-            }
-            "not_created" | "oversize_request" | "cancel_before" => assert!(
-                matches!(result, Err(WorkspaceCreationError::NotCreated(_))),
-                "{result:?}"
-            ),
-            _ => assert!(
-                matches!(result, Err(WorkspaceCreationError::OutcomeUnknown(_))),
-                "{mode}: {result:?}"
-            ),
-        }
-        if let Some(thread) = cancel_thread {
-            thread.join().unwrap();
-        }
-        if mode == "created_then_exit" {
-            assert_eq!(
-                std::fs::read_to_string(root.join("startup-observed")).unwrap(),
-                "synthetic startup side effect"
-            );
-        }
-        drop(host);
-        assert_stopped(&root);
-        return;
-    }
-    for mode in [
-        "normal",
-        "duplicate_workspace",
-        "not_created",
-        "unknown_create",
-        "failed_create",
-        "exit_create",
-        "created_then_exit",
-        "malformed_create",
-        "hang_create",
-        "wrong_cwd",
-        "wrong_group",
-        "wrong_window",
-        "incomplete_inventory",
-        "oversize_request",
-        "backpressure",
-        "cancel_before",
-        "cancel_create",
-    ] {
-        let root = tempfile::tempdir().unwrap();
-        let package = fixture(root.path(), mode);
-        let root_path = root.path().canonicalize().unwrap();
-        let output = common::run_child_case(CASE, |command| {
-            command
-                .current_dir(root.path())
-                .env("AHU_PLUGIN_PATH", &package)
-                .env("AHU_INTERACTIVE_PLUGIN", "fixture")
-                .env("FIXTURE_MODE", mode)
-                .env("FIXTURE_ROOT", &root_path);
-        });
-        assert!(output.status.success(), "{mode}: {output:?}");
-    }
-}
-
-#[test]
 fn durable_paths_require_committed_authority_before_execution() {
     let root = tempfile::tempdir().unwrap();
     let package = fixture(root.path(), "normal");
@@ -412,7 +274,7 @@ fn executable_paths_and_metadata_are_validated_without_execution() {
         manifest.replace("bin/host", "../host"),
         manifest.replace("bin/host", "/bin/sh"),
         manifest.replace("bin/host", "bin/../bin/host"),
-        manifest.replace("protocol_version: 1", "protocol_version: 2"),
+        manifest.replace("protocol_version: 2", "protocol_version: 1"),
         manifest.replace("timeout_ms: 1000", "timeout_ms: 0"),
         manifest.replace("timeout_ms: 1000", "timeout_ms: 30001"),
         manifest.replace("  path:", "  arguments: [\"unsafe\"]\n  path:"),
@@ -615,7 +477,7 @@ fn public_launch_focus_cancel_remove_and_uncertain_creation() {
         let frozen = record.session_host.as_ref().unwrap();
         assert_eq!(frozen.discovered_root.is_some(), discovered);
         assert_eq!(frozen.binding.version, "0.1.0");
-        assert_eq!(record.schema_version, 5);
+        assert_eq!(record.schema_version, ahu::task::TASK_SCHEMA_VERSION);
         let task_path = dir.join("task.json");
         let saved_record = std::fs::read(&task_path).unwrap();
         let mut value: serde_json::Value = serde_json::from_slice(&saved_record).unwrap();
@@ -624,7 +486,7 @@ fn public_launch_focus_cancel_remove_and_uncertain_creation() {
         assert!(ahu::task::load(&dir).is_err());
         value["schema_version"] = 4.into();
         std::fs::write(&task_path, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(ahu::task::load(&dir).unwrap().session_host.is_none());
+        assert!(ahu::task::load(&dir).is_err());
         value["session_host"] = serde_json::to_value(frozen).unwrap();
         std::fs::write(&task_path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(ahu::task::load(&dir).is_err());
@@ -640,16 +502,16 @@ fn public_launch_focus_cancel_remove_and_uncertain_creation() {
         );
         let git = ahu::git::discover(repo.path()).unwrap();
         let host = interactive::discover_for_record(&git, &record).unwrap();
-        let manager = interactive::repository::RepositoryManager::new(host.as_ref(), &git);
+        let manager = interactive::session::SessionManager::new(host.as_ref(), &git);
         let mut forged = record.clone();
         forged.session_host = None;
-        assert!(manager.close_task_workspace(&forged).is_err());
+        assert!(manager.close_task_session(&forged).is_err());
         forged = record.clone();
-        forged.cmux_group_id = Some("someone-else".into());
-        assert!(manager.select_task_workspace(&forged).is_err());
+        forged.session_ref = Some("forged-session-reference".into());
+        assert!(manager.select_task_session(&forged).is_err());
         forged = record.clone();
         forged.worktree = repo.path().to_path_buf();
-        assert!(manager.close_task_workspace(&forged).is_err());
+        assert!(manager.close_task_session(&forged).is_err());
         drop(host);
         // Missing discovered packages fail before any host execution.
         if discovered {
@@ -727,7 +589,7 @@ fn public_launch_focus_cancel_remove_and_uncertain_creation() {
     assert!(backend["workspaces"].get("workspace").is_none());
 
     let (_repo, source, _package, dir, record) = launch_fixture("durable_uncertain", false);
-    assert!(record.cmux_workspace_id.is_none());
+    assert!(record.session_ref.is_none());
     assert!(dir.join("prompt.txt").exists());
     let backend: serde_json::Value =
         serde_json::from_slice(&std::fs::read(source.path().join("backend.json")).unwrap())
@@ -746,7 +608,7 @@ fn incomplete_external_ownership_refuses_focus_and_removal() {
     let task_path = dir.join("task.json");
     let original = std::fs::read(&task_path).unwrap();
     let backend = std::fs::read(source.path().join("backend.json")).unwrap();
-    for (field, missing) in ["cmux_group_id", "cmux_window_id", "cmux_workspace_id"]
+    for (field, missing) in ["session_ref"]
         .into_iter()
         .flat_map(|field| [serde_json::Value::Null, serde_json::json!("")].map(|v| (field, v)))
     {
@@ -928,7 +790,7 @@ fn frozen_versions_survive_updates_and_tampering_refuses_before_execution() {
         let pin = altered.session_host.as_mut().unwrap();
         match change {
             "digest" => pin.executable_sha256 = "0".repeat(64),
-            "protocol" => pin.executable.protocol_version = 2,
+            "protocol" => pin.executable.protocol_version = 1,
             "package" => pin.package = "different".into(),
             "source" => pin.binding.source.sha256 = "0".repeat(64),
             _ => pin.policy_revision = "0".repeat(40),
@@ -974,7 +836,11 @@ fn terminal_package_cleanup_requires_task_removal_first() {
             let git = ahu::git::discover(repo.path()).unwrap();
             interactive::discover_for_record(&git, &record)
                 .unwrap()
-                .close_workspace(record.cmux_workspace_id.as_deref().unwrap())
+                .close_task_session(
+                    record.session_ref.as_deref().unwrap(),
+                    &record.repo_identity,
+                    &record.worktree,
+                )
                 .unwrap();
         }
         let marker = source.path().join("started");

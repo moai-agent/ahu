@@ -111,7 +111,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 }
             }
         },
-        // `run-task` is started by cmux inside the task worktree and works from
+        // `run-task` is started by the selected session provider inside the task worktree and works from
         // the task record alone, so it does not need repository discovery.
         Command::RunTask { task_dir } => commands::run_task(&task_dir),
         Command::BatchSupervisor { task_dir } => ahu::headless::supervise(&task_dir),

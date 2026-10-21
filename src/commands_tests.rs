@@ -128,9 +128,7 @@ fn saved(repo: &Repo, id: &str) -> (PathBuf, task::TaskRecord) {
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: crate::task::TaskState::Exited,
     };
     let dir = repo
@@ -357,7 +355,7 @@ fn task_resolution_distinguishes_missing_ambiguous_and_unreadable_records() {
             .0
             .unwrap_err()
             .to_string()
-            .contains("no recorded cmux session")
+            .contains("no recorded interactive session")
     );
     assert!(
         scripted("", |c| focus(c, &repo, "absent"))
@@ -916,7 +914,7 @@ fn cancellation_preserves_work_when_the_supervisor_finishes_or_record_becomes_un
         record.state = task::TaskState::Running;
         // Neither outcome confirms cancellation, so this workspace must never
         // be contacted or closed by the command.
-        record.cmux_workspace_id = Some("synthetic-workspace-never-contact".into());
+        record.session_ref = Some("synthetic-workspace-never-contact".into());
         task::save(&dir, &record, "synthetic prompt").unwrap();
         let marker = repo.root.join("keep-work.txt");
         std::fs::write(&marker, "reviewable work").unwrap();

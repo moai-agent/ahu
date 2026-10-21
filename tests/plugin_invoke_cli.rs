@@ -341,9 +341,7 @@ fn record(root: &std::path::Path, id: &str) -> std::path::PathBuf {
         reliability_warning: None,
         enforcement,
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: ahu::task::TaskState::Running,
     };
     let dir = root

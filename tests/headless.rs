@@ -3581,17 +3581,17 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_launc
             String::from_utf8_lossy(&interactive.stderr)
         );
         let preview = Fixture::value(&interactive);
-        assert_eq!(preview["cmux_integration"]["headless"]["allowed"], false);
-        assert_eq!(preview["cmux_integration"]["cli_version"], version);
+        assert_eq!(preview["native_admission"]["headless"]["allowed"], false);
+        assert_eq!(preview["native_admission"]["cli_version"], version);
         assert!(
-            preview["cmux_integration"]["headless"]["reasons"]
+            preview["native_admission"]["headless"]["reasons"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|v| v.as_str().unwrap().contains(reason))
         );
         assert_eq!(
-            preview["cmux_integration"]["profile"]["interactive_supported"],
+            preview["native_admission"]["profile"]["interactive_supported"],
             true
         );
         let repo = ahu::git::discover(f.repo.path()).unwrap();

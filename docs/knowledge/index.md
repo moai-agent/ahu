@@ -17,7 +17,7 @@ relative to this bundle root and refer to the accompanying checkout.
 - [Task state](task-state.md) - Where records live and how discovery and integrity checks work.
 - [Task identity](task-identity.md) - Task IDs, their grammar, the repository-scoped pointer index, and resolution semantics.
 - [Task communication](task-communication.md) - Operator-only inbox delivery and the task artifacts ahu reads back for display.
-- [Utility lookup](utility-lookup.md) - How Git and default cmux candidates are selected.
+- [Utility lookup](utility-lookup.md) - How Git and default command candidates are selected.
 - [Knowledge validation](knowledge-validation.md) - How configured bundles are checked and where validator trust ends.
 
 Validate the bundle from the repository root with `okf validate docs/knowledge`

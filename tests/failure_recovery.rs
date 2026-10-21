@@ -193,9 +193,7 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
         reliability_warning: None,
         enforcement,
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: ahu::task::TaskState::Starting,
     };
     ahu::task::save(&task_dir, &record, "p").unwrap();
@@ -526,9 +524,7 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
         reliability_warning: None,
         enforcement: plan.enforcement.clone(),
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: ahu::task::TaskState::Exited,
     };
     previous.state = ahu::task::TaskState::Exited;
@@ -642,9 +638,7 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
         reliability_warning: None,
         enforcement: plan.enforcement.clone(),
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: ahu::task::TaskState::Exited,
     };
 

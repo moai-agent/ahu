@@ -1,13 +1,13 @@
-# Executable session hosts (protocol V1)
+# Executable session hosts (protocol V2)
 
 For generic one-shot JSON processing without session-host methods, see
 [executable plugins](executable-plugins.md). The two declarations and grants are separate.
 
-ahu can explicitly activate a discovered local executable and speak Host V1 over
+ahu can explicitly activate a discovered local executable and speak Host V2 over
 its standard input and output. The current terminal is the default. Providers such as cmux are installed as external plugins. Discovery with
 `ahu plugins` reads metadata only. `ahu plugins --probe` executes the selected
-host, negotiates compatibility, reads its complete workspace inventory, then
-terminates the connection. Neither command creates an ahu task.
+host, negotiates compatibility, then terminates the connection. Neither command
+creates an Ahu task.
 
 Executable hosts require an enabled committed OKF binding with an
 `interactive-backend` grant and exact ahu compatibility. Discovery metadata and
@@ -15,17 +15,17 @@ manifest capabilities never grant execution. The selected package must match the
 binding's source digest, identity and version. Installations resolve by their
 content-addressed receipt; discovered packages are verified in place.
 
-Before workspace startup, ahu persists `session_host` in a schema-5 task record
-(older ahu binaries refuse this schema): the
-original committed binding and revision, package name, executable declaration,
-executable SHA-256 and protocol version. Task operations use that frozen identity,
-not the current selection. Each package identity has a separate group mapping;
-task records without a frozen host identity cannot be resumed through a guessed provider.
-Focus and cleanup verify host identity, workspace directory, group and window.
+Before session startup, Ahu persists `session_host` in the current task schema
+(schema 6). Older task schemas are refused. The record freezes the committed
+binding and revision, package name, executable declaration, executable SHA-256,
+and protocol version. It stores a single opaque `session_ref`; cmux group, window,
+and workspace identifiers remain inside the provider plugin. Task operations use
+the frozen host identity, not the current selection. Focus and cleanup ask the
+provider to verify ownership against the task's repository and worktree.
 Core retains harness startup, supervision, approvals, cancellation confirmation,
 and worktree cleanup. Uncertain creation preserves task inputs and work.
-Executable task focus and cleanup require the recorded workspace, group, and
-window identifiers; missing identifiers do not prove absence. If creation is
+Executable task focus and cleanup require the recorded session reference;
+missing references do not prove absence. If creation is
 uncertain, a later terminal supervisor outcome still retains the task inputs and
 package. An in-flight cancellation reports missing workspace ownership as unknown,
 and automated removal refuses until ownership is reconciled. `ahu` does not recover
@@ -47,7 +47,7 @@ and add this optional mapping inside the `ahu-plugin.md` YAML frontmatter
 ```yaml
 executable:
   path: bin/session-host
-  protocol_version: 1
+  protocol_version: 2
   timeout_ms: 5000
 ```
 
@@ -65,7 +65,7 @@ handles, reads at most 64 MiB, and copies those bytes to an owner-only temporary
 directory outside any Git checkout. The copy is executable and read-only, mode
 0500. This avoids executing a replacement symlink/path after validation; it does
 not prove the source bytes are immutable during copying. ahu runs that absolute
-copy with the single argument `--ahu-host-protocol=1`, uses the temporary directory
+copy with the single argument `--ahu-host-protocol=2`, uses the temporary directory
 as its working directory, and clears the environment except `PATH=/usr/bin:/bin`.
 The executable must be self-contained; native loader dependencies or a script's
 absolute interpreter remain OS-managed. Package-relative assets, the caller's
@@ -93,25 +93,24 @@ The envelope types and limits are public in `ahu_host_api::protocol`. Requests
 use increasing unsigned IDs starting at 1; one request is outstanding at a time:
 
 ```json
-{"protocol_version":1,"id":1,"method":"hello","params":{"protocol_versions":[1],"host_api":1,"plugin_id":"example-host","required_capabilities":["list_groups","find_group","current_window","window_for_workspace","add_workspace_to_group","current_workspace","create_anchor_workspace","set_anchor","create_group","expand_group","create_task_workspace","open_markdown","select_workspace","close_workspace","set_status","set_agent_metadata","workspaces","workspaces_in_window"]}}
+{"protocol_version":2,"id":1,"method":"hello","params":{"protocol_versions":[2],"host_api":1,"plugin_id":"example-host","required_capabilities":["create_task_session","verify_task_session","select_task_session","close_task_session","set_task_status","expand_task_session","place_coordinator","set_agent_metadata","open_markdown"]}}
 ```
 
-The first response must negotiate protocol 1, Host API 1, the exact manifest ID,
+The first response must negotiate protocol 2, Host API 1, the exact manifest ID,
 and every required method capability. Duplicate capabilities, missing methods,
 wrong IDs or versions, and malformed hello data refuse activation and kill the
-child group. Extra unique capabilities are permitted but are not invoked by V1.
-`inherited_workspace` is a host-declared ID or JSON null; ahu does not forward
-`CMUX_WORKSPACE_ID` to establish it.
+child group. Extra unique capabilities are permitted but are not invoked by V2.
+`inherited_workspace` is an opaque provider-owned reference or JSON null.
 
 ```json
-{"protocol_version":1,"id":1,"result":{"protocol_version":1,"host_api":1,"plugin_id":"example-host","capabilities":["list_groups","find_group","current_window","window_for_workspace","add_workspace_to_group","current_workspace","create_anchor_workspace","set_anchor","create_group","expand_group","create_task_workspace","open_markdown","select_workspace","close_workspace","set_status","set_agent_metadata","workspaces","workspaces_in_window"],"inherited_workspace":null}}
+{"protocol_version":2,"id":1,"result":{"protocol_version":2,"host_api":1,"plugin_id":"example-host","capabilities":["create_task_session","verify_task_session","select_task_session","close_task_session","set_task_status","expand_task_session","place_coordinator","set_agent_metadata","open_markdown"],"inherited_workspace":null}}
 ```
 
 Success has exactly `protocol_version`, `id`, and `result` (including JSON null
 for void methods). Failure has exactly `protocol_version`, `id`, and `error`:
 
 ```json
-{"protocol_version":1,"id":2,"error":{"code":"not_created","message":"request refused before creation"}}
+{"protocol_version":2,"id":2,"error":{"code":"not_created","message":"request refused before creation"}}
 ```
 
 Error codes are `failed`, `not_created`, and `outcome_unknown`. Unknown envelope
@@ -121,48 +120,32 @@ an empty successful inventory.
 
 ## Operations
 
-Methods correspond to `ahu_host_api::v1::Host`. Parameters are objects with the
-keys below; absent optional parameters must be represented as JSON null. Paths are
-absolute UTF-8 strings. `Group`, `CreatedWorkspace`, and `WorkspaceInfo` use the
-public Host V1 `serde` representation. IDs are host-owned opaque strings; inventory
-and creation validation requires nonempty IDs of at most 256 bytes without
-control characters. ahu still owns identity, approvals, worktree creation,
-records, cancellation confirmation, and repository associations.
+Methods correspond to `ahu_host_api::v2::Host`. cmux topology and identifiers
+are provider-private. Ahu stores only an opaque `session_ref` in the task record;
+the provider verifies it against the repository identity and expected worktree
+before each mutation. Paths are absolute UTF-8 strings. Ahu still owns identity,
+approvals, worktree creation, records, cancellation confirmation, and repository
+associations.
 
 | Method | Parameter keys | Success result |
 | --- | --- | --- |
-| `list_groups` | `window_id` | `{"complete":true,"groups":[Group]}` |
-| `find_group` | `group_id`, `window_id` | `Group` or null |
-| `current_window` | none | window ID or null |
-| `window_for_workspace` | `workspace_id` | window ID |
-| `add_workspace_to_group` | `group_id`, `workspace_id`, `window_id` | null |
-| `current_workspace` | none | workspace ID or null |
-| `create_anchor_workspace` | `group_id`, `title`, `cwd` | workspace ID |
-| `set_anchor` | `group_id`, `workspace_id` | null |
-| `create_group` | `name`, `cwd` | `Group` |
-| `expand_group` | `group_id` | null |
-| `create_task_workspace` | `group_id`, `window_id`, `title`, `summary`, `cwd`, `startup_command`, `focus` | `CreatedWorkspace` |
-| `open_markdown` | `path`, `focus` | workspace ID |
-| `select_workspace` | `workspace_id` | null |
-| `close_workspace` | `workspace_id` | null |
-| `set_status` | `workspace_id`, `value` | null |
-| `set_agent_metadata` | `workspace_id`, `agent`, `harness`, `model` | null |
-| `workspaces` | none | `{"complete":true,"workspaces":{"id":WorkspaceInfo}}` across all windows |
-| `workspaces_in_window` | `window_id` | same inventory shape, scoped to the supplied window; null means all windows |
-
-`complete:false` is an error. Group identities and members must be unique within
-their respective lists, and each group's members must include its anchor.
-`find_group` must return the requested identity. Inventory completeness is a
-host assertion, not proof of external reality.
+| `create_task_session` | repository identity/name/root, title, summary, worktree, startup command, focus | `CreatedSession` containing `session_ref` |
+| `verify_task_session` | `session_ref`, repository identity, expected directory | `absent`, `owned`, or `mismatch` |
+| `select_task_session` | `session_ref`, repository identity, expected directory | null |
+| `close_task_session` | `session_ref`, repository identity, expected directory | null |
+| `set_task_status` | `session_ref`, repository identity, expected directory, value | null |
+| `expand_task_session` | `session_ref`, repository identity, expected directory | null |
+| `place_coordinator` | repository identity/name/root, label, harness, model, startup command | placement notes and whether a session opened |
+| `set_agent_metadata` | `session_ref`, repository identity, expected directory, agent, harness, model | null |
+| `open_markdown` | absolute path, focus | opaque opened-session reference |
 
 For creation, callers must persist all required task inputs before dispatching
-`startup_command`: the host may start it before replying. ahu sends the command
+`startup_command`: the host may start it before replying. Ahu sends the command
 as one JSON string; it performs no shell interpolation in this transport. The
-host must preserve the requested working directory, group, and optional window.
-After a success reply ahu independently queries a complete window inventory, the
-workspace's window, and its group membership. It accepts creation only if the
-exact requested directory and ownership match. Failed verification never closes
-a workspace.
+host must start it in the requested worktree.
+After a success reply Ahu records the opaque reference and asks the provider to
+verify it against the requested worktree. Failed verification never closes a
+session.
 
 ## Deadlines, cancellation, and partial start
 
@@ -203,15 +186,15 @@ selection/close, protocol mismatch, malformed/partial frames, blocked pipe write
 indeterminate startup, deadlines, cancellation, cleanup, and executable paths.
 
 Session providers are separate repositories and are installed through the standard
-plugin package and committed binding workflow. Core keeps the Host V1 contract,
+plugin package and committed binding workflow. Core keeps the Host V2 contract,
 cross-provider task lifecycle, and harness safety checks that must be enforced
 before launching a process. It does not contain a cmux session adapter. Plugins
 execute with the user's OS permissions; the protocol and ownership checks do not
 sandbox them.
 
-Package tests exercise the server and every V1 method with a fake native CLI,
+Package tests exercise the server and all nine V2 methods with a fake native CLI,
 including creation outcome preservation and strict framed input/output. Core
-lifecycle tests use synthetic Host V1 peers. The external cmux package has also
+lifecycle tests use synthetic Host V2 peers. The external cmux package has also
 been installed and activated through Ahu's real package lifecycle, then negotiated
 and probed against a running cmux service; this read-only probe verified default
 socket discovery with Ahu's cleared environment and read the workspace inventory.

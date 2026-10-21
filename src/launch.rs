@@ -9,8 +9,6 @@ use std::time::{Duration, Instant};
 
 use crate::agent::ResolvedAgent;
 use crate::bail;
-#[cfg(test)]
-use crate::cmux;
 use crate::config::LoadedConfig;
 use crate::git::{self, Repo};
 use crate::harness::{self, EnforcementReport, LaunchCommand, LaunchRequest};
@@ -30,8 +28,7 @@ pub const DELIVERY_IS_NOT_ENFORCEMENT: &str = "ahu delivers the agent's instruct
      it, and the model may follow the task prompt instead. ahu does not use harness \
      agent-selection or system-prompt flags, so no harness enforces this agent's identity.";
 
-pub use crate::interactive::repository::{CoordinatorPlacement, group_coordinator};
-pub use crate::interactive::repository::{GroupMapping, mapping_path};
+pub use crate::interactive::session::{CoordinatorPlacement, group_coordinator};
 
 /// Optional sidebar text, independent of the assignment delivered to the harness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -54,7 +51,7 @@ pub struct LaunchPlan {
     /// Every hook ahu can see that will be in effect for this task.
     pub hooks: HookInventory,
     /// Bounded native integration evidence shared by human and JSON previews.
-    pub cmux_integration: crate::cmux::integration::Status,
+    pub native_admission: crate::native_admission::Status,
     pub base_commit: Option<String>,
     pub parent_dirty: bool,
     pub task_id: String,
@@ -176,7 +173,7 @@ pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
         "selection_basis": plan.pair.basis,
         "policy_digest": plan.pair.policy_digest,
         "catalog_version": plan.pair.catalog_version,
-        "cmux_integration": plan.cmux_integration,
+        "native_admission": plan.native_admission,
         "permissions": plan.permissions.as_str(),
         "argv": argv,
         "prompt_digest": crate::util::digest_bytes(prompt.as_bytes()),
@@ -421,7 +418,7 @@ fn plan_with_mode(
         enforcement.gaps.push(note);
     }
 
-    let cmux_integration = if work_mode {
+    let native_admission = if work_mode {
         // Interactive permission disclosures may describe different argv and
         // attribute the choice to the manifest. Work mode makes its own choice.
         enforcement.applied_controls = vec![format!(
@@ -438,7 +435,7 @@ fn plan_with_mode(
                 .map(String::as_str),
         )
     } else {
-        crate::cmux::integration::inspect(&repo.root, &pair.harness)
+        crate::native_admission::inspect(&repo.root, &pair.harness)
             .with_version(enforcement.harness_version.as_deref())
     };
     Ok(LaunchPlan {
@@ -453,7 +450,7 @@ fn plan_with_mode(
         enforcement,
         snapshot,
         hooks: found_hooks,
-        cmux_integration,
+        native_admission,
         base_commit,
         parent_dirty,
         task_id,
@@ -527,9 +524,7 @@ pub(crate) fn prepared_record(
         // Retain the field for compatibility with older records.
         reliability_warning: None,
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: TaskState::Starting,
     }
 }
@@ -574,13 +569,13 @@ fn rollback_worktree(repo: &Repo, plan: &LaunchPlan, cause: Error) -> Error {
 fn workspace_creation_failed(
     repo: &Repo,
     plan: &LaunchPlan,
-    error: interactive::v1::WorkspaceCreationError,
+    error: interactive::v2::SessionCreationError,
 ) -> Error {
     match error {
-        interactive::v1::WorkspaceCreationError::NotCreated(cause) => {
+        interactive::v2::SessionCreationError::NotCreated(cause) => {
             rollback_worktree(repo, plan, cause)
         }
-        interactive::v1::WorkspaceCreationError::OutcomeUnknown(cause) => {
+        interactive::v2::SessionCreationError::OutcomeUnknown(cause) => {
             let kind = cause.kind();
             Error::new(format!(
                 "{cause}\n\n\
@@ -627,17 +622,13 @@ fn update_task_record_locked(
     Ok(())
 }
 
-fn record_created_workspace(
+fn record_created_session(
     task_dir: &Path,
     record: &mut TaskRecord,
-    group_id: &str,
-    workspace_id: &str,
-    window_id: &str,
+    session_ref: &str,
 ) -> Result<()> {
     update_task_record_locked(task_dir, record, |latest| {
-        latest.cmux_group_id = Some(group_id.to_owned());
-        latest.cmux_workspace_id = Some(workspace_id.to_owned());
-        latest.cmux_window_id = Some(window_id.to_owned());
+        latest.session_ref = Some(session_ref.to_owned());
     })
 }
 
@@ -677,7 +668,7 @@ pub struct Launched {
     pub notes: Vec<String>,
 }
 
-/// Execute a plan: create the worktree, the task record, and the cmux session.
+/// Execute a plan: create the worktree, task record, and selected provider session.
 pub fn execute(
     repo: &Repo,
     loaded: &LoadedConfig,
@@ -704,8 +695,8 @@ pub fn execute(
     let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
     let mut notes = Vec::new();
 
-    // cmux must be reachable before a worktree is created, so an unavailable
-    // cmux never leaves a worktree behind.
+    // The selected session provider must be reachable before a worktree is
+    // created, so a missing provider never leaves an orphan worktree.
     let (session_host, frozen_host) = interactive::discover_for_launch(repo)
         .map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
     if let Some(host) = &session_host {
@@ -768,25 +759,18 @@ pub fn execute(
             .map_err(|e| Error::new(format!("cannot locate the ahu executable: {e}")))?;
         let startup = interactive::startup_command(&executable, &plan.task_dir);
         let title = interactive::workspace_title(&plan.agent_label(), &plan.title);
-        let manager = interactive::repository::RepositoryManager::new(session_host.as_ref(), repo);
-        let placement = match manager.create_task_workspace(
+        let manager = interactive::session::SessionManager::new(session_host.as_ref(), repo);
+        let created = match manager.create_task_session(
             &title,
             &plan.summary,
             &plan.worktree,
             &startup,
             focus,
-            &mut notes,
         ) {
-            Ok(placement) => placement,
+            Ok(created) => created,
             Err(e) => return Err(workspace_creation_failed(repo, &plan, e)),
         };
-        finish_workspace_launch(
-            &plan.task_dir,
-            &mut record,
-            &manager,
-            &placement,
-            &mut notes,
-        );
+        finish_workspace_launch(&plan.task_dir, &mut record, &manager, &created, &mut notes);
         // A session host starts the task in a separate workspace process. The
         // repository lock protects worktree and workspace creation only; the
         // agent's lifetime must not block the next assignment.
@@ -817,23 +801,15 @@ pub fn execute(
 fn finish_workspace_launch(
     task_dir: &Path,
     record: &mut TaskRecord,
-    manager: &interactive::repository::RepositoryManager<'_>,
-    placement: &interactive::repository::ManagedTaskWorkspace,
+    manager: &interactive::session::SessionManager<'_>,
+    created: &interactive::v2::CreatedSession,
     notes: &mut Vec<String>,
 ) {
-    let group = &placement.group;
-    let created = &placement.workspace;
-    // The workspace's shell may already be running. Cleanup requires both
-    // durable cancellation and the manager's exact ownership validation.
-    if let Err(e) = record_created_workspace(
-        task_dir,
-        record,
-        &group.id,
-        &created.workspace_id,
-        &created.window_id,
-    ) {
+    // The session may already be running. Persist its opaque reference before
+    // any best-effort status or presentation updates.
+    if let Err(e) = record_created_session(task_dir, record, &created.session_ref) {
         notes.push(format!(
-            "the cmux session started but its task record could not be updated: {e}"
+            "the interactive session started but its task record could not be updated: {e}"
         ));
         return;
     }
@@ -841,9 +817,9 @@ fn finish_workspace_launch(
     // lock, cancel may already have returned without a workspace to close. If
     // publication won, cancel's confirmation read will see these identifiers.
     if record.state == TaskState::Cancelled {
-        if let Err(error) = manager.close_task_workspace(record) {
+        if let Err(error) = manager.close_task_session(record) {
             notes.push(format!(
-                "cancellation confirmed, but cmux workspace close failed: {error}"
+                "cancellation confirmed, but session close failed: {error}"
             ));
         }
         return;
@@ -854,12 +830,15 @@ fn finish_workspace_launch(
     ) {
         notes.push(format!("could not set the sidebar status: {e}"));
     }
-    if let Err(e) = manager.expand_task_group(record) {
-        notes.push(format!("could not expand the repository group: {e}"));
+    if let Err(e) = manager.set_agent_metadata(record) {
+        notes.push(format!("could not set session agent metadata: {e}"));
+    }
+    if let Err(e) = manager.expand_task_session(record) {
+        notes.push(format!("could not expand the interactive session: {e}"));
     }
 }
 
-/// Reconcile recorded tasks against cmux, so sessions closed outside ahu do not
+/// Reconcile recorded tasks against their session host, so sessions closed outside ahu do not
 /// linger as "running" forever.
 ///
 /// Returns the whole listing, unreadable directories included. Reconciliation
@@ -869,7 +848,7 @@ pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
     let mut tasks = task::list(repo)?;
     for (dir, record) in tasks.records.iter_mut() {
         if dir.join("headless.json").exists()
-            || record.cmux_workspace_id.is_none()
+            || record.session_ref.is_none()
             || !record.state.is_live()
         {
             continue;
@@ -877,13 +856,14 @@ pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
         let Ok(client) = interactive::discover_for_record(repo, record) else {
             continue;
         };
-        let Ok(live) = client.workspaces() else {
+        let Some(session_ref) = record.session_ref.as_deref() else {
             continue;
         };
-        let Some(workspace_id) = record.cmux_workspace_id.as_deref() else {
-            continue;
-        };
-        if !live.contains_key(workspace_id) && record.state.is_live() {
+        if matches!(
+            client.verify_task_session(session_ref, &repo.identity(), &record.worktree),
+            Ok(crate::interactive::v2::WorkspaceOwnership::Absent)
+        ) && record.state.is_live()
+        {
             // Best effort: failed persistence must not break listing or invent
             // an outcome. Reload under lock so a supervisor's terminal state wins.
             let _ = task::set_exited_if_live(dir, record);
@@ -1126,7 +1106,7 @@ pub(crate) fn verify_task(
     {
         eprintln!(
             "ahu: this workspace resolves {} to {}, not the {} seen at submission. \
-             That is normal under cmux, which installs a per-surface wrapper.",
+             Session environments can install harness wrappers with different paths.",
             rebuilt.program,
             executable.display(),
             record.harness_executable.display()
@@ -1402,15 +1382,14 @@ fn run_verified_task(
     // Nested commands discover the checkout the session edits.
     state::ensure_checkout_state(&record.worktree)?;
     task::set_state(task_dir, TaskState::Running)?;
-    if record.cmux_workspace_id.is_some()
+    if record.session_ref.is_some()
         && let Ok(repo) = git::discover(&record.worktree)
         && let Ok(client) = interactive::discover_for_record(&repo, &record)
     {
-        let _ = interactive::repository::RepositoryManager::new(client.as_ref(), &repo)
-            .set_task_status(
-                &record,
-                &interactive::workspace_identity(&record.identity.agent, &record.identity.model),
-            );
+        let _ = interactive::session::SessionManager::new(client.as_ref(), &repo).set_task_status(
+            &record,
+            &interactive::workspace_identity(&record.identity.agent, &record.identity.model),
+        );
     }
 
     // A cancellation that arrived before the harness started must not be
@@ -1459,8 +1438,8 @@ fn run_verified_task(
             .env("AHU_BIN", std::env::current_exe()?)
             .env(
                 "AHU_WORKER_SESSION",
-                if record.cmux_workspace_id.is_some() {
-                    "cmux"
+                if record.session_ref.is_some() {
+                    "interactive"
                 } else {
                     "terminal"
                 },
@@ -1573,51 +1552,6 @@ fn record_harness_outcome(
 #[cfg(test)]
 mod group_recovery_tests {
     use super::*;
-    fn group(id: &str, member: &str) -> crate::interactive::v1::Group {
-        crate::interactive::v1::Group {
-            id: id.into(),
-            name: "ahu".into(),
-            anchor_workspace_id: member.into(),
-            member_workspace_ids: vec![member.into()],
-            is_collapsed: false,
-        }
-    }
-    #[test]
-    fn reuse_current_group_and_refuse_ambiguous_recovery() {
-        let groups = vec![
-            group("new", "task"),
-            group("original", "coordinator"),
-            group("unrelated", "other-repo"),
-        ];
-        let matches =
-            cmux::repository::repository_group_candidates(&groups, "ahu", |id| id != "other-repo");
-        assert_eq!(matches.len(), 2);
-        assert_eq!(
-            cmux::repository::recover_group(&matches, Some("coordinator"))
-                .unwrap()
-                .unwrap()
-                .id,
-            "original"
-        );
-        assert!(cmux::repository::recover_group(&matches, None).is_err());
-        assert_eq!(
-            cmux::repository::recover_group(&matches[..1], None)
-                .unwrap()
-                .unwrap()
-                .id,
-            "new"
-        );
-        assert!(
-            cmux::repository::recover_group(&[], None)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            cmux::repository::repository_group_candidates(&groups, "different", |_| true)
-                .is_empty()
-        );
-    }
-
     fn spawn_sleep(seconds: &str) -> std::process::Child {
         use std::os::unix::process::CommandExt;
         std::process::Command::new("sleep")

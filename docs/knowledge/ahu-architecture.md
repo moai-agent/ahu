@@ -46,7 +46,7 @@ sources:
 The core agent-task service V1, documented in `../agent-task-service.md`, defines an opt-in,
 provider-neutral task lifecycle interface for core-issued scoped sessions. Its
 in-memory and local implementations retain admission and execution control in
-core. It is independent of the terminal Host V1 API and adds no remote agent
+core. It is independent of the terminal Host V2 API and adds no remote agent
 protocol or plugin storage access. CLI and MCP task inspection use its scoped
 read interface. Launch, cancel, approval, message, and headless wait/result
 operations remain on their existing core paths; there is no production execution

@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use crate::agent::{self, ResolvedAgent};
 use crate::bail;
 use crate::catalog;
-use crate::cmux;
 use crate::config::{self, LoadedConfig};
 use crate::context_lock;
 use crate::drift;
@@ -18,6 +17,7 @@ use crate::interactive;
 use crate::knowledge;
 use crate::launch;
 use crate::launcher::{self, Console};
+use crate::native_admission;
 use crate::onboard;
 use crate::selection::{self, ResolvedPair};
 use crate::style::{self, Role};
@@ -104,7 +104,7 @@ fn coordinating_session(repo: &Repo, program: &str, label: &str, bypass: &[&str]
     let ranked = loaded
         .as_ref()
         .and_then(|loaded| selection::ranked_models(loaded, harness).into_iter().next());
-    // Telemetry and cmux metadata still need a value for a harness with no
+    // Telemetry and session metadata still need a value for a harness with no
     // ranked model; the argument list gets no model option in that case.
     let model = ranked.clone().unwrap_or_else(|| "unconfigured".to_string());
     let mut args: Vec<String> = match &ranked {
@@ -786,23 +786,23 @@ pub fn doctor_with_verbosity(
         let version = crate::catalog::harness(harness)
             .and_then(|entry| crate::selection::installed_version(entry.executable));
         let status =
-            cmux::integration::inspect(&integration_root, harness).with_version(version.as_deref());
+            native_admission::inspect(&integration_root, harness).with_version(version.as_deref());
         if status
             .components
             .iter()
-            .any(|c| c.registration != cmux::integration::Registration::Installed)
+            .any(|c| c.registration != native_admission::Registration::Installed)
         {
             warnings += 1;
         }
         if verbose {
             console.say(&format!("native safety {}:\n", display_safe(harness)))?;
-            console.say(&cmux::integration::render_summary(&status))?;
+            console.say(&native_admission::render_summary(&status))?;
         } else {
             let verified = status
                 .components
                 .iter()
                 .filter(|component| {
-                    component.registration == cmux::integration::Registration::Installed
+                    component.registration == native_admission::Registration::Installed
                 })
                 .count();
             let unknown = status.components.len().saturating_sub(verified);
@@ -1030,8 +1030,8 @@ fn tasks_limited_at(
             "headless"
         } else if record.session_host.is_some() {
             "plugin"
-        } else if record.cmux_workspace_id.is_some() {
-            "cmux"
+        } else if record.session_ref.is_some() {
+            "interactive"
         } else {
             "terminal"
         };
@@ -1446,7 +1446,7 @@ fn load_indexed_record(
 /// reachable from any checkout of the repository that launched it.
 fn resolve_task(repo: &Repo, input: &str) -> Result<Located> {
     let id = crate::task_ref::resolve(repo, input)?;
-    // Inspection needs no live cmux connection and does not rewrite records.
+    // Inspection needs no live session provider and does not rewrite records.
     let listing = task::list(repo)?;
     if let Some((dir, record)) = listing.records.iter().find(|(_, r)| r.task_id == id) {
         return Ok(Located::Listing(dir.clone(), record.clone()));
@@ -1526,7 +1526,7 @@ pub(crate) fn inspect_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::Task
 fn inspect_local_task(repo: &Repo, id: &str) -> Result<(PathBuf, task::TaskRecord)> {
     let normalized = crate::task_ref::resolve(repo, id)?;
     let id: &str = &normalized;
-    // Inspection needs no live cmux connection and does not rewrite records.
+    // Inspection needs no live session provider and does not rewrite records.
     let listing = task::list(repo)?;
     let exact = listing.records.iter().any(|(_, r)| r.task_id == id)
         || listing.unreadable.iter().any(|r| r.task_id == id);
@@ -1585,9 +1585,8 @@ pub fn task_summary(dir: &Path, record: &task::TaskRecord) -> Result<serde_json:
         "worktree": record.worktree,
         "worktree_exists": record.worktree.is_dir(),
         "record_path": dir.join("task.json"),
-        "cmux_workspace_id": record.cmux_workspace_id,
+        "session_ref": record.session_ref,
         "session_host": record.session_host,
-        "cmux_window_id": record.cmux_window_id,
         "session_state": current_state,
         "completion_verified": false,
         "harness_executable": record.harness_executable,
@@ -1596,10 +1595,10 @@ pub fn task_summary(dir: &Path, record: &task::TaskRecord) -> Result<serde_json:
         "headless".into()
     } else if record.session_host.is_some() {
         "external-host".into()
-    } else if record.cmux_workspace_id.is_none() {
+    } else if record.session_ref.is_none() {
         "terminal".into()
     } else {
-        "cmux".into()
+        "interactive-plugin".into()
     };
     if crate::headless::review::is_headless(dir) {
         value["attempt"] = crate::headless::inspection(dir)?;
@@ -1631,8 +1630,8 @@ pub fn task_cmd(console: &mut Console<'_>, repo: &Repo, id: &str, json: bool) ->
             console.say("  session   current terminal\n")?;
         } else {
             console.say(&format!(
-                "  cmux      {}\n",
-                display_safe(record.cmux_workspace_id.as_deref().unwrap_or("none"))
+                "  session   {}\n",
+                display_safe(record.session_ref.as_deref().unwrap_or("none"))
             ))?;
         }
         if let Some(request) = &approval {
@@ -1982,7 +1981,7 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
             // record, saying so is the difference between a user looking for a
             // typo and a user looking at a leftover worktree.
             bail!(
-                "task {} exists but ahu cannot read its record, so it cannot find its cmux \
+                "task {} exists but ahu cannot read its record, so it cannot find its interactive \
                  session.\n{}\nThe record is at {}. Run `ahu tasks` for its worktree and branch.",
                 display_safe(&crate::task_ref::display(&blocked.task_id)),
                 display_safe_block(&blocked.reason),
@@ -2001,12 +2000,15 @@ pub fn focus(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Result<i3
             );
         }
     };
-    if record.cmux_workspace_id.is_none() {
-        bail!("task {} has no recorded cmux session.", record.task_id);
+    if record.session_ref.is_none() {
+        bail!(
+            "task {} has no recorded interactive session.",
+            record.task_id
+        );
     }
     let client = interactive::discover_for_record(repo, &record)?;
-    interactive::repository::RepositoryManager::new(client.as_ref(), repo)
-        .select_task_workspace(&record)?;
+    interactive::session::SessionManager::new(client.as_ref(), repo)
+        .select_task_session(&record)?;
     console.say(&format!(
         "Focused {} — {}\n  worktree {}\n",
         style::stdout().paint(Role::Agent, &display_safe(&record.agent_label())),
@@ -2173,15 +2175,15 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     } else {
         None
     };
-    let cmux_status = if record.cmux_workspace_id.is_some() || record.session_host.is_some() {
+    let session_status = if record.session_ref.is_some() || record.session_host.is_some() {
         let client = interactive::discover_for_record(gate, &record).map_err(|error| {
             Error::new(format!(
-                "cannot safely remove task {} while its recorded session workspace cannot be checked: {error}",
+                "cannot safely remove task {} while its recorded session cannot be checked: {error}",
                 display_safe(task_id)
             ))
         })?;
-        if interactive::repository::RepositoryManager::new(client.as_ref(), gate)
-            .close_task_workspace(&record)?
+        if interactive::session::SessionManager::new(client.as_ref(), gate)
+            .close_task_session(&record)?
         {
             "closed"
         } else {
@@ -2207,7 +2209,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
             }
             Err(e) => {
                 bail!(
-                    "could not remove task worktree: {e}\nTask record and branch were preserved; workspace {cmux_status}."
+                    "could not remove task worktree: {e}\nTask record and branch were preserved; session {session_status}."
                 );
             }
         }
@@ -2271,7 +2273,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     }
     let mut said = format!("removed task {}\n", display_safe(task_id));
     said.push_str(&format!(
-        "  worktree  {}\n  branch    {}\n  record    {}\n  cmux      {cmux_status}\n",
+        "  worktree  {}\n  branch    {}\n  record    {}\n  session   {session_status}\n",
         completed[0].1, completed[2].1, completed[1].1,
     ));
     console.say(&said)?;
@@ -2282,7 +2284,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
 ///
 /// A check, so its exit status is the result: 0 when the bundles pass under the
 /// project's policy, 5 when they do not. Nothing in a bundle is written to,
-/// and no cmux session or harness is involved.
+/// and no interactive provider or harness is involved.
 pub fn knowledge_lint(console: &mut Console<'_>, repo: &Repo, json: bool) -> Result<i32> {
     let loaded = config::load(&repo.root)?.ok_or_else(|| {
         crate::util::Error::new(
@@ -2373,8 +2375,8 @@ pub fn cancel_cmd(repo: &Repo, id: &str, json_output: bool) -> Result<i32> {
     let (cancellation, workspace) =
         confirm_interactive_cancellation(&dir, &mut record, Duration::from_secs(5), |current| {
             interactive::discover_for_record(repo, current).and_then(|client| {
-                interactive::repository::RepositoryManager::new(client.as_ref(), repo)
-                    .close_task_workspace(current)
+                interactive::session::SessionManager::new(client.as_ref(), repo)
+                    .close_task_session(current)
                     .map(|_| ())
             })
         })?;
@@ -2428,13 +2430,13 @@ pub(crate) fn confirm_interactive_cancellation(
 
     // Only the spawning supervisor can confirm termination. A timeout or a
     // read failure preserves the pane; closing it is not process supervision.
-    let workspace = match record.cmux_workspace_id.as_deref() {
+    let workspace = match record.session_ref.as_deref() {
         None if record.session_host.is_some() => "unknown",
         None => "absent",
         Some(_workspace_id) if cancellation == "confirmed" => {
             close_workspace(record).map_err(|error| {
                 crate::util::Error::new(format!(
-                    "cancellation confirmed, but cmux workspace close failed: {error}"
+                    "cancellation confirmed, but interactive session close failed: {error}"
                 ))
             })?;
             "closed"
@@ -2494,7 +2496,7 @@ pub fn approval_cmd(repo: &Repo, id: &str, approve: bool, json_output: bool) -> 
     Ok(0)
 }
 
-/// `ahu run-task --task-dir <dir>` — the fixed entrypoint cmux starts.
+/// `ahu run-task --task-dir <dir>` — the fixed entrypoint the session provider starts.
 pub fn run_task(task_dir: &Path) -> Result<i32> {
     let record = crate::task::load(task_dir)?;
     if let Some(loaded) = crate::config::load(&record.worktree)? {
@@ -2770,7 +2772,7 @@ fn submit(
     }
 
     let launched = launch::execute(repo, loaded, &plan, prompt, focus_new)?;
-    if launched.record.cmux_workspace_id.is_some() || launched.record.session_host.is_some() {
+    if launched.record.session_ref.is_some() || launched.record.session_host.is_some() {
         console.say(&format!(
             "\nStarted @{} in the selected session host.\n  task       {}\n  worktree   {}\n\nOpen session: ahu focus {}\nList tasks:   ahu tasks\n",
             display_safe(&launched.record.identity.agent),
@@ -2935,7 +2937,7 @@ pub fn render_launch_preview(
             ),
         ));
     }
-    out.push_str(&cmux::integration::render_summary(&plan.cmux_integration));
+    out.push_str(&native_admission::render_summary(&plan.native_admission));
     out
 }
 
@@ -3184,8 +3186,8 @@ pub fn render_preview(
     out.push_str(
         "The harness is resolved from PATH by name in the task workspace, and only from an\n\
          absolute PATH entry outside this repository. The path above is what PATH resolves to\n\
-         here; under cmux the workspace may resolve a different per-surface wrapper of the same\n\
-         harness.\n",
+         here; the session may resolve a different wrapper of the same harness\n\
+         on its own PATH.\n",
     );
     if let Some(code) = confirmation_code {
         out.push_str(&style.paint(
@@ -3197,7 +3199,7 @@ pub fn render_preview(
         ));
         out.push_str("It was generated after your prompt was read, so no pasted text can have supplied it.\n");
     }
-    out.push_str(&cmux::integration::render(&plan.cmux_integration));
+    out.push_str(&native_admission::render(&plan.native_admission));
     out
 }
 

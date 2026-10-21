@@ -334,9 +334,7 @@ fn a_task_record_without_a_prompt_digest_does_not_load_at_all() {
             "applied_controls": [],
         },
         "reliability_warning": null,
-        "cmux_group_id": null,
-        "cmux_workspace_id": null,
-        "cmux_window_id": null,
+        "session_ref": null,
         "state": "starting",
     });
     std::fs::write(
@@ -512,9 +510,7 @@ fn write_record(
         reliability_warning: None,
         enforcement,
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: TaskState::Starting,
     };
     tamper(&mut record);
@@ -580,9 +576,7 @@ fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
             "applied_controls": [],
         },
         "reliability_warning": null,
-        "cmux_group_id": null,
-        "cmux_workspace_id": null,
-        "cmux_window_id": null,
+        "session_ref": null,
         "state": "exited",
     });
     std::fs::write(

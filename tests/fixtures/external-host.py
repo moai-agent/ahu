@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Synthetic Host V1 peer: in-memory surfaces only, never starts a shell/terminal."""
+"""Synthetic Host V2 peer: in-memory surfaces only, never starts a shell/terminal."""
 import json
 import os
 import struct
@@ -59,11 +59,11 @@ while True:
     size = struct.unpack(">I", read_exact(4))[0]
     assert 0 < size <= 1024 * 1024
     request = json.loads(read_exact(size))
-    assert request["protocol_version"] == 1
+    assert request["protocol_version"] == 2
     method, params = request["method"], request["params"]
-    response = {"protocol_version": 1, "id": request["id"], "result": None}
+    response = {"protocol_version": 2, "id": request["id"], "result": None}
     if method == "hello":
-        assert params["protocol_versions"] == [1]
+        assert params["protocol_versions"] == [2]
         if MODE == "exit_hello":
             sys.exit(1)
         if MODE == "hang_hello":
@@ -82,7 +82,7 @@ while True:
             sys.exit(0)
         capabilities = params["required_capabilities"]
         response["result"] = {
-            "protocol_version": 2 if MODE == "bad_negotiation" else 1,
+            "protocol_version": 1 if MODE == "bad_negotiation" else 2,
             "host_api": 1,
             "plugin_id": "other" if MODE == "wrong_identity" else PLUGIN_ID,
             "capabilities": capabilities[:-1] if MODE == "missing_capability" else capabilities,
@@ -93,30 +93,22 @@ while True:
         if MODE == "wrong_id":
             response["id"] += 1
         if MODE == "wrong_version":
-            response["protocol_version"] = 2
+            response["protocol_version"] = 1
         if MODE == "unknown_envelope_field":
             response["extra"] = True
         if MODE == "both_result_error":
             response["error"] = {"code": "failed", "message": "synthetic"}
         if MODE == "stderr_flood":
             os.write(2, b"x" * (1024 * 1024))
-    elif method in ("workspaces", "workspaces_in_window"):
-        if MODE == "duplicate_workspace":
-            body = (b'{"protocol_version":1,"id":' + str(request["id"]).encode()
-                    + b',"result":{"complete":false,"complete":true,"workspaces":{}}}')
-            sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
-            sys.stdout.buffer.flush()
-            sys.exit(0)
-        response["result"] = {"complete": MODE != "incomplete_inventory", "workspaces": workspaces}
-    elif method == "create_group":
-        group["name"] = params["name"]
-        workspaces["anchor"] = {"directory": params["cwd"], "title": params["name"]}
-        response["result"] = group
-    elif method == "list_groups":
-        response["result"] = {"complete": True, "groups": [group]}
-    elif method == "find_group":
-        response["result"] = group if params["group_id"] == group["id"] else None
-    elif method == "create_task_workspace":
+    elif method == "verify_task_session":
+        if params["session_ref"] != "fixture-session-ref" or "workspace" not in workspaces:
+            response["result"] = "absent"
+        elif (workspaces["workspace"]["directory"] != params["expected_directory"]
+              or MODE == "wrong_window"):
+            response["result"] = "mismatch"
+        else:
+            response["result"] = "owned"
+    elif method == "create_task_session":
         if MODE.startswith("durable"):
             import shlex
             words = shlex.split(params["startup_command"])
@@ -125,12 +117,12 @@ while True:
                 task = json.load(stream)
                 pin = task["session_host"]
                 assert pin["package"] == "fixture-host"
-                assert pin["executable"]["protocol_version"] == 1
+                assert pin["executable"]["protocol_version"] == 2
                 assert len(pin["executable_sha256"]) == 64
-                assert task["cmux_workspace_id"] is None
+                assert task["session_ref"] is None
 
         if MODE == "created_then_exit":
-            with open(os.path.join(params["cwd"], "startup-observed"), "w") as stream:
+            with open(os.path.join(params["worktree"], "startup-observed"), "w") as stream:
                 stream.write("synthetic startup side effect")
             sys.exit(0)
         if MODE == "exit_create":
@@ -142,29 +134,25 @@ while True:
             response["error"] = {"code": {"not_created": "not_created", "unknown_create": "outcome_unknown", "failed_create": "failed"}[MODE], "message": "synthetic refusal"}
         else:
             # Models creation but deliberately never evaluates startup_command.
-            workspaces["workspace"] = {"directory": "/wrong" if MODE == "wrong_cwd" else params["cwd"], "title": params["title"], "description": params["summary"]}
+            workspaces["workspace"] = {"directory": "/wrong" if MODE == "wrong_cwd" else params["worktree"], "title": params["title"], "description": params["summary"]}
             group["member_workspace_ids"].append("workspace")
-            response["result"] = {"workspace_id": "workspace", "window_id": "window", "group_id": "wrong" if MODE == "wrong_group" else "group"}
-    elif method == "window_for_workspace":
-        response["result"] = "wrong" if MODE == "wrong_window" else "window"
-    elif method in ("current_workspace", "current_window"):
-        response["result"] = None
-    elif method == "close_workspace":
-        workspaces.pop(params["workspace_id"], None)
-        group["member_workspace_ids"].remove(params["workspace_id"])
-    elif method in ("select_workspace", "set_status", "set_agent_metadata", "expand_group", "set_anchor", "add_workspace_to_group"):
-        pass
-    elif method == "create_anchor_workspace":
-        response["result"] = "anchor"
+            response["result"] = {"session_ref": "fixture-session-ref"}
+    elif method in ("select_task_session", "close_task_session", "set_task_status", "expand_task_session", "set_agent_metadata"):
+        if method == "close_task_session":
+            workspaces.pop("workspace", None)
+            if "workspace" in group["member_workspace_ids"]:
+                group["member_workspace_ids"].remove("workspace")
+    elif method == "place_coordinator":
+        response["result"] = {"notes": [], "opened_session": False}
     elif method == "open_markdown":
         response["result"] = "document"
     else:
         del response["result"]
         response["error"] = {"code": "failed", "message": "unsupported fixture operation"}
-    if method == "create_task_workspace" and MODE == "malformed_create":
+    if method == "create_task_session" and MODE == "malformed_create":
         response["result"] = "invalid result"
     persist()
-    if method == "create_task_workspace" and MODE == "durable_uncertain":
+    if method == "create_task_session" and MODE == "durable_uncertain":
         sys.exit(0)
     send(response)
     if method == "hello" and MODE == "backpressure":

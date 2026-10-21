@@ -341,7 +341,7 @@ The interactive preview has `schema_version: 1` and these fields:
 | `prompt_digest`, `prompt_bytes` | SHA-256 and UTF-8 byte length of the original task prompt. |
 | `enforcement` | Model enforcement status, gaps, and applied controls. |
 | `warnings` | Hook, approval, wrapper, and other launch disclosures; ordinary in-session model switching is not a reliability warning. |
-| `cmux_integration` | Shared local component evidence, activation/isolation uncertainty, and headless admission. |
+| `native_admission` | Shared local component evidence, activation/isolation uncertainty, and headless admission. |
 | `executed` | Always `false` for a preview. |
 
 JSON strings preserve the actual metadata through JSON escaping; terminal
@@ -1723,7 +1723,7 @@ an unreadable or unavailable signal reports `unknown` and does not mark the task
 running. Interactive runner processes hold `owner.lock`; older tasks without that
 proof remain `unknown`, even when their terminal workspace still exists. JSON schema version 2 includes `task_id`, `agent`,
 `harness`, `model`, `branch`, `base_commit`, `worktree`, `worktree_exists`,
-`record_path`, `cmux_workspace_id`, and `cmux_window_id`. `session_state` is the
+`record_path`, `session_workspace_id`, and `session_window_id`. `session_state` is the
 effective `starting`, `running`, `waiting-for-approval`, `exited`, `failed`,
 `cancelled`, or `unknown` state; `completion_verified` is always `false`.
 Headless records also include an
@@ -1808,14 +1808,14 @@ the full recorded list.
   same trust consequences as the rest of the repository.
 - **The configured harness and model at launch.** The preview records the
   executable found on the submitting shell's `PATH`. For interactive startup, `run-task`
-  resolves the same harness name on the workspace's `PATH`; cmux wrappers can
-  differ between surfaces. ahu reports a changed path and rejects relative or
+  resolves the same harness name on the session's `PATH`; wrapper paths can
+  differ between environments. ahu reports a changed path and rejects relative or
   repository-local executables. ahu does not substitute a model or pass permission
   flags beyond those requested
   by the manifest. The harness controls model changes during the session.
 - **A frozen record.** The agent version, both digests of its source file, the
   configuration snapshot digest, the policy digest, the base commit, branch,
-  worktree, and cmux ids are written to local task metadata. Editing an agent
+  worktree, and the opaque session reference is written to local task metadata. Editing an agent
   later changes the next launch; a running task keeps what it started with.
 
 ### Two digests, each named
@@ -1942,7 +1942,7 @@ file that exists but cannot be parsed is reported as *unknown* hooks, never as
 
 ## Interactive host boundary
 
-Interactive session providers use the versioned external Host V1 protocol
+Interactive session providers use the versioned external Host V2 protocol
 ([details](executable-hosts.md)). Ahu owns cross-harness coordination, task
 lifecycle, worktree operations, and MCP; provider-specific session mechanics
 live in plugins. The current terminal is the default. An enabled committed
@@ -1953,7 +1953,7 @@ permissions; plugin separation is an integration boundary, not a sandbox.
 
 ## Native hook safety inspection
 
-Ahu performs bounded, read-only inspection of native hook configuration that can affect headless launches. It does not invoke the cmux CLI, install native hooks, or manage session hosting. Session creation, inventory, focus, and cleanup use the selected external session-host plugin through Host V1.
+Ahu performs bounded, read-only inspection of native hook configuration that can affect headless launches. It does not invoke the cmux CLI, install native hooks, or manage session hosting. Session creation, inventory, focus, and cleanup use the selected external session-host plugin through Host V2.
 
 Headless admission is checked before execution and rechecked by the supervisor. The child environment removes inherited `CMUX_*` routing variables and restores only a reviewed process-local control when the evidence requires one. Current verified guards use `CMUX_CODEX_HOOKS_DISABLED` or `CMUX_OPENCODE_HOOKS_DISABLED`. Claude’s reviewed wrapper requires a direct executable; registered Claude and Antigravity hook commands remain unknown. A variable name alone is not proof of isolation. Unsafe or unknown components refuse admission. Ahu leaves native homes and settings in place. Arbitrary shell commands, hooks, remote plugins, and concurrent same-user changes remain outside these controls. A successful static inspection does not launch or validate a native session.
 
@@ -2026,24 +2026,15 @@ Headless tasks use primary-owned coordination; interactive tasks use their own
 worktree-local records. `tasks` and `task` include compatible legacy records as
 well. `focus` uses the task’s recorded session-host plugin.
 
-### Interactive cmux ownership
+### Interactive provider ownership
 
-All interactive harnesses enter `cmux::repository::RepositoryManager` after
-harness and model resolution. That manager owns repository-group selection and
-recovery, anchor restoration, task-workspace creation, and the recorded
-task-to-group/window/workspace association. `ahu focus`, confirmed cancellation,
-task status updates, and `ahu remove` cleanup resolve that association through
-the same manager. Ambiguous or mismatched ownership fails closed rather than
-selecting or closing a similarly named workspace. Headless tasks do not require
-cmux and do not enter this lifecycle.
-
-ahu stores cmux's group, window, and workspace identifiers in the task record.
-The workspace is the addressable task terminal surface in the cmux API used by
-ahu; cmux does not provide ahu a stable separate pane/surface identifier for
-that shell. The `surface_id` returned by `markdown.open` is for the separate
-explanation viewer and is not a task-session identifier. These limits mean ahu
-can confirm and manage the task workspace, but does not claim to inspect the
-harness process or terminal internals from cmux alone.
+Interactive session lifecycle uses the selected external Host V2 plugin. Ahu
+owns task records, worktree creation, cancellation confirmation, and cleanup
+decisions. The provider owns its native grouping and session identifiers and
+returns an opaque `session_ref`. Before focus, status updates, metadata changes,
+or close, the provider verifies that reference against the task's repository and
+worktree. Ownership mismatches fail closed. Headless tasks do not require a
+session provider.
 
 Each interactive task stores `task.json` and `prompt.txt` under
 `<task-worktree>/.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Session status
@@ -2081,7 +2072,7 @@ leaves redirected paths alone. Cleanup can itself fail, so inspect the reported
 paths. A retained worktree without a record appears as incomplete in `ahu tasks`.
 Listing does not remove it or establish that its contents are safe to delete.
 
-Once the cmux create command has started, a failed command or discovery lookup
+Once the provider create operation has started, a failed command or lookup
 does not prove non-creation. ahu retains the task record, index, worktree and
 branch, reports the task identity and inspection paths, and does not invent a
 terminal outcome. Every new workspace candidate must match the requested
@@ -2092,8 +2083,7 @@ the record remains `starting` and manual inspection confirms no session uses the
 checkout, use non-forced Git worktree and branch removal rather than fabricating
 a terminal task state.
 
-The primary checkout owns the launch lock, cmux group mapping, headless
-coordination, and scoped task index. Generated architecture documents use the
+The primary checkout owns the launch lock, headless coordination, and scoped task index. Generated architecture documents use the
 invoking checkout’s `.ahu/state/`. All locations derive from
 explicit repository discovery, not ambient storage selectors. Ownership requires
 positive Git verification, with filesystem checks before reusing process-local
@@ -2173,10 +2163,9 @@ ahu uses the one its own resolution picks; it does not search for a version that
 matches the catalog. An exact project pin can make that choice reproducible.
 Project configuration pins catalog `2026-10-19`; a mismatch is an error.
 
-Persisted task records use schema 5, including the frozen `session_host` binding
-and `waiting-for-approval` state, with hyphenated `UUID v7` IDs. Schemas 3 and 4
-remain readable; schema 2 records
-also remain readable with their original 18-character hex IDs. Schema 1 is refused. Launch-preview and task-inspection JSON use
+Persisted task records use schema 6, including the frozen `session_host` binding
+and `waiting-for-approval` state, with hyphenated `UUID v7` IDs. Only schema 6
+task records are readable; every earlier task schema is refused. Launch-preview and task-inspection JSON use
 schema 1. Incompatible persisted records are refused and listed as unreadable;
 ahu does not reinterpret their digests or delete their worktrees.
 

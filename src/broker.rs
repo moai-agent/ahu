@@ -628,9 +628,7 @@ mod tests {
                 "applied_controls": []
             },
             "reliability_warning": null,
-            "cmux_group_id": null,
-            "cmux_workspace_id": null,
-            "cmux_window_id": null,
+            "session_ref": null,
             "state": "running"
         }))
         .unwrap()

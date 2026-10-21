@@ -1175,7 +1175,7 @@ pub fn launch(
         spec.gaps.push("The ENTIRE assignment has a read-only MODEL TOOL ceiling: parent and helpers have no model tools for editing, building, shell commands or shell-launching registered children. Settings-defined hooks are outside that tool ceiling and their side effects are not proven read-only. MCP tools and slash commands are disabled; repository settings remain discoverable. Roles are requested/observed, not an allowlist; total helper count is not capped. Budget is 5 USD per attempt, concurrency 1, depth 1, helper model equals manifest model.".into());
     }
     spec.native_profile = profile;
-    let cmux_integration = validate_environment(
+    let native_admission = validate_environment(
         repo,
         &repo.root,
         &plan.pair.harness,
@@ -1191,15 +1191,15 @@ pub fn launch(
             &plan.pair.model,
             permissions,
             &repo.root,
-            Some(&cmux_integration.headless),
+            Some(&native_admission.headless),
         )?;
     }
-    plan.cmux_integration = cmux_integration.clone();
+    plan.native_admission = native_admission.clone();
     if spec.options.work_mode {
-        spec.gaps.extend(cmux_integration.gaps.clone());
-        plan.enforcement.gaps.extend(cmux_integration.gaps.clone());
+        spec.gaps.extend(native_admission.gaps.clone());
+        plan.enforcement.gaps.extend(native_admission.gaps.clone());
     } else {
-        spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", cmux_integration.headless.evidence_digest));
+        spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", native_admission.headless.evidence_digest));
     }
     let (delivered, delivery) = crate::orchestration::deliver_composed(
         plan.agent.as_ref().map(|a| a.instructions.as_str()),
@@ -1243,13 +1243,13 @@ pub fn launch(
         "task_handle_candidate":format!("@{}",plan.task_name.clone().unwrap_or_else(||crate::task_handles::generated_name(&plan.title))), "task_handle_reserved":false,
         "branch":plan.branch,"command":plan.command.redacted(),"executable":plan.harness_executable,"capabilities":spec,
         "runtime":plan.task_dir,"identity": {"agent":plan.agent_label(),"harness":plan.pair.harness,"model":plan.pair.model,"permissions":permissions},
-        "acceptance":"not assessed", "cmux_integration":cmux_integration});
+        "acceptance":"not assessed", "native_admission":native_admission});
     if dry_run {
         emit(&preview, json_output)?;
         return Ok(0);
     }
     if spec.options.work_mode {
-        for gap in &cmux_integration.gaps {
+        for gap in &native_admission.gaps {
             console.say(&format!("{gap}\n"))?;
         }
     }
@@ -1422,7 +1422,7 @@ fn validate_environment(
     executable: &Path,
     trust_opencode_native_state: bool,
     work_mode: bool,
-) -> Result<crate::cmux::integration::Status> {
+) -> Result<crate::native_admission::Status> {
     for variable in [
         "HOME",
         "CODEX_HOME",
@@ -1479,7 +1479,7 @@ fn validate_environment(
                 .map(String::as_str),
         ));
     }
-    crate::cmux::integration::enforce_headless_executable_with_opencode_state(
+    crate::native_admission::enforce_headless_executable_with_opencode_state(
         config_root,
         harness,
         version,
@@ -1531,8 +1531,8 @@ pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-fn sanitize(command: &mut Command, policy: Option<&crate::cmux::integration::HeadlessPolicy>) {
-    crate::cmux::integration::sanitize(command, policy);
+fn sanitize(command: &mut Command, policy: Option<&crate::native_admission::HeadlessPolicy>) {
+    crate::native_admission::sanitize(command, policy);
     if let Some(path) = std::env::var_os("PATH") {
         let paths = std::env::split_paths(&path)
             .filter(|p| !p.to_string_lossy().contains("cmux-cli-shims"))
@@ -2221,7 +2221,7 @@ struct RecordedCompletion<'a> {
     executable: &'a Path,
     expected_executable_digest: Option<&'a str>,
     worktree: &'a Path,
-    policy: Option<&'a crate::cmux::integration::HeadlessPolicy>,
+    policy: Option<&'a crate::native_admission::HeadlessPolicy>,
     /// The attempt created this session itself: ahu passed no `--session`.
     fresh_session: bool,
     exited_zero: bool,
@@ -2933,7 +2933,7 @@ fn run_attempt(
     crate::catalog::check_headless_version(&record.identity.harness, &spec.harness_version)?;
     validate_parent_attempt(&repo, spec)?;
     validate_frozen_configuration(&record, spec.options.work_mode)?;
-    let cmux_integration = validate_environment(
+    let native_admission = validate_environment(
         &repo,
         &record.worktree,
         &record.identity.harness,
@@ -2951,7 +2951,7 @@ fn run_attempt(
             &record.identity.model,
             record.identity.permissions,
             &record.worktree,
-            Some(&cmux_integration.headless),
+            Some(&native_admission.headless),
         )?;
     }
     if spec.options.work_mode {
@@ -2985,7 +2985,7 @@ fn run_attempt(
         &record.identity.harness,
         &record.worktree,
     );
-    sanitize(&mut command, Some(&cmux_integration.headless));
+    sanitize(&mut command, Some(&native_admission.headless));
     let telemetry = crate::config::load(&record.worktree)?
         .map(|loaded| loaded.config.telemetry)
         .unwrap_or_default();
@@ -3268,7 +3268,7 @@ fn run_attempt(
             executable: &real,
             expected_executable_digest: Some(&spec.executable_digest),
             worktree: &record.worktree,
-            policy: Some(&cmux_integration.headless),
+            policy: Some(&native_admission.headless),
             fresh_session: spec.session.is_none(),
             exited_zero: status.success(),
             attempt_started_ms,
@@ -6008,7 +6008,7 @@ mod profile_and_metadata_tests {
     fn saved_attempt(repo: &crate::git::Repo, id: &str, spec: &Spec) -> PathBuf {
         let dir = store(repo).unwrap().join(id);
         let record: task::TaskRecord = serde_json::from_value(json!({
-            "schema_version": 2, "task_id": id, "title": "Synthetic attempt",
+            "schema_version": task::TASK_SCHEMA_VERSION, "task_id": id, "title": "Synthetic attempt",
             "created_at": "2026-01-01T00:00:00Z", "repo_identity": repo.identity(),
             "repo_root": repo.root, "branch": "ahu/synthetic", "worktree": repo.root,
             "identity": {"mode": "automatic", "agent": "auto", "permissions": "prompt",

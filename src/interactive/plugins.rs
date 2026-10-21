@@ -142,21 +142,19 @@ pub fn probe(output_json: bool) -> Result<()> {
     let repo = crate::git::discover(&std::env::current_dir()?);
     let id = super::selection(repo.as_ref().ok())?.id;
     let capabilities = host.check_capabilities()?;
-    let workspaces = host.workspaces()?;
     let report = serde_json::json!({
         "schema_version": 1, "plugin_id": id,
-        "protocol_version": host.persistence_key().map(|_| 1),
-        "capabilities": capabilities, "workspaces": workspaces,
+        "protocol_version": host.persistence_key().map(|_| 2),
+        "capabilities": capabilities,
         "persistent_sessions": host.check_persistence().is_ok(),
     });
     if output_json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
         println!(
-            "{}: activated; {} capabilities, {} workspaces; durable sessions supported={}",
+            "{}: activated; {} provider-neutral capabilities; durable sessions supported={}",
             id,
             capabilities.len(),
-            workspaces.len(),
             host.check_persistence().is_ok()
         );
     }

@@ -913,9 +913,7 @@ fn record_a_launch(
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: ahu::task::TaskState::Exited,
     };
     tweak(&mut record.identity);

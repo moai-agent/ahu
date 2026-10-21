@@ -1,18 +1,18 @@
 //! Interactive session hosting, independent of harness execution.
 //!
-//! Host V1 is an external plugin protocol for interactive session providers.
+//! Host V2 is an external plugin protocol for interactive session providers.
 
 pub mod external;
 pub mod plugins;
-pub mod repository;
-pub mod v1;
+pub mod session;
+pub mod v2;
 
 use crate::util::{Result, shell_single_quote};
 use std::path::Path;
 
 pub mod binding;
 
-pub(crate) type LaunchHost = (Option<Box<dyn v1::Host>>, Option<binding::FrozenHost>);
+pub(crate) type LaunchHost = (Option<Box<dyn v2::Host>>, Option<binding::FrozenHost>);
 
 /// Selection intent only: no package reads, authority checks, or host execution.
 pub(crate) struct Selection {
@@ -85,7 +85,7 @@ pub fn discover_for_launch(repo: &crate::git::Repo) -> Result<LaunchHost> {
 }
 
 /// Public activation always checks committed policy before executing a package.
-pub fn discover() -> Result<Box<dyn v1::Host>> {
+pub fn discover() -> Result<Box<dyn v2::Host>> {
     let repo = crate::git::discover(&std::env::current_dir()?);
     match selection(repo.as_ref().ok())?.id.as_str() {
         "terminal" | "none" => Err(crate::util::Error::new(
@@ -106,7 +106,7 @@ pub fn discover() -> Result<Box<dyn v1::Host>> {
 }
 
 /// Legacy records have no frozen plugin identity and cannot safely activate a host.
-pub fn discover_for_tasks() -> Result<Box<dyn v1::Host>> {
+pub fn discover_for_tasks() -> Result<Box<dyn v2::Host>> {
     Err(crate::util::Error::new(
         "legacy task has no recorded external session-host binding; refusing to guess a provider",
     )
@@ -116,7 +116,7 @@ pub fn discover_for_tasks() -> Result<Box<dyn v1::Host>> {
 pub fn discover_for_record(
     repo: &crate::git::Repo,
     record: &crate::task::TaskRecord,
-) -> Result<Box<dyn v1::Host>> {
+) -> Result<Box<dyn v2::Host>> {
     match &record.session_host {
         None => Err(crate::util::Error::new(
             "legacy task has no recorded external session-host binding; refusing to guess a provider",
@@ -141,15 +141,8 @@ pub fn discover_for_record(
 }
 
 /// No host is needed by a coordinator in its current terminal.
-pub fn discover_for_coordinator() -> Result<Option<Box<dyn v1::Host>>> {
+pub fn discover_for_coordinator() -> Result<Option<Box<dyn v2::Host>>> {
     if std::env::var_os("AHU_INTERACTIVE_PLUGIN").is_none() {
-        return Ok(None);
-    }
-    if std::env::var("CMUX_WORKSPACE_ID")
-        .ok()
-        .filter(|id| !id.is_empty())
-        .is_none()
-    {
         return Ok(None);
     }
     if matches!(
@@ -158,7 +151,12 @@ pub fn discover_for_coordinator() -> Result<Option<Box<dyn v1::Host>>> {
     ) {
         return Ok(None);
     }
-    discover().map(Some)
+    let host = discover()?;
+    if host.inherited_workspace().is_some() {
+        Ok(Some(host))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Build the shell-interpreted startup command for a task workspace.

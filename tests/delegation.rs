@@ -483,46 +483,25 @@ fn launch_prompt_conflicts_and_terminal_stdin_are_usage_errors() {
 }
 
 #[test]
-fn saved_bracket_deliveries_replay_exactly_in_each_mode() {
+fn older_delivery_layouts_are_rejected_in_every_mode() {
     use ahu::orchestration::*;
-    // Digests captured from the original renderer, with neither body ending in
-    // a newline. These records intentionally omit the new layout fields.
-    for (policy, digest) in [
-        (
-            None,
-            "742dcad68993b2e045082e3c626bad8551b05d95daea3e7bc9a06d3bbf9bb21a",
-        ),
-        (
-            Some("disabled"),
-            "6cfe3fc50b4c23f5615e33ad1aa949157929ee9718e852a316966faf4fa5e6ac",
-        ),
-        (
-            Some("bounded"),
-            "33544bc6c977b7541bec6f0f9a8e0c5c6040eba62cfc88f93225f3ab74ed64c3",
-        ),
-    ] {
+    for version in [1, 2] {
         let delivery: Delivery = serde_json::from_value(serde_json::json!({
-            "nonce": "0123456789abcdef", "agent_instructions": "Exact λ body", "digest": digest,
+            "layout_version": version,
+            "composition": {"mode":"interactive","metadata":null,"state":null},
+            "nonce": "0123456789abcdef", "agent_instructions": null, "digest": "synthetic"
         }))
         .unwrap();
-        assert_eq!(delivery.layout_version, 1);
-        let replay = |d: &Delivery, p| match policy {
-            None => redeliver(d, p),
-            Some(policy) => redeliver_headless_policy(d, p, policy),
-        };
-        let text = replay(&delivery, "--request\r\nno final newline").unwrap();
-        assert!(text.starts_with("<<<ahu-contract-0123456789abcdef>>>\n"));
-        assert!(text.contains("Exact λ body<<</ahu-agent-0123456789abcdef>>>"));
-        assert!(text.ends_with("--request\r\nno final newline"));
-        assert_eq!(ahu::util::digest_bytes(text.as_bytes()), digest);
-        assert!(replay(&delivery, "--request\r\nno final newline\n").is_err());
-        let mut changed = delivery.clone();
-        changed.agent_instructions = Some("Exact λ body\n".into());
-        assert!(replay(&changed, "--request\r\nno final newline").is_err());
-        changed = delivery.clone();
-        changed.layout_version = 2;
-        assert!(replay(&changed, "--request\r\nno final newline").is_err());
+        assert!(redeliver(&delivery, "request").is_err());
+        assert!(redeliver_headless(&delivery, "request").is_err());
     }
+    assert!(
+        serde_json::from_value::<Delivery>(serde_json::json!({
+            "composition": {"mode":"interactive","metadata":null,"state":null},
+            "nonce":"0123456789abcdef","agent_instructions":null,"digest":"synthetic"
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -601,7 +580,7 @@ fn saved_xml_deliveries_freeze_facts_and_refuse_future_or_altered_layouts() {
             .to_string()
             .contains("fence nonce")
     );
-    for version in [0, LAYOUT_VERSION + 1, u32::MAX] {
+    for version in [0, 1, 2, LAYOUT_VERSION + 1, u32::MAX] {
         let mut future = saved.clone();
         future.layout_version = version;
         assert!(
@@ -615,7 +594,4 @@ fn saved_xml_deliveries_freeze_facts_and_refuse_future_or_altered_layouts() {
     let mut missing = saved.clone();
     missing.composition = None;
     assert!(redeliver(&missing, "request without newline").is_err());
-    let mut legacy = saved;
-    legacy.layout_version = 1;
-    assert!(redeliver(&legacy, "request without newline").is_err());
 }

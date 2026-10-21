@@ -1,4 +1,4 @@
-//! Core-owned agent task coordination, independent of terminal Host V1.
+//! Core-owned agent task coordination, independent of terminal Host V2.
 //!
 //! Only a trusted core controller admits tasks or invokes execution adapters.
 //! Consumers receive a scoped `v1::TaskService`, never a store or controller.

@@ -355,9 +355,7 @@ fn task_record(repo: &ahu::git::Repo, task_id: &str) -> ahu::task::TaskRecord {
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: ahu::task::TaskState::Starting,
     }
 }

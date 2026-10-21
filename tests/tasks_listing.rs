@@ -63,9 +63,7 @@ fn write_schema_1(tasks_dir: &Path, task_id: &str) -> PathBuf {
             "applied_controls": [],
         },
         "reliability_warning": null,
-        "cmux_group_id": null,
-        "cmux_workspace_id": null,
-        "cmux_window_id": null,
+        "session_ref": null,
         "state": "running",
     });
     std::fs::write(
@@ -132,9 +130,7 @@ fn write_current(tasks_dir: &Path, repo: &TestRepo, task_id: &str) -> PathBuf {
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: ahu::task::TaskState::Exited,
     };
     let dir = tasks_dir.join(task_id);

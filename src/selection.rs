@@ -434,7 +434,7 @@ pub(crate) fn check_launch_compatibility_with_policy(
     model: &str,
     permissions: crate::agent::Permissions,
     cwd: &Path,
-    policy: Option<&crate::cmux::integration::HeadlessPolicy>,
+    policy: Option<&crate::native_admission::HeadlessPolicy>,
 ) -> Result<()> {
     use crate::agent::Permissions;
     if harness == "kiro" {
@@ -482,7 +482,7 @@ pub(crate) fn check_launch_compatibility_with_policy(
     let mut command = std::process::Command::new(executable);
     command.args(&args).current_dir(cwd);
     if let Some(policy) = policy {
-        crate::cmux::integration::sanitize(&mut command, Some(policy));
+        crate::native_admission::sanitize(&mut command, Some(policy));
     }
     let output = bounded_config_probe(&mut command, capture, std::time::Duration::from_secs(8));
     if crate::snapshot::collect(cwd)?.digest() != before {

@@ -110,9 +110,7 @@ fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskReco
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: task::TaskState::Exited,
     }
 }
@@ -401,9 +399,7 @@ fn unavailable_plugin_preserves_legacy_cmux_records_and_owned_resources() {
     let dir = prepare_task(&repo, id);
     let worktree = worktree_of(&repo, id);
     let mut record = task::load(&dir).unwrap();
-    record.cmux_workspace_id = Some("legacy-workspace".into());
-    record.cmux_group_id = Some("legacy-group".into());
-    record.cmux_window_id = Some("legacy-window".into());
+    record.session_ref = Some("legacy-workspace".into());
     task::save(&dir, &record, "current work").unwrap();
     let before = std::fs::read(dir.join("task.json")).unwrap();
     for command in ["focus", "remove"] {

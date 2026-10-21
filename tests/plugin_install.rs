@@ -695,9 +695,7 @@ fn record(root: &Path, id: &str) -> std::path::PathBuf {
         reliability_warning: None,
         enforcement,
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: ahu::task::TaskState::Running,
     };
     let dir = root
@@ -755,7 +753,7 @@ fn terminal_external_workspace_task_retains_its_plugin_until_removal() {
         executable_sha256: "0".repeat(64),
         discovered_root: None,
     });
-    task.cmux_workspace_id = Some("already-closed-workspace".into());
+    task.session_ref = Some("already-closed-workspace".into());
     ahu::task::save(&task_dir, &task, "synthetic prompt").unwrap();
 
     failure(

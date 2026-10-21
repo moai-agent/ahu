@@ -63,8 +63,8 @@ impl Repo {
     /// A stable per-repository identifier shared by all of its worktrees.
     ///
     /// Launching from two different worktrees of one repository must land in a
-    /// single cmux group, so the identity is derived from the Git common
-    /// directory rather than the current working tree.
+    /// same repository identity across providers, so it is derived from the
+    /// Git common directory rather than the current working tree.
     pub fn identity(&self) -> String {
         let canonical = self
             .common_dir
@@ -73,7 +73,7 @@ impl Repo {
         digest_bytes(canonical.as_os_str().as_encoded_bytes())[..16].to_string()
     }
 
-    /// Human-facing repository name, used for the cmux group title.
+    /// Human-facing repository name, supplied to session providers.
     pub fn display_name(&self) -> String {
         // For a linked worktree the common dir is `<main>/.git`; for the main
         // checkout it is also `<main>/.git`. Either way the repository name is
@@ -137,17 +137,10 @@ fn run_ok_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
 
 /// Find the repository containing `start`.
 pub fn discover(start: &Path) -> Result<Repo> {
-    discover_with_exclusions(start, true)
+    discover_with_exclusions(start)
 }
 
-/// Discover a host-reported directory without registering its repositories as
-/// process-wide harness exclusions. The caller must compare the result to its
-/// own repository before using it for coordination.
-pub(crate) fn discover_untrusted(start: &Path) -> Result<Repo> {
-    discover_with_exclusions(start, false)
-}
-
-fn discover_with_exclusions(start: &Path, register_exclusions: bool) -> Result<Repo> {
+fn discover_with_exclusions(start: &Path) -> Result<Repo> {
     let probe = run(start, &["rev-parse", "--is-inside-work-tree"])?;
     if !probe.status.success() {
         bail!(
@@ -183,10 +176,8 @@ fn discover_with_exclusions(start: &Path, register_exclusions: bool) -> Result<R
     };
     // Harnesses must never resolve from any checkout that shares this Git
     // repository, not just the one from which this process was invoked.
-    if register_exclusions {
-        for worktree in repo.worktree_roots()? {
-            crate::selection::exclude_root(&worktree);
-        }
+    for worktree in repo.worktree_roots()? {
+        crate::selection::exclude_root(&worktree);
     }
     Ok(repo)
 }
@@ -425,16 +416,6 @@ pub fn branches_matching(repo: &Repo, pattern: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn untrusted_discovery_does_not_register_global_harness_exclusions() {
-        let root = tempfile::tempdir().unwrap();
-        git(root.path(), &["init", "--quiet"]);
-
-        let repo = discover_untrusted(root.path()).unwrap();
-        assert_eq!(repo.root, root.path().canonicalize().unwrap());
-        assert!(!crate::selection::is_excluded(root.path()));
-    }
 
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git")

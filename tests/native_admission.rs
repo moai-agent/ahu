@@ -4,7 +4,8 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ahu::cmux::integration::{self, Isolation, Locations, Registration};
+use ahu::native_admission as integration;
+use ahu::native_admission::{Isolation, Locations, Registration};
 use serde_json::{Value, json};
 
 struct Fixture {
@@ -359,9 +360,9 @@ fn headless_dry_run_uses_the_same_status_and_refuses_unknown_registration() {
         String::from_utf8_lossy(&result.stderr)
     );
     let preview: Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(preview["cmux_integration"]["harness"], "claude-code");
-    assert_eq!(preview["cmux_integration"]["headless"]["allowed"], true);
-    let digest = preview["cmux_integration"]["headless"]["evidence_digest"]
+    assert_eq!(preview["native_admission"]["harness"], "claude-code");
+    assert_eq!(preview["native_admission"]["headless"]["allowed"], true);
+    let digest = preview["native_admission"]["headless"]["evidence_digest"]
         .as_str()
         .unwrap();
     assert!(
@@ -399,7 +400,7 @@ fn headless_dry_run_uses_the_same_status_and_refuses_unknown_registration() {
             String::from_utf8_lossy(&result.stderr)
         );
         let preview: Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(preview["cmux_integration"]["headless"]["allowed"], true);
+        assert_eq!(preview["native_admission"]["headless"]["allowed"], true);
         let profile = ahu::harness::isolation::profile("claude-code", version).unwrap();
         assert!(
             preview["capabilities"]["native_controls"]

@@ -131,9 +131,7 @@ fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskReco
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: task::TaskState::Exited,
     }
 }
@@ -183,7 +181,8 @@ fn a_plain_launch_places_task_state_inside_the_worktree_it_creates() {
     );
     // And the location reaches the child through the startup command ahu
     // builds, so nothing has to be exported for the session to find it.
-    let startup = ahu::cmux::startup_command(Path::new("/usr/local/bin/ahu"), &plan.task_dir);
+    let startup =
+        ahu::interactive::startup_command(Path::new("/usr/local/bin/ahu"), &plan.task_dir);
     assert!(
         startup.contains(&plan.task_dir.to_string_lossy().to_string()),
         "{startup}"

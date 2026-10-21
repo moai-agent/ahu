@@ -10,8 +10,8 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use ahu::cmux;
 use ahu::harness::{self, LaunchRequest};
+use ahu::interactive;
 use ahu::util::shell_single_quote;
 use common::{HOSTILE_PROMPT, TestRepo, fake_harness};
 
@@ -209,7 +209,7 @@ fn the_cmux_startup_command_carries_no_prompt_and_survives_a_hostile_path() {
     let recorder = temp.path().join("argv.txt");
     let exe = write_argv_recorder(temp.path(), &recorder);
 
-    let command = cmux::startup_command(&exe, &nasty);
+    let command = interactive::startup_command(&exe, &nasty);
     assert!(!command.contains("$(touch"));
     assert!(!command.contains(HOSTILE_PROMPT));
 
@@ -464,9 +464,7 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
         reliability_warning: Some(harness::RELIABILITY_WARNING.to_string()),
         enforcement,
         session_host: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_ref: None,
         state: TaskState::Starting,
     };
     ahu::task::save(task_dir, &record, prompt).unwrap();

@@ -8,7 +8,7 @@ use std::net::TcpListener;
 fn fixture(root: &Path, attempt: u32) -> (PathBuf, task::TaskRecord, Spec) {
     let dir = root.join("synthetic-task");
     let record = serde_json::from_value(json!({
-        "schema_version":2,"task_id":"synthetic-task","title":"private-title-marker",
+        "schema_version":task::TASK_SCHEMA_VERSION,"task_id":"synthetic-task","title":"private-title-marker",
         "created_at":"2026-01-01T00:00:00Z","repo_identity":"synthetic",
         "repo_root":root,"branch":"synthetic","worktree":root,
         "identity":{"mode":"named","agent":"worker","agent_version":"1.0.0",

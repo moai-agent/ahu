@@ -1,7 +1,7 @@
 # Core agent-task service V1
 
 `ahu::agent_task::v1::TaskService` is a provider-neutral, in-process task
-coordination interface. It is separate from `ahu_host_api::v1::Host`, which
+coordination interface. It is separate from `ahu_host_api::v2::Host`, which
 supplies terminal operations. A terminal workspace ID is not a task identity,
 and terminal creation, process exit, and assignment acceptance remain different
 facts. This contract adds no A2A transport, plugin storage grant, native auth
@@ -277,7 +277,7 @@ behavior, execution routing and native history replay are not claimed.
 
 See [system architecture](knowledge/ahu-architecture.md),
 [task state](knowledge/task-state.md), [task communication](knowledge/task-communication.md),
-and [terminal Host V1](../crates/ahu-host-api/src/v1.rs).
+and [terminal Host V2](../crates/ahu-host-api/src/v2.rs).
 
 ## Executable plugin CLI observations
 

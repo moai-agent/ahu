@@ -101,7 +101,7 @@ fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
         },
         snapshot: Default::default(),
         hooks: Default::default(),
-        cmux_integration: crate::cmux::integration::inspect_in(
+        native_admission: crate::native_admission::inspect_in(
             &repo.root,
             "codex",
             &Default::default(),
@@ -258,7 +258,7 @@ fn prepared_record_freezes_identity_and_redacts_assignment() {
             .unwrap()
             .contains("never-executed")
     );
-    assert!(record.cmux_workspace_id.is_none());
+    assert!(record.session_ref.is_none());
 }
 
 #[test]
@@ -286,14 +286,7 @@ fn created_workspace_metadata_preserves_a_state_written_by_the_started_task() {
             )
             .unwrap();
         }
-        record_created_workspace(
-            &plan.task_dir,
-            &mut record,
-            "group-1",
-            "workspace-1",
-            "window-1",
-        )
-        .unwrap();
+        record_created_session(&plan.task_dir, &mut record, "session-ref-1").unwrap();
         if !runtime_first {
             record_runtime_metadata(
                 &plan.task_dir,
@@ -306,9 +299,7 @@ fn created_workspace_metadata_preserves_a_state_written_by_the_started_task() {
 
         let persisted = task::load(&plan.task_dir).unwrap();
         assert_eq!(persisted.state, state);
-        assert_eq!(persisted.cmux_group_id.as_deref(), Some("group-1"));
-        assert_eq!(persisted.cmux_workspace_id.as_deref(), Some("workspace-1"));
-        assert_eq!(persisted.cmux_window_id.as_deref(), Some("window-1"));
+        assert_eq!(persisted.session_ref.as_deref(), Some("session-ref-1"));
         assert_eq!(
             persisted.enforcement.harness_version.as_deref(),
             Some("1.2.3")
@@ -327,8 +318,7 @@ fn reconciliation_preserves_terminal_outcomes_in_both_orders() {
             std::fs::create_dir_all(&plan.worktree).unwrap();
             task::save(&plan.task_dir, &stale, PROMPT).unwrap();
             let mut latest = stale.clone();
-            record_created_workspace(&plan.task_dir, &mut latest, "group", "workspace", "window")
-                .unwrap();
+            record_created_session(&plan.task_dir, &mut latest, "session-ref").unwrap();
             record_runtime_metadata(
                 &plan.task_dir,
                 &mut latest,
@@ -1019,7 +1009,7 @@ exit 0
     unsafe { std::env::set_var("AHU_TEST_LAUNCH_LOCK_PATH", launch_lock) };
     let launched = execute(&repo, &loaded, &plan, PROMPT, false).unwrap();
     assert_eq!(launched.record.state, TaskState::Exited);
-    assert!(launched.record.cmux_workspace_id.is_none());
+    assert!(launched.record.session_ref.is_none());
     assert!(launched.record.session_host.is_none());
     assert!(std::path::Path::new(&std::env::var("AHU_TEST_TERMINAL_MARKER").unwrap()).exists());
     assert_eq!(
@@ -1139,7 +1129,7 @@ fn unknown_creation_outcome_names_the_session_host_without_naming_a_plugin_ui() 
     let error = workspace_creation_failed(
         &repo,
         &plan,
-        interactive::v1::WorkspaceCreationError::OutcomeUnknown(
+        interactive::v2::SessionCreationError::OutcomeUnknown(
             Error::new("synthetic creation outcome unknown")
                 .with_kind(crate::util::ErrorKind::Prerequisite),
         ),

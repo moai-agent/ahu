@@ -1,7 +1,7 @@
 //! ahu — the moai-agent launcher.
 //!
-//! ahu launches repository-defined agents in isolated Git worktrees and
-//! organises their interactive sessions in cmux. Its contract, in one place:
+//! ahu launches repository-defined agents in Git worktrees and delegates
+//! interactive sessions to optional provider plugins. Its contract, in one place:
 //!
 //!   - a named agent's harness, model, and instructions come from the
 //!     repository and are used exactly as configured, or the launch fails. The
@@ -23,7 +23,6 @@ pub mod approval;
 pub mod auth_binding;
 pub mod catalog;
 pub mod cli;
-pub mod cmux;
 pub mod commands;
 pub mod config;
 pub mod context_lock;
@@ -40,6 +39,7 @@ pub mod knowledge;
 pub mod launch;
 pub mod launcher;
 pub mod migration;
+pub mod native_admission;
 mod native_mcp;
 pub mod okf;
 pub mod onboard;

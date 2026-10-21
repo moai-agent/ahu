@@ -1,5 +1,5 @@
 //! Explicit automatic work, without native configuration admission or overrides.
-use crate::cmux::integration::{HeadlessPolicy, Status};
+use crate::native_admission::{HeadlessPolicy, Status};
 
 pub(crate) fn hooks(harness: &str) -> crate::hooks::HookInventory {
     crate::hooks::HookInventory {
@@ -105,14 +105,14 @@ mod tests {
                 .any(|gap| gap.contains("native delegation follows harness configuration"))
         );
         assert!(
-            crate::cmux::integration::render(&status)
+            crate::native_admission::render(&status)
                 .contains("headless work mode; native compatibility unverified")
         );
-        let rendered = crate::cmux::integration::render(&status);
+        let rendered = crate::native_admission::render(&status);
         assert!(rendered.contains("note: explicit work mode"));
         assert!(!rendered.contains("refusal:"));
         assert!(
-            crate::cmux::integration::render_summary(&status)
+            crate::native_admission::render_summary(&status)
                 .contains("work mode; native compatibility unverified")
         );
     }

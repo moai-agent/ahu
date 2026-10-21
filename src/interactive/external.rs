@@ -1,11 +1,11 @@
-//! A persistent, bounded executable transport for Host V1.
-use super::{plugins::PluginStatus, v1::*};
+//! A persistent, bounded executable transport for Host V2.
+use super::{plugins::PluginStatus, v2::*};
 use crate::util::{Error, ErrorKind, Result};
 use ahu_host_api::protocol::{self, ErrorCode, Hello, Request, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
@@ -37,7 +37,7 @@ impl Executable {
         if self.protocol_version != protocol::VERSION || !(100..=30_000).contains(&self.timeout_ms)
         {
             return Err(Error::new(
-                "executable requires protocol_version = 1 and timeout_ms between 100 and 30000",
+                "executable requires protocol_version = 2 and timeout_ms between 100 and 30000",
             )
             .with_kind(ErrorKind::Usage));
         }
@@ -319,7 +319,7 @@ impl ExternalHost {
         file.set_permissions(std::fs::Permissions::from_mode(0o500))?;
         drop(file);
         let mut child = Command::new(&executable)
-            .arg("--ahu-host-protocol=1")
+            .arg("--ahu-host-protocol=2")
             .current_dir(snapshot.path())
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -346,7 +346,7 @@ impl ExternalHost {
         };
         nonblocking(process.input.as_raw_fd())?;
         nonblocking(process.output.as_raw_fd())?;
-        let value = process.rpc("hello", json!({"protocol_versions":[1], "host_api":1, "plugin_id":status.id, "required_capabilities":protocol::METHODS}))?;
+        let value = process.rpc("hello", json!({"protocol_versions":[2], "host_api":1, "plugin_id":status.id, "required_capabilities":protocol::METHODS}))?;
         let hello: Hello =
             serde_json::from_value(value).map_err(|_| Error::new("invalid external host hello"))?;
         let capabilities: BTreeSet<_> = hello.capabilities.iter().map(String::as_str).collect();
@@ -407,37 +407,12 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorkspaceInventory {
-    complete: bool,
-    workspaces: BTreeMap<String, WorkspaceInfo>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GroupInventory {
-    complete: bool,
-    groups: Vec<Group>,
-}
-fn check_group(group: &Group) -> Result<()> {
-    let unique: BTreeSet<_> = group.member_workspace_ids.iter().collect();
-    if !valid_id(&group.id)
-        || !valid_id(&group.anchor_workspace_id)
-        || group.member_workspace_ids.iter().any(|id| !valid_id(id))
-        || unique.len() != group.member_workspace_ids.len()
-        || !group
-            .member_workspace_ids
-            .contains(&group.anchor_workspace_id)
-    {
-        return Err(Error::new("external host returned invalid group ownership"));
-    }
-    Ok(())
-}
 fn path_text(path: &Path) -> Result<&str> {
     path.to_str()
         .filter(|_| path.is_absolute())
         .ok_or_else(|| Error::new("external host paths must be absolute UTF-8 paths"))
 }
+
 impl Host for ExternalHost {
     fn persistence_key(&self) -> Option<String> {
         Some(self.persistence_key.clone())
@@ -451,174 +426,136 @@ impl Host for ExternalHost {
         }
         Ok(self.hello.capabilities.clone())
     }
-    fn list_groups(&self, window_id: Option<&str>) -> Result<Vec<Group>> {
-        let result: GroupInventory = self.call("list_groups", json!({"window_id":window_id}))?;
-        if !result.complete {
-            return Err(Error::new("external host group inventory is incomplete"));
-        }
-        let mut unique = BTreeSet::new();
-        for group in &result.groups {
-            check_group(group)?;
-            if !unique.insert(&group.id) {
-                return Err(Error::new("external host returned duplicate groups"));
-            }
-        }
-        Ok(result.groups)
-    }
-    fn find_group(&self, group_id: &str, window_id: Option<&str>) -> Result<Option<Group>> {
-        let result: Option<Group> = self.call(
-            "find_group",
-            json!({"group_id":group_id,"window_id":window_id}),
-        )?;
-        if let Some(group) = &result {
-            check_group(group)?;
-            if group.id != group_id {
-                return Err(Error::new("external host returned a different group"));
-            }
-        }
-        Ok(result)
-    }
-    fn current_window(&self) -> Result<Option<String>> {
-        self.call("current_window", json!({}))
-    }
-    fn window_for_workspace(&self, workspace_id: &str) -> Result<String> {
-        self.call("window_for_workspace", json!({"workspace_id":workspace_id}))
-    }
-    fn add_workspace_to_group(
+    fn create_task_session(
         &self,
-        group_id: &str,
-        workspace_id: &str,
-        window_id: &str,
-    ) -> Result<()> {
-        self.call(
-            "add_workspace_to_group",
-            json!({"group_id":group_id,"workspace_id":workspace_id,"window_id":window_id}),
-        )
-    }
-    fn current_workspace(&self) -> Result<Option<String>> {
-        self.call("current_workspace", json!({}))
-    }
-    fn create_anchor_workspace(&self, group_id: &str, title: &str, cwd: &Path) -> Result<String> {
-        self.call(
-            "create_anchor_workspace",
-            json!({"group_id":group_id,"title":title,"cwd":path_text(cwd)?}),
-        )
-    }
-    fn set_anchor(&self, group_id: &str, workspace_id: &str) -> Result<()> {
-        self.call(
-            "set_anchor",
-            json!({"group_id":group_id,"workspace_id":workspace_id}),
-        )
-    }
-    fn create_group(&self, name: &str, cwd: &Path) -> Result<Group> {
-        let group = self.call("create_group", json!({"name":name,"cwd":path_text(cwd)?}))?;
-        check_group(&group)?;
-        Ok(group)
-    }
-    fn expand_group(&self, group_id: &str) -> Result<()> {
-        self.call("expand_group", json!({"group_id":group_id}))
-    }
-    fn create_task_workspace(
-        &self,
-        request: &WorkspaceRequest<'_>,
-    ) -> WorkspaceCreationResult<CreatedWorkspace> {
-        let cwd = path_text(request.cwd).map_err(WorkspaceCreationError::NotCreated)?;
-        let result = self.process.borrow_mut().rpc("create_task_workspace", json!({
-            "group_id":request.group_id,"window_id":request.window_id,"title":request.title,
-            "summary":request.summary,"cwd":cwd,"startup_command":request.startup_command,"focus":request.focus
-        })).map_err(|error| {
-            if !error.dispatched || error.not_created { WorkspaceCreationError::NotCreated(error.error) }
-            else { WorkspaceCreationError::OutcomeUnknown(error.error) }
+        request: &TaskSessionRequest<'_>,
+    ) -> SessionCreationResult<CreatedSession> {
+        let params = json!({
+            "repository_identity": request.repository_identity,
+            "repository_name": request.repository_name,
+            "repository_root": path_text(request.repository_root).map_err(SessionCreationError::NotCreated)?,
+            "title": request.title,
+            "summary": request.summary,
+            "worktree": path_text(request.worktree).map_err(SessionCreationError::NotCreated)?,
+            "startup_command": request.startup_command,
+            "focus": request.focus,
+        });
+        let result = self
+            .process
+            .borrow_mut()
+            .rpc("create_task_session", params)
+            .map_err(|error| {
+                if !error.dispatched || error.not_created {
+                    SessionCreationError::NotCreated(error.error)
+                } else {
+                    SessionCreationError::OutcomeUnknown(error.error)
+                }
+            })?;
+        let created: CreatedSession = serde_json::from_value(result).map_err(|_| {
+            SessionCreationError::OutcomeUnknown(Error::new(
+                "external host returned an invalid session reference",
+            ))
         })?;
-        // A success envelope is not enough: validate ownership and exact cwd
-        // through a complete inventory before accepting the created resource.
-        let verify = || -> Result<CreatedWorkspace> {
-            let created: CreatedWorkspace = serde_json::from_value(result)
-                .map_err(|_| Error::new("external host returned an invalid creation result"))?;
-            if !valid_id(&created.workspace_id)
-                || !valid_id(&created.window_id)
-                || created.group_id.as_deref() != Some(request.group_id)
-                || request.window_id.is_some_and(|w| w != created.window_id)
-            {
-                return Err(Error::new(
-                    "external host returned unexpected workspace ownership",
-                ));
-            }
-            let inventory = self.workspaces_in_window(Some(&created.window_id))?;
-            if inventory
-                .get(&created.workspace_id)
-                .is_none_or(|w| w.directory != cwd)
-            {
-                return Err(Error::new(
-                    "external host creation has no matching workspace directory",
-                ));
-            }
-            if self.window_for_workspace(&created.workspace_id)? != created.window_id
-                || !self
-                    .find_group(request.group_id, Some(&created.window_id))?
-                    .is_some_and(|g| g.member_workspace_ids.contains(&created.workspace_id))
-            {
-                return Err(Error::new(
-                    "external host creation ownership could not be confirmed",
-                ));
-            }
-            Ok(created)
-        };
-        verify().map_err(WorkspaceCreationError::OutcomeUnknown)
+        if !valid_id(&created.session_ref) {
+            return Err(SessionCreationError::OutcomeUnknown(Error::new(
+                "external host returned an invalid session reference",
+            )));
+        }
+        if self
+            .verify_task_session(
+                &created.session_ref,
+                request.repository_identity,
+                request.worktree,
+            )
+            .map_err(SessionCreationError::OutcomeUnknown)?
+            != WorkspaceOwnership::Owned
+        {
+            return Err(SessionCreationError::OutcomeUnknown(Error::new(
+                "external host could not confirm the created session",
+            )));
+        }
+        Ok(created)
     }
-    fn open_markdown(&self, path: &Path, focus: bool) -> Result<String> {
+    fn verify_task_session(
+        &self,
+        session_ref: &str,
+        repository_identity: &str,
+        expected_directory: &Path,
+    ) -> Result<WorkspaceOwnership> {
         self.call(
-            "open_markdown",
-            json!({"path":path_text(path)?,"focus":focus}),
+            "verify_task_session",
+            json!({
+                "session_ref": session_ref,
+                "repository_identity": repository_identity,
+                "expected_directory": path_text(expected_directory)?,
+            }),
         )
     }
-    fn select_workspace(&self, workspace_id: &str) -> Result<()> {
-        self.call("select_workspace", json!({"workspace_id":workspace_id}))
+    fn select_task_session(
+        &self,
+        session_ref: &str,
+        repository_identity: &str,
+        expected_directory: &Path,
+    ) -> Result<()> {
+        self.call("select_task_session", json!({"session_ref":session_ref,"repository_identity":repository_identity,"expected_directory":path_text(expected_directory)?}))
     }
-    fn close_workspace(&self, workspace_id: &str) -> Result<()> {
-        self.call("close_workspace", json!({"workspace_id":workspace_id}))
+    fn close_task_session(
+        &self,
+        session_ref: &str,
+        repository_identity: &str,
+        expected_directory: &Path,
+    ) -> Result<()> {
+        self.call("close_task_session", json!({"session_ref":session_ref,"repository_identity":repository_identity,"expected_directory":path_text(expected_directory)?}))
     }
-    fn set_status(&self, workspace_id: &str, value: &str) -> Result<()> {
-        self.call(
-            "set_status",
-            json!({"workspace_id":workspace_id,"value":value}),
-        )
+    fn set_task_status(
+        &self,
+        session_ref: &str,
+        repository_identity: &str,
+        expected_directory: &Path,
+        value: &str,
+    ) -> Result<()> {
+        self.call("set_task_status", json!({"session_ref":session_ref,"repository_identity":repository_identity,"expected_directory":path_text(expected_directory)?,"value":value}))
+    }
+    fn expand_task_session(
+        &self,
+        session_ref: &str,
+        repository_identity: &str,
+        expected_directory: &Path,
+    ) -> Result<()> {
+        self.call("expand_task_session", json!({"session_ref":session_ref,"repository_identity":repository_identity,"expected_directory":path_text(expected_directory)?}))
     }
     fn set_agent_metadata(
         &self,
-        workspace_id: &str,
+        session_ref: &str,
+        repository_identity: &str,
+        expected_directory: &Path,
         agent: &str,
         harness: &str,
         model: &str,
     ) -> Result<()> {
         self.call(
             "set_agent_metadata",
-            json!({"workspace_id":workspace_id,"agent":agent,"harness":harness,"model":model}),
+            json!({"session_ref":session_ref,"repository_identity":repository_identity,"expected_directory":expected_directory,"agent":agent,"harness":harness,"model":model}),
         )
     }
-    fn workspaces(&self) -> Result<BTreeMap<String, WorkspaceInfo>> {
-        self.inventory("workspaces", json!({}))
+    fn place_coordinator(&self, request: &CoordinatorRequest<'_>) -> Result<CoordinatorPlacement> {
+        self.call(
+            "place_coordinator",
+            json!({
+                "repository_identity":request.repository_identity,
+                "repository_name":request.repository_name,
+                "repository_root":path_text(request.repository_root)?,
+                "label":request.label,
+                "harness":request.harness,
+                "model":request.model,
+                "startup_command":request.startup_command,
+            }),
+        )
     }
-    fn workspaces_in_window(
-        &self,
-        window: Option<&str>,
-    ) -> Result<BTreeMap<String, WorkspaceInfo>> {
-        self.inventory("workspaces_in_window", json!({"window_id":window}))
-    }
-}
-impl ExternalHost {
-    fn inventory(&self, method: &str, params: Value) -> Result<BTreeMap<String, WorkspaceInfo>> {
-        let result: WorkspaceInventory = self.call(method, params)?;
-        if !result.complete
-            || result
-                .workspaces
-                .iter()
-                .any(|(id, w)| !valid_id(id) || !Path::new(&w.directory).is_absolute())
-        {
-            return Err(Error::new(
-                "external host workspace inventory is incomplete or invalid",
-            ));
-        }
-        Ok(result.workspaces)
+    fn open_markdown(&self, path: &Path, focus: bool) -> Result<String> {
+        self.call(
+            "open_markdown",
+            json!({"path":path_text(path)?,"focus":focus}),
+        )
     }
 }
