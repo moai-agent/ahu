@@ -424,6 +424,26 @@ settings, and delegation to the harness; this smoke does not validate their
 behavior or establish filesystem confinement. A Git worktree manages a branch
 and working directory, not a sandbox.
 
+### OpenCode headless follow-up observation
+
+A separate coordinator-reported observation on 2026-10-21 ran one bounded,
+read-only `@defsec-glm` task through `--work-mode` on ahu 0.11.0 with
+OpenCode 2.0.32 and `ollama/glm-5.3:cloud`. The process exited 0, and ahu
+recorded a succeeded terminal result through OpenCode's recorded-session
+export fallback. That fallback consults the harness's own sanitized session
+export once, before a missing-terminal failure is finalized, and only when
+the attempt created the session, the stream named exactly that session,
+nothing else about the attempt failed, and the process exited 0.
+
+The coordinator reviewed the native session's final answer, which correctly
+identified the `ahu.execution.mode` check and its regression test in
+`src/otel_report.rs`. The durable result still recorded `completion_verified`
+as `false` and no `agent_report_path`: the report remains harness-owned, and
+ahu neither persisted nor independently verified it. No live MCP call or local
+collector receipt was verified for this run, so it provides no OTel export
+evidence. This observation adds one bounded data point; it does not revise the
+2026-10-20 smoke results above.
+
 ### Local invocation and completion evidence
 
 The 2026-10-19 documentation audit checked installed CLI versions/help and the
