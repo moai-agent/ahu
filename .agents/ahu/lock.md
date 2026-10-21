@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 13bf257e671cd4f97d41da2bafc188bd6937118b4d7b27d9b7d8d411c719829b
+  digest: 8626ecf36d3f100c6158cea6fb7736216087a0df30f2536c7e7c97cbf0df294c
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -159,7 +159,7 @@ ahu:
     executable: false
     path: .mcp.json
   - bytes: 6230
-    digest: 6e85a25ff3ea19c292ce828cab84de8793413cec5ccf7b2a48068d8251cd33b0
+    digest: 506677b0626f63a16fcfdb267ba7b5bc51e71562a5a4ab250eb5cab38d0dcc33
     executable: false
     path: AGENTS.md
   - bytes: 646
