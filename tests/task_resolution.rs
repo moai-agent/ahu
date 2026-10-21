@@ -432,7 +432,10 @@ fn focus_resolves_through_the_task_index() {
     let out = ahu_at(&scenario, c.path(), &["focus", id]);
     let text = text_of(&out);
     assert_eq!(out.status.code(), Some(5), "{text}");
-    assert!(text.contains("has no recorded cmux session"), "{text}");
+    assert!(
+        text.contains("has no recorded interactive session"),
+        "{text}"
+    );
 }
 
 /// `ahu task` resolves a registered task from a sibling checkout and hands

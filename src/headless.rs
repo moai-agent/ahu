@@ -2689,7 +2689,7 @@ impl SessionCheckpoint {
         if self.schema_version != 2
             || self.task_id != id
             || record.task_id != id
-            || !matches!(record.schema_version, 2..=5)
+            || record.schema_version != task::TASK_SCHEMA_VERSION
             || self.attempt == 0
             || self.attempt != spec.attempt
             || self.harness != record.identity.harness
@@ -6018,7 +6018,7 @@ mod profile_and_metadata_tests {
             "config_snapshot_digest": "synthetic",
             "materialize": {"written": [], "removed": [], "concurrently_modified": []},
             "launch_command": {"program": "synthetic-executable", "args": []},
-            "delivery": {"nonce": "synthetic", "agent_instructions": null, "digest": "synthetic"},
+            "delivery": {"layout_version": 3, "composition": {"mode":"headless_disabled","metadata":null,"state":null}, "nonce": "synthetic", "agent_instructions": null, "digest": "synthetic"},
             "prompt_digest": digest_bytes(b"original prompt"),
             "enforcement": {"harness": "codex", "harness_version": null,
                 "model_fixed_for_session": false, "gaps": [], "applied_controls": []},

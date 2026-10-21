@@ -412,8 +412,22 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
     let adapter = ahu::harness::adapter_for("claude-code").unwrap();
     // The fixture composes the delivered prompt exactly as `launch::plan` does,
     // because `run_task` rebuilds it from the frozen delivery and compares.
-    let (delivered, delivery) =
-        ahu::orchestration::deliver(Some("You are chris.\n"), prompt).unwrap();
+    let (delivered, delivery) = ahu::orchestration::deliver_composed(
+        Some("You are chris.\n"),
+        prompt,
+        ahu::orchestration::Composition {
+            mode: ahu::orchestration::Mode::Interactive,
+            metadata: Some(ahu::orchestration::Metadata {
+                task_id: "testtask0001".into(),
+                agent: "chris@1.0.0".into(),
+                harness: "claude-code".into(),
+                model: "claude-opus-5".into(),
+                permissions: Default::default(),
+            }),
+            state: None,
+        },
+    )
+    .unwrap();
     let command = adapter
         .launch_command(&LaunchRequest {
             model: "claude-opus-5",

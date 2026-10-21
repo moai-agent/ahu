@@ -324,7 +324,7 @@ fn a_task_record_without_a_prompt_digest_does_not_load_at_all() {
         "config_snapshot_digest": "0",
         "materialize": {"written": [], "removed": [], "concurrently_modified": []},
         "launch_command": {"program": "claude", "args": []},
-        "delivery": {"nonce": "0", "agent_instructions": null, "digest": "0"},
+        "delivery": {"layout_version": 3, "composition": {"mode":"interactive","metadata":null,"state":null}, "nonce": "0", "agent_instructions": null, "digest": "0"},
         // prompt_digest is deliberately absent.
         "enforcement": {
             "harness": "claude-code",
@@ -513,6 +513,32 @@ fn write_record(
         session_ref: None,
         state: TaskState::Starting,
     };
+    let (delivered, delivery) = ahu::orchestration::deliver_composed(
+        Some("You are sable.\n"),
+        prompt,
+        ahu::orchestration::Composition {
+            mode: ahu::orchestration::Mode::Interactive,
+            metadata: Some(ahu::orchestration::Metadata {
+                task_id: record.task_id.clone(),
+                agent: record.agent_label(),
+                harness: record.identity.harness.clone(),
+                model: record.identity.model.clone(),
+                permissions: record.identity.permissions,
+            }),
+            state: None,
+        },
+    )
+    .unwrap();
+    record.delivery = delivery;
+    record.launch_command = adapter
+        .launch_command(&LaunchRequest {
+            model: "claude-sonnet-5",
+            prompt: &delivered,
+            cwd: worktree,
+            permissions: Default::default(),
+        })
+        .unwrap()
+        .redacted();
     tamper(&mut record);
     ahu::task::save(task_dir, &record, prompt).unwrap();
 }
@@ -526,10 +552,10 @@ fn write_record(
 /// name, which is worse than failing.
 #[test]
 fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
-    assert_eq!(ahu::task::TASK_SCHEMA_VERSION, 5);
+    assert_eq!(ahu::task::TASK_SCHEMA_VERSION, 6);
     assert!(
-        ahu::task::READABLE_SCHEMA_VERSIONS.contains(&2),
-        "schema 2 is this build's immediate predecessor and must stay readable"
+        ahu::task::READABLE_SCHEMA_VERSIONS.contains(&6),
+        "only the latest task schema is readable"
     );
 
     let temp = tempfile::TempDir::new().unwrap();
@@ -566,7 +592,7 @@ fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
         "config_snapshot_digest": "0",
         "materialize": {"written": [], "removed": [], "concurrently_modified": []},
         "launch_command": {"program": "claude", "args": []},
-        "delivery": {"nonce": "0", "agent_instructions": null, "digest": "0"},
+        "delivery": {"layout_version": 3, "composition": {"mode":"interactive","metadata":null,"state":null}, "nonce": "0", "agent_instructions": null, "digest": "0"},
         "prompt_digest": "0",
         "enforcement": {
             "harness": "claude-code",

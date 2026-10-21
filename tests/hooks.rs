@@ -68,7 +68,7 @@ fn doctor_separates_project_hook_inventory_from_all_harness_integration_status()
         assert!(!text.contains(hooks::NON_PROJECT_HOOK_WARNING), "{text}");
         for harness in ["claude-code", "codex", "opencode", "antigravity"] {
             assert!(
-                text.contains(&format!("cmux integration {harness}:")),
+                text.contains(&format!("native safety {harness}:")),
                 "{text}"
             );
         }

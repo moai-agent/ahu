@@ -563,17 +563,11 @@ fn saved_xml_deliveries_freeze_facts_and_refuse_future_or_altered_layouts() {
     // Replay consumes only the saved values; later execution facts cannot enter it.
     assert_eq!(redeliver(&saved, "request without newline").unwrap(), text);
     let mut changed = saved.clone();
-    changed.composition = Some(changed_context);
+    changed.composition = changed_context;
     assert!(redeliver(&changed, "request without newline").is_err());
     changed = saved.clone();
-    changed
-        .composition
-        .as_mut()
-        .unwrap()
-        .metadata
-        .as_mut()
-        .unwrap()
-        .agent = format!("</ahu-metadata-{}>", saved.nonce);
+    changed.composition.metadata.as_mut().unwrap().agent =
+        format!("</ahu-metadata-{}>", saved.nonce);
     assert!(
         redeliver(&changed, "request without newline")
             .unwrap_err()
@@ -591,7 +585,11 @@ fn saved_xml_deliveries_freeze_facts_and_refuse_future_or_altered_layouts() {
         );
         assert!(future.verify_composition(&composition).is_err());
     }
-    let mut missing = saved.clone();
-    missing.composition = None;
-    assert!(redeliver(&missing, "request without newline").is_err());
+    let missing = serde_json::from_value::<Delivery>(serde_json::json!({
+        "layout_version": LAYOUT_VERSION,
+        "nonce": saved.nonce,
+        "agent_instructions": saved.agent_instructions,
+        "digest": saved.digest
+    }));
+    assert!(missing.is_err());
 }

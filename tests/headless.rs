@@ -1102,7 +1102,7 @@ fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     assert_eq!(previous["enforcement"]["harness_version"], "2.1.270");
     let spec: ahu::headless::Spec =
         serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
-    let composition = record.delivery.composition.as_ref().unwrap();
+    let composition = &record.delivery.composition;
     let state = composition.state.as_ref().unwrap();
     assert_eq!(state, &spec.coordination_state());
     assert_eq!(state.attempt, 2);
@@ -1441,7 +1441,7 @@ fn execution_rechecks_snapshot_and_user_hooks_before_spawning() {
         // The delivery also freezes the attempt number now.
         let mut record = ahu::task::load(dir).unwrap();
         let prompt = ahu::task::load_prompt(dir).unwrap();
-        let mut composition = record.delivery.composition.clone().unwrap();
+        let mut composition = record.delivery.composition.clone();
         composition.state.as_mut().unwrap().attempt = 2;
         record.delivery = ahu::orchestration::deliver_composed(
             record.delivery.agent_instructions.as_deref(),
@@ -3110,18 +3110,12 @@ fn composed_batch_launch_and_continuation_freeze_identity_session_and_grants() {
                 }
                 assert!(saved.verify_composition(&changed).is_err());
                 let mut corrupted = saved.clone();
-                corrupted.composition = Some(changed);
+                corrupted.composition = changed;
                 assert!(redeliver_headless_policy(&corrupted, prompt, policy).is_err());
             }
             let mut collision = saved.clone();
-            collision
-                .composition
-                .as_mut()
-                .unwrap()
-                .state
-                .as_mut()
-                .unwrap()
-                .native_session = Some(close_tag("state", &saved.nonce));
+            collision.composition.state.as_mut().unwrap().native_session =
+                Some(close_tag("state", &saved.nonce));
             assert!(
                 redeliver_headless_policy(&collision, prompt, policy)
                     .unwrap_err()

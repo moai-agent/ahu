@@ -80,8 +80,22 @@ fn prepare_task(repo: &TestRepo, from: &Path, task_id: &str) -> PathBuf {
 fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskRecord {
     let discovered = git::discover(repo.path()).unwrap();
     let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let (delivered, delivery) =
-        ahu::orchestration::deliver(Some("You are chris."), "current work").unwrap();
+    let (delivered, delivery) = ahu::orchestration::deliver_composed(
+        Some("You are chris."),
+        "current work",
+        ahu::orchestration::Composition {
+            mode: ahu::orchestration::Mode::Interactive,
+            metadata: Some(ahu::orchestration::Metadata {
+                task_id: task_id.to_string(),
+                agent: "chris@1.0.0".into(),
+                harness: "claude-code".into(),
+                model: "claude-opus-5".into(),
+                permissions: Default::default(),
+            }),
+            state: None,
+        },
+    )
+    .unwrap();
     let command = adapter
         .launch_command(&ahu::harness::LaunchRequest {
             model: "claude-opus-5",

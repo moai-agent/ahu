@@ -201,7 +201,7 @@ fn tasks_lists_the_readable_record_and_reports_the_unreadable_one() {
         "{text}"
     );
     assert!(
-        text.contains("schema version (1)") && text.contains("reads task schemas 2, 3, 4, and 5"),
+        text.contains("schema version (1)") && text.contains("reads task schema 6"),
         "the reason must say why, not just that: {text}"
     );
     assert!(

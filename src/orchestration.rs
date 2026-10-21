@@ -211,8 +211,7 @@ impl Composition {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Delivery {
     pub layout_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub composition: Option<Composition>,
+    pub composition: Composition,
     pub nonce: String,
     pub agent_instructions: Option<String>,
     pub digest: String,
@@ -227,7 +226,7 @@ impl Delivery {
                 self.layout_version
             );
         }
-        if self.composition.as_ref() == Some(expected) {
+        if self.composition == *expected {
             Ok(())
         } else {
             bail!("delivery composition differs from the frozen execution facts")
@@ -386,7 +385,7 @@ pub fn deliver_composed(
     let text = render(&nonce, agent, prompt, &composition)?;
     let delivery = Delivery {
         layout_version: LAYOUT_VERSION,
-        composition: Some(composition),
+        composition,
         nonce,
         agent_instructions: agent.map(str::to_string),
         digest: digest_bytes(text.as_bytes()),
@@ -425,11 +424,10 @@ fn replay(delivery: &Delivery, prompt: &str, mode: Mode) -> Result<String> {
             delivery.layout_version
         );
     }
-    let composition = delivery
-        .composition
-        .as_ref()
-        .filter(|composition| composition.mode == mode)
-        .ok_or_else(|| Error::new("missing or mismatched frozen delivery composition"))?;
+    let composition = &delivery.composition;
+    if composition.mode != mode {
+        bail!("missing or mismatched frozen delivery composition");
+    }
     if delivery.digest.is_empty() {
         bail!("this task has no recorded delivery digest; re-submit the task");
     }

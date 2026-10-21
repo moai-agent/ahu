@@ -618,7 +618,7 @@ mod tests {
             "config_snapshot_digest": "snapshot-digest",
             "materialize": {"written": [], "removed": [], "concurrently_modified": []},
             "launch_command": {"program": "claude", "args": []},
-            "delivery": {"nonce": "n", "agent_instructions": null, "digest": "d"},
+            "delivery": {"layout_version": 3, "composition": {"mode":"headless_disabled","metadata":null,"state":null}, "nonce": "n", "agent_instructions": null, "digest": "d"},
             "prompt_digest": "p",
             "enforcement": {
                 "harness": "claude-code",

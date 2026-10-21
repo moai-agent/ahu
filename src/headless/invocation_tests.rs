@@ -18,7 +18,7 @@ fn fixture(root: &Path, attempt: u32) -> (PathBuf, task::TaskRecord, Spec) {
         "config_snapshot_digest":"synthetic",
         "materialize":{"written":[],"removed":[],"concurrently_modified":[]},
         "launch_command":{"program":"private-program-marker","args":["private-argument-marker"]},
-        "delivery":{"nonce":"synthetic","digest":"synthetic"},
+        "delivery":{"layout_version":3,"composition":{"mode":"headless_disabled","metadata":null,"state":null},"nonce":"synthetic","digest":"synthetic"},
         "prompt_digest":digest_bytes(b"private-prompt-marker"),
         "enforcement":{"harness":"codex","model_fixed_for_session":false,"gaps":[],"applied_controls":[]},
         "state":"starting"

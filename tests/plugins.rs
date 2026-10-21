@@ -328,11 +328,7 @@ fn local_selection_refuses_activation_without_plugin_or_terminal_fallback() {
         assert_eq!(error.kind(), ahu::util::ErrorKind::Prerequisite);
         assert!(error.to_string().contains("committed project binding"));
         let coordinator = ahu::interactive::discover_for_coordinator();
-        if std::env::var_os("CMUX_WORKSPACE_ID").is_some() {
-            assert!(coordinator.is_err());
-        } else {
-            assert!(coordinator.unwrap().is_none());
-        }
+        assert!(coordinator.is_err());
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -390,7 +386,6 @@ fn malformed_or_incompatible_local_manifests_fail_closed() {
             "title: Fixture package\ntitle: Duplicate\n",
         ),
         valid.replace("\"fixture\"", "\"none\""),
-        valid.replace("\"fixture\"", "\"cmux\""),
         valid.replace("\"fixture\"", "\"../escape\""),
         valid.replace("\"fixture\"", "\"Uppercase\""),
         valid.replace("\"fixture\"", "\"\""),
