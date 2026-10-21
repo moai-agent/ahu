@@ -374,7 +374,7 @@ pub(crate) fn export_establishes_completion(
             // else — a shell message, a compaction, a type added by a later
             // OpenCode — leaves this check unable to describe the run.
             "system" | "synthetic" | "skill" | "agent-switched" | "model-switched"
-            | "location-switched" => (),
+            | "location-switched" | "compaction" => (),
             _ => return Err("the export holds a message type this check does not recognize"),
         }
     }
@@ -557,6 +557,8 @@ mod tests {
         let stepped = serde_json::json!([
             prompt(),
             assistant("msg_step", "tool-calls", "completed"),
+            {"id":"msg_compaction","type":"compaction","status":"completed",
+             "time":{"created":STARTED + 850}},
             assistant("msg_turn", "stop", "completed"),
             idle("succeeded"),
         ]);
