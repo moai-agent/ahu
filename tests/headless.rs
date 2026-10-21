@@ -495,6 +495,47 @@ fn headless_planning_does_not_activate_the_selected_session_host() {
 }
 
 #[test]
+fn headless_launch_and_result_work_without_cmux_or_a_session_host() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.bin.join("cmux")).unwrap();
+
+    let launch = f
+        .command()
+        .env("AHU_INTERACTIVE_PLUGIN", "none")
+        .env("SCENARIO", "success")
+        .args([
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "run without an interactive session host",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        launch.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launch.stderr)
+    );
+    let launched = Fixture::value(&launch);
+    let task_id = launched["task_id"].as_str().expect("task id");
+
+    let result = f
+        .command()
+        .env("AHU_INTERACTIVE_PLUGIN", "none")
+        .args(["result", task_id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(Fixture::value(&result)["outcome"], "succeeded");
+}
+
+#[test]
 fn foreground_keeps_primary_coordination_and_identity_without_native_copies() {
     let f = Fixture::new();
     let out = f.launch("success", &[]);
