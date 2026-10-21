@@ -196,7 +196,6 @@ pub fn inspect(executable: &Path, cwd: &Path, version: &str) -> Result<Value> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     crate::native_admission::sanitize(&mut command, None);
-    command.env("CMUX_CODEX_HOOKS_DISABLED", "1");
     use std::os::unix::process::CommandExt;
     command.process_group(0);
     let mut child = command

@@ -1166,26 +1166,31 @@ fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     );
 }
 #[test]
-fn wrapper_is_refused_before_even_version_probe() {
+fn wrapper_runs_as_the_configured_harness_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
     let f = Fixture::new();
     let marker = f.external.path().join("invoked");
+    let executable = f.bin.join("claude");
+    let real_executable = f.bin.join("claude.real");
+    std::fs::rename(&executable, &real_executable).unwrap();
     std::fs::write(
-        f.bin.join("claude"),
+        &executable,
         format!(
-            "#!/bin/sh\n# cmux wrapper\ntouch '{}'\necho 2.1.270\n",
-            marker.display()
+            "#!/bin/sh\n# terminal wrapper\ntouch '{}'\nexec '{}' \"$@\"\n",
+            marker.display(),
+            real_executable.display()
         ),
     )
     .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let out = f.launch("success", &[]);
-    assert!(!out.status.success());
-    assert!(!marker.exists());
-    assert_eq!(
-        common::git(f.repo.path(), &["worktree", "list", "--porcelain"])
-            .matches("worktree ")
-            .count(),
-        1
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    assert!(marker.exists());
 }
 #[test]
 fn recursive_registered_child_inherits_headless_and_is_discoverable() {

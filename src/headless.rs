@@ -479,18 +479,9 @@ fn refresh_resume_profile(
 }
 
 fn validate_executable(path: &Path, repo: &crate::git::Repo) -> Result<PathBuf> {
-    if let Some(note) = crate::harness::wrapper_interposed(path) {
-        bail!("headless launch refuses cmux wrappers: {note}");
-    }
     let real = path.canonicalize()?;
     if real.starts_with(repo.primary_root()?.canonicalize()?) {
         bail!("headless executable must be outside the repository");
-    }
-    // Recognise script shims as well as the known cmux path conventions.
-    let mut prefix = vec![0; 16384];
-    let n = std::fs::File::open(&real)?.read(&mut prefix)?;
-    if prefix[..n].starts_with(b"#!") && String::from_utf8_lossy(&prefix[..n]).contains("cmux") {
-        bail!("headless launch refuses a script wrapper referencing cmux");
     }
     Ok(real)
 }
@@ -1533,14 +1524,6 @@ pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
 
 fn sanitize(command: &mut Command, policy: Option<&crate::native_admission::HeadlessPolicy>) {
     crate::native_admission::sanitize(command, policy);
-    if let Some(path) = std::env::var_os("PATH") {
-        let paths = std::env::split_paths(&path)
-            .filter(|p| !p.to_string_lossy().contains("cmux-cli-shims"))
-            .collect::<Vec<_>>();
-        if let Ok(path) = std::env::join_paths(paths) {
-            command.env("PATH", path);
-        }
-    }
     command.env_remove("AHU_EXPECTED_DIGEST");
 }
 
@@ -5470,7 +5453,7 @@ mod profile_and_metadata_tests {
 
     #[cfg(unix)]
     #[test]
-    fn executable_validation_rejects_repository_binaries_and_cmux_wrappers() {
+    fn executable_validation_rejects_repository_binaries_but_accepts_user_wrappers() {
         use std::os::unix::fs::PermissionsExt;
 
         let repo_root = tempfile::tempdir().unwrap();
@@ -5497,11 +5480,9 @@ mod profile_and_metadata_tests {
         let wrapper = outside_root.path().join("wrapper");
         std::fs::write(&wrapper, "#!/bin/sh\n# cmux wrapper\n").unwrap();
         std::fs::set_permissions(&wrapper, permissions.clone()).unwrap();
-        assert!(
-            validate_executable(&wrapper, &repo)
-                .unwrap_err()
-                .to_string()
-                .contains("script wrapper")
+        assert_eq!(
+            validate_executable(&wrapper, &repo).unwrap(),
+            wrapper.canonicalize().unwrap()
         );
 
         let valid = outside_root.path().join("agent");

@@ -751,34 +751,6 @@ fn a_source_format_only_decides_how_its_file_is_parsed() {
     }
 }
 
-/// A wrapper between ahu and the harness can add flags ahu refuses to pass, so
-/// ahu must disclose it rather than claim the harness's defaults are intact.
-#[test]
-fn a_wrapper_on_the_path_is_disclosed_as_an_enforcement_gap() {
-    let shim =
-        Path::new("/var/folders/xx/T/cmux-cli-shims/00000000-0000-0000-0000-000000000000/codex");
-    let note = harness::wrapper_interposed(shim).expect("a cmux shim must be detected");
-    assert!(note.contains("cmux shim"), "{note}");
-    assert!(note.contains("cannot inspect"), "{note}");
-
-    // A real binary is not flagged.
-    assert!(harness::wrapper_interposed(Path::new("/usr/local/bin/codex")).is_none());
-
-    // No adapter may claim a wrapper leaves the harness's defaults untouched.
-    for harness_id in ["claude-code", "codex", "antigravity"] {
-        let report = harness::adapter_for(harness_id)
-            .unwrap()
-            .enforcement("m", Default::default())
-            .unwrap();
-        for control in &report.applied_controls {
-            assert!(
-                !control.contains("are unchanged"),
-                "{harness_id} must not claim defaults are unchanged: {control}"
-            );
-        }
-    }
-}
-
 /// Widening a harness's approval boundary is opt-in, per agent, and mapped onto
 /// each harness's own native flag. Absent configuration passes nothing at all.
 #[test]

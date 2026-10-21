@@ -525,7 +525,7 @@ fn planning_freezes_registered_identity_and_discloses_repository_inputs() {
     let Ok(case) = std::env::var(CASE) else {
         for case in ["automatic", "named", "missing", "symlink", "dirty-context"] {
             let external = tempfile::tempdir().unwrap();
-            let bin = external.path().join("cmux-cli-shims");
+            let bin = external.path().join("harness-bin");
             std::fs::create_dir(&bin).unwrap();
             symlink(
                 crate::selection::resolve_utility("git").unwrap(),
@@ -646,7 +646,6 @@ fn planning_freezes_registered_identity_and_discloses_repository_inputs() {
         for expected in [
             "fixture-plugin@1.0.0",
             "1 MCP server(s)",
-            "cmux shim",
             "declares approval settings ahu does not set",
             DELIVERY_IS_NOT_ENFORCEMENT,
         ] {

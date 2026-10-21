@@ -413,11 +413,6 @@ fn plan_with_mode(
             entry.display_name
         ));
     }
-    // A wrapper between ahu and the harness can add flags ahu refuses to pass.
-    if let Some(note) = harness::wrapper_interposed(&harness_executable) {
-        enforcement.gaps.push(note);
-    }
-
     let native_admission = if work_mode {
         // Interactive permission disclosures may describe different argv and
         // attribute the choice to the manifest. Work mode makes its own choice.
