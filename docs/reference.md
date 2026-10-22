@@ -485,6 +485,31 @@ The [release telemetry guide](otel-release-report.md) describes separate
 task/attempt-attributed export checks. Adapter and loopback transport fixtures
 exercise synthetic events, not authenticated provider completion.
 
+### Current local candidate snapshot (2026-10-22)
+
+The coordinator built candidate `4af6d80` and ran headless work-mode dry-run
+previews for the five registered harnesses below. These previews resolved the
+listed executables and planned each manifest's `auto` permission mode. A preview
+does not start a harness or establish account, model, tool, or task completion.
+Work mode skips native-configuration admission; it does not inspect native
+hooks, plugins, or settings, prevent permission prompts, or confine filesystem,
+process, or network access. No account or harness configuration was changed.
+
+| Harness and locally resolved CLI | Model | Headless evidence on the current candidate | Interactive task completion on the current CLI | Live MCP evidence on the current candidate |
+| --- | --- | --- | --- | --- |
+| Codex CLI 0.163.0 | `gpt-6-astra` | Preview only in this audit. A separate 2026-10-20 smoke on an earlier 0.11.0 source revision succeeded for 7/7 agents; not replayed on this candidate. | Unverified | Unverified for this candidate; the older catalog record is on Codex 0.160.0. |
+| Claude Code 2.1.306 | `claude-opus-5` | Preview only in this audit. The documented 4/4 work-mode smoke used 2.1.304 on an earlier source revision. | Unverified | Unverified |
+| Antigravity CLI 1.4.5 | `gemini-3.1-pro-high` | Preview only in this audit. The documented 5/5 work-mode smoke used 1.4.3 on an earlier source revision. | Unverified | Unverified |
+| OpenCode 2.0.32 | `ollama/glm-5.3:cloud` | One bounded task exited 0 with a terminal event and ahu outcome `succeeded`; `completion_verified` remained false because no durable agent report was recorded. | Unverified | The task made one native `ahu_agents_list` MCP call successfully; other tools and interactive use were not tested here. |
+| Kiro CLI 2.33.1 | `claude-sonnet-4.5` | Preview only in this audit. The documented 3/3 failed work-mode runs used Kiro 2.32.0 on an earlier source revision; current-version completion is unverified. | Unverified | Unverified |
+
+The rows are scoped to the named version, model, mode, and candidate. Earlier
+smokes do not certify a later CLI version or source revision. Interactive
+startup, headless preview, a completed task, a successful MCP call, and OTel
+collector delivery are separate observations. This public compatibility note
+contains no trace payloads or collector metrics; local telemetry evidence stays
+outside the repository.
+
 Readiness and budget observations are local and time-sensitive, so this public
 reference does not publish account identities, binding states, or capacity
 figures. Use `ahu auth readiness` and `ahu auth budget --output json` for current
