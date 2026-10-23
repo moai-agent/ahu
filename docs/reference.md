@@ -552,6 +552,18 @@ The selected harness may still block on its own authentication, hooks, plugins,
 or provider behavior; work mode records that boundary and does not claim to
 sandbox the harness. See [work mode](#work-mode) for the recorded controls.
 
+### Native workspace trust
+
+Automatic tool approval and workspace trust are separate native decisions.
+Claude Code 2.1.308 and Antigravity CLI 1.4.6 can present a folder-trust dialog
+when an interactive task opens a new checkout, even with automatic tool
+permissions selected. Ahu does not answer that dialog or rewrite native trust
+stores. Complete native trust setup before relying on unattended interactive
+work, or use explicit headless `--work-mode` for assigned batch work. Successful
+headless execution does not establish interactive readiness. A session-host
+plugin can successfully create and own a workspace while its harness waits at
+this dialog; task/session creation alone is not a completed harness smoke test.
+
 ### Work mode
 
 `ahu @agent --work-mode --prompt "..."` is the assigned-work path for a
