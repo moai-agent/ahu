@@ -1018,8 +1018,7 @@ pub fn launch(
         crate::launch::plan(repo, agent, pair, prompt)?
     };
     plan.apply_display(display)?;
-    // cmux integration environment is removed before supervisor and worker execution.
-    plan.hooks.wrapper_injected = false;
+
     let executable = validate_executable(&plan.harness_executable, repo)?;
     let version = plan
         .enforcement
@@ -1156,7 +1155,7 @@ pub fn launch(
         spec.gaps.extend(profile.gaps.clone());
     }
     if !spec.options.work_mode {
-        spec.gaps.push("Native integration evidence is bounded; unsupported configuration and hooks are refused. ahu itself never invokes cmux in this backend; arbitrary shell commands remain outside integration inspection. Same-UID code is not isolated from supervisor state.".into());
+        spec.gaps.push("Native integration evidence is bounded; unsupported configuration and hooks are refused. Arbitrary shell commands remain outside integration inspection. Same-UID code is not isolated from supervisor state.".into());
     }
     if !spec.child_grants.is_empty() {
         spec.gaps.push("Broker grants approve only frozen registered identities and profiles. Codex workspace-write receives the task's requests directory as a narrow additional write root; read-only Codex transport is refused. Limits: 128 tasks per root grant, depth 8, 16 active/interrupted tasks per repository, no hidden queue or global token cap.".into());
@@ -1176,13 +1175,12 @@ pub fn launch(
         spec.options.work_mode,
     )?;
     if !spec.options.work_mode {
-        crate::selection::check_launch_compatibility_with_policy(
+        crate::selection::check_launch_compatibility(
             &plan.harness_executable,
             &plan.pair.harness,
             &plan.pair.model,
             permissions,
             &repo.root,
-            Some(&native_admission.headless),
         )?;
     }
     plan.native_admission = native_admission.clone();
@@ -1190,7 +1188,7 @@ pub fn launch(
         spec.gaps.extend(native_admission.gaps.clone());
         plan.enforcement.gaps.extend(native_admission.gaps.clone());
     } else {
-        spec.gaps.push(format!("cmux admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", native_admission.headless.evidence_digest));
+        spec.gaps.push(format!("Native configuration admission allowed for inspected native components; evidence SHA-256 {}. Live conformance remains unverified.", native_admission.headless.evidence_digest));
     }
     let (delivered, delivery) = crate::orchestration::deliver_composed(
         plan.agent.as_ref().map(|a| a.instructions.as_str()),
@@ -1348,18 +1346,16 @@ pub(crate) fn validate_frozen_configuration(
     let loaded = crate::config::load(&record.worktree)?
         .ok_or_else(|| Error::new("task configuration is missing"))?;
     let snapshot = crate::snapshot::collect(&record.worktree)?;
-    let mut hooks = if work_mode {
+    let hooks = if work_mode {
         work_mode::hooks(&record.identity.harness)
     } else {
         crate::hooks::collect(&record.worktree, &record.identity.harness)?
     };
-    let mut expected_hooks = record.hooks.clone();
+    let expected_hooks = record.hooks.clone();
     if expected_hooks.digest() != record.hooks_digest {
         bail!("recorded hook inventory integrity mismatch");
     }
-    // Submission may come from a cmux pane; neither worker backend nor hook content changes.
-    hooks.wrapper_injected = false;
-    expected_hooks.wrapper_injected = false;
+
     if loaded.digest != record.policy_digest
         || snapshot.digest() != record.config_snapshot_digest
         || hooks.digest() != expected_hooks.digest()
@@ -1522,8 +1518,7 @@ pub(crate) fn emit(value: &Value, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-fn sanitize(command: &mut Command, policy: Option<&crate::native_admission::HeadlessPolicy>) {
-    crate::native_admission::sanitize(command, policy);
+fn sanitize(command: &mut Command) {
     command.env_remove("AHU_EXPECTED_DIGEST");
 }
 
@@ -1539,7 +1534,7 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    sanitize(&mut command, None);
+    sanitize(&mut command);
     crate::telemetry::configure_task_identity(&mut command, &task::load(dir)?, Some(spec));
     crate::telemetry::configure_supervisor_parent(&mut command, spec);
     command
@@ -2204,7 +2199,6 @@ struct RecordedCompletion<'a> {
     executable: &'a Path,
     expected_executable_digest: Option<&'a str>,
     worktree: &'a Path,
-    policy: Option<&'a crate::native_admission::HeadlessPolicy>,
     /// The attempt created this session itself: ahu passed no `--session`.
     fresh_session: bool,
     exited_zero: bool,
@@ -2293,7 +2287,7 @@ fn opencode_recorded_completion(
         // above, so it can never be read as an option.
         command.args(["session", "export", "--sanitize", "--standalone", session]);
         crate::harness::configure_task_directory(&mut command, "opencode", attempt.worktree);
-        sanitize(&mut command, attempt.policy);
+        sanitize(&mut command);
         // This process only verifies completion; it must not create a second
         // Ahu or native telemetry observation using the supervisor's environment.
         command
@@ -2949,7 +2943,7 @@ fn run_attempt(
     crate::catalog::check_headless_version(&record.identity.harness, &spec.harness_version)?;
     validate_parent_attempt(&repo, spec)?;
     validate_frozen_configuration(&record, spec.options.work_mode)?;
-    let native_admission = validate_environment(
+    validate_environment(
         &repo,
         &record.worktree,
         &record.identity.harness,
@@ -2961,13 +2955,12 @@ fn run_attempt(
         spec.options.work_mode,
     )?;
     if !spec.options.work_mode {
-        crate::selection::check_launch_compatibility_with_policy(
+        crate::selection::check_launch_compatibility(
             &real,
             &record.identity.harness,
             &record.identity.model,
             record.identity.permissions,
             &record.worktree,
-            Some(&native_admission.headless),
         )?;
     }
     if spec.options.work_mode {
@@ -3001,7 +2994,7 @@ fn run_attempt(
         &record.identity.harness,
         &record.worktree,
     );
-    sanitize(&mut command, Some(&native_admission.headless));
+    sanitize(&mut command);
     let telemetry = crate::config::load(&record.worktree)?
         .map(|loaded| loaded.config.telemetry)
         .unwrap_or_default();
@@ -3284,7 +3277,6 @@ fn run_attempt(
             executable: &real,
             expected_executable_digest: Some(&spec.executable_digest),
             worktree: &record.worktree,
-            policy: Some(&native_admission.headless),
             fresh_session: spec.session.is_none(),
             exited_zero: status.success(),
             attempt_started_ms,
@@ -4467,6 +4459,44 @@ mod write_tracking_tests {
     use super::*;
 
     #[test]
+    fn sanitation_preserves_provider_controls_and_removes_only_ahu_launch_digest() {
+        const CASE: &str = "headless::write_tracking_tests::sanitation_preserves_provider_controls_and_removes_only_ahu_launch_digest";
+        if std::env::var_os("AHU_PROVIDER_ENV_TEST_CHILD").is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1"])
+                .env("AHU_PROVIDER_ENV_TEST_CHILD", "1")
+                .env("CMUX_WORKSPACE_ID", "inherited-workspace")
+                .env("CMUX_CODEX_HOOKS_DISABLED", "0")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        let mut command = Command::new("synthetic-harness");
+        command.env("CMUX_WORKSPACE_ID", "synthetic-workspace");
+        command.env("CMUX_CODEX_HOOKS_DISABLED", "0");
+        command.env("OTHER_PROVIDER_ROUTE", "synthetic-route");
+        command.env("AHU_EXPECTED_DIGEST", "stale");
+        sanitize(&mut command);
+        let env: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        for (key, value) in [
+            ("CMUX_WORKSPACE_ID", "synthetic-workspace"),
+            ("CMUX_CODEX_HOOKS_DISABLED", "0"),
+            ("OTHER_PROVIDER_ROUTE", "synthetic-route"),
+        ] {
+            assert_eq!(
+                env[std::ffi::OsStr::new(key)],
+                Some(std::ffi::OsStr::new(value))
+            );
+        }
+        assert_eq!(env[std::ffi::OsStr::new("AHU_EXPECTED_DIGEST")], None);
+    }
+
+    #[test]
     fn structured_result_write_exemption_is_exact_and_not_serialized() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -4911,7 +4941,6 @@ mod write_tracking_tests {
             executable,
             expected_executable_digest: None,
             worktree,
-            policy: None,
             fresh_session: true,
             exited_zero: true,
             attempt_started_ms: RECORDED_START,

@@ -48,8 +48,8 @@ pub fn freeze_grants(
         if !matches!(policy, "disabled" | "bounded") {
             bail!("child native_helpers must be disabled or bounded");
         }
-        let mut hooks = crate::hooks::collect(&repo.root, &agent.manifest.harness)?;
-        hooks.wrapper_injected = false;
+        let hooks = crate::hooks::collect(&repo.root, &agent.manifest.harness)?;
+
         grants.push(ChildGrant {
             contract: agent.contract.clone(),
             agent: name.clone(),
@@ -832,8 +832,8 @@ mod tests {
         assert_eq!(grants[0].native_helpers, "disabled");
         let agent = crate::agent::find(&repo.root, "reviewer").unwrap();
         assert_eq!(grants[0].identity_digest, agent.identity_digest());
-        let mut hooks = crate::hooks::collect(&repo.root, "claude-code").unwrap();
-        hooks.wrapper_injected = false;
+        let hooks = crate::hooks::collect(&repo.root, "claude-code").unwrap();
+
         assert_eq!(grants[0].hooks_digest, hooks.digest());
     }
 

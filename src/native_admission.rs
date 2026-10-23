@@ -3,20 +3,12 @@
 //! No hook bodies are persisted, interpreted, installed, or copied by
 //! inspection.
 //!
-//! `sanitize` runs only after admission, removing `CMUX_*` routing variables
-//! from a child command and restoring reviewed disable controls. This module
-//! never invokes the cmux CLI or installs native configuration.
-//! The `enforce*` family are pure gate predicates over inspection results:
-//! they read and decide, never mutate.
-//!
-//! Native hook fingerprints reviewed against cmux ddd4a01bc:
-//! <https://github.com/manaflow-ai/cmux/blob/ddd4a01bc/CLI/CMUXCLI%2BAgentHookDefinitions.swift>.
-//! OpenCode and Claude fingerprints identify inspected native artifacts, not
-//! implementations maintained by ahu. A changed fingerprint is unknown.
+//! Admission is provider-neutral: executable hook and plugin behavior remains
+//! unknown unless covered by a harness invocation profile. Inspection never
+//! changes native settings or provider environment variables.
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -25,55 +17,6 @@ use crate::util::{Error, Result, digest_bytes, display_safe};
 
 const LIMIT: u64 = 1024 * 1024;
 const MAX_ENTRIES: usize = 256;
-const FEED_DIGEST: &str = "aae76d0577a008d89e96932abb3b7c61d83b0086ca5e08b7622aac0aa8d76b9c";
-const SESSION_DIGEST: &str = "a9664ca1aff28fc5aa194efdfb2ed41b2584ee4569e91503e9388b3035a625b7";
-const WRAPPER_DIGEST: &str = "e930666189e326972d4b4ed36ca7bd955260845953a779b3049be44677c175d4";
-
-// Exact native command bytes reviewed in cmux ddd4a01bc. These fingerprints
-// identify code; a marker, filename, or matching substring never establishes it.
-const CODEX_COMMANDS: &[(&str, &str)] = &[
-    (
-        "PermissionRequest",
-        "563533aafffeb346cf801342b83777c927125ddaa001f6061a4254c955d7c3ca",
-    ),
-    (
-        "PostCompact",
-        "debac46f677cacc603c95b1779a466528224ccb369b95e1faca5e812a60a79b8",
-    ),
-    (
-        "PostToolUse",
-        "af2cc98aebaaa20784604a798fa84b612470ea79027be6c5bf878f044dad3f6d",
-    ),
-    (
-        "PreCompact",
-        "502302f8fbc0df0ba49e1d0f662371bcc8a1135b8783e9fce2a4ddb961ad0b5b",
-    ),
-    (
-        "PreToolUse",
-        "0f640048731777c1d4b134f34b3c2a7a4f2db9d2b3e21051d28731bed37f3f1b",
-    ),
-    (
-        "SubagentStart",
-        "8f855b07fbe1ace2f17f5c1a863cf2ea8abcfffb00b9711d48f6180a819462b4",
-    ),
-    (
-        "SubagentStop",
-        "39ce821db00c1a26ae934a3d033297df519e9260d3f33fb31b2550ad48a32df5",
-    ),
-    (
-        "UserPromptSubmit",
-        "9b5ed21ec71b8f3996e912663f3ff10072b3fdcacec15d4bd5999cb2d13955a3",
-    ),
-    (
-        "SessionStart",
-        "6d14ad8d3539332107af5c68dcb89edecf2b8972c8848f55a9e075d53077b942",
-    ),
-    (
-        "Stop",
-        "ec802d73827f74550c99641ac4cabcd6c7190925160a573d6d5c46c3c740ea47",
-    ),
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Registration {
@@ -180,7 +123,6 @@ impl Status {
 #[derive(Debug, Clone, Serialize)]
 pub struct HeadlessPolicy {
     pub allowed: bool,
-    pub disable_variable: Option<String>,
     pub reasons: Vec<String>,
     pub evidence_digest: String,
 }
@@ -263,7 +205,6 @@ fn codex_system_root() -> PathBuf {
 pub struct Locations {
     pub home: Option<PathBuf>,
     pub overrides: BTreeMap<String, String>,
-    pub wrapper: Option<PathBuf>,
     pub managed_claude: Option<PathBuf>,
     pub managed_opencode: Option<PathBuf>,
     pub managed_preferences: Option<PathBuf>,
@@ -304,9 +245,6 @@ impl Locations {
                 .into_iter()
                 .filter_map(|key| std::env::var_os(key).map(|_| (key.to_string(), String::new())))
                 .collect(),
-            wrapper: Some(PathBuf::from(
-                "/Applications/cmux.app/Contents/Resources/bin/cmux-claude-wrapper",
-            )),
             managed_claude: Some(PathBuf::from(
                 "/Library/Application Support/ClaudeCode/managed-settings.json",
             )),
@@ -332,16 +270,6 @@ fn native_agent(harness: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-fn disable_variable(harness: &str) -> Option<&'static str> {
-    match harness {
-        "codex" => Some("CMUX_CODEX_HOOKS_DISABLED"),
-        "opencode" => Some("CMUX_OPENCODE_HOOKS_DISABLED"),
-        "claude-code" => Some("CMUX_CLAUDE_HOOKS_DISABLED"),
-        "antigravity" => Some("CMUX_ANTIGRAVITY_HOOKS_DISABLED"),
-        _ => None,
-    }
-}
-
 // Check all existing ancestors before opening: dangling links, linked parent
 // directories and special files are uncertainty, never evidence of absence.
 fn check_path(path: &Path) -> std::result::Result<(), String> {
@@ -506,20 +434,6 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
             codex_activation(&repo.join(".codex/config.toml"), &mut components);
         }
         "claude-code" => {
-            if let Some(path) = &locations.wrapper {
-                let mut c = component("wrapper", path, "application bundle");
-                if let Some(bytes) = file_bytes(&mut c) {
-                    if digest_bytes(&bytes) == WRAPPER_DIGEST {
-                        c.registration = Registration::Installed;
-                        c.conformance = Conformance::SourceInspected;
-                        c.isolation = Isolation::DirectExecutableOnly;
-                        c.detail = "reviewed bundled wrapper available; invocation/injection not observed; headless requires a direct harness executable".into();
-                    } else {
-                        c.detail = "unrecognized wrapper bytes".into();
-                    }
-                }
-                components.push(c);
-            }
             for (path, scope) in [
                 (home.join(".claude/settings.json"), "user"),
                 (repo.join(".claude/settings.json"), "project"),
@@ -542,7 +456,7 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
                     &mut components,
                 );
             }
-            gaps.push("Claude integration is wrapper-managed. Separately configured hooks and plugins have independent behavior.".into());
+            gaps.push("Native hooks, plugins and executable wrappers have independent behavior; wrapper injection is not inspected.".into());
         }
         "opencode" => {
             scan_opencode_sources(locations, &mut components);
@@ -653,11 +567,18 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
         let mut c = component("additional integration scope", &path, "project");
         if let Some(bytes) = file_bytes(&mut c) {
             match serde_json::from_slice::<Value>(&bytes) {
-                Ok(value) if !json_mentions_cmux(&value) => {
+                Ok(value)
+                    if value.is_object()
+                        && (file == ".mcp.json"
+                            || value.as_object().is_some_and(serde_json::Map::is_empty)) =>
+                {
                     absent(&mut c);
-                    c.detail = "no cmux reference observed; arbitrary subprocess behavior is outside inspection".into();
-                },
-                Ok(_) => c.detail = "cmux reference in an unsupported integration scope; not proof of registration or isolation".into(),
+                    c.detail = "no executable hook policy in inspected scope; MCP subprocess behavior remains native and outside inspection".into();
+                }
+                Ok(_) => {
+                    c.detail =
+                        "unsupported executable configuration scope; behavior is unknown".into()
+                }
                 Err(_) => c.detail = "malformed integration configuration".into(),
             }
         }
@@ -690,9 +611,9 @@ fn scan_kiro(base: &Path, scope: &str, out: &mut Vec<Component>) {
     let mut c = component("Kiro MCP settings", &base.join("settings/mcp.json"), scope);
     if let Some(bytes) = file_bytes(&mut c) {
         match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) if value.is_object() && !json_mentions_cmux(&value) => {
+            Ok(value) if value.is_object() => {
                 absent(&mut c);
-                c.detail = "no cmux reference observed; arbitrary MCP subprocess behavior is outside inspection".into();
+                c.detail = "MCP configuration remains native; arbitrary subprocess behavior is outside inspection".into();
             }
             _ => c.detail = "Kiro MCP settings contain unresolved integration configuration".into(),
         }
@@ -753,35 +674,30 @@ fn kiro_permissions(value: &Value) -> bool {
 }
 
 fn kiro_mcp_servers(value: &Value) -> bool {
-    !json_mentions_cmux(value)
-        && value.as_object().is_some_and(|servers| {
-            servers.values().all(|server| {
-                server.as_object().is_some_and(|fields| {
-                    fields.iter().all(|(key, value)| match key.as_str() {
-                        "command" | "cwd" | "url" | "type" | "versionNegotiation" => {
-                            value.is_string()
-                        }
-                        "args" | "disabledTools" | "autoApprove" | "oauthScopes" => {
-                            string_array(value)
-                        }
-                        "disabled" | "waitForReady" => value.is_boolean(),
-                        "timeout" => value.is_number(),
-                        "env" | "headers" => value
-                            .as_object()
-                            .is_some_and(|fields| fields.values().all(Value::is_string)),
-                        "oauth" => value.as_object().is_some_and(|fields| {
-                            fields.iter().all(|(key, value)| {
-                                matches!(
-                                    key.as_str(),
-                                    "clientId" | "redirectUri" | "clientMetadataUrl"
-                                ) && value.is_string()
-                            })
-                        }),
-                        _ => false,
-                    })
+    value.as_object().is_some_and(|servers| {
+        servers.values().all(|server| {
+            server.as_object().is_some_and(|fields| {
+                fields.iter().all(|(key, value)| match key.as_str() {
+                    "command" | "cwd" | "url" | "type" | "versionNegotiation" => value.is_string(),
+                    "args" | "disabledTools" | "autoApprove" | "oauthScopes" => string_array(value),
+                    "disabled" | "waitForReady" => value.is_boolean(),
+                    "timeout" => value.is_number(),
+                    "env" | "headers" => value
+                        .as_object()
+                        .is_some_and(|fields| fields.values().all(Value::is_string)),
+                    "oauth" => value.as_object().is_some_and(|fields| {
+                        fields.iter().all(|(key, value)| {
+                            matches!(
+                                key.as_str(),
+                                "clientId" | "redirectUri" | "clientMetadataUrl"
+                            ) && value.is_string()
+                        })
+                    }),
+                    _ => false,
                 })
             })
         })
+    })
 }
 
 // Deliberately narrower than the native schema: no executable hooks, knowledge
@@ -895,55 +811,12 @@ fn scan_kiro_agents(
     }
 }
 
-fn json_mentions_cmux(value: &Value) -> bool {
-    match value {
-        Value::String(text) => text.to_ascii_lowercase().contains("cmux"),
-        Value::Array(items) => items.iter().any(json_mentions_cmux),
-        Value::Object(items) => items.iter().any(|(key, value)| {
-            key.to_ascii_lowercase().contains("cmux") || json_mentions_cmux(value)
-        }),
-        _ => false,
-    }
-}
-
-fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) -> Status {
+fn finish(harness: &str, mut components: Vec<Component>, gaps: Vec<String>) -> Status {
     // A native user path can also be reached by project ancestor discovery.
     // Retain one observation, without collapsing duplicate hook registrations
     // (their numbered names differ).
     let mut seen = std::collections::BTreeSet::new();
     components.retain(|c| seen.insert((c.name.clone(), c.evidence[0].path.clone())));
-    if harness == "codex" {
-        let missing: Vec<_> = CODEX_COMMANDS
-            .iter()
-            .filter(|(event, _)| {
-                !components.iter().any(|c| {
-                    c.registration == Registration::Installed
-                        && c.name.starts_with(&format!("{event} registration "))
-                })
-            })
-            .map(|(event, _)| *event)
-            .collect();
-        if !missing.is_empty() {
-            gaps.push(format!(
-                "Native event coverage is missing or unverified: {}",
-                missing.join(", ")
-            ));
-        }
-    }
-    if harness == "opencode" {
-        for (label, digest) in [("Session", SESSION_DIGEST), ("Feed", FEED_DIGEST)] {
-            if !components.iter().any(|c| {
-                c.registration == Registration::Installed
-                    && c.evidence
-                        .iter()
-                        .any(|e| e.digest.as_deref() == Some(digest))
-            }) {
-                gaps.push(format!(
-                    "OpenCode {label} plugin registration is missing or unverified."
-                ));
-            }
-        }
-    }
     let reasons: Vec<String> = components
         .iter()
         .filter(|c| matches!(c.isolation, Isolation::Unknown | Isolation::Unsafe))
@@ -956,14 +829,8 @@ fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) 
             )
         })
         .collect();
-    let guarded = components
-        .iter()
-        .any(|c| c.isolation == Isolation::VerifiedDisable);
     let headless = HeadlessPolicy {
         allowed: reasons.is_empty(),
-        disable_variable: guarded
-            .then(|| disable_variable(harness).map(str::to_string))
-            .flatten(),
         reasons,
         evidence_digest: digest_bytes(
             &serde_json::to_vec(&components).expect("component serialization"),
@@ -971,11 +838,7 @@ fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) 
     };
     Status { profile: crate::catalog::isolation_profile(harness), cli_version: None, version_checked: false, harness: harness.into(), native_agent: native_agent(harness).map(str::to_string),
         components, gaps, conformance: "locally_inspected; live_untested".into(), headless,
-        next_action: match harness {
-            "claude-code" => "Use interactive execution while independent hooks/plugins or managed settings are unresolved. Review those sources with their native owner, then inspect again. cmux Settings > Automation controls only the Claude wrapper; no native Claude installer is exposed.".into(),
-            "opencode" => "Use interactive execution for unresolved native configuration/authentication sources; credentials and account databases are not read. Native --pure disables external plugins but does not resolve authenticated remote configuration. Changing native homes or hiding account stores can change provider/model resolution and is not an isolation repair. For unguarded Feed, explicit native removal is `cmux hooks opencode uninstall`, then inspect again. Reinstalling the same Feed does not provide isolation.".into(),
-            _ => "Inspect unknown components and native scope; use interactive execution until isolation is verified. Review native configuration with its owner, then inspect again.".into(),
-        } }
+        next_action: "Review unresolved native configuration with its owner; use interactive execution or explicit --work-mode when native compatibility is unverified.".into() }
 }
 
 /// Presence-only inspection for credentials, opaque native stores and legacy
@@ -1243,10 +1106,7 @@ fn codex_indirection(value: &toml::Value) -> bool {
             {
                 return true;
             }
-        } else if (entry.is_table() && codex_indirection(entry))
-            || key.to_ascii_lowercase().contains("cmux")
-            || entry.to_string().to_ascii_lowercase().contains("cmux")
-        {
+        } else if entry.is_table() && codex_indirection(entry) {
             return true;
         }
     }
@@ -1256,7 +1116,7 @@ fn codex_indirection(value: &toml::Value) -> bool {
 fn scan_hooks(
     path: &Path,
     scope: &str,
-    harness: &str,
+    _harness: &str,
     activation: Activation,
     out: &mut Vec<Component>,
 ) {
@@ -1312,7 +1172,7 @@ fn scan_hooks(
                 out.push(c);
                 return;
             };
-            for entry in entries {
+            for _entry in entries {
                 count += 1;
                 if count > MAX_ENTRIES {
                     c.detail = "hook inspection entry limit exceeded".into();
@@ -1324,12 +1184,6 @@ fn scan_hooks(
                 item.activation = activation;
                 item.detail =
                     "unrecognized native hook command; isolation cannot be established".into();
-                if harness == "codex"
-                    && entry.get("type").and_then(Value::as_str) == Some("command")
-                    && let Some(command) = entry.get("command").and_then(Value::as_str)
-                {
-                    verify_codex(command, event, &mut item);
-                }
                 out.push(item);
             }
         }
@@ -1337,66 +1191,6 @@ fn scan_hooks(
     if count == 0 {
         absent(&mut c);
         out.push(c);
-    }
-}
-// A deliberately small POSIX literal grammar, not a shell parser. Quoting must
-// enclose the whole path; unquoted words allow no expansion or token syntax.
-fn literal_artifact_path(command: &str) -> Option<&Path> {
-    let path = if let Some(quoted) = command.strip_prefix('\'') {
-        let path = quoted.strip_suffix('\'')?;
-        if path.contains('\'') || path.chars().any(char::is_control) {
-            return None;
-        }
-        path
-    } else {
-        if !command
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"/_-.:+".contains(&b))
-        {
-            return None;
-        }
-        command
-    };
-    path.starts_with('/').then(|| Path::new(path))
-}
-
-fn verify_codex(command: &str, event: &str, item: &mut Component) {
-    let Some((_, expected)) = CODEX_COMMANDS.iter().find(|(name, _)| *name == event) else {
-        return;
-    };
-    let mut digest = digest_bytes(command.as_bytes());
-    if digest != *expected {
-        let Some(path) = literal_artifact_path(command) else {
-            return;
-        };
-        let Ok(Some(bytes)) = read(path) else {
-            item.detail = "referenced hook artifact missing, unreadable or unresolved".into();
-            return;
-        };
-        use std::os::unix::fs::PermissionsExt;
-        if !std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
-            item.detail = "referenced hook artifact is not executable".into();
-            return;
-        }
-        item.evidence.push(Evidence {
-            path: path.into(),
-            scope: "referenced native artifact".into(),
-            method: "exact reviewed SHA-256".into(),
-            digest: Some(digest_bytes(&bytes)),
-        });
-        let Some(body) = bytes
-            .strip_prefix(b"#!/bin/sh\n")
-            .and_then(|b| b.strip_suffix(b"\n"))
-        else {
-            return;
-        };
-        digest = digest_bytes(body);
-    }
-    if digest == *expected {
-        item.registration = Registration::Installed;
-        item.conformance = Conformance::SourceInspected;
-        item.isolation = Isolation::VerifiedDisable;
-        item.detail = "reviewed native command; disable variable and absent surface guard prevent dispatch; live activation unverified".into();
     }
 }
 fn scan_directory(path: &Path, scope: &str, plugins: bool, out: &mut Vec<Component>) {
@@ -1449,19 +1243,8 @@ fn scan_directory(path: &Path, scope: &str, plugins: bool, out: &mut Vec<Compone
     }
     for path in paths {
         let mut item = component("native plugin", &path, scope);
-        if let Some(bytes) = file_bytes(&mut item) {
-            let plugins = plugins && path.extension().is_some_and(|e| e == "js" || e == "ts");
-            match digest_bytes(&bytes).as_str() {
-                SESSION_DIGEST if plugins => {
-                    item.registration = Registration::Installed; item.isolation = Isolation::VerifiedDisable;
-                    item.detail = "reviewed OpenCode session plugin with disable and surface guards; activation unverified".into();
-                },
-                FEED_DIGEST if plugins => {
-                    item.registration = Registration::Installed; item.isolation = Isolation::Unsafe;
-                    item.detail = "OpenCode Feed has no disable/surface guard and can connect to a fallback socket".into();
-                },
-                _ => item.detail = "unrecognized native code; filename does not establish integration or isolation".into(),
-            }
+        if file_bytes(&mut item).is_some() {
+            item.detail = "unreviewed native code; executable behavior is unknown".into();
         }
         out.push(item);
     }
@@ -1678,53 +1461,10 @@ pub fn codex_effective_status(
         .filter(|hooks| hooks.len() <= MAX_ENTRIES)
         .ok_or_else(|| Error::new("native Codex hook inventory is missing or exceeds the bound"))?;
     let mut components = status.components;
-    for (index, hook) in hooks.iter().enumerate() {
-        let event = match hook.get("eventName").and_then(Value::as_str) {
-            Some("preToolUse") => "PreToolUse",
-            Some("postToolUse") => "PostToolUse",
-            Some("permissionRequest") => "PermissionRequest",
-            Some("preCompact") => "PreCompact",
-            Some("postCompact") => "PostCompact",
-            Some("sessionStart") => "SessionStart",
-            Some("userPromptSubmit") => "UserPromptSubmit",
-            Some("subagentStart") => "SubagentStart",
-            Some("subagentStop") => "SubagentStop",
-            Some("stop") => "Stop",
-            _ => return Err(Error::new("native Codex hook event is not reviewed")),
-        };
-        // Disabled or untrusted unknown hooks are not treated as safe: native
-        // trust/activation can change independently of their command identity.
-        if hook.get("handlerType").and_then(Value::as_str) != Some("command")
-            || hook.get("isManaged") != Some(&Value::Bool(false))
-            || hook.get("enabled").and_then(Value::as_bool).is_none()
-            || !matches!(
-                hook.get("source").and_then(Value::as_str),
-                Some("user" | "project" | "sessionFlags")
-            )
-        {
-            return Err(Error::new(
-                "native Codex hook has an unresolved handler or managed source",
-            ));
-        }
-        let command = hook
-            .get("command")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::new("native Codex hook command is missing"))?;
-        let mut item = component(
-            &format!("effective {event} registration {index}"),
-            repo,
-            "native effective metadata",
-        );
-        item.evidence[0].method =
-            "bounded hooks/list command SHA-256; no raw native response retained".into();
-        item.evidence[0].digest = Some(digest_bytes(command.as_bytes()));
-        verify_codex(command, event, &mut item);
-        if item.isolation != Isolation::VerifiedDisable {
-            return Err(Error::new(
-                "native Codex hook command or artifact is outside the reviewed guarded allowlist",
-            ));
-        }
-        components.push(item);
+    if !hooks.is_empty() {
+        return Err(Error::new(
+            "native Codex executable hooks are unverified, including disabled or untrusted hooks",
+        ));
     }
     for item in &mut components {
         if [
@@ -1799,21 +1539,6 @@ pub fn enforce(repo: &Path, harness: &str) -> Result<Status> {
     }
     Ok(status)
 }
-/// Called only after admission; removes routing and restores reviewed process
-/// disable controls. Does not alter homes or native settings.
-pub fn sanitize(command: &mut Command, policy: Option<&HeadlessPolicy>) {
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("CMUX_") {
-            command.env_remove(key);
-        }
-    }
-    if let Some(policy) = policy.filter(|p| p.allowed)
-        && let Some(variable) = &policy.disable_variable
-    {
-        command.env(variable, "1");
-    }
-}
-
 /// Compact disclosure for the ordinary launch screen; full provenance remains
 /// available in the dry-run and explicit status report.
 pub fn render_summary(status: &Status) -> String {
@@ -1946,7 +1671,6 @@ mod trusted_opencode_state_tests {
             conformance: "locally_inspected; live_untested".into(),
             headless: HeadlessPolicy {
                 allowed: false,
-                disable_variable: None,
                 reasons: vec!["opaque state".into()],
                 evidence_digest: "fixture".into(),
             },

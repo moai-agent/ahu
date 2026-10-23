@@ -10,11 +10,10 @@ use common::TestRepo;
 
 /// Locations pointing at a throwaway home, so a developer's own
 /// `~/.claude/settings.json` can never change a test's outcome.
-fn locations(home: &Path, cmux_wrapper: bool) -> Locations {
+fn locations(home: &Path) -> Locations {
     Locations {
         home: Some(home.to_path_buf()),
         managed: None,
-        cmux_wrapper,
     }
 }
 
@@ -94,7 +93,7 @@ fn project_hooks_are_found_and_marked_as_travelling() {
         &settings_with_hooks("PreToolUse", Some("Bash"), "./.claude/hooks/guard.sh"),
     );
 
-    let found = hooks::collect_in(repo.path(), &locations(home.path(), false)).unwrap();
+    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
     assert_eq!(found.hooks.len(), 1);
     let hook = &found.hooks[0];
     assert_eq!(hook.event, "PreToolUse");
@@ -122,7 +121,7 @@ fn hooks_outside_the_repository_are_flagged_and_do_not_travel() {
     )
     .unwrap();
 
-    let found = hooks::collect_in(repo.path(), &locations(home.path(), false)).unwrap();
+    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
     assert_eq!(found.hooks.len(), 1);
     let hook = &found.hooks[0];
     assert_eq!(hook.scope, Scope::User);
@@ -143,7 +142,7 @@ fn a_project_local_hook_travels_but_is_still_not_project_policy() {
         &settings_with_hooks("UserPromptSubmit", None, "inject-context"),
     );
 
-    let found = hooks::collect_in(repo.path(), &locations(home.path(), false)).unwrap();
+    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
     let hook = &found.hooks[0];
     assert_eq!(hook.scope, Scope::ProjectLocal);
     assert!(hook.scope.travels_into_worktree());
@@ -161,7 +160,7 @@ fn an_unreadable_settings_file_reports_unknown_hooks_rather_than_none() {
     let home = tempfile::TempDir::new().unwrap();
     repo.write(".claude/settings.json", "{ this is not json");
 
-    let found = hooks::collect_in(repo.path(), &locations(home.path(), false)).unwrap();
+    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
     assert!(found.hooks.is_empty());
     assert_eq!(found.unreadable.len(), 1, "{found:?}");
     assert!(found.unreadable[0].contains("settings.json"));
@@ -177,7 +176,7 @@ fn a_hooks_key_ahu_does_not_understand_is_reported_not_ignored() {
         "{\"hooks\": {\"PreToolUse\": \"nope\"}}",
     );
 
-    let found = hooks::collect_in(repo.path(), &locations(home.path(), false)).unwrap();
+    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
     assert!(found.hooks.is_empty());
     assert_eq!(found.unreadable.len(), 1, "{found:?}");
 }
@@ -188,22 +187,10 @@ fn settings_without_hooks_are_read_cleanly() {
     let home = tempfile::TempDir::new().unwrap();
     repo.write(".claude/settings.json", "{\"model\": \"claude-opus-5\"}");
 
-    let found = hooks::collect_in(repo.path(), &locations(home.path(), false)).unwrap();
+    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
     assert!(found.hooks.is_empty());
     assert!(found.unreadable.is_empty());
     assert!(!found.checked.is_empty(), "the file was actually examined");
-}
-
-#[test]
-fn the_cmux_wrapper_is_reported_as_an_unreadable_hook_source() {
-    let repo = TestRepo::new();
-    let home = tempfile::TempDir::new().unwrap();
-    let found = hooks::collect_in(repo.path(), &locations(home.path(), true)).unwrap();
-    assert!(found.wrapper_injected);
-    // It also changes the digest, so a launch inside cmux is not presented as
-    // having the same effective hooks as one outside it.
-    let outside = hooks::collect_in(repo.path(), &locations(home.path(), false)).unwrap();
-    assert_ne!(found.digest(), outside.digest());
 }
 
 #[test]
@@ -214,14 +201,14 @@ fn the_hook_digest_covers_scopes_the_config_snapshot_cannot_see() {
     let user_settings = home.path().join(".claude/settings.json");
     std::fs::write(&user_settings, settings_with_hooks("Stop", None, "one")).unwrap();
 
-    let before = hooks::collect_in(repo.path(), &locations(home.path(), false))
+    let before = hooks::collect_in(repo.path(), &locations(home.path()))
         .unwrap()
         .digest();
     let snapshot_before = snapshot::collect(repo.path()).unwrap().digest();
 
     std::fs::write(&user_settings, settings_with_hooks("Stop", None, "two")).unwrap();
 
-    let after = hooks::collect_in(repo.path(), &locations(home.path(), false))
+    let after = hooks::collect_in(repo.path(), &locations(home.path()))
         .unwrap()
         .digest();
     assert_ne!(before, after, "a user hook change must show as drift");
@@ -243,7 +230,7 @@ fn reading_hooks_never_modifies_a_settings_file() {
     std::fs::write(&user_settings, settings_with_hooks("Stop", None, "notify")).unwrap();
 
     for _ in 0..3 {
-        hooks::collect_in(repo.path(), &locations(home.path(), true)).unwrap();
+        hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
     }
     assert_eq!(repo.read(".claude/settings.json"), body);
     assert_eq!(
@@ -373,7 +360,6 @@ fn the_preview_warns_about_hooks_that_are_not_project_policy() {
         scope: Scope::ProjectLocal,
         source: ".claude/settings.local.json".to_string(),
     });
-    found.wrapper_injected = true;
 
     let text = hooks::render_for_preview(&found, 2);
     assert!(
@@ -385,13 +371,10 @@ fn the_preview_warns_about_hooks_that_are_not_project_policy() {
         "{text}"
     );
     assert!(text.contains(hooks::NON_PROJECT_HOOK_WARNING), "{text}");
+    assert!(text.contains("wrapper and plugin hook injection is not established"));
     assert!(
         text.contains("inject-my-context"),
         "the hook's program is still identifiable: {text}"
-    );
-    assert!(
-        text.contains("cmux injects its own Claude Code hooks"),
-        "{text}"
     );
     assert!(
         text.contains("does not add, edit, or remove hooks"),
@@ -477,7 +460,7 @@ fn hook_arguments_are_not_printed_or_persisted() {
         ),
     );
 
-    let found = hooks::collect_in(repo.path(), &locations(home.path(), false)).unwrap();
+    let found = hooks::collect_in(repo.path(), &locations(home.path())).unwrap();
     let rendered = hooks::render_for_preview(&found, 0);
     assert!(
         !rendered.contains("sk-secret-TOKEN-abcdef"),

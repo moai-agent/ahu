@@ -23,7 +23,6 @@ pub fn read_account(executable: &Path, cwd: &Path) -> Result<Value> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    crate::native_admission::sanitize(&mut command, None);
     command.process_group(0);
     let mut child = command
         .spawn()
@@ -100,7 +99,6 @@ pub fn read_budget(executable: &Path, cwd: &Path) -> Result<(Value, Value)> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    crate::native_admission::sanitize(&mut command, None);
     command.process_group(0);
     let mut child = command
         .spawn()
@@ -195,7 +193,6 @@ pub fn inspect(executable: &Path, cwd: &Path, version: &str) -> Result<Value> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    crate::native_admission::sanitize(&mut command, None);
     use std::os::unix::process::CommandExt;
     command.process_group(0);
     let mut child = command

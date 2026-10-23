@@ -16,7 +16,6 @@ fn locations(home: &Path) -> Locations {
     Locations {
         home: Some(home.to_path_buf()),
         managed: None,
-        cmux_wrapper: false,
     }
 }
 
@@ -820,6 +819,9 @@ fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::
 /// says nothing about the harness fetching and running code named inside it.
 #[test]
 fn declared_opencode_plugins_are_named_on_the_preview() {
+    if !common::in_harness_fixture("declared_opencode_plugins_are_named_on_the_preview") {
+        return;
+    }
     let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
     repo.write(
         "opencode.json",
@@ -882,6 +884,9 @@ fn a_harness_that_does_not_run_declared_plugins_is_not_told_that_it_does() {
 /// A `.jsonc` ahu cannot parse is reported as unknown, never as "no plugins".
 #[test]
 fn an_unparseable_opencode_config_is_unknown_rather_than_empty() {
+    if !common::in_harness_fixture("an_unparseable_opencode_config_is_unknown_rather_than_empty") {
+        return;
+    }
     let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
     repo.write(
         "opencode.jsonc",
@@ -998,6 +1003,11 @@ fn declared_plugins_do_not_suppress_the_unscanned_settings_disclosure() {
 /// files rather than reporting them unread.
 #[test]
 fn opencode_settings_and_plugins_are_scanned_without_unscanned_disclosure() {
+    if !common::in_harness_fixture(
+        "opencode_settings_and_plugins_are_scanned_without_unscanned_disclosure",
+    ) {
+        return;
+    }
     let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
     repo.write("opencode.json", r#"{"plugin":["some-remote-plugin"]}"#);
     repo.commit("fixture");

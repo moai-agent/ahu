@@ -29,7 +29,7 @@ a=sys.argv[1:]
 assert '--print' in a and '--permission-prompts' in a and 'none' in a
 assert a[a.index('--model')+1]=='claude-opus-5'
 assert os.environ['AHU_EXECUTION_BACKEND']=='headless'
-assert not any(k.startswith('CMUX_') for k in os.environ)
+assert os.environ.get('CMUX_WORKSPACE_ID') == 'sentinel'
 assert 'ahu delegation contract (v3, headless)' in a[-1]
 assert sys.stdin.read()==''
 if 'EXPECT_RELEASE' in os.environ:
@@ -3907,7 +3907,7 @@ assert a[a.index('--model')+1]=='claude-sonnet-4.5'
 assert '--no-interactive' in a and '--require-mcp-startup' in a and '--' not in a
 assert a[a.index('--output-format')+1]=='stream-json'
 assert '--trust-all-tools' not in a
-assert not any(k.startswith('CMUX_') for k in os.environ)
+assert os.environ.get('CMUX_WORKSPACE_ID') == 'sentinel'
 assert sys.stdin.read()==''
 scenario=os.environ.get('SCENARIO','success')
 session=a[a.index('--resume-id')+1] if '--resume-id' in a else 'sess_fixture'

@@ -223,7 +223,7 @@ impl Profile {
 ///   - the session tool allowlist binds the parent *and* every helper at every
 ///     depth, overriding a built-in role's nominal unrestricted tool set. That
 ///     is what removes shell execution, writes, native worktrees, agent teams,
-///     and with them any route to cmux;
+///     and with them shell-launched subprocesses;
 ///   - a spawn-depth cap of one, imposed by removing the delegation tool from
 ///     helpers rather than by refusing their calls;
 ///   - a helper concurrency cap, whose excess attempts are counted in the
@@ -406,9 +406,9 @@ fn bounded(request: &Request<'_>) -> Result<Profile> {
             "EnterWorktree, ExitWorktree, Workflow, SendMessage and ListAgents are outside the ceiling, so helpers create no worktrees and no agent teams",
         ),
         Control::new(
-            "native.helper.no_cmux",
+            "native.helper.no_shell",
             Mechanism::Structural,
-            "no shell tool is in the ceiling, so a helper has no route to invoke cmux",
+            "no shell tool is in the ceiling; this does not constrain hook or plugin subprocesses",
         ),
         Control::new(
             "native.helper.depth",

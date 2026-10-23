@@ -205,3 +205,21 @@ also created and verified a cmux workspace, ran a read-only command, and removed
 the task; cleanup verified ownership and closed that exact workspace. This is a
 single live observation, not a claim that other harnesses or cmux versions have
 the same result. Repeat live checks after changing either side.
+
+## Native hook and provider policy boundary
+
+Rust core coordinates harness invocation, tasks, worktrees and MCP. It does not
+recognize provider hook fingerprints, inspect provider wrapper installations,
+or alter provider routing and hook-control environment variables. Guarded
+admission conservatively checks native executable configuration; explicit
+`--work-mode` leaves compatibility unverified and uses native automatic approvals.
+Neither mode establishes filesystem confinement.
+
+Provider-specific hook diagnostics or installation belong to an explicitly
+invoked plugin. Such a plugin would need a declared capability and permission
+for each operation, bounded structured diagnostic results separating observed
+configuration from live verification, and an explicit user-authorized mutation
+operation with scope and outcome. Diagnostic results must not authorize core
+admission or silently rewrite native hooks. Host V2 remains the session lifecycle
+contract; it is not a hook-policy API. This cleanup adds no extension API or
+provider default and invokes no native installer.

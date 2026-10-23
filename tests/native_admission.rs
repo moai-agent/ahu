@@ -167,7 +167,7 @@ fn partial_plugins_changed_feed_and_declared_modules_refuse_headless() {
     );
     let status = f.inspect("opencode");
     assert!(!status.headless.allowed);
-    assert!(status.next_action.contains("uninstall"));
+    assert!(status.next_action.contains("native configuration"));
     assert!(
         status
             .components
@@ -233,52 +233,6 @@ fn cmux_cli_management_is_not_part_of_core() {
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("unknown command"));
     }
-}
-
-#[test]
-fn sanitation_removes_routing_and_sets_native_disable_controls() {
-    let mut command = Command::new("synthetic");
-    let policy = integration::HeadlessPolicy {
-        allowed: true,
-        disable_variable: Some("CMUX_CODEX_HOOKS_DISABLED".into()),
-        reasons: vec![],
-        evidence_digest: String::new(),
-    };
-    integration::sanitize(&mut command, Some(&policy));
-    let env: std::collections::BTreeMap<_, _> = command.get_envs().collect();
-    assert_eq!(
-        env[std::ffi::OsStr::new("CMUX_CODEX_HOOKS_DISABLED")],
-        Some(std::ffi::OsStr::new("1"))
-    );
-    let mut absent = Command::new("synthetic");
-    integration::sanitize(&mut absent, None);
-    assert!(
-        absent
-            .get_envs()
-            .filter(|(key, _)| key.to_string_lossy().starts_with("CMUX_"))
-            .all(|(_, value)| value.is_none())
-    );
-}
-
-#[test]
-fn wrapper_evidence_does_not_spill_into_other_harnesses_and_old_digests_roundtrip() {
-    let f = Fixture::new();
-    let locations = ahu::hooks::Locations {
-        home: Some(f.home.clone()),
-        managed: None,
-        cmux_wrapper: true,
-    };
-    let found = ahu::hooks::collect_for(&f.root, "codex", &locations).unwrap();
-    assert!(!found.wrapper_injected);
-    let old = ahu::hooks::HookInventory {
-        wrapper_injected: true,
-        ..Default::default()
-    };
-    let digest = old.digest();
-    let serialized = serde_json::to_string(&old).unwrap();
-    let restored: ahu::hooks::HookInventory = serde_json::from_str(&serialized).unwrap();
-    assert_eq!(digest, restored.digest());
-    assert!(restored.wrapper_injected);
 }
 
 #[test]
@@ -431,7 +385,6 @@ fn legacy_user_plugin_scope_refuses_opaque_feed_and_inventory_is_not_isolation()
         &ahu::hooks::Locations {
             home: Some(f.home.clone()),
             managed: None,
-            cmux_wrapper: false,
         },
     )
     .unwrap();
@@ -518,8 +471,8 @@ fn escaped_json_references_have_the_same_admission_as_literal_json() {
             let f = Fixture::new();
             f.write(f.root.join(file), body);
             assert!(
-                !f.inspect("codex").headless.allowed,
-                "escaped reference admitted: {body}"
+                f.inspect("codex").headless.allowed == (file == ".mcp.json"),
+                "configuration scope differs for escaped reference: {body}"
             );
         }
     }
@@ -705,7 +658,7 @@ fn codex_cwd_configuration_is_an_executable_hook_scope() {
 }
 
 #[test]
-fn literal_quoted_artifact_paths_are_inspected_without_shell_expansion() {
+fn hook_artifact_paths_remain_unknown_without_reading_or_executing_them() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     for name in ["a\\b", "a*b", "a?b", "a[b]", "a(b)", "a b", "a$HOME"] {
@@ -721,10 +674,9 @@ fn literal_quoted_artifact_paths_are_inspected_without_shell_expansion() {
             .unwrap();
         assert_eq!(
             hook.evidence.len(),
-            2,
-            "literal quoted path should be inspected: {name}"
+            1,
+            "hook artifact must not be interpreted: {name}"
         );
-        assert_eq!(hook.evidence[1].path, path);
         assert_eq!(hook.registration, Registration::Unknown); // opaque synthetic bytes
     }
 }
@@ -1067,7 +1019,11 @@ fn codex_effective_metadata_refuses_unknown_hooks_even_if_disabled_or_untrusted(
                     version,
                 )
                 .unwrap_err();
-                assert!(error.to_string().contains("guarded allowlist"));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("executable hooks are unverified")
+                );
             }
         }
         for hook in [
@@ -1121,5 +1077,22 @@ fn codex_effective_metadata_rejects_incomplete_scopes_and_unresolved_paths() {
             integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata, version)
                 .is_err()
         );
+    }
+}
+
+#[test]
+fn provider_names_in_declarative_values_do_not_control_admission() {
+    let f = Fixture::new();
+    for name in ["cmux", "other-provider"] {
+        f.write(
+            f.home.join(".codex/config.toml"),
+            format!("model = '{name}'\n"),
+        );
+        assert!(f.inspect("codex").headless.allowed);
+        f.write(
+            f.root.join(".mcp.json"),
+            json!({"mcpServers": {name: {"command": name}}}).to_string(),
+        );
+        assert!(f.inspect("codex").headless.allowed);
     }
 }

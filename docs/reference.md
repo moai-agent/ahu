@@ -533,7 +533,7 @@ acknowledgement; without it, the caller supervises in the foreground. Use the
 foreground form under CI or a host service that manages process lifetime.
 A dry run performs preflight checks and prints the redacted command, frozen
 identity, capabilities, gaps, timeout, and coordination path without launching.
-Known cmux wrappers are refused; use the actual harness executable on `PATH`.
+Use the actual harness executable on `PATH`; executable selection does not establish wrapper behavior.
 
 Installed CLI versions float by default; `[harness_version_pins]` can require
 an exact version. The [recorded batch versions](#harness-compatibility-by-execution-mode)
@@ -677,9 +677,9 @@ The launch preview and default `ahu doctor --verbose` report the read-only nativ
 
 | Harness | Required native isolation evidence |
 | --- | --- |
-| Codex | Absent sources or exact reviewed hooks guarded against permission expansion. Versions 0.157.1 and 0.160.0 additionally require native effective metadata inspection with no warnings or managed requirements, and turn off optional plugins for the invocation. Other versions retain unresolved plugin, cloud, and managed-source checks. |
-| OpenCode | Absent sources or the reviewed guarded Session plugin. Feed is unsafe; declared modules and substitutions remain unresolved. Opaque authentication/account stores refuse admission unless the project explicitly trusts native state as described above. |
-| Claude Code | Direct executable avoids the cmux wrapper. Versions 2.1.283, 2.1.288, 2.1.289 and 2.1.302 turn off parsed non-managed hooks for the invocation. Enabled plugins, malformed settings, and unresolved managed sources still refuse admission. |
+| Codex | Absent executable hook sources; configured hooks remain unknown regardless of provider, trust or activation. Versions 0.157.1 and 0.160.0 additionally require native effective metadata inspection with no warnings or managed requirements, and turn off optional plugins for the invocation. Other versions retain unresolved plugin, cloud, and managed-source checks. |
+| OpenCode | Absent plugin sources; executable plugins, declared modules and substitutions remain unresolved regardless of provider. Opaque authentication/account stores refuse admission unless the project explicitly trusts native state as described above. |
+| Claude Code | Versions 2.1.283, 2.1.288, 2.1.289 and 2.1.302 turn off parsed non-managed hooks for the invocation. Enabled plugins, malformed settings, and unresolved managed sources still refuse admission. |
 | Antigravity | Absent inspected hooks. Custom hooks, extensions, and overrides remain unverified. |
 | Kiro | V3 2.28.0/2.29.0 and the inspected subset of native agents and CLI preferences. Unknown formats/fields, nonempty hooks, extensions, Powers, workflows, cloud configuration, and environment indirection are refused. See [Kiro CLI](#kiro-cli). |
 
@@ -1980,8 +1980,8 @@ the launch preview says what each one means for the task:
   changing between two `chris@1.2.0` launches is reported rather than hidden under
   the same version label.
 
-What ahu cannot see: hooks injected by the cmux Claude wrapper, and hooks
-contributed by plugins. Both are reported as gaps rather than omitted. A settings
+What ahu cannot see completely: hooks injected by executable wrappers and
+hooks contributed by plugins. Configuration inventory cannot establish runtime injection. A settings
 file that exists but cannot be parsed is reported as *unknown* hooks, never as
 *no* hooks.
 
@@ -2000,13 +2000,15 @@ permissions; plugin separation is an integration boundary, not a sandbox.
 
 ahu performs bounded, read-only inspection of native hook configuration that can affect headless launches. It does not invoke the cmux CLI, install native hooks, or manage session hosting. Session creation, inventory, focus, and cleanup use the selected external session-host plugin through Host V2.
 
-Headless admission is checked before execution and rechecked by the supervisor. The child environment removes inherited `CMUX_*` routing variables and restores only a reviewed process-local control when the evidence requires one. Current verified guards use `CMUX_CODEX_HOOKS_DISABLED` or `CMUX_OPENCODE_HOOKS_DISABLED`. Claude’s reviewed wrapper requires a direct executable; registered Claude and Antigravity hook commands remain unknown. A variable name alone is not proof of isolation. Unsafe or unknown components refuse admission. ahu leaves native homes and settings in place. Arbitrary shell commands, hooks, remote plugins, and concurrent same-user changes remain outside these controls. A successful static inspection does not launch or validate a native session.
+Guarded headless admission is checked before execution and rechecked by the supervisor. Core does not recognize provider hook fingerprints, inspect provider bundle paths, remove provider environment variables, or set provider hook-disable controls. Unknown executable hooks and plugins refuse guarded admission unless covered by an existing harness invocation profile. Codex effective metadata must contain no executable hooks, including disabled or untrusted hooks. Generic harness flags, explicit approvals, bounded parsing and process/task ownership still apply. Native homes and settings remain in place. MCP configuration stays native; admission does not certify MCP subprocess behavior. A successful static inspection does not validate a native session or filesystem confinement.
+
+Explicit `--work-mode` remains unattended: it selects the harness's automatic permission mapping and skips native compatibility admission and integration overrides. Native hooks and provider environment remain inherited. A Git worktree is not a sandbox; outside-write observations provide limited detection, not prevention.
 
 Native authentication stores, account databases, managed preferences, and plugin sources can select additional executable configuration. ahu checks their presence without reading credentials or fetching remote context. Present or unresolved opaque sources refuse headless admission, even for a legitimate setup. Interactive execution remains available.
 
 ### Conformance evidence
 
-The local investigation baseline is cmux 0.64.22 build ddd4a01bc, Codex 0.155.1,
+Earlier local observations included Codex 0.155.1,
 Claude Code 2.1.281, OpenCode 1.18.32, and Antigravity CLI 1.2.9. Installed versions
 are observations, not new compatibility claims. [Headless admission](#headless-execution)
 checks the installed version and integration evidence; specialized controls
@@ -2014,11 +2016,10 @@ remain tied to their reviewed versions.
 
 | Evidence class | What it establishes | What remains unverified |
 | --- | --- | --- |
-| Native artifact/source inspection | Exact command/plugin fingerprints, declared settings, guards, and installer arguments | Effective trust, actual hook activation, native event delivery, and unknown builds |
-| Synthetic fixtures | Parser, refusal, environment filtering, and fixed-argv behavior under controlled inputs | Actual native harness behavior |
+| Native artifact/source inspection | Bounded native settings and version-specific harness invocation controls | Effective trust, actual hook activation, native event delivery, and unknown builds |
+| Synthetic fixtures | Parser, refusal, environment preservation, and fixed-argv behavior under controlled inputs | Actual native harness behavior |
 | Real PTY tests | Terminal ownership, stdin/signal handling, restoration, and cancellation with test processes | Live harness terminal interface/session conformance |
 | Live cmux plumbing tests | Group/workspace operations and focus behavior with harmless startup processes | Native hooks or harness provider sessions |
-| Scoped native Codex hook no-op probes | Reviewed hook behavior under the probed hook-off/absent-surface conditions | A live Codex conversation or equivalence with the other harnesses |
 
 The status report deliberately labels its evidence `locally_inspected;
 live_untested`. Do not infer live harness conformance from installation,
@@ -2576,7 +2577,7 @@ Powers, workflows, cloud configuration, custom native paths and diagnostic-outpu
 overrides remain refused. Project ancestors and cloud-cache sources are inspected
 as well. Symlinks, malformed/oversized configuration, scan limits and versions
 other than 2.28.0 or 2.29.0 produce a refusal; ahu does not delete or rewrite them. Native permissions, MCP and skills remain active.
-This is bounded configuration inspection, not a sandbox. Native cmux hook
+This is bounded configuration inspection, not a sandbox. Native hook
 installation, detailed hook inventory and bounded helpers remain unsupported;
 `--native-helpers disabled` is a prompt instruction, not a native tool restriction.
 Work mode skips this inspection and its version restriction. The separate

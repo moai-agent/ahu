@@ -1160,7 +1160,6 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(slave));
-    crate::native_admission::sanitize(&mut command, None);
     command
         .env("TERM", "xterm-256color")
         .env("NO_COLOR", "1")
@@ -1288,7 +1287,6 @@ fn bounded_command(executable: &str, args: &[&str], cwd: &Path) -> Result<Vec<u8
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    crate::native_admission::sanitize(&mut command, None);
     let mut child = command
         .spawn()
         .map_err(|_| Error::new("cannot start read-only harness auth status"))?;

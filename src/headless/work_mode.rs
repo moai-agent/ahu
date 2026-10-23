@@ -55,7 +55,6 @@ pub(crate) fn integration(harness: &str, version: Option<&str>, pin: Option<&str
         conformance: "unverified; explicit work mode".into(),
         headless: HeadlessPolicy {
             allowed: true,
-            disable_variable: None,
             reasons: vec!["explicit work mode; native compatibility admission skipped".into()],
             evidence_digest: String::new(),
         },

@@ -361,7 +361,6 @@ fn kiro_native_agent_controls_fail_closed_without_echoing_values() {
         json!({"hooks":[{"name":"stop", "enabled":false,"trigger":"Stop","action":{"type":"agent","prompt":"private-marker"}}]}),
         json!({"futureControl":"private-marker"}),
         json!({"includePowers":true}),
-        json!({"mcpServers":{"fixture":{"command":"CMUX", "args":[]}}}),
         json!({"mcpServers":{"fixture":{"futureControl":"private-marker"}}}),
         json!({"permissions":{"rules":[],"futureControl":"private-marker"}}),
         json!({"permissions":{"rules":[{"capability":"shell","effect":"allow","futureControl":"private-marker"}]}}),
@@ -506,4 +505,31 @@ fn kiro_agent_inspection_refuses_symlinks_and_bounded_scan_overflow() {
             .headless
             .allowed
     );
+}
+
+#[test]
+fn kiro_mcp_admission_uses_structure_without_provider_name_policy() {
+    use ahu::native_admission::{Locations, inspect_in};
+    use serde_json::json;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let locations = Locations {
+        home: Some(home.path().canonicalize().unwrap()),
+        ..Default::default()
+    };
+    let agents = repo.path().join(".kiro/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    for command in ["cmux", "CMUX", "other-provider"] {
+        let profile =
+            json!({"name":"fixture","mcpServers":{"fixture":{"command":command,"args":[]}}});
+        std::fs::write(agents.join("fixture.json"), profile.to_string()).unwrap();
+        let status = inspect_in(&repo.path().canonicalize().unwrap(), "kiro", &locations);
+        assert!(status.headless.allowed, "{command}: {status:?}");
+        assert!(
+            status
+                .gaps
+                .iter()
+                .any(|gap| gap.contains("arbitrary MCP subprocess behavior is not inspected"))
+        );
+    }
 }
