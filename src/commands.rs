@@ -503,7 +503,7 @@ fn auth_readiness_summary(status: &serde_json::Value) -> (&'static str, bool, bo
 
 /// `ahu doctor`
 pub fn doctor(console: &mut Console<'_>, repo: &Result<Repo>) -> Result<i32> {
-    doctor_with_verbosity(console, repo, false)
+    doctor_with_options(console, repo, false, false)
 }
 
 pub fn doctor_with_verbosity(
@@ -511,11 +511,23 @@ pub fn doctor_with_verbosity(
     repo: &Result<Repo>,
     verbose: bool,
 ) -> Result<i32> {
+    doctor_with_options(console, repo, verbose, false)
+}
+
+pub fn doctor_with_options(
+    console: &mut Console<'_>,
+    repo: &Result<Repo>,
+    verbose: bool,
+    work_mode: bool,
+) -> Result<i32> {
     let mut problems = 0;
     let mut warnings = 0;
     let mut project_harnesses = std::collections::BTreeSet::new();
     let mut loaded_config: Option<LoadedConfig> = None;
     let mut registered_agents = Vec::new();
+    if work_mode {
+        console.say("mode         explicit headless work mode (permissions=auto; native compatibility unverified)\n")?;
+    }
     match repo {
         Ok(repo) => {
             if verbose {
@@ -583,7 +595,7 @@ pub fn doctor_with_verbosity(
         }
     }
 
-    if let Ok(repo) = repo {
+    if !work_mode && let Ok(repo) = repo {
         for harness in &project_harnesses {
             if hooks::hook_surface_is_implemented(harness) {
                 match hooks::collect(&repo.root, harness) {
@@ -659,7 +671,14 @@ pub fn doctor_with_verbosity(
         ))?;
     }
 
-    if let Ok(repo) = repo {
+    if work_mode {
+        if registered_agents.is_empty() {
+            console.say("auth         no registered agents; provider identity is not checked\n")?;
+        } else {
+            warnings += 1;
+            console.say("auth         native identity is not verified in work mode; harness authentication may fail\n")?;
+        }
+    } else if let Ok(repo) = repo {
         // Inspect each registered harness/model pair once. Readiness projects
         // status only: doctor must never print account principals or tokens.
         let pairs: std::collections::BTreeSet<_> = registered_agents
@@ -782,89 +801,125 @@ pub fn doctor_with_verbosity(
         .as_ref()
         .map(|r| r.root.clone())
         .unwrap_or(std::env::current_dir()?);
-    for harness in ["claude-code", "codex", "opencode", "antigravity"] {
-        let version = crate::catalog::harness(harness)
-            .and_then(|entry| crate::selection::installed_version(entry.executable));
-        let status =
-            native_admission::inspect(&integration_root, harness).with_version(version.as_deref());
-        if status
-            .components
-            .iter()
-            .any(|c| c.registration != native_admission::Registration::Installed)
-        {
+    if work_mode {
+        for harness in &project_harnesses {
+            let version = crate::catalog::harness(harness)
+                .and_then(|entry| crate::selection::installed_version(entry.executable));
+            let pin = loaded_config
+                .as_ref()
+                .and_then(|loaded| loaded.config.harness_version_pins.get(harness))
+                .map(String::as_str);
+            let status = crate::headless::work_mode::integration(harness, version.as_deref(), pin);
             warnings += 1;
-        }
-        if verbose {
-            console.say(&format!("native safety {}:\n", display_safe(harness)))?;
-            console.say(&native_admission::render_summary(&status))?;
-        } else {
-            let verified = status
-                .components
-                .iter()
-                .filter(|component| {
-                    component.registration == native_admission::Registration::Installed
-                })
-                .count();
-            let unknown = status.components.len().saturating_sub(verified);
+            let supported =
+                crate::catalog::harness(harness).is_some_and(|entry| entry.adapter_available);
             console.say(&format!(
-                "native       {}: {verified} verified, {unknown} unknown; headless {}\n",
+                "work mode    {}: {}; native compatibility unverified\n",
                 display_safe(harness),
-                if status.headless.allowed {
-                    "ready"
+                if supported {
+                    "ahu adapter supports explicit headless work mode"
                 } else {
-                    "needs review"
+                    "unsupported by this ahu version"
                 }
             ))?;
-        }
-        if verbose && let Some(reason) = status.headless.reasons.first() {
-            let safe = display_safe(reason);
-            let mut shown: String = safe.chars().take(240).collect();
-            if safe.chars().count() > 240 {
-                shown.push('…');
+            if verbose {
+                for gap in status.gaps {
+                    console.say(&format!("  work-mode  {}\n", display_safe(&gap)))?;
+                }
             }
-            console.say(&format!("  headless   {shown}\n"))?;
+        }
+    } else {
+        for harness in ["claude-code", "codex", "opencode", "antigravity"] {
+            let version = crate::catalog::harness(harness)
+                .and_then(|entry| crate::selection::installed_version(entry.executable));
+            let status = native_admission::inspect(&integration_root, harness)
+                .with_version(version.as_deref());
+            if status
+                .components
+                .iter()
+                .any(|c| c.registration != native_admission::Registration::Installed)
+            {
+                warnings += 1;
+            }
+            if verbose {
+                console.say(&format!("native safety {}:\n", display_safe(harness)))?;
+                console.say(&native_admission::render_summary(&status))?;
+            } else {
+                let verified = status
+                    .components
+                    .iter()
+                    .filter(|component| {
+                        component.registration == native_admission::Registration::Installed
+                    })
+                    .count();
+                let unknown = status.components.len().saturating_sub(verified);
+                console.say(&format!(
+                    "native       {}: {verified} verified, {unknown} unknown; headless {}\n",
+                    display_safe(harness),
+                    if status.headless.allowed {
+                        "ready"
+                    } else {
+                        "needs review"
+                    }
+                ))?;
+            }
+            if !status.headless.allowed {
+                console.say("  note       explicit `ahu @agent --work-mode` bypasses native admission and reports compatibility gaps\n")?;
+            }
+            if verbose && let Some(reason) = status.headless.reasons.first() {
+                let safe = display_safe(reason);
+                let mut shown: String = safe.chars().take(240).collect();
+                if safe.chars().count() > 240 {
+                    shown.push('…');
+                }
+                console.say(&format!("  headless   {shown}\n"))?;
+            }
         }
     }
 
-    let selected_host = interactive::plugins::status();
-    match &selected_host {
-        Ok(status) if status.selected => console.say(&format!(
-            "session host {} ({})\n",
-            display_safe(&status.id),
-            display_safe(&status.package),
-        ))?,
-        Ok(_) => console.say("session host disabled or not included in this build\n")?,
-        Err(e) => console.say(&format!(
-            "session host selection unavailable: {}\n",
-            display_safe_block(&e.to_string())
-        ))?,
-    }
-    if selected_host
-        .as_ref()
-        .is_ok_and(|status| status.selected && status.id == "terminal")
-    {
-        console.say("host         current terminal (no session plugin required)\n")?;
+    if work_mode {
+        console.say("session host not required for headless work mode\n")?;
     } else {
-        match interactive::discover() {
-            Ok(client) => {
-                console.say("host         reachable\n")?;
-                match client.check_capabilities() {
-                    Ok(_) => console.say("  host groups supported\n")?,
-                    Err(e) => {
-                        problems += 1;
-                        console.say(&format!(
-                            "  host groups {}\n",
-                            display_safe_block(&e.to_string())
-                        ))?;
+        let selected_host = interactive::plugins::status();
+        match &selected_host {
+            Ok(status) if status.selected => console.say(&format!(
+                "session host {} ({})\n",
+                display_safe(&status.id),
+                display_safe(&status.package),
+            ))?,
+            Ok(_) => console.say("session host disabled or not included in this build\n")?,
+            Err(e) => console.say(&format!(
+                "session host selection unavailable: {}\n",
+                display_safe_block(&e.to_string())
+            ))?,
+        }
+        if selected_host
+            .as_ref()
+            .is_ok_and(|status| status.selected && status.id == "terminal")
+        {
+            console.say("host         current terminal (no session plugin required)\n")?;
+        } else {
+            match interactive::discover() {
+                Ok(client) => {
+                    console.say("host         reachable\n")?;
+                    match client.check_capabilities() {
+                        Ok(_) => console.say("  host groups supported\n")?,
+                        Err(e) => {
+                            problems += 1;
+                            console.say(&format!(
+                                "  host groups {}\n",
+                                display_safe_block(&e.to_string())
+                            ))?;
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                problems += 1;
-                console.say(&format!(
-                    "host         {}\n",
-                    display_safe_block(&e.to_string())
-                ))?;
+                Err(e) => {
+                    problems += 1;
+                    console.say(&format!(
+                        "host         {}\n",
+                        display_safe_block(&e.to_string())
+                    ))?;
+                }
             }
         }
     }

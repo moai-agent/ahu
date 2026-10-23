@@ -673,7 +673,7 @@ owner or use interactive execution; see OpenCode's
 Claude's `--bare` similarly changes authentication resolution and is not used.
 Antigravity has no reviewed invocation override for unresolved hooks/extensions.
 
-The launch preview and `ahu doctor --verbose` report the read-only native hook safety inspection used for headless admission. This inspection does not invoke cmux or manage session hosting. An admitted version and inspected components do not replace executable, approval, model, or other launch checks.
+The launch preview and default `ahu doctor --verbose` report the read-only native hook safety inspection used for headless admission. `ahu doctor --work-mode` checks the explicit headless automatic-approval path instead: it skips native hook/configuration and session-host checks, reports native compatibility as unverified, and still checks repository, executable, context-lock, skills, and telemetry prerequisites. Work mode does not verify provider identity or sandbox access. An admitted native version and inspected components do not replace executable, approval, model, or other launch checks.
 
 | Harness | Required native isolation evidence |
 | --- | --- |

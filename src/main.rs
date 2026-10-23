@@ -449,9 +449,11 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             }
         }
         // `doctor` reports on a missing repository rather than failing on one.
-        Command::Doctor { verbose } => {
+        Command::Doctor { verbose, work_mode } => {
             let repo = commands::repo_from_cwd();
-            commands::with_stdio(|console| commands::doctor_with_verbosity(console, &repo, verbose))
+            commands::with_stdio(|console| {
+                commands::doctor_with_options(console, &repo, verbose, work_mode)
+            })
         }
         other => {
             let repo = commands::repo_from_cwd()?;

@@ -848,6 +848,47 @@ fn doctor_reports_invalid_agents_and_lock_without_changing_them() {
 }
 
 #[test]
+fn doctor_work_mode_checks_headless_prerequisites_without_native_or_session_host_admission() {
+    let (_root, repo) = repository();
+    configured(&repo);
+    let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+    crate::context_lock::refresh(&repo, &snapshot).unwrap();
+    git(&repo.root, &["add", "."]);
+    git(
+        &repo.root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "doctor work-mode fixture",
+        ],
+    );
+
+    let (result, text) = scripted("", |c| {
+        doctor_with_options(c, &Ok(repo.clone()), false, true)
+    });
+
+    assert!(result.is_ok(), "{text}");
+    assert!(text.contains("explicit headless work mode"), "{text}");
+    assert!(
+        text.contains("work mode    claude-code: ahu adapter supports explicit headless work mode"),
+        "{text}"
+    );
+    assert!(text.contains("native compatibility unverified"), "{text}");
+    assert!(
+        text.contains("session host not required for headless work mode"),
+        "{text}"
+    );
+    assert!(!text.contains("native safety claude-code"), "{text}");
+    assert!(!text.contains("host groups"), "{text}");
+}
+
+#[test]
 fn task_listing_reports_an_unreadable_question_without_hiding_the_task() {
     let (_root, repo) = repository();
     let (dir, record) = saved(&repo, "question01");

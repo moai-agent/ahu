@@ -92,7 +92,8 @@ Commands:
   telemetry report --key KEY [--output json]
                         Report opted-in local headless measurements
   mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
-  doctor [--verbose]    Check repository, configuration, harness, and plugins
+  doctor [--verbose] [--work-mode]
+                        Check readiness for native or explicit work-mode launches
   agy                   Open the Antigravity CLI here on this project's
                         top-ranked Antigravity model, in YOLO mode
                         (--dangerously-skip-permissions)
@@ -211,6 +212,7 @@ tasks options:
 
 doctor options:
   --verbose             Show component-level native safety, drift, and context-lock details
+  --work-mode           Check explicit headless work mode; native configuration is not inspected
 
 agent assignment options:
   Scripted assignments already leave focus unchanged; omit --no-focus.
@@ -314,7 +316,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "explain" => help_section("explain options:", "onboard options:"),
         "onboard" => help_section("onboard options:", "knowledge lint options:"),
         "knowledge lint" => help_section("knowledge lint options:", "eval report options:"),
-        "doctor" => "Usage: ahu doctor\n\nSummarize project, context-lock, skills, harness, telemetry, and selected external session host. Use --verbose for component-level diagnostics.\n".to_string(),
+        "doctor" => "Usage: ahu doctor [--verbose] [--work-mode]\n\nSummarize project, context-lock, skills, harness and telemetry readiness. By default, headless readiness uses native admission and checks the selected interactive session host. --work-mode checks explicit headless automatic-approval mode, skips native configuration and session-host checks, and reports native compatibility as unverified. Use --verbose for component-level diagnostics.\n".to_string(),
         "migrate" => "Usage: ahu migrate [--preview|--apply|--rollback]\n\nPreview is read-only and shows deterministic OKF targets and typed-policy parity. Apply refuses managed task worktrees and duplicate formats, supports mixed policy/lock formats while preserving canonical policy bytes and lock annotations, preserves exact source backups in .ahu/migrations/project-okf-v1/journal.json, and checks concurrent edits. Rollback explicitly recovers an interrupted transaction. No task, native, auth, or local-acceptance files are migrated. Review and commit the resulting shared files and source removals.\n".to_string(),
         "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes .agents/ahu/lock.md and accepts local context in owner-only host state; review and commit .agents/ahu/lock.md only when shared context changed.\n".to_string(),
         "plugins" | "plugins invoke" => "Usage: ahu plugins [--project|--probe] [--output json]\n       ahu plugins installed [--output json]\n       ahu plugins install|update|enable|disable|remove ID\n       ahu plugins digest /absolute/package/path\n       ahu plugins invoke ID --input-file PATH|- [--task-observations [--allow-task UUID ...]]\n\nInspect external session plugins, committed bindings, and host selection without executing plugins.\nAHU_PLUGIN_PATH lists absolute package directories containing ahu-plugin.md (OKF 0.2 YAML frontmatter, type ahu:plugin; Cargo.toml remains TOML).\nSelect terminal, none, or an installed/discovered binding id with AHU_INTERACTIVE_PLUGIN. `terminal` runs the interactive harness in the caller's terminal; it is the default. Source-only packages cannot be activated. --project reads only committed OKF bindings in .agents/ahu/plugins from local HEAD; source pins and grants remain unverified declarations. It excludes index/worktree edits, fetches nothing, activates nothing, and cannot be combined with --probe. Explicit install/update verifies committed source pins and copies data into ignored project state without executing package code. Git sources allow credential-free HTTPS or absolute local repository paths; kind: local uses a SHA-256 content revision. installed inspects retained verified packages offline; digest hashes a local package offline. enable/disable edit the working OKF binding for review and commit; commit enabled: true and the interactive-backend grant before activation. A single enabled session binding is the launch default; multiple session bindings require explicit selection. Generic entrypoint packages use committed execute grants and plugins invoke ID --input-file PATH|-; execute-only bindings do not become session defaults, and --probe never invokes their generic entrypoint. disable/remove refuse live/uncertain tasks and terminal tasks that still need this package for recorded workspace cleanup; run ahu remove TASK first, even for already-closed workspaces. remove also requires disabled or absent bindings. Invocation is foreground, operator-only, strict JSON with a 64 KiB input and complete output limit; stdin requires explicit - and has a 30-second intake deadline. Relative input paths resolve in the selected --repo checkout. Task observations grant only repeated exact canonical UUIDs (maximum 128); no grants means empty scope. Only current indexed tasks are supported, with no discovery fallback or mutations. Runtime errors are fixed JSON; see docs/executable-plugins.md. Updates retain all old versions. --probe verifies committed policy and package pins, executes the selected host, negotiates its protocol, and reads its inventory; it never launches a task.\n".to_string(),
@@ -524,6 +526,7 @@ pub enum Command {
     },
     Doctor {
         verbose: bool,
+        work_mode: bool,
     },
     Codex,
     Claude,
@@ -862,11 +865,18 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             })
         }
         "telemetry" => parse_telemetry(&args[1..]),
-        "doctor" => match &args[1..] {
-            [] => Ok(Command::Doctor { verbose: false }),
-            [flag] if flag == "--verbose" => Ok(Command::Doctor { verbose: true }),
-            _ => bail!("expected ahu doctor [--verbose]"),
-        },
+        "doctor" => {
+            let mut verbose = false;
+            let mut work_mode = false;
+            for flag in &args[1..] {
+                match flag.as_str() {
+                    "--verbose" if !verbose => verbose = true,
+                    "--work-mode" if !work_mode => work_mode = true,
+                    _ => bail!("expected ahu doctor [--verbose] [--work-mode]"),
+                }
+            }
+            Ok(Command::Doctor { verbose, work_mode })
+        }
         "claude" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Claude)
@@ -2687,12 +2697,26 @@ mod focused_help_tests {
         assert!(parse_args(&["tasks", "--all", "--limit", "4"]).is_err());
         assert_eq!(
             parse_args(&["doctor"]).unwrap(),
-            Command::Doctor { verbose: false }
+            Command::Doctor {
+                verbose: false,
+                work_mode: false
+            }
         );
         assert_eq!(
             parse_args(&["doctor", "--verbose"]).unwrap(),
-            Command::Doctor { verbose: true }
+            Command::Doctor {
+                verbose: true,
+                work_mode: false
+            }
         );
+        assert_eq!(
+            parse_args(&["doctor", "--work-mode", "--verbose"]).unwrap(),
+            Command::Doctor {
+                verbose: true,
+                work_mode: true
+            }
+        );
+        assert!(parse_args(&["doctor", "--work-mode", "--work-mode"]).is_err());
     }
 
     #[test]
