@@ -77,6 +77,13 @@ pub struct CoordinatorRequest<'a> {
 
 /// Implement this exact current contract; pre-release builds do not retain
 /// compatibility with earlier host schemas or protocol versions.
+///
+/// Ahu can pass an empty session reference while reconciling a task whose
+/// provider created a workspace but whose creation reply was not persisted.
+/// Hosts must resolve it by exact repository identity and worktree path, return
+/// `Absent` when none exists, and refuse ambiguous matches. Mutations receiving
+/// an empty reference must apply the same ownership check; empty is never a
+/// wildcard.
 pub trait Host {
     fn check_persistence(&self) -> Result<()> {
         Ok(())

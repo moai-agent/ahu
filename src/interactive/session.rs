@@ -65,9 +65,17 @@ impl<'a> SessionManager<'a> {
         }
         let Some(session_ref) = record.session_ref.as_deref() else {
             if record.session_host.is_some() {
-                bail!(
-                    "task has no confirmed session reference; preserve its work and reconcile ownership before cleanup"
-                );
+                return match self.client.verify_task_session(
+                    "",
+                    &self.repo.identity(),
+                    &record.worktree,
+                )? {
+                    WorkspaceOwnership::Absent => Ok(None),
+                    WorkspaceOwnership::Owned => Ok(Some("")),
+                    WorkspaceOwnership::Mismatch => bail!(
+                        "task session ownership does not match its recorded worktree; no session was selected or closed"
+                    ),
+                };
             }
             return Ok(None);
         };

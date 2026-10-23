@@ -22,14 +22,20 @@ and protocol version. It stores a single opaque `session_ref`; cmux group, windo
 and workspace identifiers remain inside the provider plugin. Task operations use
 the frozen host identity, not the current selection. Focus and cleanup ask the
 provider to verify ownership against the task's repository and worktree.
+If a provider created a workspace but Ahu did not persist its creation reply,
+Ahu can reconcile with an empty `session_ref` plus the exact repository identity
+and worktree path. The host must return `owned` only for one exact, verified
+match; no match is `absent`, and mismatched or ambiguous ownership stays blocked.
+Any following mutation with an empty reference must repeat the same ownership
+check. Empty is a recovery sentinel, never a wildcard.
 Core retains harness startup, supervision, approvals, cancellation confirmation,
 and worktree cleanup. Uncertain creation preserves task inputs and work.
-Executable task focus and cleanup require the recorded session reference;
-missing references do not prove absence. If creation is
-uncertain, a later terminal supervisor outcome still retains the task inputs and
-package. An in-flight cancellation reports missing workspace ownership as unknown,
-and automated removal refuses until ownership is reconciled. `ahu` does not recover
-ownership automatically after a lost creation reply.
+Task focus and cleanup require the frozen host identity and verified ownership.
+When a reference is recorded, the host checks that reference. When it is missing
+after a possible create, Ahu asks the pinned host to reconcile by repository and
+worktree; a unique match can be acted on, while absent, mismatched, or ambiguous
+ownership remains explicit. An uncertain create still preserves task inputs and
+work until that reconciliation succeeds.
 
 Updating a binding retains old installations and existing tasks keep their exact
 version. The binding's enabled state and grants in the launching checkout still
@@ -194,10 +200,8 @@ sandbox them.
 
 Package tests exercise the server and all nine V2 methods with a fake native CLI,
 including creation outcome preservation and strict framed input/output. Core
-lifecycle tests use synthetic Host V2 peers. The external cmux package has also
-been installed and activated through ahu's real package lifecycle, then negotiated
-and probed against a running cmux service; this read-only probe verified default
-socket discovery with ahu's cleared environment and read the workspace inventory.
-Live task-workspace creation and close have not been exercised as part of that
-smoke test. Package existence and project activation alone do not establish live
-compatibility, so repeat the read-only probe after changing either side.
+lifecycle tests use synthetic Host V2 peers. A local Ahu-managed Codex smoke task
+also created and verified a cmux workspace, ran a read-only command, and removed
+the task; cleanup verified ownership and closed that exact workspace. This is a
+single live observation, not a claim that other harnesses or cmux versions have
+the same result. Repeat live checks after changing either side.

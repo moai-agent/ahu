@@ -11,6 +11,7 @@ use std::path::Path;
 struct SyntheticHost {
     inherited: Option<String>,
     sessions: RefCell<std::collections::BTreeMap<String, String>>,
+    persistence: RefCell<Option<String>>,
     mismatch: bool,
     fail_verify: bool,
     mutations: RefCell<Vec<String>>,
@@ -25,6 +26,7 @@ impl SyntheticHost {
                 "task-session".into(),
                 "/work/task".into(),
             )])),
+            persistence: RefCell::new(None),
             mismatch: false,
             fail_verify: false,
             mutations: RefCell::new(Vec::new()),
@@ -34,6 +36,9 @@ impl SyntheticHost {
 }
 
 impl Host for SyntheticHost {
+    fn persistence_key(&self) -> Option<String> {
+        self.persistence.borrow().clone()
+    }
     fn inherited_workspace(&self) -> Option<String> {
         self.inherited.clone()
     }
@@ -62,7 +67,7 @@ impl Host for SyntheticHost {
         &self,
         session_ref: &str,
         _: &str,
-        _: &Path,
+        expected_directory: &Path,
     ) -> Result<WorkspaceOwnership> {
         if self.fail_verify {
             bail!("synthetic verification failed");
@@ -70,7 +75,15 @@ impl Host for SyntheticHost {
         if self.mismatch {
             return Ok(WorkspaceOwnership::Mismatch);
         }
-        Ok(if self.sessions.borrow().contains_key(session_ref) {
+        let sessions = self.sessions.borrow();
+        let found = if session_ref.is_empty() {
+            sessions
+                .values()
+                .any(|directory| Path::new(directory) == expected_directory)
+        } else {
+            sessions.contains_key(session_ref)
+        };
+        Ok(if found {
             WorkspaceOwnership::Owned
         } else {
             WorkspaceOwnership::Absent
@@ -122,6 +135,39 @@ impl Host for SyntheticHost {
     }
     fn open_markdown(&self, _: &Path, _: bool) -> Result<String> {
         Ok("document".into())
+    }
+}
+
+fn frozen_test_host() -> crate::interactive::binding::FrozenHost {
+    use crate::plugin_binding::{Binding, Compatibility, Grant, Source, SourceKind};
+    crate::interactive::binding::FrozenHost {
+        binding: Binding {
+            schema_version: 1,
+            id: "test-host".into(),
+            version: "1.0.0".into(),
+            source: Source {
+                repository: "/repo/plugin".into(),
+                revision: "0".repeat(64),
+                sha256: "0".repeat(64),
+                subdirectory: None,
+                kind: SourceKind::Local,
+            },
+            compatibility: Compatibility {
+                ahu: env!("CARGO_PKG_VERSION").into(),
+                host_api: 1,
+            },
+            enabled: true,
+            grants: vec![Grant::InteractiveBackend],
+        },
+        policy_revision: "0".repeat(40),
+        package: "test-package".into(),
+        executable: crate::interactive::external::Executable {
+            path: "bin/host".into(),
+            protocol_version: 2,
+            timeout_ms: 5_000,
+        },
+        executable_sha256: "0".repeat(64),
+        discovered_root: None,
     }
 }
 
@@ -195,4 +241,31 @@ fn absent_sessions_are_reconciled_without_mutation_and_unbound_coordinators_stay
             .opened_workspace
     );
     assert!(host.request.borrow().is_none());
+}
+
+#[test]
+fn missing_external_session_reference_is_reconciled_by_exact_task_directory() {
+    let (_temp, repo, loaded, plan) = fixture();
+    let mut record = prepared_record(&repo, &loaded, &plan, "prompt", Default::default());
+    let frozen = frozen_test_host();
+    let host = SyntheticHost::new(&repo);
+    *host.persistence.borrow_mut() = Some(frozen.key().unwrap());
+    host.sessions.borrow_mut().insert(
+        "orphaned-provider-session".into(),
+        record.worktree.to_string_lossy().into_owned(),
+    );
+    record.session_host = Some(frozen);
+
+    let manager = SessionManager::new(&host, &repo);
+    assert!(manager.close_task_session(&record).unwrap());
+    assert_eq!(&*host.mutations.borrow(), &["close:"]);
+
+    let absent = SyntheticHost::new(&repo);
+    *absent.persistence.borrow_mut() = Some(record.session_host.as_ref().unwrap().key().unwrap());
+    assert!(
+        !SessionManager::new(&absent, &repo)
+            .close_task_session(&record)
+            .unwrap()
+    );
+    assert!(absent.mutations.borrow().is_empty());
 }
