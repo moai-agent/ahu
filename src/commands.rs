@@ -1,6 +1,6 @@
 //! Command implementations.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -978,21 +978,42 @@ fn telemetry_collector_status(config: &crate::config::TelemetryConfig) -> (Strin
         Some("::1" | "[::1]") => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
         _ => return ("enabled; endpoint is not local".to_string(), true),
     };
-    if local_collector_reachable(address) {
-        (
-            format!(
-                "enabled; TCP listener reachable at {} (OTLP not verified)",
-                address
-            ),
+    let origin = endpoint.origin().ascii_serialization();
+    match local_collector_otlp_status(&origin) {
+        Ok(()) => (
+            format!("enabled; OTLP/HTTP traces endpoint accepted an empty probe at {address}"),
             false,
-        )
-    } else {
-        (format!("enabled; no local listener at {}", address), true)
+        ),
+        Err(Some(status)) => (
+            format!("enabled; listener at {address} rejected OTLP/HTTP probe (HTTP {status})"),
+            true,
+        ),
+        Err(None) => (
+            format!("enabled; no responsive OTLP/HTTP traces endpoint at {address}"),
+            true,
+        ),
     }
 }
 
-fn local_collector_reachable(address: SocketAddr) -> bool {
-    TcpStream::connect_timeout(&address, Duration::from_millis(150)).is_ok()
+/// Submit an empty, valid OTLP ExportTraceServiceRequest. It contains no spans
+/// or user data, and verifies the protocol endpoint rather than only its port.
+fn local_collector_otlp_status(origin: &str) -> std::result::Result<(), Option<u16>> {
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| None)?
+        .post(format!("{}/v1/traces", origin.trim_end_matches('/')))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+        .body(Vec::new())
+        .send()
+        .map_err(|_| None)?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(Some(response.status().as_u16()))
+    }
 }
 
 /// The one sentence `ahu tasks` may print only when it really found nothing.
@@ -3292,7 +3313,7 @@ pub fn task_dirs(repo: &Repo) -> Result<Vec<PathBuf>> {
 
 #[cfg(test)]
 mod doctor_tests {
-    use super::{local_collector_reachable, telemetry_collector_status};
+    use super::{local_collector_otlp_status, telemetry_collector_status};
     use crate::config::TelemetryConfig;
     use std::net::TcpListener;
 
@@ -3331,13 +3352,35 @@ mod doctor_tests {
     }
 
     #[test]
-    fn local_collector_probe_only_checks_tcp_reachability() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        assert!(local_collector_reachable(listener.local_addr().unwrap()));
-        // Port zero cannot have a listening peer, unlike an ephemeral port
-        // released here that another parallel test could immediately reuse.
-        let address = "127.0.0.1:0".parse().unwrap();
-        assert!(!local_collector_reachable(address));
+    fn local_collector_probe_requires_an_otlp_http_response() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        for (status, expected) in [
+            ("200 OK", Ok(())),
+            ("404 Not Found", Err(Some(404))),
+            ("302 Found", Err(Some(302))),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let status = status.to_string();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                let _ = stream.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request).contains("POST /v1/traces HTTP/1.1"));
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            });
+            assert_eq!(
+                local_collector_otlp_status(&format!("http://{address}")),
+                expected
+            );
+            server.join().unwrap();
+        }
     }
 
     #[test]
@@ -3363,8 +3406,8 @@ mod doctor_tests {
             assert_eq!(
                 telemetry_collector_status(&config),
                 (
-                    format!("enabled; TCP listener reachable at {address} (OTLP not verified)"),
-                    false
+                    format!("enabled; no responsive OTLP/HTTP traces endpoint at {address}"),
+                    true
                 )
             );
         }
@@ -3373,7 +3416,10 @@ mod doctor_tests {
         config.endpoint = "http://127.0.0.1:0/v1/traces".into();
         assert_eq!(
             telemetry_collector_status(&config),
-            ("enabled; no local listener at 127.0.0.1:0".into(), true)
+            (
+                "enabled; no responsive OTLP/HTTP traces endpoint at 127.0.0.1:0".into(),
+                true
+            )
         );
     }
 }
