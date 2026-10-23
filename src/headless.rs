@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 const EVAL_OTEL_CHILD_DRAIN: Duration = Duration::from_millis(750);
 
-/// Owns the live foreground `run-task` process, whether its terminal is cmux
+/// Owns the live foreground `run-task` process, whether its terminal uses a plugin
 /// or the caller's current terminal. The durable lock file lets inspection
 /// report activity without inferring it from a workspace alone.
 pub(crate) struct InteractiveTaskOwner {
@@ -228,7 +228,12 @@ pub fn batch_command(
             match request.permissions {
                 Permissions::Prompt => add(&["-c", "sandbox_mode=\"read-only\""]),
                 Permissions::Auto => {
-                    add(&["-c", "sandbox_mode=\"workspace-write\""]);
+                    let sandbox = if spec.options.work_mode {
+                        "sandbox_mode=\"danger-full-access\""
+                    } else {
+                        "sandbox_mode=\"workspace-write\""
+                    };
+                    add(&["-c", sandbox]);
                     // The project's Codex MCP config approves only ahu's
                     // bounded local coordination tools. Provider-backed
                     // tools remain approval-gated and require eval opt-in.
@@ -5853,7 +5858,7 @@ mod profile_and_metadata_tests {
                 "gpt-6-astra",
                 vec![
                     "approval_policy=\"never\"",
-                    "sandbox_mode=\"workspace-write\"",
+                    "sandbox_mode=\"danger-full-access\"",
                 ],
                 vec!["agents.enabled=false", "--strict-config"],
             ),

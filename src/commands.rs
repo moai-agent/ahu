@@ -675,7 +675,6 @@ pub fn doctor_with_options(
         if registered_agents.is_empty() {
             console.say("auth         no registered agents; provider identity is not checked\n")?;
         } else {
-            warnings += 1;
             console.say("auth         native identity is not verified in work mode; harness authentication may fail\n")?;
         }
     } else if let Ok(repo) = repo {
@@ -810,7 +809,16 @@ pub fn doctor_with_options(
                 .and_then(|loaded| loaded.config.harness_version_pins.get(harness))
                 .map(String::as_str);
             let status = crate::headless::work_mode::integration(harness, version.as_deref(), pin);
-            warnings += 1;
+            if version.is_none()
+                || pin.is_some_and(|pin| {
+                    version.as_deref().and_then(crate::catalog::version_token) != Some(pin)
+                })
+            {
+                warnings += 1;
+                console.say(
+                    "  warning    CLI version unavailable or differs from the project pin\n",
+                )?;
+            }
             let supported =
                 crate::catalog::harness(harness).is_some_and(|entry| entry.adapter_available);
             console.say(&format!(
@@ -935,6 +943,7 @@ pub fn doctor_with_options(
         .unwrap_or(&state_root);
     console.say(&format!("state        {}\n", display_path(state_display)))?;
     let summary = match (problems, warnings) {
+        (0, 0) if work_mode => "\nWork-mode prerequisites passed; native compatibility and authentication remain unverified.\n".to_string(),
         (0, 0) => "\nNo blocking problems found.\n".to_string(),
         (0, w) => format!(
             "\nNo general prerequisite failures found. Review {w} warning(s); some modes or account checks may still prevent launch.\n"

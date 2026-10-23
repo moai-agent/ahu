@@ -886,6 +886,7 @@ fn doctor_work_mode_checks_headless_prerequisites_without_native_or_session_host
     );
     assert!(!text.contains("native safety claude-code"), "{text}");
     assert!(!text.contains("host groups"), "{text}");
+    assert!(!text.contains("No blocking problems found."), "{text}");
 }
 
 #[test]

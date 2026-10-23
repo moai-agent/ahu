@@ -144,10 +144,22 @@ fn prepare_task(repo: &TestRepo, task_id: &str) -> PathBuf {
 #[test]
 fn remove_clears_record_worktree_and_branch_together() {
     let repo = fixture();
-    let id = "006aa50000000000m1";
+    let id = "01900000-0000-7000-8000-000000000001";
     let record_dir = prepare_task(&repo, id);
     let worktree = worktree_of(&repo, id);
     let branch = branch_of(id);
+    let discovered = git::discover(repo.path()).unwrap();
+    ahu::task_index::register(
+        &discovered.identity(),
+        id,
+        &worktree,
+        ahu::task_index::StoreKind::Worktree,
+    )
+    .unwrap();
+    let index = ahu::task_index::root_for(&discovered)
+        .unwrap()
+        .join(format!("{id}.json"));
+    assert!(index.is_file());
 
     let out = ahu_in(repo.path(), &["remove", id]);
     let text = text_of(&out);
@@ -159,6 +171,7 @@ fn remove_clears_record_worktree_and_branch_together() {
         text.contains("  record    removed with its worktree\n"),
         "{text}"
     );
+    assert!(!index.exists(), "task index outlived successful removal");
     assert!(!worktree.exists(), "the worktree outlived removal");
     assert!(!record_dir.exists(), "the record outlived removal");
     assert_eq!(
@@ -818,9 +831,21 @@ fn remove_preserves_task_record_and_branch_when_git_refuses_worktree_cleanup() {
     let repo = fixture();
     repo.write(".claude/.gitignore", "settings.local.json\nnotes.md\n");
     repo.write(LOCAL_CONFIG, "{\"permissions\":{}}\n");
-    let id = "006aa50000000000c4";
+    let id = "01900000-0000-7000-8000-000000000004";
     let (record_dir, worktree) = prepare_task_with_copied_config(&repo, id);
     let branch = branch_of(id);
+    let discovered = git::discover(repo.path()).unwrap();
+    ahu::task_index::register(
+        &discovered.identity(),
+        id,
+        &worktree,
+        ahu::task_index::StoreKind::Worktree,
+    )
+    .unwrap();
+    let index = ahu::task_index::root_for(&discovered)
+        .unwrap()
+        .join(format!("{id}.json"));
+    assert!(index.is_file());
     std::fs::write(worktree.join(".claude/notes.md"), "task work\n").unwrap();
 
     let out = ahu_in(repo.path(), &["remove", id]);
@@ -844,12 +869,15 @@ fn remove_preserves_task_record_and_branch_when_git_refuses_worktree_cleanup() {
         "a failed cleanup deleted its branch"
     );
 
+    assert!(index.is_file(), "retryable cleanup lost its task index");
+
     // Once the task's ignored artifact is removed, the exposed status is
     // reviewable and must be handled before cleanup can finish.
     std::fs::remove_file(worktree.join(".claude/notes.md")).unwrap();
     let out = ahu_in(repo.path(), &["remove", id]);
     let text = text_of(&out);
     assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(!index.exists(), "task index outlived successful removal");
     assert!(!worktree.exists());
     assert!(!record_dir.exists());
 }

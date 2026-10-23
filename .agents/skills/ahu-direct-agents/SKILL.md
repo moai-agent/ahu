@@ -139,8 +139,9 @@ checkout's current HEAD (or already absent). A cherry-pick may not satisfy that
 ancestry check. Interactive tasks have no headless captures, so use `ahu remove`
 directly after these checks.
 
-`ahu remove` also closes a recorded cmux workspace when its group/window
-ownership can be verified; an unverifiable relationship blocks removal. Group
+`ahu remove` asks the recorded session-host plugin to close its owned session.
+The plugin verifies provider-specific ownership; an unverifiable relationship
+blocks removal. Group
 anchors and native harness stores are not generally removed. Separately inspect
 any remaining fixture anchor against the inventory, its current members, and
 session activity before closing it. Close only an owned, disposable fixture

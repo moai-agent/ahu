@@ -59,7 +59,7 @@ pub(crate) fn read_limited(file: &mut std::fs::File, limit: u64) -> std::io::Res
 /// Quote `value` so a POSIX shell passes it through as a single literal word.
 ///
 /// ahu only ever puts its own executable path and an ahu-owned task directory
-/// into a shell-interpreted cmux startup command. Task prompts are never quoted
+/// into a shell-interpreted session-host startup command. Task prompts are never quoted
 /// into a command line; they travel as files. This helper exists so the two
 /// paths that *do* get interpolated cannot break out of their word even when
 /// they contain spaces, quotes, or shell metacharacters.
@@ -157,7 +157,7 @@ fn digest_reader_with_limit(
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Names used for agents, branches, and cmux titles must be safe in all three.
+/// Names used for agents, branches, and terminal titles must be safe in all three.
 pub fn is_safe_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -330,8 +330,8 @@ pub fn display_safe_block(value: &str) -> String {
 /// Every character [`display_safe`] would escape is replaced here instead, and
 /// before truncation so the length bound still holds. This title is the one
 /// repository- and prompt-derived string that does *not* reach the terminal
-/// through a renderer: it becomes the cmux workspace name, passed to
-/// `cmux new-workspace --name`, and cmux paints it in the sidebar. Filtering
+/// through a renderer: a session-host plugin may display it directly as a
+/// workspace name. Filtering
 /// only `char::is_control` left the bidi overrides and the zero-width family
 /// intact, so a title could render as something other than what it is.
 pub fn task_title_from_prompt(prompt: &str) -> String {

@@ -599,7 +599,7 @@ pub fn configure_child(
 }
 
 /// A director has no frozen task record. Carry its bounded release label for
-/// future task creation and apply the same export policy on either cmux path.
+/// future task creation and apply the same export policy on either session-host path.
 pub(crate) fn configure_coordinator(
     command: &mut std::process::Command,
     config: &TelemetryConfig,
@@ -621,7 +621,7 @@ pub(crate) fn configure_coordinator(
     if let Some(endpoint) = eval_endpoint_override() {
         command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint);
     } else {
-        // A relocated workspace must not pick up a stale cmux-server receiver.
+        // A relocated workspace must not pick up a stale session-host receiver.
         command.env_remove("AHU_EVAL_OTEL_ENDPOINT");
     }
     let mut inherited = ahu_resource_attributes();

@@ -53,10 +53,10 @@ agent. `ahu setup` detects installed harnesses, offers available models,
 registers development agents and installs supported skills/MCP configuration.
 Harness installation and sign-in remain separate; ahu does not ship a harness
 or manage its agent-model API key.
-Git and explicit cmux lookup skip empty and relative PATH entries and use
-canonical executables outside Git working trees. Candidate ancestry is
-inspected without running candidate Git. Explicit AHU_CMUX_BIN retains
-user-selected command semantics; these checks are not OS isolation.
+Core Git lookup skips empty and relative PATH entries and uses canonical
+executables outside Git working trees. Candidate ancestry is inspected without
+running candidate Git. Terminal executable lookup and configuration belong to
+the selected plugin; these checks are not OS isolation.
 
 ahu does not use an agent-selection or system-prompt flag. A native lookup
 by name does not bind the selection to the file ahu read and digested.
@@ -118,9 +118,8 @@ flowchart TD
     N --> O["Write task record + prompt.txt"]
     O --> U{"Execution backend"}
     U -- headless --> V["Supervisor: batch argv,<br/>primary-owned coordination"]
-    U -- interactive --> P["cmux: find-or-create repository group"]
-    P --> Q["cmux: child workspace in that group"]
-    Q --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
+    U -- interactive --> P["Current terminal or selected session-host plugin"]
+    P --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
     R --> S["Re-derive argv, compare to record"]
     S --> T["supervise configured harness<br/>model flags + one composed prompt argument"]
 ```
@@ -366,7 +365,8 @@ An interactive task's record and prompt live in `.ahu/state/` in its worktree, c
 by ahu at launch and passed to the session, so removing that worktree removes
 them with it. `ahu tasks`, `task` and `focus` find them by looking through
 `.worktrees/`, from the primary checkout or from any sibling. The launch lock,
-cmux group mapping, headless coordination and task index belong to the primary;
+headless coordination and task index belong to the primary; plugin-specific
+workspace/group mappings belong to the selected session-host plugin;
 `.ahu/` ignores
 itself in Git. Nested sessions discover state from their working checkout;
 coordination stays in the primary checkout. Legacy lookup reads the primary and
@@ -383,7 +383,8 @@ Terminal outcomes persist even if foreground restoration fails.
 Existing state symlinks are refused; path checks and mutable record
 digests do not protect against concurrent hostile host processes. Policy never lives
 there. Each record freezes the launched
-identity, digests, base commit, branch, worktree, and cmux ids, so editing an agent
+identity, digests, base commit, branch, worktree, and optional session-host
+identity with an opaque session reference, so editing an agent
 later changes the next launch while a running task keeps what it started with.
 Misplaced records in managed stores are reported as notes, not accepted or migrated.
 After legacy lookup, recordless worktrees are reported as incomplete. Failed launch

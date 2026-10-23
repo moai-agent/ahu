@@ -567,7 +567,7 @@ The [batch command builder](../src/headless.rs) requests these controls:
 
 | Harness | Work-mode permission controls | Native boundary |
 | --- | --- | --- |
-| Codex | `-c 'approval_policy="never"' -c 'sandbox_mode="workspace-write"'` | Suppresses approval prompts while retaining the native workspace-write sandbox; protected paths and tool-specific approval gates can still block work. |
+| Codex | `-c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"'` | Explicit work mode permits unattended Git commits and agent-context edits without a native filesystem sandbox. The explicit `--work-mode` option authorizes this mapping; native managed policy and tool-specific gates still apply. Ordinary guarded mode retains workspace-write. |
 | Claude Code | `--permission-prompts none --permission-mode auto` | Requests native automatic decisions; those decisions can deny tools. This is not the bypass-permissions mode. |
 | Antigravity CLI | `--dangerously-skip-permissions` | Bypasses native permission checks; ahu passes no sandbox flag. |
 | OpenCode | `--auto` | Approves permissions that are not explicitly denied; native `deny` rules still apply. The 2.x batch command also uses `--standalone`. |

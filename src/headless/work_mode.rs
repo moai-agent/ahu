@@ -10,7 +10,9 @@ pub(crate) fn hooks(harness: &str) -> crate::hooks::HookInventory {
 
 pub(crate) fn permission_mapping(harness: &str) -> &'static str {
     match harness {
-        "codex" => "approval_policy=never, sandbox_mode=workspace-write",
+        "codex" => {
+            "approval_policy=never, sandbox_mode=danger-full-access (no native filesystem sandbox)"
+        }
         "claude-code" => {
             "--permission-prompts none --permission-mode auto (native automatic decisions may deny tools)"
         }

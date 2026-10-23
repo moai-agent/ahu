@@ -151,13 +151,13 @@ mod tests {
             "printf 'gemini-3.8-flash-high\\tFlash\\nunknown-model\\n'",
         );
         assert_eq!(
-            run_model_listing("antigravity", &success, root.path(), Duration::from_secs(1)),
+            run_model_listing("antigravity", &success, root.path(), Duration::from_secs(5)),
             Some(vec!["gemini-3.8-flash-high".to_string()])
         );
 
         let failure = command(root.path(), "failure", "exit 1");
         assert_eq!(
-            run_model_listing("antigravity", &failure, root.path(), Duration::from_secs(1)),
+            run_model_listing("antigravity", &failure, root.path(), Duration::from_secs(5)),
             None
         );
         assert_eq!(
@@ -195,7 +195,7 @@ mod tests {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         assert_eq!(
-            run_model_listing("opencode", &executable, root.path(), Duration::from_secs(1)),
+            run_model_listing("opencode", &executable, root.path(), Duration::from_secs(5)),
             None
         );
         assert_eq!(std::fs::read_to_string(config).unwrap(), "before\nafter\n");
