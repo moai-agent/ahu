@@ -762,6 +762,7 @@ fn fixture_request<'a>(case: &'a Path, records: &'a Path) -> RunRequest<'a> {
         runs: 1,
         timeout_seconds: 1,
         allow_widened_approvals: false,
+        work_mode: false,
         json_output: false,
     }
 }
@@ -980,6 +981,29 @@ fn run_preflight_refuses_invalid_requests_without_creating_run_artifacts() {
             "expected {message}: {error}"
         );
         assert!(output.is_empty());
+        assert!(!records.exists());
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
+    }
+    // Explicit work mode authorizes both auto manifests. The next independent
+    // rubric gate still refuses the request, before any harness or artifacts.
+    for (work_mode, allow_widened) in [(true, false), (false, true)] {
+        let mut request = fixture_request(&case, &records);
+        request.agents = &wide;
+        request.evaluator = Some("@wide");
+        request.work_mode = work_mode;
+        request.allow_widened_approvals = allow_widened;
+        let mut input = std::io::Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: false,
+        };
+        let error = run(&mut console, &repo, &request).unwrap_err();
+        assert!(
+            error.to_string().contains("requires a case `rubric`"),
+            "{error}"
+        );
         assert!(!records.exists());
         assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
     }
@@ -2165,4 +2189,85 @@ fn only_known_headless_outcomes_reach_a_record() {
         super::projected_outcome(Some(&serde_json::Value::Null)),
         None
     );
+}
+
+#[test]
+fn eval_work_mode_reaches_candidate_and_separate_evaluator_argv() {
+    for (agent, root) in [
+        ("@candidate", "/synthetic/candidate"),
+        ("@judge", "/synthetic/evaluator"),
+    ] {
+        let repo = crate::git::Repo {
+            root: root.into(),
+            common_dir: "/synthetic/common".into(),
+            head: None,
+        };
+        for work_mode in [false, true] {
+            for allow_widened in [false, true] {
+                let mut request = fixture_request(Path::new("case.md"), Path::new("records.jsonl"));
+                request.work_mode = work_mode;
+                request.allow_widened_approvals = allow_widened;
+                request.timeout_seconds = 42;
+                let command = eval_agent_command(
+                    Path::new("ahu"),
+                    &repo,
+                    agent,
+                    Path::new("prompt.txt"),
+                    &request,
+                );
+                let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
+                let mut expected = vec![
+                    "--repo",
+                    root,
+                    agent,
+                    if work_mode {
+                        "--work-mode"
+                    } else {
+                        "--headless"
+                    },
+                    "--timeout",
+                    "42",
+                    "--prompt-file",
+                    "prompt.txt",
+                    "--output",
+                    "json",
+                ];
+                if allow_widened {
+                    expected.push("--allow-widened-approvals");
+                }
+                assert_eq!(args, expected);
+                let (args, selected_repo) =
+                    crate::cli::extract_repository(args.into_iter().map(str::to_owned).collect())
+                        .unwrap();
+                assert_eq!(selected_repo.as_deref(), Some(Path::new(root)));
+                let crate::cli::Command::HeadlessLaunch { options, .. } =
+                    crate::cli::parse(args).unwrap()
+                else {
+                    panic!("expected headless launch")
+                };
+                assert_eq!(options.work_mode, work_mode);
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_work_mode_groups_are_distinct_from_guarded_and_legacy_records() {
+    // Even an identical supplied digest must not collapse different recorded modes.
+    let rows = [
+        record(&[]),
+        record(&[("work_mode", "false")]),
+        record(&[("work_mode", "true")]),
+    ];
+    let report = report_of(&rows);
+    assert_eq!(report.groups.len(), 3);
+    let modes: Vec<_> = report.groups.iter().map(|g| g.key.work_mode).collect();
+    assert_eq!(modes, vec![None, Some(false), Some(true)]);
+    for group in &report.groups {
+        assert_eq!(group.runs, 1);
+        assert_eq!(
+            group_json(group)["work_mode"],
+            serde_json::json!(group.key.work_mode)
+        );
+    }
 }

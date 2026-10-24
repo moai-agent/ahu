@@ -164,6 +164,10 @@ eval report options:
                         evaluator
 
 eval run options:
+  --work-mode          Opt in to headless automatic approvals for candidates and
+                        agent evaluators; no second widening flag required. Skips
+                        native compatibility admission using the existing work-mode
+                        path. Default: guarded headless. Worktrees are not sandboxes.
   --skill-selection <none|lexical|decision>
                         Optional prelaunch skill advice (default none). Decision
                         sends candidate-visible task and committed skill descriptions
@@ -472,6 +476,7 @@ pub enum Command {
         runs: u32,
         timeout_seconds: u64,
         allow_widened_approvals: bool,
+        work_mode: bool,
         output_json: bool,
     },
     Tasks {
@@ -1159,6 +1164,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
     let mut saw_timeout = false;
     let mut trajectory_guardrails = crate::eval::trajectory::Guardrails::default();
     let mut allow_widened_approvals = false;
+    let mut work_mode = false;
     let mut output_json = false;
     let mut index = 0;
     while index < rest.len() {
@@ -1233,6 +1239,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
                     bail!("--timeout must be an integer from 1 to 86400 seconds");
                 }
             }
+            "--work-mode" if !work_mode => work_mode = true,
             "--allow-widened-approvals" if !allow_widened_approvals => {
                 allow_widened_approvals = true
             }
@@ -1297,6 +1304,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
         runs,
         timeout_seconds,
         allow_widened_approvals,
+        work_mode,
         output_json,
     })
 }
@@ -2155,6 +2163,7 @@ mod parser_tests {
                 skill_selection: crate::skill_selection::Mode::None,
                 trajectory_guardrails: Default::default(),
                 records: Some("runs.jsonl".into()),
+                work_mode: false,
                 runs: 100,
                 timeout_seconds: 86400,
                 allow_widened_approvals: true,
@@ -2166,6 +2175,35 @@ mod parser_tests {
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
             "at most 16",
         );
+    }
+
+    #[test]
+    fn eval_work_mode_is_explicit_authorization_and_rejects_repeats() {
+        let base = ["eval", "run", "--case", "case.md", "--agent", "@fixture"];
+        for (extra, expected, widened) in [
+            (vec![], false, false),
+            (vec!["--allow-widened-approvals"], false, true),
+            (vec!["--work-mode"], true, false),
+            (vec!["--work-mode", "--allow-widened-approvals"], true, true),
+            (vec!["--allow-widened-approvals", "--work-mode"], true, true),
+        ] {
+            let Command::EvalRun {
+                work_mode,
+                allow_widened_approvals,
+                ..
+            } = parse(base.into_iter().chain(extra)).unwrap()
+            else {
+                panic!("expected eval")
+            };
+            assert_eq!(work_mode, expected);
+            assert_eq!(allow_widened_approvals, widened);
+        }
+        let args: Vec<_> = base
+            .into_iter()
+            .chain(["--work-mode", "--work-mode"])
+            .collect();
+        assert_usage(&args, "unknown or repeated option");
+        assert!(help_for(Some("eval run")).unwrap().contains("--work-mode"));
     }
 
     #[test]

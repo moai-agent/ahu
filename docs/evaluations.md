@@ -38,6 +38,21 @@ Reports remain read-only and print summaries to stdout; save a bounded summary
 in ignored `.ahu/evals/` or external storage when needed. Existing evidence
 must be migrated explicitly.
 
+`ahu eval run --work-mode` explicitly selects the existing headless work-mode
+path for every candidate and registered agent evaluator, including evaluators in
+`--evaluator-repo`. Like ordinary task work mode, this flag itself authorizes
+native automatic approvals; no second `--allow-widened-approvals` is required.
+Without it, evals use guarded headless admission, and widened manifest approvals
+still require `--allow-widened-approvals`. That flag alone does not select work mode.
+
+Work mode skips native compatibility admission using the existing task launch
+path; it does not edit native configuration, hooks or accounts. Native hooks and
+managed policy still apply. A Git worktree is not a sandbox. See
+[work mode](reference.md#work-mode) for harness-specific controls and limitations.
+Typed decision grading is unaffected; the mode applies to its candidate launches.
+The `work_mode` boolean is recorded in input fingerprints and comparison groups.
+Guarded, work-mode and older records with unspecified mode remain separate.
+
 ## Start a comparison
 
 Run `ahu setup` in your candidate project, choose its harness models, and commit

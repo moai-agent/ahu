@@ -202,6 +202,8 @@ struct Record {
     #[serde(default)]
     blinding: Option<String>,
     #[serde(default)]
+    work_mode: Option<bool>,
+    #[serde(default)]
     tool_definitions_digest: Option<String>,
     #[serde(default)]
     ahu_version: Option<String>,
@@ -341,6 +343,8 @@ pub struct GroupKey {
     pub evaluator_skill_digest: String,
     pub evaluator_repo_head: String,
     pub blinding: String,
+    /// Missing legacy mode remains distinct from explicitly recorded modes.
+    pub work_mode: Option<bool>,
     pub tool_definitions_digest: String,
     pub ahu_version: String,
     pub ahu_build_digest: String,
@@ -876,6 +880,7 @@ fn key_for(record: &Record) -> GroupKey {
         evaluator_skill_digest: or_unspecified(&record.evaluator_skill_digest, UNSPECIFIED),
         evaluator_repo_head: or_unspecified(&record.evaluator_repo_head, UNSPECIFIED),
         blinding: or_unspecified(&record.blinding, UNSPECIFIED),
+        work_mode: record.work_mode,
         tool_definitions_digest: or_unspecified(&record.tool_definitions_digest, UNSPECIFIED),
         ahu_version: or_unspecified(&record.ahu_version, UNSPECIFIED),
         ahu_build_digest: or_unspecified(&record.ahu_build_digest, UNSPECIFIED),
@@ -1503,7 +1508,7 @@ pub fn render_at(report: &Report, width: usize) -> String {
                 group.candidate_selection_runs, group.runs));
         }
         out.push_str(&format!(
-            "  inputs     case {}  prompt {} v{}  scoring v{}  suite {} {}\n                          agent id {}  evaluator id {}  blinding {}\n                          tools {}  ahu {} build {}  target HEAD {}  fingerprint {} ({})\n",
+            "  inputs     case {}  prompt {} v{}  scoring v{}  suite {} {}\n                          agent id {}  evaluator id {}  blinding {}  mode {}\n                          tools {}  ahu {} build {}  target HEAD {}  fingerprint {} ({})\n",
             display_safe(&key.case_digest),
             display_safe(&key.prompt_profile),
             display_safe(&key.prompt_version),
@@ -1513,6 +1518,7 @@ pub fn render_at(report: &Report, width: usize) -> String {
             display_safe(&key.agent_identity_digest),
             display_safe(&key.evaluator_identity_digest),
             display_safe(&key.blinding),
+            match key.work_mode { Some(true) => "work-mode", Some(false) => "guarded", None => "unspecified" },
             display_safe(&key.tool_definitions_digest),
             display_safe(&key.ahu_version),
             display_safe(&key.ahu_build_digest),
@@ -2011,6 +2017,8 @@ pub struct RunRequest<'a> {
     pub runs: u32,
     pub timeout_seconds: u64,
     pub allow_widened_approvals: bool,
+    /// Explicit automatic approval authorization for every agent launch.
+    pub work_mode: bool,
     pub json_output: bool,
 }
 
@@ -2074,7 +2082,9 @@ pub fn run(
         })
         .collect::<Result<Vec<_>>>()?;
     for candidate in &candidates {
-        if candidate.manifest.permissions.widens_defaults() && !request.allow_widened_approvals {
+        if candidate.manifest.permissions.widens_defaults()
+            && !(request.allow_widened_approvals || request.work_mode)
+        {
             bail!(kind: ErrorKind::Usage, "candidate manifest widens harness approvals; pass --allow-widened-approvals to authorize that launch");
         }
     }
@@ -2116,7 +2126,7 @@ pub fn run(
     if evaluator
         .as_ref()
         .is_some_and(|agent| agent.manifest.permissions.widens_defaults())
-        && !request.allow_widened_approvals
+        && !(request.allow_widened_approvals || request.work_mode)
     {
         bail!(kind: ErrorKind::Usage, "evaluator manifest widens harness approvals; pass --allow-widened-approvals to authorize that launch");
     }
@@ -2178,6 +2188,7 @@ pub fn run(
         create_private_dir(&run_dir)?;
 
         let mut print = fingerprint::InputFingerprint {
+            work_mode: request.work_mode,
             case_id: case.id.clone(),
             corpus_version: case.corpus_version.clone(),
             case_schema_version: case.schema_version,
@@ -2243,8 +2254,7 @@ pub fn run(
             &run_id,
             case,
             "candidate",
-            request.timeout_seconds,
-            request.allow_widened_approvals,
+            request,
             receiver.endpoint(),
             release_id.as_deref(),
         );
@@ -2515,8 +2525,7 @@ pub fn run(
                 &run_id,
                 case,
                 "evaluator",
-                request.timeout_seconds,
-                request.allow_widened_approvals,
+                request,
                 receiver.endpoint(),
                 release_id.as_deref(),
             );
@@ -3266,8 +3275,7 @@ fn launch_eval_agent(
     run_id: &str,
     case: &case::EvalCase,
     stage: &str,
-    timeout_seconds: u64,
-    allow_widened: bool,
+    request: &RunRequest<'_>,
     otel_endpoint: &str,
     release_id: Option<&str>,
 ) -> LaunchOutcome {
@@ -3281,8 +3289,7 @@ fn launch_eval_agent(
         run_id,
         case,
         stage,
-        timeout_seconds,
-        allow_widened,
+        request,
         otel_endpoint,
         release_id,
         &mut envelope,
@@ -3294,6 +3301,36 @@ fn launch_eval_agent(
     }
 }
 
+// Shared by candidate and evaluator launches, including separate evaluator checkouts.
+fn eval_agent_command(
+    executable: &Path,
+    repo: &crate::git::Repo,
+    agent: &str,
+    prompt_path: &Path,
+    request: &RunRequest<'_>,
+) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .arg("--repo")
+        .arg(&repo.root)
+        .arg(agent)
+        .arg(if request.work_mode {
+            "--work-mode"
+        } else {
+            "--headless"
+        })
+        .arg("--timeout")
+        .arg(request.timeout_seconds.to_string())
+        .arg("--prompt-file")
+        .arg(prompt_path)
+        .arg("--output")
+        .arg("json");
+    if request.allow_widened_approvals {
+        command.arg("--allow-widened-approvals");
+    }
+    command
+}
+
 #[allow(clippy::too_many_arguments)]
 fn launch_eval_agent_inner(
     repo: &crate::git::Repo,
@@ -3303,8 +3340,7 @@ fn launch_eval_agent_inner(
     run_id: &str,
     case: &case::EvalCase,
     stage: &str,
-    timeout_seconds: u64,
-    allow_widened: bool,
+    request: &RunRequest<'_>,
     otel_endpoint: &str,
     release_id: Option<&str>,
     envelope: &mut Option<serde_json::Value>,
@@ -3325,18 +3361,8 @@ fn launch_eval_agent_inner(
     }
     // Do not inherit unrelated OTel resource values into an evaluation run.
     let executable = std::env::current_exe()?;
-    let mut command = Command::new(executable);
+    let mut command = eval_agent_command(&executable, repo, agent, &prompt_path, request);
     command
-        .arg("--repo")
-        .arg(&repo.root)
-        .arg(agent)
-        .arg("--headless")
-        .arg("--timeout")
-        .arg(timeout_seconds.to_string())
-        .arg("--prompt-file")
-        .arg(&prompt_path)
-        .arg("--output")
-        .arg("json")
         .env("AHU_EVAL_OTEL_ENDPOINT", otel_endpoint)
         .env("AHU_EVAL_LOCAL_METRICS", "1")
         .env("OTEL_RESOURCE_ATTRIBUTES", &resource_attrs)
@@ -3344,9 +3370,6 @@ fn launch_eval_agent_inner(
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if allow_widened {
-        command.arg("--allow-widened-approvals");
-    }
     let mut child = command
         .spawn()
         .map_err(|error| Error::new(format!("could not start eval agent {agent}: {error}")))?;
@@ -3721,6 +3744,7 @@ fn group_json(group: &Group) -> serde_json::Value {
         "evaluator_skill_digest": key.evaluator_skill_digest,
         "evaluator_repo_head": key.evaluator_repo_head,
         "blinding": key.blinding,
+        "work_mode": key.work_mode,
         "tool_definitions_digest": key.tool_definitions_digest,
         "ahu_version": key.ahu_version,
         "ahu_build_digest": key.ahu_build_digest,

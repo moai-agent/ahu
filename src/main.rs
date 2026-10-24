@@ -264,6 +264,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             runs,
             timeout_seconds,
             allow_widened_approvals,
+            work_mode,
             output_json,
         } => {
             let repo = commands::repo_from_cwd()?;
@@ -281,6 +282,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 runs,
                 timeout_seconds,
                 allow_widened_approvals,
+                work_mode,
                 json_output: output_json,
             };
             commands::with_stdio_output(output_json, |console| {
