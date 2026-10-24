@@ -14,13 +14,17 @@ use common::TestRepo;
 fn launch(repo: &TestRepo, extra: &[&str]) -> std::process::Output {
     let temp = repo.state_path();
     let bin = common::fake_harness(temp, &temp.join("argv"));
+    let home = temp.join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let mut cmd = common::ahu();
     cmd.current_dir(repo.path())
+        .env("HOME", home.canonicalize().unwrap())
+        .env_remove("CLAUDE_CONFIG_DIR")
         .args(["@deploy", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .args(extra)
-        // cmux is deliberately absent, so a launch that gets past the gate
-        // fails at session creation rather than starting anything.
+        // The terminal host runs only the fake harness. Native trust writes
+        // must stay inside this fixture's home, never the developer's home.
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -136,6 +140,11 @@ fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
     );
     let argv = std::fs::read_to_string(repo.state_path().join("argv")).unwrap();
     assert!(argv.contains("--permission-mode\nauto\n"), "{argv}");
+    let trust: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(repo.state_path().join("home/.claude.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(trust["projects"].as_object().unwrap().len(), 1);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("permissions = auto"), "{stdout}");
     assert!(!stdout.contains("--permission-mode auto"), "{stdout}");
