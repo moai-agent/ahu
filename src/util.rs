@@ -59,7 +59,7 @@ pub(crate) fn read_limited(file: &mut std::fs::File, limit: u64) -> std::io::Res
 /// Quote `value` so a POSIX shell passes it through as a single literal word.
 ///
 /// ahu only ever puts its own executable path and an ahu-owned task directory
-/// into a shell-interpreted cmux startup command. Task prompts are never quoted
+/// into a shell-interpreted session-host startup command. Task prompts are never quoted
 /// into a command line; they travel as files. This helper exists so the two
 /// paths that *do* get interpolated cannot break out of their word even when
 /// they contain spaces, quotes, or shell metacharacters.
@@ -157,7 +157,7 @@ fn digest_reader_with_limit(
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Names used for agents, branches, and cmux titles must be safe in all three.
+/// Names used for agents, branches, and terminal titles must be safe in all three.
 pub fn is_safe_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -215,6 +215,17 @@ pub fn is_semver(value: &str) -> bool {
                 return false;
             }
         }
+    }
+    // Numeric prerelease identifiers cannot have leading zeros. Build metadata
+    // and prerelease identifiers containing non-digits may still start with zero.
+    if pre_release.is_some_and(|section| {
+        section.split('.').any(|identifier| {
+            identifier.len() > 1
+                && identifier.starts_with('0')
+                && identifier.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    }) {
+        return false;
     }
     true
 }
@@ -319,8 +330,8 @@ pub fn display_safe_block(value: &str) -> String {
 /// Every character [`display_safe`] would escape is replaced here instead, and
 /// before truncation so the length bound still holds. This title is the one
 /// repository- and prompt-derived string that does *not* reach the terminal
-/// through a renderer: it becomes the cmux workspace name, passed to
-/// `cmux new-workspace --name`, and cmux paints it in the sidebar. Filtering
+/// through a renderer: a session-host plugin may display it directly as a
+/// workspace name. Filtering
 /// only `char::is_control` left the bidi overrides and the zero-width family
 /// intact, so a title could render as something other than what it is.
 pub fn task_title_from_prompt(prompt: &str) -> String {
@@ -487,7 +498,13 @@ mod behavior_tests {
         ] {
             assert!(!is_safe_name(value), "{value:?}");
         }
-        for value in ["0.1.0", "1.2.3-rc.1+build.5", "1.2.3-alpha-beta"] {
+        for value in [
+            "0.1.0",
+            "1.2.3-rc.1+build.5",
+            "1.2.3-alpha-beta",
+            "1.2.3-0.01a.00-0+01",
+            "1.2.3+00.01",
+        ] {
             assert!(is_semver(value), "{value}");
         }
         for value in [
@@ -498,6 +515,8 @@ mod behavior_tests {
             "1.2.3-",
             "1.2.3+",
             "1.2.3-a..b",
+            "1.2.3-01",
+            "1.2.3-rc.00+01",
             "1.2.3-\u{001b}",
         ] {
             assert!(!is_semver(value), "{value:?}");

@@ -16,7 +16,6 @@ fn locations(home: &Path) -> Locations {
     Locations {
         home: Some(home.to_path_buf()),
         managed: None,
-        cmux_wrapper: false,
     }
 }
 
@@ -90,14 +89,14 @@ fn human_and_json_previews_share_the_planned_integration_evidence() {
     let before = ahu::commands::render_preview(&discovered, &plan, "review it", None);
     let json: serde_json::Value =
         serde_json::from_str(&launch::render_json(&plan, "review it").unwrap()).unwrap();
-    let expected = serde_json::to_value(&plan.cmux_integration).unwrap();
-    assert_eq!(json["cmux_integration"], expected);
+    let expected = serde_json::to_value(&plan.native_admission).unwrap();
+    assert_eq!(json["native_admission"], expected);
 
     // A later read must not silently replace one renderer's planned evidence.
     // Execution performs its own configuration and admission rechecks.
     repo.write(".claude/settings.json", "malformed settings");
     let live =
-        serde_json::to_value(ahu::cmux::integration::inspect(repo.path(), "claude-code")).unwrap();
+        serde_json::to_value(ahu::native_admission::inspect(repo.path(), "claude-code")).unwrap();
     assert_ne!(live, expected);
     assert_eq!(
         ahu::commands::render_preview(&discovered, &plan, "review it", None),
@@ -105,7 +104,7 @@ fn human_and_json_previews_share_the_planned_integration_evidence() {
     );
     let after: serde_json::Value =
         serde_json::from_str(&launch::render_json(&plan, "review it").unwrap()).unwrap();
-    assert_eq!(after["cmux_integration"], expected);
+    assert_eq!(after["native_admission"], expected);
 }
 
 /// `.claude/settings.json` decides the session's approval boundary, and ahu
@@ -803,9 +802,8 @@ fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::
         enforcement: adapter
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: ahu::task::TaskState::Exited,
     }
 }
@@ -821,6 +819,9 @@ fn record_for(repo: &TestRepo, agent: &ahu::agent::ResolvedAgent) -> ahu::task::
 /// says nothing about the harness fetching and running code named inside it.
 #[test]
 fn declared_opencode_plugins_are_named_on_the_preview() {
+    if !common::in_harness_fixture("declared_opencode_plugins_are_named_on_the_preview") {
+        return;
+    }
     let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
     repo.write(
         "opencode.json",
@@ -883,6 +884,9 @@ fn a_harness_that_does_not_run_declared_plugins_is_not_told_that_it_does() {
 /// A `.jsonc` ahu cannot parse is reported as unknown, never as "no plugins".
 #[test]
 fn an_unparseable_opencode_config_is_unknown_rather_than_empty() {
+    if !common::in_harness_fixture("an_unparseable_opencode_config_is_unknown_rather_than_empty") {
+        return;
+    }
     let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
     repo.write(
         "opencode.jsonc",
@@ -999,6 +1003,11 @@ fn declared_plugins_do_not_suppress_the_unscanned_settings_disclosure() {
 /// files rather than reporting them unread.
 #[test]
 fn opencode_settings_and_plugins_are_scanned_without_unscanned_disclosure() {
+    if !common::in_harness_fixture(
+        "opencode_settings_and_plugins_are_scanned_without_unscanned_disclosure",
+    ) {
+        return;
+    }
     let repo = repo_on("opencode", "ollama/glm-5.3:cloud");
     repo.write("opencode.json", r#"{"plugin":["some-remote-plugin"]}"#);
     repo.commit("fixture");
@@ -1108,31 +1117,28 @@ fn delivery_layout_and_nonce_changes_are_not_agent_version_drift() {
         .unwrap()
         .1;
     assert_ne!(record.delivery.digest, original);
-    for layout in [1, 2] {
-        record.delivery.layout_version = layout;
-        assert!(
-            ahu::drift::detect(
-                &record.agent_label(),
-                Some(ahu::drift::AgentIdentity {
-                    version: &agent.manifest.version,
-                    harness: &agent.manifest.harness,
-                    model: &agent.manifest.model,
-                    permissions: agent.manifest.permissions,
-                    instructions_source: Some(
-                        &agent.relative_source(&git::discover(repo.path()).unwrap().root)
-                    ),
-                    identity_digest: &agent.identity_digest(),
-                    source_digest: &agent.source_digest,
-                    instructions_digest: &agent.instructions_digest
-                }),
-                &record.config_snapshot_digest,
-                &record.policy_digest,
-                &record.hooks_digest,
-                &[(std::path::PathBuf::from("/nonexistent"), record.clone())],
-            )
-            .is_none()
-        );
-    }
+    assert!(
+        ahu::drift::detect(
+            &record.agent_label(),
+            Some(ahu::drift::AgentIdentity {
+                version: &agent.manifest.version,
+                harness: &agent.manifest.harness,
+                model: &agent.manifest.model,
+                permissions: agent.manifest.permissions,
+                instructions_source: Some(
+                    &agent.relative_source(&git::discover(repo.path()).unwrap().root)
+                ),
+                identity_digest: &agent.identity_digest(),
+                source_digest: &agent.source_digest,
+                instructions_digest: &agent.instructions_digest
+            }),
+            &record.config_snapshot_digest,
+            &record.policy_digest,
+            &record.hooks_digest,
+            &[(std::path::PathBuf::from("/nonexistent"), record.clone())],
+        )
+        .is_none()
+    );
 }
 
 #[test]

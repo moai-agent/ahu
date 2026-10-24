@@ -221,12 +221,7 @@ pub fn lookup_in(repo: &crate::git::Repo, task_id: &str) -> Result<Option<Entry>
     if !task::is_canonical_task_uuid(task_id) {
         return Ok(None);
     }
-    let root = root_for(repo)?;
-    confined(&root, false)?;
-    if let Some(entry) = read_entry(&root, task_id)? {
-        if entry.repo_identity != repo.identity() {
-            bail!("primary task index entry belongs to another repository");
-        }
+    if let Some(entry) = lookup_current_in(repo, task_id)? {
         return Ok(Some(entry));
     }
     for root in crate::storage::legacy_index_roots(repo)? {
@@ -237,6 +232,23 @@ pub fn lookup_in(repo: &crate::git::Repo, task_id: &str) -> Result<Option<Entry>
             return Ok(Some(entry));
         }
     }
+    Ok(None)
+}
+
+/// Exact current-store lookup without reading legacy lookup configuration.
+pub(crate) fn lookup_current_in(repo: &crate::git::Repo, task_id: &str) -> Result<Option<Entry>> {
+    if !task::is_canonical_task_uuid(task_id) {
+        return Ok(None);
+    }
+    let root = root_for(repo)?;
+    confined(&root, false)?;
+    if let Some(entry) = read_entry(&root, task_id)? {
+        if entry.repo_identity != repo.identity() {
+            bail!("primary task index entry belongs to another repository");
+        }
+        return Ok(Some(entry));
+    }
+
     Ok(None)
 }
 

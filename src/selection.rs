@@ -184,7 +184,10 @@ pub fn is_excluded(candidate: &Path) -> bool {
 /// `run-task` exec, and the `--version` probes alike. It refuses relative `PATH`
 /// entries and any candidate inside a repository ahu has opened.
 pub fn resolve_executable(executable: &str) -> Option<String> {
-    which(executable, Some).map(|path| path.to_string_lossy().into_owned())
+    which(executable, |candidate| {
+        (!is_excluded(&candidate)).then_some(candidate)
+    })
+    .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Bootstrap utilities without Git, including candidates in unopened worktrees.
@@ -332,6 +335,85 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// Verify the interactive command surface separately from model availability.
+/// Headless planning also builds an interactive-shaped plan before replacing
+/// its argv, so this check belongs at interactive entrypoints, not in `plan`.
+pub fn check_interactive_cli(
+    executable: &Path,
+    harness: &str,
+    args: &mut Vec<String>,
+    cwd: &Path,
+) -> Result<()> {
+    if harness != "opencode" {
+        return Ok(());
+    }
+    if !executable.is_absolute() || is_excluded(executable) {
+        bail!("compatibility probe requires a resolved harness outside the repository");
+    }
+    let before = crate::snapshot::collect(cwd)?.digest();
+    let mut command = std::process::Command::new(executable);
+    command.arg("--help").current_dir(cwd);
+    let help = bounded_config_probe(&mut command, true, std::time::Duration::from_secs(8));
+    if crate::snapshot::collect(cwd)?.digest() != before {
+        bail!(
+            "OpenCode help inspection changed project agent context; review it and refresh the committed context lock before retrying"
+        );
+    }
+    let help = help.ok_or_else(|| {
+        Error::new("OpenCode interactive CLI compatibility could not be verified: the bounded `opencode --help` probe failed or timed out. Native diagnostics are withheld; check the resolved CLI before retrying. ahu will not substitute one-shot `opencode run`.")
+    })?;
+    let already_mini = opencode_mini_index(args).is_some();
+    if !already_mini && crate::harness::opencode::check_interactive_help(&help, args).is_ok() {
+        return Ok(());
+    }
+
+    let mut command = std::process::Command::new(executable);
+    command.args(["mini", "--help"]).current_dir(cwd);
+    let mini_help = bounded_config_probe(&mut command, true, std::time::Duration::from_secs(8));
+    if crate::snapshot::collect(cwd)?.digest() != before {
+        bail!(
+            "OpenCode mini help inspection changed project agent context; review it and refresh the committed context lock before retrying"
+        );
+    }
+    let mini_help = mini_help.ok_or_else(|| {
+        Error::new("OpenCode interactive CLI compatibility could not be verified: the bounded `opencode mini --help` probe failed or timed out. Native diagnostics are withheld; check the resolved CLI before retrying.")
+    })?;
+    crate::harness::opencode::check_mini_interactive_help(&help, &mini_help, args)?;
+    if !already_mini {
+        args.insert(0, "mini".to_string());
+    }
+    Ok(())
+}
+
+/// Return the subcommand position when an OpenCode 2 interactive command has
+/// already been normalized.
+fn opencode_mini_index(args: &[String]) -> Option<usize> {
+    if args.first().is_some_and(|arg| arg == "mini") {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+/// Validate and adapt an interactive command while keeping its redacted prompt
+/// index aligned if OpenCode 2.x requires the `mini` subcommand prefix.
+pub fn check_interactive_command(
+    executable: &Path,
+    harness: &str,
+    command: &mut crate::harness::LaunchCommand,
+    cwd: &Path,
+) -> Result<()> {
+    let already_mini = opencode_mini_index(&command.args).is_some();
+    check_interactive_cli(executable, harness, &mut command.args, cwd)?;
+    if !already_mini
+        && opencode_mini_index(&command.args).is_some()
+        && let Some(prompt_arg) = &mut command.prompt_arg
+    {
+        *prompt_arg += 1;
+    }
+    Ok(())
+}
+
 /// Check native configuration without inference or changing the selected model.
 /// Call on the submitting checkout, then again on the materialized worktree
 /// immediately before execution: provider configuration and Codex trust are
@@ -342,17 +424,6 @@ pub fn check_launch_compatibility(
     model: &str,
     permissions: crate::agent::Permissions,
     cwd: &Path,
-) -> Result<()> {
-    check_launch_compatibility_with_policy(executable, harness, model, permissions, cwd, None)
-}
-
-pub(crate) fn check_launch_compatibility_with_policy(
-    executable: &Path,
-    harness: &str,
-    model: &str,
-    permissions: crate::agent::Permissions,
-    cwd: &Path,
-    policy: Option<&crate::cmux::integration::HeadlessPolicy>,
 ) -> Result<()> {
     use crate::agent::Permissions;
     if harness == "kiro" {
@@ -379,10 +450,15 @@ pub(crate) fn check_launch_compatibility_with_policy(
             (crate::harness::codex::auto_mcp_probe_args(), false)
         }
         "opencode" => {
-            // Validate before using the provider as a positional CLI argument.
+            // `opencode models` takes no positional provider: it prints every
+            // provider-qualified identifier the native configuration resolves,
+            // one per line. Passing a provider makes the CLI exit nonzero with
+            // "Unexpected positional argument", which the probe cannot tell
+            // apart from a broken provider configuration. Validate the model
+            // shape here so an unqualified or option-shaped identifier is
+            // refused before the probe rather than silently unmatched.
             crate::harness::model_args(harness, model)?;
-            let provider = model.split_once('/').expect("validated model").0;
-            (vec!["models".into(), provider.into()], true)
+            (vec!["models".into()], true)
         }
         _ => return Ok(()),
     };
@@ -394,9 +470,6 @@ pub(crate) fn check_launch_compatibility_with_policy(
     let before = crate::snapshot::collect(cwd)?.digest();
     let mut command = std::process::Command::new(executable);
     command.args(&args).current_dir(cwd);
-    if let Some(policy) = policy {
-        crate::cmux::integration::sanitize(&mut command, Some(policy));
-    }
     let output = bounded_config_probe(&mut command, capture, std::time::Duration::from_secs(8));
     if crate::snapshot::collect(cwd)?.digest() != before {
         bail!(
@@ -407,20 +480,20 @@ pub(crate) fn check_launch_compatibility_with_policy(
     if harness == "codex" {
         if output.is_none() {
             bail!(
-                "Codex cannot load its effective MCP configuration with ahu's auto tool approvals. \
-                 An untrusted project may hide .codex/config.toml, leaving an ahu server with tools \
-                 but no transport. Review project trust in Codex directly in this checkout and verify \
+                "Codex cannot load its effective project MCP configuration. An untrusted project \
+                 may hide .codex/config.toml, leaving the ahu server unavailable. Review project \
+                 trust in Codex directly in this checkout and verify \
                  `codex mcp list` recognizes the intended ahu server, then retry. A trusted project \
                  transport is sufficient; global registration is not required. ahu will not \
-                 grant trust, copy a project command into CLI overrides, or remove MCP approval gates. \
+                 grant project trust or copy a project command into CLI overrides. \
                  The native config probe failed or timed out; its output is withheld."
             );
         }
     } else {
         let Some(output) = output else {
             bail!(
-                "OpenCode model availability could not be verified: the bounded `opencode models \
-                 <provider>` probe failed or timed out. Run it in this checkout and repair native \
+                "OpenCode model availability could not be verified: the bounded `opencode models` \
+                 probe failed or timed out. Run it in this checkout and repair native \
                  provider configuration before retrying; ahu refuses a possible model fallback. \
                  Native diagnostics are withheld."
             );
@@ -428,8 +501,8 @@ pub(crate) fn check_launch_compatibility_with_policy(
         if !output.lines().any(|line| line.trim() == model) {
             bail!(
                 "OpenCode did not list the exact requested model {model:?} in this checkout. \
-                 Configure and enable that provider/model in OpenCode, verify it with \
-                 `opencode models <provider>`, then retry. ahu refuses a possible model fallback."
+                 Configure and enable that provider/model in OpenCode, verify it is listed by \
+                 `opencode models`, then retry. ahu refuses a possible model fallback."
             );
         }
     }
@@ -438,7 +511,7 @@ pub(crate) fn check_launch_compatibility_with_policy(
 
 /// Bound elapsed time, captured bytes and pipe lifetime. Config diagnostics can
 /// contain secrets, so stderr is never captured and callers never echo stdout.
-/// The Codex check discards stdout too; only the OpenCode model list is read.
+/// The Codex check discards stdout too; OpenCode checks read help or model IDs.
 pub(crate) fn bounded_config_probe(
     command: &mut std::process::Command,
     capture: bool,
@@ -546,26 +619,60 @@ mod compatibility_tests {
         file
     }
 
+    /// `opencode models` accepts no positional provider: OpenCode 2.0.32 exits
+    /// 1 with `Unexpected positional argument` when one is passed. This stub
+    /// refuses any extra argument so a reintroduced provider positional fails
+    /// here instead of only against the installed CLI.
+    fn opencode_models_stub(root: &Path, listing: &Path, argv: &Path) -> PathBuf {
+        fake(
+            root,
+            &format!(
+                "printf '%s\\n' \"$@\" > {argv}\n\
+                 test \"$1\" = models || exit 2\n\
+                 test $# -eq 1 || exit 1\n\
+                 cat {listing}",
+                argv = argv.display(),
+                listing = listing.display()
+            ),
+        )
+    }
+
     #[test]
-    fn opencode_requires_exact_available_model_and_uses_project_directory() {
+    fn opencode_probes_models_without_a_provider_argument() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
         std::fs::create_dir(&project).unwrap();
-        std::fs::write(project.join("models.txt"), "ollama/glm-5.3:cloud\n").unwrap();
-        let exe = fake(
-            root.path(),
-            "test \"$1\" = models && test \"$2\" = ollama || exit 2\ncat models.txt",
-        );
-        let check = || {
-            check_launch_compatibility(
-                &exe,
-                "opencode",
-                "ollama/glm-5.3:cloud",
-                Permissions::Prompt,
-                &project,
-            )
+        let listing = root.path().join("models.txt");
+        // Every line the real CLI prints is provider-qualified, across the
+        // providers the native configuration resolves.
+        std::fs::write(
+            &listing,
+            "opencode/big-pickle\nollama/glm-5.3:cloud\nopencode/beam-free\n",
+        )
+        .unwrap();
+        let argv = root.path().join("argv.txt");
+        let exe = opencode_models_stub(root.path(), &listing, &argv);
+        let check = |model| {
+            check_launch_compatibility(&exe, "opencode", model, Permissions::Prompt, &project)
         };
-        check().unwrap();
+        check("ollama/glm-5.3:cloud").unwrap();
+        assert_eq!(std::fs::read_to_string(&argv).unwrap(), "models\n");
+        check("opencode/beam-free").unwrap();
+        // Prefix, suffix and decorated near-misses are not the exact model.
+        for missing in [
+            "ollama/glm-5.3",
+            "ollama/glm-5.3:cloud-other",
+            "ollama/other",
+            "opencode/beam",
+        ] {
+            assert!(
+                check(missing)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("refuses a possible model fallback"),
+                "{missing} was accepted"
+            );
+        }
         for unavailable in [
             "opencode/big-pickle\n",
             "ollama/glm-5.3:cloud-other\n",
@@ -573,45 +680,53 @@ mod compatibility_tests {
             "ollama/other\n",
             "",
         ] {
-            std::fs::write(project.join("models.txt"), unavailable).unwrap();
+            std::fs::write(&listing, unavailable).unwrap();
             assert!(
-                check()
+                check("ollama/glm-5.3:cloud")
                     .unwrap_err()
                     .to_string()
                     .contains("refuses a possible model fallback")
             );
         }
-        let exe = fake(root.path(), "printf 'ollama/glm-5.3:cloud\\n'; exit 1");
-        assert!(
-            check_launch_compatibility(
-                &exe,
-                "opencode",
-                "ollama/glm-5.3:cloud",
-                Permissions::Auto,
-                &project
-            )
-            .is_err()
-        );
-        assert!(
-            check_launch_compatibility(
-                &exe,
-                "opencode",
-                "--help/model",
-                Permissions::Prompt,
-                &project
-            )
-            .is_err()
-        );
     }
 
     #[test]
-    fn codex_auto_checks_transport_without_changing_trust_or_provider_approvals() {
+    fn opencode_refuses_launch_when_the_model_probe_fails_or_times_out() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let check = |exe: &Path, model, permissions| {
+            check_launch_compatibility(exe, "opencode", model, permissions, &project)
+        };
+        // A listing printed alongside a nonzero exit is not an availability
+        // answer, and neither is one that never finishes.
+        for body in [
+            "printf 'ollama/glm-5.3:cloud\\n'; exit 1",
+            "exit 1",
+            "printf 'ollama/glm-5.3:cloud\\n'; sleep 30",
+        ] {
+            let exe = fake(root.path(), body);
+            let error = check(&exe, "ollama/glm-5.3:cloud", Permissions::Auto)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("probe failed or timed out"), "{error}");
+            assert!(
+                error.contains("refuses a possible model fallback"),
+                "{error}"
+            );
+            assert!(!error.contains("<provider>"), "{error}");
+        }
+        // An option-shaped or unqualified identifier is refused before probing.
+        let exe = fake(root.path(), "printf 'ollama/glm-5.3:cloud\\n'");
+        assert!(check(&exe, "--help/model", Permissions::Prompt).is_err());
+        assert!(check(&exe, "glm-5.3", Permissions::Prompt).is_err());
+    }
+
+    #[test]
+    fn codex_auto_checks_project_transport_without_changing_trust() {
         let root = tempfile::tempdir().unwrap();
         let args = crate::harness::codex::auto_mcp_probe_args();
-        assert_eq!(&args[args.len() - 2..], ["mcp", "list"]);
-        for tool in crate::harness::codex::AUTO_LOCAL_MCP_TOOLS {
-            assert!(args.contains(&crate::harness::codex::auto_local_mcp_config(tool)));
-        }
+        assert_eq!(args, ["mcp", "list"]);
         assert!(!args.iter().any(|arg| arg.contains("trust")
             || arg.contains("command=")
             || arg.contains("ahu_typed_decide")
@@ -622,7 +737,7 @@ mod compatibility_tests {
         };
         let error = check(Permissions::Auto).unwrap_err().to_string();
         assert!(error.contains("Review project trust"));
-        assert!(error.contains("no transport"));
+        assert!(error.contains("server unavailable"));
         check(Permissions::Prompt).unwrap();
         check(Permissions::AcceptEdits).unwrap();
         std::fs::write(root.path().join("transport-present"), "").unwrap();

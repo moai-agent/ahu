@@ -118,7 +118,8 @@ fn budget_with_probe(
                 "cannot inspect local auth profile: {error}"
             )));
         }
-        Ok(_) => load(repo, &path)?,
+        // Capacity inspection must not persist even a legacy migration.
+        Ok(_) => load_with_migration(repo, &path, false)?,
     };
     let active = bindings.active_profile.clone();
     let profile = bindings.profiles.get(&active);
@@ -669,6 +670,25 @@ pub fn capture_task_for_model(
     capture_task_for(repo, binding_harness, task_dir)
 }
 
+/// Work mode deliberately leaves account selection to the native harness.
+/// Persist that uncertainty without probing, copying, or exposing credentials.
+pub fn capture_unverified_task(task_dir: &Path) -> Result<()> {
+    let pin_path = task_dir.join("auth-identity.json");
+    crate::state::confine_file(&pin_path)?;
+    let pin = StoredBinding {
+        fingerprint: "unverified".into(),
+        identity_kind: "work-mode-unverified-provider-identity".into(),
+        profile: None,
+    };
+    let bytes = serde_json::to_vec(&pin)?;
+    let _ = crate::private_io::atomic_create(
+        &pin_path,
+        &bytes,
+        crate::private_io::Durability::Durable,
+    )?;
+    Ok(())
+}
+
 /// Pin interactive task startup to the selected project profile when the
 /// project has opted into auth bindings. Projects without profiles retain the
 /// existing interactive behavior. Headless startup also checks bindings only
@@ -1048,8 +1068,9 @@ fn codex_identity(account: &Value) -> Result<Identity> {
 /// Antigravity has no standalone account-status command, but its startup TUI
 /// renders the signed-in account before a prompt can be entered. Run it in a
 /// bounded pseudo-terminal, capture only that startup text, and terminate it
-/// as soon as an account email appears. No prompt is sent and no model request
-/// is made. If the UI stops exposing a recognizable identity, fail closed.
+/// after an account email and a short quiet interval so fragmented identity
+/// fields can arrive. No prompt is sent and no model request is made. If the
+/// UI stops exposing a recognizable identity, fail closed.
 fn probe_antigravity(cwd: &Path) -> Result<Identity> {
     let executable = crate::selection::resolve_executable("agy")
         .ok_or_else(|| Error::new("Antigravity CLI is not available on PATH"))?;
@@ -1139,7 +1160,6 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(slave));
-    crate::cmux::integration::sanitize(&mut command, None);
     command
         .env("TERM", "xterm-256color")
         .env("NO_COLOR", "1")
@@ -1156,13 +1176,23 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
         return Err(Error::new("cannot bound Antigravity startup reads"));
     }
     let deadline = Instant::now() + Duration::from_secs(12);
+    // The startup TUI can split the email, auth mode, and GCP project across
+    // PTY writes. A recognized mode does not mean the fingerprint is complete:
+    // wait for a bounded quiet window, including after "Agent Platform". The
+    // CLI exposes no explicit identity-complete event, so this reduces late
+    // field races without claiming that silence proves completeness. This does
+    // not extend the overall probe deadline.
+    let identity_settle = Duration::from_millis(2_500);
     let mut output = Vec::new();
+    let mut last_output_at: Option<Instant> = None;
     let mut buffer = [0u8; 4096];
     let outcome = loop {
         if antigravity_needs_folder_trust(&output) {
             break Err(antigravity_folder_trust_error());
         }
-        if extract_email(&output).is_some() {
+        if extract_email(&output).is_some()
+            && last_output_at.is_some_and(|last| last.elapsed() >= identity_settle)
+        {
             break Ok(output);
         }
         if output.len() >= 64 * 1024 {
@@ -1189,7 +1219,10 @@ fn antigravity_startup(executable: &str, cwd: &Path) -> Result<Vec<u8>> {
         if ready > 0 {
             match master.read(&mut buffer) {
                 Ok(0) => break Err(Error::new("Antigravity closed its startup terminal")),
-                Ok(count) => output.extend_from_slice(&buffer[..count]),
+                Ok(count) => {
+                    output.extend_from_slice(&buffer[..count]);
+                    last_output_at = Some(Instant::now());
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => (),
                 Err(_) => break Err(Error::new("cannot read Antigravity startup identity")),
@@ -1254,7 +1287,6 @@ fn bounded_command(executable: &str, args: &[&str], cwd: &Path) -> Result<Vec<u8
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    crate::cmux::integration::sanitize(&mut command, None);
     let mut child = command
         .spawn()
         .map_err(|_| Error::new("cannot start read-only harness auth status"))?;
@@ -1888,6 +1920,90 @@ mod profile_tests {
     }
 
     #[test]
+    fn budget_preserves_binding_bytes_on_success_and_errors() {
+        let (_temp, repo) = repo_fixture();
+        let path = binding_path(&repo).unwrap();
+        let identity = Identity {
+            harness: "codex".into(),
+            identity_kind: "chatgpt".into(),
+            principal: "fixture@example.invalid".into(),
+            organization: None,
+            workspace: None,
+        };
+        let providers = BTreeMap::from([(
+            "codex".into(),
+            StoredBinding {
+                fingerprint: identity.fingerprint().unwrap(),
+                identity_kind: identity.identity_kind.clone(),
+                profile: None,
+            },
+        )]);
+        let mut current = BindingFile {
+            repo_identity: repo.identity(),
+            profiles: BTreeMap::from([("default".into(), providers.clone())]),
+            ..BindingFile::default()
+        };
+        current.content_digest = content_digest(&current).unwrap();
+        for bindings in [
+            json!({"schema_version": 1, "bindings": providers}),
+            serde_json::to_value(current).unwrap(),
+        ] {
+            // Noncanonical whitespace makes rewrites visible even when the
+            // decoded binding would be equivalent.
+            let original = format!(" \n{}\n\n", serde_json::to_string(&bindings).unwrap());
+            for outcome in ["success", "probe_error", "mismatch"] {
+                std::fs::write(&path, &original).unwrap();
+                let mut probed = false;
+                let result = budget_with_probe(&repo, |_| {
+                    probed = true;
+                    if outcome == "probe_error" {
+                        return Err(Error::new("synthetic provider failure"));
+                    }
+                    let mut observed = identity.clone();
+                    if outcome == "mismatch" {
+                        observed.principal = "different@example.invalid".into();
+                    }
+                    Ok((
+                        observed,
+                        json!({"primary": {
+                            "usedPercent": 25, "windowDurationMins": 300
+                        }}),
+                    ))
+                });
+                assert!(probed);
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    original.as_bytes(),
+                    "{outcome}"
+                );
+                match outcome {
+                    "success" => {
+                        let budget = result.unwrap();
+                        assert_eq!(budget["profile"], "default");
+                        assert_eq!(budget["providers"][0]["status"], "available");
+                    }
+                    "probe_error" => assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "synthetic provider failure"
+                    ),
+                    _ => assert!(result.unwrap_err().to_string().contains("does not match")),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn budget_preserves_empty_legacy_binding_bytes_without_probing() {
+        let (_temp, repo) = repo_fixture();
+        let path = binding_path(&repo).unwrap();
+        let original = b"{ \"schema_version\": 1, \"bindings\": {} }\n";
+        std::fs::write(&path, original).unwrap();
+        let budget = budget_with_probe(&repo, |_| panic!("unbound provider")).unwrap();
+        assert_eq!(budget["profile"], Value::Null);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
     fn readiness_preserves_legacy_binding_bytes() {
         let (_temp, repo) = repo_fixture();
         let path = binding_path(&repo).unwrap();
@@ -2049,5 +2165,94 @@ mod profile_tests {
         let platform_id = parse_antigravity_identity(platform_output).unwrap();
         assert_eq!(platform_id.identity_kind, "agent-platform");
         assert_eq!(platform_id.principal, "dev@example.com");
+    }
+
+    #[test]
+    fn antigravity_startup_fingerprint_is_stable_across_banner_fragments() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let banner = "Connected to Agent Platform\nSigned in as work@example.invalid\nGCP Project: fixture-project\n";
+        let expected = parse_antigravity_identity(banner.as_bytes())
+            .unwrap()
+            .fingerprint()
+            .unwrap();
+        // Each prefix already contains both the mode and something extract_email
+        // accepts. Neither establishes that all fingerprint fields have arrived.
+        for split in [
+            banner.find("GCP Project:").unwrap(),
+            banner.find(".invalid").unwrap() + 3,
+            banner.find("fixture-project").unwrap() + 7,
+        ] {
+            let (first, rest) = banner.split_at(split);
+            let executable = temp.path().join("agy-fixture");
+            std::fs::write(
+                &executable,
+                format!(
+                    "#!/bin/sh\nprintf '%s' '{first}'\n/bin/sleep 0.2\nprintf '%s' '{rest}'\n/bin/sleep 4\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+            let output = antigravity_startup(executable.to_str().unwrap(), temp.path()).unwrap();
+            let identity = parse_antigravity_identity(&output).unwrap();
+            assert_eq!(identity.fingerprint().unwrap(), expected, "split {split}");
+        }
+    }
+
+    #[test]
+    fn antigravity_startup_collects_delayed_auth_mode_after_email() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let fixtures = [
+            (
+                "agy-platform",
+                "printf 'Signed in as work@example.invalid\\n'\n/bin/sleep 2\nprintf 'Connected to Agent Platform\\n'\n/bin/sleep 4\n",
+                Some("agent-platform"),
+            ),
+            (
+                "agy-api-key",
+                "printf 'Signed in as work@example.invalid\\n'\n/bin/sleep 2\nprintf 'Using Gemini API key\\n'\n/bin/sleep 4\n",
+                None,
+            ),
+        ];
+
+        for (name, body, expected_kind) in fixtures {
+            let executable = temp.path().join(name);
+            std::fs::write(&executable, format!("#!/bin/sh\n{body}")).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+            let output = antigravity_startup(executable.to_str().unwrap(), temp.path()).unwrap();
+            match expected_kind {
+                Some(kind) => {
+                    let identity = parse_antigravity_identity(&output).unwrap();
+                    assert_eq!(identity.identity_kind, kind);
+                }
+                None => assert!(
+                    parse_antigravity_identity(&output)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("API-key authentication")
+                ),
+            }
+        }
+
+        let account = temp.path().join("agy-account");
+        std::fs::write(
+            &account,
+            "#!/bin/sh\nprintf 'Signed in as work@example.invalid\\n'\n/bin/sleep 4\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let start = std::time::Instant::now();
+        let output = antigravity_startup(account.to_str().unwrap(), temp.path()).unwrap();
+        assert_eq!(
+            parse_antigravity_identity(&output).unwrap().identity_kind,
+            "antigravity-account"
+        );
+        assert!(start.elapsed() >= std::time::Duration::from_millis(2_500));
+        assert!(start.elapsed() < std::time::Duration::from_secs(4));
     }
 }

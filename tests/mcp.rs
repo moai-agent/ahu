@@ -288,7 +288,10 @@ fn stdio_server_negotiates_and_lists_repository_agents_and_tasks() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(rows[0]["result"]["serverInfo"]["name"], "ahu");
-    assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(
+        rows[1]["result"]["tools"].as_array().unwrap().len(),
+        ahu::mcp::TOOL_NAMES.len()
+    );
     assert_eq!(
         rows[2]["result"]["structuredContent"]["agents"][0]["name"],
         "@reviewer"
@@ -990,7 +993,10 @@ fn conformance_notifications_are_silent_and_do_not_select_modes_or_queue_work() 
 fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
     let repo = common::TestRepo::new();
     let mut client = Client::new(&repo, "alice");
-    for (params, count) in [(modern_without_tasks(json!({})), 8), (modern(json!({})), 9)] {
+    for (params, count) in [
+        (modern_without_tasks(json!({})), ahu::mcp::TOOL_NAMES.len()),
+        (modern(json!({})), ahu::mcp::TOOL_NAMES.len() + 1),
+    ] {
         let result = client.call("tools/list", params)["result"].clone();
         assert_eq!(result["resultType"], "complete");
         assert_eq!(result["ttlMs"], 0);
@@ -1027,7 +1033,10 @@ fn conformance_modes_and_all_tool_list_paths_have_consistent_shapes() {
         if method == "tools/list" {
             assert!(result.get("ttlMs").is_none());
             assert!(result.get("cacheScope").is_none());
-            assert_eq!(result["tools"].as_array().unwrap().len(), 8);
+            assert_eq!(
+                result["tools"].as_array().unwrap().len(),
+                ahu::mcp::TOOL_NAMES.len()
+            );
         }
     }
     assert_eq!(
@@ -1160,7 +1169,10 @@ fn conformance_failed_probes_allow_legacy_and_adapter_requires_both_opt_ins() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["id"], 0);
     assert_eq!(rows[0]["result"]["resultType"], "complete");
-    assert_eq!(rows[0]["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(
+        rows[0]["result"]["tools"].as_array().unwrap().len(),
+        ahu::mcp::TOOL_NAMES.len()
+    );
     assert_eq!(rows[1]["id"], -1);
     assert_eq!(rows[1]["error"]["code"], -32602);
     assert_eq!(rows[2]["id"], "");
@@ -1285,9 +1297,8 @@ fn approval_record(repo: &common::TestRepo, id: &str) -> std::path::PathBuf {
         launch_command: command,
         reliability_warning: None,
         enforcement,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: ahu::task::TaskState::Running,
     };
     let dir = repo
@@ -1298,6 +1309,33 @@ fn approval_record(repo: &common::TestRepo, id: &str) -> std::path::PathBuf {
         .join(id);
     ahu::task::save(&dir, &record, "secret prompt").unwrap();
     dir
+}
+
+#[test]
+fn task_service_inspection_jobs_preserve_schema_and_job_ownership() {
+    let repo = common::TestRepo::new();
+    let task_id = ahu::task::new_task_id().unwrap();
+    let dir = approval_record(&repo, &task_id);
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    let mut alice = Client::new(&repo, "alice");
+    let job = alice.create("ahu_task_get", json!({"task":task_id}));
+    let completed = alice.until(&job, "completed");
+    let metadata = &completed["result"]["structuredContent"];
+    assert_eq!(metadata["schema_version"], 2);
+    assert_eq!(metadata["task_id"], task_id);
+    assert_eq!(metadata["session_state"], "unknown");
+    assert!(!completed.to_string().contains("secret prompt"));
+    let mut bob = Client::new(&repo, "bob");
+    assert_eq!(bob.task("tasks/get", &job)["error"]["code"], -32602);
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+    assert!(
+        !dir.parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("agent-tasks-v1")
+            .exists()
+    );
 }
 
 fn wait_for_approval(dir: &std::path::Path) {
@@ -1325,7 +1363,6 @@ fn durable_mcp_approval_is_resolved_by_operator_cli() {
         let inspect = common::ahu()
             .current_dir(repo.path())
             .args(["task", &id, "--output", "json"])
-            .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .output()
             .unwrap();
         assert!(
@@ -1343,7 +1380,6 @@ fn durable_mcp_approval_is_resolved_by_operator_cli() {
                 "--output",
                 "json",
             ])
-            .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .output()
             .unwrap();
         assert!(
@@ -1424,6 +1460,132 @@ fn approval_requires_managed_task_context_for_direct_and_durable_calls() {
     let durable = client.call("tools/call", modern(params));
     assert!(durable.get("error").is_some(), "{durable}");
     client.stop();
+}
+
+#[test]
+fn typed_decision_invalid_requests_precede_provider_selection_in_every_mode() {
+    const CASE: &str = "typed_decision_invalid_requests_precede_provider_selection_in_every_mode";
+    if !common::is_child_case(CASE) {
+        let output = common::run_child_case(CASE, |command| {
+            // Poison selection in this subprocess only. Even a validation
+            // regression cannot contact a provider or consult credentials.
+            command
+                .env("AHU_OLLAMA_MODEL", "fixture")
+                .env("AHU_DECISION_URL", "invalid")
+                .env_remove("TYPESAFE_API_KEY")
+                .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
+        });
+        common::assert_child_passed(CASE, &output);
+        return;
+    }
+    let fixture = common::TestRepo::new();
+    let repo = ahu::git::discover(fixture.path()).unwrap();
+    let question = json!({"type":"choice","instructions":"Classify.",
+        "options":{"a":"First","b":"Second"}});
+    // Positive control: valid arguments reach the poisoned configuration.
+    let valid = json!({"state":"fixture","questions":{"q":question}});
+    assert!(
+        ahu::mcp::typed_decide(&repo, &valid)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be combined")
+    );
+    let invalid = [
+        (json!({}), "must not be empty"),
+        (json!(null), "arguments must be an object"),
+        (json!([]), "arguments must be an object"),
+        (
+            json!({"state":"fixture"}),
+            "questions must be a nonempty object",
+        ),
+        (
+            json!({"questions":{"q":question}}),
+            "state must be a string, object, or array",
+        ),
+        (
+            json!({"state":"fixture","questions":{}}),
+            "questions must be a nonempty object",
+        ),
+        (
+            json!({"state":1,"questions":{"q":question}}),
+            "state must be a string, object, or array",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":{"type":"choice"}}}),
+            "requires instructions",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":question},"extra":true}),
+            "accepts only state and questions",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":{"type":"choice","instructions":"Choose.","options":{"a":"Only one"}}}}),
+            "requires 2 to 32 options",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":{"type":"freeform","instructions":"Judge."}}}),
+            "unsupported question type",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":{"type":"probability","instructions":"  "}}}),
+            "requires instructions",
+        ),
+        (
+            json!({"state":"fixture","questions":{"q":{"type":"probability","instructions":"True?","extra":true}}}),
+            "unknown field",
+        ),
+        (
+            json!({"items":{},"question":question}),
+            "items must be a nonempty object",
+        ),
+        (
+            json!({"items":{"a":"fixture"},"question":question,"state":"fixture"}),
+            "accepts either state/questions or items/question",
+        ),
+        (
+            json!({"items":{"a":"fixture"},"question":{"type":"score","instructions":"Score.","min":1,"max":0}}),
+            "invalid shared question",
+        ),
+        (
+            json!({"items":{"a":"fixture"},"question":{"type":"probability","instructions":"True?","telemetry_key":"shared"}}),
+            "shared question cannot set telemetry_key",
+        ),
+    ];
+    for mode in 0..3 {
+        let mut client = Client::new(&fixture, "invalid-decision-fixture");
+        if mode == 0 {
+            client.call("initialize", json!({}));
+        }
+        let params = |p| match mode {
+            0 => p,
+            1 => modern_without_tasks(p),
+            _ => modern(p),
+        };
+        for (arguments, expected) in &invalid {
+            let error = ahu::mcp::typed_decide(&repo, arguments)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{arguments}: {error}");
+            let response = client.call(
+                "tools/call",
+                params(json!({
+                    "name":"ahu_typed_decide", "arguments":arguments
+                })),
+            );
+            assert_eq!(response["error"]["code"], -32602, "mode {mode}: {response}");
+            assert_eq!(response["error"]["message"], error);
+        }
+        let omitted = client.call("tools/call", params(json!({"name":"ahu_typed_decide"})));
+        assert_eq!(omitted["error"]["code"], -32602);
+        assert!(
+            omitted["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("must not be empty")
+        );
+        client.stop();
+    }
 }
 
 #[test]

@@ -102,7 +102,7 @@ impl TestRepo {
             ahu::context_lock::refresh_with_state_home(&repo, &snapshot, Some(&state_home))
                 .unwrap();
         }
-        git(self.dir.path(), &["add", "-f", "ahu.lock"]);
+        git(self.dir.path(), &["add", "-f", ".agents/ahu/lock.md"]);
         git(
             self.dir.path(),
             &["commit", "-q", "--amend", "--allow-empty", "--no-edit"],
@@ -219,11 +219,13 @@ pub fn fake_harnesses(
             format!(
                 "#!/bin/sh\n\
                  if [ \"$1\" = \"--version\" ]; then printf '1.2.3\\n'; exit 0; fi\n\
+                 if [ \"$1\" = \"--help\" ] && [ {program} = opencode ]; then printf '%s\\n' '  -m, --model  model' '      --prompt  prompt' '      --auto  auto-approve'; exit 0; fi\n\
                  record={record}\n\
                  : > \"$record\"\n\
                  for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$record\"; done\n\
                  exit 0\n",
-                record = shell_quoted(&record.to_string_lossy())
+                record = shell_quoted(&record.to_string_lossy()),
+                program = shell_quoted(program)
             ),
         )
         .expect("write fake harness");
@@ -276,7 +278,6 @@ const TEST_CONTEXT_ENV: &[&str] = &[
     "AHU_RUNTIME_DIR",
     "AHU_BIN",
     "AHU_STATE_DIR",
-    "AHU_CMUX_BIN",
     "AHU_WORKER_SESSION",
     "AHU_TASK_ID",
     "AHU_TASK_DIR",
@@ -369,7 +370,7 @@ pub const HARNESS_PROGRAMS: &[&str] = &["claude", "codex", "agy", "opencode"];
 ///
 /// The child gets fake harness executables ahead of everything else on `PATH`,
 /// a private `HOME` so no developer's `~/.claude` is read, a throwaway checkout
-/// for local state, and an `AHU_CMUX_BIN` that is not there. `configure` runs last.
+/// for local state. `configure` runs last.
 ///
 /// Returns `true` in the child, where the body should run, and `false` in the
 /// parent, which has by then run the child and asserted it passed.
@@ -396,8 +397,7 @@ pub fn in_child_fixture(test_name: &str, configure: impl FnOnce(&mut Command)) -
         command
             .env("PATH", &path)
             .env("HOME", &home)
-            .current_dir(checkout.path())
-            .env("AHU_CMUX_BIN", fixtures.path().join("no-such-cmux"));
+            .current_dir(checkout.path());
         configure(command);
     });
     assert_child_passed(test_name, &output);
@@ -408,3 +408,5 @@ pub fn in_child_fixture(test_name: &str, configure: impl FnOnce(&mut Command)) -
 pub fn in_harness_fixture(test_name: &str) -> bool {
     in_child_fixture(test_name, |_| {})
 }
+
+pub mod plugin;

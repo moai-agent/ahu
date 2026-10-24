@@ -33,9 +33,9 @@ fn native_mcp_changes_require_private_acceptance_without_shared_lock_churn() {
         "{}",
         String::from_utf8_lossy(&update.stderr)
     );
-    common::git(repo.path(), &["add", ".agents", "ahu.lock"]);
+    common::git(repo.path(), &["add", ".agents", ".agents/ahu/lock.md"]);
     common::git(repo.path(), &["commit", "-qm", "lock fixture context"]);
-    let shared = std::fs::read(repo.path().join("ahu.lock")).unwrap();
+    let shared = std::fs::read(repo.path().join(".agents/ahu/lock.md")).unwrap();
     assert!(!String::from_utf8_lossy(&shared).contains("SYNTHETIC-PRIVATE"));
     assert!(!String::from_utf8_lossy(&shared).contains("user:antigravity"));
     assert!(run(&["lock"]).status.success());
@@ -49,10 +49,16 @@ fn native_mcp_changes_require_private_acceptance_without_shared_lock_churn() {
     assert!(!String::from_utf8_lossy(&changed.stdout).contains("SYNTHETIC-PRIVATE"));
     assert!(run(&["lock", "--update"]).status.success());
     assert!(run(&["lock"]).status.success());
-    assert_eq!(std::fs::read(repo.path().join("ahu.lock")).unwrap(), shared);
+    assert_eq!(
+        std::fs::read(repo.path().join(".agents/ahu/lock.md")).unwrap(),
+        shared
+    );
     std::fs::remove_file(&native).unwrap();
     assert!(!run(&["lock"]).status.success());
     assert!(run(&["lock", "--update"]).status.success());
     assert!(run(&["lock"]).status.success());
-    assert_eq!(std::fs::read(repo.path().join("ahu.lock")).unwrap(), shared);
+    assert_eq!(
+        std::fs::read(repo.path().join(".agents/ahu/lock.md")).unwrap(),
+        shared
+    );
 }

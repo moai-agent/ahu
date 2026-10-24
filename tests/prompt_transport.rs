@@ -10,8 +10,8 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use ahu::cmux;
 use ahu::harness::{self, LaunchRequest};
+use ahu::interactive;
 use ahu::util::shell_single_quote;
 use common::{HOSTILE_PROMPT, TestRepo, fake_harness};
 
@@ -209,7 +209,7 @@ fn the_cmux_startup_command_carries_no_prompt_and_survives_a_hostile_path() {
     let recorder = temp.path().join("argv.txt");
     let exe = write_argv_recorder(temp.path(), &recorder);
 
-    let command = cmux::startup_command(&exe, &nasty);
+    let command = interactive::startup_command(&exe, &nasty);
     assert!(!command.contains("$(touch"));
     assert!(!command.contains(HOSTILE_PROMPT));
 
@@ -286,7 +286,6 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
         // Point cmux discovery at nothing so the test never touches a real session.
-        .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .expect("ahu runs");
     assert!(
@@ -371,7 +370,6 @@ fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .expect("ahu runs");
     assert!(!output.status.success());
@@ -414,8 +412,22 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
     let adapter = ahu::harness::adapter_for("claude-code").unwrap();
     // The fixture composes the delivered prompt exactly as `launch::plan` does,
     // because `run_task` rebuilds it from the frozen delivery and compares.
-    let (delivered, delivery) =
-        ahu::orchestration::deliver(Some("You are chris.\n"), prompt).unwrap();
+    let (delivered, delivery) = ahu::orchestration::deliver_composed(
+        Some("You are chris.\n"),
+        prompt,
+        ahu::orchestration::Composition {
+            mode: ahu::orchestration::Mode::Interactive,
+            metadata: Some(ahu::orchestration::Metadata {
+                task_id: "testtask0001".into(),
+                agent: "chris@1.0.0".into(),
+                harness: "claude-code".into(),
+                model: "claude-opus-5".into(),
+                permissions: Default::default(),
+            }),
+            state: None,
+        },
+    )
+    .unwrap();
     let command = adapter
         .launch_command(&LaunchRequest {
             model: "claude-opus-5",
@@ -465,9 +477,8 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
         launch_command: command.redacted(),
         reliability_warning: Some(harness::RELIABILITY_WARNING.to_string()),
         enforcement,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: TaskState::Starting,
     };
     ahu::task::save(task_dir, &record, prompt).unwrap();
@@ -646,12 +657,20 @@ fn every_launch_reports_prompt_delivery_as_a_gap_not_a_control() {
             );
         }
         let preview = ahu::commands::render_preview(&discovered, &plan, "review it", None);
+        assert!(
+            preview.contains("current terminal and installed session-host plugins are optional"),
+            "agent assignment must not require cmux: {preview}"
+        );
+        assert!(
+            !preview.contains("separate cmux sessions"),
+            "agent assignment must not imply cmux is required: {preview}"
+        );
         assert!(!preview.contains(harness::RELIABILITY_WARNING), "{preview}");
         assert!(
             !preview.contains("no harness enforces this agent's identity"),
             "{preview}"
         );
-        assert!(preview.contains("ahu.lock"), "{preview}");
+        assert!(preview.contains(".agents/ahu/lock.md"), "{preview}");
         // And it must still say where the instructions came from.
         assert!(
             preview.contains(".agents/ahu/agents/vela.md"),
@@ -729,34 +748,6 @@ fn a_source_format_only_decides_how_its_file_is_parsed() {
             })
             .unwrap();
         assert!(!command.args.iter().any(|a| a == "--agent"), "{harness_id}");
-    }
-}
-
-/// A wrapper between ahu and the harness can add flags ahu refuses to pass, so
-/// ahu must disclose it rather than claim the harness's defaults are intact.
-#[test]
-fn a_wrapper_on_the_path_is_disclosed_as_an_enforcement_gap() {
-    let shim =
-        Path::new("/var/folders/xx/T/cmux-cli-shims/00000000-0000-0000-0000-000000000000/codex");
-    let note = harness::wrapper_interposed(shim).expect("a cmux shim must be detected");
-    assert!(note.contains("cmux shim"), "{note}");
-    assert!(note.contains("cannot inspect"), "{note}");
-
-    // A real binary is not flagged.
-    assert!(harness::wrapper_interposed(Path::new("/usr/local/bin/codex")).is_none());
-
-    // No adapter may claim a wrapper leaves the harness's defaults untouched.
-    for harness_id in ["claude-code", "codex", "antigravity"] {
-        let report = harness::adapter_for(harness_id)
-            .unwrap()
-            .enforcement("m", Default::default())
-            .unwrap();
-        for control in &report.applied_controls {
-            assert!(
-                !control.contains("are unchanged"),
-                "{harness_id} must not claim defaults are unchanged: {control}"
-            );
-        }
     }
 }
 
@@ -899,7 +890,7 @@ fn approval_widening_is_opt_in_and_harness_native() {
 }
 
 #[test]
-fn codex_auto_approves_local_ahu_tools_and_checkpoint_request() {
+fn codex_auto_approves_local_ahu_tools_in_project_config() {
     use ahu::agent::Permissions;
 
     let command = harness::adapter_for("codex")
@@ -911,15 +902,15 @@ fn codex_auto_approves_local_ahu_tools_and_checkpoint_request() {
             permissions: Permissions::Auto,
         })
         .unwrap();
-    for tool in [
-        "ahu_agents_list",
-        "ahu_tasks_list",
-        "ahu_task_get",
-        "ahu_request_approval",
-    ] {
-        let config = format!("mcp_servers.ahu.tools.{tool}.approval_mode=\"approve\"");
-        assert!(command.args.contains(&config), "missing {config:?}");
-    }
+    // Per-tool approvals live in the project Codex config. Passing them as
+    // interactive CLI overrides breaks Codex's TUI bootstrap.
+    assert!(
+        !command
+            .args
+            .iter()
+            .any(|arg| arg.contains("mcp_servers.ahu.tools.")),
+        "Codex MCP approvals must come from project config, not CLI overrides"
+    );
     for tool in ["ahu_typed_decide", "ahu_skills_suggest"] {
         assert!(
             !command.args.iter().any(|arg| arg.contains(tool)),

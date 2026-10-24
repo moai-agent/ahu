@@ -25,12 +25,6 @@ pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T
     .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
 }
 
-// Lifecycle result envelopes keep the legacy unbounded API; records stay bounded.
-pub(crate) fn read_json_full<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&review::read_bytes(path, None)?)
-        .map_err(|e| Error::new(format!("{} is not valid ahu state: {e}", path.display())))
-}
-
 /// Restore only metadata for an attempt that has never acknowledged process start.
 /// This is invoked by explicit resume, never by read-only inspection or a timer.
 pub(super) fn recover_resume(dir: &Path) -> Result<()> {

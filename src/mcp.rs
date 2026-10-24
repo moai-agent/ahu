@@ -16,6 +16,9 @@ mod task_protocol;
 #[path = "mcp_decisions.rs"]
 mod decisions;
 
+#[path = "mcp_skills.rs"]
+mod skills;
+
 const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const TASKS_EXTENSION: &str = "io.modelcontextprotocol/tasks";
@@ -25,6 +28,7 @@ const CLIENT_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabiliti
 const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
 const SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_ID_BYTES: usize = 256;
 
 #[cfg(unix)]
 mod termination_signal {
@@ -287,7 +291,12 @@ fn discard_frame(reader: &mut impl BufRead) -> io::Result<()> {
 
 // MCP request IDs are strings or integers; null and fractional IDs are invalid.
 fn validate_envelope(request: &Value) -> Option<Value> {
-    let valid_id = |id: &Value| id.is_string() || id.is_i64() || id.is_u64();
+    let valid_id = |id: &Value| {
+        id.as_str()
+            .is_some_and(|value| value.len() <= MAX_REQUEST_ID_BYTES)
+            || id.is_i64()
+            || id.is_u64()
+    };
     if !request.is_object()
         || request["jsonrpc"] != "2.0"
         || !request["method"].is_string()
@@ -361,7 +370,33 @@ fn validate_request(request: &Value, session: &mut task_protocol::Session) -> Op
 }
 
 fn write_response(output: &mut impl Write, value: &Value) -> Result<()> {
-    serde_json::to_writer(&mut *output, value)?;
+    let encoded = serde_json::to_vec(value)?;
+    if encoded.len().saturating_add(1) > MAX_FRAME_BYTES {
+        let Some(response_id) = value.get("id") else {
+            // Oversized notifications have no request to correlate an error to.
+            // Suppress them instead of emitting an invalid unsolicited error.
+            return Ok(());
+        };
+        let id = if response_id
+            .as_str()
+            .is_some_and(|value| value.len() <= MAX_REQUEST_ID_BYTES)
+            || response_id.is_i64()
+            || response_id.is_u64()
+            || response_id.is_null()
+        {
+            response_id.clone()
+        } else {
+            Value::Null
+        };
+        let fallback = rpc_error(
+            &id,
+            -32603,
+            format!("MCP response exceeds {MAX_FRAME_BYTES} bytes"),
+        );
+        serde_json::to_writer(&mut *output, &fallback)?;
+    } else {
+        output.write_all(&encoded)?;
+    }
     output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
@@ -400,6 +435,9 @@ fn handle(repo: &Repo, request: &Value, session: &mut task_protocol::Session) ->
     if let Some(result) = session.handle(repo, &id, method, &params) {
         return Some(result);
     }
+    if let Some(result) = skills::handle(&repo.root, &id, method, &params, session.modern()) {
+        return Some(result);
+    }
     match method {
         "initialize" => Some(response(
             &id,
@@ -423,7 +461,7 @@ fn handle(repo: &Repo, request: &Value, session: &mut task_protocol::Session) ->
             json!({
                 "resultType": "complete",
                 "supportedVersions": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
-                "capabilities": {"tools": {}, "extensions": {TASKS_EXTENSION: {}}},
+                "capabilities": skills::capabilities(&repo.root),
                 "_meta": {SERVER_INFO_META: {"name": SERVER_NAME, "version": SERVER_VERSION}},
                 "instructions": "ahu exposes repository-scoped agent and task inspection.",
                 "ttlMs": 0,
@@ -464,7 +502,7 @@ pub fn typed_decide(repo: &Repo, arguments: &Value) -> Result<Value> {
 }
 
 fn tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         crate::eval::advice::tool_definition(),
         json!({
             "name":"ahu_agents_list",
@@ -504,7 +542,9 @@ fn tools() -> Vec<Value> {
                 "mode":{"type":"string","enum":["lexical","decision"],"default":"decision"}
             },"required":["task"],"additionalProperties":false}
         }),
-    ]
+    ];
+    tools.extend(skills::tool_definitions());
+    tools
 }
 
 /// Every tool name an ahu MCP session can expose, including the explicit
@@ -512,7 +552,7 @@ fn tools() -> Vec<Value> {
 ///
 /// Evaluation case tool expectations and evaluation record validation are both
 /// bounded by this list, so neither can name a tool that does not exist.
-pub const TOOL_NAMES: [&str; 8] = [
+pub const TOOL_NAMES: [&str; 10] = [
     "ahu_agents_recommend",
     "ahu_agents_list",
     "ahu_auth_budget",
@@ -521,6 +561,8 @@ pub const TOOL_NAMES: [&str; 8] = [
     "ahu_typed_decide",
     "ahu_request_approval",
     "ahu_skills_suggest",
+    "ahu_skills_list",
+    "ahu_skills_get",
 ];
 
 /// SHA-256 over the served tool definitions, descriptions and schemas included.
@@ -543,6 +585,8 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
         | "ahu_tasks_list"
         | "ahu_typed_decide"
         | "ahu_skills_suggest"
+        | "ahu_skills_list"
+        | "ahu_skills_get"
         | "ahu_request_approval" => false,
         "ahu_task_get" => true,
         "ahu_task_inspect" if inspection_adapter => true,
@@ -550,6 +594,9 @@ fn validate_tool_call(params: &Value, inspection_adapter: bool) -> Result<()> {
     };
     let empty = json!({});
     let arguments = params.get("arguments").unwrap_or(&empty);
+    if skills::is_tool(name) {
+        return skills::validate_tool_arguments(name, arguments);
+    }
     if name == "ahu_agents_recommend" {
         return crate::eval::advice::validate(arguments).map(|_| ());
     }
@@ -670,6 +717,7 @@ pub(super) fn call_response_with_cancellation(
         .cloned()
         .unwrap_or_else(|| json!({}));
     let result = match name {
+        "ahu_skills_list" | "ahu_skills_get" => skills::call_tool(&repo.root, name, &arguments),
         "ahu_agents_list" => agents(repo),
         "ahu_agents_recommend" => crate::eval::advice::call(repo, &arguments),
         "ahu_auth_budget" => auth_budget(repo, &arguments),
@@ -703,6 +751,10 @@ pub(super) fn call_response_with_cancellation(
             if modern {
                 result["resultType"] = json!("complete");
             }
+            if skills::is_tool(name) {
+                result["ttlMs"] = json!(0);
+                result["cacheScope"] = json!("private");
+            }
             response(id, result)
         }
         Err(error) => {
@@ -710,6 +762,10 @@ pub(super) fn call_response_with_cancellation(
                 json!({"isError":true,"content":[{"type":"text","text":error.to_string()}]});
             if modern {
                 result["resultType"] = json!("complete");
+            }
+            if skills::is_tool(name) {
+                result["ttlMs"] = json!(0);
+                result["cacheScope"] = json!("private");
             }
             response(id, result)
         }
@@ -830,12 +886,11 @@ fn candidate_routing_status(
 }
 
 fn tasks(repo: &Repo) -> Result<Value> {
-    let listing = crate::task::list(repo)?;
-    let workspaces = crate::commands::liveness_workspaces(&listing.records);
+    let listing = crate::agent_task::inspection::list(repo)?;
     let rows = listing
         .records
         .iter()
-        .map(|(dir, record)| crate::commands::task_summary(dir, record, workspaces.as_ref()))
+        .map(|(dir, record)| crate::commands::task_summary(dir, record))
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({
         "schema_version":1,
@@ -852,9 +907,7 @@ fn task_get(repo: &Repo, arguments: &Value) -> Result<Value> {
         .and_then(Value::as_str)
         .ok_or_else(|| Error::new("ahu_task_get requires arguments.task"))?;
     let (dir, record) = crate::commands::inspect_task(repo, input)?;
-    let listing = crate::task::list(repo)?;
-    let workspaces = crate::commands::liveness_workspaces(&listing.records);
-    crate::commands::task_summary(&dir, &record, workspaces.as_ref())
+    crate::commands::task_summary(&dir, &record)
 }
 
 #[cfg(test)]
@@ -862,10 +915,12 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Cursor;
 
+    use serde_json::Value;
+
     use super::{
-        AGENT_CONTEXT_CRITIC_SKILL, BUNDLED_SKILLS, MAX_FRAME_BYTES, TOOL_NAMES, read_frame,
-        skill_path, tool_definitions_digest, tools, validate_envelope, validate_tool_call,
-        verify_bundled_skills,
+        AGENT_CONTEXT_CRITIC_SKILL, BUNDLED_SKILLS, MAX_FRAME_BYTES, MAX_REQUEST_ID_BYTES,
+        TOOL_NAMES, read_frame, skill_path, tool_definitions_digest, tools, validate_envelope,
+        validate_tool_call, verify_bundled_skills, write_response,
     };
 
     #[test]
@@ -907,6 +962,52 @@ mod tests {
         let mut final_frame = Cursor::new(b"{}".to_vec());
         assert_eq!(read_frame(&mut final_frame).unwrap().as_deref(), Some("{}"));
         assert!(read_frame(&mut final_frame).unwrap().is_none());
+    }
+
+    #[test]
+    fn oversized_string_ids_and_responses_cannot_exceed_the_frame_limit() {
+        let request = serde_json::json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "id":"x".repeat(MAX_REQUEST_ID_BYTES + 1),
+            "params":{"name":"ahu_skills_get","arguments":{"uri":"ahu://skills/discover-requirements/SKILL.md"}}
+        });
+        let error = validate_envelope(&request).expect("oversized request id is rejected");
+        assert_eq!(error["error"]["code"], -32600);
+        assert_eq!(error["id"], Value::Null);
+
+        let oversized = serde_json::json!({
+            "jsonrpc":"2.0",
+            "id":77,
+            "result":{"text":"x".repeat(MAX_FRAME_BYTES)}
+        });
+        let mut encoded = Vec::new();
+        write_response(&mut encoded, &oversized).unwrap();
+        assert!(encoded.len() <= MAX_FRAME_BYTES);
+        let fallback: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(fallback["id"], 77);
+        assert_eq!(fallback["error"]["code"], -32603);
+
+        let oversized_id = serde_json::json!({
+            "jsonrpc":"2.0",
+            "id":"x".repeat(MAX_FRAME_BYTES),
+            "result":{}
+        });
+        let mut encoded = Vec::new();
+        write_response(&mut encoded, &oversized_id).unwrap();
+        assert!(encoded.len() <= MAX_FRAME_BYTES);
+        let fallback: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(fallback["id"], Value::Null);
+        assert_eq!(fallback["error"]["code"], -32603);
+
+        let oversized_notification = serde_json::json!({
+            "jsonrpc":"2.0",
+            "method":"notifications/tasks/list_changed",
+            "params":{"text":"x".repeat(MAX_FRAME_BYTES)}
+        });
+        let mut encoded = Vec::new();
+        write_response(&mut encoded, &oversized_notification).unwrap();
+        assert!(encoded.is_empty());
     }
 
     #[test]
@@ -978,6 +1079,8 @@ mod tests {
                 "ahu_typed_decide",
                 "ahu_request_approval",
                 "ahu_skills_suggest",
+                "ahu_skills_list",
+                "ahu_skills_get",
             ]
         );
         // The exported name list is what bounds evaluation tool expectations,

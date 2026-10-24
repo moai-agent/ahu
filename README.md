@@ -1,7 +1,7 @@
 # ahu
 
 Launch repository-defined coding agents in fresh Git worktrees, interactively
-in cmux or unattended in headless mode. Agent manifests pin the harness and
+in the current terminal or an optional session-host plugin, or unattended in headless mode. Agent manifests pin the harness and
 model; ahu previews the configuration, delivers instructions, and records the launch.
 
 ## Install
@@ -33,22 +33,39 @@ authenticated: Claude Code (`claude`), Codex (`codex`), Antigravity CLI (`agy`),
 OpenCode (`opencode`), or Kiro CLI (`kiro-cli`, V3 interactive and headless). An OpenCode agent also needs the model's provider
 configured in your own OpenCode configuration; see
 [OpenCode with Ollama-hosted models](docs/reference.md#opencode-with-ollama-hosted-models).
-Interactive sessions also require cmux. Headless tasks need no cmux connection.
+Interactive tasks run in the current terminal by default. cmux is an optional
+session-host plugin; enable it only for projects that want cmux workspaces.
+Headless tasks need no session host.
 Projects that configure knowledge bundles also require the `okf` binary for
-[knowledge checks](docs/reference.md#knowledge-checks). Repository agents use
-the GitHub CLI (`gh`) for issue tracking; ahu itself never invokes it.
+[knowledge checks](docs/reference.md#knowledge-checks). Projects can enable a
+provider plugin for issue tracking; core ahu does not require GitHub or the
+GitHub CLI (`gh`).
 ahu installs none of these; harness authentication remains with each harness.
 The optional Jev tool reads its separately configured API key only when called.
 Read-only help and
-launch previews do not require a cmux connection. Git and default cmux lookup
-require executables outside Git working trees; see the
+launch previews do not require a session-host connection. Git and explicit
+cmux plugin operations require its executable outside Git working trees; see the
 [lookup rules](docs/reference.md#utility-lookup).
 
 See [Kiro setup and limits](docs/reference.md#kiro-cli) for installation, model selection, and supported features.
 
+## Integration boundary
+
+ahu keeps harness launch, task/attempt state, Git worktree lifecycle, MCP
+coordination, and bounded telemetry/evaluation in core. External tools belong in
+optional plugins and skills. Users can run current-terminal and headless tasks
+without cmux, GitHub, or an issue tracker.
+
+Start with a skill that uses the tool's existing CLI. Add an executable plugin
+only when a workflow needs a stable machine-readable contract, such as session
+ownership and cleanup. Provider authentication, API details, workspace mappings,
+and issue transitions belong to that integration, not the core task model.
+See the [architecture boundary](docs/plugin-architecture.md) for ownership,
+security limits, and the review criteria for adding core behavior.
+
 ## Everyday use
 
-From a Git checkout in a cmux terminal:
+From any Git checkout:
 
 ```sh
 ahu doctor
@@ -57,7 +74,7 @@ ahu
 
 Run `ahu setup` once in each project. It detects installed harnesses, asks you
 to choose models for their ahu development agents, installs the bundled skills, adds
-project MCP entries, and writes `.agents/ahu/config.toml` and `ahu.lock`.
+project MCP entries, and writes `.agents/ahu/config.md` and `.agents/ahu/lock.md`.
 Review and commit the generated files so future ahu commands can use the same
 project setup. ahu does not stage, commit, or push them.
 
@@ -116,8 +133,13 @@ The first command waits in the foreground; the second returns after supervisor
 startup. Each launches a separate task. Headless coordination lives in the primary checkout’s private state; native
 histories stay in the harness’s own stores. See [headless execution](docs/reference.md#headless-execution) for
 supported CLI versions, result collection, resume, cancellation, and limits.
-Headless mode covers Claude Code, Codex, Antigravity, and OpenCode; an agent on
-any other harness is refused rather than run on one of them.
+Headless mode covers Claude Code, Codex, Antigravity, OpenCode, and Kiro CLI.
+An agent on a harness without a headless adapter is refused rather than run on
+another harness. `--work-mode` requests each harness's automatic/no-ask mode and
+continues when ahu cannot verify native configuration compatibility, recording
+those differences in the task result. It does not make a Git worktree a sandbox
+or guarantee that harness-native hooks, plugins, or authentication will not
+block execution.
 Headless child launches need host grants (`--allow-child` or
 `--allow-child-widened`). Claude Code 2.1.270 also supports bounded native helpers
 for entirely read-only assignments; use a separate registered reviewer for that
@@ -132,7 +154,7 @@ ahu tasks
 task_id=abc123  # replace with a full task ID from ahu tasks
 ahu task "$task_id"
 ahu result "$task_id"  # headless tasks
-ahu focus "$task_id"  # interactive cmux tasks
+ahu focus "$task_id"  # interactive session-host tasks
 ```
 
 Reviewing the changes is plain Git. `ahu task` prints the task's branch,
@@ -143,6 +165,11 @@ base_commit=COMMIT  # replace with the launch base printed by ahu task
 git -C .worktrees/"$task_id" diff "$base_commit"
 git -C .worktrees/"$task_id" status
 ```
+
+Worktrees make task changes reviewable; Git does not sandbox an agent's
+filesystem or processes. Follow the shared [agent Git workflow](docs/agent-git-workflow.md)
+for worktree boundaries, coordinator integration, release branches, and the
+limits of harness compatibility evidence.
 
 Headless inspection shows the attempt outcome, observed ownership, blockers,
 known native session reference, and artifact paths. A process exit does not
@@ -178,7 +205,7 @@ Markdown documents that pair each agent's identity with its instructions.
 Named launches use their manifest's pair independently of automatic project
 selection. This repository's automatic choice is Antigravity /
 `gemini-3.1-pro-high` (from `harness_preferences` and `model_rankings` in
-`.agents/ahu/config.toml`); it does not select a named agent.
+`.agents/ahu/config.md`); it does not select a named agent.
 
 Automatic selection walks the configured harness order, takes the first harness
 with an available adapter and a nonempty project model ranking, and selects that
@@ -213,8 +240,7 @@ assignment in nonce-bearing sections with raw bodies. This is prompt text,
 not an enforced system prompt. The harness controls the running session,
 including model changes, approvals, and context loading. ahu reports visible
 settings and gaps without claiming to know everything the harness loads.
-Ordinary launches do not alter native hooks or settings. Explicit `ahu cmux install` delegates a
-reviewable native installation to cmux.
+Ordinary launches do not alter native hooks or settings. cmux session hosting is provided by the selected external plugin; ahu does not invoke cmux to install or inspect session-host configuration.
 Private tracker material stays out of public files and reports; remote pushes
 require explicit user permission.
 
@@ -222,23 +248,21 @@ require explicit user permission.
 
 | Command | Purpose |
 | --- | --- |
-| `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness development agents, and refresh `ahu.lock` |
+| `ahu setup` | Detect harnesses, choose models, configure MCP, install skills, register per-harness development agents, and refresh `.agents/ahu/lock.md` |
 | `ahu @agent [prompt]` | Launch a registered agent directly, or open the launcher with it selected when no prompt is supplied |
 | `ahu doctor` | Concise readiness summary; add `--verbose` for component diagnostics |
 | `ahu auth readiness --harness codex --output json` | Check native identity and local project binding without a model request |
 | `ahu auth budget --output json` / MCP `ahu_auth_budget` | View the active profile's verified provider rate-limit windows; unsupported budgets remain unknown |
 | `ahu approve TASK` / `ahu reject TASK` | Resolve a task's explicit MCP approval checkpoint after inspecting it with `ahu task TASK` |
-| `ahu lock` | Check that recognized agent context and `ahu.lock` are committed and current |
-| `ahu lock --update` | Fingerprint current recognized context into `ahu.lock` for review and commit |
+| `ahu lock` | Check that recognized agent context and `.agents/ahu/lock.md` are committed and current |
+| `ahu lock --update` | Fingerprint current recognized context into `.agents/ahu/lock.md` for review and commit |
 | `ahu agents` | List registered agents and detected drift |
 | `ahu tasks` | List the 20 most recent tasks; use `--limit N` or `--all` to change the range |
-| `ahu cmux status` | Inspect native integration evidence and headless isolation |
-| `ahu cmux install --harness codex --dry-run` | Preview an explicit native installation |
 | `ahu help [COMMAND]` | Compact command list or focused help; use `ahu help all` for the full option reference |
 | `ahu onboard` | Read-only preview of native definitions available for registration |
 | `ahu knowledge lint` | Validate and lint configured OKF bundles with installed `okf` |
 | `ahu explain` | Built-in architecture overview |
-| `ahu explain --open` | Open the overview in cmux's Markdown viewer |
+| `ahu explain --open` | Open the overview through the selected session-host plugin |
 | `ahu agy` | Open a coordinating Antigravity CLI session in the current terminal |
 | `ahu claude` | Open a coordinating Claude session in the current terminal |
 | `ahu codex` | Open a coordinating Codex session in the current terminal |
@@ -251,7 +275,7 @@ require explicit user permission.
 Use the bundled `ahu-agent-context-critic` skill with `ahu eval run` and
 `ahu eval report` to investigate context changes against measured outcomes.
 The skill treats repository files as declared context, not proof that a
-harness loaded them. Shared project inputs are covered by committed `ahu.lock`;
+harness loaded them. Shared project inputs are covered by committed `.agents/ahu/lock.md`;
 recognized private local settings are accepted in owner-only per-user ahu state.
 Other harness, managed, and provider context remains outside that coverage.
 The eval cases, OTel observations, and private run artifacts should stay outside
@@ -281,8 +305,9 @@ and ahu passes no `--pure`, so the user's plugins still load.
 
 Each shortcut names the installed executable (`codex`, `claude`, `agy`,
 `opencode`, `kiro-cli`) and accepts no additional arguments. Registered child agents keep
-their own manifest permissions and launch requirements. Inside cmux, coordinator
-shortcuts place their workspace in the repository's group before starting. See
+their own manifest permissions and launch requirements. Coordinator shortcuts use
+the current terminal by default. Explicitly select an enabled session-host plugin
+with `AHU_INTERACTIVE_PLUGIN` to request provider-specific placement. See
 [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
 The MCP integration is local and repository-scoped. `ahu mcp serve` provides
@@ -291,7 +316,7 @@ agent and task inspection over stdio, and can expose the optional
 decision service. `ahu setup`
 configures a project MCP entry for each detected harness, installs bundled
 skills in harness-supported paths, creates a `dev-<harness>` ahu agent using a
-model you choose, and refreshes `ahu.lock`. Review and commit the generated
+model you choose, and refreshes `.agents/ahu/lock.md`. Review and commit the generated
 project files before launching. Claude Code asks before using project MCP
 servers, and Codex must trust the repository before loading project configuration. See the
 [typed-decision experiment](docs/typed-decisions.md) for its model-neutral
@@ -301,6 +326,9 @@ External issue tracking is optional and remains policy in skills and tracker
 tools, not in ahu's task CLI. The bundled `ahu-direct-agents` skill lets a project
 choose whether to use tracker records and, when configured, link those records
 to ahu task IDs on the provider side.
+The shared [task service](docs/agent-task-service.md#optional-tracker-foundation-scoped-task-listing)
+also provides scoped, paginated task reads as an in-process foundation for future
+optional adapters. It does not activate a tracker or grant external access.
 
 See the [CLI and context reference](docs/reference.md) for registration, JSON
 contracts, prompt transport, hooks, state, and delegation boundaries.
@@ -341,12 +369,12 @@ Skill maintenance checks validate the skill tree contract and its compiled
 bundle; they do not install or sync skills globally. See [knowledge checks](docs/reference.md#knowledge-checks)
 for project configuration and machine-readable results.
 
-Tests use temporary repositories and stand-in harness executables. Live cmux
-tests are opt-in through `AHU_TEST_CMUX=1`; ordinary test runs do not open cmux
-workspaces. Once opted in, unreachable cmux is an error. Run live checks only
-with authorization. CI probes for a reachable cmux first and skips the live job
-with a visible notice when the runner provides none, so a missing optional
-integration is never reported as a passing live probe.
+Tests use temporary repositories and stand-in harness executables. Core CI tests
+the generic session-host and plugin contracts without cmux or GitHub services.
+Core has no compiled cmux adapter or live cmux test target. Live provider
+checks belong to the external plugin's validation and require an explicitly
+selected installed provider. Passing core fixtures does not establish live
+provider compatibility.
 
 ```sh
 cargo test --locked --doc
@@ -356,7 +384,7 @@ cargo run --locked -- explain --mermaid > /tmp/ahu-diagrams.md
 
 The explanation tests check diagram structure, not rendering. Full validation
 requires parsing the emitted blocks with Mermaid; `ahu explain --open` displays
-them in cmux.
+them through the selected session-host plugin.
 
 ### Prose linting
 
@@ -384,3 +412,5 @@ beside each entry in `.vale.ini`.
 
 See the [0.10.0 release notes](docs/releases/0.10.0.md) for Kiro CLI support,
 headless Kiro agents, and improved evaluation and local telemetry evidence. Earlier notes are in [docs/releases/](docs/releases/).
+
+See [shared project documents and explicit migration](docs/project-documents.md) for OKF schemas, legacy compatibility, and recovery.

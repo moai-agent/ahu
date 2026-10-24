@@ -75,12 +75,166 @@ fn run(fixture: &PlantedRepo, path: &str, args: &[&str]) -> std::process::Output
     common::ahu()
         .args(args)
         .current_dir(fixture.repo.path())
-        .env("AHU_CMUX_BIN", fixture.outside.path().join("missing-cmux"))
         // A throwaway home, so the developer's own settings cannot change this.
         .env("HOME", fixture.outside.path())
         .env("PATH", path)
         .output()
         .expect("ahu runs")
+}
+
+#[test]
+fn a_linked_checkout_never_probes_a_harness_from_the_primary_checkout() {
+    let fixture = planted("tools/claude");
+    let linked = fixture.outside.path().join("linked-checkout");
+    let added = std::process::Command::new("git")
+        .args(["worktree", "add", "--detach"])
+        .arg(&linked)
+        .arg("HEAD")
+        .current_dir(fixture.repo.path())
+        .output()
+        .expect("git worktree add runs");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let path = format!(
+        "{}:{}:/usr/bin:/bin",
+        fixture.repo.path().join("tools").display(),
+        fixture.external_bin.display()
+    );
+    let output = common::ahu()
+        .args(["doctor"])
+        .current_dir(&linked)
+        .env("HOME", fixture.outside.path())
+        .env("PATH", path)
+        .output()
+        .expect("ahu doctor runs");
+    assert!(
+        !fixture.marker.exists(),
+        "doctor executed a harness from the primary checkout: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("claude-code 1.2.3 — executable ready"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("2.1.269"),
+        "primary checkout harness was resolved: {text}"
+    );
+}
+
+#[test]
+fn repository_commands_ignore_inherited_git_repository_selectors() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.commit("isolated git environment fixture");
+    let output = common::ahu()
+        .args(["tasks", "--output", "json"])
+        .current_dir(repo.path())
+        .env("GIT_DIR", "/")
+        .env("GIT_WORK_TREE", "/")
+        .env("GIT_COMMON_DIR", "/")
+        .env("GIT_INDEX_FILE", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["tasks"].as_array().unwrap().len(), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_non_utf8_sibling_worktree_harness_is_excluded_through_a_utf8_symlink() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.add_agent("sable", "1.0.0", "claude-sonnet-5");
+    repo.write("assignment.txt", "review the launcher\n");
+    repo.commit("fixture");
+
+    let outside = tempfile::TempDir::new().expect("outside dir");
+    let outside_root = outside.path().canonicalize().unwrap();
+    let linked_normal = outside_root.join("linked-normal");
+    let added = std::process::Command::new("git")
+        .args(["worktree", "add", "--detach"])
+        .arg(&linked_normal)
+        .arg("HEAD")
+        .current_dir(repo.path())
+        .output()
+        .expect("git worktree add runs");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let linked = outside_root.join(std::ffi::OsString::from_vec(b"linked-\xff".to_vec()));
+    let linked_admin = std::fs::read_dir(repo.path().join(".git/worktrees"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("gitdir"))
+        .find(|gitdir| {
+            std::fs::read(gitdir).is_ok_and(|bytes| {
+                bytes == [linked_normal.as_os_str().as_encoded_bytes(), b"/.git\n"].concat()
+            })
+        })
+        .expect("linked worktree admin record");
+    std::fs::rename(&linked_normal, &linked).unwrap();
+    let mut linked_gitdir = linked.as_os_str().as_encoded_bytes().to_vec();
+    linked_gitdir.extend_from_slice(b"/.git\n");
+    std::fs::write(linked_admin, linked_gitdir).unwrap();
+
+    let marker = outside.path().join("non-utf8-harness-ran");
+    let attacker = linked.join("tools/claude");
+    std::fs::create_dir_all(attacker.parent().unwrap()).unwrap();
+    std::fs::write(
+        &attacker,
+        format!(
+            "#!/bin/sh\n: > '{}'\nprintf 'claude 9.9.9\\n'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&attacker);
+
+    let alias_dir = outside.path().join("alias-bin");
+    std::fs::create_dir_all(&alias_dir).unwrap();
+    std::os::unix::fs::symlink(&attacker, alias_dir.join("claude")).unwrap();
+    let legitimate = outside.path().join("legitimate-bin");
+    let legitimate_record = outside.path().join("legitimate-argv.json");
+    let legitimate = common::fake_harness(&legitimate, &legitimate_record);
+    assert!(legitimate.join("claude").is_file());
+    let path = format!(
+        "{}:{}:/usr/bin:/bin",
+        alias_dir.display(),
+        legitimate.display()
+    );
+
+    let output = common::ahu()
+        .args(["doctor"])
+        .current_dir(repo.path())
+        .env("HOME", outside.path())
+        .env("PATH", path)
+        .output()
+        .expect("ahu doctor runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!marker.exists(), "non-UTF-8 sibling harness ran: {stdout}");
+    assert!(
+        stdout.contains("claude-code 1.2.3 — executable ready"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("9.9.9"),
+        "attacker harness was probed: {stdout}"
+    );
 }
 
 /// A relative `PATH` entry must never execute a repository binary — not even to

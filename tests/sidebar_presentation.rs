@@ -115,7 +115,6 @@ fn cli_transports_metadata_to_plan_without_changing_assignment() {
                 "json",
             ])
             .args(extra)
-            .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
             .env(
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),

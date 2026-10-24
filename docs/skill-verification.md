@@ -5,8 +5,11 @@ supported harness, whether skills in the canonical `.agents/skills/` tree are
 discovered and can be invoked, and what this repository observed when it ran those
 probes. The versioned results below are historical observations, not guarantees
 about current harness releases. Re-run the fixture probes before treating them as
-current compatibility claims. It exists so portability claims about the
-canonical tree stay tied to reproducible commands and recorded evidence instead
+current compatibility claims. Raw CLI probes do not establish that ahu admits
+the same version, configuration, or execution mode. See the
+[mode-specific compatibility reference](reference.md#harness-compatibility-by-execution-mode)
+for adapter support and refusals. This page keeps portability claims about the
+canonical tree tied to reproducible commands and recorded evidence instead
 of assumptions.
 
 `scripts/check-skills.py` verifies the tree contract deterministically in CI.
@@ -87,7 +90,7 @@ invocation, start `opencode`, ask it to use the probe skill, and check for
 `PROBE_SKILL_OK`.
 
 Observed (OpenCode 1.18.32): `opencode debug skill` lists skills from
-`.agents/skills/`, including all four canonical repository skills at
+`.agents/skills/`, including the canonical repository skills present in that probe at
 `.agents/skills/<name>/SKILL.md`, and live in-session invocation followed the
 listed skills. OpenCode discovers `.agents/skills/` natively.
 
@@ -134,14 +137,14 @@ that probe-skill was not available; while `.claude/skills/probe-skill` was
 discovered and the invocation probe answered `PROBE_SKILL_OK`. Discovery
 required the fixture to be a git repository: a non-git directory with
 `.claude/skills/` present showed nothing. In the ahu worktree itself, none of
-the four canonical skills were available to a Claude Code session.
+the canonical skills present in that probe were available to a Claude Code session.
 
 Per the [skills documentation][claude-skills], a project skill must live at
 `.claude/skills/<name>/SKILL.md`, and a same-named skill in another location
 does not replace it. `ahu setup` writes ordinary, byte-identical copies to
 `.claude/skills/` when Claude Code is detected. It refuses to replace a changed
 copy. The canonical source remains under `.agents/skills/`; when Claude Code
-setup is committed, its `.claude/skills/` copies are pinned in `ahu.lock` and
+setup is committed, its `.claude/skills/` copies are pinned in `.agents/ahu/lock.md` and
 reviewed with the rest of setup. `.claude/settings.local.json` never enters the
 shared lock.
 
@@ -176,22 +179,39 @@ skill invocation event was emitted. ahu's headless evaluator recognizes this
 stream envelope and records its nested usage and lifecycle fields, but it does
 not claim a project skill was used when Antigravity does not expose one.
 
+## Kiro CLI
+
+ahu setup installs bundled copies under `.kiro/skills/`; the canonical sources
+remain under `.agents/skills/`. The [Kiro adapter](../src/harness/kiro.rs) and
+[catalog](../src/catalog.rs) record interactive V3 2.28.0 and headless
+2.28.0/2.29.0 launch evidence. Those records do not establish native discovery
+of `.agents/skills/` or invocation of an installed skill. No fixture discovery
+or invocation result is recorded here for Kiro in either mode. Both remain
+unverified, as does native skill-invocation event accounting.
+
 ## Results
 
-| Harness        | Version | `.agents/skills/` native discovery | Invocation | Notes |
-| -------------- | ------- | --------------------------------- | ---------- | ----- |
-| OpenCode       | 1.18.32 | yes                               | verified in session | `opencode debug skill` is the deterministic surface |
-| Codex          | 0.155.1 | yes                               | `PROBE_SKILL_OK` | `codex debug prompt-input` is the deterministic surface |
-| Claude Code    | 2.1.281 | no                                | `.claude/skills/` only, `PROBE_SKILL_OK` | project discovery needs git trust; `.agents/skills/` not a documented location |
-| Antigravity    | 1.2.9   | not observed                      | not observed | builtin skills only; folder trust untested |
+| Harness | Version | Invocation mode | `.agents/skills/` native discovery | Invocation | Notes |
+| --- | --- | --- | --- | --- | --- |
+| OpenCode | 1.18.32 | Interactive session | yes | verified in session | Discovery inspected with `opencode debug skill`; separate headless event evidence is recorded in the catalog. |
+| Codex | 0.155.1 | Headless `exec` | yes | `PROBE_SKILL_OK` | Discovery inspected with `codex debug prompt-input`; interactive invocation unverified here. |
+| Claude Code | 2.1.281 | Headless print | no | `.claude/skills/` only, `PROBE_SKILL_OK` | Project discovery needs git trust; interactive invocation unverified here. |
+| Antigravity | 1.2.9 | Headless print | not observed | not observed | Builtin skills only; folder trust and interactive invocation untested. |
+| Kiro CLI V3 | No skill-probe version recorded | Interactive and headless untested | unverified | unverified | Installing `.kiro/skills/` copies or completing a task does not establish skill use. |
+
+These skill probes do not establish live MCP calls or collector receipt of
+OTel data. Configuration, discovery, invocation reports, successful tool
+completion, and telemetry delivery require separate evidence. A sentinel
+response alone does not prove a native skill-tool event or execution of every
+instruction in the skill.
 
 ## Not verified here
 
 - Antigravity skill discovery in a trusted folder or interactive session.
 - Claude Code interactive sessions, plugin distribution, managed settings, and
   Claude.ai sync. Each can carry skills by other paths.
-- Any harness other than the four preceding, and any version other than the
-  recorded ones.
+- Kiro skill discovery and invocation in either mode, and skill probes on
+  versions other than those recorded above.
 - Probes of live harnesses in CI; the fixture protocol earlier is the manual
   replacement, and `scripts/check-skills.py` guards the tree contract
   deterministically. The provider-free helper records operator observations;
@@ -244,6 +264,8 @@ objects, prompts, response text, tool arguments, arbitrary payloads, or
 credentials are copied into invocation records. Names are untrusted labels,
 not authorization or proof of provenance. Unrecognized envelopes, tools,
 renamed fields, and text-only sentinel responses produce no invocation record.
+Kiro has no accepted skill-invocation envelope in this normalizer; ordinary
+tool events do not fill that gap.
 New protocol shapes require explicit adapter and fixture updates. The two
 Antigravity tool-name aliases produce one report. OpenCode and nested
 Antigravity snapshots with the same bounded call ID update one record. Reports

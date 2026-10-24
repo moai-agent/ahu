@@ -49,7 +49,6 @@ fn ahu_in(dir: &Path, args: &[&str]) -> std::process::Output {
         // are about what is on disk, so they are pointed at a cmux that is not
         // there: neither a developer's real session nor another test's stub can
         // change what they see.
-        .env("AHU_CMUX_BIN", dir.join("no-such-cmux"))
         .output()
         .expect("ahu runs")
 }
@@ -81,8 +80,22 @@ fn prepare_task(repo: &TestRepo, from: &Path, task_id: &str) -> PathBuf {
 fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskRecord {
     let discovered = git::discover(repo.path()).unwrap();
     let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let (delivered, delivery) =
-        ahu::orchestration::deliver(Some("You are chris."), "current work").unwrap();
+    let (delivered, delivery) = ahu::orchestration::deliver_composed(
+        Some("You are chris."),
+        "current work",
+        ahu::orchestration::Composition {
+            mode: ahu::orchestration::Mode::Interactive,
+            metadata: Some(ahu::orchestration::Metadata {
+                task_id: task_id.to_string(),
+                agent: "chris@1.0.0".into(),
+                harness: "claude-code".into(),
+                model: "claude-opus-5".into(),
+                permissions: Default::default(),
+            }),
+            state: None,
+        },
+    )
+    .unwrap();
     let command = adapter
         .launch_command(&ahu::harness::LaunchRequest {
             model: "claude-opus-5",
@@ -131,9 +144,8 @@ fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskReco
         enforcement: adapter
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: task::TaskState::Exited,
     }
 }
@@ -183,7 +195,8 @@ fn a_plain_launch_places_task_state_inside_the_worktree_it_creates() {
     );
     // And the location reaches the child through the startup command ahu
     // builds, so nothing has to be exported for the session to find it.
-    let startup = ahu::cmux::startup_command(Path::new("/usr/local/bin/ahu"), &plan.task_dir);
+    let startup =
+        ahu::interactive::startup_command(Path::new("/usr/local/bin/ahu"), &plan.task_dir);
     assert!(
         startup.contains(&plan.task_dir.to_string_lossy().to_string()),
         "{startup}"

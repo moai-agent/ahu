@@ -49,6 +49,12 @@ pub(super) fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
         .map_err(|_| Error::new("metadata is malformed or has an unsupported shape"))
 }
 
+/// Parse persisted result envelopes through the same marker-safe JSON parser
+/// used for newly submitted structured artifacts.
+pub(super) fn read_result(path: &Path, limit: Option<u64>) -> Result<Value> {
+    crate::structured::parse_json(&read_bytes(path, limit)?)
+}
+
 /// Lifecycle reads preserve the legacy unbounded result API; inspection passes
 /// a bound. Both paths pin and validate the actual descriptor identically.
 pub(super) fn read_bytes(path: &Path, limit: Option<u64>) -> Result<Vec<u8>> {
@@ -132,15 +138,19 @@ pub(super) fn validate_result(value: &Value, id: &str, attempt: u32) -> Result<(
 }
 
 /// The plain Git command that shows what this task changed, when the record
-/// names both a checkout and a launch base. The checkout path is
-/// repository-controlled and the reader is expected to paste the line, so it
-/// is quoted as one shell word.
+/// names both a checkout and a launch base. Quote both values and accept only
+/// a full object ID for the base because the reader is expected to paste this
+/// line into a shell.
 fn review_command(dir: &Path) -> Option<String> {
     let record: crate::task::TaskRecord = read(&dir.join("task.json")).ok()?;
     let base = record.base_commit?;
+    if !crate::git::is_full_object_id(&base) {
+        return None;
+    }
     Some(format!(
-        "git -C {} diff {base}",
-        crate::util::shell_single_quote(&record.worktree.to_string_lossy())
+        "git -C {} diff --no-ext-diff --no-textconv {} --",
+        crate::util::shell_single_quote(&record.worktree.to_string_lossy()),
+        crate::util::shell_single_quote(&base)
     ))
 }
 

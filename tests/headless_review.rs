@@ -57,9 +57,8 @@ fn record(repo: &TestRepo, dir: PathBuf, id: &str) -> PathBuf {
         launch_command: command,
         reliability_warning: None,
         enforcement,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: ahu::task::TaskState::Running,
     };
     ahu::task::save(&dir, &record, "secret prompt").unwrap();
@@ -102,7 +101,6 @@ impl Fixture {
             .args(args)
             .current_dir(self.repo.path())
             .env("AHU_RUNTIME_DIR", self.runtime.path())
-            .env("AHU_CMUX_BIN", self.runtime.path().join("no-cmux"))
             .env("AHU_EXECUTION_BACKEND", "headless")
             .output()
             .unwrap()
@@ -147,7 +145,7 @@ fn snapshot(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 #[test]
-fn headless_controls_share_typed_task_reference_resolution() {
+fn headless_controls_share_task_references_and_reconcile_missing_owners() {
     let f = Fixture::new();
     f.terminal("succeeded");
     let before = snapshot(&f.dir);
@@ -162,11 +160,37 @@ fn headless_controls_share_typed_task_reference_resolution() {
         assert_eq!(output.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&output.stderr).contains("expected a task reference"));
     }
-    assert_eq!(snapshot(&f.dir), before);
+    let persisted: ahu::task::TaskRecord =
+        serde_json::from_slice(&std::fs::read(f.dir.join("task.json")).unwrap()).unwrap();
+    assert_eq!(persisted.state, ahu::task::TaskState::Exited);
+    assert_ne!(snapshot(&f.dir), before);
 }
 
 #[test]
-fn running_and_interrupted_are_observations_with_string_ids_and_read_only_inspection() {
+fn headless_inspection_omits_review_command_for_untrusted_base_text() {
+    let f = Fixture::new();
+    let path = f.dir.join("task.json");
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["base_commit"] = "HEAD; printf AHU_REVIEW_SENTINEL".into();
+    write_json(&path, &value);
+
+    let inspection = f.json("result");
+    let commands = inspection["review"]["commands"].as_array().unwrap();
+    assert!(commands.iter().all(|command| {
+        !command
+            .as_str()
+            .unwrap_or_default()
+            .contains("AHU_REVIEW_SENTINEL")
+    }));
+    assert!(
+        commands
+            .iter()
+            .all(|command| { !command.as_str().unwrap_or_default().contains(" diff ") })
+    );
+}
+
+#[test]
+fn running_and_interrupted_follow_owner_liveness_and_reconcile_stale_state() {
     use std::os::fd::AsRawFd;
     let f = Fixture::new();
     let lock = std::fs::File::open(f.dir.join("owner.lock")).unwrap();
@@ -201,7 +225,7 @@ fn running_and_interrupted_are_observations_with_string_ids_and_read_only_inspec
     assert_eq!(result["task_id"], "abc1");
     assert_eq!(result["outcome"], "interrupted");
     assert_eq!(result["review"]["liveness"], "stale");
-    assert_eq!(f.json("task")["session_state"], "running");
+    assert_eq!(f.json("task")["session_state"], "exited");
     let out = text(f.run(&["result", "abc1"]));
     assert!(out.contains("no live supervisor"));
     assert!(!out.contains("ahu diff"), "{out}");
@@ -209,7 +233,10 @@ fn running_and_interrupted_are_observations_with_string_ids_and_read_only_inspec
     assert!(out.contains("git -C '"), "{out}");
     assert!(out.contains("' diff "), "{out}");
     assert!(out.contains("not verified"));
-    assert_eq!(snapshot(&f.dir), before);
+    let persisted: ahu::task::TaskRecord =
+        serde_json::from_slice(&std::fs::read(f.dir.join("task.json")).unwrap()).unwrap();
+    assert_eq!(persisted.state, ahu::task::TaskState::Exited);
+    assert_ne!(snapshot(&f.dir), before);
 }
 
 #[test]
@@ -388,12 +415,12 @@ fn unreadable_signals_and_redirected_metadata_are_explicit_and_never_modified() 
     let f = Fixture::new();
     std::fs::remove_file(f.dir.join("owner.lock")).unwrap();
     let task = f.json("task");
-    assert_eq!(task["liveness"], "unknown");
+    assert_eq!(task["session_state"], "unknown");
     assert_eq!(task["attempt"]["outcome"], "unavailable");
     assert!(!f.dir.join("owner.lock").exists());
     f.terminal("succeeded");
     assert_eq!(f.json("task")["attempt"]["outcome"], "succeeded");
-    assert_eq!(f.json("task")["liveness"], "unknown");
+    assert_eq!(f.json("task")["session_state"], "unknown");
     let result = f.dir.join("attempt-1/result.json");
     let target = f.runtime.path().join("do-not-read");
     std::fs::rename(&result, &target).unwrap();

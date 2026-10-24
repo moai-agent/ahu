@@ -21,7 +21,8 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Cold tool installation plus the serialized coverage suite exceeds 20 minutes.
+    timeout-minutes: 40
     env:
       TEST_THREADS: ${{ matrix.os == 'ubuntu-24.04' && '1' || '2' }}
     defaults:
@@ -49,11 +50,20 @@ jobs:
           python3 scripts/check-skills.py
           python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Build
         run: cargo build --locked
       - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Check optional session plugin absence
+        run: |
+          cargo clippy --no-default-features --all-targets --locked -- -D warnings
+          cargo test --no-default-features --locked --test native_admission --test plugins --test task_remove --test utility_resolution
+          cargo test --no-default-features --locked --test headless foreground_keeps_primary_coordination_and_identity_without_native_copies
+      - name: Check provider-neutral session-plugin compatibility
+        run: cargo test --locked --test external_host --test plugins --test plugin_install --test plugin_invoke_cli --test task_remove --test utility_resolution
+      - name: Check headless operation without a session host
+        run: cargo test --no-default-features --locked --test headless headless_launch_and_result_work_without_cmux_or_a_session_host -- --exact
       - name: Install synthetic harness executables
         run: |
           set -euo pipefail
@@ -76,7 +86,7 @@ jobs:
       - name: Test and report code coverage
         run: |
           unset AHU_TEST_CMUX XDG_CONFIG_HOME OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT
-          cargo llvm-cov --all-targets --locked --summary-only -- --test-threads="$TEST_THREADS"
+          cargo llvm-cov --workspace --all-targets --locked --summary-only -- --test-threads="$TEST_THREADS"
           cargo llvm-cov report --json --summary-only | python3 -B scripts/check-eval-mcp-coverage.py
       # Configured knowledge validation remains a separate maintainer check:
       # install OKF 0.5.0 outside the checkout, then run
@@ -129,8 +139,14 @@ jobs:
       - name: Validate the release package
         run: |
           set -euo pipefail
-          cargo package --locked --no-verify
-          if cargo package --locked --no-verify --list | grep -Eiq '(^|/)(\.ahu|\.env|.*\.(pem|key|log|trace|dump|sqlite|db)|credentials|secrets)(/|$)'; then
+          # These private workspace crates are built/installed from the locked
+          # source workspace, not a registry. Archives inspect each package's
+          # file boundary; generating registry lockfiles requires publication.
+          cargo package --workspace --locked --no-verify --exclude-lockfile
+          package_list="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ahu-package-list.XXXXXX")"
+          trap 'rm -f "$package_list"' EXIT
+          cargo package --workspace --locked --no-verify --exclude-lockfile --list > "$package_list"
+          if grep -Eiq '(^|/)(\.ahu|\.env|.*\.(pem|key|log|trace|dump|sqlite|db)|credentials|secrets)(/|$)|(^|/)\.agents/ahu/(config|lock)\.md$' "$package_list"; then
             echo 'Release package contains a private-state or credential-like path' >&2
             exit 1
           fi
@@ -154,41 +170,9 @@ jobs:
               raise SystemExit(1)
           print(f'checked {len(files)} Markdown files')
 
-  cmux:
-    name: Live cmux (macOS)
-    runs-on: macos-14
-    timeout-minutes: 15
-    defaults:
-      run:
-        shell: bash
+  cmux-boundary:
+    name: cmux plugin boundary
+    runs-on: ubuntu-24.04
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Check whether live cmux is available
-        id: cmux
-        run: |
-          set -euo pipefail
-          if ! command -v cmux >/dev/null 2>&1; then
-            echo '::notice::GitHub-hosted macOS runner does not provide cmux; live probe skipped.'
-            echo 'available=false' >> "$GITHUB_OUTPUT"
-          elif ! cmux ping >/dev/null 2>&1; then
-            echo '::notice::cmux is installed but unreachable; live probe skipped.'
-            echo 'available=false' >> "$GITHUB_OUTPUT"
-          else
-            cmux --version
-            echo 'available=true' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Install pinned Rust and components
-        if: steps.cmux.outputs.available == 'true'
-        run: rustup toolchain install --no-self-update
-      - name: Run live cmux plumbing
-        if: steps.cmux.outputs.available == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v cmux >/dev/null 2>&1 || ! cmux ping >/dev/null 2>&1; then
-            echo '::error::cmux became unavailable after the initial probe.'
-            exit 1
-          fi
-          AHU_TEST_CMUX=1 cargo test --locked --test cmux_integration -- --test-threads=1
+      - name: Explain live integration coverage
+        run: echo '::notice::Ahu core has no compiled cmux adapter or live cmux test target. Generic session-host and plugin lifecycle tests run in the checks job; live provider conformance is not established by this repository.'

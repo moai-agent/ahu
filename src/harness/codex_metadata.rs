@@ -23,7 +23,6 @@ pub fn read_account(executable: &Path, cwd: &Path) -> Result<Value> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    crate::cmux::integration::sanitize(&mut command, None);
     command.process_group(0);
     let mut child = command
         .spawn()
@@ -100,7 +99,6 @@ pub fn read_budget(executable: &Path, cwd: &Path) -> Result<(Value, Value)> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    crate::cmux::integration::sanitize(&mut command, None);
     command.process_group(0);
     let mut child = command
         .spawn()
@@ -195,8 +193,6 @@ pub fn inspect(executable: &Path, cwd: &Path, version: &str) -> Result<Value> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    crate::cmux::integration::sanitize(&mut command, None);
-    command.env("CMUX_CODEX_HOOKS_DISABLED", "1");
     use std::os::unix::process::CommandExt;
     command.process_group(0);
     let mut child = command
@@ -452,7 +448,7 @@ mod tests {
             );
             std::fs::write(&executable, script).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-            for version in ["0.157.1", "0.160.0"] {
+            for version in ["0.157.1", "0.160.0", "codex-cli v0.160.0"] {
                 let result = inspect(&executable, &cwd, version);
                 assert_eq!(result.is_ok(), requirements.is_null());
             }

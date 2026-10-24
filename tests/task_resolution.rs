@@ -101,7 +101,6 @@ fn ahu_at(scenario: &Scenario, dir: &Path, args: &[&str]) -> std::process::Outpu
         .env("AHU_TASK_INDEX_DIR", &scenario.index)
         .env("AHU_RUNTIME_DIR", &scenario.runtime)
         // Nothing here is about cmux; no reachable session may leak in.
-        .env("AHU_CMUX_BIN", dir.join("no-such-cmux"))
         .output()
         .expect("ahu runs")
 }
@@ -177,9 +176,8 @@ fn record_for(repo: &TestRepo, task_id: &str, worktree: &Path) -> task::TaskReco
         enforcement: adapter
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: task::TaskState::Exited,
     }
 }
@@ -434,7 +432,10 @@ fn focus_resolves_through_the_task_index() {
     let out = ahu_at(&scenario, c.path(), &["focus", id]);
     let text = text_of(&out);
     assert_eq!(out.status.code(), Some(5), "{text}");
-    assert!(text.contains("has no recorded cmux session"), "{text}");
+    assert!(
+        text.contains("has no recorded interactive session"),
+        "{text}"
+    );
 }
 
 /// `ahu task` resolves a registered task from a sibling checkout and hands
@@ -510,13 +511,60 @@ fn legacy_headless_entry_resolves_from_a_sibling_checkout() {
     state::write_json(&a.path().join(".ahu/state/legacy-lookup.json"), &serde_json::json!({"schema_version":1,"runtime_roots":[scenario.runtime.canonicalize().unwrap()]})).unwrap();
     let dir = scenario.runtime.join(&identity).join(id);
     task::save(&dir, &record_for(&a, id, a.path()), "current work").unwrap();
+    state::write_json(
+        &dir.join("headless.json"),
+        &serde_json::json!({
+            "schema_version": 1,
+            "options": {
+                "background": false,
+                "timeout_seconds": 1800,
+                "native_helpers": "disabled",
+                "native_helpers_explicit": false,
+                "child_agents": [],
+                "child_widened": []
+            },
+            "harness_version": "2.1.0",
+            "executable_digest": "0".repeat(64),
+            "parent_task": null,
+            "parent_attempt": null,
+            "root_task": null,
+            "broker_request": null,
+            "child_grants": [],
+            "contract": {},
+            "depth": 0,
+            "attempt": 1,
+            "session": null,
+            "broker_dir": null,
+            "native_profile": null,
+            "native_controls": [],
+            "gaps": []
+        }),
+    )
+    .unwrap();
+    let attempt = dir.join("attempt-1");
+    private_dir(attempt.clone());
+    state::write_json(
+        &attempt.join("result.json"),
+        &serde_json::json!({
+            "schema_version": 1,
+            "task_id": id,
+            "attempt": 1,
+            "outcome": "succeeded",
+            "process": {"exit_code": 0},
+            "harness": {"terminal": true, "failed": false, "blockers": []},
+            "acceptance": "not assessed",
+            "completion_verified": false
+        }),
+    )
+    .unwrap();
     task_index::register(&identity, id, a.path(), StoreKind::Headless).unwrap();
 
     let out = ahu_at(&scenario, c.path(), &["task", id]);
     let text = text_of(&out);
     assert_eq!(out.status.code(), Some(0), "{text}");
     assert!(text.contains(id), "{text}");
-    assert!(text.contains("  liveness  unknown"), "{text}");
+    assert!(text.contains("  attempt   1 / succeeded"), "{text}");
+    assert!(text.contains("  ownership unknown"), "{text}");
 }
 
 /// Registration itself refuses non-canonical ids and relative checkouts.

@@ -1,4 +1,4 @@
-//! The launch pipeline: validate, snapshot, worktree, cmux, record.
+//! The launch pipeline: validate, snapshot, worktree, selected session, record.
 //!
 //! Every step is ordered so that nothing irreversible happens before the launch
 //! is known to be valid, and so that a failure part-way leaves either nothing
@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 
 use crate::agent::ResolvedAgent;
 use crate::bail;
-use crate::cmux::{self, Cmux};
 use crate::config::LoadedConfig;
 use crate::git::{self, Repo};
 use crate::harness::{self, EnforcementReport, LaunchCommand, LaunchRequest};
 use crate::hooks::{self, HookInventory};
+use crate::interactive;
 use crate::selection::ResolvedPair;
 use crate::snapshot::{self, ConfigSnapshot};
 use crate::state::{self, LaunchLock};
@@ -28,8 +28,7 @@ pub const DELIVERY_IS_NOT_ENFORCEMENT: &str = "ahu delivers the agent's instruct
      it, and the model may follow the task prompt instead. ahu does not use harness \
      agent-selection or system-prompt flags, so no harness enforces this agent's identity.";
 
-pub use crate::cmux::repository::{CoordinatorPlacement, group_coordinator};
-pub use crate::cmux::repository::{GroupMapping, mapping_path};
+pub use crate::interactive::session::{CoordinatorPlacement, group_coordinator};
 
 /// Optional sidebar text, independent of the assignment delivered to the harness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,7 +51,7 @@ pub struct LaunchPlan {
     /// Every hook ahu can see that will be in effect for this task.
     pub hooks: HookInventory,
     /// Bounded native integration evidence shared by human and JSON previews.
-    pub cmux_integration: crate::cmux::integration::Status,
+    pub native_admission: crate::native_admission::Status,
     pub base_commit: Option<String>,
     pub parent_dirty: bool,
     pub task_id: String,
@@ -174,7 +173,7 @@ pub fn render_json(plan: &LaunchPlan, prompt: &str) -> Result<String> {
         "selection_basis": plan.pair.basis,
         "policy_digest": plan.pair.policy_digest,
         "catalog_version": plan.pair.catalog_version,
-        "cmux_integration": plan.cmux_integration,
+        "native_admission": plan.native_admission,
         "permissions": plan.permissions.as_str(),
         "argv": argv,
         "prompt_digest": crate::util::digest_bytes(prompt.as_bytes()),
@@ -207,6 +206,26 @@ pub fn plan_with_state_home(
     prompt: &str,
     state_home: Option<&std::path::Path>,
 ) -> Result<LaunchPlan> {
+    plan_with_mode(repo, agent, pair, prompt, state_home, false)
+}
+
+pub(crate) fn plan_work_mode(
+    repo: &Repo,
+    agent: Option<ResolvedAgent>,
+    pair: ResolvedPair,
+    prompt: &str,
+) -> Result<LaunchPlan> {
+    plan_with_mode(repo, agent, pair, prompt, None, true)
+}
+
+fn plan_with_mode(
+    repo: &Repo,
+    agent: Option<ResolvedAgent>,
+    pair: ResolvedPair,
+    prompt: &str,
+    state_home: Option<&std::path::Path>,
+    work_mode: bool,
+) -> Result<LaunchPlan> {
     let release_id = crate::telemetry::release_id_for_launch()?;
     if prompt.trim().is_empty() {
         bail!(kind: crate::util::ErrorKind::Usage, "the task prompt is empty; nothing was launched.");
@@ -227,12 +246,18 @@ pub fn plan_with_state_home(
             context_lock.detail
         );
     }
-    crate::auth_binding::verify_launch(repo, &pair.harness, &pair.model)?;
+    if !work_mode {
+        crate::auth_binding::verify_launch(repo, &pair.harness, &pair.model)?;
+    }
     // Scanning for hooks is harness-specific: `hooks::collect` knows Claude
     // Code's settings files and nothing else, so it is told which harness this
     // launch is for and reports a coverage gap rather than "none found" when it
     // has no implementation for it.
-    let found_hooks = hooks::collect(&repo.root, &pair.harness)?;
+    let found_hooks = if work_mode {
+        crate::headless::work_mode::hooks(&pair.harness)
+    } else {
+        hooks::collect(&repo.root, &pair.harness)?
+    };
     let parent_dirty = git::is_dirty(repo)?;
     // Refuse early if `.worktrees` is a symlink, before anything is created.
 
@@ -250,10 +275,14 @@ pub fn plan_with_state_home(
     let task_dir = state::worktree_task_dir(&worktree, &repo_identity, &task_id);
     let title = crate::util::task_title_from_prompt(prompt);
 
-    let permissions = agent
-        .as_ref()
-        .map(|a| a.manifest.permissions)
-        .unwrap_or_default();
+    let permissions = if work_mode {
+        crate::agent::Permissions::Auto
+    } else {
+        agent
+            .as_ref()
+            .map(|a| a.manifest.permissions)
+            .unwrap_or_default()
+    };
     // Adapters transport the fully composed text literally. All rendered facts
     // are frozen now, rather than reconstructed from the runtime environment.
     let metadata = crate::orchestration::Metadata {
@@ -295,7 +324,12 @@ pub fn plan_with_state_home(
         .harness_version
         .as_deref()
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
-    crate::catalog::check_harness_version(
+    let check_version = if work_mode {
+        crate::headless::work_mode::check_version
+    } else {
+        crate::catalog::check_harness_version
+    };
+    check_version(
         &pair.harness,
         version,
         loaded
@@ -379,13 +413,26 @@ pub fn plan_with_state_home(
             entry.display_name
         ));
     }
-    // A wrapper between ahu and the harness can add flags ahu refuses to pass.
-    if let Some(note) = harness::wrapper_interposed(&harness_executable) {
-        enforcement.gaps.push(note);
-    }
-
-    let cmux_integration = crate::cmux::integration::inspect(&repo.root, &pair.harness)
-        .with_version(enforcement.harness_version.as_deref());
+    let native_admission = if work_mode {
+        // Interactive permission disclosures may describe different argv and
+        // attribute the choice to the manifest. Work mode makes its own choice.
+        enforcement.applied_controls = vec![format!(
+            "explicit work mode selects permissions=auto: {}",
+            crate::headless::work_mode::permission_mapping(&pair.harness)
+        )];
+        crate::headless::work_mode::integration(
+            &pair.harness,
+            enforcement.harness_version.as_deref(),
+            loaded
+                .config
+                .harness_version_pins
+                .get(&pair.harness)
+                .map(String::as_str),
+        )
+    } else {
+        crate::native_admission::inspect(&repo.root, &pair.harness)
+            .with_version(enforcement.harness_version.as_deref())
+    };
     Ok(LaunchPlan {
         release_id,
         mode: if agent.is_some() {
@@ -398,7 +445,7 @@ pub fn plan_with_state_home(
         enforcement,
         snapshot,
         hooks: found_hooks,
-        cmux_integration,
+        native_admission,
         base_commit,
         parent_dirty,
         task_id,
@@ -471,9 +518,8 @@ pub(crate) fn prepared_record(
         enforcement: plan.enforcement.clone(),
         // Retain the field for compatibility with older records.
         reliability_warning: None,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: TaskState::Starting,
     }
 }
@@ -513,6 +559,86 @@ fn rollback_worktree(repo: &Repo, plan: &LaunchPlan, cause: Error) -> Error {
     cause
 }
 
+/// Only affirmative non-creation permits rollback. Do not rewrite the record:
+/// run-task may already have updated it while workspace discovery was failing.
+fn workspace_creation_failed(
+    repo: &Repo,
+    plan: &LaunchPlan,
+    error: interactive::v2::SessionCreationError,
+) -> Error {
+    match error {
+        interactive::v2::SessionCreationError::NotCreated(cause) => {
+            rollback_worktree(repo, plan, cause)
+        }
+        interactive::v2::SessionCreationError::OutcomeUnknown(cause) => {
+            let kind = cause.kind();
+            Error::new(format!(
+                "{cause}\n\n\
+                 Task {} may have started. Its record, worktree and branch are retained:\n  \
+                 record   {}\n  worktree {}\n  branch   {}\n\
+                 Inspect `ahu task {}` and the selected session host for a workspace using this \
+                 exact worktree directory. No terminal outcome has been recorded by this failure. \
+                 Reconcile the session before retrying or cleaning up: if it is running, use `ahu \
+                 cancel {}` and verify termination. If ownership or termination cannot be \
+                 confirmed, preserve the resources. Only after confirming no session is using the \
+                 checkout, inspect its changes. Use `ahu remove {}` if the record is terminal; if \
+                 it remains starting with no session, remove the checkout manually with non-forced \
+                 `git worktree remove` and then its branch with `git branch -d`. Do not invent a \
+                 terminal task state to permit cleanup.",
+                plan.task_id,
+                plan.task_dir.join("task.json").display(),
+                plan.worktree.display(),
+                plan.branch,
+                plan.task_id,
+                plan.task_id,
+                plan.task_id,
+            ))
+            .with_kind(kind)
+        }
+    }
+}
+
+/// Reload and update task metadata under the same lock used for task-state
+/// transitions so concurrent startup and coordinator writes cannot restore
+/// stale records.
+fn update_task_record_locked(
+    task_dir: &Path,
+    record: &mut TaskRecord,
+    update: impl FnOnce(&mut TaskRecord),
+) -> Result<()> {
+    let _lock = task::lock_state(task_dir)?;
+    let mut latest = task::load(task_dir)?;
+    update(&mut latest);
+    state::write_json(
+        &crate::storage::TaskStorage::new(task_dir).record(),
+        &latest,
+    )?;
+    *record = latest;
+    Ok(())
+}
+
+fn record_created_session(
+    task_dir: &Path,
+    record: &mut TaskRecord,
+    session_ref: &str,
+) -> Result<()> {
+    update_task_record_locked(task_dir, record, |latest| {
+        latest.session_ref = Some(session_ref.to_owned());
+    })
+}
+
+fn record_runtime_metadata(
+    task_dir: &Path,
+    record: &mut TaskRecord,
+    version: &str,
+    executable: &Path,
+) -> Result<()> {
+    update_task_record_locked(task_dir, record, |latest| {
+        latest.enforcement.harness_version = Some(version.to_owned());
+        latest.harness_executable = executable.to_path_buf();
+    })
+}
+
 /// Remove a task directory a failed launch created, but never through a path
 /// ahu would refuse to write to.
 ///
@@ -537,7 +663,7 @@ pub struct Launched {
     pub notes: Vec<String>,
 }
 
-/// Execute a plan: create the worktree, the task record, and the cmux session.
+/// Execute a plan: create the worktree, task record, and selected provider session.
 pub fn execute(
     repo: &Repo,
     loaded: &LoadedConfig,
@@ -545,8 +671,15 @@ pub fn execute(
     prompt: &str,
     focus: bool,
 ) -> Result<Launched> {
+    let mut plan = plan.clone();
     // Interactive admission runs in the submitting checkout. Headless callers
     // perform their native probe only after their isolation policy is admitted.
+    crate::selection::check_interactive_command(
+        &plan.harness_executable,
+        &plan.pair.harness,
+        &mut plan.command,
+        &repo.root,
+    )?;
     crate::selection::check_launch_compatibility(
         &plan.harness_executable,
         &plan.pair.harness,
@@ -557,11 +690,13 @@ pub fn execute(
     let _lock = LaunchLock::acquire_at(state::coordination_dir(repo)?.join("launch.lock"))?;
     let mut notes = Vec::new();
 
-    // cmux must be reachable before a worktree is created, so an unavailable
-    // cmux never leaves a worktree behind.
-    let cmux_client =
-        Cmux::discover().map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
-    cmux_client.check_capabilities()?;
+    // The selected session provider must be reachable before a worktree is
+    // created, so a missing provider never leaves an orphan worktree.
+    let (session_host, frozen_host) = interactive::discover_for_launch(repo)
+        .map_err(|e| e.with_kind(crate::util::ErrorKind::Prerequisite))?;
+    if let Some(host) = &session_host {
+        host.check_capabilities()?;
+    }
 
     if git::branch_exists(repo, &plan.branch)? {
         bail!(
@@ -583,13 +718,13 @@ pub fn execute(
     // while no session could have started in it.
     let materialize = match snapshot::materialize(&repo.root, &plan.snapshot, &plan.worktree) {
         Ok(report) => report,
-        Err(e) => return Err(rollback_worktree(repo, plan, e)),
+        Err(e) => return Err(rollback_worktree(repo, &plan, e)),
     };
     // The task's own state directory, created now that its worktree exists. A
     // repository that committed a link at `.ahu` or `.ahu/state` is refused
     // here, before a record or a prompt is written through it.
     if let Err(e) = state::ensure_checkout_state(&plan.worktree) {
-        return Err(rollback_worktree(repo, plan, e));
+        return Err(rollback_worktree(repo, &plan, e));
     }
     if !materialize.concurrently_modified.is_empty() {
         notes.push(format!(
@@ -599,10 +734,11 @@ pub fn execute(
         ));
     }
 
-    let mut record = prepared_record(repo, loaded, plan, prompt, materialize);
+    let mut record = prepared_record(repo, loaded, &plan, prompt, materialize);
+    record.session_host = frozen_host;
 
     if let Err(e) = task::save(&plan.task_dir, &record, prompt) {
-        return Err(rollback_worktree(repo, plan, e));
+        return Err(rollback_worktree(repo, &plan, e));
     }
     if let Err(e) = crate::task_index::register(
         &repo.identity(),
@@ -610,46 +746,44 @@ pub fn execute(
         &plan.worktree,
         crate::task_index::StoreKind::Worktree,
     ) {
-        return Err(rollback_worktree(repo, plan, e));
+        return Err(rollback_worktree(repo, &plan, e));
     }
 
-    let executable = std::env::current_exe()
-        .map_err(|e| Error::new(format!("cannot locate the ahu executable: {e}")))?;
-    let startup = cmux::startup_command(&executable, &plan.task_dir);
-    let title = cmux::workspace_title(&plan.agent_label(), &plan.title);
-    let manager = cmux::repository::RepositoryManager::new(&cmux_client, repo);
-    let placement = match manager.create_task_workspace(
-        &title,
-        &plan.summary,
-        &plan.worktree,
-        &startup,
-        focus,
-        &mut notes,
-    ) {
-        Ok(placement) => placement,
-        // A rejected or uncreated workspace leaves no session behind.
-        Err(e) => return Err(rollback_worktree(repo, plan, e)),
-    };
-    let group = placement.group;
-    let created = placement.workspace;
-    record.cmux_group_id = Some(group.id.clone());
-    record.cmux_workspace_id = Some(created.workspace_id.clone());
-    record.cmux_window_id = Some(created.window_id.clone());
-    // Past this point the workspace exists and its shell may already be running
-    // the harness, so nothing is torn down automatically; problems are reported.
-    if let Err(e) = task::save(&plan.task_dir, &record, prompt) {
-        notes.push(format!(
-            "the cmux session started but its task record could not be updated: {e}"
-        ));
-    }
-    if let Err(e) = manager.set_task_status(
-        &record,
-        &cmux::workspace_identity(&record.identity.agent, &record.identity.model),
-    ) {
-        notes.push(format!("could not set the sidebar status: {e}"));
-    }
-    if let Err(e) = manager.expand_task_group(&record) {
-        notes.push(format!("could not expand the repository group: {e}"));
+    if let Some(session_host) = session_host {
+        let executable = std::env::current_exe()
+            .map_err(|e| Error::new(format!("cannot locate the ahu executable: {e}")))?;
+        let startup = interactive::startup_command(&executable, &plan.task_dir);
+        let title = interactive::workspace_title(&plan.agent_label(), &plan.title);
+        let manager = interactive::session::SessionManager::new(session_host.as_ref(), repo);
+        let created = match manager.create_task_session(
+            &title,
+            &plan.summary,
+            &plan.worktree,
+            &startup,
+            focus,
+        ) {
+            Ok(created) => created,
+            Err(e) => return Err(workspace_creation_failed(repo, &plan, e)),
+        };
+        finish_workspace_launch(&plan.task_dir, &mut record, &manager, &created, &mut notes);
+        // A session host starts the task in a separate workspace process. The
+        // repository lock protects worktree and workspace creation only; the
+        // agent's lifetime must not block the next assignment.
+        drop(_lock);
+    } else {
+        // The current-terminal backend runs the harness in this process. Drop
+        // the coordination lock before waiting for the interactive session so
+        // another agent can be launched while this one is working.
+        drop(_lock);
+        match run_task(&plan.task_dir)? {
+            HarnessOutcome::Exited(status) if !status.success() => {
+                bail!(
+                    "the harness exited unsuccessfully ({status}); the task worktree and record are retained."
+                );
+            }
+            HarnessOutcome::Exited(_) | HarnessOutcome::Cancelled => {}
+        }
+        record = task::load(&plan.task_dir)?;
     }
 
     Ok(Launched {
@@ -659,13 +793,47 @@ pub fn execute(
     })
 }
 
-/// Compatibility wrapper for launch-local tests; policy lives in the shared manager.
-#[cfg(test)]
-fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<cmux::Group> {
-    cmux::repository::RepositoryManager::new(client, repo).ensure_group(notes)
+fn finish_workspace_launch(
+    task_dir: &Path,
+    record: &mut TaskRecord,
+    manager: &interactive::session::SessionManager<'_>,
+    created: &interactive::v2::CreatedSession,
+    notes: &mut Vec<String>,
+) {
+    // The session may already be running. Persist its opaque reference before
+    // any best-effort status or presentation updates.
+    if let Err(e) = record_created_session(task_dir, record, &created.session_ref) {
+        notes.push(format!(
+            "the interactive session started but its task record could not be updated: {e}"
+        ));
+        return;
+    }
+    // Publication reloads under the task-state lock. If cancellation won that
+    // lock, cancel may already have returned without a workspace to close. If
+    // publication won, cancel's confirmation read will see these identifiers.
+    if record.state == TaskState::Cancelled {
+        if let Err(error) = manager.close_task_session(record) {
+            notes.push(format!(
+                "cancellation confirmed, but session close failed: {error}"
+            ));
+        }
+        return;
+    }
+    if let Err(e) = manager.set_task_status(
+        record,
+        &interactive::workspace_identity(&record.identity.agent, &record.identity.model),
+    ) {
+        notes.push(format!("could not set the sidebar status: {e}"));
+    }
+    if let Err(e) = manager.set_agent_metadata(record) {
+        notes.push(format!("could not set session agent metadata: {e}"));
+    }
+    if let Err(e) = manager.expand_task_session(record) {
+        notes.push(format!("could not expand the interactive session: {e}"));
+    }
 }
 
-/// Reconcile recorded tasks against cmux, so sessions closed outside ahu do not
+/// Reconcile recorded tasks against their session host, so sessions closed outside ahu do not
 /// linger as "running" forever.
 ///
 /// Returns the whole listing, unreadable directories included. Reconciliation
@@ -673,43 +841,43 @@ fn ensure_group(client: &Cmux, repo: &Repo, notes: &mut Vec<String>) -> Result<c
 /// user what exists needs to know about the ones it could not.
 pub fn reconcile(repo: &Repo) -> Result<task::TaskListing> {
     let mut tasks = task::list(repo)?;
-    let Ok(client) = Cmux::discover() else {
-        return Ok(tasks);
-    };
-    let Ok(live) = client.workspaces() else {
-        // Partial or unreadable window coverage cannot prove a session exited.
-        return Ok(tasks);
-    };
     for (dir, record) in tasks.records.iter_mut() {
-        let Some(workspace_id) = record.cmux_workspace_id.as_deref() else {
+        if dir.join("headless.json").exists()
+            || record.session_ref.is_none()
+            || !record.state.is_live()
+        {
+            continue;
+        }
+        let Ok(client) = interactive::discover_for_record(repo, record) else {
             continue;
         };
-        if !live.contains_key(workspace_id) && record.state.is_live() {
-            record.state = TaskState::Exited;
-            // Best effort, and deliberately not fatal: reconciliation is a
-            // status refresh, and a state directory that has gone read-only
-            // must not stop `ahu tasks` listing what exists. The value returned
-            // to the caller is the true one either way — cmux is the authority
-            // on whether the workspace is still there, not this file.
-            let _ = task::set_state(dir, TaskState::Exited);
+        let Some(session_ref) = record.session_ref.as_deref() else {
+            continue;
+        };
+        if matches!(
+            client.verify_task_session(session_ref, &repo.identity(), &record.worktree),
+            Ok(crate::interactive::v2::WorkspaceOwnership::Absent)
+        ) && record.state.is_live()
+        {
+            // Best effort: failed persistence must not break listing or invent
+            // an outcome. Reload under lock so a supervisor's terminal state wins.
+            let _ = task::set_exited_if_live(dir, record);
         }
     }
     Ok(tasks)
 }
 
-/// Run a task inside its cmux workspace.
+/// Run a task under supervision in its selected terminal session.
 ///
-/// This is the fixed entrypoint that cmux's shell-interpreted startup command
-/// invokes. It receives only a directory path; the prompt is read from a file
-/// and handed to the harness as one argument, so shell syntax in the prompt is
-/// never interpreted.
+/// A session host's startup command invokes this fixed entrypoint. It receives
+/// only a directory path; the prompt is read from a file and handed to the
+/// harness as one argument, so shell syntax in the prompt is never interpreted.
 pub(crate) fn verify_task(
     task_dir: &Path,
     batch: Option<&crate::headless::Spec>,
 ) -> Result<(TaskRecord, LaunchCommand, PathBuf)> {
-    // A refused record is read here inside a live cmux pane, where the user has
-    // no other context, so the error says what to do next rather than only what
-    // went wrong.
+    // A refused record is read inside the task's terminal, where the user has
+    // no other context, so the error says what to do next as well as what failed.
     let record = task::load(task_dir).map_err(|e| {
         Error::new(format!(
             "{e}\n\
@@ -757,6 +925,7 @@ pub(crate) fn verify_task(
     // the frozen delivery and refuses if its digest has moved.
     let expected_composition = crate::orchestration::Composition {
         mode: match batch {
+            Some(spec) if spec.options.work_mode => crate::orchestration::Mode::headless_work(),
             Some(spec) => crate::orchestration::Mode::headless(&spec.options.native_helpers)?,
             None => crate::orchestration::Mode::Interactive,
         },
@@ -771,11 +940,15 @@ pub(crate) fn verify_task(
     };
     record.delivery.verify_composition(&expected_composition)?;
     let delivered = if let Some(spec) = batch {
-        crate::orchestration::redeliver_headless_policy(
-            &record.delivery,
-            &prompt,
-            &spec.options.native_helpers,
-        )?
+        if spec.options.work_mode {
+            crate::orchestration::redeliver_headless_work(&record.delivery, &prompt)?
+        } else {
+            crate::orchestration::redeliver_headless_policy(
+                &record.delivery,
+                &prompt,
+                &spec.options.native_helpers,
+            )?
+        }
     } else {
         crate::orchestration::redeliver(&record.delivery, &prompt)?
     };
@@ -797,6 +970,12 @@ pub(crate) fn verify_task(
             record.repo_root.display(),
             discovered.identity()
         );
+    }
+    if let Some(frozen) = &record.session_host {
+        if batch.is_some() {
+            bail!("headless task cannot carry an interactive host binding");
+        }
+        interactive::binding::verify(&discovered, frozen)?;
     }
     let expected_worktree = state::worktree_dir(&discovered.root, &record.task_id)?;
     // `.worktrees` could have been replaced by a symlink between submission and
@@ -850,11 +1029,29 @@ pub(crate) fn verify_task(
         cwd: &record.worktree,
         permissions: record.identity.permissions,
     };
-    let rebuilt = if let Some(spec) = batch {
+    let mut rebuilt = if let Some(spec) = batch {
         crate::headless::batch_command(&record.identity.harness, &request, spec)?
     } else {
         adapter.launch_command(&request)?
     };
+    let executable = crate::selection::resolve_executable(&rebuilt.program)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            Error::new(format!(
+                "{} is not on PATH in this workspace, so task {} cannot start.\n\
+                 ahu will not fall back to a different harness.",
+                rebuilt.program, record.task_id
+            ))
+            .with_kind(crate::util::ErrorKind::Prerequisite)
+        })?;
+    if batch.is_none() {
+        crate::selection::check_interactive_command(
+            &executable,
+            &record.identity.harness,
+            &mut rebuilt,
+            &record.worktree,
+        )?;
+    }
     if rebuilt.redacted() != record.launch_command {
         bail!(
             "the recorded launch command for task {} does not match what its configuration \
@@ -869,21 +1066,10 @@ pub(crate) fn verify_task(
     // Resolving by name and checking the name is what the adapter asked for
     // removes that surface instead of trying to validate it.
     //
-    // The path is deliberately not pinned across sessions: cmux installs a
-    // per-surface shim directory, so the absolute path of `claude` differs
-    // between the shell that submitted the task and the workspace shell that
-    // runs it. The plan-time resolution is recorded for disclosure, and the
-    // preview says the workspace may resolve a different wrapper.
-    let executable = crate::selection::resolve_executable(&rebuilt.program)
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| {
-            Error::new(format!(
-                "{} is not on PATH in this workspace, so task {} cannot start.\n\
-                 ahu will not fall back to a different harness.",
-                rebuilt.program, record.task_id
-            ))
-            .with_kind(crate::util::ErrorKind::Prerequisite)
-        })?;
+    // The path is deliberately not pinned across sessions: the external session
+    // host may install per-session shim directories, so executable lookup can
+    // differ between the submitting shell and the task workspace. The plan-time
+    // resolution is recorded for disclosure, and the preview describes this.
     // The resolved executable must be absolute and outside the repository and
     // task worktree, including when reached through a symlink.
     if !executable.is_absolute() {
@@ -915,7 +1101,7 @@ pub(crate) fn verify_task(
     {
         eprintln!(
             "ahu: this workspace resolves {} to {}, not the {} seen at submission. \
-             That is normal under cmux, which installs a per-surface wrapper.",
+             Session environments can install harness wrappers with different paths.",
             rebuilt.program,
             executable.display(),
             record.harness_executable.display()
@@ -1041,7 +1227,7 @@ impl Drop for Foreground {
 /// Only for a fresh group whose unreaped child this supervisor owns.
 fn signal_owned_group(pid: u32, signal: i32) -> Result<()> {
     let pid = i32::try_from(pid).map_err(|_| Error::new("invalid owned process group"))?;
-    if pid <= 0 {
+    if pid <= 1 {
         bail!("invalid owned process group");
     }
     if unsafe { libc::kill(-pid, signal) } != 0 {
@@ -1095,6 +1281,10 @@ fn terminate_group(child: &mut std::process::Child) -> Result<()> {
 
 pub fn run_task(task_dir: &Path) -> Result<HarnessOutcome> {
     // Do not mutate a task path until its frozen execution record is verified.
+    let _ = verify_task(task_dir, None)?;
+    let _owner = crate::headless::interactive_task_owner(task_dir)?;
+    // Removal and another run may have raced the first validation. Re-read the
+    // frozen inputs while holding the same owner lock used by task inspection.
     let (record, rebuilt, executable) = verify_task(task_dir, None)?;
     let mut started = false;
     run_verified_task(task_dir, record, rebuilt, executable, &mut started)
@@ -1131,10 +1321,11 @@ fn record_startup_error(task_dir: &Path, started: bool, error: Error) -> Error {
 fn run_verified_task(
     task_dir: &Path,
     mut record: TaskRecord,
-    rebuilt: LaunchCommand,
+    mut rebuilt: LaunchCommand,
     executable: PathBuf,
     started: &mut bool,
 ) -> Result<HarnessOutcome> {
+    harness::native_trust::prepare(task_dir, &record)?;
     let loaded = crate::config::load(&record.worktree)?;
     let config = loaded.as_ref().map(|loaded| &loaded.config);
     let version = crate::selection::probe_version(
@@ -1150,9 +1341,7 @@ fn run_verified_task(
             .and_then(|config| config.harness_version_pins.get(&record.identity.harness))
             .map(String::as_str),
     )?;
-    record.enforcement.harness_version = Some(version);
-    record.harness_executable = executable.clone();
-    task::save(task_dir, &record, &task::load_prompt(task_dir)?)?;
+    record_runtime_metadata(task_dir, &mut record, &version, &executable)?;
     let telemetry = config
         .map(|config| config.telemetry.clone())
         .unwrap_or_default();
@@ -1189,10 +1378,13 @@ fn run_verified_task(
     // Nested commands discover the checkout the session edits.
     state::ensure_checkout_state(&record.worktree)?;
     task::set_state(task_dir, TaskState::Running)?;
-    if let (Ok(client), Ok(repo)) = (Cmux::discover(), git::discover(&record.worktree)) {
-        let _ = cmux::repository::RepositoryManager::new(&client, &repo).set_task_status(
+    if record.session_ref.is_some()
+        && let Ok(repo) = git::discover(&record.worktree)
+        && let Ok(client) = interactive::discover_for_record(&repo, &record)
+    {
+        let _ = interactive::session::SessionManager::new(client.as_ref(), &repo).set_task_status(
             &record,
-            &cmux::workspace_identity(&record.identity.agent, &record.identity.model),
+            &interactive::workspace_identity(&record.identity.agent, &record.identity.model),
         );
     }
 
@@ -1213,6 +1405,12 @@ fn run_verified_task(
     // workspace starts and pin this task immediately before starting an
     // interactive harness, so a changed native login cannot inherit the task.
     let repo = git::discover(&record.repo_root)?;
+    crate::selection::check_interactive_command(
+        &executable,
+        &record.identity.harness,
+        &mut rebuilt,
+        &record.worktree,
+    )?;
     crate::selection::check_launch_compatibility(
         &executable,
         &record.identity.harness,
@@ -1234,10 +1432,17 @@ fn run_verified_task(
         command
             .args(&rebuilt.args)
             .env("AHU_BIN", std::env::current_exe()?)
-            .env("AHU_WORKER_SESSION", "cmux")
+            .env(
+                "AHU_WORKER_SESSION",
+                if record.session_ref.is_some() {
+                    "interactive"
+                } else {
+                    "terminal"
+                },
+            )
             .env("AHU_TASK_ID", &record.task_id)
-            .env("AHU_TASK_DIR", task_dir)
-            .current_dir(&record.worktree);
+            .env("AHU_TASK_DIR", task_dir);
+        harness::configure_task_directory(&mut command, &record.identity.harness, &record.worktree);
         crate::telemetry::configure_child(
             &mut command,
             &telemetry,
@@ -1343,51 +1548,6 @@ fn record_harness_outcome(
 #[cfg(test)]
 mod group_recovery_tests {
     use super::*;
-    fn group(id: &str, member: &str) -> cmux::Group {
-        cmux::Group {
-            id: id.into(),
-            name: "ahu".into(),
-            anchor_workspace_id: member.into(),
-            member_workspace_ids: vec![member.into()],
-            is_collapsed: false,
-        }
-    }
-    #[test]
-    fn reuse_current_group_and_refuse_ambiguous_recovery() {
-        let groups = vec![
-            group("new", "task"),
-            group("original", "coordinator"),
-            group("unrelated", "other-repo"),
-        ];
-        let matches =
-            cmux::repository::repository_group_candidates(&groups, "ahu", |id| id != "other-repo");
-        assert_eq!(matches.len(), 2);
-        assert_eq!(
-            cmux::repository::recover_group(&matches, Some("coordinator"))
-                .unwrap()
-                .unwrap()
-                .id,
-            "original"
-        );
-        assert!(cmux::repository::recover_group(&matches, None).is_err());
-        assert_eq!(
-            cmux::repository::recover_group(&matches[..1], None)
-                .unwrap()
-                .unwrap()
-                .id,
-            "new"
-        );
-        assert!(
-            cmux::repository::recover_group(&[], None)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            cmux::repository::repository_group_candidates(&groups, "different", |_| true)
-                .is_empty()
-        );
-    }
-
     fn spawn_sleep(seconds: &str) -> std::process::Child {
         use std::os::unix::process::CommandExt;
         std::process::Command::new("sleep")

@@ -70,12 +70,16 @@ fn eval_run_defaults_to_ignored_primary_records_and_keeps_raw_artifacts_external
         &harness,
         r#"#!/usr/bin/env python3
 import json, os, subprocess, sys
+attrs = dict(pair.split('=',1) for pair in os.environ['OTEL_RESOURCE_ATTRIBUTES'].split(',') if '=' in pair)
+assert attrs['ahu.release.id'] == 'release-eval-test', attrs
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
-if sys.argv[1:] == ['models', 'ollama']:
+if sys.argv[1:] == ['models']:
+    print('opencode/big-pickle')
     print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
+assert sys.argv[1] != 'models', sys.argv
 prompt = sys.argv[-1]
 if 'Score this candidate output' in prompt:
     with open('score.json', 'w', encoding='utf-8') as score:
@@ -139,7 +143,10 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
         .env("PATH", path)
         .env_remove("XDG_STATE_HOME")
         .env("HOME", &home)
-        .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
+        .env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "ahu.release.id=release-eval-test",
+        )
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .output()
@@ -164,6 +171,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
     // rather than a pass by absence.
     assert_eq!(trial["tool_expectation_status"], "not_applicable");
     assert_eq!(summary["evaluator"], "@judge");
+    assert_eq!(summary["release_id"], "release-eval-test");
     assert_eq!(summary["planned_trials"], 1);
     assert_eq!(summary["planned_launches"], 2);
     assert_eq!(summary["blinding"], "prompt_only");
@@ -182,6 +190,7 @@ emit('step_finish', {'type':'step-finish','reason':'stop','usage':{'input_tokens
         .collect();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["schema_version"], 2);
+    assert_eq!(rows[0]["release_id"], "release-eval-test");
     assert_eq!(rows[0]["mcp_tool_call_count"], 1);
     assert_eq!(rows[0]["mcp_tools"]["ahu_agents_list"], 1);
     assert_eq!(rows[0]["evaluator"], "judge");
@@ -368,9 +377,11 @@ import json, os, subprocess, sys, time
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
-if sys.argv[1:] == ['models', 'ollama']:
+if sys.argv[1:] == ['models']:
+    print('opencode/big-pickle')
     print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
+assert sys.argv[1] != 'models', sys.argv
 mode = os.environ['AHU_TEST_ANSWER']
 if mode == 'launch_failed':
     raise SystemExit(1)
@@ -464,7 +475,6 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
             .env("PATH", &path)
             .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
-            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
             .env("AHU_TEST_ANSWER", mode)
             .env("NO_COLOR", "1")
             .stdin(Stdio::null())
@@ -477,14 +487,31 @@ print(json.dumps({'type':'step_finish','timestamp':2,'sessionID':session,'part':
         );
         let summary: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(summary["trials"][0]["terminal_status"], status);
-        let row: Value = std::fs::read_to_string(records)
+        let line = std::fs::read_to_string(records)
             .unwrap()
             .lines()
             .next()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .unwrap();
+            .unwrap()
+            .to_owned();
+        let row: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(row["terminal_status"], status);
         assert_eq!(row["failure_category"], category);
+        // Records live in the repository by default. A failed trial states why
+        // it failed without writing the operator's home directory or the layout
+        // of the out-of-repository artifact store into that file.
+        assert!(
+            !line.contains("eval-artifacts") && !line.contains(home.to_str().unwrap()),
+            "{mode} leaked a host artifact path into its record: {line}"
+        );
+        // Every failing path records why it failed, so this check is never
+        // satisfied by an absent field.
+        let reason = row["failure_reason"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{mode} did not record a string failure reason: {row}"));
+        assert!(
+            !reason.contains('/') && !reason.contains('\\'),
+            "{mode}: {reason}"
+        );
         // The harness's own outcome survives when it reported one, so a run that
         // ran out of time is not filed as a generic failure.
         assert_eq!(
@@ -713,9 +740,11 @@ import json, os, subprocess, sys
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
-if sys.argv[1:] == ['models', 'ollama']:
+if sys.argv[1:] == ['models']:
+    print('opencode/big-pickle')
     print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
+assert sys.argv[1] != 'models', sys.argv
 rows = [
  {'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
  {'jsonrpc':'2.0','method':'notifications/initialized'},
@@ -812,7 +841,6 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
             .env("HOME", home)
             .env("AHU_DECISION_URL", endpoint)
             .env("FIXTURE_WRITE_ANSWER", if answer { "yes" } else { "no" })
-            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -873,9 +901,11 @@ import json, os, subprocess, sys
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
-if sys.argv[1:] == ['models', 'ollama']:
+if sys.argv[1:] == ['models']:
+    print('opencode/big-pickle')
     print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
+assert sys.argv[1] != 'models', sys.argv
 with open('answer.json', 'w') as f: json.dump({'route':'billing'}, f)
 rows = [{'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
         {'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}}]
@@ -997,7 +1027,6 @@ print(json.dumps({'type':'step_finish','sessionID':os.environ['AHU_PARENT_TASK']
             .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
             .env("AHU_DECISION_URL", &endpoint)
-            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -1079,9 +1108,11 @@ import json, os, sys
 if '--version' in sys.argv:
     print('1.18.32')
     raise SystemExit(0)
-if sys.argv[1:] == ['models', 'ollama']:
+if sys.argv[1:] == ['models']:
+    print('opencode/big-pickle')
     print('ollama/glm-5.3:cloud')
     raise SystemExit(0)
+assert sys.argv[1] != 'models', sys.argv
 with open('answer.json', 'w', encoding='utf-8') as answer:
     json.dump({'route':'billing'}, answer)
 mode = os.environ['AHU_TEST_TRAJECTORY_MODE']
@@ -1152,7 +1183,6 @@ else:
             .env_remove("XDG_STATE_HOME")
             .env("HOME", &home)
             .env("AHU_TEST_TRAJECTORY_MODE", mode)
-            .env("AHU_CMUX_BIN", external.path().join("missing-cmux"))
             .stdin(Stdio::null())
             .output()
             .unwrap();

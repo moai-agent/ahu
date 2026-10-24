@@ -185,16 +185,15 @@ fn the_bounded_tool_ceiling_excludes_every_escape_route() {
     );
 }
 
-/// With no shell in the ceiling there is no route to cmux, and that is the only
-/// reason ahu may say so.
+/// The model tool ceiling excludes shell execution; hooks remain independent.
 #[test]
-fn the_absence_of_a_shell_is_what_backs_the_cmux_claim() {
+fn the_tool_ceiling_backs_the_no_shell_control() {
     let profile = profile_of(&bounded());
-    let control = control(&profile, "native.helper.no_cmux").expect("the claim must be a control");
+    let control = control(&profile, "native.helper.no_shell").expect("the claim must be a control");
     assert_eq!(
         control.mechanism,
         Mechanism::Structural,
-        "a cmux claim resting on anything but a missing tool would be a prompt-level claim"
+        "the no-shell control must be structural"
     );
 }
 
@@ -473,7 +472,7 @@ fn control_ids_carry_their_mechanism() {
     assert!(ids.iter().any(|id| id == "native.helper.tools=flag"));
     assert!(
         ids.iter()
-            .any(|id| id == "native.helper.no_cmux=structural")
+            .any(|id| id == "native.helper.no_shell=structural")
     );
     assert_eq!(ids.len(), profile.enforced.len());
 }

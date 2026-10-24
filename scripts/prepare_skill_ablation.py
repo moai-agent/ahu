@@ -119,9 +119,9 @@ def main() -> int:
             raise RuntimeError(
                 "the source checkout has ignored harness context; commit or remove it before preparing an arm so both arms inherit the same context"
             )
-        lock_path = repo / "ahu.lock"
+        lock_path = repo / ".agents/ahu/lock.md"
         if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
-            raise RuntimeError("ahu.lock must be a regular file, not a symlink or directory")
+            raise RuntimeError(".agents/ahu/lock.md must be a regular file, not a symlink or directory")
         relative_targets = [
             Path(root) if args.all_project_skills else Path(root) / skill_name
             for root in SKILL_ROOTS
@@ -141,7 +141,7 @@ def main() -> int:
             raise RuntimeError("no project skill files matched; the control arm was not changed")
 
         # Keep user-specific lock acceptance in disposable state. The shared
-        # ahu.lock is committed in the generated worktree; local fingerprints
+        # .agents/ahu/lock.md is committed in the generated worktree; local fingerprints
         # are neither written to it nor left in the user's normal Ahu state.
         with tempfile.TemporaryDirectory(prefix="ahu-skill-ablation-state-", dir=destination.parent) as state_home:
             env = os.environ.copy()
@@ -150,18 +150,18 @@ def main() -> int:
 
         if any(path.exists() or path.is_symlink() for path in targets):
             raise RuntimeError("lock refresh recreated removed skills; the arm was not committed")
-        control_lock = destination / "ahu.lock"
+        control_lock = destination / ".agents/ahu/lock.md"
         if control_lock.is_symlink() or not control_lock.is_file():
-            raise RuntimeError("lock refresh did not produce a regular ahu.lock")
+            raise RuntimeError("lock refresh did not produce a regular .agents/ahu/lock.md")
         changed = run(["git", "diff", "HEAD", "--name-only", "-z"], cwd=destination, strip=False)
         untracked = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=destination, strip=False)
         paths = [path for path in (changed + "\0" + untracked).split("\0") if path]
         if any(
-            path != "ahu.lock" and not any(path == root or path.startswith(root + "/") for root in removed)
+            path != ".agents/ahu/lock.md" and not any(path == root or path.startswith(root + "/") for root in removed)
             for path in paths
         ):
             raise RuntimeError("lock refresh produced unexpected changes; the arm was not committed")
-        run(["git", "add", "-A", "-f", "--", *removed, "ahu.lock"], cwd=destination)
+        run(["git", "add", "-A", "-f", "--", *removed, ".agents/ahu/lock.md"], cwd=destination)
         run(
             [
                 "git",

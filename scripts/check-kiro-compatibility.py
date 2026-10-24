@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-import tomllib
+import re
 
 SOURCE = Path(__file__).resolve().parents[1]
 
@@ -104,12 +104,15 @@ def main():
         git('init', '--quiet', '--template=')
         git('config', 'user.name', 'Compatibility Probe')
         git('config', 'user.email', 'probe@example.invalid')
-        catalog = tomllib.loads((SOURCE / '.agents/ahu/config.toml').read_text())['catalog_version']
+        # Synthetic policy uses this source revision's public catalog constant.
+        catalog = re.search(r'pub const CATALOG_VERSION: &str = "([^"]+)"',
+                            (SOURCE / 'src/catalog.rs').read_text()).group(1)
         agents = repo / '.agents/ahu/agents'
         agents.mkdir(parents=True)
-        (repo / '.agents/ahu/config.toml').write_text(
-            'schema_version = 1\nharness_preferences = ["kiro"]\nmodel_selection = "project-ranked"\n'
-            f'catalog_version = {json.dumps(catalog)}\n[model_rankings]\nkiro = [{json.dumps(args.model)}]\n')
+        (repo / '.agents/ahu/config.md').write_text(
+            "---\nokf_version: '0.2'\ntype: ahu:project\nahu:\n"
+            '  schema_version: 1\n  harness_preferences: ["kiro"]\n  model_selection: project-ranked\n'
+            f'  catalog_version: {json.dumps(catalog)}\n  model_rankings:\n    kiro: [{json.dumps(args.model)}]\n---\n')
         for name, permission in [('probe', 'auto'), ('prompt-probe', 'prompt')]:
             (agents / f'{name}.md').write_text(
                 f'---\nokf_version: 0.2\ntype: ahu:agent\ntitle: {name}\n'
@@ -133,7 +136,7 @@ def main():
         git('add', '.')
         git('commit', '--quiet', '-m', 'Create isolated Kiro compatibility fixture')
         run([binary, 'lock', '--update'])
-        git('add', 'ahu.lock')
+        git('add', '.agents/ahu/lock.md')
         git('commit', '--quiet', '-m', 'Lock fixture context')
         case = root / 'mcp-case.md'
         case.write_text('''---
@@ -200,7 +203,7 @@ Call the tool and produce the requested answer. Do not delegate or modify source
         print(f'Suite stopped: {failure}; inspect external evidence', flush=True)
     finally:
         cleanup = []
-        if (repo / '.agents/ahu/config.toml').exists():
+        if (repo / '.agents/ahu/config.md').exists():
             cleanup = cleanup_tasks(ahu, owned)
             if any(item['status'] != 'terminal_confirmed' for item in cleanup):
                 failure = failure or 'cleanup_unconfirmed'

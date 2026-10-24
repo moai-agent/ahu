@@ -4,14 +4,14 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ahu::cmux::integration::{self, Isolation, Locations, Registration};
+use ahu::native_admission as integration;
+use ahu::native_admission::{Isolation, Locations, Registration};
 use serde_json::{Value, json};
 
 struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
     home: PathBuf,
-    bin: PathBuf,
 }
 impl Fixture {
     fn new() -> Self {
@@ -19,12 +19,10 @@ impl Fixture {
         let root = temp.path().canonicalize().unwrap();
         let home = root.join("home");
         std::fs::create_dir(&home).unwrap();
-        let bin = root.join("native ; $literal");
         Self {
             _temp: temp,
             root,
             home,
-            bin,
         }
     }
     fn write(&self, path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) {
@@ -41,29 +39,10 @@ impl Fixture {
     fn inspect(&self, harness: &str) -> integration::Status {
         integration::inspect_in(&self.root, harness, &self.locations())
     }
-    fn native(&self, code: i32, version: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        self.write(
-            &self.bin,
-            format!(
-                r#"#!/bin/sh
-if [ "$1" = --version ]; then printf '%s\n' '{}'; exit 0; fi
-printf '%s\n' "$@" > "$HOME/argv"
-printf 'native confirmation preserved\n' >&2
-read reply
-printf '%s' "$reply" > "$HOME/reply"
-exit {code}
-"#,
-                version
-            ),
-        );
-        std::fs::set_permissions(&self.bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
     fn command(&self) -> Command {
         let mut command = common::ahu();
         command
             .current_dir(&self.root)
-            .env("AHU_CMUX_BIN", &self.bin)
             .env("HOME", &self.home)
             .env("PATH", "/usr/bin:/bin");
         for key in [
@@ -188,7 +167,7 @@ fn partial_plugins_changed_feed_and_declared_modules_refuse_headless() {
     );
     let status = f.inspect("opencode");
     assert!(!status.headless.allowed);
-    assert!(status.next_action.contains("uninstall"));
+    assert!(status.next_action.contains("native configuration"));
     assert!(
         status
             .components
@@ -244,154 +223,16 @@ fn native_trust_data_does_not_imply_activation_and_profile_notify_is_unknown() {
 }
 
 #[test]
-fn native_installer_receives_fixed_argv_and_preserves_confirmation_and_exit() {
-    use std::io::Write;
-    use std::process::Stdio;
+fn cmux_cli_management_is_not_part_of_core() {
     let f = Fixture::new();
-    f.native(23, "cmux 0.64.22 (102) [ddd4a01bc]");
-    let mut child = f
-        .command()
-        .args(["cmux", "install", "--harness", "opencode"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"native yes\n")
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(23),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        std::fs::read_to_string(f.home.join("argv")).unwrap(),
-        "hooks\nopencode\ninstall\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(f.home.join("reply")).unwrap(),
-        "native yes"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Native operation:"));
-    assert!(stderr.contains("native confirmation preserved"));
-    assert!(stderr.contains("cmux integration opencode"));
-}
-
-#[test]
-fn dry_run_claude_guidance_unknown_version_and_parser_never_install() {
-    let f = Fixture::new();
-    f.native(0, "0.64.22 (102) [ddd4a01bc]");
-    let output = f
-        .command()
-        .args(["cmux", "install", "--harness", "codex", "--dry-run"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(plan["argv"], json!(["hooks", "codex", "install"]));
-    assert_eq!(plan["available"], true);
-    let output = f
-        .command()
-        .args(["cmux", "install", "--harness", "claude-code"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("wrapper-managed"));
-    f.native(0, "0.64.220 (102) [ddd4a01bc]");
-    let output = f
-        .command()
-        .args(["cmux", "install", "--harness", "codex"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
     for args in [
-        vec!["cmux", "install", "--harness", "codex; false"],
-        vec!["cmux", "install", "--harness", "codex", "--yes"],
-        vec!["cmux", "install", "--harness", "codex", "--project"],
-        vec!["cmux", "status", "--output", "text"],
+        vec!["cmux", "status"],
+        vec!["cmux", "install", "--harness", "codex"],
     ] {
-        assert!(!f.command().args(args).output().unwrap().status.success());
+        let output = f.command().args(args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unknown command"));
     }
-    assert!(!f.home.join("argv").exists());
-}
-
-#[test]
-fn human_json_status_agree_without_socket_or_mutation() {
-    let f = Fixture::new();
-    f.native(0, "0.64.22 (102) [ddd4a01bc]");
-    let output = f
-        .command()
-        .args(["cmux", "status", "--output", "json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["integrations"].as_array().unwrap().len(), 5);
-    assert_eq!(value["installation_plans"].as_array().unwrap().len(), 4);
-    let human = f.command().args(["cmux", "status"]).output().unwrap();
-    let text = String::from_utf8(human.stdout).unwrap();
-    for status in value["integrations"].as_array().unwrap() {
-        assert!(text.contains(&format!(
-            "cmux integration {}:",
-            status["harness"].as_str().unwrap()
-        )));
-    }
-    assert!(!f.home.join("argv").exists());
-    assert!(!f.home.join(".codex").exists());
-    assert!(!f.home.join(".config").exists());
-}
-
-#[test]
-fn sanitation_removes_routing_and_sets_native_disable_controls() {
-    let mut command = Command::new("synthetic");
-    let policy = integration::HeadlessPolicy {
-        allowed: true,
-        disable_variable: Some("CMUX_CODEX_HOOKS_DISABLED".into()),
-        reasons: vec![],
-        evidence_digest: String::new(),
-    };
-    integration::sanitize(&mut command, Some(&policy));
-    let env: std::collections::BTreeMap<_, _> = command.get_envs().collect();
-    assert_eq!(
-        env[std::ffi::OsStr::new("CMUX_CODEX_HOOKS_DISABLED")],
-        Some(std::ffi::OsStr::new("1"))
-    );
-    let mut absent = Command::new("synthetic");
-    integration::sanitize(&mut absent, None);
-    assert!(
-        absent
-            .get_envs()
-            .filter(|(key, _)| key.to_string_lossy().starts_with("CMUX_"))
-            .all(|(_, value)| value.is_none())
-    );
-}
-
-#[test]
-fn wrapper_evidence_does_not_spill_into_other_harnesses_and_old_digests_roundtrip() {
-    let f = Fixture::new();
-    let locations = ahu::hooks::Locations {
-        home: Some(f.home.clone()),
-        managed: None,
-        cmux_wrapper: true,
-    };
-    let found = ahu::hooks::collect_for(&f.root, "codex", &locations).unwrap();
-    assert!(!found.wrapper_injected);
-    let old = ahu::hooks::HookInventory {
-        wrapper_injected: true,
-        ..Default::default()
-    };
-    let digest = old.digest();
-    let serialized = serde_json::to_string(&old).unwrap();
-    let restored: ahu::hooks::HookInventory = serde_json::from_str(&serialized).unwrap();
-    assert_eq!(digest, restored.digest());
-    assert!(restored.wrapper_injected);
 }
 
 #[test]
@@ -412,58 +253,6 @@ fn ancestor_project_hooks_are_not_mistaken_for_a_clean_leaf() {
             .iter()
             .any(|c| c.registration == Registration::Unknown
                 && c.evidence[0].scope == "project ancestor")
-    );
-}
-
-#[test]
-fn unsupported_install_scope_and_missing_cli_have_reviewable_plans() {
-    let f = Fixture::new();
-    let cli = integration::NativeCli {
-        executable: Some(f.bin.clone()),
-        version: Some("0.64.22 (102) [ddd4a01bc]".into()),
-        installer_supported: true,
-        detail: "synthetic".into(),
-    };
-    let mut locations = f.locations();
-    locations.overrides.insert(
-        "CODEX_HOME".into(),
-        f.root.join("custom").display().to_string(),
-    );
-    let plan = integration::installation_plan_in("codex", &cli, &locations).unwrap();
-    assert!(!plan.available);
-    assert_eq!(plan.unresolved_overrides, ["CODEX_HOME"]);
-    let plan = integration::installation_plan_in("codex", &cli, &f.locations()).unwrap();
-    assert_eq!(
-        plan.affected_paths,
-        [
-            f.home.join(".codex/hooks.json"),
-            f.home.join(".codex/config.toml"),
-            f.home.join(".cmux/hooks")
-        ]
-    );
-    let output = f
-        .command()
-        .args(["cmux", "status", "--output", "json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(status["cli"]["installer_supported"], false);
-}
-
-#[test]
-fn native_cancellation_status_is_not_replaced_with_success() {
-    let f = Fixture::new();
-    f.native(130, "0.64.22 (102) [ddd4a01bc]");
-    let output = f
-        .command()
-        .args(["cmux", "install", "--harness", "antigravity"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(130));
-    assert_eq!(
-        std::fs::read_to_string(f.home.join("argv")).unwrap(),
-        "hooks\nantigravity\ninstall\n"
     );
 }
 
@@ -525,9 +314,9 @@ fn headless_dry_run_uses_the_same_status_and_refuses_unknown_registration() {
         String::from_utf8_lossy(&result.stderr)
     );
     let preview: Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(preview["cmux_integration"]["harness"], "claude-code");
-    assert_eq!(preview["cmux_integration"]["headless"]["allowed"], true);
-    let digest = preview["cmux_integration"]["headless"]["evidence_digest"]
+    assert_eq!(preview["native_admission"]["harness"], "claude-code");
+    assert_eq!(preview["native_admission"]["headless"]["allowed"], true);
+    let digest = preview["native_admission"]["headless"]["evidence_digest"]
         .as_str()
         .unwrap();
     assert!(
@@ -545,12 +334,13 @@ fn headless_dry_run_uses_the_same_status_and_refuses_unknown_registration() {
     let result = launch();
     assert!(!result.status.success());
     assert!(
-        String::from_utf8_lossy(&result.stderr).contains("headless cmux isolation is unverified"),
+        String::from_utf8_lossy(&result.stderr)
+            .contains("headless native integration admission is unverified"),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(!Path::new(preview["worktree"].as_str().unwrap()).exists());
-    for version in ["2.1.283", "2.1.288", "2.1.289"] {
+    for version in ["2.1.283", "2.1.288", "2.1.289", "2.1.302"] {
         f.write(
             &executable,
             format!(
@@ -564,7 +354,7 @@ fn headless_dry_run_uses_the_same_status_and_refuses_unknown_registration() {
             String::from_utf8_lossy(&result.stderr)
         );
         let preview: Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(preview["cmux_integration"]["headless"]["allowed"], true);
+        assert_eq!(preview["native_admission"]["headless"]["allowed"], true);
         let profile = ahu::harness::isolation::profile("claude-code", version).unwrap();
         assert!(
             preview["capabilities"]["native_controls"]
@@ -595,7 +385,6 @@ fn legacy_user_plugin_scope_refuses_opaque_feed_and_inventory_is_not_isolation()
         &ahu::hooks::Locations {
             home: Some(f.home.clone()),
             managed: None,
-            cmux_wrapper: false,
         },
     )
     .unwrap();
@@ -682,8 +471,8 @@ fn escaped_json_references_have_the_same_admission_as_literal_json() {
             let f = Fixture::new();
             f.write(f.root.join(file), body);
             assert!(
-                !f.inspect("codex").headless.allowed,
-                "escaped reference admitted: {body}"
+                f.inspect("codex").headless.allowed == (file == ".mcp.json"),
+                "configuration scope differs for escaped reference: {body}"
             );
         }
     }
@@ -869,7 +658,7 @@ fn codex_cwd_configuration_is_an_executable_hook_scope() {
 }
 
 #[test]
-fn literal_quoted_artifact_paths_are_inspected_without_shell_expansion() {
+fn hook_artifact_paths_remain_unknown_without_reading_or_executing_them() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     for name in ["a\\b", "a*b", "a?b", "a[b]", "a(b)", "a b", "a$HOME"] {
@@ -885,10 +674,9 @@ fn literal_quoted_artifact_paths_are_inspected_without_shell_expansion() {
             .unwrap();
         assert_eq!(
             hook.evidence.len(),
-            2,
-            "literal quoted path should be inspected: {name}"
+            1,
+            "hook artifact must not be interpreted: {name}"
         );
-        assert_eq!(hook.evidence[1].path, path);
         assert_eq!(hook.registration, Registration::Unknown); // opaque synthetic bytes
     }
 }
@@ -1001,7 +789,15 @@ fn claude_invocation_isolation_covers_only_parsed_nonmanaged_hooks() {
                 && c.isolation == Isolation::VerifiedDisable
                 && c.registration == Registration::Unknown)
     );
-    for version in ["2.1.270", "2.1.284", ""] {
+    for version in [
+        "2.1.270",
+        "2.1.284",
+        "2.1.301",
+        "2.1.303",
+        "2.1.302-beta.1",
+        "2.1.302+build.1",
+        "",
+    ] {
         assert!(
             !integration::headless_status(f.inspect("claude-code"), version)
                 .headless
@@ -1036,7 +832,11 @@ fn claude_invocation_isolation_covers_only_parsed_nonmanaged_hooks() {
 
 #[test]
 fn current_claude_isolates_hooks_without_admitting_plugins_or_managed_sources() {
-    for version in ["2.1.288 (Claude Code)", "2.1.289 (Claude Code)"] {
+    for version in [
+        "2.1.288 (Claude Code)",
+        "2.1.289 (Claude Code)",
+        "2.1.302 (Claude Code)",
+    ] {
         let f = Fixture::new();
         let settings = f.home.join(".claude/settings.json");
         let hook = br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch synthetic-marker"}]}]}}"#;
@@ -1073,15 +873,70 @@ fn current_claude_isolates_hooks_without_admitting_plugins_or_managed_sources() 
 #[test]
 fn current_codex_requires_fresh_metadata_even_without_visible_sources() {
     let f = Fixture::new();
-    let status = integration::headless_status(f.inspect("codex"), "codex-cli 0.160.0");
-    assert!(!status.headless.allowed);
-    assert!(
-        status
-            .headless
-            .reasons
-            .iter()
-            .any(|r| r.contains("fresh native"))
-    );
+    for version in ["0.157.1", "0.160.0"] {
+        for decorated in [version.to_owned(), format!("codex-cli v{version}")] {
+            let status = integration::headless_status(f.inspect("codex"), &decorated);
+            assert!(!status.headless.allowed, "{decorated}");
+            assert!(
+                status
+                    .headless
+                    .reasons
+                    .iter()
+                    .any(|r| r.contains("fresh native"))
+            );
+        }
+    }
+}
+
+#[test]
+fn codex_empty_notify_is_declarative_but_other_sources_still_refuse() {
+    let f = Fixture::new();
+    let metadata = json!({"data":[{"cwd":f.root,"hooks":[],"warnings":[],"errors":[]}]});
+    for path in [
+        f.home.join(".codex/config.toml"),
+        f.root.join(".codex/config.toml"),
+        f.root.join("config.toml"),
+    ] {
+        for (config, allowed) in [
+            ("notify = []\n", true),
+            ("[profiles.quiet]\nnotify = []\n", true),
+            ("notify = ['unknown-command']\n", false),
+            ("notify = ''\n", false),
+            ("notify = false\n", false),
+            ("notify = {}\n", false),
+            ("notify = [0]\n", false),
+            ("[profiles.quiet]\nnotify = ['unknown-command']\n", false),
+            ("notify = []\ninclude = 'unknown.toml'\n", false),
+            ("notify = []\n[plugins.unknown]\nenabled = true\n", false),
+            (
+                "notify = []\ncli_auth_credentials_store = 'unknown'\n",
+                false,
+            ),
+        ] {
+            f.write(&path, config);
+            let status = f.inspect("codex");
+            assert_eq!(status.headless.allowed, allowed, "{path:?}: {config}");
+            // Empty notify never substitutes for effective hook inspection.
+            assert!(
+                !integration::headless_status(status, "0.160.0")
+                    .headless
+                    .allowed
+            );
+            assert_eq!(
+                integration::codex_effective_status(
+                    f.inspect("codex"),
+                    &f.root,
+                    &metadata,
+                    "0.160.0"
+                )
+                .is_ok(),
+                allowed,
+                "{path:?}: {config}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), config);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[test]
@@ -1164,7 +1019,11 @@ fn codex_effective_metadata_refuses_unknown_hooks_even_if_disabled_or_untrusted(
                     version,
                 )
                 .unwrap_err();
-                assert!(error.to_string().contains("guarded allowlist"));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("executable hooks are unverified")
+                );
             }
         }
         for hook in [
@@ -1218,5 +1077,22 @@ fn codex_effective_metadata_rejects_incomplete_scopes_and_unresolved_paths() {
             integration::codex_effective_status(f.inspect("codex"), &f.root, &metadata, version)
                 .is_err()
         );
+    }
+}
+
+#[test]
+fn provider_names_in_declarative_values_do_not_control_admission() {
+    let f = Fixture::new();
+    for name in ["cmux", "other-provider"] {
+        f.write(
+            f.home.join(".codex/config.toml"),
+            format!("model = '{name}'\n"),
+        );
+        assert!(f.inspect("codex").headless.allowed);
+        f.write(
+            f.root.join(".mcp.json"),
+            json!({"mcpServers": {name: {"command": name}}}).to_string(),
+        );
+        assert!(f.inspect("codex").headless.allowed);
     }
 }

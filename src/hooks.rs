@@ -315,9 +315,6 @@ pub struct HookInventory {
     /// so "none found" would be a false negative rather than a result.
     #[serde(default)]
     pub unscanned_harness: Option<String>,
-    /// True when ahu is running under a cmux terminal, whose Claude wrapper
-    /// injects hooks of its own that ahu cannot enumerate.
-    pub wrapper_injected: bool,
 }
 
 impl HookInventory {
@@ -395,9 +392,6 @@ impl HookInventory {
             buffer.push_str(harness);
             buffer.push_str("-unscanned\n");
         }
-        if self.wrapper_injected {
-            buffer.push_str("cmux-wrapper\n");
-        }
         digest_bytes(buffer.as_bytes())
     }
 
@@ -416,8 +410,6 @@ pub struct Locations {
     pub home: Option<PathBuf>,
     /// Machine policy settings.
     pub managed: Option<PathBuf>,
-    /// Whether a cmux Claude wrapper is in play, injecting hooks ahu cannot read.
-    pub cmux_wrapper: bool,
 }
 
 impl Locations {
@@ -427,10 +419,6 @@ impl Locations {
             managed: Some(PathBuf::from(
                 "/Library/Application Support/ClaudeCode/managed-settings.json",
             )),
-            // Environment routing is not proof that a wrapper ran. Keep this
-            // legacy frozen field for digest compatibility; new inspection
-            // reports wrapper availability and activation separately.
-            cmux_wrapper: false,
         }
     }
 }
@@ -509,10 +497,7 @@ pub fn collect_for(
     harness_id: &str,
     locations: &Locations,
 ) -> Result<HookInventory> {
-    let mut inventory = HookInventory {
-        wrapper_injected: harness_id == "claude-code" && locations.cmux_wrapper,
-        ..HookInventory::default()
-    };
+    let mut inventory = HookInventory::default();
     // `.mcp.json` is read for every harness: it is repository configuration that
     // travels into the task worktree either way. Whether a declared server
     // starts depends on the selected harness.
@@ -1085,9 +1070,13 @@ pub fn render_for_preview(inventory: &HookInventory, executable_config_files: us
              configuration snapshot, and whatever they declare will apply there.\n",
             display_safe(harness)
         ));
-    } else if inventory.is_empty() && !inventory.wrapper_injected {
+    } else if inventory.is_empty() {
         out.push_str("  none found in the settings files ahu can read\n");
     }
+
+    out.push_str(
+        "  Executable wrapper and plugin hook injection is not established by this inventory.\n",
+    );
 
     let travelling = inventory.travelling();
     if !travelling.is_empty() {
@@ -1129,12 +1118,6 @@ pub fn render_for_preview(inventory: &HookInventory, executable_config_files: us
         out.push_str(
             "     ahu does not add, edit, or remove hooks, and it will not disable one for you.\n\
              \x20    Move a hook into this repository's settings to make it project policy.\n",
-        );
-    }
-    if inventory.wrapper_injected {
-        out.push_str(
-            "\n  !! cmux injects its own Claude Code hooks through its Claude wrapper.\n\
-             \x20    ahu cannot enumerate them, so this inventory is incomplete by construction.\n",
         );
     }
     for unreadable in &inventory.unreadable {
@@ -1303,7 +1286,6 @@ mod parser_tests {
             &Locations {
                 home: Some(machine.path().to_path_buf()),
                 managed: Some(machine.path().join("managed.json")),
-                cmux_wrapper: false,
             },
         )
         .unwrap();

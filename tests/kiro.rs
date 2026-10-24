@@ -10,10 +10,10 @@ fn shortcut_and_capabilities_are_explicit() {
     assert!(!entry.supports(ahu::catalog::Feature::AcceptEditsApprovals));
     assert!(!entry.supports(ahu::catalog::Feature::HookInventory));
     let repo = tempfile::tempdir().unwrap();
-    let status = ahu::cmux::integration::inspect_in(
+    let status = ahu::native_admission::inspect_in(
         repo.path(),
         "kiro",
-        &ahu::cmux::integration::Locations::default(),
+        &ahu::native_admission::Locations::default(),
     )
     .with_version(Some("kiro-cli 2.28.0"));
     assert!(!status.headless.allowed);
@@ -59,7 +59,6 @@ exit 7
             .arg("kiro")
             .current_dir(repo.path())
             .env_remove("CMUX_WORKSPACE_ID")
-            .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
             .env(
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -169,7 +168,7 @@ fn kiro_requires_final_run_result_and_preserves_denials_and_identity_failures() 
 
 #[test]
 fn kiro_headless_inspection_refuses_unreviewed_sources_without_reading_credentials() {
-    use ahu::cmux::integration::{Locations, inspect_in};
+    use ahu::native_admission::{Locations, inspect_in};
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let locations = Locations {
@@ -256,7 +255,7 @@ fn kiro_events_feed_partial_acp_call_evidence_without_inferred_usage() {
 
 #[test]
 fn kiro_admission_retains_228_and_inspects_229_without_admitting_unknown_versions() {
-    use ahu::cmux::integration::{Locations, inspect_in};
+    use ahu::native_admission::{Locations, inspect_in};
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let locations = Locations {
@@ -290,7 +289,7 @@ fn kiro_admission_retains_228_and_inspects_229_without_admitting_unknown_version
 
 #[test]
 fn kiro_admits_declarative_native_agents_in_each_discovered_scope() {
-    use ahu::cmux::integration::{Locations, inspect_in};
+    use ahu::native_admission::{Locations, inspect_in};
     use serde_json::json;
     let home = tempfile::tempdir().unwrap();
     let ancestor = tempfile::tempdir().unwrap();
@@ -345,7 +344,7 @@ fn kiro_admits_declarative_native_agents_in_each_discovered_scope() {
 
 #[test]
 fn kiro_native_agent_controls_fail_closed_without_echoing_values() {
-    use ahu::cmux::integration::{Locations, inspect_in};
+    use ahu::native_admission::{Locations, inspect_in};
     use serde_json::json;
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
@@ -362,7 +361,6 @@ fn kiro_native_agent_controls_fail_closed_without_echoing_values() {
         json!({"hooks":[{"name":"stop", "enabled":false,"trigger":"Stop","action":{"type":"agent","prompt":"private-marker"}}]}),
         json!({"futureControl":"private-marker"}),
         json!({"includePowers":true}),
-        json!({"mcpServers":{"fixture":{"command":"CMUX", "args":[]}}}),
         json!({"mcpServers":{"fixture":{"futureControl":"private-marker"}}}),
         json!({"permissions":{"rules":[],"futureControl":"private-marker"}}),
         json!({"permissions":{"rules":[{"capability":"shell","effect":"allow","futureControl":"private-marker"}]}}),
@@ -410,7 +408,7 @@ fn kiro_native_agent_controls_fail_closed_without_echoing_values() {
 
 #[test]
 fn kiro_cli_settings_allow_only_inspected_preferences_and_types() {
-    use ahu::cmux::integration::{Locations, inspect_in};
+    use ahu::native_admission::{Locations, inspect_in};
     use serde_json::json;
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
@@ -462,7 +460,7 @@ fn kiro_cli_settings_allow_only_inspected_preferences_and_types() {
 #[test]
 #[cfg(unix)]
 fn kiro_agent_inspection_refuses_symlinks_and_bounded_scan_overflow() {
-    use ahu::cmux::integration::{Locations, inspect_in};
+    use ahu::native_admission::{Locations, inspect_in};
     use std::os::unix::fs::symlink;
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
@@ -507,4 +505,31 @@ fn kiro_agent_inspection_refuses_symlinks_and_bounded_scan_overflow() {
             .headless
             .allowed
     );
+}
+
+#[test]
+fn kiro_mcp_admission_uses_structure_without_provider_name_policy() {
+    use ahu::native_admission::{Locations, inspect_in};
+    use serde_json::json;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let locations = Locations {
+        home: Some(home.path().canonicalize().unwrap()),
+        ..Default::default()
+    };
+    let agents = repo.path().join(".kiro/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    for command in ["cmux", "CMUX", "other-provider"] {
+        let profile =
+            json!({"name":"fixture","mcpServers":{"fixture":{"command":command,"args":[]}}});
+        std::fs::write(agents.join("fixture.json"), profile.to_string()).unwrap();
+        let status = inspect_in(&repo.path().canonicalize().unwrap(), "kiro", &locations);
+        assert!(status.headless.allowed, "{command}: {status:?}");
+        assert!(
+            status
+                .gaps
+                .iter()
+                .any(|gap| gap.contains("arbitrary MCP subprocess behavior is not inspected"))
+        );
+    }
 }

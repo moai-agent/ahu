@@ -6,7 +6,8 @@ description: ahu architecture and workflow explanation
 
 ahu is cross-harness configuration management for agent sessions. It launches
 agents that a repository defines into separate Git worktrees
-and runs interactive sessions in cmux or unattended headless attempts.
+and runs interactive sessions in the current terminal by default, through an
+explicitly selected session-host plugin, or as unattended headless attempts.
 
 ahu is not an agent harness. Claude Code, Codex, the Antigravity CLI, OpenCode and Kiro CLI
 run the agent loop and own the conversation. ahu chooses the configured harness, model, instructions and
@@ -18,12 +19,29 @@ An agent's harness, model, and instructions live in the repository, so changing
 how it behaves is a reviewable change like any other. A launch uses exactly that
 configuration or it fails.
 
+## Keep integrations outside core
+
+Use skills for workflows that agents can perform with an existing CLI. Use an
+optional executable plugin when ahu needs a machine-readable integration contract.
+Core owns harness launch, task/attempt state, worktrees, MCP coordination and
+bounded telemetry/evaluation. Plugins own provider API calls, credentials, terminal
+workspace mappings and external issue transitions. Neither cmux nor GitHub is a
+core dependency; headless and current-terminal execution require neither.
+
+The cmux package implements generic Host V2; GitHub workflows use skills and
+optional one-shot executable actions. These are distinct contracts, not a
+universal provider framework. Generic task observation does not grant task
+mutation or automatic tracker synchronization. Do not add provider-name branches,
+a core tracker client, or a second built-in path for an optional plugin.
+See `docs/plugin-architecture.md` for the ownership and security boundaries.
+
 ## Delegation follows the entrypoint
 
 Outside ahu, sub-agents and fan out use the current harness's native
 sub-agent features. Inside ahu, registered assignments use registered ahu
 agents, each using its configured harness and model in a separate worktree.
-Headless children inherit that backend; interactive children use cmux.
+Headless children inherit that backend; interactive children use the selected
+session host or current terminal.
 Use `ahu @name 'assignment text'` for a direct launch, or
 `ahu @name --prompt-file /path/to/task.txt` for a file-backed assignment.
 The direct form also accepts `--prompt`; without a prompt, `ahu @name` opens
@@ -38,21 +56,23 @@ harness or its shell tools from starting other processes.
 
 ## What ahu needs
 
-- **cmux**, required for interactive task sessions; headless execution needs no cmux.
+- **A session host**, optional. Interactive work defaults to the current
+  terminal; cmux is available through an explicitly enabled plugin. Headless
+  execution needs no session host.
 - **A supported harness**, installed and signed in by you: Claude Code, Codex, the Antigravity CLI, OpenCode, or Kiro CLI (V3).
 - **Git**: every task gets its own branch and worktree.
 
-ahu creates the repository group and the per-task workspace through cmux, and
-interactive sessions require that connection. Headless tasks and local inspection do
-not. The harness is what actually runs the
+When selected, the cmux plugin creates repository groups and per-task workspaces.
+Without a session-host plugin, interactive tasks run in the current terminal.
+Headless tasks and local inspection need no terminal plugin. The harness is what actually runs the
 agent. `ahu setup` detects installed harnesses, offers available models,
 registers development agents and installs supported skills/MCP configuration.
 Harness installation and sign-in remain separate; ahu does not ship a harness
 or manage its agent-model API key.
-Git and default cmux lookup skip empty and relative PATH entries and use
-canonical executables outside Git working trees. Candidate ancestry is
-inspected without running candidate Git. Explicit AHU_CMUX_BIN retains
-user-selected command semantics; these checks are not OS isolation.
+Core Git lookup skips empty and relative PATH entries and uses canonical
+executables outside Git working trees. Candidate ancestry is inspected without
+running candidate Git. Terminal executable lookup and configuration belong to
+the selected plugin; these checks are not OS isolation.
 
 ahu does not use an agent-selection or system-prompt flag. A native lookup
 by name does not bind the selection to the file ahu read and digested.
@@ -79,12 +99,12 @@ design and data handling, and `docs/typed-decisions.md` for provider configurati
    The harness and model are fixed by flags; the instructions are delivered as
    prompt text, which ahu reports as a gap rather than as enforcement.
 2. One project policy. Rankings, cadence, and the fixed catalog revision are the same
-   for every ahu user in the project. There are no personal profiles and no
-   command-line switches that change them. A machine that cannot meet the policy
+   for every ahu user in the project. Personal profiles and command-line switches cannot change them. A machine that cannot meet the policy
    reports a diagnostic; it does not get different behaviour.
 3. Harness-native conventions win. Skills, memory, settings, and agent
    definitions stay where the harness wants them. ahu references them in place
-   and never reorganises or rewrites them.
+   and does not reorganise them. The narrow exception is native folder trust for
+   explicitly authorized interactive auto tasks, described below.
 4. Say what you cannot do. Where ahu cannot see a context source or cannot
    enforce an identity, it reports that rather than implying a guarantee.
 
@@ -92,7 +112,7 @@ design and data handling, and `docs/typed-decisions.md` for provider configurati
 
 ```mermaid
 flowchart TD
-    A["ahu (in a Git repo)"] --> B{".agents/ahu/config.toml?"}
+    A["ahu (in a Git repo)"] --> B{".agents/ahu/config.md?"}
     B -- no --> C["First-run setup:<br/>project-agreed harness order,<br/>model order, catalog pin"]
     C --> D
     B -- yes --> D["Launcher"]
@@ -114,25 +134,24 @@ flowchart TD
     N --> O["Write task record + prompt.txt"]
     O --> U{"Execution backend"}
     U -- headless --> V["Supervisor: batch argv,<br/>primary-owned coordination"]
-    U -- interactive --> P["cmux: find-or-create repository group"]
-    P --> Q["cmux: child workspace in that group"]
-    Q --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
+    U -- interactive --> P["Current terminal or selected session-host plugin"]
+    P --> R["Shell runs:<br/>ahu run-task --task-dir '...'"]
     R --> S["Re-derive argv, compare to record"]
     S --> T["supervise configured harness<br/>model flags + one composed prompt argument"]
 ```
 
 ## Identity and selection
 
-Only `.agents/ahu/agents/<name>.md` makes an agent launchable. Definitions found
+Only `.agents/ahu/agents/<name>.md` makes an agent available for launch. Definitions found
 anywhere else are onboarding candidates, never implicit registrations: a skill is
-not an agent, and AGENTS.md is not an agent registry. A manifest names an explicit
+not an agent, and `AGENTS.md` is not an agent registry. A manifest names an explicit
 harness, an exact model identifier (never an alias), and a semantic version, and
 either carries its instructions in its body or references a native definition in
 place. A nonempty parsed frontmatter model other than inherit must match; ahu
 does not rewrite either file.
 
-At launch ahu reads that file, records two digests of it — one over the whole
-file, one over exactly the instruction text it will deliver — and puts the
+At launch ahu reads that file, records two digests of it: one over the whole
+file and one over exactly the instruction text it delivers. It puts the
 instruction text into the harness's prompt, ahead of the task prompt. It passes
 no agent-selection flag on any harness. The harness and the model are fixed by
 real flags; the identity is not, and ahu reports that as a gap rather than a
@@ -140,7 +159,7 @@ control.
 
 Without an @agent, ahu walks the project's harness order, takes the first
 with an available adapter and nonempty project model ranking, and selects
-that ranking's first model. There is no catalog fallback or named identity. Local
+that ranking's first model. No catalog fallback or named identity applies. Local
 prerequisites are checked after the pair is resolved, so a missing installation is
 a diagnostic for that machine, never a different selection for that user.
 
@@ -155,7 +174,7 @@ flowchart LR
     R --> N
     N -->|"one argv element"| C["configured harness<br/>contract + instructions + prompt"]
 
-    S["cmux startup command<br/>(shell-interpreted)"] --> R
+    S["Session-host startup command<br/>(provider transport)"] --> R
     Q["Only ahu's own exe path<br/>+ task dir, single-quoted"] --> S
 
     style F fill:#e8f4ea,stroke:#3a7d44
@@ -163,8 +182,9 @@ flowchart LR
     style N fill:#fdf1e7,stroke:#b5651d
 ```
 
-The cmux startup command is shell-interpreted, so it contains only ahu's own
-executable path and task directory, both single-quoted. The prompt is written to a
+The session host receives a startup command string containing ahu’s executable
+path and task directory, each shell-quoted by core. A host that uses a shell must
+preserve that quoting; the provider transport belongs to the plugin. The prompt is written to a
 file and handed to the harness as one argument vector element. Shell syntax inside
 a prompt is therefore delivered literally and never evaluated.
 
@@ -203,7 +223,7 @@ flowchart TB
 Every task gets a unique id, a fresh branch `ahu/<agent>/<task-id>`, and a fresh
 worktree under .worktrees/ in the primary checkout. The worktree starts at the invoking checkout's HEAD. Before planning the launch,
 ahu requires every recognized context input to be tracked and clean and checks
-that `ahu.lock` matches. Operators update and commit the lock with context edits;
+that `.agents/ahu/lock.md` matches. Operators update and commit the lock with context edits;
 ahu never stages or commits. Scan skips and depth limits still bound coverage,
 and harness-managed or global context remains outside the repository lock.
 
@@ -235,7 +255,7 @@ flowchart LR
     style unseen fill:#fdf1e7,stroke:#b5651d
 ```
 
-`ahu.lock` records committed recognized context; it does not prove a harness loaded every source.
+`.agents/ahu/lock.md` records committed recognized context; it does not prove a harness loaded every source.
 and ends with what ahu cannot see. `available` means the harness can discover a
 source, not that its contents reached the model. The lock is never described as
 proof that the harness loaded the source.
@@ -252,14 +272,10 @@ travels into the task worktree with executable bits preserved; the harness
 decides whether and when hooks run. Local settings can travel without being
 shared policy. User and managed settings remain at their native locations.
 Hooks outside project policy raise the consistency warning below.
-ahu cmux status, doctor and launch disclosures share native integration evidence.
-Registration, activation, isolation and live conformance are separate facts.
-Explicit ahu cmux install --harness ID delegates fixed native installer argv;
---dry-run previews it. Native confirmations, scope and exit status are preserved.
-The installer mapping is reviewed only for cmux 0.64.22 build ddd4a01bc.
-Claude uses cmux Settings > Automation, with no native installer operation.
-Reviewed OpenCode Feed lacks disable/surface guards and refuses headless use.
-Unknown components and builds stay unknown. Static inspection is not live testing.
+Session-host installation and native terminal integrations belong to the selected
+external plugin and its documentation. Core has no `ahu cmux` command and does
+not install or inspect cmux integrations. Generic discovery, activation and live
+provider conformance are separate facts. Static inspection is not live testing.
 
 ## Versions and drift
 
@@ -279,7 +295,7 @@ says so rather than reporting one number that could mean either.
 `ahu @name --headless` uses batch execution without cmux or a PTY. Add --background
 to return after supervisor startup; otherwise execution stays in the foreground.
 The preview names the observed CLI version, exact command, timeout and gaps.
-Installed versions float unless the project pins one. Known cmux wrappers,
+Installed versions float unless the project pins one. Unverified executable wrappers,
 missing adapters, version-pin mismatches, and unresolved isolation fail without
 a fallback. Specialized native controls remain version-specific.
 Minimal coordination belongs to the primary checkout's owner-only .ahu/state/.
@@ -298,7 +314,7 @@ relative targets, or detect missing events. Final stream observations are checke
 including cancellation of registered descendants. This is not a sandbox.
 resume explicitly continues its recorded native session, and
 cancel requests termination of the task and its recorded ahu descendants; an
-interactive (cmux) task is stopped by its run-task parent. Confirmed cancellation
+interactive task is stopped by its run-task parent. Confirmed cancellation
 closes its workspace; an unconfirmed request leaves it open. Work and records stay.
 Earlier attempt artifacts survive resume. Configuration or executable drift
 refuses resume. A child cannot resume after its owning parent attempt terminates;
@@ -338,6 +354,20 @@ commands require a vetted environment; ahu's backend itself does not use cmux.
 Explicit cleanup removes recognized old captures and bounded requests, retaining
 structured results, frozen inputs, native stores, branches and worktrees.
 
+## Task-scoped native folder trust
+
+Interactive auto assignments authorize trust for their exact canonical ahu-owned
+worktree in Claude Code, Codex and Antigravity. Preparation runs after task verification
+and before native startup probes. Preview, prompt, accept-edits and arbitrary
+checkouts never grant this trust. ahu does not grant parent or blanket trust,
+relocate native homes, or replace unrelated native fields. A small owned receipt
+lets `ahu remove` undo only ahu-added trust, including after crash or cancellation;
+pre-existing trust and native project history remain. Unsafe or malformed native
+state refuses startup/cleanup. A per-home lock coordinates ahu writers only;
+native writes are not an atomic cooperating transaction. See the supported
+schema evidence and recovery limits in `docs/reference.md#native-workspace-trust`.
+This explicit task-trust exception does not authorize general native trust edits.
+
 ## Account checks and cooperative approval
 
 Local auth profiles opt a project into account checks before launch/startup and
@@ -362,7 +392,8 @@ An interactive task's record and prompt live in `.ahu/state/` in its worktree, c
 by ahu at launch and passed to the session, so removing that worktree removes
 them with it. `ahu tasks`, `task` and `focus` find them by looking through
 `.worktrees/`, from the primary checkout or from any sibling. The launch lock,
-cmux group mapping, headless coordination and task index belong to the primary;
+headless coordination and task index belong to the primary; plugin-specific
+workspace/group mappings belong to the selected session-host plugin;
 `.ahu/` ignores
 itself in Git. Nested sessions discover state from their working checkout;
 coordination stays in the primary checkout. Legacy lookup reads the primary and
@@ -370,7 +401,7 @@ invoking plain-checkout stores; managed worktree stores always enforce ownership
 Use ahu --repo PATH before the command to select a checkout explicitly.
 AHU_REPO_ROOT, AHU_STATE_DIR, AHU_RUNTIME_DIR and AHU_TASK_INDEX_DIR are not selectors.
 Old external stores are read in place; legacy-lookup.json names additional roots.
-There is no migration or global task scope across unrelated repositories.
+Migration and global task scope across unrelated repositories are unsupported.
 Task commands accept ahu:task:<id>, bare IDs and unique prefixes consistently.
 Message arguments after the task reference are literal inbox payload.
 The run-task owner supervises the child and lends/restores terminal foreground.
@@ -379,7 +410,8 @@ Terminal outcomes persist even if foreground restoration fails.
 Existing state symlinks are refused; path checks and mutable record
 digests do not protect against concurrent hostile host processes. Policy never lives
 there. Each record freezes the launched
-identity, digests, base commit, branch, worktree, and cmux ids, so editing an agent
+identity, digests, base commit, branch, worktree, and optional session-host
+identity with an opaque session reference, so editing an agent
 later changes the next launch while a running task keeps what it started with.
 Misplaced records in managed stores are reported as notes, not accepted or migrated.
 After legacy lookup, recordless worktrees are reported as incomplete. Failed launch

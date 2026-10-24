@@ -63,6 +63,7 @@ mod tests {
         json!({"resourceSpans":[{"resource":{"attributes":[
             attribute("ahu.release.id",json!("candidate")), attribute("ahu.task.id",json!("task-one")),
             attribute("ahu.task.attempt",json!("1")), attribute("ahu.harness",json!(harness)), attribute("ahu.model",json!("model")),
+            attribute("ahu.execution.mode",json!("headless")),
             attribute("service.name",json!("ahu-mcp")), attribute("service.version",json!("0.10.0"))
         ]},"scopeSpans":[{"spans":[{"name":name,"traceId":"11111111111111111111111111111111","spanId":"2222222222222222","attributes":extra}]}]}]})
     }
@@ -141,8 +142,14 @@ mod tests {
             assert_eq!(group["metrics"]["ahu.tokens.input"]["observed_attempts"], 0);
         }
         let mut r = Report::new(vec![selected("codex", "interactive")], "candidate").unwrap();
-        r.consume(&export("codex", "ahu.mcp.tool.call", vec![]))
-            .unwrap();
+        let mut event = export("codex", "ahu.mcp.tool.call", vec![]);
+        event["resourceSpans"][0]["resource"]["attributes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|attribute| attribute["key"] == "ahu.execution.mode")
+            .unwrap()["value"]["stringValue"] = json!("interactive");
+        r.consume(&event).unwrap();
         let out = r.finish();
         assert_eq!(
             out["attempts"][0]["coverage"],
@@ -192,12 +199,18 @@ mod tests {
             ("no_response", "unknown"),
         ] {
             let mut r = Report::new(vec![selected("codex", "interactive")], "candidate").unwrap();
-            r.consume(&export(
+            let mut event = export(
                 "codex",
                 "ahu.mcp.tool.call",
                 vec![attribute("ahu.mcp.outcome", json!(outcome))],
-            ))
-            .unwrap();
+            );
+            event["resourceSpans"][0]["resource"]["attributes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|attribute| attribute["key"] == "ahu.execution.mode")
+                .unwrap()["value"]["stringValue"] = json!("interactive");
+            r.consume(&event).unwrap();
             let out = r.finish();
             assert_eq!(out["attempts"][0]["mcp_tool_calls"], 1);
             assert_eq!(out["attempts"][0]["mcp_tool_outcomes"][field], 1);
@@ -278,6 +291,28 @@ mod tests {
             r.consume(&export("codex", "ahu.mcp.tool.call", vec![]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn missing_or_mismatched_execution_mode_is_not_attributed_to_selection() {
+        for mode_attribute in [None, Some("interactive")] {
+            let mut event = export("codex", "ahu.harness.run", vec![]);
+            let attributes = event["resourceSpans"][0]["resource"]["attributes"]
+                .as_array_mut()
+                .unwrap();
+            attributes.retain(|attribute| attribute["key"] != "ahu.execution.mode");
+            if let Some(mode) = mode_attribute {
+                attributes.push(attribute("ahu.execution.mode", json!(mode)));
+            }
+            let mut report = Report::new(vec![selected("codex", "headless")], "candidate").unwrap();
+            report.consume(&event).unwrap();
+            let output = report.finish();
+            assert_eq!(
+                output["attempts"][0]["coverage"],
+                "conflicting_observations"
+            );
+            assert_eq!(output["attempts"][0]["spans"], 0);
+        }
     }
     #[cfg(unix)]
     #[test]
@@ -541,7 +576,7 @@ impl Report {
             }
             if string(&a, "ahu.harness") != Some(&s.harness)
                 || string(&a, "ahu.model") != Some(&s.model)
-                || string(&a, "ahu.execution.mode").is_some_and(|mode| mode != s.mode)
+                || string(&a, "ahu.execution.mode") != Some(&s.mode)
             {
                 self.rows[index].conflict = true;
                 continue;

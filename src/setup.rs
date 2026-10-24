@@ -274,6 +274,13 @@ fn run_detected_with_native(
     // This remains a shared, explicit choice, separate from the per-harness
     // developer agents created below.
     let loaded = config::load(&repo.root)?;
+    if crate::util::resolve_existing_within(&repo.root, crate::context_lock::LEGACY_LOCK_PATH)?
+        .is_some()
+    {
+        return Err(Error::new(
+            "legacy context lock requires explicit `ahu migrate --preview` and `ahu migrate --apply` before setup",
+        ));
+    }
     let (new_config, existing_config) = if loaded.is_none() {
         let Some(config) = configure_project(console)? else {
             console.say("Cancelled. Nothing was changed.\n")?;
@@ -369,7 +376,7 @@ fn run_detected_with_native(
     if let Some(config) = new_config {
         writes.push((
             safe_new_path(&repo.root, config::CONFIG_RELATIVE_PATH)?,
-            config::render(&config).into_bytes(),
+            config::try_render(&config)?.into_bytes(),
         ));
     }
     for &(name, content) in crate::mcp::BUNDLED_SKILLS {
@@ -754,7 +761,10 @@ fn add_codex_server(root: &Path, writes: &mut Vec<(PathBuf, Vec<u8>)>) -> Result
                 ]
             });
         if command_matches && args_match {
-            if let Some(updated) = codex_env_forwarding(&existing, &parsed)? {
+            let original = existing.clone();
+            let updated = codex_env_forwarding(&existing, &parsed)?.unwrap_or(existing);
+            let updated = add_codex_local_tool_approvals(&updated)?;
+            if updated != original {
                 writes.push((path, updated.into_bytes()));
             }
             return Ok(());
@@ -777,8 +787,54 @@ fn add_codex_server(root: &Path, writes: &mut Vec<(PathBuf, Vec<u8>)>) -> Result
                 .collect()
         )
     ));
+    output = add_codex_local_tool_approvals(&output)?;
     writes.push((path, output.into_bytes()));
     Ok(())
+}
+
+/// Store the safe local coordination-tool approvals in project config. Passing
+/// these as CLI `-c` overrides breaks Codex 0.163.0's interactive TUI bootstrap.
+/// Existing per-tool policy is always respected, including an explicit prompt
+/// or disabled setting.
+fn add_codex_local_tool_approvals(existing: &str) -> Result<String> {
+    let parsed: toml::Value = toml::from_str(existing)
+        .map_err(|error| Error::new(format!("cannot safely update .codex/config.toml: {error}")))?;
+    let tools = parsed
+        .get("mcp_servers")
+        .and_then(|value| value.get("ahu"))
+        .and_then(|value| value.get("tools"));
+    if tools.is_some_and(|value| !value.is_table()) {
+        return Err(Error::new(
+            ".codex/config.toml ahu MCP tools setting must be a table",
+        ));
+    }
+    for tool in crate::harness::codex::AUTO_LOCAL_MCP_TOOLS {
+        if tools
+            .and_then(|value| value.get(*tool))
+            .is_some_and(|value| !value.is_table())
+        {
+            return Err(Error::new(format!(
+                ".codex/config.toml ahu MCP tool {tool} setting must be a table"
+            )));
+        }
+    }
+    let missing: Vec<_> = crate::harness::codex::AUTO_LOCAL_MCP_TOOLS
+        .iter()
+        .filter(|tool| tools.and_then(|value| value.get(**tool)).is_none())
+        .collect();
+    if missing.is_empty() {
+        return Ok(existing.to_owned());
+    }
+    let mut output = existing.to_owned();
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    for tool in missing {
+        output.push_str(&format!(
+            "\n[mcp_servers.ahu.tools.{tool}]\napproval_mode = \"approve\"\n"
+        ));
+    }
+    Ok(output)
 }
 
 fn verify_client_configurations(root: &Path, detected: &[Detected]) -> Result<()> {
@@ -1242,11 +1298,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut plan = Vec::new();
         add_codex_server(root.path(), &mut plan).unwrap();
-        assert!(
-            String::from_utf8(plan.pop().unwrap().1)
-                .unwrap()
-                .contains("[mcp_servers.ahu]")
-        );
+        let generated = String::from_utf8(plan.pop().unwrap().1).unwrap();
+        assert!(generated.contains("[mcp_servers.ahu]"));
+        let generated_value: toml::Value = toml::from_str(&generated).unwrap();
+        for tool in crate::harness::codex::AUTO_LOCAL_MCP_TOOLS {
+            assert_eq!(
+                generated_value["mcp_servers"]["ahu"]["tools"][*tool]["approval_mode"].as_str(),
+                Some("approve")
+            );
+        }
 
         std::fs::create_dir_all(root.path().join(".codex")).unwrap();
         let path = root.path().join(".codex/config.toml");
@@ -1262,6 +1322,32 @@ mod tests {
         let mut idempotent = Vec::new();
         add_codex_server(root.path(), &mut idempotent).unwrap();
         assert!(idempotent.is_empty());
+
+        // Existing per-tool policy is respected while missing Ahu tools get
+        // the project-scoped defaults required for unattended coordination.
+        std::fs::write(
+            &path,
+            "[mcp_servers.ahu]\ncommand='ahu'\nargs=['mcp','serve']\n[mcp_servers.ahu.tools.ahu_agents_list]\napproval_mode='prompt'\n",
+        )
+        .unwrap();
+        let mut plan = Vec::new();
+        add_codex_server(root.path(), &mut plan).unwrap();
+        let merged = String::from_utf8(plan.pop().unwrap().1).unwrap();
+        let merged_value: toml::Value = toml::from_str(&merged).unwrap();
+        assert_eq!(
+            merged_value["mcp_servers"]["ahu"]["tools"]["ahu_agents_list"]["approval_mode"]
+                .as_str(),
+            Some("prompt")
+        );
+        for tool in crate::harness::codex::AUTO_LOCAL_MCP_TOOLS
+            .iter()
+            .filter(|tool| **tool != "ahu_agents_list")
+        {
+            assert_eq!(
+                merged_value["mcp_servers"]["ahu"]["tools"][*tool]["approval_mode"].as_str(),
+                Some("approve")
+            );
+        }
 
         std::fs::write(&path, "[mcp_servers.ahu]\ncommand='other'\n").unwrap();
         assert!(
@@ -2346,6 +2432,7 @@ esac
                 vec![crate::catalog::models_for("codex")[0].model.into()],
             )]),
             knowledge: Default::default(),
+            headless: Default::default(),
             telemetry: Default::default(),
         }
     }

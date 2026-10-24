@@ -68,6 +68,11 @@ pub fn plan(path: &Path, executable: &Path) -> Result<Plan> {
         if normalized.get("env") == Some(&serde_json::json!({})) {
             normalized.as_object_mut().unwrap().remove("env");
         }
+        // Native clients may write an explicit enabled state. Treat only the
+        // boolean false as the default; preserve all original bytes on success.
+        if normalized.get("disabled") == Some(&serde_json::json!(false)) {
+            normalized.as_object_mut().unwrap().remove("disabled");
+        }
         if normalized != wanted {
             return Err(Error::new(
                 "Antigravity native MCP configuration already defines a different ahu server; setup will not replace it",
@@ -176,6 +181,31 @@ mod tests {
         );
         assert!(!plan(&path, exe).unwrap().apply().unwrap());
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn native_setup_preserves_explicit_enabled_entry_but_refuses_disabled_or_unknown_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gemini/config/mcp_config.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let exe = Path::new("/usr/bin/true");
+        for disabled in [
+            serde_json::json!(false),
+            serde_json::json!(true),
+            serde_json::json!("false"),
+            serde_json::Value::Null,
+        ] {
+            let original = serde_json::to_vec_pretty(&serde_json::json!({
+                "mcpServers": {"ahu": {"command": exe, "args": ["mcp", "serve"], "env": {}, "disabled": disabled}}
+            })).unwrap();
+            std::fs::write(&path, &original).unwrap();
+            if disabled == serde_json::json!(false) {
+                assert!(!plan(&path, exe).unwrap().apply().unwrap());
+            } else {
+                assert!(plan(&path, exe).is_err());
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
     }
 
     #[test]

@@ -9,6 +9,7 @@ use opentelemetry_proto::tonic::{
 use prost::Message;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::path::Path;
 use std::process::Command;
 use std::sync::{
     Arc, Mutex,
@@ -22,6 +23,8 @@ struct Capture {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
+
+type CapturedPluginSpan = (Vec<KeyValue>, Vec<KeyValue>, Vec<u8>, Vec<u8>);
 
 impl Capture {
     fn wait_for_runs(&self, expected: usize) {
@@ -49,6 +52,32 @@ impl Capture {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn plugin_span(&self) -> Option<CapturedPluginSpan> {
+        let exports = self.exports.lock().unwrap();
+        for export in exports.iter() {
+            for resource in &export.resource_spans {
+                for scope in &resource.scope_spans {
+                    if let Some(span) = scope
+                        .spans
+                        .iter()
+                        .find(|span| span.name == "ahu.plugin.invoke")
+                    {
+                        return Some((
+                            resource
+                                .resource
+                                .as_ref()
+                                .map_or_else(Vec::new, |resource| resource.attributes.clone()),
+                            span.attributes.clone(),
+                            span.trace_id.clone(),
+                            span.parent_span_id.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn start() -> Self {
@@ -129,6 +158,116 @@ fn attribute<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a AttributeV
         .find(|entry| entry.key == key)
         .and_then(|entry| entry.value.as_ref())
         .and_then(|value| value.value.as_ref())
+}
+
+#[test]
+fn plugin_invocation_exports_payload_free_release_attributed_span() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/text-stats");
+    let digest = ahu::plugin_install::digest(&package).unwrap();
+    let binding = ahu::plugin_binding::Binding {
+        schema_version: 1,
+        id: "text-stats".into(),
+        version: "1.0.0".into(),
+        source: ahu::plugin_binding::Source {
+            repository: package.to_str().unwrap().into(),
+            revision: digest.clone(),
+            sha256: digest,
+            subdirectory: None,
+            kind: ahu::plugin_binding::SourceKind::Local,
+        },
+        compatibility: ahu::plugin_binding::Compatibility {
+            ahu: env!("CARGO_PKG_VERSION").into(),
+            host_api: 1,
+        },
+        enabled: true,
+        grants: vec![ahu::plugin_binding::Grant::Execute],
+    };
+    let document = ahu::okf::Document::new("ahu:plugin-binding", &binding, "")
+        .unwrap()
+        .render()
+        .unwrap();
+    repo.write(".agents/ahu/plugins/text-stats.md", &document);
+    repo.commit("synthetic plugin binding");
+
+    let install = common::ahu()
+        .current_dir(repo.path())
+        .args(["plugins", "install", "text-stats"])
+        .output()
+        .unwrap();
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let input = repo.write(
+        "plugin-input.json",
+        &serde_json::json!({
+            "text": "synthetic payload must not be exported"
+        })
+        .to_string(),
+    );
+    let capture = Capture::start();
+    let invocation = common::ahu()
+        .current_dir(repo.path())
+        .env("AHU_EVAL_OTEL_ENDPOINT", &capture.endpoint)
+        .env("OTEL_RESOURCE_ATTRIBUTES", "ahu.release.id=release-fixture")
+        .args([
+            "plugins",
+            "invoke",
+            "text-stats",
+            "--input-file",
+            input.file_name().unwrap().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        invocation.status.success(),
+        "{}",
+        String::from_utf8_lossy(&invocation.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&invocation.stdout).unwrap();
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["result"],
+        serde_json::json!({"characters": 38, "words": 6})
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (resource_attributes, span_attributes, trace_id, parent_span_id) = loop {
+        if let Some(attributes) = capture.plugin_span() {
+            break attributes;
+        }
+        assert!(Instant::now() < deadline, "plugin span was not exported");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        string_attribute(&resource_attributes, "ahu.release.id").as_deref(),
+        Some("release-fixture")
+    );
+    assert_eq!(
+        string_attribute(&span_attributes, "ahu.plugin.id").as_deref(),
+        Some("text-stats")
+    );
+    assert_eq!(
+        string_attribute(&span_attributes, "ahu.plugin.mode").as_deref(),
+        Some("json")
+    );
+    assert_eq!(
+        string_attribute(&span_attributes, "ahu.plugin.outcome").as_deref(),
+        Some("succeeded")
+    );
+    assert_eq!(trace_id.len(), 16);
+    assert!(parent_span_id.is_empty());
+    assert!(
+        span_attributes
+            .iter()
+            .all(|attribute| !attribute.key.contains("body")
+                && !attribute.key.contains("payload")
+                && !attribute.key.contains("input")
+                && !attribute.key.contains("path"))
+    );
 }
 
 fn string_attribute(attributes: &[KeyValue], key: &str) -> Option<String> {

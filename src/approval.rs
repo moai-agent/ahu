@@ -188,7 +188,7 @@ fn request_for_task(
         return Err(error);
     }
     drop(state_lock);
-    notify_cmux(repo, &record, "Waiting for approval");
+    notify_session(repo, &record, "Waiting for approval");
     let deadline = Instant::now() + max_wait;
     let outcome = (|| {
         loop {
@@ -204,7 +204,7 @@ fn request_for_task(
             if cancellation.is_some_and(|path| path.exists()) {
                 crate::task::set_state_locked(task_dir, crate::task::TaskState::Running)?;
                 drop(state_lock);
-                notify_cmux(repo, &record, "Running");
+                notify_session(repo, &record, "Running");
                 return Err(Error::new(
                     "approval request was cancelled by the MCP client",
                 ));
@@ -220,7 +220,7 @@ fn request_for_task(
                 if response.decision == "approve" {
                     crate::task::set_state_locked(task_dir, crate::task::TaskState::Running)?;
                     drop(state_lock);
-                    notify_cmux(repo, &record, "Running");
+                    notify_session(repo, &record, "Running");
                     return Ok(json!({"approved":true,"request_id":request.request_id}));
                 }
                 return Err(Error::new("operator rejected the requested operation"));
@@ -228,7 +228,7 @@ fn request_for_task(
             if Instant::now() >= deadline {
                 decide_locked(repo, task_dir, &request.task_id, false)?;
                 drop(state_lock);
-                notify_cmux(repo, &record, "Approval rejected");
+                notify_session(repo, &record, "Approval rejected");
                 return Err(Error::new("approval request expired after 30 minutes"));
             }
             drop(state_lock);
@@ -346,7 +346,7 @@ pub fn decide(
     let request = decide_locked(repo, dir, expected_task_id, approve)?;
     let record = crate::task::load(dir)?;
     drop(lock);
-    notify_cmux(
+    notify_session(
         repo,
         &record,
         if approve {
@@ -399,12 +399,12 @@ fn decide_locked(
     Ok(request)
 }
 
-fn notify_cmux(repo: &crate::git::Repo, record: &crate::task::TaskRecord, status: &str) {
-    if record.cmux_workspace_id.is_none() {
+fn notify_session(repo: &crate::git::Repo, record: &crate::task::TaskRecord, status: &str) {
+    if record.session_ref.is_none() {
         return;
     }
-    if let Ok(client) = crate::cmux::Cmux::discover()
-        && let manager = crate::cmux::repository::RepositoryManager::new(&client, repo)
+    if let Ok(client) = crate::interactive::discover_for_record(repo, record)
+        && let manager = crate::interactive::session::SessionManager::new(client.as_ref(), repo)
     {
         let _ = manager.set_task_status(record, status);
     }
@@ -474,9 +474,8 @@ mod tests {
             harness_executable: "/synthetic/codex".into(),
             enforcement: adapter.enforcement("gpt-6", Default::default()).unwrap(),
             reliability_warning: None,
-            cmux_group_id: None,
-            cmux_workspace_id: None,
-            cmux_window_id: None,
+            session_host: None,
+            session_ref: None,
             state: crate::task::TaskState::WaitingForApproval,
         };
         crate::task::save(&dir, &record, "approval fixture").unwrap();

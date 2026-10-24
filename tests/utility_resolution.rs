@@ -23,7 +23,6 @@ struct Fixture {
     bin: PathBuf,
     alias: PathBuf,
     git_marker: PathBuf,
-    cmux_marker: PathBuf,
 }
 
 impl Fixture {
@@ -36,13 +35,10 @@ impl Fixture {
         let outside = tempfile::tempdir().unwrap();
         let bin = common::fake_harness(outside.path(), &outside.path().join("harness-argv"));
         let git_marker = outside.path().join("repository-git-ran");
-        let cmux_marker = outside.path().join("repository-cmux-ran");
-        for (name, marker) in [("git", &git_marker), ("cmux", &cmux_marker)] {
-            executable(
-                &repo.path().join(name),
-                &format!(": > {}\nexit 1", quote(marker)),
-            );
-        }
+        executable(
+            &repo.path().join("git"),
+            &format!(": > {}\nexit 1", quote(&git_marker)),
+        );
         executable(
             &bin.join("git"),
             &format!(
@@ -50,19 +46,9 @@ impl Fixture {
                 quote(&outside.path().join("external-git-ran"))
             ),
         );
-        // Stop launch/doctor at a synthetic cmux failure, never a live session.
-        executable(
-            &bin.join("cmux"),
-            &format!(
-                ": > {}\nprintf 'synthetic cmux unavailable\\n' >&2\nexit 1",
-                quote(&outside.path().join("external-cmux-ran"))
-            ),
-        );
         let alias = outside.path().join("aliases");
         std::fs::create_dir(&alias).unwrap();
-        for name in ["git", "cmux"] {
-            symlink(repo.path().join(name), alias.join(name)).unwrap();
-        }
+        symlink(repo.path().join("git"), alias.join("git")).unwrap();
         symlink(repo.path(), outside.path().join("directory-alias")).unwrap();
         repo.commit("fixture");
         Self {
@@ -71,7 +57,6 @@ impl Fixture {
             bin,
             alias,
             git_marker,
-            cmux_marker,
         }
     }
 
@@ -81,7 +66,6 @@ impl Fixture {
             .current_dir(cwd)
             .env("PATH", path)
             .env("HOME", self.outside.path())
-            .env_remove("AHU_CMUX_BIN")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -90,10 +74,7 @@ impl Fixture {
     }
 
     fn assert_unexecuted(&self, result: &Output) {
-        assert!(
-            !self.git_marker.exists() && !self.cmux_marker.exists(),
-            "repository utility ran: {result:?}"
-        );
+        assert!(!self.git_marker.exists(), "repository Git ran: {result:?}");
     }
 }
 
@@ -127,12 +108,17 @@ fn repository_utilities_are_excluded_before_discovery_and_launch() {
                 .unwrap();
             fixture.assert_unexecuted(&result);
             assert!(fixture.outside.path().join("external-git-ran").exists());
-            if args == ["agents"] || args.contains(&"--dry-run") {
+            if args == ["agents"]
+                || args.contains(&"--dry-run")
+                || (args == ["doctor"])
+                || (args.first() == Some(&"@sable"))
+            {
                 assert!(result.status.success(), "{args:?}: {result:?}");
+                if args.first() == Some(&"@sable") && !args.contains(&"--dry-run") {
+                    assert!(fixture.outside.path().join("harness-argv").exists());
+                }
             } else {
                 assert!(!result.status.success(), "{args:?}: {result:?}");
-                assert!(fixture.outside.path().join("external-cmux-ran").exists());
-                std::fs::remove_file(fixture.outside.path().join("external-cmux-ran")).unwrap();
             }
             std::fs::remove_file(fixture.outside.path().join("external-git-ran")).unwrap();
         }
@@ -158,7 +144,6 @@ fn bootstrap_inspects_ancestors_and_worktree_git_files() {
             .unwrap();
         fixture.assert_unexecuted(&result);
         assert!(fixture.outside.path().join("external-git-ran").exists());
-        assert!(fixture.outside.path().join("external-cmux-ran").exists());
     }
 }
 
@@ -180,63 +165,7 @@ fn utility_resolution_fails_closed_without_an_external_installation() {
         assert!(!result.status.success());
         let text = String::from_utf8_lossy(&result.stdout);
         assert!(text.contains("git was not found"), "{result:?}");
-        assert!(text.contains("cmux was not found"), "{result:?}");
     }
-}
-
-#[test]
-fn explicit_cmux_overrides_retain_user_selected_command_semantics() {
-    let fixture = Fixture::new();
-    let path = format!(
-        "{}:{}:/usr/bin:/bin",
-        fixture.repo.path().display(),
-        fixture.bin.display()
-    );
-    for override_path in [
-        PathBuf::from("cmux"),
-        PathBuf::from("./cmux"),
-        fixture.repo.path().join("cmux"),
-    ] {
-        let result = fixture
-            .command(fixture.repo.path(), &path)
-            .env("AHU_CMUX_BIN", override_path)
-            .arg("doctor")
-            .output()
-            .unwrap();
-        assert!(!result.status.success());
-        assert!(!fixture.git_marker.exists());
-        assert!(fixture.cmux_marker.exists(), "{result:?}");
-        std::fs::remove_file(&fixture.cmux_marker).unwrap();
-    }
-}
-
-#[test]
-fn default_cmux_pins_the_external_target_across_rpc_calls() {
-    let fixture = Fixture::new();
-    let real = fixture.outside.path().join("cmux-installation");
-    let marker = fixture.outside.path().join("capabilities-ran");
-    executable(
-        &real,
-        &format!(
-            "case \"$1\" in\nping) /bin/ln -sf {} {} ;;\ncapabilities) : > {}; printf '{{\"capabilities\":[]}}\\n' ;;\nesac",
-            quote(&fixture.repo.path().join("cmux")),
-            quote(&fixture.bin.join("cmux")),
-            quote(&marker),
-        ),
-    );
-    std::fs::remove_file(fixture.bin.join("cmux")).unwrap();
-    symlink(real, fixture.bin.join("cmux")).unwrap();
-    let path = format!("{}:/usr/bin:/bin", fixture.bin.display());
-    let result = fixture
-        .command(fixture.repo.path(), &path)
-        .arg("doctor")
-        .output()
-        .unwrap();
-    fixture.assert_unexecuted(&result);
-    assert!(
-        marker.exists(),
-        "the pinned external cmux must receive capabilities: {result:?}"
-    );
 }
 
 #[test]
@@ -257,9 +186,7 @@ fn utility_candidates_in_primary_and_sibling_worktrees_are_never_bootstrap_tools
             .path()
             .join(format!("worktree-aliases-{index}"));
         std::fs::create_dir(&aliases).unwrap();
-        for name in ["git", "cmux"] {
-            symlink(candidate_root.join(name), aliases.join(name)).unwrap();
-        }
+        symlink(candidate_root.join("git"), aliases.join("git")).unwrap();
         let directory_alias = fixture
             .outside
             .path()
@@ -287,16 +214,7 @@ fn utility_candidates_in_primary_and_sibling_worktrees_are_never_bootstrap_tools
                         fixture.outside.path().join("external-git-ran").exists(),
                         "{result:?}"
                     );
-                    if command == "agents" {
-                        assert!(result.status.success(), "{result:?}");
-                    } else {
-                        assert!(
-                            fixture.outside.path().join("external-cmux-ran").exists(),
-                            "{result:?}"
-                        );
-                        std::fs::remove_file(fixture.outside.path().join("external-cmux-ran"))
-                            .unwrap();
-                    }
+                    assert!(result.status.success(), "{result:?}");
                     std::fs::remove_file(fixture.outside.path().join("external-git-ran")).unwrap();
                 }
             }
@@ -366,7 +284,9 @@ fn observed_versions_are_evidence_not_an_allowlist() {
         .collect();
     assert_eq!(
         verified,
-        vec!["1.18.29", "1.18.30", "1.18.31", "1.18.32", "1.18.34"]
+        vec![
+            "1.18.29", "1.18.30", "1.18.31", "1.18.32", "1.18.34", "2.0.32",
+        ]
     );
 
     // The current installed CLI floats by default. Only a missing or
@@ -384,7 +304,7 @@ fn observed_versions_are_evidence_not_an_allowlist() {
     for (harness, expected) in [
         ("claude-code", vec!["2.1.269", "2.1.283", "2.1.288"]),
         ("codex", vec!["0.154.0", "0.157.1", "0.160.0"]),
-        ("antigravity", vec!["1.2.2", "1.2.16"]),
+        ("antigravity", vec!["1.2.2", "1.2.16", "1.4.2"]),
     ] {
         let entry = ahu::catalog::harness(harness).expect("catalog entry");
         let versions: Vec<&str> = entry
@@ -397,44 +317,6 @@ fn observed_versions_are_evidence_not_an_allowlist() {
             versions == expected,
             "{harness} verified versions differ: {}",
             entry.verified_versions
-        );
-    }
-}
-
-#[test]
-fn explicit_cmux_installer_plan_pins_selected_repository_executable() {
-    let fixture = Fixture::new();
-    executable(
-        &fixture.repo.path().join("cmux"),
-        "if [ \"$1\" = --version ]; then echo '0.64.22 (102) [ddd4a01bc]'; exit 0; fi\nexit 99",
-    );
-    for prefix in [".", ""] {
-        let path = format!("{prefix}:{}:/usr/bin:/bin", fixture.bin.display());
-        let result = fixture
-            .command(fixture.repo.path(), &path)
-            .env("AHU_CMUX_BIN", "cmux")
-            .env("HOME", fixture.outside.path().canonicalize().unwrap())
-            .env_remove("CODEX_HOME")
-            .args(["cmux", "install", "--harness", "codex", "--dry-run"])
-            .output()
-            .unwrap();
-        assert!(result.status.success(), "{result:?}");
-        let plan: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(
-            plan["executable"],
-            fixture
-                .repo
-                .path()
-                .join("cmux")
-                .canonicalize()
-                .unwrap()
-                .to_string_lossy()
-                .as_ref()
-        );
-        assert_eq!(plan["available"], true);
-        assert_eq!(
-            plan["argv"],
-            serde_json::json!(["hooks", "codex", "install"])
         );
     }
 }

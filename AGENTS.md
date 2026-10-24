@@ -72,3 +72,28 @@ Verify both project and linked issue repository visibility before tracker writes
 Keep discovery records, skill evolution proposals, and rejected evolution records
 private, never in repository logs or docs/skill-evolution. Setup of a skill does
 not authorize conducting a discovery session or creating live discovery records.
+
+## Git worktrees and release flow
+
+A Git worktree is a separate working directory and branch view. It is not a
+filesystem, process, or network sandbox. An agent running as the same user may
+still access paths outside its worktree unless an operating-system or
+container-level policy separately confines it. Keep work inside the assigned
+worktree, use relative paths where practical, and report suspected outside
+writes. Treat ahu's outside-write observations as detection with limited event
+coverage, not prevention or proof of isolation. Harness approval modes also
+do not establish filesystem confinement.
+
+During release preparation, the coordinator works from `release/vX.Y.Z` (or the
+documented release branch for that version). Task branches start from the
+coordinator's release checkout; agents make scoped changes on their own task
+branches and return reviewable commits. The coordinator reviews and integrates
+accepted work into the release branch, then runs release checks against the
+integrated candidate. Keep `main` unchanged while the release is stabilizing.
+Once the candidate is stable and release gates are satisfied, merge the release
+branch to `main` as part of completing the release. Agents do not independently
+merge task branches into `main` or publish branches/tags.
+
+These instructions apply to every harness. Harness-specific permissions,
+approval behavior, interactive/headless support, and tool access vary; consult
+compatibility evidence for the exact harness version and execution mode.

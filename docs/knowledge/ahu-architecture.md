@@ -43,6 +43,21 @@ sources:
 
 # ahu system architecture
 
+ahu is a thin coordinator around harnesses. Keep external integrations in
+optional plugins and skills; see the integration ownership and review rules in `docs/plugin-architecture.md`.
+Core owns task execution and worktree lifecycle, not terminal workspace layouts
+or external issue state. Current-terminal and headless execution require no
+session-host or issue-tracker plugin.
+
+The core agent-task service V1, documented in `../agent-task-service.md`, defines an opt-in,
+provider-neutral task lifecycle interface for core-issued scoped sessions. Its
+in-memory and local implementations retain admission and execution control in
+core. It is independent of the terminal Host V2 API and adds no remote agent
+protocol or plugin storage access. CLI and MCP task inspection use its scoped
+read interface. Launch, cancel, approval, message, and headless wait/result
+operations remain on their existing core paths; there is no production execution
+adapter yet.
+
 This diagram follows the main paths through the CLI. Agent behavior occurs in a
 provider harness; ahu prepares and records the session, while the MCP server
 exposes ahu tools to connected agents. Telemetry and task records provide
@@ -54,7 +69,7 @@ flowchart LR
     Operator["Operator / ahu CLI"] --> CLI["CLI dispatch"]
     CLI --> Doctor["Doctor and readiness"]
     CLI --> LockCmd["ahu lock --update"]
-    LockCmd --> LockFile["ahu.lock"]
+    LockCmd --> LockFile[".agents/ahu/lock.md"]
     LockCmd --> PrivateLock["Private acceptance per user and project"]
     Local["Recognized local Claude / native Antigravity settings"] --> PrivateLock
     PrivateLock --> Admission
@@ -90,7 +105,7 @@ flowchart LR
 
 ## Reading the boundaries
 
-`ahu.lock` gates use of recognized project context. `ahu lock --update` writes a
+`.agents/ahu/lock.md` gates use of recognized project context. `ahu lock --update` writes a
 candidate lock; an operator reviews and commits it with the context files. The
 lock does not contain per-user settings. Recognized local settings that affect
 agent behavior are separately fingerprinted in owner-only host state per user
@@ -129,6 +144,20 @@ and waits for `ahu approve TASK` or `ahu reject TASK`. Rejection or expiry
 requests cancellation. The checkpoint does not intercept arbitrary tool calls,
 shell commands, or filesystem writes, and does not expand native harness
 permissions.[^approval]
+
+## Project plugin inspection
+
+`ahu plugins --project` reads typed OKF plugin bindings from one pinned local
+Git commit. It reports exact ahu-version compatibility and declared source pins
+and grants. It neither reads the working-tree configuration nor fetches or runs
+plugins. Missing local Git objects fail with all Git transports denied. Committed
+symlinks and non-file bindings are refused; metadata reads are bounded.
+Inspection is not activation. Explicit package installation verifies source pins;
+execution requires the matching committed enabled binding, compatibility and
+the appropriate grant. One-shot execution and session hosting have separate
+contracts. See `docs/executable-plugins.md`,
+`docs/executable-hosts.md`, and the CLI reference section
+`Committed project plugin bindings` for their bounds and limitations.
 
 [^main]: CLI routing in src/main.rs.
 [^launch]: Launch admission and task planning in src/launch.rs.

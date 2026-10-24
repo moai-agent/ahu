@@ -14,14 +14,17 @@ use common::TestRepo;
 fn launch(repo: &TestRepo, extra: &[&str]) -> std::process::Output {
     let temp = repo.state_path();
     let bin = common::fake_harness(temp, &temp.join("argv"));
+    let home = temp.join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let mut cmd = common::ahu();
     cmd.current_dir(repo.path())
+        .env("HOME", home.canonicalize().unwrap())
+        .env_remove("CLAUDE_CONFIG_DIR")
         .args(["@deploy", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .args(extra)
-        // cmux is deliberately absent, so a launch that gets past the gate
-        // fails at session creation rather than starting anything.
-        .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
+        // The terminal host runs only the fake harness. Native trust writes
+        // must stay inside this fixture's home, never the developer's home.
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -110,7 +113,6 @@ fn launch_still_needs_no_opt_in_for_an_agent_that_widens_nothing() {
         .args(["@sable", "--prompt-file"])
         .arg(repo.path().join("assignment.txt"))
         .arg("--dry-run")
-        .env("AHU_CMUX_BIN", temp.join("missing-cmux"))
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -124,19 +126,25 @@ fn launch_still_needs_no_opt_in_for_an_agent_that_widens_nothing() {
     );
 }
 
-/// With the opt-in, the launch proceeds — and fails only because cmux is absent.
-///
-/// The flag is the disclosure: it is in the command line the delegating harness
-/// shows its own user before running it.
+/// With the opt-in, the launch proceeds. A provider-free build starts the
+/// configured harness in the current terminal; the optional cmux build fails
+/// only because its explicitly selected executable is unavailable.
 #[test]
 fn the_opt_in_lets_a_widened_launch_through_and_is_a_real_flag() {
     let repo = repo_with_widened_agent("auto");
     let output = launch(&repo, &["--allow-widened-approvals"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !output.status.success() && stderr.contains("cmux"),
-        "the launch should get as far as cmux: {stderr}"
+        output.status.success(),
+        "terminal default must proceed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let argv = std::fs::read_to_string(repo.state_path().join("argv")).unwrap();
+    assert!(argv.contains("--permission-mode\nauto\n"), "{argv}");
+    let trust: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(repo.state_path().join("home/.claude.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(trust["projects"].as_object().unwrap().len(), 1);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("permissions = auto"), "{stdout}");
     assert!(!stdout.contains("--permission-mode auto"), "{stdout}");
@@ -325,7 +333,7 @@ fn a_task_record_without_a_prompt_digest_does_not_load_at_all() {
         "config_snapshot_digest": "0",
         "materialize": {"written": [], "removed": [], "concurrently_modified": []},
         "launch_command": {"program": "claude", "args": []},
-        "delivery": {"nonce": "0", "agent_instructions": null, "digest": "0"},
+        "delivery": {"layout_version": 3, "composition": {"mode":"interactive","metadata":null,"state":null}, "nonce": "0", "agent_instructions": null, "digest": "0"},
         // prompt_digest is deliberately absent.
         "enforcement": {
             "harness": "claude-code",
@@ -335,9 +343,7 @@ fn a_task_record_without_a_prompt_digest_does_not_load_at_all() {
             "applied_controls": [],
         },
         "reliability_warning": null,
-        "cmux_group_id": null,
-        "cmux_workspace_id": null,
-        "cmux_window_id": null,
+        "session_ref": null,
         "state": "starting",
     });
     std::fs::write(
@@ -388,7 +394,6 @@ fn an_empty_prompt_digest_refuses_the_session() {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -435,7 +440,6 @@ fn editing_the_recorded_agent_instructions_refuses_the_session() {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
-        .env("AHU_CMUX_BIN", temp.path().join("no-such-cmux"))
         .output()
         .unwrap();
     assert!(
@@ -514,11 +518,36 @@ fn write_record(
         harness_executable: harness_path.to_path_buf(),
         reliability_warning: None,
         enforcement,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: TaskState::Starting,
     };
+    let (delivered, delivery) = ahu::orchestration::deliver_composed(
+        Some("You are sable.\n"),
+        prompt,
+        ahu::orchestration::Composition {
+            mode: ahu::orchestration::Mode::Interactive,
+            metadata: Some(ahu::orchestration::Metadata {
+                task_id: record.task_id.clone(),
+                agent: record.agent_label(),
+                harness: record.identity.harness.clone(),
+                model: record.identity.model.clone(),
+                permissions: record.identity.permissions,
+            }),
+            state: None,
+        },
+    )
+    .unwrap();
+    record.delivery = delivery;
+    record.launch_command = adapter
+        .launch_command(&LaunchRequest {
+            model: "claude-sonnet-5",
+            prompt: &delivered,
+            cwd: worktree,
+            permissions: Default::default(),
+        })
+        .unwrap()
+        .redacted();
     tamper(&mut record);
     ahu::task::save(task_dir, &record, prompt).unwrap();
 }
@@ -532,10 +561,10 @@ fn write_record(
 /// name, which is worse than failing.
 #[test]
 fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
-    assert_eq!(ahu::task::TASK_SCHEMA_VERSION, 4);
+    assert_eq!(ahu::task::TASK_SCHEMA_VERSION, 6);
     assert!(
-        ahu::task::READABLE_SCHEMA_VERSIONS.contains(&2),
-        "schema 2 is this build's immediate predecessor and must stay readable"
+        ahu::task::READABLE_SCHEMA_VERSIONS.contains(&6),
+        "only the latest task schema is readable"
     );
 
     let temp = tempfile::TempDir::new().unwrap();
@@ -572,7 +601,7 @@ fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
         "config_snapshot_digest": "0",
         "materialize": {"written": [], "removed": [], "concurrently_modified": []},
         "launch_command": {"program": "claude", "args": []},
-        "delivery": {"nonce": "0", "agent_instructions": null, "digest": "0"},
+        "delivery": {"layout_version": 3, "composition": {"mode":"interactive","metadata":null,"state":null}, "nonce": "0", "agent_instructions": null, "digest": "0"},
         "prompt_digest": "0",
         "enforcement": {
             "harness": "claude-code",
@@ -582,9 +611,7 @@ fn a_schema_1_task_record_is_refused_rather_than_reinterpreted() {
             "applied_controls": [],
         },
         "reliability_warning": null,
-        "cmux_group_id": null,
-        "cmux_workspace_id": null,
-        "cmux_window_id": null,
+        "session_ref": null,
         "state": "exited",
     });
     std::fs::write(

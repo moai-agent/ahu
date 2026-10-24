@@ -39,9 +39,8 @@ sources:
 
 Each interactive task's `task.json` and `prompt.txt` live under its own worktree at
 `.ahu/state/repos/<repo-identity>/tasks/<task-id>/`. Task directories are named by
-a version-7 universally unique identifier; record schemas 3 and 4 write these IDs, while
-records written by schema 2 keep their original 18-character hex identifiers and
-load unchanged. Launch derives this path without an environment override, and
+a version-7 universally unique identifier. ahu reads only current task schema 6;
+older task records are reported as unreadable and are not migrated. Launch derives this path without an environment override, and
 registers the task in the cross-checkout index once durable state exists. Removing
 the worktree removes its local state; `ahu remove` also removes the index
 entry. Records include session status, which does not prove task completion.[^state][^task][^index][^launch][^tests]
@@ -114,7 +113,7 @@ attempting removal, leaves redirected paths alone and can fail. A retained
 recordless worktree is visible as incomplete; listing does not delete it or
 prove its contents disposable.[^launch][^tests]
 
-The launch lock, cmux group mapping, task handle reservations, headless coordination, and scoped task index
+The launch lock, task handle reservations, headless coordination, and scoped task index
 belong to the primary checkout’s state store. Generated architecture text uses the invoking checkout's store. Paths come from explicit checkout and repository discovery.
 ahu neither resolves state through `AHU_STATE_DIR` nor injects it into sessions.
 The `--repo` prefix selects a checkout; `AHU_REPO_ROOT`, `AHU_STATE_DIR`,
@@ -131,9 +130,8 @@ prefixes still resolve, and older tasks are not renamed.[^launch][^commands]
 
 Coordinator shortcuts preserve the invoking directory and pass the project's
 top-ranked model for the harness explicitly, using the same model-option mapping
-as the headless adapters. Inside cmux they join the repository's group before
-starting the harness, using the same primary-owned mapping as task launches. A
-grouping failure prevents startup. Outside cmux they retain the current terminal.
+as the headless adapters. When a session provider is available, it manages
+coordinator placement. Without a provider, they retain the current terminal.
 `ahu codex` requests `--dangerously-bypass-approvals-and-sandbox`; `ahu claude`
 and `ahu agy` request `--dangerously-skip-permissions`, the Antigravity CLI's
 unattended mode; `ahu opencode` requests `--auto`, which approves every
@@ -166,6 +164,16 @@ not prevent concurrent replacement. Startup checks prompt and delivery digests,
 command reconstruction, and repository/worktree identity. A writer able to alter
 records and digests can alter both; these checks are not authentication or OS
 isolation.[^state][^launch]
+
+The opt-in core agent-task service V1, documented in `../agent-task-service.md`, keeps scoped
+ownership, monotonic revisions, operation receipts and one-shot effect claims in
+primary-owned `agent-tasks-v1/` coordination. It reuses the existing state and
+record-discovery helpers without rewriting task records or importing native
+history. CLI and MCP task inspection use its scoped read interface. Launch,
+cancel, approval, message, and headless wait/result operations remain on their
+existing core paths; the service has no production execution adapter yet. It is
+separate from terminal Host V2 and does not import native history. Core admission
+and execution ownership remain prerequisites.
 
 The state reference in docs/reference.md at the repository root details storage
 paths and explicit legacy lookup configuration. [Task identity](task-identity.md) records

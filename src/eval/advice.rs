@@ -1,4 +1,4 @@
-//! Read-only advice over an explicit external record file and fixed case pool.
+//! Read-only advice over an explicit bounded result file and fixed case pool.
 //! Evidence is locally editable, not identity attestation or provider billing.
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -1049,7 +1049,7 @@ mod tests {
             agent_index: 0,
             run_index: 1,
         };
-        let fields = super::super::base_fields("fixture-run", &trial, "candidate");
+        let fields = super::super::base_fields("fixture-run", &trial, "candidate", None);
         assert!(fields["observed_at_unix_seconds"].as_u64().unwrap() > 0);
         for source in [
             "opencode_step_finish_sum",

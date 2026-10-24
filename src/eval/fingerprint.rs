@@ -208,6 +208,8 @@ pub struct InputFingerprint {
     /// Configured typed grading policy, independent of returned provider identity.
     pub decision_evaluator: Option<serde_json::Value>,
     pub blinding: Blinding,
+    /// Selected for both candidates and agent evaluators.
+    pub work_mode: bool,
     /// Digest over the skills the candidate's harness was given. Absent when the
     /// launch reported no skill catalog.
     pub skill_digest: Option<String>,
@@ -284,6 +286,7 @@ impl InputFingerprint {
             "evaluator": self.evaluator.as_ref().map(AgentFingerprint::canonical),
             "decision_evaluator": self.decision_evaluator,
             "blinding": self.blinding.as_str(),
+            "work_mode": self.work_mode,
             "skill_digest": self.skill_digest,
             "selection_policy_digest": self.selection_policy_digest,
             "evaluator_skill_digest": self.evaluator_skill_digest,
@@ -315,6 +318,7 @@ impl InputFingerprint {
                 .clone()
                 .map_or(serde_json::Value::Null, Into::into),
         );
+        put("work_mode", self.work_mode.into());
         put("case_id", self.case_id.clone().into());
         put("corpus_version", self.corpus_version.clone().into());
         put("case_schema_version", self.case_schema_version.into());
@@ -535,6 +539,7 @@ mod tests {
 
     fn complete() -> InputFingerprint {
         InputFingerprint {
+            work_mode: false,
             case_id: "routing-1".into(),
             corpus_version: "1.0.0".into(),
             case_schema_version: 2,
@@ -653,6 +658,7 @@ mod tests {
             Box::new(|f| f.build.version = "9.9.9".into()),
             Box::new(|f| f.target_repo_head = Some("cafe".into())),
             Box::new(|f| f.blinding = Blinding::Isolated),
+            Box::new(|f| f.work_mode = true),
             Box::new(|f| {
                 f.suite = Some(SuiteIdentity {
                     id: "s".into(),
@@ -671,6 +677,16 @@ mod tests {
                 "mutation {index} must be visible"
             );
         }
+    }
+
+    #[test]
+    fn eval_work_mode_is_recorded_and_changes_input_identity() {
+        let mut fingerprint = complete();
+        let guarded = fingerprint.digest();
+        assert_eq!(fingerprint.record_fields()["work_mode"], false);
+        fingerprint.work_mode = true;
+        assert_eq!(fingerprint.record_fields()["work_mode"], true);
+        assert_ne!(fingerprint.digest(), guarded);
     }
 
     #[test]

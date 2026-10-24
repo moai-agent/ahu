@@ -1,83 +1,22 @@
-//! Bounded evidence about native integrations, plus the gated entry points
-//! that act on it. Inspection and status evidence collection is read-only: it
-//! reads at most LIMIT bytes per file, considers at most MAX_ENTRIES entries,
-//! and no hook bodies are persisted, interpreted, installed, or copied by
+//! Bounded, read-only evidence about native hook integrations. Inspection
+//! reads at most LIMIT bytes per file and considers at most MAX_ENTRIES entries.
+//! No hook bodies are persisted, interpreted, installed, or copied by
 //! inspection.
 //!
-//! Mutation is narrow and individually gated: `sanitize` runs only after
-//! admission, removing `CMUX_*` routing variables from a child command and
-//! restoring reviewed disable controls; `execute_install` runs the native
-//! installer only after the installation plan is inspected and verified
-//! (`plan.available` and the exact `["hooks", agent, "install"]` argv check).
-//! The `enforce*` family are pure gate predicates over inspection results:
-//! they read and decide, never mutate.
-//!
-//! Native command generation reviewed against cmux ddd4a01bc:
-//! <https://github.com/manaflow-ai/cmux/blob/ddd4a01bc/CLI/CMUXCLI%2BAgentHookDefinitions.swift>.
-//! OpenCode and Claude fingerprints identify inspected native artifacts, not
-//! implementations maintained by ahu. A changed fingerprint is unknown.
+//! Admission is provider-neutral: executable hook and plugin behavior remains
+//! unknown unless covered by a harness invocation profile. Inspection never
+//! changes native settings or provider environment variables.
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::util::{Error, Result, digest_bytes, display_safe, shell_single_quote};
+use crate::util::{Error, Result, digest_bytes, display_safe};
 
 const LIMIT: u64 = 1024 * 1024;
 const MAX_ENTRIES: usize = 256;
-const REVIEWED_VERSION: &str = "0.64.22 (102) [ddd4a01bc]";
-const FEED_DIGEST: &str = "aae76d0577a008d89e96932abb3b7c61d83b0086ca5e08b7622aac0aa8d76b9c";
-const SESSION_DIGEST: &str = "a9664ca1aff28fc5aa194efdfb2ed41b2584ee4569e91503e9388b3035a625b7";
-const WRAPPER_DIGEST: &str = "e930666189e326972d4b4ed36ca7bd955260845953a779b3049be44677c175d4";
-
-// Exact native command bytes reviewed in cmux ddd4a01bc. These fingerprints
-// identify code; a marker, filename, or matching substring never establishes it.
-const CODEX_COMMANDS: &[(&str, &str)] = &[
-    (
-        "PermissionRequest",
-        "563533aafffeb346cf801342b83777c927125ddaa001f6061a4254c955d7c3ca",
-    ),
-    (
-        "PostCompact",
-        "debac46f677cacc603c95b1779a466528224ccb369b95e1faca5e812a60a79b8",
-    ),
-    (
-        "PostToolUse",
-        "af2cc98aebaaa20784604a798fa84b612470ea79027be6c5bf878f044dad3f6d",
-    ),
-    (
-        "PreCompact",
-        "502302f8fbc0df0ba49e1d0f662371bcc8a1135b8783e9fce2a4ddb961ad0b5b",
-    ),
-    (
-        "PreToolUse",
-        "0f640048731777c1d4b134f34b3c2a7a4f2db9d2b3e21051d28731bed37f3f1b",
-    ),
-    (
-        "SubagentStart",
-        "8f855b07fbe1ace2f17f5c1a863cf2ea8abcfffb00b9711d48f6180a819462b4",
-    ),
-    (
-        "SubagentStop",
-        "39ce821db00c1a26ae934a3d033297df519e9260d3f33fb31b2550ad48a32df5",
-    ),
-    (
-        "UserPromptSubmit",
-        "9b5ed21ec71b8f3996e912663f3ff10072b3fdcacec15d4bd5999cb2d13955a3",
-    ),
-    (
-        "SessionStart",
-        "6d14ad8d3539332107af5c68dcb89edecf2b8972c8848f55a9e075d53077b942",
-    ),
-    (
-        "Stop",
-        "ec802d73827f74550c99641ac4cabcd6c7190925160a573d6d5c46c3c740ea47",
-    ),
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Registration {
@@ -184,7 +123,6 @@ impl Status {
 #[derive(Debug, Clone, Serialize)]
 pub struct HeadlessPolicy {
     pub allowed: bool,
-    pub disable_variable: Option<String>,
     pub reasons: Vec<String>,
     pub evidence_digest: String,
 }
@@ -267,7 +205,6 @@ fn codex_system_root() -> PathBuf {
 pub struct Locations {
     pub home: Option<PathBuf>,
     pub overrides: BTreeMap<String, String>,
-    pub wrapper: Option<PathBuf>,
     pub managed_claude: Option<PathBuf>,
     pub managed_opencode: Option<PathBuf>,
     pub managed_preferences: Option<PathBuf>,
@@ -308,9 +245,6 @@ impl Locations {
                 .into_iter()
                 .filter_map(|key| std::env::var_os(key).map(|_| (key.to_string(), String::new())))
                 .collect(),
-            wrapper: Some(PathBuf::from(
-                "/Applications/cmux.app/Contents/Resources/bin/cmux-claude-wrapper",
-            )),
             managed_claude: Some(PathBuf::from(
                 "/Library/Application Support/ClaudeCode/managed-settings.json",
             )),
@@ -336,16 +270,6 @@ fn native_agent(harness: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-fn disable_variable(harness: &str) -> Option<&'static str> {
-    match harness {
-        "codex" => Some("CMUX_CODEX_HOOKS_DISABLED"),
-        "opencode" => Some("CMUX_OPENCODE_HOOKS_DISABLED"),
-        "claude-code" => Some("CMUX_CLAUDE_HOOKS_DISABLED"),
-        "antigravity" => Some("CMUX_ANTIGRAVITY_HOOKS_DISABLED"),
-        _ => None,
-    }
-}
-
 // Check all existing ancestors before opening: dangling links, linked parent
 // directories and special files are uncertainty, never evidence of absence.
 fn check_path(path: &Path) -> std::result::Result<(), String> {
@@ -510,20 +434,6 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
             codex_activation(&repo.join(".codex/config.toml"), &mut components);
         }
         "claude-code" => {
-            if let Some(path) = &locations.wrapper {
-                let mut c = component("wrapper", path, "application bundle");
-                if let Some(bytes) = file_bytes(&mut c) {
-                    if digest_bytes(&bytes) == WRAPPER_DIGEST {
-                        c.registration = Registration::Installed;
-                        c.conformance = Conformance::SourceInspected;
-                        c.isolation = Isolation::DirectExecutableOnly;
-                        c.detail = "reviewed bundled wrapper available; invocation/injection not observed; headless requires a direct harness executable".into();
-                    } else {
-                        c.detail = "unrecognized wrapper bytes".into();
-                    }
-                }
-                components.push(c);
-            }
             for (path, scope) in [
                 (home.join(".claude/settings.json"), "user"),
                 (repo.join(".claude/settings.json"), "project"),
@@ -546,7 +456,7 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
                     &mut components,
                 );
             }
-            gaps.push("Claude integration is wrapper-managed. Separately configured hooks and plugins have independent behavior.".into());
+            gaps.push("Native hooks, plugins and executable wrappers have independent behavior; wrapper injection is not inspected.".into());
         }
         "opencode" => {
             scan_opencode_sources(locations, &mut components);
@@ -657,11 +567,18 @@ pub fn inspect_in(repo: &Path, harness: &str, locations: &Locations) -> Status {
         let mut c = component("additional integration scope", &path, "project");
         if let Some(bytes) = file_bytes(&mut c) {
             match serde_json::from_slice::<Value>(&bytes) {
-                Ok(value) if !json_mentions_cmux(&value) => {
+                Ok(value)
+                    if value.is_object()
+                        && (file == ".mcp.json"
+                            || value.as_object().is_some_and(serde_json::Map::is_empty)) =>
+                {
                     absent(&mut c);
-                    c.detail = "no cmux reference observed; arbitrary subprocess behavior is outside inspection".into();
-                },
-                Ok(_) => c.detail = "cmux reference in an unsupported integration scope; not proof of registration or isolation".into(),
+                    c.detail = "no executable hook policy in inspected scope; MCP subprocess behavior remains native and outside inspection".into();
+                }
+                Ok(_) => {
+                    c.detail =
+                        "unsupported executable configuration scope; behavior is unknown".into()
+                }
                 Err(_) => c.detail = "malformed integration configuration".into(),
             }
         }
@@ -694,9 +611,9 @@ fn scan_kiro(base: &Path, scope: &str, out: &mut Vec<Component>) {
     let mut c = component("Kiro MCP settings", &base.join("settings/mcp.json"), scope);
     if let Some(bytes) = file_bytes(&mut c) {
         match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) if value.is_object() && !json_mentions_cmux(&value) => {
+            Ok(value) if value.is_object() => {
                 absent(&mut c);
-                c.detail = "no cmux reference observed; arbitrary MCP subprocess behavior is outside inspection".into();
+                c.detail = "MCP configuration remains native; arbitrary subprocess behavior is outside inspection".into();
             }
             _ => c.detail = "Kiro MCP settings contain unresolved integration configuration".into(),
         }
@@ -757,35 +674,30 @@ fn kiro_permissions(value: &Value) -> bool {
 }
 
 fn kiro_mcp_servers(value: &Value) -> bool {
-    !json_mentions_cmux(value)
-        && value.as_object().is_some_and(|servers| {
-            servers.values().all(|server| {
-                server.as_object().is_some_and(|fields| {
-                    fields.iter().all(|(key, value)| match key.as_str() {
-                        "command" | "cwd" | "url" | "type" | "versionNegotiation" => {
-                            value.is_string()
-                        }
-                        "args" | "disabledTools" | "autoApprove" | "oauthScopes" => {
-                            string_array(value)
-                        }
-                        "disabled" | "waitForReady" => value.is_boolean(),
-                        "timeout" => value.is_number(),
-                        "env" | "headers" => value
-                            .as_object()
-                            .is_some_and(|fields| fields.values().all(Value::is_string)),
-                        "oauth" => value.as_object().is_some_and(|fields| {
-                            fields.iter().all(|(key, value)| {
-                                matches!(
-                                    key.as_str(),
-                                    "clientId" | "redirectUri" | "clientMetadataUrl"
-                                ) && value.is_string()
-                            })
-                        }),
-                        _ => false,
-                    })
+    value.as_object().is_some_and(|servers| {
+        servers.values().all(|server| {
+            server.as_object().is_some_and(|fields| {
+                fields.iter().all(|(key, value)| match key.as_str() {
+                    "command" | "cwd" | "url" | "type" | "versionNegotiation" => value.is_string(),
+                    "args" | "disabledTools" | "autoApprove" | "oauthScopes" => string_array(value),
+                    "disabled" | "waitForReady" => value.is_boolean(),
+                    "timeout" => value.is_number(),
+                    "env" | "headers" => value
+                        .as_object()
+                        .is_some_and(|fields| fields.values().all(Value::is_string)),
+                    "oauth" => value.as_object().is_some_and(|fields| {
+                        fields.iter().all(|(key, value)| {
+                            matches!(
+                                key.as_str(),
+                                "clientId" | "redirectUri" | "clientMetadataUrl"
+                            ) && value.is_string()
+                        })
+                    }),
+                    _ => false,
                 })
             })
         })
+    })
 }
 
 // Deliberately narrower than the native schema: no executable hooks, knowledge
@@ -899,55 +811,12 @@ fn scan_kiro_agents(
     }
 }
 
-fn json_mentions_cmux(value: &Value) -> bool {
-    match value {
-        Value::String(text) => text.to_ascii_lowercase().contains("cmux"),
-        Value::Array(items) => items.iter().any(json_mentions_cmux),
-        Value::Object(items) => items.iter().any(|(key, value)| {
-            key.to_ascii_lowercase().contains("cmux") || json_mentions_cmux(value)
-        }),
-        _ => false,
-    }
-}
-
-fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) -> Status {
+fn finish(harness: &str, mut components: Vec<Component>, gaps: Vec<String>) -> Status {
     // A native user path can also be reached by project ancestor discovery.
     // Retain one observation, without collapsing duplicate hook registrations
     // (their numbered names differ).
     let mut seen = std::collections::BTreeSet::new();
     components.retain(|c| seen.insert((c.name.clone(), c.evidence[0].path.clone())));
-    if harness == "codex" {
-        let missing: Vec<_> = CODEX_COMMANDS
-            .iter()
-            .filter(|(event, _)| {
-                !components.iter().any(|c| {
-                    c.registration == Registration::Installed
-                        && c.name.starts_with(&format!("{event} registration "))
-                })
-            })
-            .map(|(event, _)| *event)
-            .collect();
-        if !missing.is_empty() {
-            gaps.push(format!(
-                "Native event coverage is missing or unverified: {}",
-                missing.join(", ")
-            ));
-        }
-    }
-    if harness == "opencode" {
-        for (label, digest) in [("Session", SESSION_DIGEST), ("Feed", FEED_DIGEST)] {
-            if !components.iter().any(|c| {
-                c.registration == Registration::Installed
-                    && c.evidence
-                        .iter()
-                        .any(|e| e.digest.as_deref() == Some(digest))
-            }) {
-                gaps.push(format!(
-                    "OpenCode {label} plugin registration is missing or unverified."
-                ));
-            }
-        }
-    }
     let reasons: Vec<String> = components
         .iter()
         .filter(|c| matches!(c.isolation, Isolation::Unknown | Isolation::Unsafe))
@@ -960,14 +829,8 @@ fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) 
             )
         })
         .collect();
-    let guarded = components
-        .iter()
-        .any(|c| c.isolation == Isolation::VerifiedDisable);
     let headless = HeadlessPolicy {
         allowed: reasons.is_empty(),
-        disable_variable: guarded
-            .then(|| disable_variable(harness).map(str::to_string))
-            .flatten(),
         reasons,
         evidence_digest: digest_bytes(
             &serde_json::to_vec(&components).expect("component serialization"),
@@ -975,11 +838,7 @@ fn finish(harness: &str, mut components: Vec<Component>, mut gaps: Vec<String>) 
     };
     Status { profile: crate::catalog::isolation_profile(harness), cli_version: None, version_checked: false, harness: harness.into(), native_agent: native_agent(harness).map(str::to_string),
         components, gaps, conformance: "locally_inspected; live_untested".into(), headless,
-        next_action: match harness {
-            "claude-code" => "Use interactive execution while independent hooks/plugins or managed settings are unresolved. Review those sources with their native owner, then inspect again. cmux Settings > Automation controls only the Claude wrapper; no native Claude installer is exposed.".into(),
-            "opencode" => "Use interactive execution for unresolved native configuration/authentication sources; credentials and account databases are not read. Native --pure disables external plugins but does not resolve authenticated remote configuration. Changing native homes or hiding account stores can change provider/model resolution and is not an isolation repair. For unguarded Feed, explicit native removal is `cmux hooks opencode uninstall`, then inspect again. Reinstalling the same Feed does not provide isolation.".into(),
-            _ => "Inspect unknown components and native scope; use interactive execution until isolation is verified. Installation is explicit: ahu cmux install --harness ID --dry-run.".into(),
-        } }
+        next_action: "Review unresolved native configuration with its owner; use interactive execution or explicit --work-mode when native compatibility is unverified.".into() }
 }
 
 /// Presence-only inspection for credentials, opaque native stores and legacy
@@ -1220,7 +1079,10 @@ fn codex_indirection(value: &toml::Value) -> bool {
         return true;
     };
     for (key, entry) in table {
-        if ["notify", "include", "imports", "profile"].contains(&key.as_str())
+        // An explicit empty argv defines no notification command. Keep every
+        // nonempty or malformed value unresolved, including in native profiles.
+        if (key == "notify" && entry.as_array().is_none_or(|args| !args.is_empty()))
+            || ["include", "imports", "profile"].contains(&key.as_str())
             || (["plugins", "marketplaces"].contains(&key.as_str())
                 && entry.as_table().is_none_or(|t| !t.is_empty()))
             || (key == "cli_auth_credentials_store" && entry.as_str() != Some("file"))
@@ -1244,10 +1106,7 @@ fn codex_indirection(value: &toml::Value) -> bool {
             {
                 return true;
             }
-        } else if (entry.is_table() && codex_indirection(entry))
-            || key.to_ascii_lowercase().contains("cmux")
-            || entry.to_string().to_ascii_lowercase().contains("cmux")
-        {
+        } else if entry.is_table() && codex_indirection(entry) {
             return true;
         }
     }
@@ -1257,7 +1116,7 @@ fn codex_indirection(value: &toml::Value) -> bool {
 fn scan_hooks(
     path: &Path,
     scope: &str,
-    harness: &str,
+    _harness: &str,
     activation: Activation,
     out: &mut Vec<Component>,
 ) {
@@ -1313,7 +1172,7 @@ fn scan_hooks(
                 out.push(c);
                 return;
             };
-            for entry in entries {
+            for _entry in entries {
                 count += 1;
                 if count > MAX_ENTRIES {
                     c.detail = "hook inspection entry limit exceeded".into();
@@ -1325,12 +1184,6 @@ fn scan_hooks(
                 item.activation = activation;
                 item.detail =
                     "unrecognized native hook command; isolation cannot be established".into();
-                if harness == "codex"
-                    && entry.get("type").and_then(Value::as_str) == Some("command")
-                    && let Some(command) = entry.get("command").and_then(Value::as_str)
-                {
-                    verify_codex(command, event, &mut item);
-                }
                 out.push(item);
             }
         }
@@ -1338,66 +1191,6 @@ fn scan_hooks(
     if count == 0 {
         absent(&mut c);
         out.push(c);
-    }
-}
-// A deliberately small POSIX literal grammar, not a shell parser. Quoting must
-// enclose the whole path; unquoted words allow no expansion or token syntax.
-fn literal_artifact_path(command: &str) -> Option<&Path> {
-    let path = if let Some(quoted) = command.strip_prefix('\'') {
-        let path = quoted.strip_suffix('\'')?;
-        if path.contains('\'') || path.chars().any(char::is_control) {
-            return None;
-        }
-        path
-    } else {
-        if !command
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"/_-.:+".contains(&b))
-        {
-            return None;
-        }
-        command
-    };
-    path.starts_with('/').then(|| Path::new(path))
-}
-
-fn verify_codex(command: &str, event: &str, item: &mut Component) {
-    let Some((_, expected)) = CODEX_COMMANDS.iter().find(|(name, _)| *name == event) else {
-        return;
-    };
-    let mut digest = digest_bytes(command.as_bytes());
-    if digest != *expected {
-        let Some(path) = literal_artifact_path(command) else {
-            return;
-        };
-        let Ok(Some(bytes)) = read(path) else {
-            item.detail = "referenced hook artifact missing, unreadable or unresolved".into();
-            return;
-        };
-        use std::os::unix::fs::PermissionsExt;
-        if !std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
-            item.detail = "referenced hook artifact is not executable".into();
-            return;
-        }
-        item.evidence.push(Evidence {
-            path: path.into(),
-            scope: "referenced native artifact".into(),
-            method: "exact reviewed SHA-256".into(),
-            digest: Some(digest_bytes(&bytes)),
-        });
-        let Some(body) = bytes
-            .strip_prefix(b"#!/bin/sh\n")
-            .and_then(|b| b.strip_suffix(b"\n"))
-        else {
-            return;
-        };
-        digest = digest_bytes(body);
-    }
-    if digest == *expected {
-        item.registration = Registration::Installed;
-        item.conformance = Conformance::SourceInspected;
-        item.isolation = Isolation::VerifiedDisable;
-        item.detail = "reviewed native command; disable variable and absent surface guard prevent dispatch; live activation unverified".into();
     }
 }
 fn scan_directory(path: &Path, scope: &str, plugins: bool, out: &mut Vec<Component>) {
@@ -1450,19 +1243,8 @@ fn scan_directory(path: &Path, scope: &str, plugins: bool, out: &mut Vec<Compone
     }
     for path in paths {
         let mut item = component("native plugin", &path, scope);
-        if let Some(bytes) = file_bytes(&mut item) {
-            let plugins = plugins && path.extension().is_some_and(|e| e == "js" || e == "ts");
-            match digest_bytes(&bytes).as_str() {
-                SESSION_DIGEST if plugins => {
-                    item.registration = Registration::Installed; item.isolation = Isolation::VerifiedDisable;
-                    item.detail = "reviewed OpenCode session plugin with disable and surface guards; activation unverified".into();
-                },
-                FEED_DIGEST if plugins => {
-                    item.registration = Registration::Installed; item.isolation = Isolation::Unsafe;
-                    item.detail = "OpenCode Feed has no disable/surface guard and can connect to a fallback socket".into();
-                },
-                _ => item.detail = "unrecognized native code; filename does not establish integration or isolation".into(),
-            }
+        if file_bytes(&mut item).is_some() {
+            item.detail = "unreviewed native code; executable behavior is unknown".into();
         }
         out.push(item);
     }
@@ -1539,17 +1321,98 @@ pub fn enforce_headless_executable(
     version: &str,
     executable: &Path,
 ) -> Result<Status> {
+    enforce_headless_executable_with_opencode_state(repo, harness, version, executable, false)
+}
+
+/// Inspect headless native configuration, optionally honoring the project's
+/// explicit trust decision for OpenCode's opaque account/authentication state.
+/// The accepted state remains visible in `gaps`; no credential or database
+/// content is read.
+pub fn enforce_headless_executable_with_opencode_state(
+    repo: &Path,
+    harness: &str,
+    version: &str,
+    executable: &Path,
+    trust_opencode_native_state: bool,
+) -> Result<Status> {
     if harness != "codex" || crate::harness::isolation::profile(harness, version).is_none() {
-        return enforce_headless(repo, harness, version);
+        let mut status = headless_status(inspect(repo, harness), version);
+        if harness == "opencode"
+            && trust_opencode_native_state
+            && trust_only_opencode_account_state(
+                &mut status,
+                &std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_default(),
+            )
+        {
+            return Ok(status);
+        }
+        if !status.headless.allowed {
+            return Err(Error::new(format!(
+                "headless native integration admission is unverified for {harness}:\n{}\n{}",
+                status.headless.reasons.join("\n"),
+                status.next_action
+            )));
+        }
+        return Ok(status);
     }
     let status = inspect_codex_effective(repo, executable, version)?.with_version(Some(version));
     if !status.headless.allowed {
         return Err(Error::new(format!(
-            "headless cmux isolation is unverified for codex:\n{}",
+            "headless native integration admission is unverified for codex:\n{}",
             status.headless.reasons.join("\n")
         )));
     }
     Ok(status)
+}
+
+fn trust_only_opencode_account_state(status: &mut Status, home: &Path) -> bool {
+    let unresolved = status
+        .components
+        .iter()
+        .filter(|component| matches!(component.isolation, Isolation::Unknown | Isolation::Unsafe))
+        .collect::<Vec<_>>();
+    if unresolved.is_empty()
+        || unresolved.iter().any(|component| {
+            !matches!(
+                component.name.as_str(),
+                "authenticated account config" | "authenticated remote config"
+            ) || component.evidence.len() != 1
+                || !matches!(
+                    component.evidence[0].scope.as_str(),
+                    "native account database" | "user native authentication"
+                )
+                || component.evidence[0].method != "metadata only; contents not read"
+                || !opencode_auth_path(home, &component.evidence[0].path)
+        })
+    {
+        return false;
+    }
+    status.headless.allowed = true;
+    status.headless.reasons.clear();
+    status.gaps.push(
+        "Project policy explicitly trusts OpenCode native account/authentication state for headless execution. It may select authenticated remote configuration and executable plugins; ahu does not inspect, disable, or constrain that state. Credentials and database contents remain unread.".into(),
+    );
+    status.next_action =
+        "OpenCode native account/authentication state is explicitly trusted by project policy; review it with OpenCode's native controls.".into();
+    true
+}
+
+fn opencode_auth_path(home: &Path, path: &Path) -> bool {
+    let root = home.join(".local/share/opencode");
+    if !path.starts_with(&root) {
+        return false;
+    }
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let native_name = name == "auth.json"
+        || (name.starts_with("opencode")
+            && [".db", ".db-wal", ".db-shm"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix)));
+    native_name
+        && std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
 /// Compatibility probes use the same version-specific invocation controls as
@@ -1598,53 +1461,10 @@ pub fn codex_effective_status(
         .filter(|hooks| hooks.len() <= MAX_ENTRIES)
         .ok_or_else(|| Error::new("native Codex hook inventory is missing or exceeds the bound"))?;
     let mut components = status.components;
-    for (index, hook) in hooks.iter().enumerate() {
-        let event = match hook.get("eventName").and_then(Value::as_str) {
-            Some("preToolUse") => "PreToolUse",
-            Some("postToolUse") => "PostToolUse",
-            Some("permissionRequest") => "PermissionRequest",
-            Some("preCompact") => "PreCompact",
-            Some("postCompact") => "PostCompact",
-            Some("sessionStart") => "SessionStart",
-            Some("userPromptSubmit") => "UserPromptSubmit",
-            Some("subagentStart") => "SubagentStart",
-            Some("subagentStop") => "SubagentStop",
-            Some("stop") => "Stop",
-            _ => return Err(Error::new("native Codex hook event is not reviewed")),
-        };
-        // Disabled or untrusted unknown hooks are not treated as safe: native
-        // trust/activation can change independently of their command identity.
-        if hook.get("handlerType").and_then(Value::as_str) != Some("command")
-            || hook.get("isManaged") != Some(&Value::Bool(false))
-            || hook.get("enabled").and_then(Value::as_bool).is_none()
-            || !matches!(
-                hook.get("source").and_then(Value::as_str),
-                Some("user" | "project" | "sessionFlags")
-            )
-        {
-            return Err(Error::new(
-                "native Codex hook has an unresolved handler or managed source",
-            ));
-        }
-        let command = hook
-            .get("command")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::new("native Codex hook command is missing"))?;
-        let mut item = component(
-            &format!("effective {event} registration {index}"),
-            repo,
-            "native effective metadata",
-        );
-        item.evidence[0].method =
-            "bounded hooks/list command SHA-256; no raw native response retained".into();
-        item.evidence[0].digest = Some(digest_bytes(command.as_bytes()));
-        verify_codex(command, event, &mut item);
-        if item.isolation != Isolation::VerifiedDisable {
-            return Err(Error::new(
-                "native Codex hook command or artifact is outside the reviewed guarded allowlist",
-            ));
-        }
-        components.push(item);
+    if !hooks.is_empty() {
+        return Err(Error::new(
+            "native Codex executable hooks are unverified, including disabled or untrusted hooks",
+        ));
     }
     for item in &mut components {
         if [
@@ -1684,7 +1504,7 @@ pub fn codex_effective_status(
     let status = finish("codex", components, gaps);
     if !status.headless.allowed {
         return Err(Error::new(format!(
-            "headless cmux isolation is unverified for codex:\n{}",
+            "headless native integration admission is unverified for codex:\n{}",
             status.headless.reasons.join("\n")
         )));
     }
@@ -1700,7 +1520,7 @@ pub fn enforce_headless(repo: &Path, harness: &str, version: &str) -> Result<Sta
     let status = headless_status(inspect(repo, harness), version);
     if !status.headless.allowed {
         return Err(Error::new(format!(
-            "headless cmux isolation is unverified for {harness}:\n{}\n{}",
+            "headless native integration admission is unverified for {harness}:\n{}\n{}",
             status.headless.reasons.join("\n"),
             status.next_action
         )));
@@ -1712,28 +1532,13 @@ pub fn enforce(repo: &Path, harness: &str) -> Result<Status> {
     let status = inspect(repo, harness);
     if !status.headless.allowed {
         return Err(Error::new(format!(
-            "headless cmux isolation is unverified for {harness}:\n{}\n{}",
+            "headless native integration admission is unverified for {harness}:\n{}\n{}",
             status.headless.reasons.join("\n"),
             status.next_action
         )));
     }
     Ok(status)
 }
-/// Called only after admission; removes routing and restores reviewed process
-/// disable controls. Does not alter homes or native settings.
-pub fn sanitize(command: &mut Command, policy: Option<&HeadlessPolicy>) {
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("CMUX_") {
-            command.env_remove(key);
-        }
-    }
-    if let Some(policy) = policy.filter(|p| p.allowed)
-        && let Some(variable) = &policy.disable_variable
-    {
-        command.env(variable, "1");
-    }
-}
-
 /// Compact disclosure for the ordinary launch screen; full provenance remains
 /// available in the dry-run and explicit status report.
 pub fn render_summary(status: &Status) -> String {
@@ -1748,9 +1553,13 @@ pub fn render_summary(status: &Status) -> String {
         .filter(|c| c.registration == Registration::Unknown)
         .count();
     format!(
-        "  cmux       {installed} verified component(s), {unknown} unknown; activation/live delivery unverified; headless {}. Details: ahu cmux status\n",
+        "  native     {installed} verified component(s), {unknown} unknown; activation/live delivery unverified; headless {}. Details are included in the launch review.\n",
         if status.headless.allowed {
-            "compatible with inspected components"
+            if status.conformance == "unverified; explicit work mode" {
+                "work mode; native compatibility unverified"
+            } else {
+                "compatible with inspected components"
+            }
         } else {
             "refused"
         }
@@ -1759,16 +1568,20 @@ pub fn render_summary(status: &Status) -> String {
 
 pub fn render(status: &Status) -> String {
     let mut text = format!(
-        "cmux integration {}: headless {}\n",
+        "native integration {}: headless {}\n",
         display_safe(&status.harness),
         if status.headless.allowed {
-            "compatible with inspected components"
+            if status.conformance == "unverified; explicit work mode" {
+                "work mode; native compatibility unverified"
+            } else {
+                "compatible with inspected components"
+            }
         } else {
             "refused"
         }
     );
     text.push_str(&format!(
-        "  CLI version: {} ({}); approval, executable and launch checks still apply\n",
+        "  harness CLI version: {} ({}); approval, executable and launch checks still apply\n",
         display_safe(status.cli_version.as_deref().unwrap_or("unknown")),
         if status.version_checked {
             "checked"
@@ -1784,7 +1597,15 @@ pub fn render(status: &Status) -> String {
         ));
     }
     for reason in &status.headless.reasons {
-        text.push_str(&format!("  refusal: {}\n", display_safe(reason)));
+        text.push_str(&format!(
+            "  {}: {}\n",
+            if status.headless.allowed {
+                "note"
+            } else {
+                "refusal"
+            },
+            display_safe(reason)
+        ));
     }
     for c in &status.components {
         text.push_str(&format!(
@@ -1820,208 +1641,102 @@ pub fn render(status: &Status) -> String {
     text
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct NativeCli {
-    pub executable: Option<PathBuf>,
-    pub version: Option<String>,
-    pub installer_supported: bool,
-    pub detail: String,
-}
-impl NativeCli {
-    pub fn discover() -> Self {
-        let executable = super::resolve_executable().ok();
-        let version = executable.as_ref().and_then(|path| {
-            if std::env::var_os("AHU_CMUX_BIN").is_some() {
-                crate::selection::probe_explicit_utility_version(path)
-            } else {
-                path.to_str().and_then(crate::selection::probe_version)
-            }
-        });
-        let installer_supported = version
-            .as_deref()
-            .is_some_and(|v| v.strip_prefix("cmux ").unwrap_or(v) == REVIEWED_VERSION);
-        Self { executable, version, installer_supported,
-            detail: "CLI probe independent of socket reachability. Installer mapping reviewed only for cmux 0.64.22 (102) [ddd4a01bc]; other builds remain unknown.".into() }
-    }
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct InstallationPlan {
-    pub harness: String,
-    pub executable: Option<PathBuf>,
-    pub argv: Vec<String>,
-    pub available: bool,
-    pub scope: String,
-    pub affected_paths: Vec<PathBuf>,
-    pub unresolved_overrides: Vec<String>,
-    pub detail: String,
-}
-pub fn installation_plan(harness: &str, cli: &NativeCli) -> Result<InstallationPlan> {
-    installation_plan_in(harness, cli, &Locations::detect())
-}
-pub fn installation_plan_in(
-    harness: &str,
-    cli: &NativeCli,
-    locations: &Locations,
-) -> Result<InstallationPlan> {
-    let agent = native_agent(harness).ok_or_else(|| {
-        Error::new("unsupported harness; use claude-code, codex, opencode, or antigravity")
-    })?;
-    let wrapper = agent == "claude";
-    let relevant: &[&str] = match harness {
-        "codex" => &["CODEX_HOME"],
-        "opencode" => &[
-            "XDG_CONFIG_HOME",
-            "OPENCODE_CONFIG",
-            "OPENCODE_CONFIG_DIR",
-            "OPENCODE_CONFIG_CONTENT",
-        ],
-        "antigravity" => &["GEMINI_CLI_HOME", "AGY_CONFIG_DIR"],
-        _ => &[],
-    };
-    let unresolved_overrides: Vec<String> = relevant
-        .iter()
-        .filter(|k| locations.overrides.contains_key(**k))
-        .map(|k| (*k).into())
-        .collect();
-    let affected_paths = locations
-        .home
-        .as_ref()
-        .map(|home| {
-            let files: &[&str] = match harness {
-                "codex" => &[".codex/hooks.json", ".codex/config.toml", ".cmux/hooks"],
-                "opencode" => &[
-                    ".config/opencode/plugins/cmux-feed.js",
-                    ".config/opencode/plugins/cmux-session.js",
-                ],
-                "antigravity" => &[".gemini/config/hooks.json"],
-                _ => &[],
-            };
-            files.iter().map(|f| home.join(f)).collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let scope_known = unresolved_overrides.is_empty()
-        && locations
-            .home
-            .as_ref()
-            .is_some_and(|p| check_path(p).is_ok());
-    Ok(InstallationPlan { harness: harness.into(), executable: cli.executable.clone(),
-        argv: if wrapper { vec![] } else { vec!["hooks".into(), agent.into(), "install".into()] },
-        available: !wrapper && cli.installer_supported && cli.executable.is_some() && scope_known,
-        scope: "native default user scope; custom configuration overrides require separate native review; no project or bulk installation requested".into(),
-        affected_paths,
-        unresolved_overrides,
-        detail: if wrapper { "Claude is wrapper-managed: use cmux Settings > Automation. There is no supported `hooks claude install` operation.".into() }
-            else { "Native cmux owns hooks/scripts and associated activation/trust settings. Native confirmations and exit status are preserved. Success does not prove activation or live conformance.".into() },
-    })
-}
-/// Inherit terminal streams; never insert --yes or evaluate shell input.
-pub fn execute_install(plan: &InstallationPlan) -> Result<i32> {
-    if !plan.available {
-        return Err(Error::new(
-            "native installer unavailable or unverified; inspect the installation plan",
-        ));
-    }
-    let expected = native_agent(&plan.harness)
-        .filter(|v| *v != "claude")
-        .ok_or_else(|| Error::new("unsupported native installer"))?;
-    if plan.argv != ["hooks", expected, "install"] {
-        return Err(Error::new("invalid native installation operation"));
-    }
-    let executable = plan
-        .executable
-        .as_ref()
-        .ok_or_else(|| Error::new("cmux executable unavailable"))?;
-    let status = Command::new(executable).args(&plan.argv).status()?;
-    use std::os::unix::process::ExitStatusExt;
-    Ok(status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)))
-}
-pub fn status_command(repo: &Path, json: bool) -> Result<i32> {
-    let cli = NativeCli::discover();
-    let statuses: Vec<_> = ["claude-code", "codex", "opencode", "antigravity", "kiro"]
-        .into_iter()
-        .map(|h| {
-            let version = crate::catalog::harness(h)
-                .and_then(|entry| crate::selection::installed_version(entry.executable));
-            inspect(repo, h).with_version(version.as_deref())
-        })
-        .collect();
-    let plans = statuses
-        .iter()
-        .filter(|s| s.harness != "kiro")
-        .map(|s| installation_plan(&s.harness, &cli))
-        .collect::<Result<Vec<_>>>()?;
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string(
-                &serde_json::json!({"schema_version":1,"cli":cli,"integrations":statuses,"installation_plans":plans})
-            )?
-        );
-    } else {
-        println!(
-            "cmux CLI: {} ({})",
-            cli.executable
-                .as_ref()
-                .map(|p| display_safe(&p.display().to_string()))
-                .unwrap_or_else(|| "unavailable".into()),
-            display_safe(cli.version.as_deref().unwrap_or("version unknown"))
-        );
-        for status in &statuses {
-            print!("{}", render(status));
+#[cfg(test)]
+mod trusted_opencode_state_tests {
+    use super::*;
+
+    fn status(name: &str, scope: &str, path: &Path) -> Status {
+        let component = Component {
+            name: name.into(),
+            registration: Registration::Unknown,
+            activation: Activation::Unknown,
+            isolation: Isolation::Unknown,
+            conformance: Conformance::Untested,
+            evidence: vec![Evidence {
+                path: path.to_path_buf(),
+                scope: scope.into(),
+                method: "metadata only; contents not read".into(),
+                digest: None,
+            }],
+            detail: "opaque state".into(),
+        };
+        Status {
+            harness: "opencode".into(),
+            native_agent: None,
+            profile: None,
+            cli_version: Some("1.18.32".into()),
+            version_checked: true,
+            components: vec![component],
+            gaps: vec![],
+            conformance: "locally_inspected; live_untested".into(),
+            headless: HeadlessPolicy {
+                allowed: false,
+                reasons: vec!["opaque state".into()],
+                evidence_digest: "fixture".into(),
+            },
+            next_action: "interactive".into(),
         }
-        for plan in &plans {
-            println!(
-                "installer {}: {} — {}",
-                plan.harness,
-                if plan.available {
-                    "available"
-                } else {
-                    "unavailable/unknown"
-                },
-                plan.detail
+    }
+
+    #[test]
+    fn project_trust_accepts_only_native_opencode_authentication_stores() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        for (name, scope, file) in [
+            (
+                "authenticated account config",
+                "native account database",
+                "opencode.db-wal",
+            ),
+            (
+                "authenticated remote config",
+                "user native authentication",
+                "auth.json",
+            ),
+        ] {
+            let path = home.join(".local/share/opencode").join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"opaque fixture").unwrap();
+            let mut status = status(name, scope, &path);
+            assert!(trust_only_opencode_account_state(&mut status, home));
+            assert!(status.headless.allowed);
+            assert!(status.headless.reasons.is_empty());
+            assert!(
+                status
+                    .gaps
+                    .iter()
+                    .any(|gap| gap.contains("executable plugins"))
             );
         }
     }
-    Ok(0)
-}
-pub fn install_command(repo: &Path, harness: &str, dry_run: bool) -> Result<i32> {
-    let cli = NativeCli::discover();
-    let plan = installation_plan(harness, &cli)?;
-    eprintln!("{}\nScope: {}", plan.detail, plan.scope);
-    for path in &plan.affected_paths {
-        eprintln!("  {}", display_safe(&path.display().to_string()));
-    }
-    if !plan.unresolved_overrides.is_empty() {
-        eprintln!(
-            "Unresolved scope overrides: {}",
-            plan.unresolved_overrides.join(", ")
-        );
+
+    #[test]
+    fn project_trust_does_not_accept_project_plugins_or_other_unknown_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let path = home.join(".config/opencode/config.json");
+        let mut status = status("user defaults", "user", &path);
+        assert!(!trust_only_opencode_account_state(&mut status, home));
+        assert!(!status.headless.allowed);
+        assert_eq!(status.headless.reasons, ["opaque state"]);
     }
 
-    if !plan.argv.is_empty()
-        && let Some(executable) = &plan.executable
-    {
-        eprintln!(
-            "Native operation: {} {}",
-            display_safe(&shell_single_quote(&executable.to_string_lossy())),
-            plan.argv
-                .iter()
-                .map(|s| shell_single_quote(s))
-                .collect::<Vec<_>>()
-                .join(" ")
+    #[test]
+    fn project_trust_does_not_accept_symlinked_native_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let directory = home.join(".local/share/opencode");
+        std::fs::create_dir_all(&directory).unwrap();
+        let target = home.join("outside.db");
+        std::fs::write(&target, b"opaque fixture").unwrap();
+        let path = directory.join("opencode.db");
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        let mut status = status(
+            "authenticated account config",
+            "native account database",
+            &path,
         );
+        assert!(!trust_only_opencode_account_state(&mut status, home));
+        assert!(!status.headless.allowed);
     }
-    if dry_run {
-        println!("{}", serde_json::to_string(&plan)?);
-        return Ok(0);
-    }
-    if harness == "claude-code" {
-        return Ok(0);
-    }
-    let code = execute_install(&plan)?;
-    // Rescan even after a failed/partial native operation. No inferred success.
-    eprint!("{}", render(&inspect(repo, harness)));
-    Ok(code)
 }

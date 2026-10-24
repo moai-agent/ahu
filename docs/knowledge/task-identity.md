@@ -42,10 +42,9 @@ owned by the primary checkout. Linked checkouts share the same repository names;
 removal retains the binding to its original task ID. Human handles are lookup
 references, not a replacement for task identity or delivery authority.[^commands]
 
-Record schema 4 writes these version-7 IDs and adds the `waiting-for-approval`
-state. Schema 3 also used version-7 IDs; schema 2 used 18-character hex IDs.
-The build reads schemas 2, 3, and 4 without rewriting their IDs. It refuses
-schema 1, whose digest field reinterprets file bytes as delivered bytes.[^task]
+Current task schema 6 stores opaque session references and frozen external host
+identity. ahu reads only this task schema; older task records are reported as
+unreadable and are never reinterpreted or migrated.[^task]
 
 The repository-scoped task index maps IDs to durable state. Each entry holds the
 ID, repository identity, checkout, and store kind. New schema-2 entries live at

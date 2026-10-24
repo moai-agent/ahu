@@ -762,6 +762,7 @@ fn fixture_request<'a>(case: &'a Path, records: &'a Path) -> RunRequest<'a> {
         runs: 1,
         timeout_seconds: 1,
         allow_widened_approvals: false,
+        work_mode: false,
         json_output: false,
     }
 }
@@ -980,6 +981,29 @@ fn run_preflight_refuses_invalid_requests_without_creating_run_artifacts() {
             "expected {message}: {error}"
         );
         assert!(output.is_empty());
+        assert!(!records.exists());
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
+    }
+    // Explicit work mode authorizes both auto manifests. The next independent
+    // rubric gate still refuses the request, before any harness or artifacts.
+    for (work_mode, allow_widened) in [(true, false), (false, true)] {
+        let mut request = fixture_request(&case, &records);
+        request.agents = &wide;
+        request.evaluator = Some("@wide");
+        request.work_mode = work_mode;
+        request.allow_widened_approvals = allow_widened;
+        let mut input = std::io::Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let mut console = crate::launcher::Console {
+            input: &mut input,
+            output: &mut output,
+            interactive: false,
+        };
+        let error = run(&mut console, &repo, &request).unwrap_err();
+        assert!(
+            error.to_string().contains("requires a case `rubric`"),
+            "{error}"
+        );
         assert!(!records.exists());
         assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
     }
@@ -1350,7 +1374,7 @@ fn evaluator_agent_joins_only_its_owned_task_and_attempt_including_failures() {
         &decision
     ));
     let mut observation = decision::Observation::new("agent");
-    let mut envelope = serde_json::json!({"task_id":"judge-task", "attempt":2, "outcome":"failed", "metrics":{"values":{"input":{"kind":"observed", "value":42}, "output":{"kind":"unavailable"}}}});
+    let mut envelope = serde_json::json!({"task_id":"judge-task", "attempt":2, "outcome":"failed", "metrics":{"values":{"ahu.tokens.input":{"kind":"observed", "value":42}, "ahu.tokens.output":{"kind":"unavailable"}}}});
     observe_evaluator_agent(&mut observation, &envelope, &receiver).unwrap();
     assert_eq!(observation.task_id.as_deref(), Some("judge-task"));
     assert_eq!(observation.attempt, Some(2));
@@ -1362,10 +1386,14 @@ fn evaluator_agent_joins_only_its_owned_task_and_attempt_including_failures() {
         observation.telemetry.as_ref().unwrap()["evaluator_decision_errors"],
         1
     );
-    assert_eq!(observation.reported_tokens["input"]["value"], 42);
+    assert_eq!(observation.reported_tokens["ahu.tokens.input"]["value"], 42);
     let summary = decision::Summary::collect([(Some(&observation), Some(100.0))].into_iter());
-    assert_eq!(summary.means["evaluator_agent.input"], 42.0);
-    assert!(!summary.means.contains_key("evaluator_agent.output"));
+    assert_eq!(summary.means["evaluator_agent.ahu.tokens.input"], 42.0);
+    assert!(
+        !summary
+            .means
+            .contains_key("evaluator_agent.ahu.tokens.output")
+    );
     assert!(observation.validate());
 }
 
@@ -1930,4 +1958,316 @@ fn comparison_fingerprints_bind_identity_and_preserve_missing_model_evidence() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn recorded_failure_reasons_drop_host_paths_and_stay_bounded() {
+    // The reachable launch diagnostic: the child ahu printed no usable JSON and
+    // the message names the external artifact directory, which is an absolute
+    // host path under the operator's home.
+    let reason = bounded_failure_reason(
+        "eval agent @triage returned no valid JSON result (exit 2); bounded stderr and stdout were saved under the external run artifacts at /Users/fixture/.local/state/ahu/eval-artifacts/0123456789abcdef/ahu-eval-case-1/run-000/candidate",
+    );
+    assert_eq!(reason, "Evaluation failed; a host path was redacted.");
+
+    // Spaces and punctuation in an absolute path must not leave suffix fragments.
+    assert_eq!(
+        bounded_failure_reason(
+            "could not write (/Users/Fixture User/Private Runs/current/result.json); retry later"
+        ),
+        "Evaluation failed; a host path was redacted."
+    );
+    assert_eq!(
+        bounded_failure_reason(r"could not write C:\\Users\\Fixture User\\Runs\\result.json"),
+        "Evaluation failed; a host path was redacted."
+    );
+
+    // Diagnostics that name no path keep their wording, so the row stays useful.
+    let outcome = bounded_failure_reason(
+        "eval agent @triage did not complete successfully (timed_out); inspect the external run result for its task outcome",
+    );
+    assert_eq!(
+        outcome,
+        "eval agent @triage did not complete successfully (timed_out); inspect the external run result for its task outcome"
+    );
+
+    // An unbounded diagnostic cannot grow a record without limit.
+    let bounded =
+        bounded_failure_reason(&format!("could not start eval agent: {}", "x".repeat(8192)));
+    assert!(bounded.len() <= 259, "{} bytes", bounded.len());
+    assert!(bounded.ends_with("..."), "{bounded}");
+
+    // Terminal-hostile bytes are escaped exactly as every other printed value.
+    assert_eq!(
+        bounded_failure_reason("could not start eval agent \u{1b}[2K@triage"),
+        display_safe("could not start eval agent \u{1b}[2K@triage")
+    );
+
+    // Truncation never splits a multi-byte character.
+    let wide = bounded_failure_reason(&"é".repeat(400));
+    assert!(wide.is_char_boundary(wide.len() - 3), "{}", wide.len());
+}
+
+#[test]
+fn envelope_metrics_are_projected_by_name_and_shape() {
+    let envelope = serde_json::json!({
+        "metrics": {"values": {
+            // Supported names and shapes, including a sibling key the record
+            // must not inherit from the envelope's object.
+            "ahu.tokens.input":
+                {"kind": "observed", "value": 120, "note": "/Users/fixture/eval-artifacts"},
+            "ahu.tokens.output": 40,
+            "ahu.tokens.total": {"kind": "unavailable"},
+            "ahu.cost.harness_reported_usd": {"kind": "observed_float", "value": 0.0125},
+            // Unrecognized names, whatever they carry.
+            "artifact_dir": "/Users/fixture/eval-artifacts/run-1",
+            "ahu.tokens.input_tokens": {"kind": "observed", "value": 7},
+            "harness.notes": {"path": "/Users/fixture/home"},
+            // Recognized names whose values are not the measurement the name
+            // carries: a token count is a non-negative integer, and only the
+            // harness-reported cost is a float.
+            "ahu.tokens.cached": {"kind": "observed", "value": "/Users/fixture/run"},
+            "ahu.tokens.cache_write": {"kind": "spoofed", "value": 7},
+            "ahu.tokens.reasoning": -3,
+        }},
+    });
+    let projected = super::reported_tokens(Some(&envelope), None).expect("projects its metrics");
+    assert_eq!(
+        projected,
+        serde_json::json!({
+            "ahu.tokens.input": {"kind": "observed", "value": 120},
+            "ahu.tokens.output": 40,
+            "ahu.tokens.total": {"kind": "unavailable"},
+            "ahu.cost.harness_reported_usd": {"kind": "observed_float", "value": 0.0125},
+        })
+    );
+    let text = projected.to_string();
+    assert!(
+        !text.contains("eval-artifacts") && !text.contains('/'),
+        "{text}"
+    );
+
+    // A token count that is not a non-negative integer is not a count, whether
+    // it arrived bare or under a measurement kind, and a float-kinded token is
+    // not a shape any recorder writes.
+    for value in [
+        serde_json::json!(1.5),
+        serde_json::json!(-3),
+        serde_json::json!({"kind": "observed", "value": 1.5}),
+        serde_json::json!({"kind": "observed", "value": -3}),
+        serde_json::json!({"kind": "observed_float", "value": 7.0}),
+        serde_json::json!({"kind": "observed_float", "value": 7}),
+        serde_json::json!({"kind": "observed"}),
+        serde_json::json!("12"),
+    ] {
+        assert!(
+            super::reported_tokens(
+                Some(&serde_json::json!({"metrics": {"values": {"ahu.tokens.total": value}}})),
+                None,
+            )
+            .is_none(),
+            "{value}"
+        );
+    }
+
+    // The harness-reported cost is the one float amount, and it is still finite
+    // and non-negative.
+    assert_eq!(
+        super::reported_tokens(
+            Some(&serde_json::json!({"metrics": {"values": {
+                "ahu.cost.harness_reported_usd": {"kind": "observed_float", "value": 0.0075},
+            }}})),
+            None,
+        )
+        .expect("projects the cost")["ahu.cost.harness_reported_usd"],
+        serde_json::json!({"kind": "observed_float", "value": 0.0075})
+    );
+    for value in [
+        serde_json::json!({"kind": "observed_float", "value": -0.01}),
+        serde_json::json!({"kind": "observed_float", "value": "0.01"}),
+        serde_json::json!(-0.01),
+    ] {
+        assert!(
+            super::reported_tokens(
+                Some(&serde_json::json!({"metrics": {"values": {
+                    "ahu.cost.harness_reported_usd": value,
+                }}})),
+                None,
+            )
+            .is_none(),
+            "{value}"
+        );
+    }
+
+    // An envelope that reported nothing recognizable reports nothing at all,
+    // rather than a record field holding its unrecognized keys.
+    assert!(
+        super::reported_tokens(
+            Some(&serde_json::json!({
+                "metrics": {"values": {"artifact_dir": "/Users/fixture/eval-artifacts"}},
+            })),
+            None,
+        )
+        .is_none()
+    );
+    assert!(
+        super::reported_tokens(
+            Some(&serde_json::json!({"metrics": {"values": "/Users/fixture"}})),
+            None,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn decision_service_usage_survives_envelope_metric_projection() {
+    let telemetry = crate::eval_otel::TaskTelemetry {
+        decision_input_tokens: Some(120),
+        decision_output_tokens: Some(20),
+        selection_input_tokens: Some(9),
+        selection_output_tokens: Some(3),
+        ..Default::default()
+    };
+    let envelope = serde_json::json!({
+        "metrics": {"values": {"ahu.tokens.total": {"kind": "observed", "value": 800}}},
+        "harness": {"cost": {"usd": 0.004}},
+    });
+    let projected =
+        super::reported_tokens(Some(&envelope), Some(&telemetry)).expect("projects both sources");
+    assert_eq!(
+        projected,
+        serde_json::json!({
+            "ahu.tokens.total": {"kind": "observed", "value": 800},
+            "ahu.cost.harness_reported_usd": {"kind": "observed_float", "value": 0.004},
+            "decision_service.input": 120,
+            "decision_service.output": 20,
+            "skill_selection_service.input_known": 9,
+            "skill_selection_service.output_known": 3,
+        })
+    );
+
+    // The service's own usage is still recorded for an attempt whose harness
+    // reported no metrics at all.
+    assert_eq!(
+        super::reported_tokens(None, Some(&telemetry)).expect("projects service usage")["decision_service.input"],
+        120
+    );
+}
+
+#[test]
+fn only_known_headless_outcomes_reach_a_record() {
+    for outcome in super::HEADLESS_OUTCOMES {
+        assert_eq!(
+            super::projected_outcome(Some(&serde_json::Value::from(outcome))),
+            Some(outcome),
+            "{outcome}"
+        );
+    }
+    for reported in [
+        // Non-terminal lifecycle labels are not result outcomes.
+        serde_json::json!("running"),
+        serde_json::json!("interrupted"),
+        serde_json::json!("started"),
+        serde_json::json!("/Users/fixture/eval-artifacts/run-1"),
+        serde_json::json!("succeeded\u{1b}[2K"),
+        serde_json::json!(""),
+        serde_json::json!(7),
+        serde_json::json!({"outcome": "succeeded"}),
+        serde_json::json!(["succeeded"]),
+    ] {
+        assert_eq!(
+            super::projected_outcome(Some(&reported)),
+            Some("unknown"),
+            "{reported}"
+        );
+    }
+
+    // An envelope that reported no outcome is not an envelope that reported an
+    // unknown one: the caller keeps whatever its own terminal status stated.
+    assert_eq!(super::projected_outcome(None), None);
+    assert_eq!(
+        super::projected_outcome(Some(&serde_json::Value::Null)),
+        None
+    );
+}
+
+#[test]
+fn eval_work_mode_reaches_candidate_and_separate_evaluator_argv() {
+    for (agent, root) in [
+        ("@candidate", "/synthetic/candidate"),
+        ("@judge", "/synthetic/evaluator"),
+    ] {
+        let repo = crate::git::Repo {
+            root: root.into(),
+            common_dir: "/synthetic/common".into(),
+            head: None,
+        };
+        for work_mode in [false, true] {
+            for allow_widened in [false, true] {
+                let mut request = fixture_request(Path::new("case.md"), Path::new("records.jsonl"));
+                request.work_mode = work_mode;
+                request.allow_widened_approvals = allow_widened;
+                request.timeout_seconds = 42;
+                let command = eval_agent_command(
+                    Path::new("ahu"),
+                    &repo,
+                    agent,
+                    Path::new("prompt.txt"),
+                    &request,
+                );
+                let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
+                let mut expected = vec![
+                    "--repo",
+                    root,
+                    agent,
+                    if work_mode {
+                        "--work-mode"
+                    } else {
+                        "--headless"
+                    },
+                    "--timeout",
+                    "42",
+                    "--prompt-file",
+                    "prompt.txt",
+                    "--output",
+                    "json",
+                ];
+                if allow_widened {
+                    expected.push("--allow-widened-approvals");
+                }
+                assert_eq!(args, expected);
+                let (args, selected_repo) =
+                    crate::cli::extract_repository(args.into_iter().map(str::to_owned).collect())
+                        .unwrap();
+                assert_eq!(selected_repo.as_deref(), Some(Path::new(root)));
+                let crate::cli::Command::HeadlessLaunch { options, .. } =
+                    crate::cli::parse(args).unwrap()
+                else {
+                    panic!("expected headless launch")
+                };
+                assert_eq!(options.work_mode, work_mode);
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_work_mode_groups_are_distinct_from_guarded_and_legacy_records() {
+    // Even an identical supplied digest must not collapse different recorded modes.
+    let rows = [
+        record(&[]),
+        record(&[("work_mode", "false")]),
+        record(&[("work_mode", "true")]),
+    ];
+    let report = report_of(&rows);
+    assert_eq!(report.groups.len(), 3);
+    let modes: Vec<_> = report.groups.iter().map(|g| g.key.work_mode).collect();
+    assert_eq!(modes, vec![None, Some(false), Some(true)]);
+    for group in &report.groups {
+        assert_eq!(group.runs, 1);
+        assert_eq!(
+            group_json(group)["work_mode"],
+            serde_json::json!(group.key.work_mode)
+        );
+    }
 }

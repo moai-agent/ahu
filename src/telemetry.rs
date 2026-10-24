@@ -156,6 +156,12 @@ fn initialize_named(
     // SDK detectors retain non-ahu resource configuration. Rebuild ahu identity
     // from one bounded source so an absent frozen field cannot fall through to
     // an ambient value (including on independently launched MCP servers).
+    let headless_attempt = service_name == "ahu"
+        && identity.as_ref().is_some_and(|attributes| {
+            attributes
+                .iter()
+                .any(|(key, value)| *key == "ahu.execution.mode" && value == "headless")
+        });
     let attributes = identity.unwrap_or_else(|| {
         if service_name == "ahu-mcp" {
             std::env::var("AHU_MCP_RESOURCE_ATTRIBUTES")
@@ -166,15 +172,36 @@ fn initialize_named(
             ahu_resource_attributes()
         }
     });
-    let resource = identity_resource(service_name, attributes);
+    let resource = if headless_attempt {
+        // Headless invocation evidence has no ambient resource payload. Keep
+        // paths, arbitrary labels and credentials out of Ahu-owned exports.
+        Resource::builder_empty()
+            .with_service_name(service_name)
+            .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+            .with_attributes(
+                attributes
+                    .into_iter()
+                    .map(|(key, value)| KeyValue::new(key, value)),
+            )
+            .build()
+    } else {
+        identity_resource(service_name, attributes)
+    };
     // Keep export asynchronous and bounded, and override OTEL_BSP_* values so
     // an inherited environment cannot turn a local ahu process into an
     // unbounded queue or stall task execution. Full queues drop telemetry.
     let processor = bounded_span_processor(exporter);
-    let provider = SdkTracerProvider::builder()
+    let mut builder = SdkTracerProvider::builder()
         .with_resource(resource)
-        .with_span_processor(processor)
-        .build();
+        .with_span_processor(processor);
+    if headless_attempt {
+        // Every owned attempt needs a terminal observation, even if an ambient
+        // SDK sampler or attribute limit would otherwise erase that evidence.
+        builder = builder
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .with_span_limits(opentelemetry_sdk::trace::SpanLimits::default());
+    }
+    let provider = builder.build();
     global::set_tracer_provider(provider.clone());
     *provider_slot().lock().expect("telemetry mutex poisoned") = Some(provider);
     Ok(())
@@ -572,7 +599,7 @@ pub fn configure_child(
 }
 
 /// A director has no frozen task record. Carry its bounded release label for
-/// future task creation and apply the same export policy on either cmux path.
+/// future task creation and apply the same export policy on either session-host path.
 pub(crate) fn configure_coordinator(
     command: &mut std::process::Command,
     config: &TelemetryConfig,
@@ -594,7 +621,7 @@ pub(crate) fn configure_coordinator(
     if let Some(endpoint) = eval_endpoint_override() {
         command.env("AHU_EVAL_OTEL_ENDPOINT", endpoint);
     } else {
-        // A relocated workspace must not pick up a stale cmux-server receiver.
+        // A relocated workspace must not pick up a stale session-host receiver.
         command.env_remove("AHU_EVAL_OTEL_ENDPOINT");
     }
     let mut inherited = ahu_resource_attributes();
@@ -1060,6 +1087,10 @@ pub(crate) fn mcp_request_span(request: &serde_json::Value) -> SpanGuard {
         | "server/discover"
         | "tools/list"
         | "tools/call"
+        | "skills/list"
+        | "skills/get"
+        | "resources/list"
+        | "resources/read"
         | "tasks/get"
         | "tasks/update"
         | "tasks/cancel"
@@ -1573,6 +1604,31 @@ pub fn shutdown() {
     }
 }
 
+/// Run ordinary-collector assertions without inheriting eval capture or mutating
+/// the environment shared by parallel tests. Return true in the parent process.
+#[cfg(test)]
+pub(crate) fn test_without_eval_endpoint(test_name: &str) -> bool {
+    const CHILD: &str = "AHU_TEST_WITHOUT_EVAL_ENDPOINT";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        assert!(std::env::var_os("AHU_EVAL_OTEL_ENDPOINT").is_none());
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+        .env(CHILD, test_name)
+        .args(["--exact", test_name, "--nocapture"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+        "{test_name}: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1585,6 +1641,11 @@ mod tests {
 
     #[test]
     fn local_metrics_are_opt_in_numeric_and_do_not_infer_totals() {
+        if super::test_without_eval_endpoint(
+            "telemetry::tests::local_metrics_are_opt_in_numeric_and_do_not_infer_totals",
+        ) {
+            return;
+        }
         let mut events = crate::headless::Events::default();
         events.observe("codex", br#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":7,"cached_tokens":"private-marker","total_tokens":-1,"tracker_url":"private-marker"},"prompt":"private-marker","model":"private-marker"}"#);
         let mut config = TelemetryConfig::default();
@@ -1749,6 +1810,11 @@ mod tests {
 
     #[test]
     fn child_environment_invalid_endpoint_no_export() {
+        if super::test_without_eval_endpoint(
+            "telemetry::tests::child_environment_invalid_endpoint_no_export",
+        ) {
+            return;
+        }
         for endpoint in [
             "https://127.0.0.1:4318",
             "http://example.com:4318",
@@ -1810,6 +1876,11 @@ mod tests {
 
     #[test]
     fn child_environment_is_only_changed_when_enabled() {
+        if super::test_without_eval_endpoint(
+            "telemetry::tests::child_environment_is_only_changed_when_enabled",
+        ) {
+            return;
+        }
         let mut disabled = std::process::Command::new("true");
         configure_child(
             &mut disabled,
@@ -1878,6 +1949,11 @@ mod tests {
 
     #[test]
     fn child_environment_enables_otlp_for_all_signals() {
+        if super::test_without_eval_endpoint(
+            "telemetry::tests::child_environment_enables_otlp_for_all_signals",
+        ) {
+            return;
+        }
         let enabled = TelemetryConfig {
             enabled: true,
             ..TelemetryConfig::default()
@@ -2313,6 +2389,83 @@ mod tests {
     }
 
     #[test]
+    fn skill_retrieval_telemetry_excludes_content_uris_metadata_and_digests() {
+        let marker = "synthetic-sensitive-skill";
+        let digest = crate::util::digest_bytes(marker.as_bytes());
+        let skill = serde_json::json!({
+            "uri": format!("ahu://skills/{marker}/SKILL.md"),
+            "frontmatter": {"name": marker, "description": marker},
+            "resources": [{"uri": marker, "digest": format!("sha256:{digest}"), "size": 42}],
+            "_meta": {"origin": marker},
+        });
+        for method in [
+            "skills/list",
+            "skills/get",
+            "resources/list",
+            "resources/read",
+        ] {
+            for response in [
+                serde_json::json!({"result": {
+                    "skills": [skill.clone()], "skill": skill,
+                    "resources": [{"uri": marker, "digest": digest}],
+                    "contents": [{"uri": marker, "text": marker}],
+                    "_meta": {"origin": marker},
+                }}),
+                serde_json::json!({"error": {"code": -32602, "message": marker, "data": skill}}),
+            ] {
+                let attributes = mcp_result_attributes(method, marker, &response);
+                assert!(attributes.iter().all(|attribute| {
+                    [
+                        "ahu.mcp.outcome",
+                        "ahu.mcp.error.code",
+                        "ahu.mcp.error.category",
+                    ]
+                    .contains(&attribute.key.as_str())
+                }));
+                assert!(string_attr(&attributes, "ahu.mcp.outcome").is_some());
+                let rendered = format!("{attributes:?}");
+                assert!(!rendered.contains(marker));
+                assert!(!rendered.contains(&digest));
+                assert!(!rendered.contains("ahu://"));
+                assert!(!rendered.contains("execution"));
+            }
+        }
+    }
+
+    #[test]
+    fn skill_tool_telemetry_retains_only_names_and_outcomes() {
+        let marker = "synthetic-private-skill";
+        let payload = serde_json::json!({
+            "uri": marker, "cursor": marker, "contents": [{"text":marker}],
+            "skill": {"frontmatter": {"description":marker}, "_meta": {"origin":marker}},
+        });
+        for name in ["ahu_skills_list", "ahu_skills_get"] {
+            let arguments = mcp_tool_attributes(name, &payload);
+            assert_eq!(arguments.len(), 1);
+            assert_eq!(
+                string_attr(&arguments, "ahu.mcp.tool.name"),
+                Some(name.into())
+            );
+            for response in [
+                serde_json::json!({"result":{"structuredContent":payload, "content":[{"type":"text","text":marker}]}}),
+                serde_json::json!({"result":{"isError":true,"content":[{"type":"text","text":marker}]}}),
+                serde_json::json!({"error":{"code":-32602,"message":marker}}),
+            ] {
+                let attributes = mcp_result_attributes("tools/call", name, &response);
+                assert!(attributes.iter().all(|attribute| {
+                    [
+                        "ahu.mcp.outcome",
+                        "ahu.mcp.error.code",
+                        "ahu.mcp.error.category",
+                    ]
+                    .contains(&attribute.key.as_str())
+                }));
+                assert!(!format!("{attributes:?}").contains(marker));
+            }
+        }
+    }
+
+    #[test]
     fn mcp_protocol_spans_include_offered_tools_and_protocol_outcomes() {
         let tools = mcp_result_attributes(
             "tools/list",
@@ -2637,6 +2790,11 @@ mod causal_context_tests {
 
     #[test]
     fn disabled_child_cannot_reuse_inherited_context() {
+        if super::test_without_eval_endpoint(
+            "telemetry::causal_context_tests::disabled_child_cannot_reuse_inherited_context",
+        ) {
+            return;
+        }
         let provider = SdkTracerProvider::builder()
             .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
             .build();
@@ -2710,6 +2868,9 @@ mod primary_export_tests {
                 assert!(env["AHU_MCP_RESOURCE_ATTRIBUTES"].contains("ahu.task.id=synthetic-task"));
                 assert!(super::eval_endpoint_override().is_some());
             } else {
+                let expected_endpoint =
+                    super::eval_endpoint_override().unwrap_or_else(|| config.endpoint.clone());
+                assert_eq!(env["OTEL_EXPORTER_OTLP_ENDPOINT"], expected_endpoint);
                 assert_eq!(env["OTEL_TRACES_EXPORTER"], "otlp");
                 assert_eq!(env["OTEL_METRICS_EXPORTER"], expected);
                 assert_eq!(env["OTEL_LOGS_EXPORTER"], expected);
@@ -3177,6 +3338,7 @@ pub(crate) fn export_eval_selection(
     run_id: &str,
     selection_id: &str,
     selection: &crate::skill_selection::Selection,
+    release_id: Option<&str>,
 ) -> bool {
     use opentelemetry_proto::tonic::{
         collector::trace::v1::ExportTraceServiceRequest,
@@ -3257,16 +3419,20 @@ pub(crate) fn export_eval_selection(
         .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64);
     // Construct the wire resource explicitly: SDK Resource::builder and the
     // default OTLP exporter both import unrelated inherited environment data.
+    let mut resource_attributes = vec![
+        string("service.name", "ahu-eval"),
+        string("ahu.eval.run_id", run_id),
+        string("ahu.eval.stage", "skill_selection"),
+        string("ahu.task.id", selection_id),
+        string("ahu.task.attempt", "1"),
+    ];
+    if let Some(release_id) = release_id {
+        resource_attributes.push(string("ahu.release.id", release_id));
+    }
     let message = ExportTraceServiceRequest {
         resource_spans: vec![ResourceSpans {
             resource: Some(ProtoResource {
-                attributes: vec![
-                    string("service.name", "ahu-eval"),
-                    string("ahu.eval.run_id", run_id),
-                    string("ahu.eval.stage", "skill_selection"),
-                    string("ahu.task.id", selection_id),
-                    string("ahu.task.attempt", "1"),
-                ],
+                attributes: resource_attributes,
                 ..Default::default()
             }),
             scope_spans: vec![ScopeSpans {
@@ -3336,7 +3502,8 @@ mod selection_tests {
             &endpoint,
             "wire-run",
             "wire-selection",
-            &selection
+            &selection,
+            Some("release-fixture")
         ));
     }
 
@@ -3461,6 +3628,12 @@ mod selection_tests {
         ] {
             assert!(!body.windows(sentinel.len()).any(|w| w == sentinel));
         }
+        if !decision {
+            assert!(
+                body.windows(b"release-fixture".len())
+                    .any(|w| w == b"release-fixture")
+            );
+        }
         assert!(matches!(proxy.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
     }
     #[test]
@@ -3479,7 +3652,8 @@ mod selection_tests {
             receiver.endpoint(),
             "selection-run",
             "selector-1",
-            &selection
+            &selection,
+            Some("release-fixture")
         ));
         let observed = receiver.task("selector-1", 1).unwrap();
         assert_eq!(observed.selection_observations, 1);
@@ -3505,7 +3679,8 @@ mod selection_tests {
                 endpoint,
                 "selection-run",
                 "selector-1",
-                &selection
+                &selection,
+                None
             ));
         }
     }

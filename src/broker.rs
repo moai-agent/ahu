@@ -9,53 +9,52 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChildGrant {
     pub agent: String,
     pub identity_digest: String,
     pub permissions: crate::agent::Permissions,
     pub hooks_digest: String,
     pub native_helpers: String,
+    #[serde(default, skip_serializing_if = "crate::structured::Contract::is_empty")]
+    pub contract: crate::structured::Contract,
 }
 
 pub fn freeze_grants(
     repo: &crate::git::Repo,
     ordinary: &[String],
     widened: &[String],
+    work_mode: bool,
 ) -> Result<Vec<ChildGrant>> {
-    let loaded =
-        crate::config::load(&repo.root)?.ok_or_else(|| Error::new("configuration required"))?;
-    let project: toml::Value = toml::from_str(&std::fs::read_to_string(loaded.path)?)
-        .map_err(|e| Error::new(e.to_string()))?;
+    crate::config::load(&repo.root)?.ok_or_else(|| Error::new("configuration required"))?;
     let mut grants = Vec::new();
     for name in ordinary.iter().chain(widened) {
         let agent = crate::agent::find(&repo.root, name)?;
-        if agent.manifest.permissions.widens_defaults() && !widened.contains(name) {
+        let permissions = if work_mode {
+            crate::agent::Permissions::Auto
+        } else {
+            agent.manifest.permissions
+        };
+        if permissions.widens_defaults() && !widened.contains(name) {
             bail!(
                 "child @{name} requires explicit --allow-child-widened @{name} at host submission"
             );
         }
         let policy = match &agent.manifest.native_helpers {
             Some(policy) => policy.as_str(),
-            None => match project
-                .get("execution")
-                .and_then(|v| v.get("native_helpers"))
-            {
-                None => "disabled",
-                Some(value) => value.as_str().ok_or_else(|| {
-                    Error::new("child native_helpers must be disabled or bounded")
-                })?,
-            },
+            None => "disabled",
         };
         if !matches!(policy, "disabled" | "bounded") {
             bail!("child native_helpers must be disabled or bounded");
         }
-        let mut hooks = crate::hooks::collect(&repo.root, &agent.manifest.harness)?;
-        hooks.wrapper_injected = false;
+        let hooks = crate::hooks::collect(&repo.root, &agent.manifest.harness)?;
+
         grants.push(ChildGrant {
+            contract: agent.contract.clone(),
             agent: name.clone(),
             identity_digest: agent.identity_digest(),
-            permissions: agent.manifest.permissions,
+            permissions,
             hooks_digest: hooks.digest(),
             native_helpers: policy.into(),
         });
@@ -71,10 +70,14 @@ struct Request {
     parent_task: String,
     agent: String,
     prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    structured_input: Option<String>,
     title: Option<String>,
     summary: Option<String>,
     name: Option<String>,
     timeout_seconds: u64,
+    #[serde(default)]
+    work_mode: bool,
     native_helpers: Option<String>,
     allow_widened_approvals: bool,
 }
@@ -183,6 +186,7 @@ impl Broker {
             if request.schema_version != 1
                 || request.capability != self.token
                 || request.parent_task != self.owner.task_id
+                || request.work_mode != self.spec.options.work_mode
             {
                 headless::durable_json(&claim, &json!({"state":"refused"}))?;
                 headless::durable_json(
@@ -213,6 +217,14 @@ impl Broker {
                 continue;
             }
             let grant = granted.ok_or_else(|| Error::new("missing child grant"))?;
+            if let Err(error) = grant
+                .contract
+                .validate_input(request.structured_input.as_deref())
+            {
+                headless::durable_json(&claim, &json!({"state":"refused"}))?;
+                headless::durable_json(&response, &json!({"ok":false,"error":error.to_string()}))?;
+                continue;
+            }
             // Persist before dispatch; a lost supervisor never replays a claim.
             headless::durable_json(
                 &claim,
@@ -249,6 +261,14 @@ impl Broker {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if request.work_mode {
+                command.arg("--work-mode");
+            }
+            if let Some(input) = &request.structured_input {
+                let artifact = self.private_dir.join(format!("{stem}.input.json"));
+                crate::state::write_private_file(&artifact, input.as_bytes())?;
+                command.arg("--input-file").arg(artifact);
+            }
             crate::telemetry::configure_task_identity(&mut command, &self.owner, Some(&self.spec));
             command.env_remove("AHU_BROKER_PARENT_ATTRIBUTES");
             if let Some(carrier) = &self.parent_context {
@@ -334,6 +354,9 @@ pub fn request(
             "legacy dispatch is unsupported by this binary; use the original runner and its owning supervisor"
         );
     }
+    if options.work_mode && !spec.options.work_mode {
+        bail!("work mode must be selected by the host and cannot expand a frozen child grant");
+    }
     let record = task::load(&dir)?;
     if record.worktree.canonicalize()? != repo.root.canonicalize()? {
         bail!("broker request must originate in its owning worktree");
@@ -355,10 +378,16 @@ pub fn request(
         parent_task: parent,
         agent: agent.into(),
         prompt: prompt.into(),
+        structured_input: options
+            .input_file
+            .as_ref()
+            .map(|p| crate::structured::read_artifact(p).map(|v| v.to_string()))
+            .transpose()?,
         title: display.title.clone(),
         summary: display.summary.clone(),
         name: display.name.clone(),
         timeout_seconds: options.timeout_seconds,
+        work_mode: spec.options.work_mode,
         native_helpers: options
             .native_helpers_explicit
             .then(|| options.native_helpers.clone()),
@@ -589,7 +618,7 @@ mod tests {
             "config_snapshot_digest": "snapshot-digest",
             "materialize": {"written": [], "removed": [], "concurrently_modified": []},
             "launch_command": {"program": "claude", "args": []},
-            "delivery": {"nonce": "n", "agent_instructions": null, "digest": "d"},
+            "delivery": {"layout_version": 3, "composition": {"mode":"headless_disabled","metadata":null,"state":null}, "nonce": "n", "agent_instructions": null, "digest": "d"},
             "prompt_digest": "p",
             "enforcement": {
                 "harness": "claude-code",
@@ -599,9 +628,7 @@ mod tests {
                 "applied_controls": []
             },
             "reliability_warning": null,
-            "cmux_group_id": null,
-            "cmux_workspace_id": null,
-            "cmux_window_id": null,
+            "session_ref": null,
             "state": "running"
         }))
         .unwrap()
@@ -621,6 +648,7 @@ mod tests {
             root_task: None,
             broker_request: None,
             child_grants: grants,
+            contract: Default::default(),
             depth: 0,
             attempt: 1,
             session: None,
@@ -633,6 +661,7 @@ mod tests {
 
     fn grant(agent: &str, permissions: crate::agent::Permissions, helpers: &str) -> ChildGrant {
         ChildGrant {
+            contract: Default::default(),
             agent: agent.into(),
             identity_digest: "a".repeat(64),
             permissions,
@@ -659,10 +688,12 @@ mod tests {
             parent_task: TASK.into(),
             agent: agent.into(),
             prompt: "review the diff".into(),
+            structured_input: None,
             title: None,
             summary: None,
             name: None,
             timeout_seconds: 60,
+            work_mode: false,
             native_helpers: None,
             allow_widened_approvals: false,
         }
@@ -691,11 +722,109 @@ mod tests {
     }
 
     #[test]
+    fn structured_valid_input_is_frozen_for_dispatch() {
+        let (_dir, repo) = repo();
+        let record = owner(&repo);
+        let mut child = grant("reviewer", crate::agent::Permissions::Prompt, "disabled");
+        child.contract.input = Some(json!({"type":"null"}));
+        let spec = spec(2, vec![child]);
+        let dir = mailbox(&repo);
+        let mut broker = Broker::new(&dir, &record, &spec).unwrap();
+        let private = broker.private_dir.clone();
+        // Stop at the dispatch boundary; never launch a provider or create a worktree.
+        headless::durable_json(&private.with_file_name("admission-closed.json"), &json!({}))
+            .unwrap();
+        let id = "abcdef0000000000";
+        let mut request = submitted(&broker.token, "reviewer");
+        request.structured_input = Some("null".into());
+        submit(&dir, id, &serde_json::to_vec(&request).unwrap());
+        broker.poll().unwrap();
+        broker.finish().unwrap();
+        assert_eq!(
+            std::fs::read(private.join(format!("{id}.input.json"))).unwrap(),
+            b"null"
+        );
+        let claim: Value = headless::read_json(&private.join(format!("{id}.claim.json"))).unwrap();
+        assert_eq!(claim["state"], "dispatching");
+        assert_eq!(
+            std::fs::read(private.join(format!("{id}.prompt.txt"))).unwrap(),
+            request.prompt.as_bytes()
+        );
+        assert!(!repo.root.join(".worktrees").exists());
+    }
+
+    #[test]
+    fn structured_invalid_input_is_refused_before_dispatch() {
+        let (_dir, repo) = repo();
+        let record = owner(&repo);
+        let mut child = grant("reviewer", crate::agent::Permissions::Prompt, "disabled");
+        child.contract.input = Some(
+            json!({"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}},"additionalProperties":false}),
+        );
+        let spec = spec(2, vec![child]);
+        let dir = mailbox(&repo);
+        let mut broker = Broker::new(&dir, &record, &spec).unwrap();
+        for (i, input) in [
+            None,
+            Some("{}"),
+            Some("{bad private-capability"),
+            Some(r#"{"ok":"no"}"#),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let id = format!("{i:016x}");
+            let mut request = submitted(&broker.token, "reviewer");
+            request.structured_input = input.map(str::to_owned);
+            submit(&dir, &id, &serde_json::to_vec(&request).unwrap());
+            broker.poll().unwrap();
+            let response = refusal(&broker.private_dir, &id);
+            assert!(!response.contains(&broker.token));
+            assert!(!response.contains("private-capability"));
+            assert!(!response.contains(&broker.private_dir.to_string_lossy().to_string()));
+            assert!(!broker.private_dir.join(format!("{id}.prompt.txt")).exists());
+        }
+        broker.finish().unwrap();
+        assert!(!repo.root.join(".worktrees").exists());
+    }
+
+    #[test]
+    fn structured_grants_freeze_and_legacy_grants_deserialize() {
+        let legacy: ChildGrant = serde_json::from_value(json!({"agent":"reader","identity_digest":"a","permissions":"prompt","hooks_digest":"b","native_helpers":"disabled"})).unwrap();
+        assert!(legacy.contract.is_empty());
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("contract")
+                .is_none()
+        );
+        let (_dir, repo) = repo();
+        write_config(&repo.root);
+        write_agent(&repo.root, "reviewer", "prompt", None);
+        let path = repo.root.join(".agents/ahu/agents/reviewer.md");
+        let text = std::fs::read_to_string(&path).unwrap().replacen(
+            "---\n",
+            "---\ninput_schema:\n  type: string\n",
+            1,
+        );
+        std::fs::write(&path, text).unwrap();
+
+        let first = freeze_grants(&repo, &["reviewer".into()], &[], false).unwrap();
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("  type: string", "  type: boolean");
+        std::fs::write(&path, text).unwrap();
+        let second = freeze_grants(&repo, &["reviewer".into()], &[], false).unwrap();
+        assert_eq!(first[0].contract.input, Some(json!({"type":"string"})));
+        assert_ne!(first[0].identity_digest, second[0].identity_digest);
+    }
+
+    #[test]
     fn freezing_a_grant_records_the_identity_hooks_and_default_helper_policy() {
         let (_dir, repo) = repo();
         write_config(&repo.root);
         write_agent(&repo.root, "reviewer", "prompt", None);
-        let grants = freeze_grants(&repo, &["reviewer".into()], &[]).unwrap();
+        let grants = freeze_grants(&repo, &["reviewer".into()], &[], false).unwrap();
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].agent, "reviewer");
         assert_eq!(grants[0].permissions, crate::agent::Permissions::Prompt);
@@ -703,8 +832,8 @@ mod tests {
         assert_eq!(grants[0].native_helpers, "disabled");
         let agent = crate::agent::find(&repo.root, "reviewer").unwrap();
         assert_eq!(grants[0].identity_digest, agent.identity_digest());
-        let mut hooks = crate::hooks::collect(&repo.root, "claude-code").unwrap();
-        hooks.wrapper_injected = false;
+        let hooks = crate::hooks::collect(&repo.root, "claude-code").unwrap();
+
         assert_eq!(grants[0].hooks_digest, hooks.digest());
     }
 
@@ -713,15 +842,15 @@ mod tests {
         let (_dir, repo) = repo();
         write_config(&repo.root);
         write_agent(&repo.root, "writer", "auto", None);
-        let error = freeze_grants(&repo, &["writer".into()], &[])
+        let error = freeze_grants(&repo, &["writer".into()], &[], false)
             .expect_err("an unnamed widening child is refused")
             .to_string();
         assert!(error.contains("--allow-child-widened @writer"), "{error}");
-        let grants = freeze_grants(&repo, &[], &["writer".into()]).unwrap();
+        let grants = freeze_grants(&repo, &[], &["writer".into()], false).unwrap();
         assert_eq!(grants[0].permissions, crate::agent::Permissions::Auto);
         // Ordinary and widened children are frozen together, in that order.
         write_agent(&repo.root, "reviewer", "prompt", None);
-        let grants = freeze_grants(&repo, &["reviewer".into()], &["writer".into()]).unwrap();
+        let grants = freeze_grants(&repo, &["reviewer".into()], &["writer".into()], false).unwrap();
         assert_eq!(
             grants.iter().map(|g| g.agent.as_str()).collect::<Vec<_>>(),
             ["reviewer", "writer"]
@@ -729,11 +858,24 @@ mod tests {
     }
 
     #[test]
+    fn work_mode_requires_explicit_widened_child_grants() {
+        let (_dir, repo) = repo();
+        write_config(&repo.root);
+        write_agent(&repo.root, "reviewer", "prompt", None);
+        let error = freeze_grants(&repo, &["reviewer".into()], &[], true)
+            .expect_err("work mode must not auto-widen an ordinary child grant")
+            .to_string();
+        assert!(error.contains("--allow-child-widened @reviewer"), "{error}");
+        let grants = freeze_grants(&repo, &[], &["reviewer".into()], true).unwrap();
+        assert_eq!(grants[0].permissions, crate::agent::Permissions::Auto);
+    }
+
+    #[test]
     fn a_manifest_helper_policy_is_frozen_into_the_grant() {
         let (_dir, repo) = repo();
         write_config(&repo.root);
         write_agent(&repo.root, "reviewer", "prompt", Some("bounded"));
-        let grants = freeze_grants(&repo, &["reviewer".into()], &[]).unwrap();
+        let grants = freeze_grants(&repo, &["reviewer".into()], &[], false).unwrap();
         assert_eq!(grants[0].native_helpers, "bounded");
     }
 
@@ -741,12 +883,12 @@ mod tests {
     fn freezing_requires_project_configuration_and_a_registered_agent() {
         let (_dir, repo) = repo();
         write_agent(&repo.root, "reviewer", "prompt", None);
-        let error = freeze_grants(&repo, &["reviewer".into()], &[])
+        let error = freeze_grants(&repo, &["reviewer".into()], &[], false)
             .expect_err("a project without configuration cannot grant children")
             .to_string();
         assert!(error.contains("configuration required"), "{error}");
         write_config(&repo.root);
-        let error = freeze_grants(&repo, &["ghost".into()], &[])
+        let error = freeze_grants(&repo, &["ghost".into()], &[], false)
             .expect_err("an unregistered child is refused")
             .to_string();
         assert!(error.contains("no agent named \"ghost\""), "{error}");
@@ -1187,10 +1329,12 @@ mod tests {
             parent_task: TASK.into(),
             agent: "reviewer".into(),
             prompt: "review".into(),
+            structured_input: None,
             title: None,
             summary: None,
             name: None,
             timeout_seconds: 60,
+            work_mode: false,
             native_helpers: None,
             allow_widened_approvals: false,
         };

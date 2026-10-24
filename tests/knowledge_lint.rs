@@ -177,14 +177,12 @@ impl Run {
 }
 
 /// Run ahu in `cwd` with the stub okf first on PATH.
-fn run(repo: &TestRepo, stub: &StubOkf, cwd: &Path, args: &[&str]) -> Run {
+fn run(_repo: &TestRepo, stub: &StubOkf, cwd: &Path, args: &[&str]) -> Run {
     let output = common::ahu()
         .current_dir(cwd)
         .args(args)
         .env("NO_COLOR", "1")
-        // Nothing here may need cmux or a harness, so both are pointed at
-        // paths that do not exist.
-        .env("AHU_CMUX_BIN", repo.state_path().join("missing-cmux"))
+        // This read-only path invokes only the selected okf fixture.
         .env("STUB_OKF_FIXTURES", stub.fixtures())
         .env(
             "PATH",

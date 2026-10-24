@@ -6,10 +6,16 @@ description: Coordinate repository work through registered ahu agents and task r
 
 Use this skill when coordinating work inside an ahu task. Registered agents are
 launched through ahu, with their configured harness, model, permissions, and
-fresh worktree. Do not impersonate an agent with native harness delegation or
-silently substitute another harness. The workflow is tracker- and terminal-
-neutral. GitHub and cmux are supported integrations, not assumptions every
-project or machine must satisfy.
+task worktree. A worktree is a Git working directory and branch, not a sandbox:
+same-user processes can access files outside it unless an OS or container
+policy separately restricts them. Do not claim that Git worktrees or harness
+approval settings confine filesystem or process access. Agents must keep their
+changes inside the assigned worktree; this is an instruction, not enforcement.
+See `docs/agent-git-workflow.md` for the shared branch and release flow. Do not
+impersonate an agent with native harness delegation or silently substitute
+another harness. The workflow is tracker- and terminal-neutral. GitHub and cmux
+are supported integrations, not assumptions every project or machine must
+satisfy.
 
 ## Assign work
 
@@ -31,6 +37,46 @@ and timed suites across agents on a shared host; separate build directories do
 not isolate CPU load. Use a distinct external `CARGO_TARGET_DIR` for each build
 and require reports to name the tested commit, commands, results, and skips.
 
+## Structured child contracts
+
+A headless agent can declare nested JSON Schema objects directly in its existing
+OKF YAML frontmatter. For example:
+
+```yaml
+input_schema:
+  type: object
+  required: [file]
+  properties:
+    file: {type: string}
+  additionalProperties: false
+output_schema:
+  type: object
+  required: [ok]
+  properties:
+    ok: {type: boolean}
+  additionalProperties: false
+```
+
+With `{"file":"src/lib.rs"}` in an external input artifact, assign a granted
+child using:
+
+```sh
+ahu @reviewer --headless --prompt 'Review the supplied file.' --input-file /absolute/path/outside/repositories/input.json
+```
+
+Schemas are checked at manifest load and frozen in the child identity. Input is
+checked before dispatch or worktree creation. The child writes a result such as
+`{"ok":true}` to `AHU_STRUCTURED_RESULT`; invalid or missing output blocks
+success. `ahu result TASK --output json` retains validated `structured_output`.
+Prompt-only manifests remain compatible. Contracts require headless execution;
+output contracts refuse read-only Codex and bounded-helper profiles.
+
+The supported Draft 2020-12 subset, bounds, and YAML restrictions are documented
+in `docs/structured-contracts.md`. Unknown keywords, references, path-string
+schema declarations, and floating-point YAML schema scalars are refused rather
+than weakened. No schema references are fetched. Commit the manifest and update
+the context lock as usual. Schema validity still requires independent review.
+
 ## Inspect and accept
 
 Use `ahu tasks`, `ahu task <id>`, `ahu wait <id>`, and `ahu result <id>` to track
@@ -50,6 +96,13 @@ Children inherit the parent's current HEAD, not uncommitted source edits. For a
 review of local changes, name the source checkout and exact revision or diff in
 the assignment. Keep issue updates with the coordinator responsible for the
 parent work, and do not push unless explicitly authorized.
+
+During release work, the coordinator's checkout is on the release branch.
+Task branches inherit that release checkout's current commit. The coordinator
+reviews and integrates accepted commits into the release branch and validates
+the integrated candidate. Keep `main` unchanged until release gates pass; the
+release branch is merged to `main` as part of completing the release. Task
+agents do not independently merge to `main` or publish branches or tags.
 
 ## Long-running work and tracker records
 
@@ -86,8 +139,9 @@ checkout's current HEAD (or already absent). A cherry-pick may not satisfy that
 ancestry check. Interactive tasks have no headless captures, so use `ahu remove`
 directly after these checks.
 
-`ahu remove` also closes a recorded cmux workspace when its group/window
-ownership can be verified; an unverifiable relationship blocks removal. Group
+`ahu remove` asks the recorded session-host plugin to close its owned session.
+The plugin verifies provider-specific ownership; an unverifiable relationship
+blocks removal. Group
 anchors and native harness stores are not generally removed. Separately inspect
 any remaining fixture anchor against the inventory, its current members, and
 session activity before closing it. Close only an owned, disposable fixture

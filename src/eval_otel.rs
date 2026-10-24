@@ -879,17 +879,7 @@ fn string_attributes(
             .then(|| (attribute.key.clone(), value.clone()))
         })
         .filter(|(key, value)| match key.as_str() {
-            "ahu.mcp.tool.name" => matches!(
-                value.as_str(),
-                "ahu_agents_list"
-                    | "ahu_agents_recommend"
-                    | "ahu_auth_budget"
-                    | "ahu_tasks_list"
-                    | "ahu_task_get"
-                    | "ahu_typed_decide"
-                    | "ahu_skills_suggest"
-                    | "ahu_request_approval"
-            ),
+            "ahu.mcp.tool.name" => crate::mcp::TOOL_NAMES.contains(&value.as_str()),
             "ahu.mcp.approval.operation" => matches!(
                 value.as_str(),
                 "external-write" | "network" | "destructive" | "other"
@@ -1559,6 +1549,24 @@ mod tests {
         let projection = state.receiver_stats.projection.unwrap();
         assert_eq!(projection.dedup_capacity_spans, 2);
         assert_eq!(projection.invalid_identity_spans, 3);
+    }
+
+    #[test]
+    fn every_advertised_tool_is_counted_without_payloads() {
+        let state = Arc::new(Mutex::new(CaptureState::default()));
+        let mut spans: Vec<_> = crate::mcp::TOOL_NAMES
+            .iter()
+            .enumerate()
+            .map(|(index, name)| tool_call_span(index as u8 + 1, name))
+            .collect();
+        spans.push(session_span(255, crate::mcp::TOOL_NAMES.len() as i64));
+        consume(export("tools", spans), &state);
+        let state = state.lock().unwrap();
+        let task = &state.tasks[&("tools".into(), 1)];
+        for name in crate::mcp::TOOL_NAMES {
+            assert_eq!(task.tool_calls_by_name[name], 1);
+        }
+        assert!(task.tool_calls_fully_named());
     }
 
     #[test]

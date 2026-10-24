@@ -32,6 +32,9 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         cli::extract_color(args).map_err(|error| error.with_kind(ahu::util::ErrorKind::Usage))?;
     style::configure(color);
     let command = cli::parse_with_stdin(args, !std::io::stdin().is_terminal())?;
+    if let Command::PluginInvoke(options) = command {
+        return Ok(ahu::plugin_exec::cli::run(options, repository.as_deref()));
+    }
     if let Some(repository) = repository {
         std::env::set_current_dir(&repository).map_err(|error| {
             ahu::util::Error::new(format!(
@@ -45,6 +48,29 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             println!("{}", cli::help_for(topic.as_deref())?);
             Ok(0)
         }
+        Command::Plugins {
+            output_json,
+            probe,
+            project,
+        } => {
+            if project {
+                ahu::interactive::plugins::project::list(&std::env::current_dir()?, output_json)?;
+            } else if probe {
+                ahu::interactive::plugins::probe(output_json)?;
+            } else {
+                ahu::interactive::plugins::list(output_json)?;
+            }
+            Ok(0)
+        }
+        Command::PluginsInstalled { output_json } => {
+            ahu::plugin_install::list(&std::env::current_dir()?, output_json)?;
+            Ok(0)
+        }
+        Command::PluginLifecycle { action, id } => {
+            ahu::plugin_install::run(&std::env::current_dir()?, &action, &id)?;
+            Ok(0)
+        }
+        Command::PluginInvoke(_) => unreachable!("handled before repository selection"),
         Command::Version => {
             println!("ahu {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
@@ -63,15 +89,15 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 print!("{}", ahu::explain::mermaid_only());
                 Ok(0)
             }
-            ExplainFormat::OpenInCmux => {
-                // The document is written either way, so a machine without cmux
-                // still ends up with something it can open.
+            ExplainFormat::OpenInSessionHost => {
                 let path = ahu::explain::write_document()?;
                 println!("Wrote {}", path.display());
-                match ahu::explain::open_in_cmux(&path, true) {
+                match ahu::explain::open_in_session_host(&path, true) {
                     Ok(surface) => {
-                        println!("Opened in cmux's Markdown viewer (surface {surface}).");
-                        println!("Diagrams render there; the file also renders on GitHub.");
+                        println!(
+                            "Opened through the selected session-host plugin (surface {surface})."
+                        );
+                        println!("Rendering support depends on the selected plugin.");
                         Ok(0)
                     }
                     Err(e) => {
@@ -85,7 +111,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 }
             }
         },
-        // `run-task` is started by cmux inside the task worktree and works from
+        // `run-task` is started by the selected session provider inside the task worktree and works from
         // the task record alone, so it does not need repository discovery.
         Command::RunTask { task_dir } => commands::run_task(&task_dir),
         Command::BatchSupervisor { task_dir } => ahu::headless::supervise(&task_dir),
@@ -106,13 +132,12 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         }
         Command::TasksJson => {
             let repo = commands::repo_from_cwd()?;
-            let listing = ahu::task::list(&repo)?;
-            let workspaces = commands::liveness_workspaces(&listing.records);
+            let listing = ahu::agent_task::inspection::list(&repo)?;
             println!(
                 "{}",
                 serde_json::to_string(&serde_json::json!({
                     "schema_version": 1,
-                    "tasks": listing.records.iter().map(|(dir,r)| commands::task_summary(dir,r,workspaces.as_ref())).collect::<ahu::util::Result<Vec<_>>>()?,
+                    "tasks": listing.records.iter().map(|(dir,r)| commands::task_summary(dir,r)).collect::<ahu::util::Result<Vec<_>>>()?,
                     "unreadable": listing.unreadable.iter().map(|row| serde_json::json!({"task_id":row.task_id,"reason":row.reason})).collect::<Vec<_>>(),
                     "notes":listing.notes,
                 }))?
@@ -200,15 +225,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
         }
         // Discover before resolving defaults and validating the eval storage boundary.
         Command::EvalVerify { records, facts } => {
-            use std::io::Read;
             let repo = ahu::git::discover(&std::env::current_dir()?)?;
             let records = ahu::eval::storage::resolve_records(&repo, records.as_deref())?;
             let report = ahu::eval::report(&repo, &records)?;
-            let mut text = String::new();
-            std::fs::File::open(facts)?
-                .take(64 * 1024 + 1)
-                .read_to_string(&mut text)?;
-            let verified = ahu::eval::comparison::verify_facts(&report, &text)?;
+            let verified = ahu::eval::comparison::verify_facts_file(&repo, &report, &facts)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -244,6 +264,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             runs,
             timeout_seconds,
             allow_widened_approvals,
+            work_mode,
             output_json,
         } => {
             let repo = commands::repo_from_cwd()?;
@@ -261,21 +282,12 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 runs,
                 timeout_seconds,
                 allow_widened_approvals,
+                work_mode,
                 json_output: output_json,
             };
             commands::with_stdio_output(output_json, |console| {
                 ahu::eval::run(console, &repo, &request)
             })
-        }
-        Command::CmuxStatus { output_json } => {
-            let cwd = std::env::current_dir()?;
-            let root = commands::repo_from_cwd().map(|r| r.root).unwrap_or(cwd);
-            ahu::cmux::integration::status_command(&root, output_json)
-        }
-        Command::CmuxInstall { harness, dry_run } => {
-            let cwd = std::env::current_dir()?;
-            let root = commands::repo_from_cwd().map(|r| r.root).unwrap_or(cwd);
-            ahu::cmux::integration::install_command(&root, &harness, dry_run)
         }
         Command::McpServe => {
             let repo = commands::repo_from_cwd()?;
@@ -439,9 +451,11 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
             }
         }
         // `doctor` reports on a missing repository rather than failing on one.
-        Command::Doctor { verbose } => {
+        Command::Doctor { verbose, work_mode } => {
             let repo = commands::repo_from_cwd();
-            commands::with_stdio(|console| commands::doctor_with_verbosity(console, &repo, verbose))
+            commands::with_stdio(|console| {
+                commands::doctor_with_options(console, &repo, verbose, work_mode)
+            })
         }
         other => {
             let repo = commands::repo_from_cwd()?;
@@ -464,6 +478,7 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                     model.as_deref(),
                     &version,
                 ),
+                Command::Migrate { action } => commands::migrate_cmd(console, &repo, &action),
                 Command::Lock { update } => commands::lock_cmd(console, &repo, update),
                 Command::Tasks { limit } => commands::tasks_with_limit(console, &repo, limit),
                 Command::Task {
@@ -483,8 +498,6 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::Version
                 | Command::Explain { .. }
                 | Command::Doctor { .. }
-                | Command::CmuxStatus { .. }
-                | Command::CmuxInstall { .. }
                 | Command::McpServe
                 | Command::Auth { .. }
                 | Command::Telemetry { .. }
@@ -499,6 +512,10 @@ fn run(args: Vec<String>) -> ahu::util::Result<i32> {
                 | Command::EvalReport { .. }
                 | Command::EvalVerify { .. }
                 | Command::EvalRun { .. }
+                | Command::Plugins { .. }
+                | Command::PluginLifecycle { .. }
+                | Command::PluginsInstalled { .. }
+                | Command::PluginInvoke(_)
                 | Command::RunTask { .. } => unreachable!("handled above"),
             })
         }

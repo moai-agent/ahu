@@ -1,10 +1,9 @@
 //! Model choices for setup. Prefer lists exposed by a configured harness and
 //! keep ahu's compatibility catalog as the final authority for launchable IDs.
 
-use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -55,47 +54,30 @@ fn live_model_ids(harness: &str) -> Option<Vec<String>> {
         )
         .ok();
     }
-    run_model_listing(harness, Path::new(&executable), Duration::from_secs(8))
+    let cwd = std::env::current_dir().ok()?;
+    run_model_listing(
+        harness,
+        Path::new(&executable),
+        &cwd,
+        Duration::from_secs(8),
+    )
 }
 
-fn run_model_listing(harness: &str, executable: &Path, timeout: Duration) -> Option<Vec<String>> {
+fn run_model_listing(
+    harness: &str,
+    executable: &Path,
+    cwd: &Path,
+    timeout: Duration,
+) -> Option<Vec<String>> {
     let program = match harness {
         "antigravity" | "opencode" => executable,
         _ => return None,
     };
-    let mut child = Command::new(program)
-        .arg("models")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut output = String::new();
-        stdout.read_to_string(&mut output).ok().map(|_| output)
-    });
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(40));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    }?;
-    let output = reader.join().ok()??;
-    if !status.success() {
+    let before = crate::snapshot::collect(cwd).ok()?.digest();
+    let mut command = Command::new(program);
+    command.arg("models").current_dir(cwd);
+    let output = crate::selection::bounded_config_probe(&mut command, true, timeout)?;
+    if crate::snapshot::collect(cwd).ok()?.digest() != before {
         return None;
     }
     Some(parse_ids(harness, &output))
@@ -169,19 +151,20 @@ mod tests {
             "printf 'gemini-3.8-flash-high\\tFlash\\nunknown-model\\n'",
         );
         assert_eq!(
-            run_model_listing("antigravity", &success, Duration::from_secs(1)),
+            run_model_listing("antigravity", &success, root.path(), Duration::from_secs(5)),
             Some(vec!["gemini-3.8-flash-high".to_string()])
         );
 
         let failure = command(root.path(), "failure", "exit 1");
         assert_eq!(
-            run_model_listing("antigravity", &failure, Duration::from_secs(1)),
+            run_model_listing("antigravity", &failure, root.path(), Duration::from_secs(5)),
             None
         );
         assert_eq!(
             run_model_listing(
                 "antigravity",
                 Path::new("/path/that/does/not/exist"),
+                root.path(),
                 Duration::from_secs(1)
             ),
             None
@@ -189,9 +172,33 @@ mod tests {
 
         let sleeper = command(root.path(), "sleeper", "sleep 1");
         assert_eq!(
-            run_model_listing("opencode", &sleeper, Duration::from_millis(20)),
+            run_model_listing("opencode", &sleeper, root.path(), Duration::from_millis(20)),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_listing_rejects_changes_to_snapshotted_agent_configuration() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join(".agents/ahu/config.md");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "before\n").unwrap();
+        let executable = root.path().join("mutating-model-list");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'ollama/glm-5.3:cloud\\n'\nprintf 'after\\n' >> .agents/ahu/config.md\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(
+            run_model_listing("opencode", &executable, root.path(), Duration::from_secs(5)),
+            None
+        );
+        assert_eq!(std::fs::read_to_string(config).unwrap(), "before\nafter\n");
     }
 
     #[test]

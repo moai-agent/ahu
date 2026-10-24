@@ -51,63 +51,6 @@ fn with_state<T>(_repo: &TestRepo, f: impl FnOnce() -> T) -> T {
 }
 
 #[test]
-fn a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record() {
-    if !common::in_harness_fixture(
-        "a_launch_that_cannot_reach_cmux_leaves_no_worktree_branch_or_record",
-    ) {
-        return;
-    }
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    repo.commit("fixture");
-
-    let discovered = git::discover(repo.path()).unwrap();
-    let loaded = config::load(repo.path()).unwrap().unwrap();
-    let agent = ahu::agent::find(repo.path(), "chris").unwrap();
-    let pair = selection::ResolvedPair {
-        harness: agent.manifest.harness.clone(),
-        model: agent.manifest.model.clone(),
-        basis: "named agent".to_string(),
-        policy_digest: loaded.digest.clone(),
-        catalog_version: loaded.config.catalog_version.clone(),
-    };
-    // The child fixture keeps state private and makes cmux unavailable, so
-    // this failure cannot touch a real session.
-    let (plan, error) = with_state(&repo, || {
-        let plan = launch::plan(&discovered, Some(agent), pair, "do the thing").unwrap();
-        let error = launch::execute(&discovered, &loaded, &plan, "do the thing", false)
-            .unwrap_err()
-            .to_string();
-        (plan, error)
-    });
-    assert!(
-        plan.worktree
-            .starts_with(discovered.root.join(".worktrees"))
-    );
-    assert!(error.contains("cmux"), "{error}");
-
-    assert!(
-        !plan.worktree.exists(),
-        "a failed launch left a worktree behind"
-    );
-    assert!(
-        !plan.task_dir.exists(),
-        "a failed launch left a task record behind"
-    );
-    assert!(
-        !git::branch_exists(&discovered, &plan.branch).unwrap(),
-        "a failed launch left branch {} behind",
-        plan.branch
-    );
-    // The invoking checkout is untouched.
-    assert_eq!(
-        common::git(repo.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "main"
-    );
-}
-
-#[test]
 fn an_empty_prompt_is_refused_before_anything_is_created() {
     if !common::in_harness_fixture("an_empty_prompt_is_refused_before_anything_is_created") {
         return;
@@ -249,9 +192,8 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
         launch_command: command,
         reliability_warning: None,
         enforcement,
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: ahu::task::TaskState::Starting,
     };
     ahu::task::save(&task_dir, &record, "p").unwrap();
@@ -411,7 +353,7 @@ fn a_noninteractive_first_run_requires_the_single_setup_command() {
     };
     let error = result.unwrap_err().to_string();
     assert!(error.contains("run `ahu setup` first"), "{error}");
-    assert!(!repo.path().join(".agents/ahu/config.toml").exists());
+    assert!(!repo.path().join(config::CONFIG_RELATIVE_PATH).exists());
 }
 
 #[test]
@@ -426,7 +368,7 @@ fn cancelled_setup_writes_nothing() {
     });
     assert_eq!(code, 1, "{text}");
     assert!(text.contains("Nothing was written"), "{text}");
-    assert!(!repo.path().join(".agents/ahu/config.toml").exists());
+    assert!(!repo.path().join(config::CONFIG_RELATIVE_PATH).exists());
 }
 
 #[test]
@@ -439,11 +381,8 @@ fn setup_saves_only_the_config_file() {
         scripted("1\n\ny\n", |console| policy_wizard(console, repo.path()))
     });
     assert_eq!(code, 0, "{text}");
-    let written = repo.read(".agents/ahu/config.toml");
-    assert!(
-        written.contains("harness_preferences = [\"claude-code\"]"),
-        "{written}"
-    );
+    let written = repo.read(config::CONFIG_RELATIVE_PATH);
+    assert!(written.contains("harness_preferences:"), "{written}");
     assert!(written.contains("claude-opus-5"), "{written}");
 
     // Only the config file was added, and nothing was staged.
@@ -584,9 +523,8 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
         launch_command: plan.command.clone(),
         reliability_warning: None,
         enforcement: plan.enforcement.clone(),
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: ahu::task::TaskState::Exited,
     };
     previous.state = ahu::task::TaskState::Exited;
@@ -699,9 +637,8 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
         launch_command: plan.command.clone(),
         reliability_warning: None,
         enforcement: plan.enforcement.clone(),
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: ahu::task::TaskState::Exited,
     };
 

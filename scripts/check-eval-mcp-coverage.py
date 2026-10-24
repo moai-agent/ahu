@@ -22,6 +22,7 @@ def is_mcp(path: str) -> bool:
             "/src/approval.rs",
             "/src/mcp.rs",
             "/src/mcp_decisions.rs",
+            "/src/mcp_skills.rs",
             "/src/mcp_tasks.rs",
             "/src/telemetry.rs",
         )

@@ -9,6 +9,33 @@ agents on when to use the tool and how to handle its output and data boundary.
 
 ## MCP tool
 
+Discover `ahu_typed_decide` through `tools/list` and read its `inputSchema`;
+do not call it with `{}` to discover arguments by rejection. Supply exactly
+one pair: `state` and `questions`, or `items` and `question`. A minimal valid
+choice request (synthetic evidence):
+
+```json
+{
+  "state": "A bug report says a button label is misspelled.",
+  "questions": {
+    "category": {
+      "type": "choice",
+      "instructions": "Classify the reported defect.",
+      "options": {
+        "text": "Incorrect displayed text",
+        "behavior": "Incorrect application behavior"
+      }
+    }
+  }
+}
+```
+
+Empty, incomplete, mixed-form, and invalid requests are rejected before
+provider selection, credential access, or dispatch. An empty request returns
+an invalid-params error (`-32602`) with schema-discovery guidance and this
+example; it is not a readiness check. A valid call contacts the configured
+provider, so use the example only when that data transfer is authorized.
+
 `ahu mcp serve` advertises `ahu_typed_decide`. With no local provider settings,
 it uses TypeSafe Jev. `AHU_OLLAMA_MODEL` selects native Ollama;
 `AHU_DECISION_URL` selects the provider-neutral loopback HTTP adapter.

@@ -2,3 +2,15 @@
 command = "ahu"
 args = ["mcp", "serve"]
 env_vars = ["AHU_EVAL_OTEL_ENDPOINT", "AHU_MCP_RESOURCE_ATTRIBUTES", "OTEL_RESOURCE_ATTRIBUTES", "TYPESAFE_API_KEY", "AHU_DECISION_URL", "AHU_DECISION_MODEL"]
+
+[mcp_servers.ahu.tools.ahu_agents_list]
+approval_mode = "approve"
+
+[mcp_servers.ahu.tools.ahu_tasks_list]
+approval_mode = "approve"
+
+[mcp_servers.ahu.tools.ahu_task_get]
+approval_mode = "approve"
+
+[mcp_servers.ahu.tools.ahu_request_approval]
+approval_mode = "approve"

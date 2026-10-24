@@ -158,6 +158,11 @@ impl ConfigSnapshot {
 }
 
 fn is_config_path(relative: &Path) -> bool {
+    // Generated lock must not fingerprint itself. Legacy task snapshot bytes
+    // remain identical; neither format is an inherited source input.
+    if relative == Path::new(crate::context_lock::LOCK_PATH) {
+        return false;
+    }
     for component in relative.components() {
         if let Component::Normal(name) = component {
             let name = name.to_string_lossy();
@@ -543,4 +548,262 @@ fn sync_mode(wanted: u32, target: &Path) -> Result<bool> {
 #[cfg(not(unix))]
 fn sync_mode(_wanted: u32, _target: &Path) -> Result<bool> {
     Ok(false)
+}
+
+/// Untracked paths in a task worktree, split by whether ahu put them there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UntrackedConfig {
+    /// Configuration ahu copied into the worktree at launch that still holds
+    /// exactly the bytes and mode it wrote.
+    pub unchanged_copies: Vec<String>,
+    /// Every other untracked path: work the task produced, and copied
+    /// configuration the task went on to change.
+    pub changed: Vec<String>,
+}
+
+/// Decide which of a task worktree's untracked paths are nothing more than
+/// ahu's own configuration copy.
+///
+/// A task worktree inherits the parent's working-tree configuration, so a
+/// configuration file the parent never committed arrives untracked and stays
+/// untracked for the life of the task. Git reports it even when the user's
+/// global ignore rules hide the same file in the parent checkout, because ahu
+/// runs Git with no global configuration. Such a file is not reviewable work:
+/// it is a byte-identical copy of a file that still exists in the parent.
+///
+/// Only a path ahu recorded as written *and* still matching its snapshot entry
+/// qualifies. Anything the task added, edited, or chmod'ed is reported as a
+/// change, and so is any path the record cannot account for.
+pub fn classify_untracked(
+    worktree_root: &Path,
+    snapshot: &ConfigSnapshot,
+    materialized: &MaterializeReport,
+    untracked: &[String],
+) -> UntrackedConfig {
+    let recorded = snapshot.by_path();
+    let written: std::collections::BTreeSet<&str> =
+        materialized.written.iter().map(String::as_str).collect();
+    let mut split = UntrackedConfig::default();
+    // A copied configuration file can itself contain ignore rules. Git may
+    // hide a later copied file (or task-authored file) from status until the
+    // ignore file is removed. Inspect every written copy that still exists,
+    // in addition to paths Git reports, so cleanup cannot expose one copy only
+    // after it has started deleting another.
+    let mut candidates: std::collections::BTreeSet<String> = untracked.iter().cloned().collect();
+    for path in &materialized.written {
+        if crate::util::resolve_existing_within(worktree_root, path)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            candidates.insert(path.clone());
+        }
+    }
+    for path in &candidates {
+        match recorded.get(path.as_str()) {
+            Some(entry)
+                if written.contains(path.as_str()) && is_unchanged_copy(worktree_root, entry) =>
+            {
+                split.unchanged_copies.push(path.clone());
+            }
+            _ => split.changed.push(path.clone()),
+        }
+    }
+    split
+}
+
+/// `true` when the worktree still holds exactly the file the snapshot records:
+/// a regular file, reached without traversing a symlink, with the recorded
+/// size, executable bit, and contents.
+fn is_unchanged_copy(worktree_root: &Path, entry: &SnapshotEntry) -> bool {
+    let Ok(Some(path)) = crate::util::resolve_existing_within(worktree_root, &entry.path) else {
+        return false;
+    };
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() != entry.bytes || is_executable(&meta) != entry.executable {
+        return false;
+    }
+    digest_file(&path).ok().as_deref() == Some(entry.digest.as_str())
+}
+
+/// Delete the configuration copies [`classify_untracked`] accounted for, so
+/// `git worktree remove` sees the clean checkout it refuses to force.
+///
+/// Each file is verified again immediately before it is unlinked: a copy that
+/// changed after the gate ran is left in place and named, and the caller's
+/// removal fails rather than discarding it. Only files already proven
+/// byte-identical to the configuration snapshot recorded at launch
+/// are removed; no directory is pruned.
+pub fn discard_unchanged_copies(
+    worktree_root: &Path,
+    snapshot: &ConfigSnapshot,
+    paths: &[String],
+) -> Result<()> {
+    let recorded = snapshot.by_path();
+    for path in paths {
+        let Some(entry) = recorded.get(path.as_str()) else {
+            bail!("{path} is not recorded configuration for this task worktree");
+        };
+        if !is_unchanged_copy(worktree_root, entry) {
+            bail!("{path} changed after the worktree was checked; it was left in place");
+        }
+        let target = crate::util::resolve_existing_within(worktree_root, path)?
+            .ok_or_else(|| Error::new(format!("{path} disappeared while removing the worktree")))?;
+        std::fs::remove_file(&target).map_err(|e| {
+            Error::new(format!(
+                "cannot remove copied configuration {}: {e}",
+                target.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    /// Build a parent holding one uncommitted configuration file and a
+    /// "worktree" that has ahu's copy of it.
+    fn copied(contents: &str) -> (tempfile::TempDir, ConfigSnapshot, MaterializeReport) {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let worktree = root.path().join("worktree");
+        std::fs::create_dir_all(parent.join(".claude")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(parent.join(".claude/settings.local.json"), contents).unwrap();
+        let snapshot = collect(&parent).unwrap();
+        let report = materialize(&parent, &snapshot, &worktree).unwrap();
+        assert_eq!(report.written, vec![".claude/settings.local.json"]);
+        (root, snapshot, report)
+    }
+
+    fn classify(
+        root: &Path,
+        snapshot: &ConfigSnapshot,
+        report: &MaterializeReport,
+    ) -> UntrackedConfig {
+        classify_untracked(
+            &root.join("worktree"),
+            snapshot,
+            report,
+            &[".claude/settings.local.json".to_string()],
+        )
+    }
+
+    #[test]
+    fn an_untouched_copy_is_the_only_thing_accounted_for() {
+        let (root, snapshot, report) = copied("{}\n");
+        let split = classify(root.path(), &snapshot, &report);
+        assert_eq!(split.unchanged_copies, vec![".claude/settings.local.json"]);
+        assert!(split.changed.is_empty());
+
+        // An untracked path the record never mentions stays a change.
+        let split = classify_untracked(
+            &root.path().join("worktree"),
+            &snapshot,
+            &report,
+            &["notes.md".to_string()],
+        );
+        assert_eq!(
+            split.unchanged_copies,
+            vec![".claude/settings.local.json"],
+            "known copies are included even when Git hides them"
+        );
+        assert_eq!(split.changed, vec!["notes.md"]);
+    }
+
+    #[test]
+    fn edited_chmoded_relinked_and_unwritten_copies_are_changes() {
+        let (root, snapshot, report) = copied("{}\n");
+        let copy = root.path().join("worktree/.claude/settings.local.json");
+
+        std::fs::write(&copy, "{\"allow\":[]}\n").unwrap();
+        assert_eq!(
+            classify(root.path(), &snapshot, &report).changed,
+            vec![".claude/settings.local.json"],
+            "an edited copy is the task's work"
+        );
+        std::fs::write(&copy, "{}\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&copy).unwrap().permissions().mode();
+            std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(mode | 0o111)).unwrap();
+            assert_eq!(
+                classify(root.path(), &snapshot, &report).changed,
+                vec![".claude/settings.local.json"],
+                "a copy that became executable is the task's work"
+            );
+            std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        // A snapshot entry ahu never wrote into this worktree is not its copy.
+        let unwritten = MaterializeReport::default();
+        assert_eq!(
+            classify(root.path(), &snapshot, &unwritten).changed,
+            vec![".claude/settings.local.json"]
+        );
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&copy).unwrap();
+            std::os::unix::fs::symlink(
+                root.path().join("parent/.claude/settings.local.json"),
+                &copy,
+            )
+            .unwrap();
+            assert_eq!(
+                classify(root.path(), &snapshot, &report).changed,
+                vec![".claude/settings.local.json"],
+                "a symlink is never read through, so it is never an accounted copy"
+            );
+        }
+    }
+
+    #[test]
+    fn discarding_removes_only_verified_copies_and_never_the_parent() {
+        let (root, snapshot, _report) = copied("{}\n");
+        let worktree = root.path().join("worktree");
+        let copy = worktree.join(".claude/settings.local.json");
+
+        // A copy that changed after the gate ran is kept, and said so.
+        std::fs::write(&copy, "{\"allow\":[]}\n").unwrap();
+        let refused = discard_unchanged_copies(
+            &worktree,
+            &snapshot,
+            &[".claude/settings.local.json".to_string()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("changed after the worktree was checked"),
+            "{refused}"
+        );
+        assert!(copy.is_file());
+
+        // A path no snapshot records is never deleted on a caller's say-so.
+        let refused = discard_unchanged_copies(&worktree, &snapshot, &["notes.md".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("not recorded configuration"), "{refused}");
+
+        std::fs::write(&copy, "{}\n").unwrap();
+        discard_unchanged_copies(
+            &worktree,
+            &snapshot,
+            &[".claude/settings.local.json".to_string()],
+        )
+        .unwrap();
+        assert!(!copy.exists(), "the verified copy was kept");
+        assert!(
+            root.path()
+                .join("parent/.claude/settings.local.json")
+                .is_file(),
+            "discarding a copy reached into the parent checkout"
+        );
+    }
 }

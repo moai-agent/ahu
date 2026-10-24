@@ -38,8 +38,14 @@ Codex or OpenCode.
 
 Read the repository's `AGENTS.md` and the current release notes before changing
 anything. Start from a clean checkout and record the exact base commit. Keep
-release work on `release/vX.Y.Z` (or the repository's documented equivalent),
-and make a separate post-release branch from updated `main` for improvements to
+release work on `release/vX.Y.Z` (or the repository's documented equivalent).
+The coordinator integrates reviewed task commits into that release branch and
+runs checks on the integrated candidate. Keep `main` unchanged while the
+candidate is stabilizing; merge the stable release branch to `main` only as
+part of completing the release. Task worktrees are Git working directories,
+not security sandboxes; do not describe them or harness approval settings as
+filesystem confinement. Follow the shared `docs/agent-git-workflow.md` contract.
+Make a separate post-release branch from updated `main` for improvements to
 this workflow or its skill. Do not mix that follow-up work into the release PR.
 
 Establish publication scope from the user's existing instructions. Honor an
@@ -174,7 +180,7 @@ Before handoff, reconcile the ahu tasks used to implement this release. Run
 `ahu tasks --all` from the repository and use provider-side task links, branch
 names, and commits to identify release tasks; do not guess from agent names or
 task titles alone. Inventory the exact owned task IDs, worktrees, branches, and
-recorded cmux workspace/group IDs before cleanup. Confirm each task is terminal,
+recorded session-host identities and opaque session references before cleanup. Confirm each task is terminal,
 its result was reviewed, and its changes are integrated. For each completed
 headless release task, run `ahu cleanup <task>` and then `ahu remove <task>` from
 another checkout only when its worktree is clean and its branch is merged into
@@ -183,8 +189,8 @@ may not satisfy that ancestry check. Do not bypass a refusal by deleting work.
 Interactive tasks have no headless captures; run `ahu remove <task>` directly
 after the same checks.
 
-`ahu remove` checks the recorded cmux workspace's group/window ownership and
-closes that workspace when present; it refuses an unverifiable relationship.
+`ahu remove` asks the recorded session-host plugin to verify ownership and
+close its session; an unverifiable relationship blocks removal.
 It does not generally remove repository group anchors or native harness session
 stores. Empty fixture anchors can remain after task removal. Inspect remaining
 groups and their members against the inventory before separately closing an

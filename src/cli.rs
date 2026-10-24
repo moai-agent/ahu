@@ -7,9 +7,9 @@ use crate::util::Result;
 
 pub const HELP_ALL: &str = "ahu - The moai-agent command-line interface
 
-Launch repository-defined agents in fresh Git worktrees and organise their
-interactive sessions in cmux. Use --headless for unattended execution with
-primary-owned coordination and optional detached supervision.
+Launch repository-defined agents in fresh Git worktrees and run them in the
+current terminal or through an explicitly selected session-host plugin. Use
+--headless for unattended execution with primary-owned coordination.
 
 Usage: ahu [--repo <path>] [COMMAND]
 
@@ -37,7 +37,9 @@ Commands:
                         Also accepts --prompt or --prompt-file.
   agents                List the agents registered for this repository
   onboard               Preview native agent definitions that could be registered
-  lock [--update]       Check committed agent context, or refresh ahu.lock before committing it
+  migrate [--preview|--apply|--rollback]
+                        Explicitly migrate legacy project policy and context lock
+  lock [--update]       Check committed agent context, or refresh .agents/ahu/lock.md before committing it
   knowledge lint [--output json]
                         Check the OKF bundles named in [knowledge] with okf.
                         Reads only; nothing is fetched, indexed, or rewritten
@@ -61,19 +63,16 @@ Commands:
                                   and bounded requests; retain results and native sessions,
                                   branches and worktrees
   cancel <task-id>                Request cancellation of the task and ahu descendants;
-                                  confirmed interactive cancellation closes its cmux workspace,
+                                  confirmed interactive cancellation closes its session-host workspace,
                                   while the worktree, branch and record are kept
   resume <task-id> --prompt-file PATH [--output json]
                                   Resume a root task from the host using its recorded native session;
                                   child/worker resume unsupported: submit a new registered assignment
-  focus <task-id>       Bring a task's cmux session to the front
+  focus <task-id>       Focus a task through its recorded session-host plugin
   remove <task-id>      Remove a terminal task's record, worktree, and branch
   message <task-id> <text>
                         Append an operator message; subsequent flags are literal text
-  cmux status [--output json]
-                        Inspect native integration evidence and headless isolation
-  cmux install --harness ID [--dry-run]
-                        Preview or explicitly delegate a native cmux installation
+  plugins [--project|--probe] [--output json] Inspect packages/bindings or invoke an installed JSON entrypoint; --probe executes the selected host
   auth status --harness ID [--profile NAME]
                         Check this checkout's current harness account binding
   auth readiness --harness ID [--model MODEL]
@@ -93,7 +92,8 @@ Commands:
   telemetry report --key KEY [--output json]
                         Report opted-in local headless measurements
   mcp serve              Serve repository-scoped ahu tools and typed decisions over stdio MCP
-  doctor [--verbose]    Check repository, configuration, harness, and cmux
+  doctor [--verbose] [--work-mode]
+                        Check readiness for native or explicit work-mode launches
   agy                   Open the Antigravity CLI here on this project's
                         top-ranked Antigravity model, in YOLO mode
                         (--dangerously-skip-permissions)
@@ -107,7 +107,7 @@ Commands:
                         model, auto-approving every permission it does not deny
                         (--auto; ahu passes no --pure)
   kiro                  Open Kiro V3 here with the ranked model and --trust-all-tools
-  run-task              Internal: run a prepared task (used by cmux)
+  run-task              Internal: run a prepared task (used by the session host)
   supervise --task-dir PATH
                         Internal: supervise a detached headless task
 
@@ -133,7 +133,7 @@ Options:
 explain options:
   --markdown            Print the overview as a Markdown document
   --mermaid             Print only the diagrams, as fenced Mermaid blocks
-  --open                Render it in cmux's Markdown viewer, diagrams and all
+  --open                Write the overview and open it through the selected session-host plugin
 
 onboard options:
   --register <name>     Register a previewed native definition
@@ -143,7 +143,7 @@ onboard options:
 
 knowledge lint options:
   --output json         Emit a versioned JSON report on stdout, diagnostics on
-                        stderr. Bundles come from [knowledge] in the project
+                        stderr. Bundles come from ahu.knowledge in the project
                         configuration; knowledge.fail_on_warnings decides whether
                         warnings fail the check. Errors always do.
 
@@ -164,6 +164,10 @@ eval report options:
                         evaluator
 
 eval run options:
+  --work-mode          Opt in to headless automatic approvals for candidates and
+                        agent evaluators; no second widening flag required. Skips
+                        native compatibility admission using the existing work-mode
+                        path. Default: guarded headless. Worktrees are not sandboxes.
   --skill-selection <none|lexical|decision>
                         Optional prelaunch skill advice (default none). Decision
                         sends candidate-visible task and committed skill descriptions
@@ -211,7 +215,8 @@ tasks options:
   --output json         Emit the complete task list as JSON; cannot be combined with --limit/--all
 
 doctor options:
-  --verbose             Show component-level cmux, hook, drift, and context-lock details
+  --verbose             Show component-level native safety, drift, and context-lock details
+  --work-mode           Check explicit headless work mode; native configuration is not inspected
 
 agent assignment options:
   Scripted assignments already leave focus unchanged; omit --no-focus.
@@ -224,7 +229,9 @@ agent assignment options:
                         Explicit sources take precedence over unread stdin.
   --output json        Emit a versioned plan or headless launch/result envelope.
                         JSON goes to stdout, diagnostics to stderr.
-  --headless            Run without cmux; descendants inherit this backend
+  --input-file <path>   Bounded JSON input for an agent input_schema; requires --headless
+  --headless            Run unattended without an interactive session host
+  --work-mode           Headless auto permissions; native compatibility remains unverified
   --allow-child @name   Grant this exact registered child identity (repeatable)
   --allow-child-widened @name
                         Grant a child whose manifest widens approvals. Frozen at
@@ -242,9 +249,8 @@ agent assignment options:
                         supplies the default; this flag overrides it.
   --dry-run             Show the preview and create nothing
   --allow-widened-approvals
-                        Required to launch an agent whose manifest declares
-                        permissions = auto or accept-edits. `ahu @agent` reads no
-                        confirmation, so widening is opt-in on the command line
+                        Explicitly authorize an agent manifest that widens tool
+                        approvals (permissions = auto or accept-edits)
 
 Exit codes:
   0 success; 1 cancelled; 2 usage error; 3 unknown agent;
@@ -274,8 +280,9 @@ Commands:
   cleanup|remove ID     Clean headless captures or remove a terminal task
   focus|message ID ...  Focus a task or send it a message
   eval run|report       Run and compare local agent evaluations
+  migrate               Preview/apply the explicit shared-policy format migration
   knowledge lint        Check configured OKF bundles
-  cmux status|install   Inspect or install native cmux integration
+  plugins               Inspect session packages or committed project bindings
   auth profiles|status|readiness|budget|bind|select
                         Check or manage local project auth profiles
   mcp serve             Serve repository tools over stdio MCP
@@ -304,7 +311,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         return Ok(HELP_ALL.to_string());
     }
     let help = match topic {
-        "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh ahu.lock. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
+        "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh .agents/ahu/lock.md. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
         "eval run" => help_section("eval run options:", "tasks options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
@@ -313,10 +320,10 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "explain" => help_section("explain options:", "onboard options:"),
         "onboard" => help_section("onboard options:", "knowledge lint options:"),
         "knowledge lint" => help_section("knowledge lint options:", "eval report options:"),
-        "doctor" => "Usage: ahu doctor\n\nSummarize project, context-lock, skills, harness, telemetry, and cmux readiness. Use --verbose for component-level diagnostics.\n".to_string(),
-        "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes ahu.lock and accepts local context in owner-only host state; review and commit ahu.lock only when shared context changed.\n".to_string(),
-        "cmux status" => "Usage: ahu cmux status [--output json]\n\nInspect native integration evidence and headless isolation.\n".to_string(),
-        "cmux install" => "Usage: ahu cmux install --harness ID [--dry-run]\n\nPreview or delegate a native cmux installation.\n".to_string(),
+        "doctor" => "Usage: ahu doctor [--verbose] [--work-mode]\n\nSummarize project, context-lock, skills, harness and telemetry readiness. By default, headless readiness uses native admission and checks the selected interactive session host. --work-mode checks explicit headless automatic-approval mode, skips native configuration and session-host checks, and reports native compatibility as unverified. Use --verbose for component-level diagnostics.\n".to_string(),
+        "migrate" => "Usage: ahu migrate [--preview|--apply|--rollback]\n\nPreview is read-only and shows deterministic OKF targets and typed-policy parity. Apply refuses managed task worktrees and duplicate formats, supports mixed policy/lock formats while preserving canonical policy bytes and lock annotations, preserves exact source backups in .ahu/migrations/project-okf-v1/journal.json, and checks concurrent edits. Rollback explicitly recovers an interrupted transaction. No task, native, auth, or local-acceptance files are migrated. Review and commit the resulting shared files and source removals.\n".to_string(),
+        "lock" => "Usage: ahu lock [--update]\n\nChecks committed shared context and this user's private local-context acceptance. --update refreshes .agents/ahu/lock.md and accepts local context in owner-only host state; review and commit .agents/ahu/lock.md only when shared context changed.\n".to_string(),
+        "plugins" | "plugins invoke" => "Usage: ahu plugins [--project|--probe] [--output json]\n       ahu plugins installed [--output json]\n       ahu plugins install|update|enable|disable|remove ID\n       ahu plugins digest /absolute/package/path\n       ahu plugins invoke ID --input-file PATH|- [--task-observations [--allow-task UUID ...]]\n\nInspect external session plugins, committed bindings, and host selection without executing plugins.\nAHU_PLUGIN_PATH lists absolute package directories containing ahu-plugin.md (OKF 0.2 YAML frontmatter, type ahu:plugin; Cargo.toml remains TOML).\nSelect terminal, none, or an installed/discovered binding id with AHU_INTERACTIVE_PLUGIN. `terminal` runs the interactive harness in the caller's terminal; it is the default. Source-only packages cannot be activated. --project reads only committed OKF bindings in .agents/ahu/plugins from local HEAD; source pins and grants remain unverified declarations. It excludes index/worktree edits, fetches nothing, activates nothing, and cannot be combined with --probe. Explicit install/update verifies committed source pins and copies data into ignored project state without executing package code. Git sources allow credential-free HTTPS or absolute local repository paths; kind: local uses a SHA-256 content revision. installed inspects retained verified packages offline; digest hashes a local package offline. enable/disable edit the working OKF binding for review and commit; commit enabled: true and the interactive-backend grant before activation. A single enabled session binding is the launch default; multiple session bindings require explicit selection. Generic entrypoint packages use committed execute grants and plugins invoke ID --input-file PATH|-; execute-only bindings do not become session defaults, and --probe never invokes their generic entrypoint. disable/remove refuse live/uncertain tasks and terminal tasks that still need this package for recorded workspace cleanup; run ahu remove TASK first, even for already-closed workspaces. remove also requires disabled or absent bindings. Invocation is foreground, operator-only, strict JSON with a 64 KiB input and complete output limit; stdin requires explicit - and has a 30-second intake deadline. Relative input paths resolve in the selected --repo checkout. Task observations grant only repeated exact canonical UUIDs (maximum 128); no grants means empty scope. Only current indexed tasks are supported, with no discovery fallback or mutations. Runtime errors are fixed JSON; see docs/executable-plugins.md. Updates retain all old versions. --probe verifies committed policy and package pins, executes the selected host, negotiates its protocol, and reads its inventory; it never launches a task.\n".to_string(),
         "auth" => "Usage: ahu auth profiles\n       ahu auth status --harness ID [--profile NAME]\n       ahu auth readiness --harness ID [--model MODEL] [--output json]\n       ahu auth budget [--output json]\n       ahu auth bind --harness ID [--profile NAME] [--replace]\n       ahu auth select --profile NAME\n\nProfiles are local to this project and contain identity fingerprints, never credentials. One active profile is shared by all agents and child tasks in the project. ahu checks the current native sign-in before launch and resume, then pins each task to its starting identity; ahu never switches accounts. `auth readiness` never emits principal values, credentials, or provider diagnostics. `auth budget` reports verified provider rate-limit windows for the active profile. These are percentages and reset periods, not literal token counts; agents sharing one account share its capacity. Unsupported providers remain unknown.\n\nIdentity probes: codex, claude-code, antigravity, kiro (GitHub social login), and ollama. Use --harness ollama to check the loopback daemon selected by OLLAMA_HOST (default 127.0.0.1:11434). OpenCode readiness requires --model with an Ollama cloud model; other OpenCode providers remain unsupported. Readiness checks account identity and project binding only: it does not verify OpenCode's configured provider endpoint, model availability, or inference access.\n".to_string(),
         "telemetry" => "Usage: ahu telemetry report --otlp FILE --selection FILE --release ID [--output json]\n       ahu telemetry link --key KEY --task TASK\n       ahu telemetry unlink --key KEY [--task TASK]\n       ahu telemetry report --key KEY [--output json]\n\nThe OTLP report reads local collector JSONL and an explicit task/attempt selection, writes no state, and reports unknown usage as null. Repeat --otlp for rotated files. See docs/otel-release-report.md.\n\nAssociations are stored owner-only in the host state directory, outside checkouts and task records. KEY is an opaque local tracker key; ahu does not contact a tracker or verify its visibility. Enable telemetry.local_metrics before launching tasks to include their headless numeric measurements. Reports preserve harness/model/outcome groups, keep cost sources separate, and never sum token observations across retries or child tasks.\n".to_string(),
         "mcp serve" => "Usage: ahu mcp serve\n\nServe repository-scoped agent/task inspection and optional typed decisions over stdio MCP.\n".to_string(),
@@ -328,11 +335,11 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         "resume" => "Usage: ahu resume TASK --prompt-file PATH [--output json]\n\nResume a root headless task using its recorded native session.\n".to_string(),
         "cleanup" => "Usage: ahu cleanup TASK\n\nRemove recognized captures and bounded requests after headless termination is known. Interactive tasks have no headless captures; use ahu remove after reviewing and integrating their work.\n".to_string(),
         "remove" => "Usage: ahu remove TASK\n\nRemove a completed task's record, worktree, and branch when safe.\n".to_string(),
-        "focus" => "Usage: ahu focus TASK\n\nBring an interactive task's cmux session to the front.\n".to_string(),
+        "focus" => "Usage: ahu focus TASK\n\nBring an interactive task to the front through its recorded session-host plugin.\n".to_string(),
         "message" => "Usage: ahu message TASK TEXT\n\nAppend an operator message for the task. The remaining arguments are literal text.\n".to_string(),
         "run-task" => "Usage: ahu run-task --task-dir PATH\n\nInternal worker command started by ahu's task supervisor.\n".to_string(),
         "supervise" => "Usage: ahu supervise --task-dir PATH\n\nInternal supervisor command for detached headless tasks.\n".to_string(),
-        "agents" | "eval" | "knowledge" | "cmux" | "mcp" | "agy" | "claude" | "codex" | "opencode" | "kiro" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
+        "agents" | "eval" | "knowledge" | "mcp" | "agy" | "claude" | "codex" | "opencode" | "kiro" | "help" => return Ok(format!("{}\n\nRun `ahu help all` for detailed options.\n", help_line_for(topic).unwrap_or("Unknown command"))),
         other => return Err(crate::util::Error::new(format!("unknown help topic {other:?}; run `ahu help` for commands."))),
     };
     Ok(help)
@@ -357,10 +364,10 @@ fn help_line_for(topic: &str) -> Option<&'static str> {
         "setup" => "ahu setup — configure this project",
         "tasks" => "ahu tasks — list recent tasks",
         "doctor" => "ahu doctor — check project readiness",
+        "migrate" => "ahu migrate — explicitly migrate shared project documents",
         "lock" => "ahu lock — check committed agent context",
         "eval" => "ahu eval — run, compare or verify evaluations",
         "knowledge" => "ahu knowledge lint — validate configured knowledge bundles",
-        "cmux" => "ahu cmux — inspect or install cmux integration",
         "mcp" => "ahu mcp serve — start the MCP server",
         "auth" => "ahu auth — check or bind local harness accounts",
         "telemetry" => "ahu telemetry — link private records and report local measurements",
@@ -388,8 +395,8 @@ pub enum ExplainFormat {
     Markdown,
     /// Only the diagrams, as fenced Mermaid blocks.
     Mermaid,
-    /// Written to ahu's state directory and opened in cmux's Markdown viewer.
-    OpenInCmux,
+    /// Written to ahu's state directory and opened through the selected session host.
+    OpenInSessionHost,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -412,9 +419,7 @@ pub enum Command {
         display: crate::launch::DisplayMetadata,
         output_json: bool,
         dry_run: bool,
-        /// Opt in to launching an agent whose manifest widens the harness's own
-        /// approval boundary. Required on this path because it has no
-        /// interactive confirmation.
+        /// Legacy compatibility flag; manifest permissions are authoritative.
         allow_widened_approvals: bool,
     },
     HeadlessLaunch {
@@ -437,6 +442,9 @@ pub enum Command {
         remove: Option<String>,
         model: Option<String>,
         version: String,
+    },
+    Migrate {
+        action: String,
     },
     Lock {
         update: bool,
@@ -468,6 +476,7 @@ pub enum Command {
         runs: u32,
         timeout_seconds: u64,
         allow_widened_approvals: bool,
+        work_mode: bool,
         output_json: bool,
     },
     Tasks {
@@ -487,12 +496,18 @@ pub enum Command {
         task_id: String,
         text: String,
     },
-    CmuxStatus {
+    Plugins {
+        output_json: bool,
+        probe: bool,
+        project: bool,
+    },
+    PluginsInstalled {
         output_json: bool,
     },
-    CmuxInstall {
-        harness: String,
-        dry_run: bool,
+    PluginInvoke(crate::plugin_exec::cli::Options),
+    PluginLifecycle {
+        action: String,
+        id: String,
     },
     McpServe,
     Auth {
@@ -516,6 +531,7 @@ pub enum Command {
     },
     Doctor {
         verbose: bool,
+        work_mode: bool,
     },
     Codex,
     Claude,
@@ -608,7 +624,7 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 None => ExplainFormat::Terminal,
                 Some("--markdown") => ExplainFormat::Markdown,
                 Some("--mermaid") => ExplainFormat::Mermaid,
-                Some("--open") => ExplainFormat::OpenInCmux,
+                Some("--open") => ExplainFormat::OpenInSessionHost,
                 Some(other) => bail!("unknown option {other:?} for `ahu explain`."),
             };
             if format != ExplainFormat::Terminal {
@@ -712,7 +728,59 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 Ok(Command::Tasks { limit })
             }
         }
-        "cmux" => parse_cmux(&args[1..]),
+        "plugins" if args.get(1).is_some_and(|v| v == "invoke") => {
+            crate::plugin_exec::cli::parse(&args[2..]).map(Command::PluginInvoke)
+        }
+        "plugins" => match &args[1..] {
+            [action] if action == "installed" => {
+                Ok(Command::PluginsInstalled { output_json: false })
+            }
+            [action, output, value]
+                if action == "installed" && output == "--output" && value == "json" =>
+            {
+                Ok(Command::PluginsInstalled { output_json: true })
+            }
+            [action, id]
+                if matches!(
+                    action.as_str(),
+                    "install" | "update" | "enable" | "disable" | "remove" | "digest"
+                ) =>
+            {
+                Ok(Command::PluginLifecycle {
+                    action: action.clone(),
+                    id: id.clone(),
+                })
+            }
+            [] => Ok(Command::Plugins {
+                output_json: false,
+                probe: false,
+                project: false,
+            }),
+            [flag, value] if flag == "--output" && value == "json" => Ok(Command::Plugins {
+                output_json: true,
+                probe: false,
+                project: false,
+            }),
+            [flag] if matches!(flag.as_str(), "--probe" | "--project") => Ok(Command::Plugins {
+                output_json: false,
+                probe: flag == "--probe",
+                project: flag == "--project",
+            }),
+            [flag, output, value]
+                if matches!(flag.as_str(), "--probe" | "--project")
+                    && output == "--output"
+                    && value == "json" =>
+            {
+                Ok(Command::Plugins {
+                    output_json: true,
+                    probe: flag == "--probe",
+                    project: flag == "--project",
+                })
+            }
+            _ => bail!(
+                "expected ahu plugins [--project|--probe] [--output json] or plugins install|update|enable|disable|remove ID or plugins digest PATH"
+            ),
+        },
         "mcp" => match args.get(1).map(String::as_str) {
             Some("serve") if args.len() == 2 => Ok(Command::McpServe),
             _ => bail!("expected ahu mcp serve"),
@@ -802,11 +870,18 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             })
         }
         "telemetry" => parse_telemetry(&args[1..]),
-        "doctor" => match &args[1..] {
-            [] => Ok(Command::Doctor { verbose: false }),
-            [flag] if flag == "--verbose" => Ok(Command::Doctor { verbose: true }),
-            _ => bail!("expected ahu doctor [--verbose]"),
-        },
+        "doctor" => {
+            let mut verbose = false;
+            let mut work_mode = false;
+            for flag in &args[1..] {
+                match flag.as_str() {
+                    "--verbose" if !verbose => verbose = true,
+                    "--work-mode" if !work_mode => work_mode = true,
+                    _ => bail!("expected ahu doctor [--verbose] [--work-mode]"),
+                }
+            }
+            Ok(Command::Doctor { verbose, work_mode })
+        }
         "claude" => {
             expect_no_more(&args[1..])?;
             Ok(Command::Claude)
@@ -868,6 +943,15 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
                 })?;
             let text = args[2..].join(" ");
             Ok(Command::Message { task_id, text })
+        }
+        "migrate" => {
+            let action = args.get(1).map(String::as_str).unwrap_or("--preview");
+            if args.len() > 2 || !matches!(action, "--preview" | "--apply" | "--rollback") {
+                bail!("Usage: ahu migrate [--preview|--apply|--rollback]");
+            }
+            Ok(Command::Migrate {
+                action: action.into(),
+            })
         }
         "lock" => match args.get(1).map(String::as_str) {
             None => Ok(Command::Lock { update: false }),
@@ -935,6 +1019,7 @@ fn help_request(args: &[String]) -> Result<Option<Command>> {
             flag.as_str(),
             "--prompt"
                 | "--prompt-file"
+                | "--input-file"
                 | "--records"
                 | "--case"
                 | "--suite"
@@ -953,6 +1038,7 @@ fn help_request(args: &[String]) -> Result<Option<Command>> {
                 | "--remove"
                 | "--agent-version"
                 | "--output"
+                | "--allow-task"
                 | "--allow-child"
                 | "--allow-child-widened"
                 | "--native-helpers"
@@ -963,7 +1049,7 @@ fn help_request(args: &[String]) -> Result<Option<Command>> {
     let Some(first) = before_help.first() else {
         return Ok(Some(Command::Help { topic: None }));
     };
-    let count = if matches!(first.as_str(), "eval" | "knowledge" | "cmux" | "mcp") {
+    let count = if matches!(first.as_str(), "eval" | "knowledge" | "mcp") {
         before_help.len().min(2)
     } else {
         1
@@ -1078,6 +1164,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
     let mut saw_timeout = false;
     let mut trajectory_guardrails = crate::eval::trajectory::Guardrails::default();
     let mut allow_widened_approvals = false;
+    let mut work_mode = false;
     let mut output_json = false;
     let mut index = 0;
     while index < rest.len() {
@@ -1152,6 +1239,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
                     bail!("--timeout must be an integer from 1 to 86400 seconds");
                 }
             }
+            "--work-mode" if !work_mode => work_mode = true,
             "--allow-widened-approvals" if !allow_widened_approvals => {
                 allow_widened_approvals = true
             }
@@ -1216,6 +1304,7 @@ fn parse_eval_run(rest: &[String]) -> Result<Command> {
         runs,
         timeout_seconds,
         allow_widened_approvals,
+        work_mode,
         output_json,
     })
 }
@@ -1293,7 +1382,12 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
         let flag = rest[i].as_str();
         if matches!(
             flag,
-            "--headless" | "--background" | "--timeout" | "--native-helpers"
+            "--headless"
+                | "--work-mode"
+                | "--background"
+                | "--timeout"
+                | "--native-helpers"
+                | "--input-file"
         ) && !batch_flags.insert(flag)
         {
             bail!("repeated batch option {flag}");
@@ -1303,7 +1397,14 @@ fn parse_launch_backend(rest: &[String], stdin_available: bool) -> Result<Comman
         }
         match flag {
             "--headless" => headless = true,
+            "--work-mode" => {
+                headless = true;
+                options.work_mode = true;
+            }
             "--background" => options.background = true,
+            "--input-file" if options.input_file.is_none() => {
+                options.input_file = Some(PathBuf::from(value_for("--input-file", rest, &mut i)?));
+            }
             "--timeout" => {
                 options.timeout_seconds = value_for("--timeout", rest, &mut i)?
                     .parse()
@@ -1521,7 +1622,7 @@ pub fn extract_color(
                 "always" => ColorChoice::Always,
                 "never" => ColorChoice::Never,
                 _ => {
-                    bail!(kind: crate::util::ErrorKind::Usage, "invalid --color {value:?}; expected auto, always, or never.")
+                    bail!(kind: crate::util::ErrorKind::Usage, "invalid --color; expected auto, always, or never.")
                 }
             });
         } else {
@@ -1531,6 +1632,7 @@ pub fn extract_color(
                     | "--title"
                     | "--summary"
                     | "--prompt-file"
+                    | "--input-file"
                     | "--output"
                     | "--limit"
                     | "--register"
@@ -1540,6 +1642,7 @@ pub fn extract_color(
                     | "--task-dir"
                     | "--timeout"
                     | "--native-helpers"
+                    | "--allow-task"
                     | "--allow-child"
                     | "--allow-child-widened"
                     | "--harness"
@@ -1647,43 +1750,6 @@ fn parse_telemetry(args: &[String]) -> Result<Command> {
         task_ref,
         output_json,
     })
-}
-
-fn parse_cmux(args: &[String]) -> Result<Command> {
-    match args.first().map(String::as_str) {
-        Some("status") => {
-            let output_json = match &args[1..] {
-                [] => false,
-                [flag, value] if flag == "--output" && value == "json" => true,
-                _ => bail!("expected ahu cmux status [--output json]"),
-            };
-            Ok(Command::CmuxStatus { output_json })
-        }
-        Some("install") => {
-            let mut harness = None;
-            let mut dry_run = false;
-            let mut index = 1;
-            while index < args.len() {
-                match args[index].as_str() {
-                    "--harness" if harness.is_none() => {
-                        harness = Some(value_for("--harness", args, &mut index)?.to_string());
-                    }
-                    "--dry-run" if !dry_run => dry_run = true,
-                    _ => bail!("expected ahu cmux install --harness ID [--dry-run]"),
-                }
-                index += 1;
-            }
-            let harness =
-                harness.ok_or_else(|| crate::util::Error::new("--harness ID required"))?;
-            if !["claude-code", "codex", "opencode", "antigravity"].contains(&harness.as_str()) {
-                bail!("unsupported harness; use claude-code, codex, opencode, or antigravity");
-            }
-            Ok(Command::CmuxInstall { harness, dry_run })
-        }
-        _ => bail!(
-            "expected ahu cmux status [--output json] or ahu cmux install --harness ID [--dry-run]"
-        ),
-    }
 }
 
 #[cfg(test)]
@@ -2009,56 +2075,6 @@ mod parser_tests {
     }
 
     #[test]
-    fn cmux_install_validates_harness_and_singleton_options() {
-        for harness in ["claude-code", "codex", "opencode", "antigravity"] {
-            for dry_run in [false, true] {
-                let mut args = vec!["cmux", "install"];
-                if dry_run {
-                    args.push("--dry-run");
-                }
-                args.extend(["--harness", harness]);
-                assert_eq!(
-                    parse(args).unwrap(),
-                    Command::CmuxInstall {
-                        harness: harness.into(),
-                        dry_run,
-                    }
-                );
-            }
-        }
-        assert_usage(&["cmux", "install"], "--harness ID required");
-        assert_usage(&["cmux", "install", "--harness"], "--harness needs a value");
-        assert_usage(
-            &["cmux", "install", "--harness", "unknown"],
-            "unsupported harness",
-        );
-        for args in [
-            vec![
-                "cmux",
-                "install",
-                "--harness",
-                "codex",
-                "--harness",
-                "opencode",
-            ],
-            vec![
-                "cmux",
-                "install",
-                "--harness",
-                "codex",
-                "--dry-run",
-                "--dry-run",
-            ],
-            vec!["cmux", "install", "--unknown"],
-            vec!["cmux", "status", "--output", "yaml"],
-            vec!["cmux"],
-            vec!["cmux", "unknown"],
-        ] {
-            assert_usage(&args, "expected ahu cmux");
-        }
-    }
-
-    #[test]
     fn eval_run_checks_numeric_limits_and_candidate_identity() {
         let base = [
             "eval",
@@ -2147,6 +2163,7 @@ mod parser_tests {
                 skill_selection: crate::skill_selection::Mode::None,
                 trajectory_guardrails: Default::default(),
                 records: Some("runs.jsonl".into()),
+                work_mode: false,
                 runs: 100,
                 timeout_seconds: 86400,
                 allow_widened_approvals: true,
@@ -2158,6 +2175,35 @@ mod parser_tests {
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
             "at most 16",
         );
+    }
+
+    #[test]
+    fn eval_work_mode_is_explicit_authorization_and_rejects_repeats() {
+        let base = ["eval", "run", "--case", "case.md", "--agent", "@fixture"];
+        for (extra, expected, widened) in [
+            (vec![], false, false),
+            (vec!["--allow-widened-approvals"], false, true),
+            (vec!["--work-mode"], true, false),
+            (vec!["--work-mode", "--allow-widened-approvals"], true, true),
+            (vec!["--allow-widened-approvals", "--work-mode"], true, true),
+        ] {
+            let Command::EvalRun {
+                work_mode,
+                allow_widened_approvals,
+                ..
+            } = parse(base.into_iter().chain(extra)).unwrap()
+            else {
+                panic!("expected eval")
+            };
+            assert_eq!(work_mode, expected);
+            assert_eq!(allow_widened_approvals, widened);
+        }
+        let args: Vec<_> = base
+            .into_iter()
+            .chain(["--work-mode", "--work-mode"])
+            .collect();
+        assert_usage(&args, "unknown or repeated option");
+        assert!(help_for(Some("eval run")).unwrap().contains("--work-mode"));
     }
 
     #[test]
@@ -2313,6 +2359,54 @@ mod parser_tests {
     }
 
     #[test]
+    fn structured_input_file_is_a_headless_option_and_preserves_prompt_literals() {
+        let args = [
+            "@worker",
+            "--headless",
+            "--input-file",
+            "/tmp/input.json",
+            "--prompt",
+            "--input-file",
+        ];
+        let parsed = parse_launch_backend(&args.map(str::to_owned), false).unwrap();
+        let Command::HeadlessLaunch { options, launch } = parsed else {
+            panic!("headless expected")
+        };
+        assert_eq!(options.input_file, Some(PathBuf::from("/tmp/input.json")));
+        let Command::Launch { prompt, .. } = *launch else {
+            panic!("launch expected")
+        };
+        assert_eq!(prompt, PromptSource::Inline("--input-file".into()));
+        for args in [
+            vec![
+                "@worker",
+                "--input-file",
+                "/tmp/input.json",
+                "--prompt",
+                "go",
+            ],
+            vec![
+                "@worker",
+                "--headless",
+                "--input-file",
+                "a",
+                "--input-file",
+                "b",
+                "--prompt",
+                "go",
+            ],
+        ] {
+            assert!(
+                parse_launch_backend(
+                    &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                    false
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn headless_launch_keeps_options_separate_from_literal_prompt_values() {
         for policy in ["disabled", "bounded"] {
             let Command::HeadlessLaunch { launch, options } = parse([
@@ -2340,6 +2434,8 @@ mod parser_tests {
             assert_eq!(
                 options,
                 crate::headless::Options {
+                    work_mode: false,
+                    input_file: None,
                     background: true,
                     timeout_seconds: 1,
                     native_helpers: policy.into(),
@@ -2358,6 +2454,55 @@ mod parser_tests {
                     dry_run: false,
                     allow_widened_approvals: false,
                 }
+            );
+        }
+    }
+
+    #[test]
+    fn work_mode_selects_headless_auto_approval_without_a_second_widening_flag() {
+        let Command::HeadlessLaunch { launch, options } =
+            parse(["@fixture", "--work-mode", "--prompt", "write a marker"]).unwrap()
+        else {
+            panic!("expected headless work-mode launch")
+        };
+        assert!(options.work_mode);
+        assert_eq!(
+            options,
+            crate::headless::Options {
+                work_mode: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            *launch,
+            Command::Launch {
+                agent: "fixture".into(),
+                prompt: PromptSource::Inline("write a marker".into()),
+                display: crate::launch::DisplayMetadata::default(),
+                output_json: false,
+                dry_run: false,
+                allow_widened_approvals: false,
+            }
+        );
+        let Command::HeadlessLaunch { options, .. } =
+            parse(["@fixture", "--headless", "--work-mode", "--prompt", "write"]).unwrap()
+        else {
+            panic!("expected headless work-mode launch")
+        };
+        assert!(options.work_mode);
+        for args in [
+            vec![
+                "@fixture",
+                "--work-mode",
+                "--work-mode",
+                "--prompt",
+                "write",
+            ],
+            vec!["@fixture", "--headless", "--headless", "--prompt", "write"],
+        ] {
+            assert!(
+                parse(args).is_err(),
+                "repeated work-mode/headless options must be rejected"
             );
         }
     }
@@ -2590,12 +2735,26 @@ mod focused_help_tests {
         assert!(parse_args(&["tasks", "--all", "--limit", "4"]).is_err());
         assert_eq!(
             parse_args(&["doctor"]).unwrap(),
-            Command::Doctor { verbose: false }
+            Command::Doctor {
+                verbose: false,
+                work_mode: false
+            }
         );
         assert_eq!(
             parse_args(&["doctor", "--verbose"]).unwrap(),
-            Command::Doctor { verbose: true }
+            Command::Doctor {
+                verbose: true,
+                work_mode: false
+            }
         );
+        assert_eq!(
+            parse_args(&["doctor", "--work-mode", "--verbose"]).unwrap(),
+            Command::Doctor {
+                verbose: true,
+                work_mode: true
+            }
+        );
+        assert!(parse_args(&["doctor", "--work-mode", "--work-mode"]).is_err());
     }
 
     #[test]
@@ -2622,7 +2781,6 @@ mod focused_help_tests {
             "focus",
             "remove",
             "message",
-            "cmux",
             "auth",
             "telemetry",
             "mcp",
@@ -2702,9 +2860,7 @@ mod focused_help_tests {
         assert_eq!(help_for(Some("all")).unwrap(), HELP_ALL);
         for (topic, expected) in [
             ("setup", "Detect installed harnesses"),
-            ("lock", "--update refreshes ahu.lock"),
-            ("cmux status", "native integration evidence"),
-            ("cmux install", "Preview or delegate"),
+            ("lock", "--update refreshes .agents/ahu/lock.md"),
             ("mcp serve", "stdio MCP"),
             ("resume", "recorded native session"),
             ("run-task", "Internal worker"),

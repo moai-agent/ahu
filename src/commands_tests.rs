@@ -1,5 +1,6 @@
 //! Command behavior with isolated repositories and scripted terminal input.
 use super::*;
+use std::collections::BTreeMap;
 use std::process::Command;
 
 fn git(root: &Path, args: &[&str]) {
@@ -48,6 +49,7 @@ fn configured(repo: &Repo) {
             harness_version_pins: Default::default(),
             model_rankings: BTreeMap::from([("claude-code".into(), vec!["claude-opus-5".into()])]),
             knowledge: Default::default(),
+            headless: Default::default(),
             telemetry: Default::default(),
         },
     )
@@ -125,9 +127,8 @@ fn saved(repo: &Repo, id: &str) -> (PathBuf, task::TaskRecord) {
         enforcement: adapter
             .enforcement("claude-opus-5", Default::default())
             .unwrap(),
-        cmux_group_id: None,
-        cmux_workspace_id: None,
-        cmux_window_id: None,
+        session_host: None,
+        session_ref: None,
         state: crate::task::TaskState::Exited,
     };
     let dir = repo
@@ -239,7 +240,7 @@ fn lock_update_requires_commit_and_detects_context_changes() {
     assert!(output.contains("Refreshed"));
     git(&repo.root, &["diff", "--cached", "--exit-code"]);
     assert!(scripted("", |c| lock_cmd(c, &repo, false)).0.is_err());
-    git(&repo.root, &["add", "AGENTS.md", "ahu.lock"]);
+    git(&repo.root, &["add", "AGENTS.md", ".agents/ahu/lock.md"]);
     git(
         &repo.root,
         &[
@@ -354,7 +355,7 @@ fn task_resolution_distinguishes_missing_ambiguous_and_unreadable_records() {
             .0
             .unwrap_err()
             .to_string()
-            .contains("no recorded cmux session")
+            .contains("no recorded interactive session")
     );
     assert!(
         scripted("", |c| focus(c, &repo, "absent"))
@@ -475,7 +476,11 @@ fn indexed_task_loading_rejects_stale_corrupt_and_mismatched_records() {
         match changed {
             "task" => mismatched.task_id = "different01".into(),
             "repository" => mismatched.repo_identity = "different".into(),
-            "checkout" => mismatched.worktree = repo.root.join("absent"),
+            "checkout" => {
+                let other = repo.root.join("different-checkout");
+                std::fs::create_dir_all(&other).unwrap();
+                mismatched.worktree = other;
+            }
             _ => unreachable!(),
         }
         task::save(&dir, &mismatched, "synthetic prompt").unwrap();
@@ -605,7 +610,7 @@ fn commands_propagate_output_failures() {
 }
 
 #[test]
-fn launch_refuses_widened_approvals_even_during_dry_run() {
+fn launch_requires_explicit_opt_in_for_widened_manifest_permissions() {
     let (_root, repo) = repository();
     configured(&repo);
     let manifests = repo.root.join(config::AGENTS_RELATIVE_DIR);
@@ -614,26 +619,45 @@ fn launch_refuses_widened_approvals_even_during_dry_run() {
         std::fs::write(manifests.join("reviewer.md"), format!(
             "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: reviewer\nversion: 1.0.0\nharness: claude-code\nmodel: claude-opus-5\npermissions: {permissions}\n---\nReview carefully.\n"
         )).unwrap();
-        for dry_run in [false, true] {
-            let (result, output) = scripted("y\n", |c| {
-                launch_cmd(
-                    c,
-                    &repo,
-                    "reviewer",
-                    "synthetic task",
-                    false,
-                    dry_run,
-                    false,
-                    &Default::default(),
-                )
-            });
-            let error = result.unwrap_err().to_string();
-            assert!(error.contains("--allow-widened-approvals"), "{error}");
-            assert!(error.contains(permissions));
-            assert!(output.is_empty());
-            assert!(task_dirs(&repo).unwrap().is_empty());
-            assert!(!repo.root.join(".worktrees").exists());
-        }
+        let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+        crate::context_lock::refresh(&repo, &snapshot).unwrap();
+        git(&repo.root, &["add", "."]);
+        git(
+            &repo.root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "fixture context",
+            ],
+        );
+        let (result, _) = scripted("", |c| {
+            launch_cmd(
+                c,
+                &repo,
+                "reviewer",
+                "synthetic task",
+                false,
+                true,
+                false,
+                &Default::default(),
+            )
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains(&format!("permissions = {permissions}")),
+            "{permissions} must be refused without explicit opt-in"
+        );
+        // Refusal happens before task state, branches, or worktrees are made.
+        assert!(task_dirs(&repo).unwrap().is_empty());
+        assert!(!repo.root.join(".worktrees").exists());
     }
 }
 
@@ -667,7 +691,7 @@ fn agents_distinguish_drift_from_unreadable_history() {
 }
 
 #[test]
-fn removal_reports_partial_cleanup_when_a_worktree_is_locked() {
+fn removal_preserves_task_state_when_a_worktree_is_locked() {
     let (_root, repo) = repository();
     let (dir, mut record) = saved(&repo, "locked01");
     record.worktree = repo.root.join(".worktrees/locked01");
@@ -690,24 +714,27 @@ fn removal_reports_partial_cleanup_when_a_worktree_is_locked() {
 
     let (result, output) = scripted("", |c| remove_cmd(c, &repo, &record.task_id));
     let error = result.unwrap_err().to_string();
-    assert!(error.contains("was only partly removed"), "{error}");
-    assert!(error.contains("Completed:\n  record    removed"), "{error}");
-    assert!(error.contains("Not removed:\n  worktree"), "{error}");
-    assert!(error.contains("branch"));
-    assert!(error.contains("Delete the branch yourself"));
+    assert!(error.contains("could not remove task worktree"), "{error}");
+    assert!(
+        error.contains("Task record and branch were preserved"),
+        "{error}"
+    );
     assert!(output.is_empty());
-    assert!(!dir.exists());
+    assert!(
+        dir.exists(),
+        "the record was removed after the worktree refusal"
+    );
     assert!(record.worktree.join(".git").exists());
     assert!(git::branch_exists(&repo, &record.branch).unwrap());
     git(
         &repo.root,
         &["worktree", "unlock", record.worktree.to_str().unwrap()],
     );
-    git(
-        &repo.root,
-        &["worktree", "remove", record.worktree.to_str().unwrap()],
-    );
-    git(&repo.root, &["branch", "-d", &record.branch]);
+    let (result, _) = scripted("", |c| remove_cmd(c, &repo, &record.task_id));
+    assert_eq!(result.unwrap(), 0);
+    assert!(!dir.exists());
+    assert!(!record.worktree.exists());
+    assert!(!git::branch_exists(&repo, &record.branch).unwrap());
 }
 
 #[test]
@@ -789,7 +816,7 @@ fn doctor_reports_invalid_agents_and_lock_without_changing_them() {
     std::fs::create_dir_all(&manifests).unwrap();
     let manifest = manifests.join("broken.md");
     std::fs::write(&manifest, "not an agent manifest").unwrap();
-    let lock = repo.root.join("ahu.lock");
+    let lock = repo.root.join(".agents/ahu/lock.md");
     std::fs::write(&lock, "not a context lock").unwrap();
     let repo = Ok(repo);
     for verbose in [false, true] {
@@ -818,6 +845,48 @@ fn doctor_reports_invalid_agents_and_lock_without_changing_them() {
     );
     assert_eq!(std::fs::read_to_string(lock).unwrap(), "not a context lock");
     assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+}
+
+#[test]
+fn doctor_work_mode_checks_headless_prerequisites_without_native_or_session_host_admission() {
+    let (_root, repo) = repository();
+    configured(&repo);
+    let snapshot = crate::snapshot::collect(&repo.root).unwrap();
+    crate::context_lock::refresh(&repo, &snapshot).unwrap();
+    git(&repo.root, &["add", "."]);
+    git(
+        &repo.root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "doctor work-mode fixture",
+        ],
+    );
+
+    let (result, text) = scripted("", |c| {
+        doctor_with_options(c, &Ok(repo.clone()), false, true)
+    });
+
+    assert!(result.is_ok(), "{text}");
+    assert!(text.contains("explicit headless work mode"), "{text}");
+    assert!(
+        text.contains("work mode    claude-code: ahu adapter supports explicit headless work mode"),
+        "{text}"
+    );
+    assert!(text.contains("native compatibility unverified"), "{text}");
+    assert!(
+        text.contains("session host not required for headless work mode"),
+        "{text}"
+    );
+    assert!(!text.contains("native safety claude-code"), "{text}");
+    assert!(!text.contains("host groups"), "{text}");
+    assert!(!text.contains("No blocking problems found."), "{text}");
 }
 
 #[test]
@@ -887,7 +956,7 @@ fn cancellation_preserves_work_when_the_supervisor_finishes_or_record_becomes_un
         record.state = task::TaskState::Running;
         // Neither outcome confirms cancellation, so this workspace must never
         // be contacted or closed by the command.
-        record.cmux_workspace_id = Some("synthetic-workspace-never-contact".into());
+        record.session_ref = Some("synthetic-workspace-never-contact".into());
         task::save(&dir, &record, "synthetic prompt").unwrap();
         let marker = repo.root.join("keep-work.txt");
         std::fs::write(&marker, "reviewable work").unwrap();
@@ -940,7 +1009,7 @@ fn run_task_refuses_invalid_project_configuration_before_starting_a_harness() {
     let before = std::fs::read(dir.join("task.json")).unwrap();
     std::fs::write(config::config_path(&repo.root), "invalid = [").unwrap();
     let error = run_task(&dir).unwrap_err().to_string();
-    assert!(error.contains("TOML"), "{error}");
+    assert!(error.contains("YAML frontmatter"), "{error}");
     assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
 }
 

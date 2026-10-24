@@ -13,20 +13,21 @@ fn local_metrics_default_off_and_round_trip_independently_of_export() {
     assert!(!loaded.telemetry.local_metrics);
     assert!(!loaded.telemetry.enabled);
     loaded.telemetry.local_metrics = true;
-    repo.write(".agents/ahu/config.toml", &config::render(&loaded));
+    repo.remove(".agents/ahu/config.toml");
+    repo.write(config::CONFIG_RELATIVE_PATH, &config::render(&loaded));
     assert_eq!(config::load(repo.path()).unwrap().unwrap().config, loaded);
     let rendered = config::render(&loaded);
     repo.write(
-        ".agents/ahu/config.toml",
-        &rendered.replace("local_metrics = true", "local_metrics = \"yes\""),
+        config::CONFIG_RELATIVE_PATH,
+        &rendered.replace("local_metrics: true", "local_metrics: \"yes\""),
     );
     assert!(config::load(repo.path()).is_err());
     for field in ["tracker_url", "record_key", "private_mapping", "tracker_id"] {
         repo.write(
-            ".agents/ahu/config.toml",
+            config::CONFIG_RELATIVE_PATH,
             &rendered.replace(
-                "local_metrics = true",
-                &format!("{field} = \"private-marker\""),
+                "local_metrics: true",
+                &format!("{field}: \"private-marker\""),
             ),
         );
         assert!(config::load(repo.path()).is_err());
@@ -144,6 +145,7 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
             .into_iter()
             .collect(),
         knowledge: config::Knowledge::default(),
+        headless: config::HeadlessConfig::default(),
         telemetry: config::TelemetryConfig::default(),
     };
     let path = config::write_new(repo.path(), &new_config).expect("first write");
@@ -156,6 +158,17 @@ fn writing_config_is_exclusive_so_a_concurrent_init_cannot_be_overwritten() {
     assert!(error.contains("already exists"), "{error}");
     assert!(error.contains("nothing was overwritten"), "{error}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+}
+
+#[test]
+fn legacy_catalog_date_round_trips_through_okf() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    let original = config::load(repo.path()).unwrap().unwrap().config;
+    let rendered = config::try_render(&original).unwrap();
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    repo.write(config::CONFIG_RELATIVE_PATH, &rendered);
+    assert_eq!(config::load(repo.path()).unwrap().unwrap().config, original);
 }
 
 #[test]
@@ -177,9 +190,7 @@ fn rendered_config_round_trips() {
         .collect(),
         // A non-default knowledge section so the round trip proves it is
         // rendered, not silently dropped back to the default. The non-ASCII
-        // paths are the reason the bundles are rendered as TOML rather than
-        // with `{:?}`: Rust's escapes for these are not TOML's, so a config
-        // rendered with them would load once and then fail to parse.
+        // paths exercise the YAML serializer rather than Rust debug escapes.
         knowledge: config::Knowledge {
             bundles: vec![
                 "docs/knowledge".to_string(),
@@ -189,6 +200,7 @@ fn rendered_config_round_trips() {
             fail_on_warnings: true,
         },
         telemetry: config::TelemetryConfig::default(),
+        headless: config::HeadlessConfig::default(),
     };
     config::write_new(repo.path(), &original).unwrap();
     let loaded = config::load(repo.path()).unwrap().unwrap();
@@ -196,10 +208,30 @@ fn rendered_config_round_trips() {
 }
 
 #[test]
+fn headless_opencode_native_state_trust_is_explicit_and_round_trips() {
+    let repo = TestRepo::new();
+    repo.init_config();
+    let mut config = config::load(repo.path()).unwrap().unwrap().config;
+    config.headless.trust_opencode_native_state = true;
+    let rendered = config::try_render(&config).unwrap();
+    assert!(rendered.contains("trust_opencode_native_state: true"));
+    repo.remove(config::LEGACY_CONFIG_PATH);
+    repo.write(config::CONFIG_RELATIVE_PATH, &rendered);
+    assert_eq!(config::load(repo.path()).unwrap().unwrap().config, config);
+
+    config.headless.trust_opencode_native_state = false;
+    assert!(
+        !config::try_render(&config)
+            .unwrap()
+            .contains("trust_opencode_native_state")
+    );
+}
+
+#[test]
 fn missing_harness_version_pins_float_and_invalid_pins_are_refused() {
     let repo = TestRepo::new();
     repo.write(
-        config::CONFIG_RELATIVE_PATH,
+        config::LEGACY_CONFIG_PATH,
         &format!(
             "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = {:?}\n[model_rankings]\n\"claude-code\" = [\"claude-opus-5\"]\n",
             catalog::CATALOG_VERSION
@@ -209,7 +241,7 @@ fn missing_harness_version_pins_float_and_invalid_pins_are_refused() {
     assert!(loaded.config.harness_version_pins.is_empty());
 
     repo.write(
-        config::CONFIG_RELATIVE_PATH,
+        config::LEGACY_CONFIG_PATH,
         &format!(
             "schema_version = 1\nharness_preferences = [\"claude-code\"]\nmodel_selection = \"project-ranked\"\ncatalog_version = {:?}\n[model_rankings]\n\"claude-code\" = [\"claude-opus-5\"]\n[harness_version_pins]\n\"claude-code\" = \"2.1\"\n",
             catalog::CATALOG_VERSION
@@ -559,7 +591,6 @@ fn a_relative_path_entry_never_resolves_a_harness() {
         .current_dir(repo.path())
         .env("PATH", format!(":{}:", bin.display()))
         .env("HOME", scratch.path().canonicalize().unwrap())
-        .env("AHU_CMUX_BIN", scratch.path().join("missing-cmux"))
         .output()
         .expect("ahu runs");
     let combined = String::from_utf8_lossy(&output.stdout).to_string();
@@ -676,13 +707,14 @@ fn a_proposed_manifest_round_trips_through_the_loader() {
 /// Updating a verified harness version moves the catalog revision, and a
 /// project pinned to the previous one stops rather than being upgraded for free.
 ///
-/// That is the point of the pin: catalog `2026-10-09` adds the Kiro 2.28.0
+/// That is the point of the pin: catalog `2026-10-19` adds current harness
+/// compatibility evidence while preserving project selection behavior.
 /// headless compatibility check. Changing which catalog a project uses is a
 /// project decision, made by editing `catalog_version`, not a side effect of
 /// installing a newer ahu.
 #[test]
 fn a_project_pinned_to_the_previous_catalog_is_stopped_not_upgraded() {
-    assert_eq!(catalog::CATALOG_VERSION, "2026-10-09");
+    assert_eq!(catalog::CATALOG_VERSION, "2026-10-19");
 
     let error = catalog::require_version("2026-09-27")
         .expect_err("a superseded pin must not be silently accepted")

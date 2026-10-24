@@ -3,7 +3,7 @@
 //! The catalog is data, not policy. It records what a pair *is* — a verified
 //! identifier, the harness versions it was checked against, and the basis for
 //! its quality rank. Which pair a project actually uses is decided by the
-//! project's own rankings in `.agents/ahu/config.toml`.
+//! project's own rankings in `.agents/ahu/config.md`.
 //!
 //! The catalog revision is fixed in project configuration so that installing
 //! a newer ahu cannot silently change a project's selection.
@@ -12,7 +12,7 @@ use crate::bail;
 use crate::util::Result;
 
 /// The catalog revision shipped with this ahu build.
-pub const CATALOG_VERSION: &str = "2026-10-09";
+pub const CATALOG_VERSION: &str = "2026-10-19";
 
 /// One capability a harness adapter has actually been validated to deliver.
 ///
@@ -160,7 +160,7 @@ pub fn isolation_profile(id: &str) -> Option<IsolationProfile> {
             "Absent native sources or the exact reviewed guarded Session plugin; Feed is unsafe, and authentication/account stores, substitutions and declared modules are unresolved."
         }
         "claude-code" => {
-            "Direct executable bypasses the cmux wrapper; 2.1.283, 2.1.288 and 2.1.289 headless invocations disable non-managed hooks with frozen profiles. Enabled plugins and managed settings must still be resolved."
+            "2.1.283, 2.1.288, 2.1.289 and 2.1.302 headless invocations disable non-managed hooks with frozen profiles. The 2.1.302 profile is based on installed CLI help, vendor documentation and synthetic admission/argv tests, not authenticated headless verification. Enabled plugins and managed settings must still be resolved."
         }
         "antigravity" => {
             "Absent inspected hook configuration; custom hooks, extensions and configuration overrides are unverified."
@@ -307,9 +307,12 @@ pub const HARNESSES: &[HarnessEntry] = &[
         display_name: "Antigravity CLI",
         adapter_available: true,
         executable: "agy",
-        verified_versions: "1.2.2, 1.2.16",
+        verified_versions: "1.2.2, 1.2.16, 1.4.2",
         // 1.2.16: live headless implementation and decision eval tasks
         // completed with actual MCP calls and collector export on 2026-10-03.
+        // 1.4.2: installed CLI help, model discovery, and interactive startup
+        // checked on 2026-10-19. Headless behavior is not newly claimed; it
+        // remains verified only through 1.2.16.
         headless_verified_versions: &["1.2.2", "1.2.16"],
         enforces_model_for_session: false,
         features: &[
@@ -331,9 +334,10 @@ pub const HARNESSES: &[HarnessEntry] = &[
         display_name: "OpenCode",
         adapter_available: true,
         executable: "opencode",
-        // Both were checked on 2026-09-13; the install updated itself in place
-        // between the two probe runs, which is why the entry lists a pair.
-        verified_versions: "1.18.29, 1.18.30, 1.18.31, 1.18.32, 1.18.34",
+        // 1.x versions were checked on 2026-09-13 and later dates. OpenCode
+        // 2.0.32 `mini` help and interactive startup were checked on 2026-10-19;
+        // headless behavior is still claimed only for the listed 1.x versions.
+        verified_versions: "1.18.29, 1.18.30, 1.18.31, 1.18.32, 1.18.34, 2.0.32",
         // The batch surface was inspected on 1.18.30; 1.18.29 carries the same
         // `run` options and is the other version the catalog entry names.
         // 1.18.31 was live-probed on 2026-09-15: a fresh `run --format json`
@@ -526,7 +530,7 @@ pub fn require_version(pinned: &str) -> Result<()> {
             "this project pins compatibility catalog {pinned:?}, but this ahu build ships {CATALOG_VERSION}.\n\
              Selection behaviour differs between catalogs, so ahu will not substitute one for the other.\n\
              Install the ahu release carrying catalog {pinned:?}, or agree a project change to catalog {CATALOG_VERSION} \
-             by editing `catalog_version` in .agents/ahu/config.toml."
+             by editing `catalog_version` in .agents/ahu/config.md."
         );
     }
     Ok(())

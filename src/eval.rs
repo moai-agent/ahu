@@ -202,6 +202,8 @@ struct Record {
     #[serde(default)]
     blinding: Option<String>,
     #[serde(default)]
+    work_mode: Option<bool>,
+    #[serde(default)]
     tool_definitions_digest: Option<String>,
     #[serde(default)]
     ahu_version: Option<String>,
@@ -341,6 +343,8 @@ pub struct GroupKey {
     pub evaluator_skill_digest: String,
     pub evaluator_repo_head: String,
     pub blinding: String,
+    /// Missing legacy mode remains distinct from explicitly recorded modes.
+    pub work_mode: Option<bool>,
     pub tool_definitions_digest: String,
     pub ahu_version: String,
     pub ahu_build_digest: String,
@@ -876,6 +880,7 @@ fn key_for(record: &Record) -> GroupKey {
         evaluator_skill_digest: or_unspecified(&record.evaluator_skill_digest, UNSPECIFIED),
         evaluator_repo_head: or_unspecified(&record.evaluator_repo_head, UNSPECIFIED),
         blinding: or_unspecified(&record.blinding, UNSPECIFIED),
+        work_mode: record.work_mode,
         tool_definitions_digest: or_unspecified(&record.tool_definitions_digest, UNSPECIFIED),
         ahu_version: or_unspecified(&record.ahu_version, UNSPECIFIED),
         ahu_build_digest: or_unspecified(&record.ahu_build_digest, UNSPECIFIED),
@@ -1503,7 +1508,7 @@ pub fn render_at(report: &Report, width: usize) -> String {
                 group.candidate_selection_runs, group.runs));
         }
         out.push_str(&format!(
-            "  inputs     case {}  prompt {} v{}  scoring v{}  suite {} {}\n                          agent id {}  evaluator id {}  blinding {}\n                          tools {}  ahu {} build {}  target HEAD {}  fingerprint {} ({})\n",
+            "  inputs     case {}  prompt {} v{}  scoring v{}  suite {} {}\n                          agent id {}  evaluator id {}  blinding {}  mode {}\n                          tools {}  ahu {} build {}  target HEAD {}  fingerprint {} ({})\n",
             display_safe(&key.case_digest),
             display_safe(&key.prompt_profile),
             display_safe(&key.prompt_version),
@@ -1513,6 +1518,7 @@ pub fn render_at(report: &Report, width: usize) -> String {
             display_safe(&key.agent_identity_digest),
             display_safe(&key.evaluator_identity_digest),
             display_safe(&key.blinding),
+            match key.work_mode { Some(true) => "work-mode", Some(false) => "guarded", None => "unspecified" },
             display_safe(&key.tool_definitions_digest),
             display_safe(&key.ahu_version),
             display_safe(&key.ahu_build_digest),
@@ -2011,6 +2017,8 @@ pub struct RunRequest<'a> {
     pub runs: u32,
     pub timeout_seconds: u64,
     pub allow_widened_approvals: bool,
+    /// Explicit automatic approval authorization for every agent launch.
+    pub work_mode: bool,
     pub json_output: bool,
 }
 
@@ -2028,6 +2036,7 @@ pub fn run(
     repo: &crate::git::Repo,
     request: &RunRequest<'_>,
 ) -> Result<i32> {
+    let release_id = crate::telemetry::release_id_for_launch()?;
     if request.decision_evaluator
         && (request.evaluator.is_some() || request.evaluator_repo.is_some())
     {
@@ -2073,7 +2082,9 @@ pub fn run(
         })
         .collect::<Result<Vec<_>>>()?;
     for candidate in &candidates {
-        if candidate.manifest.permissions.widens_defaults() && !request.allow_widened_approvals {
+        if candidate.manifest.permissions.widens_defaults()
+            && !(request.allow_widened_approvals || request.work_mode)
+        {
             bail!(kind: ErrorKind::Usage, "candidate manifest widens harness approvals; pass --allow-widened-approvals to authorize that launch");
         }
     }
@@ -2115,7 +2126,7 @@ pub fn run(
     if evaluator
         .as_ref()
         .is_some_and(|agent| agent.manifest.permissions.widens_defaults())
-        && !request.allow_widened_approvals
+        && !(request.allow_widened_approvals || request.work_mode)
     {
         bail!(kind: ErrorKind::Usage, "evaluator manifest widens harness approvals; pass --allow-widened-approvals to authorize that launch");
     }
@@ -2177,6 +2188,7 @@ pub fn run(
         create_private_dir(&run_dir)?;
 
         let mut print = fingerprint::InputFingerprint {
+            work_mode: request.work_mode,
             case_id: case.id.clone(),
             corpus_version: case.corpus_version.clone(),
             case_schema_version: case.schema_version,
@@ -2222,6 +2234,7 @@ pub fn run(
             &run_id,
             &selection_id,
             &selection,
+            release_id.as_deref(),
         );
         let selection_observed = selection_exported
             && receiver
@@ -2241,9 +2254,9 @@ pub fn run(
             &run_id,
             case,
             "candidate",
-            request.timeout_seconds,
-            request.allow_widened_approvals,
+            request,
             receiver.endpoint(),
+            release_id.as_deref(),
         );
         let total_elapsed_ms = trial_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let candidate_result = match launch.result {
@@ -2265,16 +2278,20 @@ pub fn run(
                         .with_harness_version(harness_version(envelope));
                     print.skill_digest = skill_digest(envelope);
                 }
-                let harness_outcome = envelope
-                    .and_then(|value| value.get("outcome"))
-                    .and_then(serde_json::Value::as_str);
+                let harness_outcome =
+                    projected_outcome(envelope.and_then(|value| value.get("outcome")));
                 let status = match harness_outcome {
                     Some("timed_out") => "candidate_timed_out",
                     Some("cancelled") => "candidate_cancelled",
                     _ => "candidate_launch_failed",
                 };
                 let mut record = print.record_fields();
-                record.extend(base_fields(&run_id, trial, "candidate"));
+                record.extend(base_fields(
+                    &run_id,
+                    trial,
+                    "candidate",
+                    release_id.as_deref(),
+                ));
                 record.extend(outcome_fields(status, Some("candidate_run_failed")));
                 record.insert("launch_elapsed_ms".into(), launch.elapsed_ms.into());
                 insert_selection_fields(
@@ -2283,7 +2300,10 @@ pub fn run(
                     selection_observed,
                     total_elapsed_ms,
                 )?;
-                record.insert("failure_reason".into(), error.to_string().into());
+                record.insert(
+                    "failure_reason".into(),
+                    bounded_failure_reason(&error.to_string()).into(),
+                );
                 if let Some(harness_outcome) = harness_outcome {
                     record.insert("outcome".into(), harness_outcome.into());
                 }
@@ -2397,7 +2417,12 @@ pub fn run(
                     "candidate_answer_invalid"
                 };
                 let mut record = print.record_fields();
-                record.extend(base_fields(&run_id, trial, "candidate"));
+                record.extend(base_fields(
+                    &run_id,
+                    trial,
+                    "candidate",
+                    release_id.as_deref(),
+                ));
                 record.extend(outcome_fields(status, Some("candidate_answer_invalid")));
                 record.insert("task_id".into(), candidate_task.into());
                 record.insert("attempt".into(), attempt.into());
@@ -2409,7 +2434,10 @@ pub fn run(
                     selection_observed,
                     total_elapsed_ms,
                 )?;
-                record.insert("failure_reason".into(), error.to_string().into());
+                record.insert(
+                    "failure_reason".into(),
+                    bounded_failure_reason(&error.to_string()).into(),
+                );
                 let telemetry = receiver.task(candidate_task, attempt);
                 insert_telemetry_fields(&mut record, telemetry.as_ref())?;
                 if let Some(tokens) = reported_tokens(Some(&candidate_result), telemetry.as_ref()) {
@@ -2497,9 +2525,9 @@ pub fn run(
                 &run_id,
                 case,
                 "evaluator",
-                request.timeout_seconds,
-                request.allow_widened_approvals,
+                request,
                 receiver.endpoint(),
+                release_id.as_deref(),
             );
             let envelope = evaluator_launch
                 .result
@@ -2572,7 +2600,12 @@ pub fn run(
         let (score, passed, score_source) = (Some(answer_score), answer_passed, "deterministic");
 
         let mut record = print.record_fields();
-        record.extend(base_fields(&run_id, trial, "candidate"));
+        record.extend(base_fields(
+            &run_id,
+            trial,
+            "candidate",
+            release_id.as_deref(),
+        ));
         record.extend(outcome_fields(
             if judge_status == "failed" {
                 "candidate_scored_judge_failed"
@@ -2596,10 +2629,9 @@ pub fn run(
         put("answer_status", "scored".into());
         put(
             "outcome",
-            candidate_result
-                .get("outcome")
-                .cloned()
-                .unwrap_or_else(|| "unknown".into()),
+            projected_outcome(candidate_result.get("outcome"))
+                .unwrap_or("unknown")
+                .into(),
         );
         put("score", score.map_or(serde_json::Value::Null, number));
         put("passed", passed.into());
@@ -2813,6 +2845,7 @@ pub fn run(
         "trajectory_guard_exit_code": exit_code,
         "schema_version": RECORD_SCHEMA_VERSION,
         "run_id": run_id,
+        "release_id": release_id,
         "suite_id": suite_identity.as_ref().map(|suite| suite.id.clone()),
         "cases": cases.iter().map(|entry| entry.case.id.clone()).collect::<Vec<_>>(),
         "candidates": candidates.iter().map(|agent| agent.label()).collect::<Vec<_>>(),
@@ -2884,6 +2917,7 @@ fn base_fields(
     run_id: &str,
     trial: &Trial,
     stage: &str,
+    release_id: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
     fields.insert("schema_version".into(), RECORD_SCHEMA_VERSION.into());
@@ -2893,12 +2927,51 @@ fn base_fields(
         fields.insert("observed_at_unix_seconds".into(), age.as_secs().into());
     }
     fields.insert("run_id".into(), run_id.into());
+    if let Some(release_id) = release_id {
+        fields.insert("release_id".into(), release_id.into());
+    }
     fields.insert("stage".into(), stage.into());
     fields.insert("trial_index".into(), trial.index.into());
     fields.insert("case_index".into(), (trial.case_index + 1).into());
     fields.insert("agent_index".into(), (trial.agent_index + 1).into());
     fields.insert("run_index".into(), trial.run_index.into());
     fields
+}
+
+/// The terminal outcomes a headless attempt result can report.
+///
+/// The same set `headless::review::validate_result` accepts. A non-terminal
+/// label such as `running` or `interrupted` is not a result outcome and is not
+/// projected onto a record as one.
+const HEADLESS_OUTCOMES: [&str; 7] = [
+    "succeeded",
+    "failed",
+    "cancelled",
+    "timed_out",
+    "capture_failed",
+    "boundary_violation",
+    "supervisor_error",
+];
+
+/// The attempt outcome an envelope reported, as one of the strings a record may
+/// carry, or `None` when it reported none.
+///
+/// An envelope is harness-shaped input, and its outcome is the one short label
+/// copied from it onto a record. A value that is not a recognized outcome is
+/// reported as `"unknown"` rather than copied, so no free-form string -- a host
+/// path among them -- reaches a record through this field.
+fn projected_outcome(value: Option<&serde_json::Value>) -> Option<&'static str> {
+    let value = value.filter(|value| !value.is_null())?;
+    Some(
+        value
+            .as_str()
+            .and_then(|outcome| {
+                HEADLESS_OUTCOMES
+                    .into_iter()
+                    .find(|known| *known == outcome)
+            })
+            .unwrap_or("unknown"),
+    )
 }
 
 /// How a trial ended, and why, when it did not end cleanly.
@@ -3202,9 +3275,9 @@ fn launch_eval_agent(
     run_id: &str,
     case: &case::EvalCase,
     stage: &str,
-    timeout_seconds: u64,
-    allow_widened: bool,
+    request: &RunRequest<'_>,
     otel_endpoint: &str,
+    release_id: Option<&str>,
 ) -> LaunchOutcome {
     let started = std::time::Instant::now();
     let mut envelope = None;
@@ -3216,9 +3289,9 @@ fn launch_eval_agent(
         run_id,
         case,
         stage,
-        timeout_seconds,
-        allow_widened,
+        request,
         otel_endpoint,
+        release_id,
         &mut envelope,
     );
     LaunchOutcome {
@@ -3226,6 +3299,36 @@ fn launch_eval_agent(
         envelope,
         result,
     }
+}
+
+// Shared by candidate and evaluator launches, including separate evaluator checkouts.
+fn eval_agent_command(
+    executable: &Path,
+    repo: &crate::git::Repo,
+    agent: &str,
+    prompt_path: &Path,
+    request: &RunRequest<'_>,
+) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .arg("--repo")
+        .arg(&repo.root)
+        .arg(agent)
+        .arg(if request.work_mode {
+            "--work-mode"
+        } else {
+            "--headless"
+        })
+        .arg("--timeout")
+        .arg(request.timeout_seconds.to_string())
+        .arg("--prompt-file")
+        .arg(prompt_path)
+        .arg("--output")
+        .arg("json");
+    if request.allow_widened_approvals {
+        command.arg("--allow-widened-approvals");
+    }
+    command
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3237,9 +3340,9 @@ fn launch_eval_agent_inner(
     run_id: &str,
     case: &case::EvalCase,
     stage: &str,
-    timeout_seconds: u64,
-    allow_widened: bool,
+    request: &RunRequest<'_>,
     otel_endpoint: &str,
+    release_id: Option<&str>,
     envelope: &mut Option<serde_json::Value>,
 ) -> Result<serde_json::Value> {
     create_private_dir(output_dir)?;
@@ -3247,26 +3350,19 @@ fn launch_eval_agent_inner(
     write_private_file(&prompt_path, prompt.as_bytes())?;
     let case_id = &case.id;
     let corpus = &case.corpus_version;
-    let resource_attrs = format!(
+    let mut resource_attrs = format!(
         "ahu.eval.run_id={run_id},ahu.eval.case_id={case_id},ahu.eval.corpus_version={corpus},ahu.eval.stage={stage}"
     );
+    if let Some(release_id) = release_id {
+        resource_attrs.push_str(&format!(",ahu.release.id={release_id}"));
+    }
     if resource_attrs.len() > 512 {
         bail!("evaluation telemetry identity exceeds its bound");
     }
     // Do not inherit unrelated OTel resource values into an evaluation run.
     let executable = std::env::current_exe()?;
-    let mut command = Command::new(executable);
+    let mut command = eval_agent_command(&executable, repo, agent, &prompt_path, request);
     command
-        .arg("--repo")
-        .arg(&repo.root)
-        .arg(agent)
-        .arg("--headless")
-        .arg("--timeout")
-        .arg(timeout_seconds.to_string())
-        .arg("--prompt-file")
-        .arg(&prompt_path)
-        .arg("--output")
-        .arg("json")
         .env("AHU_EVAL_OTEL_ENDPOINT", otel_endpoint)
         .env("AHU_EVAL_LOCAL_METRICS", "1")
         .env("OTEL_RESOURCE_ATTRIBUTES", &resource_attrs)
@@ -3274,9 +3370,6 @@ fn launch_eval_agent_inner(
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if allow_widened {
-        command.arg("--allow-widened-approvals");
-    }
     let mut child = command
         .spawn()
         .map_err(|error| Error::new(format!("could not start eval agent {agent}: {error}")))?;
@@ -3303,10 +3396,13 @@ fn launch_eval_agent_inner(
     write_private_file(&output_dir.join("agent-stderr.log"), &stderr)?;
     let result: serde_json::Value = serde_json::from_slice(&stdout).map_err(|_| {
         let _ = write_private_file(&output_dir.join("agent-stdout.log"), &stdout);
+        // The external artifact root is printed once in the run summary. Name
+        // the stage rather than interpolating an absolute host path here: this
+        // message is also the record's failure reason, and records live in the
+        // repository.
         Error::new(format!(
-            "eval agent {agent} returned no valid JSON result (exit {}); bounded stderr and stdout were saved under the external run artifacts at {}",
-            status.code().unwrap_or(128),
-            display_path(output_dir)
+            "eval agent {agent} returned no valid JSON result (exit {}); its bounded {stage} stderr and stdout were saved under this run's external artifacts",
+            status.code().unwrap_or(128)
         ))
     })?;
     // Kept before the success check: the caller records what this launch
@@ -3317,12 +3413,7 @@ fn launch_eval_agent_inner(
     {
         bail!(
             "eval agent {agent} did not complete successfully ({}); inspect the external run result for its task outcome",
-            display_safe(
-                result
-                    .get("outcome")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("no outcome reported")
-            )
+            projected_outcome(result.get("outcome")).unwrap_or("no outcome reported")
         );
     }
     Ok(result)
@@ -3359,6 +3450,34 @@ fn safe_artifact(worktree: &Path, name: &str) -> Result<PathBuf> {
         bail!("{name} resolves outside the task worktree");
     }
     Ok(actual)
+}
+
+/// A bounded, path-free projection of a launch diagnostic for an eval record.
+///
+/// Records default to the primary checkout's ignored `.ahu/evals/`. A launch
+/// diagnostic is the one free-text value that reaches a record, and it can name
+/// the operator's external artifact directory. Paths may contain spaces or
+/// punctuation, so token-level redaction can leave part of one behind. When a
+/// diagnostic contains a path separator, keep a fixed summary instead. The
+/// console output and saved artifacts retain the full message outside the
+/// record; the record remains bounded and path-free.
+fn bounded_failure_reason(message: &str) -> String {
+    const MAX_REASON_BYTES: usize = 256;
+    let projected = if message.contains(['/', '\\']) {
+        "Evaluation failed; a host path was redacted."
+    } else {
+        message
+    };
+    let mut reason = display_safe(projected);
+    if reason.len() > MAX_REASON_BYTES {
+        let mut end = MAX_REASON_BYTES;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+        reason.push_str("...");
+    }
+    reason
 }
 
 /// The harness version the launch reported, or `None` when it reported none.
@@ -3433,6 +3552,65 @@ fn insert_trajectory_fields(
     Ok(())
 }
 
+/// The metric names a launch envelope may contribute to a record.
+///
+/// ahu's own local-metrics projection writes exactly these; the envelope is
+/// otherwise harness-shaped input whose remaining keys and values are free form.
+/// Records default to the primary checkout's ignored `.ahu/evals/`, so an
+/// unrecognized name is dropped rather than copied there.
+const ENVELOPE_METRICS: [&str; 7] = [
+    "ahu.tokens.input",
+    "ahu.tokens.output",
+    "ahu.tokens.cached",
+    "ahu.tokens.cache_write",
+    "ahu.tokens.reasoning",
+    "ahu.tokens.total",
+    "ahu.cost.harness_reported_usd",
+];
+
+/// One envelope metric, rebuilt from the bounded shapes a record may hold.
+///
+/// `{"kind": "observed", "value": n}` is the local-metrics measurement,
+/// `{"kind": "unavailable"}` is a field the harness named but never measured,
+/// and a bare number is the bare-amount form a projecting helper writes. Each
+/// is rebuilt from what it stated rather than cloned, so a sibling key on the
+/// object never reaches the record.
+///
+/// The amount a name may carry is the one its recorder writes: a token count is
+/// a non-negative integer, and only the harness-reported cost is a finite,
+/// non-negative float, under `observed_float`. Anything else is not that
+/// measurement and is dropped.
+fn envelope_metric(name: &str, value: &serde_json::Value) -> Option<serde_json::Value> {
+    let cost = name.starts_with("ahu.cost.");
+    let amount = |value: Option<&serde_json::Value>| {
+        let value = value?;
+        let valid = if cost {
+            value
+                .as_f64()
+                .is_some_and(|amount| amount.is_finite() && amount >= 0.0)
+        } else {
+            value.as_u64().is_some()
+        };
+        valid.then(|| value.clone())
+    };
+    match value {
+        serde_json::Value::Number(_) => amount(Some(value)),
+        serde_json::Value::Object(fields) => match fields.get("kind")?.as_str()? {
+            "observed_float" if cost => Some(serde_json::json!({
+                "kind": "observed_float",
+                "value": amount(fields.get("value"))?,
+            })),
+            "observed" => Some(serde_json::json!({
+                "kind": "observed",
+                "value": amount(fields.get("value"))?,
+            })),
+            "unavailable" => Some(serde_json::json!({"kind": "unavailable"})),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Everything one attempt reported about token usage, from both of its sources.
 ///
 /// The harness's own counters come from the launch envelope; the decision
@@ -3445,11 +3623,20 @@ fn reported_tokens(
     envelope: Option<&serde_json::Value>,
     telemetry: Option<&crate::eval_otel::TaskTelemetry>,
 ) -> Option<serde_json::Value> {
-    let mut tokens = envelope
+    let mut tokens = serde_json::Map::new();
+    if let Some(values) = envelope
         .and_then(|value| value.pointer("/metrics/values"))
         .and_then(serde_json::Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    {
+        for name in ENVELOPE_METRICS {
+            if let Some(metric) = values
+                .get(name)
+                .and_then(|value| envelope_metric(name, value))
+            {
+                tokens.insert(name.to_owned(), metric);
+            }
+        }
+    }
     if let Some(amount) = envelope
         .and_then(|value| value.pointer("/harness/cost/usd"))
         .and_then(serde_json::Value::as_f64)
@@ -3557,6 +3744,7 @@ fn group_json(group: &Group) -> serde_json::Value {
         "evaluator_skill_digest": key.evaluator_skill_digest,
         "evaluator_repo_head": key.evaluator_repo_head,
         "blinding": key.blinding,
+        "work_mode": key.work_mode,
         "tool_definitions_digest": key.tool_definitions_digest,
         "ahu_version": key.ahu_version,
         "ahu_build_digest": key.ahu_build_digest,

@@ -2,6 +2,39 @@ use super::*;
 
 const PROMPT: &str = "Inspect café\n$(touch never-executed)";
 
+#[test]
+fn interactive_execute_refuses_unverified_opencode_mini_before_creating_a_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, repo, loaded, mut plan) = fixture();
+    let native = tempfile::tempdir().unwrap();
+    let exe = native.path().join("opencode");
+    let help = include_str!("../tests/fixtures/opencode/2.0.32-help.txt");
+    std::fs::write(
+        &exe,
+        format!("#!/bin/sh\ntest \"$1\" = --help && test $# -eq 1 || exit 91\ncat <<'HELP'\n{help}HELP\n"),
+    ).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    plan.harness_executable = exe;
+    plan.pair.harness = "opencode".into();
+    plan.pair.model = "provider/model".into();
+    plan.command = harness::adapter_for("opencode")
+        .unwrap()
+        .launch_command(&LaunchRequest {
+            model: &plan.pair.model,
+            prompt: PROMPT,
+            cwd: &plan.worktree,
+            permissions: plan.permissions,
+        })
+        .unwrap();
+    let error = execute(&repo, &loaded, &plan, PROMPT, false).unwrap_err();
+    assert!(
+        error.to_string().contains("opencode mini --help"),
+        "{error}"
+    );
+    assert!(!plan.worktree.exists());
+    assert!(!plan.task_dir.exists());
+}
+
 // Construct the frozen boundary directly: no installed harness, user
 // configuration, cmux session or additional Git worktree is needed.
 fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
@@ -16,6 +49,7 @@ fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
         harness_version_pins: Default::default(),
         model_rankings: [("codex".into(), vec!["gpt-6".into()])].into(),
         knowledge: Default::default(),
+        headless: Default::default(),
         telemetry: Default::default(),
     };
     let loaded = LoadedConfig {
@@ -67,7 +101,7 @@ fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
         },
         snapshot: Default::default(),
         hooks: Default::default(),
-        cmux_integration: crate::cmux::integration::inspect_in(
+        native_admission: crate::native_admission::inspect_in(
             &repo.root,
             "codex",
             &Default::default(),
@@ -224,7 +258,122 @@ fn prepared_record_freezes_identity_and_redacts_assignment() {
             .unwrap()
             .contains("never-executed")
     );
-    assert!(record.cmux_workspace_id.is_none());
+    assert!(record.session_ref.is_none());
+}
+
+#[test]
+fn created_workspace_metadata_preserves_a_state_written_by_the_started_task() {
+    for (state, runtime_first) in [
+        (TaskState::Running, true),
+        (TaskState::Running, false),
+        (TaskState::Exited, true),
+        (TaskState::Exited, false),
+    ] {
+        let (_temp, repo, loaded, plan) = fixture();
+        let mut record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+        std::fs::create_dir_all(&plan.worktree).unwrap();
+        task::save(&plan.task_dir, &record, PROMPT).unwrap();
+        task::set_state(&plan.task_dir, state).unwrap();
+
+        // The two processes may write in either order while startup races the
+        // coordinator's return from workspace creation.
+        if runtime_first {
+            record_runtime_metadata(
+                &plan.task_dir,
+                &mut record,
+                "1.2.3",
+                Path::new("/synthetic/codex"),
+            )
+            .unwrap();
+        }
+        record_created_session(&plan.task_dir, &mut record, "session-ref-1").unwrap();
+        if !runtime_first {
+            record_runtime_metadata(
+                &plan.task_dir,
+                &mut record,
+                "1.2.3",
+                Path::new("/synthetic/codex"),
+            )
+            .unwrap();
+        }
+
+        let persisted = task::load(&plan.task_dir).unwrap();
+        assert_eq!(persisted.state, state);
+        assert_eq!(persisted.session_ref.as_deref(), Some("session-ref-1"));
+        assert_eq!(
+            persisted.enforcement.harness_version.as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(persisted.harness_executable, Path::new("/synthetic/codex"));
+        assert_eq!(record, persisted);
+    }
+}
+
+#[test]
+fn reconciliation_preserves_terminal_outcomes_in_both_orders() {
+    for terminal in [TaskState::Cancelled, TaskState::Failed, TaskState::Exited] {
+        for terminal_first in [true, false] {
+            let (_temp, repo, loaded, plan) = fixture();
+            let mut stale = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+            std::fs::create_dir_all(&plan.worktree).unwrap();
+            task::save(&plan.task_dir, &stale, PROMPT).unwrap();
+            let mut latest = stale.clone();
+            record_created_session(&plan.task_dir, &mut latest, "session-ref").unwrap();
+            record_runtime_metadata(
+                &plan.task_dir,
+                &mut latest,
+                "1.2.3",
+                Path::new("/synthetic/runtime"),
+            )
+            .unwrap();
+            if terminal_first {
+                task::set_state(&plan.task_dir, terminal).unwrap();
+            }
+            task::set_exited_if_live(&plan.task_dir, &mut stale).unwrap();
+            latest.state = if terminal_first {
+                terminal
+            } else {
+                TaskState::Exited
+            };
+            assert_eq!(stale.state, latest.state);
+            assert_eq!(stale, latest);
+            assert_eq!(task::load(&plan.task_dir).unwrap(), latest);
+            if !terminal_first {
+                task::set_state(&plan.task_dir, terminal).unwrap();
+                // A second stale reconciler cannot undo the supervisor's outcome.
+                task::set_exited_if_live(&plan.task_dir, &mut stale).unwrap();
+                latest.state = terminal;
+                assert_eq!(stale, latest);
+                assert_eq!(task::load(&plan.task_dir).unwrap(), latest);
+            }
+        }
+    }
+}
+
+#[test]
+fn reconciliation_only_transitions_verified_live_records() {
+    for live in [
+        TaskState::Starting,
+        TaskState::Running,
+        TaskState::WaitingForApproval,
+    ] {
+        let (_temp, repo, loaded, plan) = fixture();
+        let mut record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
+        record.state = live;
+        std::fs::create_dir_all(&plan.worktree).unwrap();
+        task::save(&plan.task_dir, &record, PROMPT).unwrap();
+        task::set_exited_if_live(&plan.task_dir, &mut record).unwrap();
+        assert_eq!(record.state, TaskState::Exited);
+        assert_eq!(record, task::load(&plan.task_dir).unwrap());
+        let before = record.clone();
+        state::write_private_file(&plan.task_dir.join("task.json"), b"{}").unwrap();
+        assert!(task::set_exited_if_live(&plan.task_dir, &mut record).is_err());
+        assert_eq!(record, before);
+        assert_eq!(
+            std::fs::read(plan.task_dir.join("task.json")).unwrap(),
+            b"{}"
+        );
+    }
 }
 
 #[test]
@@ -343,7 +492,7 @@ fn planning_refuses_missing_context_lock_before_creating_task_state() {
             .to_string()
             .contains("agent context is not committed and locked")
     );
-    assert!(error.to_string().contains("ahu.lock is missing"));
+    assert!(error.to_string().contains(".agents/ahu/lock.md is missing"));
     assert!(!repo.root.join(".worktrees").exists());
     assert!(!repo.root.join(".ahu").exists());
 }
@@ -376,7 +525,7 @@ fn planning_freezes_registered_identity_and_discloses_repository_inputs() {
     let Ok(case) = std::env::var(CASE) else {
         for case in ["automatic", "named", "missing", "symlink", "dirty-context"] {
             let external = tempfile::tempdir().unwrap();
-            let bin = external.path().join("cmux-cli-shims");
+            let bin = external.path().join("harness-bin");
             std::fs::create_dir(&bin).unwrap();
             symlink(
                 crate::selection::resolve_utility("git").unwrap(),
@@ -401,7 +550,6 @@ fn planning_freezes_registered_identity_and_discloses_repository_inputs() {
                     .env("PATH", &bin)
                     .env("XDG_CONFIG_HOME", external.path().join("config"))
                     .env("XDG_DATA_HOME", external.path().join("data"))
-                    .env("AHU_CMUX_BIN", external.path().join("absent-cmux"))
                     .current_dir(external.path())
                     .output().unwrap();
             assert!(
@@ -498,7 +646,6 @@ fn planning_freezes_registered_identity_and_discloses_repository_inputs() {
         for expected in [
             "fixture-plugin@1.0.0",
             "1 MCP server(s)",
-            "cmux shim",
             "declares approval settings ahu does not set",
             DELIVERY_IS_NOT_ENFORCEMENT,
         ] {
@@ -663,7 +810,6 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
                     .args(["--exact", "launch::launch_contract_tests::run_task_preserves_work_on_cancellation_exit_and_spawn_failure", "--nocapture"])
                     .env(CASE, case)
                     .env("PATH", bin.path())
-                    .env("AHU_CMUX_BIN", bin.path().join("absent-cmux"))
                     .current_dir(bin.path())
                     .stdin(std::process::Stdio::null())
                     .output()
@@ -768,6 +914,111 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
 }
 
 #[test]
+fn current_terminal_backend_runs_foreground_without_cmux() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    const CASE: &str = "AHU_LAUNCH_TERMINAL_FIXTURE";
+    let Ok(_) = std::env::var(CASE) else {
+        let scratch = tempfile::tempdir().unwrap();
+        symlink(
+            crate::selection::resolve_utility("git").unwrap(),
+            scratch.path().join("git"),
+        )
+        .unwrap();
+        let executable = scratch.path().join("codex");
+        let python = crate::selection::resolve_utility("python3").unwrap();
+        std::fs::write(
+            &executable,
+            r##"#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'codex-cli 0.160.0'; exit 0; fi
+if [ "$1" = "app-server" ]; then
+  printf '%s\n' '{"id":1,"result":{}}' '{"id":2,"result":{"account":{"type":"chatgpt","email":"fixture@example.invalid"}}}'
+  while read -r line; do :; done
+  exit 0
+fi
+"$AHU_TEST_PYTHON" -c 'import fcntl, os, sys
+lock = open(os.environ["AHU_TEST_LAUNCH_LOCK_PATH"], "r+")
+try:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(17)
+open(os.environ["AHU_TEST_LAUNCH_LOCK_RESULT"], "w").write("released")'
+probe_status=$?
+[ "$probe_status" -eq 0 ] || exit "$probe_status"
+printf foreground > "$AHU_TEST_TERMINAL_MARKER"
+exit 0
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let marker = scratch.path().join("foreground-ran");
+        let lock_result = scratch.path().join("launch-lock-result");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launch::launch_contract_tests::current_terminal_backend_runs_foreground_without_cmux",
+                "--nocapture",
+            ])
+            .env(CASE, "run")
+            .env("AHU_INTERACTIVE_PLUGIN", "terminal")
+            .env("AHU_TEST_TERMINAL_BIN", &executable)
+            .env("AHU_TEST_TERMINAL_MARKER", &marker)
+            .env("AHU_TEST_PYTHON", python)
+            .env("AHU_TEST_LAUNCH_LOCK_RESULT", &lock_result)
+            .env("PATH", scratch.path())
+            .env("HOME", scratch.path())
+            .current_dir(scratch.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "foreground");
+        return;
+    };
+
+    let (_temp, repo, loaded, mut plan) = fixture();
+    git::run_ok(
+        &repo.root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+    )
+    .unwrap();
+    plan.base_commit = Some(
+        git::run_ok(&repo.root, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .into(),
+    );
+    plan.harness_executable = std::env::var("AHU_TEST_TERMINAL_BIN").unwrap().into();
+    let launch_lock = state::coordination_dir(&repo).unwrap().join("launch.lock");
+    unsafe { std::env::set_var("AHU_TEST_LAUNCH_LOCK_PATH", launch_lock) };
+    let launched = execute(&repo, &loaded, &plan, PROMPT, false).unwrap();
+    assert_eq!(launched.record.state, TaskState::Exited);
+    assert!(launched.record.session_ref.is_none());
+    assert!(launched.record.session_host.is_none());
+    assert!(std::path::Path::new(&std::env::var("AHU_TEST_TERMINAL_MARKER").unwrap()).exists());
+    assert_eq!(
+        std::fs::read_to_string(std::env::var("AHU_TEST_LAUNCH_LOCK_RESULT").unwrap()).unwrap(),
+        "released",
+        "the repository launch lock must be released before interactive work begins"
+    );
+}
+
+#[test]
 fn verification_resolves_workspace_path_without_executing_or_trusting_record_path() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     const CASE: &str = "AHU_LAUNCH_VERIFY_FIXTURE";
@@ -841,152 +1092,6 @@ fn verification_resolves_workspace_path_without_executing_or_trusting_record_pat
 }
 
 #[test]
-fn group_mapping_recovers_stale_groups_and_restores_promoted_anchors() {
-    use std::os::unix::fs::PermissionsExt;
-    const CASE: &str = "AHU_LAUNCH_GROUP_FIXTURE";
-    let Ok(case) = std::env::var(CASE) else {
-        for case in ["current", "stale", "create", "restore", "restore-failed"] {
-            let (_temp, repo, _, _) = fixture();
-            let rpc = tempfile::tempdir().unwrap();
-            let group = cmux::Group {
-                id: "group".into(),
-                name: repo.display_name(),
-                anchor_workspace_id: "promoted".into(),
-                member_workspace_ids: vec!["promoted".into()],
-                is_collapsed: false,
-            };
-            let responses = [
-                (
-                    "workspace.current",
-                    serde_json::json!({"workspace_id": if case == "current" { "promoted" } else { "outside" }, "window_id": "window"}),
-                ),
-                (
-                    "workspace.list",
-                    serde_json::json!({"workspaces": [{"id": "promoted", "current_directory": repo.root}]}),
-                ),
-                (
-                    "workspace.group.list",
-                    serde_json::json!({"groups": if case == "create" { vec![] } else { vec![group.clone()] }}),
-                ),
-                (
-                    "workspace.group.create",
-                    serde_json::json!({"group": group}),
-                ),
-                (
-                    "workspace.create",
-                    serde_json::json!({"workspace_id": "restored"}),
-                ),
-                ("workspace.group.set_anchor", serde_json::json!({})),
-            ];
-            for (method, value) in responses {
-                std::fs::write(rpc.path().join(format!("{method}.json")), value.to_string())
-                    .unwrap();
-            }
-            let mut restored = group;
-            restored.anchor_workspace_id = "restored".into();
-            std::fs::write(
-                rpc.path().join("restored.json"),
-                serde_json::json!({"groups": [restored]}).to_string(),
-            )
-            .unwrap();
-            let executable = rpc.path().join("cmux-fixture");
-            std::fs::write(
-                &executable,
-                r#"#!/bin/sh
-if [ "$1" = ping ]; then exit 0; fi
-printf '%s\n' "$2" >> "$AHU_LAUNCH_RPC/calls"
-if [ "$2" = workspace.create ] && [ "$AHU_LAUNCH_GROUP_FIXTURE" = restore-failed ]; then
-  echo 'synthetic anchor failure' >&2
-  exit 1
-fi
-if [ "$2" = workspace.group.set_anchor ]; then
-  /bin/cp "$AHU_LAUNCH_RPC/restored.json" "$AHU_LAUNCH_RPC/workspace.group.list.json"
-fi
-/bin/cat "$AHU_LAUNCH_RPC/$2.json"
-"#,
-            )
-            .unwrap();
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "launch::launch_contract_tests::group_mapping_recovers_stale_groups_and_restores_promoted_anchors", "--nocapture"])
-                    .env(CASE, case).env("AHU_LAUNCH_REPO", &repo.root)
-                    .env("AHU_LAUNCH_RPC", rpc.path()).env("AHU_CMUX_BIN", executable)
-                    .env_remove("CMUX_WORKSPACE_ID").env_remove("CMUX_SOCKET_PATH")
-                    .current_dir(rpc.path())
-                    .output().unwrap();
-            assert!(
-                output.status.success(),
-                "{case}: {}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let calls = std::fs::read_to_string(rpc.path().join("calls")).unwrap();
-            assert_eq!(
-                calls
-                    .lines()
-                    .filter(|line| *line == "workspace.group.create")
-                    .count(),
-                usize::from(case == "create")
-            );
-            assert_eq!(
-                calls
-                    .lines()
-                    .filter(|line| *line == "workspace.group.set_anchor")
-                    .count(),
-                usize::from(case == "restore")
-            );
-        }
-        return;
-    };
-    let repo = git::discover(Path::new(&std::env::var("AHU_LAUNCH_REPO").unwrap())).unwrap();
-    let previous = GroupMapping {
-        group_id: Some(
-            if case.starts_with("restore") {
-                "group"
-            } else {
-                "stale"
-            }
-            .into(),
-        ),
-        window_id: Some("window".into()),
-        anchor_workspace_id: Some("original".into()),
-    };
-    state::write_json(&mapping_path(&repo).unwrap(), &previous).unwrap();
-    let client = Cmux::discover().unwrap();
-    let mut notes = Vec::new();
-    let group = ensure_group(&client, &repo, &mut notes).unwrap();
-    assert_eq!(group.id, "group");
-    let saved: GroupMapping = state::read_json(&mapping_path(&repo).unwrap()).unwrap();
-    assert_eq!(saved.group_id.as_deref(), Some("group"));
-    assert_eq!(saved.window_id.as_deref(), Some("window"));
-    match case.as_str() {
-        "current" => {
-            assert!(notes.is_empty());
-            assert_eq!(saved.anchor_workspace_id.as_deref(), Some("promoted"));
-        }
-        "restore" => {
-            assert_eq!(group.anchor_workspace_id, "restored");
-            assert_eq!(saved.anchor_workspace_id.as_deref(), Some("restored"));
-            assert!(
-                notes
-                    .iter()
-                    .any(|note| note.contains("created a new anchor"))
-            );
-        }
-        "restore-failed" => {
-            assert_eq!(saved.anchor_workspace_id.as_deref(), Some("original"));
-            assert!(
-                notes
-                    .iter()
-                    .any(|note| note.contains("synthetic anchor failure")
-                        && note.contains("could not restore"))
-            );
-        }
-        _ => assert!(notes.iter().any(|note| note.contains("no longer exists"))),
-    }
-}
-
-#[test]
 fn rollback_reports_retained_checkout_and_preserves_original_error_kind() {
     let (_temp, repo, _, plan) = fixture();
     std::fs::create_dir_all(&plan.worktree).unwrap();
@@ -1018,6 +1123,41 @@ fn rollback_reports_retained_checkout_and_preserves_original_error_kind() {
 }
 
 #[test]
+fn unknown_creation_outcome_names_the_session_host_without_naming_a_plugin_ui() {
+    let (_temp, repo, _, plan) = fixture();
+    let error = workspace_creation_failed(
+        &repo,
+        &plan,
+        interactive::v2::SessionCreationError::OutcomeUnknown(
+            Error::new("synthetic creation outcome unknown")
+                .with_kind(crate::util::ErrorKind::Prerequisite),
+        ),
+    );
+    assert_eq!(error.kind(), crate::util::ErrorKind::Prerequisite);
+    let message = error.to_string();
+    let record = plan.task_dir.join("task.json");
+    // The recovery path belongs to the session-host boundary, so it must stay
+    // accurate when a plugin other than cmux supplies the workspace.
+    assert!(message.contains("selected session host"), "{message}");
+    assert!(!message.contains("cmux"), "{message}");
+    // Identity, the no-success claim and conservative cleanup are unchanged.
+    for expected in [
+        "synthetic creation outcome unknown",
+        &plan.task_id,
+        record.to_str().unwrap(),
+        plan.worktree.to_str().unwrap(),
+        &plan.branch,
+        "may have started",
+        "No terminal outcome has been recorded",
+        "preserve the resources",
+        "git worktree remove",
+        "Do not invent a terminal task state",
+    ] {
+        assert!(message.contains(expected), "missing {expected}: {message}");
+    }
+}
+
+#[test]
 fn cleanup_removes_owned_state_but_refuses_symlinked_ancestors() {
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir().unwrap();
@@ -1037,3 +1177,6 @@ fn cleanup_removes_owned_state_but_refuses_symlinked_ancestors() {
         "keep me"
     );
 }
+
+#[path = "interactive/tests.rs"]
+mod interactive_host_tests;

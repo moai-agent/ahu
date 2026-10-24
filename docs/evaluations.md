@@ -38,6 +38,21 @@ Reports remain read-only and print summaries to stdout; save a bounded summary
 in ignored `.ahu/evals/` or external storage when needed. Existing evidence
 must be migrated explicitly.
 
+`ahu eval run --work-mode` explicitly selects the existing headless work-mode
+path for every candidate and registered agent evaluator, including evaluators in
+`--evaluator-repo`. Like ordinary task work mode, this flag itself authorizes
+native automatic approvals; no second `--allow-widened-approvals` is required.
+Without it, evals use guarded headless admission, and widened manifest approvals
+still require `--allow-widened-approvals`. That flag alone does not select work mode.
+
+Work mode skips native compatibility admission using the existing task launch
+path; it does not edit native configuration, hooks or accounts. Native hooks and
+managed policy still apply. A Git worktree is not a sandbox. See
+[work mode](reference.md#work-mode) for harness-specific controls and limitations.
+Typed decision grading is unaffected; the mode applies to its candidate launches.
+The `work_mode` true/false value is recorded in input fingerprints and comparison groups.
+Guarded, work-mode and older records with unspecified mode remain separate.
+
 ## Start a comparison
 
 Run `ahu setup` in your candidate project, choose its harness models, and commit
@@ -223,7 +238,7 @@ For a one-skill ablation, replace `--all-project-skills` with
 `--skill ahu-typed-decisions`. The helper requires a clean source checkout
 without ignored harness context and a new destination outside it. It creates a
 reviewable local branch/worktree, removes selected paths from `.agents/skills`,
-`.claude/skills`, and `.opencode/skills`, refreshes `ahu.lock`, and commits only
+`.claude/skills`, and `.opencode/skills`, refreshes `.agents/ahu/lock.md`, and commits only
 those changes. It uses disposable ahu state while refreshing the lock, so
 per-user context fingerprints are not accepted into the user's normal ahu state. The branch and
 worktree remain for review and evaluation; remove them after the experiment

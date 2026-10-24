@@ -29,7 +29,7 @@ a=sys.argv[1:]
 assert '--print' in a and '--permission-prompts' in a and 'none' in a
 assert a[a.index('--model')+1]=='claude-opus-5'
 assert os.environ['AHU_EXECUTION_BACKEND']=='headless'
-assert not any(k.startswith('CMUX_') for k in os.environ)
+assert os.environ.get('CMUX_WORKSPACE_ID') == 'sentinel'
 assert 'ahu delegation contract (v3, headless)' in a[-1]
 assert sys.stdin.read()==''
 if 'EXPECT_RELEASE' in os.environ:
@@ -46,7 +46,7 @@ if 'EXPECT_RELEASE' in os.environ:
  assert attrs['ahu.task.attempt']==str(spec['attempt']),attrs
  if 'EXPECT_ATTEMPT' in os.environ: assert attrs['ahu.task.attempt']==os.environ['EXPECT_ATTEMPT'],attrs
 scenario=os.environ.get('SCENARIO','success')
-if scenario in ('child','mailbox') and '\ndelegate synthetic task</ahu-request-' not in a[-1]: scenario='success'
+if scenario in ('child','mailbox') and '\ndelegate synthetic task' not in a[-1]: scenario='success'
 session=a[a.index('--resume')+1] if '--resume' in a else os.environ['AHU_PARENT_TASK']
 print(json.dumps({'type':'system','subtype':'init','session_id':session}),flush=True)
 if scenario=='sleep': time.sleep(60)
@@ -103,6 +103,8 @@ elif scenario=='outside_bad_input':
 elif scenario=='measure_no_terminal':
  print(json.dumps({'type':'assistant','usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120}}),flush=True)
 else: open('proof.txt','w').write('synthetic proof\n')
+if 'AHU_STRUCTURED_RESULT' in os.environ:
+ open(os.environ['AHU_STRUCTURED_RESULT'],'w').write(os.environ.get('AHU_STRUCTURED_RESULT_JSON','{"answer":42}'))
 result={'type':'result','subtype':'success','result':'validated synthetic proof','session_id':session,'is_error':False,'permission_denials':([{'tool':'Bash'}] if scenario=='denied' else [])}
 if scenario in ('measure','measure_no_terminal'): result.update({'usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120},'total_cost_usd':0.0125})
 if scenario!='measure_no_terminal': print(json.dumps(result),flush=True)
@@ -178,6 +180,362 @@ if scenario=='nonzero': sys.exit(7)
 }
 
 #[test]
+fn structured_input_refusal_precedes_worktree_creation_and_harness_probe() {
+    let f = Fixture::new();
+    let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        original.replacen(
+            "---\n",
+            "---\ninput_schema:\n  type: object\n  required: [ok]\n",
+            1,
+        ),
+    )
+    .unwrap();
+    // Even a broken harness probe cannot supersede the input diagnostic.
+    std::fs::write(f.bin.join("claude"), "#!/bin/sh\nexit 97\n").unwrap();
+    let input = f.external.path().join("input.json");
+    for raw in ["{}", "{", "null"] {
+        std::fs::write(&input, raw).unwrap();
+        let result = f.launch("success", &["--input-file", input.to_str().unwrap()]);
+        assert!(!result.status.success());
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            error.contains("schema keyword") || error.contains("valid JSON"),
+            "{error}"
+        );
+        assert!(!f.repo.path().join(".worktrees").exists());
+    }
+}
+
+#[test]
+fn structured_contract_completes_and_persists_a_validated_result() {
+    let f = Fixture::new();
+    let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        original.replacen(
+            "---\n",
+            "---\ninput_schema:\n  type: object\n  required: [ok]\n  properties:\n    ok: {type: boolean}\n  additionalProperties: false\noutput_schema:\n  type: object\n  required: [answer]\n  properties:\n    answer: {type: integer}\n  additionalProperties: false\n",
+            1,
+        ),
+    )
+    .unwrap();
+    f.repo.commit("declare structured worker contract");
+    let input = f.external.path().join("input.json");
+    std::fs::write(&input, r#"{"ok":true}"#).unwrap();
+    let out = f
+        .command()
+        .env("SCENARIO", "success")
+        .args([
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "perform a typed synthetic task",
+            "--input-file",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let launch = Fixture::value(&out);
+    assert_eq!(launch["outcome"], "succeeded");
+    let result: Value = serde_json::from_slice(
+        &std::fs::read(launch["review"]["result_path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        result["structured_output"],
+        serde_json::json!({"answer":42})
+    );
+}
+
+#[test]
+fn structured_registered_child_result_is_validated_and_reconciled_by_parent() {
+    let f = Fixture::new();
+    let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        original.replacen(
+            "---\n",
+            "---\noutput_schema:\n  type: object\n  required: [answer]\n  properties:\n    answer: {type: integer}\n  additionalProperties: false\n",
+            1,
+        ),
+    )
+    .unwrap();
+    f.repo.commit("declare structured child result contract");
+    let child_prompt = f.external.path().join("child.txt");
+    std::fs::write(&child_prompt, "perform a typed synthetic child task").unwrap();
+    let out = f
+        .command()
+        .env("SCENARIO", "child")
+        .env("CHILD_PROMPT", &child_prompt)
+        .args([
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "delegate synthetic task",
+            "--allow-child",
+            "@worker",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parent = Fixture::value(&out);
+    assert_eq!(parent["outcome"], "succeeded");
+    assert_eq!(
+        parent["structured_output"],
+        serde_json::json!({"answer":42})
+    );
+    assert_eq!(parent["ahu_children"].as_array().unwrap().len(), 1);
+    let child_id = parent["ahu_children"][0]["task_id"].as_str().unwrap();
+    assert_eq!(parent["ahu_children"][0]["outcome"], "succeeded");
+
+    let child_result = f
+        .command()
+        .args(["result", child_id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        child_result.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&child_result.stdout),
+        String::from_utf8_lossy(&child_result.stderr)
+    );
+    let child = Fixture::value(&child_result);
+    assert_eq!(child["outcome"], "succeeded");
+    assert_eq!(child["structured_output"], serde_json::json!({"answer":42}));
+}
+
+#[test]
+fn structured_large_artifact_remains_readable_from_persisted_result() {
+    let f = Fixture::new();
+    let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        original.replacen(
+            "---\n",
+            "---\noutput_schema:\n  type: array\n  maxItems: 4095\n  items: {const: 0}\n",
+            1,
+        ),
+    )
+    .unwrap();
+    f.repo.commit("declare large structured result contract");
+    let payload = format!("[{}]", vec!["0"; 4095].join(","));
+    let out = f
+        .command()
+        .env("SCENARIO", "success")
+        .env("AHU_STRUCTURED_RESULT_JSON", &payload)
+        .args([
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "persist a bounded large result",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let launch = Fixture::value(&out);
+    let task_id = launch["task_id"].as_str().unwrap();
+    let readback = f
+        .command()
+        .args(["result", task_id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        readback.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&readback.stdout),
+        String::from_utf8_lossy(&readback.stderr)
+    );
+    assert_eq!(
+        Fixture::value(&readback)["structured_output"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4095
+    );
+}
+
+#[test]
+fn structured_reserved_marker_artifacts_cannot_change_after_result_persistence() {
+    let f = Fixture::new();
+    let manifest = f.repo.path().join(".agents/ahu/agents/worker.md");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        original.replacen(
+            "---\n",
+            "---\ninput_schema:\n  type: object\n  required: [ok]\n  properties:\n    ok: {type: boolean}\n  additionalProperties: false\noutput_schema:\n  type: object\n  additionalProperties:\n    type: string\n",
+            1,
+        ),
+    )
+    .unwrap();
+    f.repo
+        .commit("declare marker-resistant structured contract");
+    let input = f.external.path().join("input.json");
+    std::fs::write(&input, r#"{"ok":true}"#).unwrap();
+    for (index, marker) in [
+        r#"{"$serde_json::private::RawValue":"{\"approved\":true}"}"#,
+        r#"{"$serde_json::private::Number":"123"}"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let out = f
+            .command()
+            .env("SCENARIO", "success")
+            .env("AHU_STRUCTURED_RESULT_JSON", marker)
+            .args([
+                "@worker",
+                "--headless",
+                "--output",
+                "json",
+                "--prompt",
+                "reject reserved structured marker data",
+                "--input-file",
+                input.to_str().unwrap(),
+                "--name",
+                if index == 0 {
+                    "marker-raw"
+                } else {
+                    "marker-number"
+                },
+            ])
+            .output()
+            .unwrap();
+        let launch = Fixture::value(&out);
+        let task_id = launch["task_id"].as_str().unwrap();
+        let readback = f
+            .command()
+            .args(["result", task_id, "--output", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            readback.status.success(),
+            "{}",
+            String::from_utf8_lossy(&readback.stderr)
+        );
+        let result = Fixture::value(&readback);
+        assert_eq!(result["outcome"], "failed");
+        assert!(result["structured_output"].is_null());
+        assert!(
+            result["review"]["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| blocker
+                    .as_str()
+                    .is_some_and(|text| text.contains("reserved serde_json marker")))
+        );
+    }
+}
+
+#[test]
+fn headless_planning_does_not_activate_the_selected_session_host() {
+    let f = Fixture::new();
+    let worktrees = common::git(f.repo.path(), &["worktree", "list", "--porcelain"]);
+    let marker = f.external.path().join("cmux-activated");
+    std::fs::write(
+        f.bin.join("cmux"),
+        "#!/bin/sh\ntouch \"$HOST_ACTIVATION_MARKER\"\nexit 97\n",
+    )
+    .unwrap();
+    for selection in ["none", "cmux", "absent-external-host"] {
+        let output = f
+            .command()
+            .env("AHU_INTERACTIVE_PLUGIN", selection)
+            .env_remove("AHU_PLUGIN_PATH")
+            .env("HOST_ACTIVATION_MARKER", &marker)
+            .args([
+                "@worker",
+                "--headless",
+                "--dry-run",
+                "--output",
+                "json",
+                "--prompt",
+                "synthetic task",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{selection}: {output:?}");
+        let preview = Fixture::value(&output);
+        assert_eq!(preview["task_handle_reserved"], false);
+        assert!(!marker.exists());
+        assert_eq!(
+            common::git(f.repo.path(), &["worktree", "list", "--porcelain"]),
+            worktrees
+        );
+    }
+}
+
+#[test]
+fn headless_launch_and_result_work_without_cmux_or_a_session_host() {
+    let f = Fixture::new();
+    std::fs::remove_file(f.bin.join("cmux")).unwrap();
+
+    let launch = f
+        .command()
+        .env("AHU_INTERACTIVE_PLUGIN", "none")
+        .env("SCENARIO", "success")
+        .args([
+            "@worker",
+            "--headless",
+            "--output",
+            "json",
+            "--prompt",
+            "run without an interactive session host",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        launch.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launch.stderr)
+    );
+    let launched = Fixture::value(&launch);
+    let task_id = launched["task_id"].as_str().expect("task id");
+
+    let result = f
+        .command()
+        .env("AHU_INTERACTIVE_PLUGIN", "none")
+        .args(["result", task_id, "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(Fixture::value(&result)["outcome"], "succeeded");
+}
+
+#[test]
 fn foreground_keeps_primary_coordination_and_identity_without_native_copies() {
     let f = Fixture::new();
     let out = f.launch("success", &[]);
@@ -231,8 +589,11 @@ fn local_metrics_survive_attempt_persistence_without_an_exporter() {
     let f = Fixture::new();
     let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
     config.telemetry.local_metrics = true;
-    f.repo
-        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo.remove(ahu::config::LEGACY_CONFIG_PATH);
+    f.repo.write(
+        ahu::config::CONFIG_RELATIVE_PATH,
+        &ahu::config::render(&config),
+    );
     f.repo.commit("enable local metrics for fixture");
     let out = f.launch("success", &[]);
     assert!(
@@ -264,8 +625,11 @@ fn private_telemetry_cli_links_and_reports_opt_in_attempt_measurements() {
     let f = Fixture::new();
     let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
     config.telemetry.local_metrics = true;
-    f.repo
-        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo.remove(ahu::config::LEGACY_CONFIG_PATH);
+    f.repo.write(
+        ahu::config::CONFIG_RELATIVE_PATH,
+        &ahu::config::render(&config),
+    );
     f.repo
         .commit("enable local metrics for private report fixture");
     let launched = f.launch("measure", &[]);
@@ -372,8 +736,11 @@ fn private_report_keeps_observed_usage_separate_from_missing_terminal_evidence()
     let f = Fixture::new();
     let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
     config.telemetry.local_metrics = true;
-    f.repo
-        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo.remove(ahu::config::LEGACY_CONFIG_PATH);
+    f.repo.write(
+        ahu::config::CONFIG_RELATIVE_PATH,
+        &ahu::config::render(&config),
+    );
     f.repo
         .commit("enable local metrics for incomplete stream fixture");
 
@@ -446,8 +813,11 @@ fn exporter_setup_failure_does_not_block_headless_execution() {
     let mut config = ahu::config::load(f.repo.path()).unwrap().unwrap().config;
     config.telemetry.enabled = true;
     config.telemetry.local_metrics = true;
-    f.repo
-        .write(".agents/ahu/config.toml", &ahu::config::render(&config));
+    f.repo.remove(ahu::config::LEGACY_CONFIG_PATH);
+    f.repo.write(
+        ahu::config::CONFIG_RELATIVE_PATH,
+        &ahu::config::render(&config),
+    );
     f.repo.commit("enable telemetry for fixture");
     let out = f
         .command()
@@ -773,7 +1143,7 @@ fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     assert_eq!(previous["enforcement"]["harness_version"], "2.1.270");
     let spec: ahu::headless::Spec =
         serde_json::from_slice(&std::fs::read(dir.join("headless.json")).unwrap()).unwrap();
-    let composition = record.delivery.composition.as_ref().unwrap();
+    let composition = &record.delivery.composition;
     let state = composition.state.as_ref().unwrap();
     assert_eq!(state, &spec.coordination_state());
     assert_eq!(state.attempt, 2);
@@ -796,26 +1166,31 @@ fn explicit_resume_keeps_session_and_creates_a_new_attempt() {
     );
 }
 #[test]
-fn wrapper_is_refused_before_even_version_probe() {
+fn wrapper_runs_as_the_configured_harness_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
     let f = Fixture::new();
     let marker = f.external.path().join("invoked");
+    let executable = f.bin.join("claude");
+    let real_executable = f.bin.join("claude.real");
+    std::fs::rename(&executable, &real_executable).unwrap();
     std::fs::write(
-        f.bin.join("claude"),
+        &executable,
         format!(
-            "#!/bin/sh\n# cmux wrapper\ntouch '{}'\necho 2.1.270\n",
-            marker.display()
+            "#!/bin/sh\n# terminal wrapper\ntouch '{}'\nexec '{}' \"$@\"\n",
+            marker.display(),
+            real_executable.display()
         ),
     )
     .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let out = f.launch("success", &[]);
-    assert!(!out.status.success());
-    assert!(!marker.exists());
-    assert_eq!(
-        common::git(f.repo.path(), &["worktree", "list", "--porcelain"])
-            .matches("worktree ")
-            .count(),
-        1
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    assert!(marker.exists());
 }
 #[test]
 fn recursive_registered_child_inherits_headless_and_is_discoverable() {
@@ -1112,7 +1487,7 @@ fn execution_rechecks_snapshot_and_user_hooks_before_spawning() {
         // The delivery also freezes the attempt number now.
         let mut record = ahu::task::load(dir).unwrap();
         let prompt = ahu::task::load_prompt(dir).unwrap();
-        let mut composition = record.delivery.composition.clone().unwrap();
+        let mut composition = record.delivery.composition.clone();
         composition.state.as_mut().unwrap().attempt = 2;
         record.delivery = ahu::orchestration::deliver_composed(
             record.delivery.agent_instructions.as_deref(),
@@ -1934,7 +2309,8 @@ scenario=os.environ"#);
     );
 }
 
-/// OpenCode's batch profile is `opencode run --format json`, and every part of
+/// OpenCode 2.x uses `opencode run --standalone --format json`; 1.x omits
+/// `--standalone` because that CLI does not support it. Every part of
 /// it was read off the running CLI rather than inferred from the interactive
 /// adapter.
 ///
@@ -1942,10 +2318,25 @@ scenario=os.environ"#);
 /// positional argument, `--format json` emits one JSON event per line, `--`
 /// ends the option list (`run --format json -m <model> -- --version` sent
 /// `--version` to the model instead of printing the version), and `--session`
-/// continues a recorded session. `-i/--interactive` is what would make `run` a
-/// session, and this path never passes it.
+/// continues a recorded session. Verified on OpenCode 1.18.5 on 2026-10-14:
+/// `--dir` pins the session's directory to the task worktree, which a
+/// git-worktree cwd alone did not do. `-i/--interactive` is what would make
+/// `run` a session, and this path never passes it.
 #[test]
-fn the_opencode_batch_profile_pins_the_model_and_ends_the_option_list() {
+fn the_opencode_batch_profile_uses_a_private_server_pins_the_model_and_ends_the_option_list() {
+    // This checks argv across supported CLI generations, not live inference.
+    for version in [
+        "1.18.30",
+        "1.18.34",
+        "1.19.0",
+        "opencode v2.0.32",
+        "opencode v3.0.0",
+    ] {
+        assert_opencode_batch_profile(version);
+    }
+}
+
+fn assert_opencode_batch_profile(version: &str) {
     use ahu::agent::Permissions;
     use ahu::harness::LaunchRequest;
     use ahu::headless::{Options, Spec};
@@ -1953,13 +2344,14 @@ fn the_opencode_batch_profile_pins_the_model_and_ends_the_option_list() {
     let spec = |session: Option<&str>| Spec {
         schema_version: 1,
         options: Options::default(),
-        harness_version: "1.18.30".into(),
+        harness_version: version.into(),
         executable_digest: "0".repeat(64),
         parent_task: None,
         parent_attempt: None,
         root_task: None,
         broker_request: None,
         child_grants: Vec::new(),
+        contract: Default::default(),
         depth: 0,
         attempt: 1,
         session: session.map(str::to_owned),
@@ -1979,18 +2371,45 @@ fn the_opencode_batch_profile_pins_the_model_and_ends_the_option_list() {
         ahu::headless::batch_command("opencode", &request(Permissions::Prompt), &spec(None))
             .expect("a prompting opencode batch launch");
     assert_eq!(prompting.program, "opencode");
-    assert_eq!(
-        prompting.args,
-        [
-            "run",
-            "--format",
-            "json",
-            "--model",
-            "ollama/glm-5.3:cloud",
-            "--",
-            "do the thing"
-        ]
-    );
+    let standalone = version.starts_with("opencode v2");
+    if standalone {
+        // Synthetic CLI grammar from static inspection of 2.0.32's run
+        // declaration. Unlike 1.x, run has no --dir option. This executes no
+        // native OpenCode session and does not inspect native configuration.
+        let output = Command::new("python3")
+            .args([
+                "-c",
+                r#"import argparse, sys
+p = argparse.ArgumentParser()
+p.add_argument('command', choices=['run'])
+p.add_argument('--standalone', action='store_true')
+p.add_argument('--format', choices=['json'])
+p.add_argument('--model')
+p.add_argument('--auto', action='store_true')
+p.add_argument('--session')
+p.add_argument('message')
+p.parse_args()
+"#,
+            ])
+            .args(&prompting.args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "synthetic v2 CLI refused argv: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let mut expected: Vec<&str> = vec!["run"];
+    if standalone {
+        expected.push("--standalone");
+    }
+    expected.extend(["--format", "json", "--model", "ollama/glm-5.3:cloud"]);
+    if !standalone {
+        expected.extend(["--dir", "/tmp"]);
+    }
+    expected.extend(["--", "do the thing"]);
+    assert_eq!(prompting.args, expected);
     // The prompt is one argv element, and the stored command redacts exactly it.
     assert_eq!(prompting.prompt_arg, Some(prompting.args.len() - 1));
     assert!(
@@ -2068,6 +2487,47 @@ fn the_opencode_event_stream_is_terminal_only_when_a_step_stops() {
     assert_eq!(complete.session.as_deref(), Some(SESSION));
     assert_eq!(complete.summary, "the final answer");
     assert_eq!(complete.unknown_events, 0, "the stream is fully recognized");
+
+    // `stop` closes an assistant message/step in OpenCode, not necessarily
+    // the whole run. A tool result can be followed by another assistant
+    // message that also ends with `stop` before the final response.
+    let intermediate_stop = format!(
+        r#"{{"type":"step_finish","timestamp":4,"sessionID":"{SESSION}","part":{{"type":"step-finish","reason":"stop"}}}}"#
+    );
+    let later_tool_step = format!(
+        r#"{{"type":"step_finish","timestamp":5,"sessionID":"{SESSION}","part":{{"type":"step-finish","reason":"tool-calls"}}}}"#
+    );
+    let final_text = format!(
+        r#"{{"type":"text","timestamp":6,"sessionID":"{SESSION}","part":{{"type":"text","text":"the actual final answer"}}}}"#
+    );
+    let final_stop = format!(
+        r#"{{"type":"step_finish","timestamp":7,"sessionID":"{SESSION}","part":{{"type":"step-finish","reason":"stop"}}}}"#
+    );
+    let multi_message = observe(&[
+        &step_start,
+        &intermediate_stop,
+        &later_tool_step,
+        &final_text,
+        &final_stop,
+    ]);
+    assert!(multi_message.terminal);
+    assert!(!multi_message.failed, "{:?}", multi_message.blockers);
+    assert!(
+        !multi_message
+            .blockers
+            .iter()
+            .any(|b| b.contains("multiple terminal events")),
+        "OpenCode stop boundaries are not duplicate task results"
+    );
+    assert_eq!(multi_message.summary, "the actual final answer");
+
+    // An earlier stop must not survive a later step that ends at a tool-call
+    // boundary; otherwise a zero exit could turn an incomplete run into a pass.
+    let unfinished_after_stop = observe(&[&stop, &step_start, &tool_step]);
+    assert!(
+        !unfinished_after_stop.terminal,
+        "a later tool-call step supersedes an earlier stop: {unfinished_after_stop:?}"
+    );
 
     // A tool-call boundary is where the model pauses to run tools; another step
     // follows it. Treating it as terminal would score an assignment complete at
@@ -2192,8 +2652,9 @@ fn a_registered_opencode_agent_runs_headless_and_records_its_session() {
 import sys,os,json
 if '--version' in sys.argv:
  print('1.18.30'); sys.exit(0)
-if sys.argv[1:] == ['models', 'ollama']:
- print('ollama/glm-5.3:cloud'); sys.exit(0)
+if sys.argv[1:] == ['models']:
+ print('opencode/big-pickle'); print('ollama/glm-5.3:cloud'); sys.exit(0)
+assert sys.argv[1] != 'models', sys.argv
 a=sys.argv[1:]
 assert a[0]=='run', a
 assert a[a.index('--format')+1]=='json', a
@@ -2594,7 +3055,9 @@ fn composed_batch_launch_and_continuation_freeze_identity_session_and_grants() {
             parent_attempt: None,
             root_task: Some("fixture-root".into()),
             broker_request: None,
+            contract: Default::default(),
             child_grants: vec![ahu::broker::ChildGrant {
+                contract: Default::default(),
                 agent: "reader".into(),
                 identity_digest: "1".repeat(64),
                 permissions: Permissions::Prompt,
@@ -2693,18 +3156,12 @@ fn composed_batch_launch_and_continuation_freeze_identity_session_and_grants() {
                 }
                 assert!(saved.verify_composition(&changed).is_err());
                 let mut corrupted = saved.clone();
-                corrupted.composition = Some(changed);
+                corrupted.composition = changed;
                 assert!(redeliver_headless_policy(&corrupted, prompt, policy).is_err());
             }
             let mut collision = saved.clone();
-            collision
-                .composition
-                .as_mut()
-                .unwrap()
-                .state
-                .as_mut()
-                .unwrap()
-                .native_session = Some(close_tag("state", &saved.nonce));
+            collision.composition.state.as_mut().unwrap().native_session =
+                Some(close_tag("state", &saved.nonce));
             assert!(
                 redeliver_headless_policy(&collision, prompt, policy)
                     .unwrap_err()
@@ -3089,7 +3546,7 @@ fn ordinary_event_subtypes_do_not_consume_helper_budget() {
 }
 
 #[test]
-fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux() {
+fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_launch() {
     use std::os::unix::fs::PermissionsExt;
     for (harness, model, executable, version, source, body, reason) in [
         (
@@ -3137,7 +3594,7 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
                         ahu::catalog::version_token(entry.verified_versions).unwrap()
                     })
             };
-            std::fs::write(&stub, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{observed}'; exit 0; fi\ntouch \"$HOME/worker-started\"\nexit 97\n")).unwrap();
+            std::fs::write(&stub, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{observed}'; exit 0; fi\nif [ \"$1\" = --help ]; then printf '  -m, --model MODEL\\n  --prompt PROMPT\\n  --auto\\n'; exit 0; fi\ntouch \"$HOME/worker-started\"\nexit 97\n")).unwrap();
             std::fs::set_permissions(stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let home = f.external.path().join("home");
@@ -3146,38 +3603,6 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, body).unwrap();
         }
-        let status = f
-            .command()
-            .args(["cmux", "status", "--output", "json"])
-            .output()
-            .unwrap();
-        assert!(
-            status.status.success(),
-            "{}",
-            String::from_utf8_lossy(&status.stderr)
-        );
-        let status = Fixture::value(&status);
-        let status = status["integrations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|v| v["harness"] == harness)
-            .unwrap();
-        assert_eq!(status["headless"]["allowed"], false, "{status}");
-        assert_eq!(status["cli_version"], version);
-        assert!(
-            status["headless"]["reasons"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v.as_str().unwrap().contains(reason)),
-            "{status}"
-        );
-        let human = f.command().args(["cmux", "status"]).output().unwrap();
-        let human = String::from_utf8(human.stdout).unwrap();
-        assert!(human.contains(reason), "{human}");
-        assert!(human.contains(status["next_action"].as_str().unwrap()));
-
         let interactive = f
             .command()
             .args([
@@ -3196,9 +3621,17 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             String::from_utf8_lossy(&interactive.stderr)
         );
         let preview = Fixture::value(&interactive);
-        assert_eq!(preview["cmux_integration"]["headless"]["allowed"], false);
+        assert_eq!(preview["native_admission"]["headless"]["allowed"], false);
+        assert_eq!(preview["native_admission"]["cli_version"], version);
+        assert!(
+            preview["native_admission"]["headless"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str().unwrap().contains(reason))
+        );
         assert_eq!(
-            preview["cmux_integration"]["profile"]["interactive_supported"],
+            preview["native_admission"]["profile"]["interactive_supported"],
             true
         );
         let repo = ahu::git::discover(f.repo.path()).unwrap();
@@ -3253,105 +3686,8 @@ fn admission_matrix_is_visible_before_launch_and_does_not_gate_interactive_cmux(
             assert_eq!(Fixture::value(&listed)["tasks"], serde_json::json!([]));
         }
         assert_eq!(preview["executed"], false);
-        assert!(!status.to_string().contains("SYNTHETIC_OPAQUE_SENTINEL"));
+        assert!(!preview.to_string().contains("SYNTHETIC_OPAQUE_SENTINEL"));
     }
-}
-
-#[test]
-fn headless_isolation_refusal_does_not_gate_real_interactive_cmux_dispatch() {
-    use std::os::unix::fs::PermissionsExt;
-    let f = Fixture::new();
-    let home = f.external.path().join("home");
-    std::fs::create_dir(home.join(".claude")).unwrap();
-    std::fs::write(
-        home.join(".claude/settings.json"),
-        r#"{"enabledPlugins":{"synthetic":true}}"#,
-    )
-    .unwrap();
-    let refused = f.launch("success", &[]);
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("plugin hook behavior"));
-    // Planning may create the self-ignoring root, but no task checkout.
-    assert!(
-        std::fs::read_dir(f.repo.path().join(".worktrees"))
-            .unwrap()
-            .all(|entry| entry.unwrap().file_name() == ".gitignore")
-    );
-
-    // Reuse the saved-group protocol from the synthetic coordinator fixture.
-    // Record the real dispatch, without executing its shell command or opening a terminal.
-    let cmux = f.bin.join("cmux");
-    std::fs::write(&cmux, r#"#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-base = Path(os.environ['HOME'])
-args = sys.argv[1:]
-if args[0] == 'ping': print('PONG'); sys.exit(0)
-if args[0] == 'capabilities':
- print(json.dumps({'capabilities':['workspace.groups.v1','workspace.group_create.v1','workspace.create_in_group.v1']})); sys.exit(0)
-if args[0] == 'new-workspace':
- assert not (base/'dispatch.json').exists()
- (base/'dispatch.json').write_text(json.dumps(args)); sys.exit(0)
-if args[0] == 'set-status': sys.exit(0)
-assert args[0] == 'rpc', args
-method, params = args[1], json.loads(args[2])
-if method == 'system.identify':
- assert params == {'caller':{'workspace_id':'sentinel'}}
- print(json.dumps({'caller':{'window_id':'synthetic-window'}}))
-elif method == 'workspace.group.list':
- assert params == {'window_id':'synthetic-window'}
- members = ['anchor']
- if (base/'dispatch.json').exists(): members.append('synthetic-task')
- print(json.dumps({'groups':[{'id':'saved-group','name':'synthetic group','anchor_workspace_id':'anchor','member_workspace_ids':members}]}))
-elif method == 'workspace.list': print(json.dumps({'workspaces':[]}))
-elif method == 'workspace.group.expand':
- assert params == {'group_id':'saved-group'}
- print('{}')
-else: raise AssertionError(method)
-"#).unwrap();
-    std::fs::set_permissions(&cmux, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let repo = ahu::git::discover(f.repo.path()).unwrap();
-    ahu::state::write_json(
-        &ahu::state::coordination_dir(&repo)
-            .unwrap()
-            .join("cmux.json"),
-        &ahu::launch::GroupMapping {
-            group_id: Some("saved-group".into()),
-            window_id: Some("synthetic-window".into()),
-            anchor_workspace_id: Some("anchor".into()),
-        },
-    )
-    .unwrap();
-    let launched = f
-        .command()
-        .env("AHU_CMUX_BIN", &cmux)
-        .args(["@worker", "--prompt", "synthetic interactive task"])
-        .output()
-        .unwrap();
-    assert!(
-        launched.status.success(),
-        "{}",
-        String::from_utf8_lossy(&launched.stderr)
-    );
-    let listing = ahu::task::list(&repo).unwrap();
-    assert!(listing.unreadable.is_empty());
-    assert_eq!(listing.records.len(), 1);
-    let (task_dir, record) = &listing.records[0];
-    assert_eq!(record.cmux_workspace_id.as_deref(), Some("synthetic-task"));
-    assert_eq!(record.cmux_group_id.as_deref(), Some("saved-group"));
-    assert!(record.worktree.is_dir());
-    assert_eq!(record.identity.agent, "worker");
-    let args: Vec<String> =
-        serde_json::from_slice(&std::fs::read(home.join("dispatch.json")).unwrap()).unwrap();
-    let option = |name| args[args.iter().position(|arg| arg == name).unwrap() + 1].clone();
-    assert_eq!(option("--cwd"), record.worktree.to_str().unwrap());
-    assert_eq!(option("--group"), "saved-group");
-    assert_eq!(
-        option("--command"),
-        ahu::cmux::startup_command(std::path::Path::new(env!("CARGO_BIN_EXE_ahu")), task_dir)
-    );
-    assert!(!ahu::headless::store(&repo).unwrap().exists());
-    assert!(!f.external.path().join("runtime").exists());
 }
 
 #[test]
@@ -3507,7 +3843,10 @@ fn opencode_preflight_refuses_missing_model_before_creating_a_worktree() {
     let stub = f.bin.join("opencode");
     std::fs::write(
         &stub,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.18.34; exit 0; fi\nif [ \"$1\" = models ] && [ \"$2\" = ollama ]; then printf '%s\\n' \"$SYNTHETIC_AVAILABLE_MODEL\"; exit 0; fi\nexit 91\n",
+        // `opencode models` takes no positional provider; a stub that required
+        // one could not tell a reintroduced provider argument from a broken
+        // provider configuration.
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.18.34; exit 0; fi\nif [ \"$1\" = models ] && [ $# -eq 1 ]; then printf '%s\\n' \"$SYNTHETIC_AVAILABLE_MODEL\"; exit 0; fi\nexit 91\n",
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3568,7 +3907,7 @@ assert a[a.index('--model')+1]=='claude-sonnet-4.5'
 assert '--no-interactive' in a and '--require-mcp-startup' in a and '--' not in a
 assert a[a.index('--output-format')+1]=='stream-json'
 assert '--trust-all-tools' not in a
-assert not any(k.startswith('CMUX_') for k in os.environ)
+assert os.environ.get('CMUX_WORKSPACE_ID') == 'sentinel'
 assert sys.stdin.read()==''
 scenario=os.environ.get('SCENARIO','success')
 session=a[a.index('--resume-id')+1] if '--resume-id' in a else 'sess_fixture'

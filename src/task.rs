@@ -188,16 +188,17 @@ pub struct TaskRecord {
     ///
     /// Evidence, not a path that gets executed: the preview shows it, and
     /// `run_task` compares it with what it resolves itself. The workspace
-    /// resolves the same harness *name* on its own `PATH` again, because cmux
-    /// installs a per-surface wrapper whose path differs from the submitting
-    /// shell's.
+    /// resolves the same harness *name* on its own `PATH` again, because the
+    /// session environment may resolve a wrapper whose path differs from the
+    /// submitting shell's.
     #[serde(default)]
     pub harness_executable: PathBuf,
     pub enforcement: EnforcementReport,
     pub reliability_warning: Option<String>,
-    pub cmux_group_id: Option<String>,
-    pub cmux_workspace_id: Option<String>,
-    pub cmux_window_id: Option<String>,
+    /// Absent for headless tasks and tasks created before external host identity was recorded.
+    #[serde(default)]
+    pub session_host: Option<crate::interactive::binding::FrozenHost>,
+    pub session_ref: Option<String>,
     pub state: TaskState,
 }
 
@@ -213,19 +214,10 @@ impl TaskRecord {
 
 pub(crate) const TASK_FILE: &str = "task.json";
 pub(crate) const PROMPT_FILE: &str = "prompt.txt";
-/// Schema 2 splits `LaunchIdentity`'s single instruction digest into
-/// `source_digest` (the whole file) and `instructions_digest` (the delivered
-/// text). A schema-1 record carries the whole-file digest under the *name*
-/// `instructions_digest`, so reading one as schema 2 would attribute file bytes
-/// to delivered bytes. `load` refuses it by version instead.
-///
-/// Schema 3 changes the task identifier from 18 hex characters to a hyphenated
-/// UUID v7. The fields are otherwise identical, so schema-2 records still load
-/// unchanged; they keep their original ids.
-pub const TASK_SCHEMA_VERSION: u32 = 4;
-/// The schema versions this build can read: the current one and its immediate
-/// predecessor. `load` refuses everything else.
-pub const READABLE_SCHEMA_VERSIONS: [u32; 3] = [2, 3, TASK_SCHEMA_VERSION];
+/// Current persisted task record schema. This pre-release reader accepts only
+/// this version; older task schemas are not migrated or reinterpreted.
+pub const TASK_SCHEMA_VERSION: u32 = 6;
+pub const READABLE_SCHEMA_VERSIONS: [u32; 1] = [TASK_SCHEMA_VERSION];
 
 /// A time-ordered, collision-resistant task identifier: a UUID v7 whose random
 /// bits come from `os_entropy`. Fails closed rather than minting a guessable id.
@@ -351,7 +343,7 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
         };
         bail!(
             "{} was written by a different ahu schema version ({version}); this ahu \
-             build reads task schemas 2, 3, and {TASK_SCHEMA_VERSION}.\n\
+             build reads task schema {TASK_SCHEMA_VERSION}.\n\
              ahu will not reinterpret it: {reason}",
             path.display()
         );
@@ -369,10 +361,18 @@ pub fn load(dir: &Path) -> Result<TaskRecord> {
     if !READABLE_SCHEMA_VERSIONS.contains(&record.schema_version) {
         bail!(
             "{} declares ahu schema version {}; this ahu build reads \
-             2, 3, and {TASK_SCHEMA_VERSION}.",
+             {TASK_SCHEMA_VERSION}.",
             path.display(),
             record.schema_version
         );
+    }
+    if record.schema_version >= TASK_SCHEMA_VERSION {
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if value.get("session_host").is_none() {
+            bail!(
+                "current task schema requires an explicit session_host binding (null for terminal sessions)"
+            );
+        }
     }
     Ok(record)
 }
@@ -389,6 +389,19 @@ pub fn load_prompt(dir: &Path) -> Result<String> {
 pub fn set_state(dir: &Path, new_state: TaskState) -> Result<()> {
     let _lock = lock_state(dir)?;
     set_state_locked(dir, new_state)
+}
+
+/// Reconcile a missing workspace with the durable task outcome.
+pub(crate) fn set_exited_if_live(dir: &Path, record: &mut TaskRecord) -> Result<()> {
+    let _lock = lock_state(dir)?;
+    *record = load(dir)?;
+    if record.state.is_live() {
+        let mut exited = record.clone();
+        exited.state = TaskState::Exited;
+        state::write_json(&crate::storage::TaskStorage::new(dir).record(), &exited)?;
+        *record = exited;
+    }
+    Ok(())
 }
 
 pub(crate) fn lock_state(dir: &Path) -> Result<StateLock> {
