@@ -569,10 +569,27 @@ managed policy and individual tool permission decisions still apply.
 The supported store shapes are Claude Code 2.1.308's
 `~/.claude.json` → `projects[canonical_worktree].hasTrustDialogAccepted` and
 Antigravity CLI 1.4.6/1.4.7's `~/.gemini/antigravity-cli/settings.json` →
-`trustedWorkspaces` string array. No supported per-invocation folder-trust
-control has been established for these adapters. Native homes stay in place;
+`trustedWorkspaces` string array. Codex 0.163.0 uses
+`~/.codex/config.toml` → `projects[canonical_worktree].trust_level = "trusted"`.
+No supported per-invocation folder-trust control has been established for these
+adapters. Native homes stay in place;
 configuration-directory overrides refuse this preparation rather than guessing
-another store. Other harnesses retain their native trust behavior.
+another store (including `CODEX_HOME` for Codex). Other harnesses retain their
+native trust behavior.
+
+Codex support is based on the tagged 0.163.0
+[folder-trust lookup](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/config_update.rs)
+and [project lookup](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/config/src/project_trust.rs):
+a saved exact working-directory entry takes precedence over the linked
+worktree’s main-repository fallback. The folder prompt reads saved configuration
+through the app server separately from tool approval settings; CLI trust
+overrides and sandbox bypass flags are not used to grant folder trust. Ahu
+edits only that exact project’s trust field, preserves unrelated TOML settings
+and comments, and restores a prior `untrusted` value on removal. An already
+trusted entry is not claimed or removed. Synthetic regression checks cover
+store edits and recovery; fresh interactive Codex validation remains pending.
+Folder trust can enable native project configuration and hooks; it does not
+provide filesystem confinement or override managed policy.
 
 If cleanup reports a native configuration-directory override, retry `ahu remove`
 with the original `HOME` and the named override unset for that invocation. Keep
@@ -584,7 +601,7 @@ A small write-ahead receipt records only the exact target and prior trust state.
 `ahu remove` reverses ahu-added trust before deleting the task, including tasks
 that failed, crashed or were cancelled. Cancellation itself retains the receipt
 with the task for later removal. Cleanup failures retain the receipt for retry.
-Malformed, oversized, symlinked, foreign-owned or group/world-writable state is
+Malformed, oversized, symlinked, hardlinked, foreign-owned or group/world-writable state is
 refused without printing native configuration. Native documents are limited to
 4 MiB and receipts to 8 KiB. A per-home lock serializes ahu writers across
 repositories. Native applications do not cooperate with this lock: a reread
