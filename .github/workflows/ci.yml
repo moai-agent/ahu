@@ -21,7 +21,8 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Cold tool installation plus the serialized coverage suite exceeds 20 minutes.
+    timeout-minutes: 40
     env:
       TEST_THREADS: ${{ matrix.os == 'ubuntu-24.04' && '1' || '2' }}
     defaults:
