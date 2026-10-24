@@ -49,6 +49,20 @@ cmux plugin operations require its executable outside Git working trees; see the
 
 See [Kiro setup and limits](docs/reference.md#kiro-cli) for installation, model selection, and supported features.
 
+## Integration boundary
+
+ahu keeps harness launch, task/attempt state, Git worktree lifecycle, MCP
+coordination, and bounded telemetry/evaluation in core. External tools belong in
+optional plugins and skills. Users can run current-terminal and headless tasks
+without cmux, GitHub, or an issue tracker.
+
+Start with a skill that uses the tool's existing CLI. Add an executable plugin
+only when a workflow needs a stable machine-readable contract, such as session
+ownership and cleanup. Provider authentication, API details, workspace mappings,
+and issue transitions belong to that integration, not the core task model.
+See the [architecture boundary](docs/plugin-architecture.md) for ownership,
+security limits, and the review criteria for adding core behavior.
+
 ## Everyday use
 
 From any Git checkout:
@@ -354,12 +368,12 @@ Skill maintenance checks validate the skill tree contract and its compiled
 bundle; they do not install or sync skills globally. See [knowledge checks](docs/reference.md#knowledge-checks)
 for project configuration and machine-readable results.
 
-Tests use temporary repositories and stand-in harness executables. Live cmux
-tests are opt-in through `AHU_TEST_CMUX=1`; ordinary test runs do not open cmux
-workspaces. Once opted in, unreachable cmux is an error. Run live checks only
-with authorization. CI probes for a reachable cmux first and skips the live job
-with a visible notice when the runner provides none, so a missing optional
-integration is never reported as a passing live probe.
+Tests use temporary repositories and stand-in harness executables. Core CI tests
+the generic session-host and plugin contracts without cmux or GitHub services.
+Core has no compiled cmux adapter or live cmux test target. Live provider
+checks belong to the external plugin's validation and require an explicitly
+selected installed provider. Passing core fixtures does not establish live
+provider compatibility.
 
 ```sh
 cargo test --locked --doc

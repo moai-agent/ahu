@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: 6ed1cacc2fe39b972b620cf06558a3f13961964582627af2f3e1d458738d6c81
+  digest: c5d3111df302da9c9719895d883b50c6221edd8af790b06b25b8c5ef8dd0e7a3
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -106,8 +106,8 @@ ahu:
     digest: b2f7e3285be8231d3329e77e455b0bbb0ea74e35ed5c76f95c9358d9485a3659
     executable: false
     path: .agents/skills/ahu-agent-context-critic/SKILL.md
-  - bytes: 26443
-    digest: 87357f03092604d4419e52e43246718e4a45493f77b920f2ddc0292a78fc4964
+  - bytes: 27147
+    digest: 3a16a0eef0c06b355c84e374dc40491ec480cce2d2c41ec1b5b3ffc477f8d8ab
     executable: false
     path: .agents/skills/ahu-architecture/SKILL.md
   - bytes: 13498

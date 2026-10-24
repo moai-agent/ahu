@@ -43,6 +43,12 @@ sources:
 
 # ahu system architecture
 
+ahu is a thin coordinator around harnesses. Keep external integrations in
+optional plugins and skills; see the integration ownership and review rules in `docs/plugin-architecture.md`.
+Core owns task execution and worktree lifecycle, not terminal workspace layouts
+or external issue state. Current-terminal and headless execution require no
+session-host or issue-tracker plugin.
+
 The core agent-task service V1, documented in `../agent-task-service.md`, defines an opt-in,
 provider-neutral task lifecycle interface for core-issued scoped sessions. Its
 in-memory and local implementations retain admission and execution control in
@@ -146,11 +152,12 @@ Git commit. It reports exact ahu-version compatibility and declared source pins
 and grants. It neither reads the working-tree configuration nor fetches or runs
 plugins. Missing local Git objects fail with all Git transports denied. Committed
 symlinks and non-file bindings are refused; metadata reads are bounded.
-Project plugin bindings remain declarations, with source verification and activation
-reported as unsupported. The separate local-package inventory and explicit
-executable probe retain their existing selection boundary. See the CLI reference
-section `Committed project plugin bindings` for output,
-bounds and limitations.
+Inspection is not activation. Explicit package installation verifies source pins;
+execution requires the matching committed enabled binding, compatibility and
+the appropriate grant. One-shot execution and session hosting have separate
+contracts. See `docs/executable-plugins.md`,
+`docs/executable-hosts.md`, and the CLI reference section
+`Committed project plugin bindings` for their bounds and limitations.
 
 [^main]: CLI routing in src/main.rs.
 [^launch]: Launch admission and task planning in src/launch.rs.
