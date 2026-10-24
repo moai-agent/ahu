@@ -2104,7 +2104,7 @@ the package directory. Session hosts use `grants: [interactive-backend]` instead
 one-shot JSON entrypoints need `execute`. Neither grant confines the executable.
 Never include credentials or private tracker associations in a shared binding.
 For a complete runnable example without an external provider, use the
-[text statistics walkthrough](../examples/plugins/text-stats/README.md).
+[text statistics example](../examples/plugins/text-stats/README.md).
 
 ## Project-local installation lifecycle
 
