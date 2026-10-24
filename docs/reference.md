@@ -568,7 +568,7 @@ managed policy and individual tool permission decisions still apply.
 
 The supported store shapes are Claude Code 2.1.308's
 `~/.claude.json` → `projects[canonical_worktree].hasTrustDialogAccepted` and
-Antigravity CLI 1.4.6's `~/.gemini/antigravity-cli/settings.json` →
+Antigravity CLI 1.4.6/1.4.7's `~/.gemini/antigravity-cli/settings.json` →
 `trustedWorkspaces` string array. No supported per-invocation folder-trust
 control has been established for these adapters. Native homes stay in place;
 configuration-directory overrides refuse this preparation rather than guessing
@@ -587,9 +587,13 @@ before atomic replacement detects some concurrent changes, but this is not an
 atomic transaction with native writers. The receipt cannot distinguish a later
 native re-acceptance of the same trust entry from Ahu's original addition.
 
-Synthetic tests cover store edits and recovery; they do not establish live
-interactive readiness. Task/session creation alone is not a completed harness
-smoke test.
+Fresh-worktree interactive checks on 2026-10-24 passed for Claude Code 2.1.308
+with `claude-opus-5` and Antigravity CLI 1.4.7 with `gemini-3.1-pro-high`:
+actual `ahu_agents_list` invocation, local shell commands, file creation and
+removal, and local OTel export all succeeded without an approval prompt. Agy
+requires its native Ahu MCP registration, which `ahu setup` prepares; an empty
+native MCP configuration does not expose Ahu's tools. These observations cover
+the tested operations, not every possible native tool or managed policy.
 
 ### Work mode
 
