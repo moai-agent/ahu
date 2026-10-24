@@ -389,6 +389,7 @@ fn eval_run_requires_named_candidate_and_case_and_accepts_explicit_records() {
             runs: 3,
             timeout_seconds: 120,
             allow_widened_approvals: false,
+            work_mode: false,
             output_json: true,
         }
     );
@@ -425,6 +426,7 @@ fn eval_run_requires_named_candidate_and_case_and_accepts_explicit_records() {
             runs: 1,
             timeout_seconds: 1800,
             allow_widened_approvals: false,
+            work_mode: false,
             output_json: false,
         }
     );
