@@ -583,11 +583,11 @@ and [project lookup](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs
 a saved exact working-directory entry takes precedence over the linked
 worktree’s main-repository fallback. The folder prompt reads saved configuration
 through the app server separately from tool approval settings; CLI trust
-overrides and sandbox bypass flags are not used to grant folder trust. Ahu
+overrides and sandbox bypass flags are not used to grant folder trust. ahu
 edits only that exact project’s trust field, preserves unrelated TOML settings
 and comments, and restores a prior `untrusted` value on removal. An already
 trusted entry is not claimed or removed. Synthetic regression checks cover
-store edits and recovery; fresh interactive Codex validation remains pending.
+store edits and recovery; they do not establish live harness compatibility.
 Folder trust can enable native project configuration and hooks; it does not
 provide filesystem confinement or override managed policy.
 
@@ -601,8 +601,9 @@ A small write-ahead receipt records only the exact target and prior trust state.
 `ahu remove` reverses ahu-added trust before deleting the task, including tasks
 that failed, crashed or were cancelled. Cancellation itself retains the receipt
 with the task for later removal. Cleanup failures retain the receipt for retry.
-Malformed, oversized, symlinked, hardlinked, foreign-owned or group/world-writable state is
-refused without printing native configuration. Native documents are limited to
+Malformed, oversized, symlinked, foreign-owned or group/world-writable state is
+refused without printing native configuration. Files with multiple hard links
+are also refused. Native documents are limited to
 4 MiB and receipts to 8 KiB. A per-home lock serializes ahu writers across
 repositories. Native applications do not cooperate with this lock: a reread
 before atomic replacement detects some concurrent changes, but this is not an
