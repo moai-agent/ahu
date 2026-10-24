@@ -1325,6 +1325,7 @@ fn run_verified_task(
     executable: PathBuf,
     started: &mut bool,
 ) -> Result<HarnessOutcome> {
+    harness::native_trust::prepare(task_dir, &record)?;
     let loaded = crate::config::load(&record.worktree)?;
     let config = loaded.as_ref().map(|loaded| &loaded.config);
     let version = crate::selection::probe_version(

@@ -555,14 +555,36 @@ sandbox the harness. See [work mode](#work-mode) for the recorded controls.
 ### Native workspace trust
 
 Automatic tool approval and workspace trust are separate native decisions.
-Claude Code 2.1.308 and Antigravity CLI 1.4.6 can present a folder-trust dialog
-when an interactive task opens a new checkout, even with automatic tool
-permissions selected. Ahu does not answer that dialog or rewrite native trust
-stores. Complete native trust setup before relying on unattended interactive
-work, or use explicit headless `--work-mode` for assigned batch work. Successful
-headless execution does not establish interactive readiness. A session-host
-plugin can successfully create and own a workspace while its harness waits at
-this dialog; task/session creation alone is not a completed harness smoke test.
+For interactive `permissions = auto` assignments, Ahu prepares native folder
+trust for the exact canonical, verified Ahu task worktree before native startup
+checks. Explicit auto authorization covers this task-scoped trust. Preview,
+`prompt`, `accept-edits`, headless execution and arbitrary checkout paths do not
+write native trust. No parent folder or global trust bypass is added.
+
+The supported store shapes are Claude Code 2.1.308's
+`~/.claude.json` → `projects[canonical_worktree].hasTrustDialogAccepted` and
+Antigravity CLI 1.4.6's `~/.gemini/antigravity-cli/settings.json` →
+`trustedWorkspaces` string array. No supported per-invocation folder-trust
+control has been established for these adapters. Native homes stay in place;
+configuration-directory overrides refuse this preparation rather than guessing
+another store. Other harnesses retain their native trust behavior.
+
+Ahu preserves unrelated fields, existing trust and native project history.
+A small write-ahead receipt records only the exact target and prior trust state.
+`ahu remove` reverses Ahu-added trust before deleting the task, including tasks
+that failed, crashed or were cancelled. Cancellation itself retains the receipt
+with the task for later removal. Cleanup failures retain the receipt for retry.
+Malformed, oversized, symlinked, foreign-owned or group/world-writable state is
+refused without printing native configuration. Native documents are limited to
+4 MiB and receipts to 8 KiB. A per-home lock serializes Ahu writers across
+repositories. Native applications do not cooperate with this lock: a reread
+before atomic replacement detects some concurrent changes, but this is not an
+atomic transaction with native writers. The receipt cannot distinguish a later
+native re-acceptance of the same trust entry from Ahu's original addition.
+
+Synthetic tests cover store edits and recovery; they do not establish live
+interactive readiness. Task/session creation alone is not a completed harness
+smoke test.
 
 ### Work mode
 

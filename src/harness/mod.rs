@@ -11,6 +11,7 @@ pub mod codex;
 pub mod codex_metadata;
 pub mod isolation;
 pub mod kiro;
+pub(crate) mod native_trust;
 pub mod opencode;
 
 use serde::{Deserialize, Serialize};

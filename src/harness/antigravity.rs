@@ -109,7 +109,7 @@ fn permission_control(permissions: Permissions) -> String {
         Permissions::Auto => format!(
             "ahu passes --dangerously-skip-permissions because this agent's manifest declares \
              permissions = auto, which auto-approves every tool request; it passes no --mode or \
-             --sandbox; {tail}"
+             --sandbox; interactive auto tasks also authorize native folder trust for only the exact verified Ahu worktree, with Ahu-added trust removed by ahu remove; {tail}"
         ),
     }
 }

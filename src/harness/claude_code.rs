@@ -110,7 +110,7 @@ fn permission_control(permissions: Permissions) -> String {
         Permissions::Auto => format!(
             "ahu passes --permission-mode auto because this agent's manifest declares \
              permissions = auto; it passes no --dangerously-skip-permissions, --allowedTools, \
-             or --add-dir; {tail}"
+             or --add-dir; interactive auto tasks also authorize native folder trust for only the exact verified Ahu worktree, with Ahu-added trust removed by ahu remove; {tail}"
         ),
     }
 }

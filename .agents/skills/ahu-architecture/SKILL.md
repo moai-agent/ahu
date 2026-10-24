@@ -88,7 +88,8 @@ design and data handling, and `docs/typed-decisions.md` for provider configurati
    reports a diagnostic; it does not get different behaviour.
 3. Harness-native conventions win. Skills, memory, settings, and agent
    definitions stay where the harness wants them. ahu references them in place
-   and never reorganises or rewrites them.
+   and does not reorganise them. The narrow exception is native folder trust for
+   explicitly authorized interactive auto tasks, described below.
 4. Say what you cannot do. Where ahu cannot see a context source or cannot
    enforce an identity, it reports that rather than implying a guarantee.
 
@@ -340,6 +341,20 @@ Same-user code is not isolated from broker state. Hooks and arbitrary shell
 commands require a vetted environment; ahu's backend itself does not use cmux.
 Explicit cleanup removes recognized old captures and bounded requests, retaining
 structured results, frozen inputs, native stores, branches and worktrees.
+
+## Task-scoped native folder trust
+
+Interactive auto assignments authorize trust for their exact canonical Ahu-owned
+worktree in Claude Code and Antigravity. Preparation runs after task verification
+and before native startup probes. Preview, prompt, accept-edits and arbitrary
+checkouts never grant this trust. Ahu does not grant parent or blanket trust,
+relocate native homes, or replace unrelated native fields. A small owned receipt
+lets `ahu remove` undo only Ahu-added trust, including after crash or cancellation;
+pre-existing trust and native project history remain. Unsafe or malformed native
+state refuses startup/cleanup. A per-home lock coordinates Ahu writers only;
+native writes are not an atomic cooperating transaction. See the supported
+schema evidence and recovery limits in `docs/reference.md#native-workspace-trust`.
+This explicit task-trust exception does not authorize general native trust edits.
 
 ## Account checks and cooperative approval
 

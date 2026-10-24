@@ -2277,6 +2277,7 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
     } else {
         "not used"
     };
+    crate::harness::native_trust::cleanup(&record_dir, &record)?;
     let mut completed: Vec<(&str, String)> = Vec::new();
     let mut not_removed: Vec<(&str, String)> = Vec::new();
     let mut worktree_removed = false;
