@@ -210,7 +210,8 @@ fn a_non_utf8_sibling_worktree_harness_is_excluded_through_a_utf8_symlink() {
     std::os::unix::fs::symlink(&attacker, alias_dir.join("claude")).unwrap();
     let legitimate = outside.path().join("legitimate-bin");
     let legitimate_record = outside.path().join("legitimate-argv.json");
-    common::fake_harness(&legitimate, &legitimate_record);
+    let legitimate = common::fake_harness(&legitimate, &legitimate_record);
+    assert!(legitimate.join("claude").is_file());
     let path = format!(
         "{}:{}:/usr/bin:/bin",
         alias_dir.display(),
