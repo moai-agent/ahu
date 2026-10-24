@@ -382,9 +382,11 @@ fn edit_codex(
     use toml_edit::{DocumentMut, Item, Table, value};
     let source = std::str::from_utf8(before.unwrap_or_default()).map_err(|_| refused())?;
     let mut doc = source.parse::<DocumentMut>().map_err(|_| refused())?;
+    let mut new_projects = Table::new();
+    new_projects.set_implicit(true);
     let projects = doc
         .entry("projects")
-        .or_insert(Item::Table(Table::new()))
+        .or_insert(Item::Table(new_projects))
         .as_table_like_mut()
         .ok_or_else(refused)?;
     let project_added = !projects.contains_key(key);
@@ -622,7 +624,10 @@ mod tests {
                 f.run("codex", true).unwrap();
                 let text = fs::read_to_string(&f.path).unwrap();
                 let doc: toml::Value = toml::from_str(&text).unwrap();
-                assert_eq!(doc["projects"].get(key).is_some(), keep_history);
+                assert_eq!(
+                    doc.get("projects").and_then(|p| p.get(key)).is_some(),
+                    keep_history
+                );
                 if keep_history {
                     assert_eq!(
                         doc["projects"][key]["history"].as_str(),
@@ -658,6 +663,7 @@ mod tests {
             Some("trusted")
         );
         update(&f.home, &dir2, "codex", &worktree2, true).unwrap();
+        assert!(fs::read_to_string(&f.path).unwrap().trim().is_empty());
     }
 
     #[test]
