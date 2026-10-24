@@ -50,7 +50,7 @@ path; it does not edit native configuration, hooks or accounts. Native hooks and
 managed policy still apply. A Git worktree is not a sandbox. See
 [work mode](reference.md#work-mode) for harness-specific controls and limitations.
 Typed decision grading is unaffected; the mode applies to its candidate launches.
-The `work_mode` boolean is recorded in input fingerprints and comparison groups.
+The `work_mode` true/false value is recorded in input fingerprints and comparison groups.
 Guarded, work-mode and older records with unspecified mode remain separate.
 
 ## Start a comparison

@@ -22,8 +22,8 @@ and protocol version. It stores a single opaque `session_ref`; cmux group, windo
 and workspace identifiers remain inside the provider plugin. Task operations use
 the frozen host identity, not the current selection. Focus and cleanup ask the
 provider to verify ownership against the task's repository and worktree.
-If a provider created a workspace but Ahu did not persist its creation reply,
-Ahu can reconcile with an empty `session_ref` plus the exact repository identity
+If a provider created a workspace but ahu did not persist its creation reply,
+ahu can reconcile with an empty `session_ref` plus the exact repository identity
 and worktree path. The host must return `owned` only for one exact, verified
 match; no match is `absent`, and mismatched or ambiguous ownership stays blocked.
 Any following mutation with an empty reference must repeat the same ownership
@@ -32,7 +32,7 @@ Core retains harness startup, supervision, approvals, cancellation confirmation,
 and worktree cleanup. Uncertain creation preserves task inputs and work.
 Task focus and cleanup require the frozen host identity and verified ownership.
 When a reference is recorded, the host checks that reference. When it is missing
-after a possible create, Ahu asks the pinned host to reconcile by repository and
+after a possible create, ahu asks the pinned host to reconcile by repository and
 worktree; a unique match can be acted on, while absent, mismatched, or ambiguous
 ownership remains explicit. An uncertain create still preserves task inputs and
 work until that reconciliation succeeds.
@@ -200,7 +200,7 @@ sandbox them.
 
 Package tests exercise the server and all nine V2 methods with a fake native CLI,
 including creation outcome preservation and strict framed input/output. Core
-lifecycle tests use synthetic Host V2 peers. A local Ahu-managed Codex smoke task
+lifecycle tests use synthetic Host V2 peers. A local ahu-managed Codex smoke task
 also created and verified a cmux workspace, ran a read-only command, and removed
 the task; cleanup verified ownership and closed that exact workspace. This is a
 single live observation, not a claim that other harnesses or cmux versions have

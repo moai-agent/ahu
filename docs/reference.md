@@ -555,14 +555,14 @@ sandbox the harness. See [work mode](#work-mode) for the recorded controls.
 ### Native workspace trust
 
 Automatic tool approval and workspace trust are separate native decisions.
-For interactive `permissions = auto` assignments, Ahu prepares native folder
-trust for the exact canonical, verified Ahu task worktree before native startup
+For interactive `permissions = auto` assignments, ahu prepares native folder
+trust for the exact canonical, verified ahu task worktree before native startup
 checks. Explicit auto authorization covers this task-scoped trust. Preview,
 `prompt`, `accept-edits`, headless execution and arbitrary checkout paths do not
 write native trust. No parent folder or global trust bypass is added.
 
 Claude interactive auto launches also pass invocation-only `--settings` with
-`enabledMcpjsonServers: ["ahu"]`, approving Ahu's project MCP server without
+`enabledMcpjsonServers: ["ahu"]`, approving ahu's project MCP server without
 approving other servers or changing persistent MCP approval settings. Native
 managed policy and individual tool permission decisions still apply.
 
@@ -577,27 +577,27 @@ another store. Other harnesses retain their native trust behavior.
 If cleanup reports a native configuration-directory override, retry `ahu remove`
 with the original `HOME` and the named override unset for that invocation. Keep
 the task's `native-trust.json` receipt until cleanup succeeds; deleting it would
-discard the information needed to reverse Ahu-added trust.
+discard the information needed to reverse ahu-added trust.
 
-Ahu preserves unrelated fields, existing trust and native project history.
+ahu preserves unrelated fields, existing trust and native project history.
 A small write-ahead receipt records only the exact target and prior trust state.
-`ahu remove` reverses Ahu-added trust before deleting the task, including tasks
+`ahu remove` reverses ahu-added trust before deleting the task, including tasks
 that failed, crashed or were cancelled. Cancellation itself retains the receipt
 with the task for later removal. Cleanup failures retain the receipt for retry.
 Malformed, oversized, symlinked, foreign-owned or group/world-writable state is
 refused without printing native configuration. Native documents are limited to
-4 MiB and receipts to 8 KiB. A per-home lock serializes Ahu writers across
+4 MiB and receipts to 8 KiB. A per-home lock serializes ahu writers across
 repositories. Native applications do not cooperate with this lock: a reread
 before atomic replacement detects some concurrent changes, but this is not an
 atomic transaction with native writers. The receipt cannot distinguish a later
-native re-acceptance of the same trust entry from Ahu's original addition.
+native re-acceptance of the same trust entry from ahu's original addition.
 
 Fresh-worktree interactive checks on 2026-10-24 passed for Claude Code 2.1.308
 with `claude-opus-5` and Antigravity CLI 1.4.7 with `gemini-3.1-pro-high`:
 actual `ahu_agents_list` invocation, local shell commands, file creation and
-removal, and local OTel export all succeeded without an approval prompt. Agy
-requires its native Ahu MCP registration, which `ahu setup` prepares; an empty
-native MCP configuration does not expose Ahu's tools. These observations cover
+removal, and local OTel export all succeeded without an approval prompt. Antigravity
+requires its native ahu MCP registration, which `ahu setup` prepares; an empty
+native MCP configuration does not expose ahu's tools. These observations cover
 the tested operations, not every possible native tool or managed policy.
 
 ### Work mode
