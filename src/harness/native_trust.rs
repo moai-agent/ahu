@@ -107,6 +107,7 @@ struct Receipt {
     home: PathBuf,
     // Claude's prior false value is restored; absent fields remain absent.
     prior_false: bool,
+    project_added: bool,
 }
 
 fn checked(path: &Path, directory: bool) -> Result<Option<fs::Metadata>> {
@@ -246,12 +247,13 @@ fn update(home: &Path, dir: &Path, harness: &str, worktree: &Path, remove: bool)
     };
     let root = doc.as_object_mut().ok_or_else(refused)?;
     let key = worktree.to_str().ok_or_else(refused)?;
-    let (already, prior_false) = if harness == "claude-code" {
+    let (already, prior_false, project_added) = if harness == "claude-code" {
         let projects = root
             .entry("projects")
             .or_insert_with(|| json!({}))
             .as_object_mut()
             .ok_or_else(refused)?;
+        let project_added = !projects.contains_key(key);
         let project = projects
             .entry(key)
             .or_insert_with(|| json!({}))
@@ -274,7 +276,10 @@ fn update(home: &Path, dir: &Path, harness: &str, worktree: &Path, remove: bool)
         } else {
             project.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
         }
-        (already, prior_false)
+        if remove && project.is_empty() && receipt.as_ref().is_some_and(|r| r.project_added) {
+            projects.remove(key);
+        }
+        (already, prior_false, project_added)
     } else {
         let entries = root
             .entry("trustedWorkspaces")
@@ -290,7 +295,7 @@ fn update(home: &Path, dir: &Path, harness: &str, worktree: &Path, remove: bool)
         } else if !already {
             entries.push(Value::String(key.into()));
         }
-        (already, false)
+        (already, false, false)
     };
     if !remove && already {
         return Ok(());
@@ -308,6 +313,7 @@ fn update(home: &Path, dir: &Path, harness: &str, worktree: &Path, remove: bool)
             worktree: worktree.into(),
             home: home.into(),
             prior_false,
+            project_added,
         };
         replace(
             &receipt_path,
@@ -447,6 +453,7 @@ mod tests {
             worktree: f.worktree.clone(),
             home: f.home.clone(),
             prior_false: true,
+            project_added: false,
         };
         fs::write(f.dir.join(RECEIPT), serde_json::to_vec(&receipt).unwrap()).unwrap();
         f.run("claude-code", false).unwrap();
@@ -543,6 +550,32 @@ mod tests {
         assert_eq!(fs::read(&f.path).unwrap(), b"{}");
         symlink(&f.path, f.dir.join(RECEIPT)).unwrap();
         assert!(f.run("claude-code", false).is_err());
+    }
+
+    #[test]
+    fn native_trust_removes_only_new_empty_projects_and_preserves_home_mode() {
+        for existing in [false, true] {
+            let f = Fixture::new("claude-code", json!({}));
+            if existing {
+                fs::write(
+                    &f.path,
+                    serde_json::to_vec(&json!({"projects":{f.worktree.to_str().unwrap():{}}}))
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+            fs::set_permissions(&f.home, fs::Permissions::from_mode(0o750)).unwrap();
+            f.run("claude-code", false).unwrap();
+            assert_eq!(fs::metadata(&f.home).unwrap().mode() & 0o777, 0o750);
+            f.run("claude-code", true).unwrap();
+            assert_eq!(
+                f.doc()["projects"]
+                    .get(f.worktree.to_str().unwrap())
+                    .is_some(),
+                existing
+            );
+            assert_eq!(fs::metadata(&f.home).unwrap().mode() & 0o777, 0o750);
+        }
     }
 
     #[test]
