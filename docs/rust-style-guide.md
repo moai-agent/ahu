@@ -43,6 +43,72 @@ and explicit invariants over clever abstractions or arbitrary size limits.
   Prefer existing facilities when they fit; do not reimplement security-sensitive
   behavior merely to avoid a dependency.
 
+## CLI behavior and plugin contracts
+
+The CLI is an API for operators, scripts, and agents. Keep command handlers thin:
+parse arguments, call domain operations, and render results. CLI and MCP entry
+points should use the same domain validation rather than maintain parallel rules.
+Do not call the ahu CLI from core Rust code to reuse its implementation.
+
+- Keep machine output separate from human presentation. In structured modes,
+  stdout contains only the documented result or protocol frames, without colors,
+  progress messages, or banners. Follow each command's stderr and exit-status
+  contract; do not silently change it to a new global convention.
+- Require explicit input sources for commands that read stdin. Headless and
+  structured operations must not wait for a terminal prompt. Missing required
+  input should produce an actionable error rather than select an implicit default.
+- Define ordering for user-visible lists when order has meaning; do not expose
+  accidental hash-map iteration order. Test semantic JSON values rather than
+  incidental whitespace, except where exact framing or byte limits matter.
+- Handle broken pipes, cancellation, and output limits deliberately. A failure
+  to deliver a result does not prove the underlying operation had no effects.
+  See the Rust CLI book's [machine communication guidance](https://rust-cli.github.io/book/in-depth/machine-communication.html).
+
+Use skills for workflows that existing CLIs already support. Use executable
+plugins for required machine contracts, keeping the process boundary independent
+of the plugin's implementation language. Do not introduce dynamic Rust library
+loading or require plugins to link the entire ahu core. Shared contract crates
+should contain protocol types and validation, not provider discovery, credentials,
+or workflow orchestration.
+
+- Keep the [one-shot protocol](executable-plugins.md) and
+  [session-host protocol](executable-hosts.md) distinct. Reuse their transport
+  implementations; do not merge their framing or privileges to reduce duplication.
+  Keep exact versions, limits, and error codes in those contract documents.
+- Separate package identity, protocol version, capabilities, and authorization.
+  A declared capability does not grant permission. Construct grants from trusted
+  host decisions, never from a plugin response or caller-supplied identity.
+  Treat plugin results as data, not instructions to execute or expand scope.
+- Make executable selection, working directory, environment, and all three
+  standard streams explicit at process boundaries. Rust's
+  [`Command` defaults](https://doc.rust-lang.org/std/process/struct.Command.html#method.new)
+  include inherited environment and working directory. Follow the selected
+  transport's environment policy; do not copy that policy onto native harness
+  launches, which have different configuration requirements.
+- Discovery, help, and inventory must not activate plugins or probe their accounts.
+  Do not fall back to an unpinned PATH executable when an installed package fails
+  verification. Keep provider references opaque and preserve frozen host identity
+  for existing tasks; removal must not redirect their cleanup to another host.
+- Validate framing, versions, request identity, and payload limits before using
+  a response. Define unknown-field behavior in the contract; do not use permissive
+  deserialization defaults to conceal an incompatible peer. Reject unsupported
+  versions with an actionable error rather than speculative compatibility layers.
+- Distinguish refusal before dispatch, confirmed completion, and unknown effects
+  after dispatch. A timeout is not proof that a write failed. Do not automatically
+  retry or reconnect after mutations; any retry needs an explicit idempotency or
+  reconciliation contract. Provider recovery belongs in the plugin; a tracker
+  error must never restart an agent task.
+- Keep telemetry outside protocol output. Use existing bounded events and
+  allowlisted attributes; do not attach input, output, environment, or native
+  diagnostics to spans. Telemetry failure must not turn successful execution
+  into a retry of its effects.
+
+For a contract change, include a short review note: the concrete consumer,
+why a skill or existing contract is insufficient, inputs and outputs, authority,
+side effects, failure/unknown outcomes, and the tests proving the boundary.
+Update the contract documentation and independent authoring example together
+when their behavior changes. Do not expand the core solely for one provider.
+
 ## Types and ownership
 
 - Represent distinct states with enums and validate inputs at boundaries.
@@ -112,6 +178,16 @@ and explicit invariants over clever abstractions or arbitrary size limits.
 - Exercise failure, interruption, and recovery where state changes or resources
   are involved. Use deterministic synchronization instead of timing sleeps to
   prove ordering. Keep live compatibility checks separate from fixture coverage.
+- For plugin transport changes, use an independent executable fixture that
+  speaks the documented wire format. Include hand-authored invalid frames so
+  matching host/client serialization mistakes cannot hide a protocol defect.
+  Cover missing or revoked grants, absent providers, malformed and partial
+  output, blocked streams, timeout after a side effect, and child cleanup as
+  applicable. Verify refused activation does not execute the fixture.
+- Exercise CLI contracts through the built executable, including exit status,
+  stdout, stderr, and non-terminal input. Test operation without optional provider
+  binaries or credentials. A live provider test belongs in its plugin repository;
+  a core fixture pass is not a claim of provider compatibility.
 - Document public contracts, units, side effects, and failure conditions with
   rustdoc. Explain surprising invariants and tradeoffs in comments; avoid narrating
   syntax or preserving obsolete implementation history.
