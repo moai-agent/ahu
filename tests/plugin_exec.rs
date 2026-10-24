@@ -16,6 +16,32 @@ use std::time::{Duration, Instant};
 use common::plugin::Fixture;
 
 #[test]
+fn non_host_grants_do_not_select_a_session_host() {
+    let mut fixture = Fixture::new("normal");
+    fixture.install();
+    for grants in [
+        vec![],
+        vec![Grant::ReadProjectContext],
+        vec![Grant::Execute],
+    ] {
+        fixture.binding.grants = grants;
+        fixture.save(true);
+        let inventory = fixture.cli(&["plugins", "--output", "json"]);
+        let entry = inventory["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "fixture")
+            .unwrap();
+        assert_ne!(
+            entry["selected"], true,
+            "non-host binding became a session host"
+        );
+        assert!(!fixture.root.join("started").exists());
+    }
+}
+
+#[test]
 fn executable_grants_do_not_forward_ambient_environment() {
     let mut fixture = Fixture::new("environment");
     fixture.install();

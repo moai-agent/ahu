@@ -36,17 +36,11 @@ pub(crate) fn selection(repo: Option<&crate::git::Repo>) -> Result<Selection> {
             .bindings
             .into_iter()
             .filter(|s| {
-                // Generic-only bindings are not session hosts. Preserve the
-                // existing fail-closed selection for legacy grantless bindings.
+                // Only an explicit host grant participates in default host selection.
                 s.binding.enabled
-                    && (s
-                        .binding
+                    && s.binding
                         .grants
                         .contains(&crate::plugin_binding::Grant::InteractiveBackend)
-                        || !s
-                            .binding
-                            .grants
-                            .contains(&crate::plugin_binding::Grant::Execute))
             })
             .map(|s| s.binding.id)
             .collect();

@@ -7,7 +7,7 @@ with YAML frontmatter. Native harness files keep their native formats.
 | --- | --- |
 | `.agents/ahu/config.md` | `type: ahu:project`; strict project settings in `ahu` |
 | `.agents/ahu/lock.md` | `type: ahu:lock`; generated shared pins in `ahu` |
-| `.agents/ahu/plugins/<id>.md` | `type: ahu:plugin-binding`; inert typed binding foundation |
+| `.agents/ahu/plugins/<id>.md` | `type: ahu:plugin-binding`; committed source pins, compatibility, activation and grants |
 | `.agents/ahu/config.toml`, `ahu.lock` | v0.11 bounded legacy readers; explicit migration only |
 | `.ahu/migrations/project-okf-v1/journal.json` | Ignored local transaction, source digests, modes, repository/base identity and exact backups |
 | Task/runtime JSON, private auth bindings and local acceptance | Existing private storage and formats |

@@ -163,12 +163,15 @@ impl Process {
             }
             // Reject unsolicited or leftover bytes before starting another request.
             let mut extra = [0];
-            match self.output.read(&mut extra) {
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                _ => {
-                    return Err(Error::new(
-                        "external host exited or sent unsolicited output",
-                    ));
+            loop {
+                match self.output.read(&mut extra) {
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    _ => {
+                        return Err(Error::new(
+                            "external host exited or sent unsolicited output",
+                        ));
+                    }
                 }
             }
             let id = self.next_id;

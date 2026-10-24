@@ -634,7 +634,7 @@ fn is_unchanged_copy(worktree_root: &Path, entry: &SnapshotEntry) -> bool {
 /// Each file is verified again immediately before it is unlinked: a copy that
 /// changed after the gate ran is left in place and named, and the caller's
 /// removal fails rather than discarding it. Only files already proven
-/// byte-identical to configuration that still exists in the parent checkout
+/// byte-identical to the configuration snapshot recorded at launch
 /// are removed; no directory is pruned.
 pub fn discard_unchanged_copies(
     worktree_root: &Path,

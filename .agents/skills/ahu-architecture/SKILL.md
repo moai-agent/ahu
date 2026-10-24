@@ -182,8 +182,9 @@ flowchart LR
     style N fill:#fdf1e7,stroke:#b5651d
 ```
 
-The session host receives startup `argv`. A host that serializes `argv` through a
-shell must preserve argument boundaries; that transport belongs to the plugin. The prompt is written to a
+The session host receives a startup command string containing ahu’s executable
+path and task directory, each shell-quoted by core. A host that uses a shell must
+preserve that quoting; the provider transport belongs to the plugin. The prompt is written to a
 file and handed to the harness as one argument vector element. Shell syntax inside
 a prompt is therefore delivered literally and never evaluated.
 
