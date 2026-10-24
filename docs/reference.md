@@ -574,6 +574,11 @@ control has been established for these adapters. Native homes stay in place;
 configuration-directory overrides refuse this preparation rather than guessing
 another store. Other harnesses retain their native trust behavior.
 
+If cleanup reports a native configuration-directory override, retry `ahu remove`
+with the original `HOME` and the named override unset for that invocation. Keep
+the task's `native-trust.json` receipt until cleanup succeeds; deleting it would
+discard the information needed to reverse Ahu-added trust.
+
 Ahu preserves unrelated fields, existing trust and native project history.
 A small write-ahead receipt records only the exact target and prior trust state.
 `ahu remove` reverses Ahu-added trust before deleting the task, including tasks

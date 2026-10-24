@@ -26,15 +26,24 @@ fn eligible(harness: &str, permissions: Permissions) -> bool {
     permissions == Permissions::Auto && matches!(harness, "claude-code" | "antigravity")
 }
 
-fn home(harness: &str) -> Result<PathBuf> {
+fn default_store(harness: &str, is_set: impl Fn(&str) -> bool) -> Result<()> {
     let overrides: &[&str] = if harness == "claude-code" {
         &["CLAUDE_CONFIG_DIR"]
     } else {
         &["GEMINI_CLI_HOME", "AGY_CONFIG_DIR"]
     };
-    if overrides.iter().any(|key| std::env::var_os(key).is_some()) {
-        return Err(refused());
+    for key in overrides {
+        if is_set(key) {
+            return Err(Error::new(format!(
+                "native task trust refused: {key} is set; relocated native trust stores are unsupported. Retry with the original HOME and {key} unset for this invocation; do not delete the task's native-trust receipt"
+            )));
+        }
     }
+    Ok(())
+}
+
+fn home(harness: &str) -> Result<PathBuf> {
+    default_store(harness, |key| std::env::var_os(key).is_some())?;
     let home = PathBuf::from(std::env::var_os("HOME").ok_or_else(refused)?);
     if !home.is_absolute() || home.canonicalize()? != home {
         return Err(refused());
@@ -247,7 +256,7 @@ fn update(home: &Path, dir: &Path, harness: &str, worktree: &Path, remove: bool)
     };
     let root = doc.as_object_mut().ok_or_else(refused)?;
     let key = worktree.to_str().ok_or_else(refused)?;
-    let (already, prior_false, project_added) = if harness == "claude-code" {
+    let (already, prior_false, project_added, project_entry_removed) = if harness == "claude-code" {
         let projects = root
             .entry("projects")
             .or_insert_with(|| json!({}))
@@ -276,10 +285,14 @@ fn update(home: &Path, dir: &Path, harness: &str, worktree: &Path, remove: bool)
         } else {
             project.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
         }
-        if remove && project.is_empty() && receipt.as_ref().is_some_and(|r| r.project_added) {
+        let project_entry_removed = remove
+            && !project_added
+            && project.is_empty()
+            && receipt.as_ref().is_some_and(|r| r.project_added);
+        if project_entry_removed {
             projects.remove(key);
         }
-        (already, prior_false, project_added)
+        (already, prior_false, project_added, project_entry_removed)
     } else {
         let entries = root
             .entry("trustedWorkspaces")
@@ -295,7 +308,7 @@ fn update(home: &Path, dir: &Path, harness: &str, worktree: &Path, remove: bool)
         } else if !already {
             entries.push(Value::String(key.into()));
         }
-        (already, false, false)
+        (already, false, false, false)
     };
     if !remove && already {
         return Ok(());
@@ -322,7 +335,7 @@ fn update(home: &Path, dir: &Path, harness: &str, worktree: &Path, remove: bool)
             8192,
         )?;
     }
-    if !remove || already {
+    if !remove || already || project_entry_removed {
         replace(&path, before.as_deref(), &after, LIMIT)?;
     }
     if remove {
@@ -336,6 +349,42 @@ fn update(home: &Path, dir: &Path, harness: &str, worktree: &Path, remove: bool)
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn native_trust_override_diagnostics_name_only_the_key_and_remedy() {
+        for (harness, key) in [
+            ("claude-code", "CLAUDE_CONFIG_DIR"),
+            ("antigravity", "GEMINI_CLI_HOME"),
+            ("antigravity", "AGY_CONFIG_DIR"),
+        ] {
+            let error = default_store(harness, |candidate| candidate == key)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(key));
+            assert!(error.contains("unset for this invocation"));
+            assert!(error.contains("do not delete"));
+            default_store(harness, |_| false).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_trust_cleanup_persists_empty_project_removal_after_native_revocation() {
+        let f = Fixture::new("claude-code", json!({}));
+        f.run("claude-code", false).unwrap();
+        let mut native = f.doc();
+        native["projects"][f.worktree.to_str().unwrap()]
+            .as_object_mut()
+            .unwrap()
+            .remove("hasTrustDialogAccepted");
+        fs::write(&f.path, serde_json::to_vec(&native).unwrap()).unwrap();
+        f.run("claude-code", true).unwrap();
+        assert!(
+            f.doc()["projects"]
+                .get(f.worktree.to_str().unwrap())
+                .is_none()
+        );
+        assert!(!f.dir.join(RECEIPT).exists());
+    }
 
     struct Fixture {
         _tmp: tempfile::TempDir,

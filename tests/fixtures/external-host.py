@@ -101,8 +101,14 @@ while True:
         if MODE == "stderr_flood":
             os.write(2, b"x" * (1024 * 1024))
     elif method == "verify_task_session":
-        if params["session_ref"] != "fixture-session-ref" or "workspace" not in workspaces:
+        if "workspace" not in workspaces:
             response["result"] = "absent"
+        elif params["session_ref"] != "fixture-session-ref":
+            # This negative fixture cannot establish ownership without its
+            # reference. An existing workspace is not proof of absence: Host V2
+            # recovery must refuse unverifiable ownership rather than allow
+            # Ahu to delete the worktree beneath a potentially live session.
+            response["result"] = "mismatch"
         elif (workspaces["workspace"]["directory"] != params["expected_directory"]
               or MODE == "wrong_window"):
             response["result"] = "mismatch"
