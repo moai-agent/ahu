@@ -1,6 +1,6 @@
 ---
 ahu:
-  digest: c5d3111df302da9c9719895d883b50c6221edd8af790b06b25b8c5ef8dd0e7a3
+  digest: 51b139aca5f6411ad87ec2fd051621b80a3d714738d36b69c0c149b6d097e97b
   entries:
   - bytes: 5396
     digest: ed5443c8bd032b30df7e4645eedd89e6eccb888be0838edba8e1218b9c59b4e0
@@ -22,36 +22,36 @@ ahu:
     digest: eab704102ba283145e69774bd9a148371f931e0caf3c8226da64ea56f405cad6
     executable: false
     path: .agents/ahu/agents/defsec-agy.md
-  - bytes: 6424
-    digest: e617b783f8e0f9c941dfe3dc50e60bf576e6ca775026f032c61504be29e179aa
+  - bytes: 6476
+    digest: ae6f0e598b0b70d05e572c19f5e555f6885cfed8f5cc1bc8fa1150986c5a968f
     executable: false
     path: .agents/ahu/agents/defsec-astra.md
-  - bytes: 6428
-    digest: 496e00c058507e58d15f96d40fe49b836d53d10a035cdd0f5ef04faaff08f0dd
+  - bytes: 6480
+    digest: 3108a7a428baa280acdb9b3fb0d94470c605be178eff18b4bbfee0c891f917c5
     executable: false
     path: .agents/ahu/agents/defsec-glm.md
-  - bytes: 6428
-    digest: f8469d274ba94622e155faa70a08402117aac4c278052c1fa034637b7cbe7f2e
+  - bytes: 6480
+    digest: bba7b247b21730a31dc3acaca956e26a39a7bdc1dd31432517adc8ed4f8e0a9d
     executable: false
     path: .agents/ahu/agents/defsec-opus.md
-  - bytes: 5286
-    digest: 7f1bdd60381da751983c0d53f5f5d53497560408dee0bcf7727e2529e2334a76
+  - bytes: 5338
+    digest: 3ad4505f1cb76f8ad65be056e0cc2324a8e1c15a2248e2e1570d5f5b433ac78e
     executable: false
     path: .agents/ahu/agents/dev-agy.md
-  - bytes: 6335
-    digest: 7d2c472051b4866d51a0396aa122fd8dcd92afad39219c9daa7a910608c590d3
+  - bytes: 6387
+    digest: 35eb43b73db32f04a2d4e9f69567c084764f2d28dd4af41d07450d67f56b4fc2
     executable: false
     path: .agents/ahu/agents/dev-astra.md
-  - bytes: 6339
-    digest: 31fc7c8b63432027b9d26ed26f405cb772da1f692609ca88ff934b39d0eea5a6
+  - bytes: 6391
+    digest: 984f6830378f3dda6429b84c9e8ba1a459e877dff55e4d7715668ad40ab185f8
     executable: false
     path: .agents/ahu/agents/dev-glm.md
   - bytes: 1262
     digest: 705e112d18e8aa0b5891cbc70f01a31413e201b080cec2aa71c1fb79d7955740
     executable: false
     path: .agents/ahu/agents/dev-kiro.md
-  - bytes: 3325
-    digest: 8e905d14f141ed7cf5b540820e2ae5fc14224ca7400a4f5f4f4c48f0f5a764b7
+  - bytes: 3342
+    digest: d0cba8ce963c99be97fb61934c9f90df8df2919506b76f7b3ae77926d81ecf53
     executable: false
     path: .agents/ahu/agents/dev-opus.md
   - bytes: 1424
@@ -74,8 +74,8 @@ ahu:
     digest: 0422aa03b769fd524d2d2de445d4a854bc06b28bfae1a1cbef4422b538eb2b5f
     executable: false
     path: .agents/ahu/agents/eval-agy.md
-  - bytes: 5897
-    digest: 3510d19222fc4a3264fb35a9cb46995046accb2ceda6fe3a115c9ed29d499d81
+  - bytes: 5949
+    digest: 075fc4fed9e48de58e849ecd0d24e8bb766fbd68dfbee55da94e45cf25641279
     executable: false
     path: .agents/ahu/agents/offsec-astra.md
   - bytes: 1285

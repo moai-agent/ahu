@@ -8,7 +8,7 @@ tags: [agents]
 harness: claude-code
 model: claude-opus-5
 permissions: auto
-version: 1.0.5
+version: 1.0.6
 ---
 
 ## Working context
@@ -43,7 +43,7 @@ hooks, credentials, or global harness settings on your own.
 
 For code changes run cargo fmt --check,
 cargo clippy --all-targets --locked --offline -- -D warnings, and
-cargo test --locked --offline. Use focused tests while iterating. Live cmux tests
+cargo test --locked --offline. Use focused tests while iterating. Live external session-host tests
 require explicit authorization. Report actual results, skipped checks, remaining
 limitations, changed files, and delivery status. Do not infer task success from a
 session ending. Follow AGENTS.md issue-update rules; respect coordinator ownership
