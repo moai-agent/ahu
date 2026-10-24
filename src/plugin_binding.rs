@@ -71,6 +71,7 @@ pub struct Compatibility {
 #[serde(rename_all = "kebab-case")]
 pub enum Grant {
     InteractiveBackend,
+    HarnessLaunch,
     Execute,
     ReadProjectContext,
 }
@@ -207,6 +208,7 @@ mod tests {
         for grants in [
             vec![],
             vec![Grant::Execute],
+            vec![Grant::HarnessLaunch],
             vec![Grant::InteractiveBackend],
             vec![Grant::ReadProjectContext],
             vec![
@@ -229,6 +231,7 @@ mod tests {
                         .iter()
                         .map(|grant| match grant {
                             Grant::Execute => "execute".into(),
+                            Grant::HarnessLaunch => "harness-launch".into(),
                             Grant::InteractiveBackend => "interactive-backend".into(),
                             Grant::ReadProjectContext => "read-project-context".into(),
                         })

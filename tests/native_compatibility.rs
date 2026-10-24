@@ -199,6 +199,7 @@ fn opencode_v2_launch_normalization_is_idempotent() {
     .unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut command = ahu::harness::LaunchCommand {
+        planner_binding_digest: None,
         program: "opencode".into(),
         args: ["--model", "ollama/glm-5.3:cloud", "--prompt", "task"]
             .into_iter()

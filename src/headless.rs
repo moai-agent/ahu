@@ -405,6 +405,7 @@ pub fn batch_command(
     let prompt_arg = Some(args.len());
     args.push(request.prompt.to_string());
     Ok(LaunchCommand {
+        planner_binding_digest: None,
         program: program.into(),
         args,
         prompt_arg,
@@ -1215,7 +1216,8 @@ pub fn launch(
         },
     )?;
     plan.delivery = delivery;
-    plan.command = batch_command(
+    plan.command = crate::harness::task_command(
+        repo,
         &plan.pair.harness,
         &LaunchRequest {
             model: &plan.pair.model,
@@ -1223,7 +1225,7 @@ pub fn launch(
             cwd: &plan.worktree,
             permissions,
         },
-        &spec,
+        Some(&spec),
     )?;
     plan.harness_executable = executable;
     plan.task_dir = store(repo)?.join(&plan.task_id);

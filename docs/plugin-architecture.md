@@ -77,3 +77,9 @@ Test core contracts offline and provider behavior in each plugin. Record live
 checks separately from fixtures and publication verification. Do not claim a
 provider works because an independent fixture passed. Keep private bindings,
 tracker content and raw telemetry out of public source and release artifacts.
+
+## Harness extraction experiment
+
+The [Codex launch-planner pilot](harness-plugin-pilot.md) tests a dedicated
+executable boundary behind an experimental build feature. It is not a complete
+harness extraction or a change to the supported default installation.

@@ -300,12 +300,17 @@ fn plan_with_mode(
         prompt,
         crate::orchestration::Composition::interactive(Some(metadata)),
     )?;
-    let command = adapter.launch_command(&LaunchRequest {
-        model: &pair.model,
-        prompt: &delivered,
-        cwd: &worktree,
-        permissions,
-    })?;
+    let command = harness::task_command(
+        repo,
+        &pair.harness,
+        &LaunchRequest {
+            model: &pair.model,
+            prompt: &delivered,
+            cwd: &worktree,
+            permissions,
+        },
+        None,
+    )?;
     let harness_executable = crate::selection::resolve_executable(&command.program)
         .map(PathBuf::from)
         .ok_or_else(|| {
@@ -1022,18 +1027,14 @@ pub(crate) fn verify_task(
         }
     }
 
-    let adapter = harness::adapter_for(&record.identity.harness)?;
     let request = LaunchRequest {
         model: &record.identity.model,
         prompt: &delivered,
         cwd: &record.worktree,
         permissions: record.identity.permissions,
     };
-    let mut rebuilt = if let Some(spec) = batch {
-        crate::headless::batch_command(&record.identity.harness, &request, spec)?
-    } else {
-        adapter.launch_command(&request)?
-    };
+    let mut rebuilt =
+        harness::task_command(&discovered, &record.identity.harness, &request, batch)?;
     let executable = crate::selection::resolve_executable(&rebuilt.program)
         .map(std::path::PathBuf::from)
         .ok_or_else(|| {

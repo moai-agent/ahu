@@ -33,6 +33,7 @@ mod executable_pin;
 pub mod explain;
 pub mod git;
 pub mod harness;
+pub mod harness_plugin;
 pub mod hooks;
 pub mod interactive;
 pub mod knowledge;

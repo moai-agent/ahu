@@ -50,6 +50,10 @@ pub struct LaunchRequest<'a> {
 pub struct LaunchCommand {
     pub program: String,
     pub args: Vec<String>,
+    /// Digest of the committed planner binding; prevents changing planner policy
+    /// or rebuilding a plugin-planned task through a built-in adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_binding_digest: Option<String>,
     /// Index in `args` holding the task prompt, when one is passed there.
     ///
     /// Task records store the command with this element replaced, so a prompt is
@@ -186,6 +190,23 @@ pub fn adapter_for(harness_id: &str) -> Result<Box<dyn Adapter>> {
             "ahu has no validated adapter for harness {other:?}. \
              It will not substitute another harness."
         ),
+    }
+}
+
+/// Pilot dispatch; the selected external path never falls back on failure.
+pub(crate) fn task_command(
+    repo: &crate::git::Repo,
+    harness: &str,
+    request: &LaunchRequest<'_>,
+    batch: Option<&crate::headless::Spec>,
+) -> Result<LaunchCommand> {
+    if cfg!(feature = "codex-plugin-pilot") && harness == "codex" {
+        return crate::harness_plugin::plan(repo, harness, request, batch);
+    }
+    if let Some(spec) = batch {
+        crate::headless::batch_command(harness, request, spec)
+    } else {
+        adapter_for(harness)?.launch_command(request)
     }
 }
 

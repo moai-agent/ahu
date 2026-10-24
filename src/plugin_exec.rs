@@ -190,56 +190,19 @@ pub fn invoke(
             .entrypoint
             .as_ref()
             .ok_or_else(|| crate::util::Error::new("no entrypoint"))?;
-        let mut source = local::entrypoint_file(&status)?;
-        let bytes = crate::util::read_limited(&mut source, 64 * 1024 * 1024)?;
-        if crate::util::digest_bytes(&bytes)
-            != crate::plugin_install::verified_file_digest(
-                &installation.join("package"),
-                &binding,
-                &spec.path,
-            )?
-        {
-            return Err(crate::util::Error::new(
-                "plugin entrypoint changed after its package pin was verified",
-            ));
-        }
-        let base = std::env::temp_dir().canonicalize()?;
-        crate::interactive::external::validate_snapshot_base(&base)?;
-        let snapshot = tempfile::Builder::new()
-            .prefix("ahu-plugin-")
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir_in(base)?;
-        let executable = snapshot.path().join("entrypoint");
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::File::options()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&executable)?;
-        file.write_all(&bytes)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o500))?;
-        drop(file);
-        Ok((snapshot, executable, Duration::from_millis(spec.timeout_ms)))
+        prepare_executable(repo, &binding, &spec.path, spec.timeout_ms)
     })()
     .map_err(|_| Failure::before(Code::Unavailable))?;
     let (snapshot, executable, timeout) = prepared;
     check_cancel()?;
-    let deadline = Instant::now() + timeout;
-    let mut command = Command::new(executable);
-    command
-        .arg("--ahu-plugin-protocol=1")
-        .current_dir(snapshot.path())
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
-    let child = command
-        .spawn()
-        .map_err(|_| Failure::before(Code::Unavailable))?;
-    let mut process = Process { child: Some(child) };
-    let output = exchange(&mut process, &request, deadline, cancelled)?;
+    let output = run_bounded(
+        &snapshot,
+        &executable,
+        "--ahu-plugin-protocol=1",
+        &request,
+        timeout,
+        cancelled,
+    )?;
     let response: Response = from_slice(&output).map_err(|_| Failure::after(Code::Protocol))?;
     match response {
         Response::Ok {
@@ -255,6 +218,77 @@ pub fn invoke(
         }
         _ => Err(Failure::after(Code::Protocol)),
     }
+}
+
+/// Shared executable verification/snapshot mechanics, not a shared wire protocol.
+pub(crate) fn prepare_executable(
+    repo: &Repo,
+    binding: &crate::plugin_binding::Binding,
+    path: &str,
+    timeout_ms: u64,
+) -> crate::util::Result<(tempfile::TempDir, std::path::PathBuf, Duration)> {
+    let store = crate::state::checkout_root(&repo.primary_root()?)?.join("plugins");
+    let installation = crate::plugin_install::installed(&store, binding)?;
+    crate::plugin_install::verify_installed(&installation, binding)?;
+    let package = installation.join("package");
+    let mut source = local::package_executable(&package, path)?;
+    let bytes = crate::util::read_limited(&mut source, 64 * 1024 * 1024)?;
+    if crate::util::digest_bytes(&bytes)
+        != crate::plugin_install::verified_file_digest(&package, binding, path)?
+    {
+        return Err(crate::util::Error::new(
+            "plugin executable changed after verification",
+        ));
+    }
+    let base = std::env::temp_dir().canonicalize()?;
+    crate::interactive::external::validate_snapshot_base(&base)?;
+    let snapshot = tempfile::Builder::new()
+        .prefix("ahu-plugin-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(base)?;
+    let executable = snapshot.path().join("entrypoint");
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&executable)?;
+    file.write_all(&bytes)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o500))?;
+    drop(file);
+    Ok((snapshot, executable, Duration::from_millis(timeout_ms)))
+}
+
+pub(crate) fn run_bounded(
+    snapshot: &tempfile::TempDir,
+    executable: &std::path::Path,
+    protocol_argument: &str,
+    request: &[u8],
+    timeout: Duration,
+    cancelled: &AtomicBool,
+) -> Result<Vec<u8>> {
+    if request.len() > MAX_BYTES {
+        return Err(Failure::before(Code::InvalidInput));
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(Failure::before(Code::Cancelled));
+    }
+    let deadline = Instant::now() + timeout;
+    let mut command = Command::new(executable);
+    command
+        .arg(protocol_argument)
+        .current_dir(snapshot.path())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let child = command
+        .spawn()
+        .map_err(|_| Failure::before(Code::Unavailable))?;
+    let mut process = Process { child: Some(child) };
+    exchange(&mut process, request, deadline, cancelled)
 }
 
 // Shared committed policy gate. Task observations are collected only after this

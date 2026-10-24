@@ -100,6 +100,7 @@ impl Adapter for Kiro {
         let prompt_arg = Some(args.len());
         args.push(request.prompt.into());
         Ok(LaunchCommand {
+            planner_binding_digest: None,
             program: "kiro-cli".into(),
             args,
             prompt_arg,

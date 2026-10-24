@@ -1,0 +1,5 @@
+# Package identity only. Installation never builds or executes this Python plugin.
+[package]
+name = "ahu-experiment-harness-codex"
+version = "0.1.0"
+publish = false

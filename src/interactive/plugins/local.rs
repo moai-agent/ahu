@@ -403,11 +403,20 @@ pub(crate) fn read_package(root: &Path) -> Result<PluginStatus> {
         entrypoint.validate()?;
         validate_executable(&open_relative(&directory, &entrypoint.path)?)?;
     }
+    if let Some(value) = manifest.metadata.get("harness_launch") {
+        let spec: crate::harness_plugin::Declaration = serde_json::from_value(value.clone())?;
+        spec.validate()?;
+        validate_executable(&open_relative(&directory, &spec.path)?)?;
+    }
     let activation_blocker = if manifest.executable.is_some() {
         None
     } else if manifest.entrypoint.is_some() {
         Some(
             "This package has a generic entrypoint but no session host; use ahu plugins invoke ID --input-file PATH|- or the plugin_exec host API.",
+        )
+    } else if manifest.metadata.contains_key("harness_launch") {
+        Some(
+            "This package is an experimental harness launch planner, not a session host or one-shot action.",
         )
     } else {
         Some(LOADING_BLOCKER)
@@ -502,19 +511,9 @@ fn validate_executable(file: &File) -> Result<()> {
     Ok(())
 }
 
-/// Reopen a generic entrypoint through the same no-symlink package boundary.
-pub(crate) fn entrypoint_file(status: &PluginStatus) -> Result<File> {
-    let root = status
-        .manifest
-        .as_ref()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| invalid("package has no manifest root"))?;
-    let spec = status
-        .entrypoint
-        .as_ref()
-        .ok_or_else(|| invalid("package has no generic entrypoint"))?;
-    spec.validate()?;
-    let file = open_relative(&open_root(root)?, &spec.path)?;
+/// Reopen an explicitly declared executable without following package symlinks.
+pub(crate) fn package_executable(root: &Path, path: &str) -> Result<File> {
+    let file = open_relative(&open_root(root)?, path)?;
     validate_executable(&file)?;
     Ok(file)
 }

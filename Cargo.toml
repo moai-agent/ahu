@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "ahu"
 path = "src/lib.rs"
 
+[features]
+# Local architecture experiment; not a published harness compatibility claim.
+codex-plugin-pilot = []
+
 [dependencies]
 ahu-host-api = { version = "0.1.0", path = "crates/ahu-host-api" }
 tempfile = "3"

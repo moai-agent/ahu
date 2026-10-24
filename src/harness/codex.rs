@@ -72,6 +72,7 @@ impl Adapter for Codex {
         let prompt_arg = Some(args.len());
         args.push(request.prompt.to_string());
         Ok(LaunchCommand {
+            planner_binding_digest: None,
             program: "codex".to_string(),
             args,
             prompt_arg,
