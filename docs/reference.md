@@ -2062,6 +2062,100 @@ the task record freezes its package identity for later focus and cleanup. ahu
 contains no compiled cmux session adapter. Providers run with the user's OS
 permissions; plugin separation is an integration boundary, not a sandbox.
 
+## Committed project plugin bindings
+
+A package describes its capabilities in `ahu-plugin.md`. A project separately
+pins and authorizes that package in `.agents/ahu/plugins/<id>.md`.
+`ahu plugins --project` reads committed bindings and reports compatibility;
+it does not install packages, invoke providers, or check provider credentials.
+See [binding fields](project-documents.md#plugin-binding-foundation) for the
+strict schema and [plugin architecture](plugin-architecture.md) for the boundary.
+
+For a reviewed local checkout, run `ahu plugins digest /absolute/package/path`.
+Use the returned digest for both `revision` and `sha256`. For example, this is
+the complete binding shape for a one-shot package named `example`:
+
+```yaml
+---
+okf_version: "0.2"
+type: ahu:plugin-binding
+ahu:
+  schema_version: 1
+  id: example
+  version: "1.0.0"
+  source:
+    kind: local
+    repository: /absolute/reviewed-checkout
+    subdirectory: package
+    revision: <digest-from-ahu-plugins-digest>
+    sha256: <digest-from-ahu-plugins-digest>
+  compatibility:
+    ahu: "0.11.0"
+    host_api: 1
+  enabled: false
+  grants: [execute]
+---
+Reviewed optional integration.
+```
+
+Replace the example identity, version, source location and digests with the
+reviewed package's values. Omit `subdirectory` when `repository` already names
+the package directory. Session hosts use `grants: [interactive-backend]` instead;
+one-shot JSON entrypoints need `execute`. Neither grant confines the executable.
+Never include credentials or private tracker associations in a shared binding.
+For a complete runnable example without an external provider, use the
+[text statistics walkthrough](../examples/plugins/text-stats/README.md).
+
+## Project-local installation lifecycle
+
+Review and commit a disabled binding before installation. Installation verifies
+the pinned package and copies it into project-local storage; it does not execute
+package code or install provider dependencies. A local snapshot's revision equals
+its content digest. A Git source instead pins a full commit revision and the
+selected package's content digest; use credential-free HTTPS or a supported local
+Git source. Remote credentials and redirects are disabled.
+
+From the consuming project, replacing `example` with the binding ID:
+
+```sh
+ahu plugins install example
+ahu plugins installed --output json
+ahu plugins enable example
+ahu lock --update
+git diff -- .agents/ahu/plugins/example.md .agents/ahu/lock.md
+```
+
+Review and commit the changed binding and lock before invocation or agent launch.
+Enable/disable change project policy; they do not run the package. Invoke a
+one-shot package with `ahu plugins invoke example --input-file request.json`,
+using its documented request shape. See the
+[foreground invocation contract](executable-plugins.md#foreground-cli-invocation)
+for grants, operator restrictions, output and errors.
+
+To turn the integration off, run `ahu plugins disable example`, refresh the lock
+with `ahu lock --update`, then review and commit both files. Invocation must now
+be refused. `ahu plugins remove example` removes the installed package while
+retaining the binding; inspect `ahu plugins installed --output json` afterward.
+Finish and remove tasks using a session host before disabling or removing it:
+existing tasks retain their frozen host identity and uncertain ownership can
+block cleanup. Changing a pin does not migrate existing tasks to another package.
+
+## Local session package discovery and selection
+
+`ahu plugins` inventories package metadata without executing it. Package metadata
+alone does not grant activation; the committed binding, compatibility, digest,
+executable declaration and `interactive-backend` grant must all pass verification.
+For package fields, framing and ownership semantics, see
+[executable session hosts](executable-hosts.md).
+
+The current terminal needs no host package. To select an enabled host explicitly,
+set `AHU_INTERACTIVE_PLUGIN` to its binding ID. For example,
+`AHU_INTERACTIVE_PLUGIN=example-host ahu plugins --probe` starts the selected
+host only for protocol negotiation, then closes the connection. A successful probe
+is not a live task or provider authentication test. `none` or `terminal` selects
+the current terminal. Coordinator shortcuts require explicit plugin selection;
+headless execution does not select a session host.
+
 ## Native hook safety inspection
 
 ahu performs bounded, read-only inspection of native hook configuration that can affect headless launches. It does not invoke the cmux CLI, install native hooks, or manage session hosting. Session creation, inventory, focus, and cleanup use the selected external session-host plugin through Host V2.
