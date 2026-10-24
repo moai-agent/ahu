@@ -125,7 +125,33 @@ fn entries(bytes: &[u8]) -> Result<Vec<Entry>> {
         .collect()
 }
 
+// Older Git can ignore GIT_NO_LAZY_FETCH and change partial-clone config before
+// the transport denylist stops its fetch. Probe the explicit option; without
+// it, refuse partial-clone repositories before reading any objects.
+fn ensure_offline_objects(root: &Path) -> Result<()> {
+    let (status, _, _) = git_output(root, &["--no-lazy-fetch", "--version"], 1024)?;
+    if status.success() {
+        return Ok(());
+    }
+    let (status, bytes, diagnostics) = git_output(
+        root,
+        &[
+            "config",
+            "--get-regexp",
+            "^(remote\\..*\\.(promisor|partialclonefilter)|extensions\\.partialclone)$",
+        ],
+        MAX_TREE_BYTES,
+    )?;
+    if status.code() == Some(1) && bytes.is_empty() && diagnostics == 0 {
+        return Ok(());
+    }
+    Err(Error::new(
+        "offline plugin inventory requires Git with --no-lazy-fetch support when partial-clone settings are present; upgrade Git or use a full clone",
+    ))
+}
+
 pub fn inventory(root: &Path) -> Result<Inventory> {
+    ensure_offline_objects(root)?;
     let (status, bytes, _) = git_output(root, &["rev-parse", "--verify", "HEAD^{commit}"], 128)?;
     if !status.success() {
         // An unborn HEAD is a symbolic branch whose ref is absent. A failed
@@ -175,6 +201,7 @@ pub(crate) fn inventory_at(root: &Path, revision: &str) -> Result<Inventory> {
     if !oid(revision) {
         return Err(Error::new("invalid project commit"));
     }
+    ensure_offline_objects(root)?;
     let revision = revision.to_owned();
     let mut report = Inventory {
         schema_version: 1,

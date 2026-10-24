@@ -2068,6 +2068,9 @@ A package describes its capabilities in `ahu-plugin.md`. A project separately
 pins and authorizes that package in `.agents/ahu/plugins/<id>.md`.
 `ahu plugins --project` reads committed bindings and reports compatibility;
 it does not install packages, invoke providers, or check provider credentials.
+Partial-clone repositories require a Git executable that supports
+`--no-lazy-fetch`; older Git may change repository configuration before refusing
+a fetch. With older Git, use a full clone for offline plugin inventory.
 See [binding fields](project-documents.md#plugin-binding-foundation) for the
 strict schema and [plugin architecture](plugin-architecture.md) for the boundary.
 
