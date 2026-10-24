@@ -987,6 +987,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if ':' in line and not line.startswith('Status:'):
                 name, value = line.split(':', 1)
                 self.send_header(name, value.strip())
+        # Bound the response instead of using a TLS socket close as framing.
+        # Git clients backed by GnuTLS reject an unannounced TLS EOF.
+        self.send_header('Content-Length', str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
     def log_message(self, *_args): pass
