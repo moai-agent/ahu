@@ -8,6 +8,13 @@ a commit message as well. A patch link alone is not sufficient.
 
 Never include or execute a remote push without the user's explicit permission.
 
+## Rust code style
+
+Read and follow [the Rust style guide](docs/rust-style-guide.md) before changing
+Rust code. Apply it during implementation and review, including workspace crates,
+tests, and examples. Keep unrelated refactors separate; document justified
+exceptions and run the checks appropriate to the change.
+
 ## Issue completion is part of the work
 
 These rules apply to every agent working in this repository: every agent

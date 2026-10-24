@@ -335,6 +335,10 @@ contracts, prompt transport, hooks, state, and delegation boundaries.
 
 ## Development
 
+Read the [Rust style guide](docs/rust-style-guide.md) before changing Rust code.
+It covers module boundaries, ownership, errors, lifecycle effects, and tests,
+alongside the formatting and lint checks below.
+
 The [CI workflow](.github/workflows/ci.yml) defines checks on Ubuntu 24.04 and
 macOS 14 using Rust 1.96.0, rustfmt, Clippy, Git, Bash, and Python 3.9 or newer.
 From a checkout with rustup installed:
