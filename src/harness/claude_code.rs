@@ -45,6 +45,11 @@ impl Adapter for ClaudeCode {
             Permissions::Auto => {
                 args.push("--permission-mode".to_string());
                 args.push("auto".to_string());
+                // Invocation-scoped approval of Ahu's project MCP server only.
+                // Do not approve every current/future server or persist this
+                // decision into the user's native settings.
+                args.push("--settings".to_string());
+                args.push(r#"{"enabledMcpjsonServers":["ahu"]}"#.to_string());
             }
         }
         // `--` closes the option list so a prompt starting with `-` is still a
@@ -110,7 +115,7 @@ fn permission_control(permissions: Permissions) -> String {
         Permissions::Auto => format!(
             "ahu passes --permission-mode auto because this agent's manifest declares \
              permissions = auto; it passes no --dangerously-skip-permissions, --allowedTools, \
-             or --add-dir; interactive auto tasks also authorize native folder trust for only the exact verified Ahu worktree, with Ahu-added trust removed by ahu remove; {tail}"
+             or --add-dir; --settings approves only the ahu project MCP server for this invocation; interactive auto tasks also authorize native folder trust for only the exact verified Ahu worktree, with Ahu-added trust removed by ahu remove; {tail}"
         ),
     }
 }
@@ -121,4 +126,37 @@ fn permission_control(permissions: Permissions) -> String {
 /// inside a repository ahu has opened, just as launches do.
 fn installed_version() -> Option<String> {
     crate::selection::installed_version("claude")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_approves_only_ahu_mcp_for_this_invocation() {
+        for permissions in [
+            Permissions::Prompt,
+            Permissions::AcceptEdits,
+            Permissions::Auto,
+        ] {
+            let command = ClaudeCode
+                .launch_command(&LaunchRequest {
+                    model: "claude-opus-5",
+                    prompt: "--settings malicious",
+                    cwd: std::path::Path::new("/tmp/task"),
+                    permissions,
+                })
+                .unwrap();
+            let settings = command.args.windows(2).find(|pair| pair[0] == "--settings");
+            if permissions == Permissions::Auto {
+                let value: serde_json::Value = serde_json::from_str(&settings.unwrap()[1]).unwrap();
+                assert_eq!(value, serde_json::json!({"enabledMcpjsonServers":["ahu"]}));
+            } else {
+                assert!(settings.is_none());
+            }
+            let index = command.prompt_arg.unwrap();
+            assert_eq!(command.args[index - 1], "--");
+            assert_eq!(command.args[index], "--settings malicious");
+        }
+    }
 }

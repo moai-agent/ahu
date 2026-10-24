@@ -561,6 +561,11 @@ checks. Explicit auto authorization covers this task-scoped trust. Preview,
 `prompt`, `accept-edits`, headless execution and arbitrary checkout paths do not
 write native trust. No parent folder or global trust bypass is added.
 
+Claude interactive auto launches also pass invocation-only `--settings` with
+`enabledMcpjsonServers: ["ahu"]`, approving Ahu's project MCP server without
+approving other servers or changing persistent MCP approval settings. Native
+managed policy and individual tool permission decisions still apply.
+
 The supported store shapes are Claude Code 2.1.308's
 `~/.claude.json` → `projects[canonical_worktree].hasTrustDialogAccepted` and
 Antigravity CLI 1.4.6's `~/.gemini/antigravity-cli/settings.json` →
