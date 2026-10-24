@@ -2210,10 +2210,18 @@ pub fn remove_cmd(console: &mut Console<'_>, repo: &Repo, task_id: &str) -> Resu
         // configuration, so it sees those copies even where the user's own
         // global ignore rules hide them -- they are not the task's work, and
         // holding a worktree hostage to them would make it unremovable.
+        // A materialized copy may now be committed, or have matched tracked
+        // content from the start. Clean tracked paths are absent from status;
+        // never classify them as disposable merely because ahu wrote them.
+        let tracked = git::tracked_paths(&discovered)?;
+        let mut disposable = record.materialize.clone();
+        disposable
+            .written
+            .retain(|path| !tracked.contains(path.as_bytes()));
         let untracked = crate::snapshot::classify_untracked(
             &record.worktree,
             &record.config_snapshot,
-            &record.materialize,
+            &disposable,
             &changes.untracked,
         );
         if changes.non_utf8_untracked

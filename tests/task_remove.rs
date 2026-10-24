@@ -736,6 +736,32 @@ fn remove_takes_a_worktree_holding_only_unchanged_copied_config() {
     );
 }
 
+#[test]
+fn remove_preserves_tracked_materialized_config_after_merge() {
+    let repo = fixture();
+    repo.write(LOCAL_CONFIG, "{\"permissions\":{}}\n");
+    let id = "006aa50000000000d1";
+    let (record_dir, worktree) = prepare_task_with_copied_config(&repo, id);
+    common::git(&worktree, &["add", "-f", "--", LOCAL_CONFIG]);
+    common::git(
+        &worktree,
+        &["commit", "-m", "retain reviewed configuration"],
+    );
+    std::fs::remove_file(repo.path().join(LOCAL_CONFIG)).unwrap();
+    common::git(repo.path(), &["merge", "--ff-only", &branch_of(id)]);
+
+    let out = ahu_in(repo.path(), &["remove", id]);
+    assert_eq!(out.status.code(), Some(0), "{}", text_of(&out));
+    assert!(!worktree.exists());
+    assert!(!record_dir.exists());
+    assert_eq!(repo.read(LOCAL_CONFIG), "{\"permissions\":{}}\n");
+    assert_eq!(common::git(repo.path(), &["status", "--porcelain"]), "");
+    assert_eq!(
+        common::git(repo.path(), &["branch", "--list", &branch_of(id)]),
+        ""
+    );
+}
+
 /// A copied configuration file the task edited is reviewable work, and so is
 /// an untracked file no snapshot accounts for. Neither is removed, and the
 /// refusal names them.

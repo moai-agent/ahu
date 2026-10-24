@@ -245,6 +245,15 @@ pub fn changes(repo: &Repo) -> Result<WorktreeChanges> {
     Ok(changes)
 }
 
+/// Exact index paths, including clean tracked files absent from status output.
+pub(crate) fn tracked_paths(repo: &Repo) -> Result<std::collections::BTreeSet<Vec<u8>>> {
+    Ok(run_ok_bytes(&repo.root, &["ls-files", "--cached", "-z"])?
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect())
+}
+
 /// Create a worktree at `path` on a new branch `branch`, based on `base`.
 pub fn add_worktree(repo: &Repo, path: &Path, branch: &str, base: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
