@@ -305,8 +305,9 @@ and ahu passes no `--pure`, so the user's plugins still load.
 
 Each shortcut names the installed executable (`codex`, `claude`, `agy`,
 `opencode`, `kiro-cli`) and accepts no additional arguments. Registered child agents keep
-their own manifest permissions and launch requirements. Inside cmux, coordinator
-shortcuts place their workspace in the repository's group before starting. See
+their own manifest permissions and launch requirements. Coordinator shortcuts use
+the current terminal by default. Explicitly select an enabled session-host plugin
+with `AHU_INTERACTIVE_PLUGIN` to request provider-specific placement. See
 [coordinator sessions](docs/reference.md#coordinator-sessions) for details.
 
 The MCP integration is local and repository-scoped. `ahu mcp serve` provides
