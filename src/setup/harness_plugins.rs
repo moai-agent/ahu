@@ -7,9 +7,37 @@ use crate::plugin_binding::{Binding, Compatibility, Source, SourceKind};
 use crate::util::{Error, Result};
 use std::path::Path;
 
-const LIMIT: &str = "Registered task launches use installed harness planners in the optional harness-plugin-pilot build, with no built-in fallback. Configuration and event handling are not yet extracted.";
+const LIMIT: &str = "Harness runtime discovery reads metadata only. Installed runtime activation requires an enabled committed binding, exact core compatibility and a harness-runtime grant. Caller migration from the harness-plugin-pilot launch-only path remains separate.";
 
-fn declaration(package: &PluginStatus) -> Result<Option<crate::harness_plugin::Declaration>> {
+struct Metadata {
+    harness: String,
+    program: String,
+    tested_versions: Vec<String>,
+    grant: &'static str,
+}
+
+fn declaration(package: &PluginStatus) -> Result<Option<Metadata>> {
+    if let Some(value) = package.metadata.get("harness_runtime") {
+        let declaration: crate::harness_runtime::Declaration =
+            serde_json::from_value(value.clone())
+                .map_err(|_| Error::new("invalid harness runtime declaration"))?;
+        declaration
+            .validate()
+            .map_err(|_| Error::new("invalid harness runtime declaration"))?;
+        let root = package
+            .manifest
+            .as_deref()
+            .and_then(Path::parent)
+            .ok_or_else(|| Error::new("runtime package requires a manifest location"))?;
+        local::package_executable(root, &declaration.path)?;
+        crate::catalog::validate_runtime_descriptors([&declaration.descriptor])?;
+        return Ok(Some(Metadata {
+            harness: declaration.descriptor.id,
+            program: declaration.descriptor.program,
+            tested_versions: declaration.descriptor.tested_versions,
+            grant: "harness-runtime",
+        }));
+    }
     package
         .metadata
         .get("harness_launch")
@@ -17,7 +45,12 @@ fn declaration(package: &PluginStatus) -> Result<Option<crate::harness_plugin::D
             let declaration: crate::harness_plugin::Declaration =
                 serde_json::from_value(value.clone())?;
             declaration.validate()?;
-            Ok(declaration)
+            Ok(Metadata {
+                harness: declaration.harness,
+                program: declaration.program,
+                tested_versions: declaration.tested_versions,
+                grant: "harness-launch",
+            })
         })
         .transpose()
 }
@@ -79,8 +112,10 @@ fn binding(root: &Path) -> Result<Binding> {
     let digest = crate::plugin_install::digest(root)?;
     let package = local::read_package(root)?;
     let declaration = declaration(&package)?.ok_or_else(|| Error::new(
-        "package has no harness_launch declaration; source-only packages must be built and staged separately before preparation"))?;
-    if package.id != format!("harness-{}", declaration.harness) {
+        "package has no harness_runtime or harness_launch declaration; source-only packages must be built and staged separately before preparation"))?;
+    if declaration.grant == "harness-launch"
+        && package.id != format!("harness-{}", declaration.harness)
+    {
         return Err(Error::new(
             "harness plugin id must be harness-<declared harness> for launch selection",
         ));
@@ -130,6 +165,9 @@ pub fn prepare(console: &mut Console<'_>, repo: &Repo, root: &Path) -> Result<i3
         return Err(Error::new("migrate the legacy context lock before setup"));
     }
     let binding = binding(root)?;
+    let grant = declaration(&local::read_package(root)?)?
+        .ok_or_else(|| Error::new("missing harness declaration"))?
+        .grant;
     let relative = format!("{}/{}.md", crate::plugin_binding::DIRECTORY, binding.id);
     let document = crate::okf::Document::new(
         "ahu:plugin-binding",
@@ -144,7 +182,7 @@ pub fn prepare(console: &mut Console<'_>, repo: &Repo, root: &Path) -> Result<i3
     let snapshot = crate::snapshot::collect(&repo.root)?;
     let lock = crate::context_lock::refresh_for_setup(repo, &snapshot)?;
     console.say(&format!(
-        "Prepared disabled {} with no grants. No package code executed, built, downloaded, installed or enabled.\nReview and commit {} and {}. Then run `ahu plugins install {}` (or `ahu plugins update {}` for a retained different version). Install reads committed pins only; keep the staged package unchanged.\nFor activation, run `ahu plugins enable {}`, explicitly add the harness-launch grant to the working binding, then run `ahu lock --update`. Review and commit the enabled binding and lock before launch.\n{LIMIT}\n",
+        "Prepared disabled {} with no grants. No package code executed, built, downloaded, installed or enabled.\nReview and commit {} and {}. Then run `ahu plugins install {}` (or `ahu plugins update {}` for a retained different version). Install reads committed pins only; keep the staged package unchanged.\nFor activation, run `ahu plugins enable {}`, explicitly add the {grant} grant to the working binding, then run `ahu lock --update`. Review and commit the enabled binding and lock before launch.\n{LIMIT}\n",
         binding.id, relative, lock.display(), binding.id, binding.id, binding.id))?;
     Ok(0)
 }

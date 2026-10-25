@@ -591,3 +591,59 @@ mod tests {
         assert!(require_version("unreleased-catalog").is_err());
     }
 }
+
+/// Validate installed metadata independently of the transitional built-in catalog.
+/// Callers migrating from `harness`, `model`, `models_for` and `HARNESSES`
+/// must use `harness_runtime::discover(repo)` and retain owned descriptors. Runtime
+/// selection never consults the old tables; removing them awaits caller migration.
+pub fn validate_runtime_descriptors<'a>(
+    descriptors: impl IntoIterator<Item = &'a ahu_harness_api::Descriptor>,
+) -> Result<()> {
+    // Native shortcuts are provider-owned, so they are intentionally absent here.
+    const RESERVED: &[&str] = &[
+        "agents",
+        "setup",
+        "tasks",
+        "doctor",
+        "migrate",
+        "lock",
+        "eval",
+        "knowledge",
+        "mcp",
+        "auth",
+        "telemetry",
+        "explain",
+        "onboard",
+        "help",
+        "run-task",
+        "supervise",
+        "plugins",
+        "task",
+        "wait",
+        "result",
+        "cancel",
+        "approve",
+        "reject",
+        "resume",
+        "cleanup",
+        "remove",
+        "focus",
+        "message",
+        "launch",
+        "version",
+        "none",
+        "terminal",
+    ];
+    let mut names = std::collections::BTreeSet::new();
+    for descriptor in descriptors {
+        descriptor
+            .validate()
+            .map_err(|_| crate::util::Error::new("invalid harness runtime descriptor"))?;
+        for name in std::iter::once(&descriptor.id).chain(&descriptor.aliases) {
+            if RESERVED.contains(&name.as_str()) || !names.insert(name) {
+                bail!("duplicate or reserved harness runtime identity/alias");
+            }
+        }
+    }
+    Ok(())
+}
