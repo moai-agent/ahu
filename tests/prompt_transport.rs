@@ -268,7 +268,18 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
         .unwrap()
         .root
         .join(".worktrees/testtask0001");
-    std::fs::create_dir_all(&worktree).unwrap();
+    common::git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "ahu/chris/testtask0001",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
     let recorder = temp.path().join("argv.txt");
     let bin = fake_harness(temp.path(), &recorder);
     let state_capture = temp.path().join("session-state.txt");
@@ -291,7 +302,11 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
         canary = canary.display()
     );
 
-    let task_dir = temp.path().join("task");
+    let task_dir = ahu::state::worktree_task_dir(
+        &worktree,
+        &ahu::git::discover(repo.path()).unwrap().identity(),
+        "testtask0001",
+    );
     write_task_record(&task_dir, &worktree, &prompt, &bin.join("claude"));
 
     let output = common::ahu()
@@ -355,6 +370,8 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
 #[test]
 fn run_task_refuses_to_start_a_session_under_an_edited_identity() {
     let repo = TestRepo::new();
+    repo.init_config();
+    repo.commit("installed runtime for recorded command validation");
     let temp = tempfile::TempDir::new().unwrap();
     // `run_task` re-derives the worktree from the repository it verifies.
     let worktree = ahu::git::discover(repo.path())
