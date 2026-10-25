@@ -1,10 +1,5 @@
 use super::*;
-use crate as core_api;
-#[path = "../tests/common/runtime.rs"]
-mod runtime;
-fn git(root: &Path, args: &[&str]) {
-    git::run_ok(root, args).unwrap();
-}
+use crate::fixture_runtime as runtime;
 
 const PROMPT: &str = "Inspect café\n$(touch never-executed)";
 

@@ -1,8 +1,6 @@
 //! Command behavior with isolated repositories and scripted terminal input.
 use super::*;
-use crate as core_api;
-#[path = "../tests/common/runtime.rs"]
-mod runtime;
+use crate::fixture_runtime as runtime;
 use std::collections::BTreeMap;
 use std::process::Command;
 

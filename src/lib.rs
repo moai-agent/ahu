@@ -75,3 +75,9 @@ pub mod models;
 pub mod native;
 
 pub mod harness_runtime;
+
+#[cfg(test)]
+use crate as core_api;
+#[cfg(test)]
+#[path = "../tests/common/runtime.rs"]
+mod fixture_runtime;

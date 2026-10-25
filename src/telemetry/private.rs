@@ -118,10 +118,7 @@ impl PrivateMapping {
             if sample.repo_identity != self.repo_identity
                 || !self.tasks.contains(sample.task_id)
                 || sample.attempt == 0
-                || !matches!(
-                    sample.harness,
-                    "codex" | "claude-code" | "antigravity" | "opencode"
-                )
+                || !ahu_harness_api::identifier(sample.harness)
                 || !safe_model_name(sample.model)
                 || !matches!(
                     sample.outcome,
@@ -134,6 +131,7 @@ impl PrivateMapping {
                         | "interrupted"
                         | "supervisor_error"
                         | "unknown"
+                        | "starting"
                         | "running"
                 )
                 || sample.agent_identity_digest.is_some_and(|digest| {

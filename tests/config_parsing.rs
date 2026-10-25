@@ -741,7 +741,7 @@ fn an_opencode_agent_definition_is_a_registrable_onboarding_candidate() {
         .expect("the OpenCode definition is a candidate");
     assert_eq!(reviewer.path, ".opencode/agent/reviewer.md");
     assert_eq!(reviewer.format.as_str(), "opencode-agent");
-    assert_eq!(reviewer.format.native_harness(), Some("opencode"));
+    assert_eq!(reviewer.harness, "opencode");
     assert_eq!(
         reviewer.native_model.as_deref(),
         Some("ollama/glm-5.3:cloud")

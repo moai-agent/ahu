@@ -537,30 +537,7 @@ fn bounded_dispatch(
 }
 
 #[cfg(test)]
-use crate as core_api;
-#[cfg(test)]
-#[path = "../tests/common/runtime.rs"]
-mod fixture_runtime;
-#[cfg(test)]
-fn git(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "Fixture")
-        .env("GIT_COMMITTER_NAME", "Fixture")
-        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
-        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
+use crate::fixture_runtime;
 #[cfg(test)]
 mod tests {
     use super::*;

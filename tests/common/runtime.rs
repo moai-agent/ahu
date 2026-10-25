@@ -52,8 +52,8 @@ pub fn install(
     let binding = format!(".agents/ahu/plugins/{id}.md");
     std::fs::create_dir_all(root.join(".agents/ahu/plugins")).unwrap();
     std::fs::write(root.join(&binding), format!("---\nokf_version: '0.2'\ntype: ahu:plugin-binding\nahu:\n  schema_version: 1\n  id: {id}\n  version: '1.0.0'\n  source:\n    kind: local\n    repository: {}\n    revision: '{digest}'\n    sha256: '{digest}'\n  compatibility:\n    ahu: '{}'\n    host_api: 1\n  enabled: true\n  grants: [harness-runtime]\n---\nTest policy.\n", serde_json::json!(package_root), env!("CARGO_PKG_VERSION"))).unwrap();
-    super::git(root, &["add", "-f", &binding]);
-    super::git(
+    git(root, &["add", "-f", &binding]);
+    git(
         root,
         &[
             "commit",
@@ -66,4 +66,23 @@ pub fn install(
         ],
     );
     ahu::plugin_install::run(root, "install", &id).unwrap();
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Fixture")
+        .env("GIT_COMMITTER_NAME", "Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
