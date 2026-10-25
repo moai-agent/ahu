@@ -514,3 +514,71 @@ pub fn stage_text_stats(base: &Path, marker: Option<&Path>) -> PathBuf {
     );
     package
 }
+
+/// Inert record data for task-service tests that never plan or execute a launch.
+/// Execution-boundary tests must use an installed runtime and `launch::plan`.
+pub fn record_command(request: &ahu::harness::LaunchRequest<'_>) -> ahu::harness::LaunchCommand {
+    ahu::harness::LaunchCommand {
+        program: "synthetic-native".into(),
+        args: vec![
+            "--model".into(),
+            request.model.into(),
+            "--".into(),
+            request.prompt.into(),
+        ],
+        native_eval_otlp: false,
+        planner_binding_digest: Some("0".repeat(64)),
+        prompt_arg: Some(3),
+    }
+}
+
+pub fn record_enforcement(harness: &str) -> ahu::harness::EnforcementReport {
+    ahu::harness::EnforcementReport {
+        harness: harness.into(),
+        harness_version: Some("1.2.3".into()),
+        model_fixed_for_session: false,
+        gaps: vec!["Synthetic stored record; no runtime observation".into()],
+        applied_controls: vec![],
+    }
+}
+
+/// Exercise core planning with a named identity and an installed independent plugin.
+/// Creates no task worktree and launches no native executable.
+pub fn runtime_plan(
+    harness: &str,
+    request: &ahu::harness::LaunchRequest<'_>,
+) -> ahu::util::Result<ahu::launch::LaunchPlan> {
+    runtime_plan_with_policy(harness, request, serde_json::json!({}))
+}
+
+pub fn runtime_plan_with_policy(
+    harness: &str,
+    request: &ahu::harness::LaunchRequest<'_>,
+    policy: serde_json::Value,
+) -> ahu::util::Result<ahu::launch::LaunchPlan> {
+    let repo = TestRepo::new();
+    repo.init_config();
+    repo.install_runtime(harness);
+    repo.write(".fixture/runtime.json", &policy.to_string());
+    repo.write(".agents/ahu/agents/runtime-fixture.md", &format!(
+        "---\nokf_version: 0.2\ntype: ahu:agent\ntitle: runtime-fixture\nversion: 1.0.0\nharness: {harness}\nmodel: {}\npermissions: {}\n---\nSynthetic instructions.\n",
+        serde_json::to_string(request.model).unwrap(), request.permissions.as_str()));
+    let agent = ahu::agent::find(repo.path(), "runtime-fixture")?;
+    repo.commit("runtime planning fixture");
+    let discovered = ahu::git::discover(repo.path())?;
+    let loaded = ahu::config::load(repo.path())?.unwrap();
+    let pair = ahu::selection::ResolvedPair {
+        harness: harness.into(),
+        model: request.model.into(),
+        basis: "named synthetic identity".into(),
+        policy_digest: loaded.digest,
+        runtime_binding_digest: ahu::harness_runtime::load(&discovered, harness)?.binding_digest(),
+    };
+    ahu::launch::plan_with_state_home(
+        &discovered,
+        Some(agent),
+        pair,
+        request.prompt,
+        Some(&repo.state.path().canonicalize()?),
+    )
+}

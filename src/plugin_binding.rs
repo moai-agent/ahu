@@ -330,6 +330,7 @@ mod tests {
     #[test]
     fn binding_files_are_context_and_symlinks_are_refused() {
         let root = tempfile::tempdir().unwrap();
+        crate::git::run_ok(root.path(), &["init", "-q"]).unwrap();
         let directory = root.path().join(DIRECTORY);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("fixture.md"), render(&binding())).unwrap();

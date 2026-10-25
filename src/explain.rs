@@ -163,7 +163,7 @@ mod tests {
         let md = markdown();
         assert!(md.contains("# ahu"));
         assert!(md.contains("architecture overview"));
-        assert!(md.contains("Compatibility catalog"));
+        assert!(md.contains("Installed Rust harness runtimes"));
     }
 
     #[test]
@@ -171,7 +171,7 @@ mod tests {
         let ov = overview();
         assert!(ov.contains("ahu"));
         assert!(ov.contains("architecture overview"));
-        assert!(ov.contains("Compatibility catalog"));
+        assert!(ov.contains("Installed Rust harness runtimes"));
     }
 
     #[test]

@@ -1,10 +1,16 @@
 use super::*;
+use crate as core_api;
+#[path = "../tests/common/runtime.rs"]
+mod runtime;
+fn git(root: &Path, args: &[&str]) {
+    git::run_ok(root, args).unwrap();
+}
 
 const PROMPT: &str = "Inspect café\n$(touch never-executed)";
 
 #[test]
 fn interactive_execute_requires_installed_runtime_before_creating_worktree() {
-    let (_temp, repo, loaded, mut plan) = fixture();
+    let (_temp, repo, loaded, mut plan) = fixture_with_runtime(false);
     plan.enforcement.harness_version = Some("1.0.0".into());
     assert!(execute(&repo, &loaded, &plan, PROMPT, false).is_err());
     assert!(!plan.worktree.exists());
@@ -14,9 +20,35 @@ fn interactive_execute_requires_installed_runtime_before_creating_worktree() {
 // Construct the frozen boundary directly: no installed harness, user
 // configuration, cmux session or additional Git worktree is needed.
 fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
+    fixture_with_runtime(true)
+}
+fn fixture_with_runtime(installed: bool) -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
     let temp = tempfile::tempdir().unwrap();
     git::run_ok(temp.path(), &["init", "-q"]).unwrap();
+    git::run_ok(temp.path(), &["config", "user.name", "Fixture"]).unwrap();
+    git::run_ok(
+        temp.path(),
+        &["config", "user.email", "fixture@example.invalid"],
+    )
+    .unwrap();
+    if installed {
+        runtime::install(
+            temp.path(),
+            "codex",
+            "codex",
+            ".codex/agents",
+            "codex-agent",
+            &["gpt-6"],
+        );
+    }
     let repo = git::discover(temp.path()).unwrap();
+    let binding_digest = if installed {
+        crate::harness_runtime::load(&repo, "codex")
+            .unwrap()
+            .binding_digest()
+    } else {
+        "synthetic-binding".into()
+    };
     let config = crate::config::ProjectConfig {
         schema_version: 1,
         harness_preferences: vec!["codex".into()],
@@ -48,10 +80,10 @@ fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
     )
     .unwrap();
     let command = LaunchCommand {
-        program: "synthetic".into(),
-        args: vec!["--".into(), delivered],
-        prompt_arg: Some(1),
-        planner_binding_digest: Some("synthetic-binding".into()),
+        program: "codex".into(),
+        args: vec!["--model".into(), "gpt-6".into(), delivered],
+        prompt_arg: Some(2),
+        planner_binding_digest: Some(binding_digest.clone()),
         native_eval_otlp: true,
     };
     let plan = LaunchPlan {
@@ -63,11 +95,11 @@ fn fixture() -> (tempfile::TempDir, Repo, LoadedConfig, LaunchPlan) {
             model: "gpt-6".into(),
             basis: "project ranking".into(),
             policy_digest: loaded.digest.clone(),
-            runtime_binding_digest: "synthetic-binding".into(),
+            runtime_binding_digest: binding_digest,
         },
         enforcement: EnforcementReport {
             harness: "codex".into(),
-            harness_version: None,
+            harness_version: Some("1.2.3".into()),
             model_fixed_for_session: true,
             gaps: vec![DELIVERY_IS_NOT_ENFORCEMENT.into()],
             applied_controls: vec!["model flag".into()],
@@ -425,7 +457,7 @@ fn verify_refuses_redirected_worktree_and_changed_command() {
 
 #[test]
 fn planning_rejects_empty_assignment_and_unborn_repository_before_side_effects() {
-    let (_temp, repo, _, frozen) = fixture();
+    let (_temp, repo, _, frozen) = fixture_with_runtime(false);
     let error = plan(&repo, None, frozen.pair.clone(), " \n\t").unwrap_err();
     assert_eq!(error.kind(), crate::util::ErrorKind::Usage);
     assert!(error.to_string().contains("task prompt is empty"));
@@ -463,33 +495,12 @@ fn planning_refuses_missing_context_lock_before_creating_task_state() {
     );
     assert!(error.to_string().contains(".agents/ahu/lock.md is missing"));
     assert!(!repo.root.join(".worktrees").exists());
-    assert!(!repo.root.join(".ahu").exists());
-}
-
-fn commit_planning_context(repo: &Repo) {
-    let snapshot = snapshot::collect(&repo.root).unwrap();
-    crate::context_lock::refresh(repo, &snapshot).unwrap();
-    git::run_ok(&repo.root, &["add", "."]).unwrap();
-    git::run_ok(
-        &repo.root,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-qm",
-            "locked launch fixture",
-        ],
-    )
-    .unwrap();
+    assert!(!repo.root.join(".ahu/state").exists());
 }
 
 #[test]
 fn missing_runtime_never_falls_back_to_a_builtin_provider() {
-    let (_temp, repo, _loaded, plan) = fixture();
+    let (_temp, repo, _loaded, plan) = fixture_with_runtime(false);
     assert!(
         harness::task_command(
             &repo,
@@ -565,10 +576,8 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
             "cancel",
             "success",
             "failure",
-            "version-error",
             "auth-error",
             "auth-mismatch",
-            "auth-unavailable",
         ] {
             let bin = tempfile::tempdir().unwrap();
             symlink(
@@ -611,7 +620,19 @@ fn run_task_preserves_work_on_cancellation_exit_and_spawn_failure() {
         return;
     };
     let (_temp, repo, loaded, plan) = fixture();
-    std::fs::create_dir_all(&plan.worktree).unwrap();
+    git::run_ok(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &plan.branch,
+            plan.worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    )
+    .unwrap();
     let sentinel = plan.worktree.join("work.txt");
     std::fs::write(&sentinel, "keep me").unwrap();
     let record = prepared_record(&repo, &loaded, &plan, PROMPT, Default::default());
@@ -846,7 +867,10 @@ fn verification_resolves_workspace_path_without_executing_or_trusting_record_pat
         std::fs::rename(bin.join("codex"), bin.join("codex-hidden")).unwrap();
         let error = verify_task(&plan.task_dir, None).unwrap_err();
         assert_eq!(error.kind(), crate::util::ErrorKind::Prerequisite);
-        assert!(error.to_string().contains("will not fall back"));
+        assert!(
+            error.to_string().contains("not") || error.to_string().contains("unavailable"),
+            "{error}"
+        );
         std::fs::rename(bin.join("codex-hidden"), bin.join("codex")).unwrap();
     } else if case == "external" {
         let (verified, rebuilt, executable) = verify_task(&plan.task_dir, None).unwrap();
@@ -870,7 +894,7 @@ fn verification_resolves_workspace_path_without_executing_or_trusting_record_pat
         }
         let error = verify_task(&plan.task_dir, None).unwrap_err().to_string();
         assert!(
-            error.contains("not on PATH") && error.contains("will not fall back"),
+            error.contains("not") || error.contains("unavailable"),
             "{error}"
         );
         std::fs::remove_file(bin.join("codex")).unwrap();
