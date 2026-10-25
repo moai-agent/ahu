@@ -773,10 +773,14 @@ in memory, not retained as ahu logs. Admission refuses a new task
 when 16 tasks in the repository runtime store lack terminal results, including
 interrupted tasks; there is no queue.
 
+Background submission is acknowledged after the supervisor acquires ownership.
+The outcome remains `starting` until the native process starts; acceptance of
+the submission does not establish that an agent is running.
+
 The timeout is positive seconds, default 1800 per attempt. `wait` follows the
 current attempt until it stops, returning 0 for `succeeded` and 5 otherwise.
 `result` reads the durable envelope without waiting; check its `outcome`, not
-just the command's exit status. Outcomes include `running`, `succeeded`, `failed`,
+just the command's exit status. Outcomes include `starting`, `running`, `succeeded`, `failed`,
 `timed_out`, `cancelled`, `boundary_violation`, `capture_failed`, `supervisor_error`, and `interrupted`. New result envelopes use schema 2 and separate process exit, bounded harness
 outcome metadata, native references, and worktree identity. Native transcript,
 final-answer, stderr, and helper-summary text is not copied into the envelope.

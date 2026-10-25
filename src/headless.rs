@@ -1266,6 +1266,25 @@ fn sanitize(command: &mut Command) {
     command.env_remove("AHU_EXPECTED_DIGEST");
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorReady {
+    pid: u32,
+    attempt: u32,
+    frozen_digest: String,
+}
+fn supervisor_ready(attempt: &Path, pid: u32, number: u32, digest: &str) -> Result<bool> {
+    let path = attempt.join("supervisor-ready.json");
+    if !path.try_exists()? {
+        return Ok(false);
+    }
+    let ready: SupervisorReady = read_json(&path)?;
+    if ready.pid != pid || ready.attempt != number || ready.frozen_digest != digest {
+        bail!("supervisor acknowledgement does not match the submitted attempt");
+    }
+    Ok(true)
+}
+
 fn start(dir: &Path, spec: &Spec) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let attempt = attempt_dir(dir, spec);
@@ -1281,8 +1300,9 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
     sanitize(&mut command);
     crate::telemetry::configure_task_identity(&mut command, &task::load(dir)?, Some(spec));
     crate::telemetry::configure_supervisor_parent(&mut command, spec);
+    let expected = frozen_digest(dir)?;
     command
-        .env("AHU_EXPECTED_DIGEST", frozen_digest(dir)?)
+        .env("AHU_EXPECTED_DIGEST", &expected)
         .env_remove("AHU_RUNTIME_DIR")
         .env_remove("AHU_TASK_INDEX_DIR");
     // SAFETY: setsid is async-signal-safe and accesses no Rust state after fork.
@@ -1297,7 +1317,7 @@ fn start(dir: &Path, spec: &Spec) -> Result<()> {
     let mut child = command.spawn()?;
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if attempt.join("started.json").exists() {
+        if supervisor_ready(&attempt, child.id(), spec.attempt, &expected)? {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
@@ -1849,6 +1869,16 @@ fn supervise_authorized(dir: &Path, expected: &str) -> Result<i32> {
     if attempt.join("result.json").exists() || attempt.join("started.json").exists() {
         bail!("attempt already started; implicit replay refused");
     }
+    // Acknowledge exclusive supervisor ownership before potentially slow native
+    // inspection. This is submission acceptance, not proof an agent has started.
+    durable_json(
+        &attempt.join("supervisor-ready.json"),
+        &SupervisorReady {
+            pid: std::process::id(),
+            attempt: spec.attempt,
+            frozen_digest: expected.into(),
+        },
+    )?;
     let mut phase = "frozen_execution_validation";
     let outcome = task::load(dir).and_then(|record| {
         observe_attempt(&record, &spec, &mut phase, |span, phase| {
@@ -2368,14 +2398,16 @@ fn run_attempt(
             let value = result(&child_dir).unwrap_or_else(
                 |_| json!({"outcome":"unknown","error":"child result unavailable"}),
             );
-            if value["outcome"] != "running" || Instant::now() >= reconcile_deadline {
+            if !matches!(value["outcome"].as_str(), Some("starting" | "running"))
+                || Instant::now() >= reconcile_deadline
+            {
                 break value;
             }
             std::thread::sleep(Duration::from_millis(50));
         };
         if matches!(
             value["outcome"].as_str(),
-            Some("running" | "unknown" | "interrupted")
+            Some("starting" | "running" | "unknown" | "interrupted")
         ) {
             events.blockers.push(format!(
                 "registered descendant {id} cancellation is unconfirmed; inspect its result"
@@ -2719,7 +2751,7 @@ fn result_attempt(dir: &Path, spec: &Spec) -> Result<Value> {
     })?;
     Ok(json!({"schema_version":spec.schema_version,
         "task_id":dir.file_name().unwrap_or_default().to_string_lossy(),"attempt":spec.attempt,
-        "outcome":if active {"running"} else {"interrupted"},"acceptance":"not assessed",
+        "outcome":if active { if attempt_dir(dir,spec).join("started.json").is_file() {"running"} else {"starting"} } else {"interrupted"},"acceptance":"not assessed",
         "completion_verified":false,
         "blockers":if active {Vec::<String>::new()} else {vec!["no live supervisor owns this attempt; process cleanup unknown, no automatic replay".into()]}}))
 }
@@ -2757,7 +2789,7 @@ fn review_attempt(
                 ))
             })?;
             json!({"schema_version":spec.schema_version,"task_id":id,"attempt":spec.attempt,
-                "outcome":if active {"running"} else {"interrupted"},"acceptance":"not assessed",
+                "outcome":if active { if attempt_dir(dir,spec).join("started.json").is_file() {"running"} else {"starting"} } else {"interrupted"},"acceptance":"not assessed",
                 "completion_verified":false,
                 "blockers":if active {Vec::<String>::new()} else {vec!["no live supervisor owns this attempt; process cleanup unknown, no automatic replay".into()]}})
         }
@@ -2774,7 +2806,7 @@ fn wait(dir: &Path, json_output: bool) -> Result<i32> {
         // Validate public review output without applying the interactive display-size
         // limit to wait's existing full-envelope API.
         let value = review_attempt(dir, &spec, |path| review::read_result(path, None))?;
-        if value["outcome"] != "running" {
+        if !matches!(value["outcome"].as_str(), Some("starting" | "running")) {
             let code = if value["outcome"] == "succeeded" {
                 0
             } else {
@@ -3795,6 +3827,28 @@ mod profile_and_metadata_tests {
     }
 
     #[test]
+    fn supervisor_receipt_binds_process_attempt_and_frozen_inputs_without_claiming_agent_start() {
+        let (_root, repo) = super::filesystem_behavior_tests::repository();
+        let attempt = store(&repo).unwrap().join("receipt-fixture");
+        confined_in(&repo, &attempt, true).unwrap();
+        assert!(!supervisor_ready(&attempt, 42, 1, "digest").unwrap());
+        durable_json(
+            &attempt.join("supervisor-ready.json"),
+            &SupervisorReady {
+                pid: 42,
+                attempt: 1,
+                frozen_digest: "digest".into(),
+            },
+        )
+        .unwrap();
+        assert!(supervisor_ready(&attempt, 42, 1, "digest").unwrap());
+        assert!(!attempt.join("started.json").exists());
+        for (pid, number, digest) in [(43, 1, "digest"), (42, 2, "digest"), (42, 1, "changed")] {
+            assert!(supervisor_ready(&attempt, pid, number, digest).is_err());
+        }
+    }
+
+    #[test]
     fn missing_result_reports_supervisor_liveness_without_claiming_completion() {
         let root = tempfile::tempdir().unwrap();
         let task_dir = root.path().join("task-1");
@@ -3802,7 +3856,13 @@ mod profile_and_metadata_tests {
         std::fs::create_dir_all(&task_dir).unwrap();
         let owner = Lock::acquire(&task_dir.join("owner.lock")).unwrap();
         let running = result_attempt(&task_dir, &spec).unwrap();
-        assert_eq!(running["outcome"], "running");
+        assert_eq!(running["outcome"], "starting");
+        std::fs::create_dir_all(attempt_dir(&task_dir, &spec)).unwrap();
+        std::fs::write(attempt_dir(&task_dir, &spec).join("started.json"), "{}").unwrap();
+        assert_eq!(
+            result_attempt(&task_dir, &spec).unwrap()["outcome"],
+            "running"
+        );
         assert_eq!(running["acceptance"], "not assessed");
         assert_eq!(running["completion_verified"], false);
         drop(owner);
