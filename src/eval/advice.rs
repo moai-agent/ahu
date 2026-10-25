@@ -187,14 +187,14 @@ fn read_records(repo: &crate::git::Repo, path: &Path) -> Result<String> {
 }
 
 pub(super) fn supported_cost_source(source: &str) -> bool {
-    matches!(
-        source,
-        "native_cumulative_usd" | "native_step_sum_usd"
-    )
+    matches!(source, "native_cumulative_usd" | "native_step_sum_usd")
 }
 
 fn cost_source(record: &Record) -> Option<&str> {
-    record.reported_cost_source.as_deref().filter(|source| supported_cost_source(source))
+    record
+        .reported_cost_source
+        .as_deref()
+        .filter(|source| supported_cost_source(source))
 }
 
 fn complete_identity(identity: &provenance::Identity, observations: u64) -> bool {
