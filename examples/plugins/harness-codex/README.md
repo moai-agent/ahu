@@ -4,6 +4,13 @@ This independent Rust executable translates launch settings into Codex arguments
 It has no ahu linkage or Python runtime requirement. It does not launch Codex,
 access accounts, receive prompts, or manage task state.
 
+Interactive plans select `--no-daemon`, verified against Codex CLI 0.163.0,
+so the native server runs embedded in ahu's supervised CLI instead of attaching
+to a shared daemon. The built-in adapter does not yet select this option.
+Headless plans are unchanged. Native versions without the option fail rather
+than fall back. Keep project MCP environment forwarding configured; this change
+does not add shared-service context transport or certify native child cleanup.
+
 See the [pilot contract](../../../docs/harness-plugin-pilot.md) for scope,
 permissions, limitations, and test commands. This is a local experiment, not a
 published supported harness plugin or live compatibility certification.

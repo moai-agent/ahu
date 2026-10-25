@@ -74,6 +74,10 @@ fn plan(request: Request) -> Result<Plan, ()> {
                 return Err(());
             }
             args.extend(["-m".to_owned(), request.model]);
+            // Codex 0.163.0 otherwise attaches to a shared server whose
+            // environment and MCP children outlive this invocation. Keep the
+            // native server embedded in the process supervised by ahu.
+            args.push("--no-daemon".to_owned());
             match request.permissions.as_str() {
                 "auto" => args.extend(
                     [
@@ -149,5 +153,51 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(()) => ExitCode::from(2),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(mode: &str, permissions: &str, session: serde_json::Value) -> Request {
+        Request {
+            protocol_version: 1,
+            harness: "codex".into(),
+            mode: mode.into(),
+            model: "synthetic-model".into(),
+            permissions: permissions.into(),
+            work_mode: mode == "headless",
+            session,
+        }
+    }
+
+    #[test]
+    fn interactive_owns_native_server_for_every_permission_mode() {
+        for permissions in ["prompt", "accept-edits", "auto"] {
+            let plan = plan(request("interactive", permissions, serde_json::Value::Null)).unwrap();
+            let separator = plan.args.iter().position(|arg| arg == "--").unwrap();
+            assert_eq!(
+                plan.args[..separator]
+                    .iter()
+                    .filter(|arg| *arg == "--no-daemon")
+                    .count(),
+                1
+            );
+            assert_eq!(plan.prompt_arg, separator + 1);
+            assert_eq!(plan.args[plan.prompt_arg], PROMPT);
+        }
+    }
+
+    #[test]
+    fn headless_fresh_and_resume_do_not_use_tui_server_options() {
+        for session in [
+            serde_json::Value::Null,
+            serde_json::json!("synthetic-session"),
+        ] {
+            let plan = plan(request("headless", "auto", session)).unwrap();
+            assert_eq!(plan.args[0], "exec");
+            assert!(!plan.args.iter().any(|arg| arg == "--no-daemon"));
+        }
     }
 }

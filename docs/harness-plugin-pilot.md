@@ -125,6 +125,30 @@ headless work mode with optional resume. Guarded headless profiles are explicitl
 unsupported by this pilot. Interactive auto retains the current native
 workspace-write mapping; it is not equivalent to unrestricted headless work mode.
 
+Interactive plans additionally pass `--no-daemon`. This is an intentional
+difference from the built-in adapter, verified in installed Codex CLI 0.163.0
+help and its [native launch policy](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/daemon_startup.rs).
+It selects an embedded native server even when a shared daemon is running.
+Headless `exec` and `exec resume` mappings are unchanged. Older native versions
+without this option fail at launch; the planner does not silently fall back to
+a shared daemon. Rebuild and repin the package before using this change.
+
+The concrete consumer is the current-terminal task supervisor: its existing
+per-task environment must reach the native MCP launcher, and native work must
+remain under the launched process's ownership. A skill cannot select this
+process topology reliably. The existing argv contract suffices; no new inputs,
+outputs, grants, task identifiers, or cleanup commands are added. Core continues
+to supply identity and supervise processes. The plugin selects native embedded
+execution without changing shared services, account settings, hooks, or native
+homes. Project MCP `env_vars` forwarding is still required. This avoids sending
+task context through a shared daemon; it does not implement that transport.
+
+Planner tests cover all interactive permission modes and unchanged headless
+fresh/resume behavior. They establish command construction, not native cleanup.
+Live attribution, normal exit, cancellation, and abrupt supervisor loss still
+need separate compatibility checks. Embedded execution does not prove arbitrary
+native descendants cannot detach, and native session history remains native-owned.
+
 ## Validation and remaining extraction
 
 Run from the repository root:
@@ -180,8 +204,10 @@ Preexisting workspaces were retained. The native daemon automatic startup settin
 not resolve the plain-terminal gap when a shared daemon was already running.
 Do not adopt that setting as a fix or require cmux to obtain working telemetry.
 
-The next runtime contract must carry per-task MCP context across native service
-boundaries and account for owned native sessions and children during cleanup.
+The plugin now selects embedded execution as described above; the observations
+in this table predate that change and are not post-change live certification.
+Any future shared-service runtime contract must carry per-task MCP context across
+native service boundaries and account for owned native sessions and children during cleanup.
 Do not assume a CLI exit stops a persistent service's work, infer missing usage
 as zero, or stop shared services to clean up one task. Native behavior belongs
 in the harness plugin; core retains task identity and coordination authority.

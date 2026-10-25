@@ -141,14 +141,14 @@ fn spec(session: Option<&str>) -> ahu::headless::Spec {
 }
 
 #[test]
-fn installed_planner_matches_native_commands_without_harness_or_prompt_access() {
+fn installed_planner_preserves_permissions_and_adds_interactive_server_ownership() {
     let f = Fixture::new(None);
     for permissions in [
         Permissions::Prompt,
         Permissions::AcceptEdits,
         Permissions::Auto,
     ] {
-        let expected = ahu::harness::codex::Codex
+        let mut expected = ahu::harness::codex::Codex
             .launch_command(&LaunchRequest {
                 model: "gpt-6-astra",
                 prompt: "--private literal task",
@@ -156,6 +156,10 @@ fn installed_planner_matches_native_commands_without_harness_or_prompt_access() 
                 permissions,
             })
             .unwrap();
+        // The pilot deliberately differs from the built-in adapter only in
+        // native server ownership. Keep model, approval and prompt parity.
+        expected.args.insert(2, "--no-daemon".into());
+        expected.prompt_arg = expected.prompt_arg.map(|index| index + 1);
         let mut actual = f.plan(permissions, None).unwrap();
         assert!(actual.planner_binding_digest.take().is_some());
         assert_eq!(actual, expected);
@@ -400,7 +404,7 @@ fn rust_planner_preserves_ascii_framing_and_exact_limits() {
         String::from_utf8(output.stdout).unwrap(),
         concat!(
             "{\"protocol_version\":1,\"harness\":\"codex\",\"program\":\"codex\",",
-            "\"args\":[\"-m\",\"\\u00e9\\ud83d\\ude00\\u007f\",\"--\",\"<prompt: see prompt.txt>\"],\"prompt_arg\":3}\n"
+            "\"args\":[\"-m\",\"\\u00e9\\ud83d\\ude00\\u007f\",\"--no-daemon\",\"--\",\"<prompt: see prompt.txt>\"],\"prompt_arg\":4}\n"
         )
     );
     let mut raw = serde_json::to_vec(&valid_request()).unwrap();
