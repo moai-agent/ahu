@@ -495,7 +495,7 @@ fn planning_refuses_missing_context_lock_before_creating_task_state() {
     );
     assert!(error.to_string().contains(".agents/ahu/lock.md is missing"));
     assert!(!repo.root.join(".worktrees").exists());
-    assert!(!repo.root.join(".ahu/state").exists());
+    assert!(!frozen.task_dir.exists());
 }
 
 #[test]
