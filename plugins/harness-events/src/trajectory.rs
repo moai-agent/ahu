@@ -41,7 +41,7 @@ pub struct Observation {
     pub coverage: Coverage,
     /// Independent partial metering, never model steps, tokens or USD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kiro_metering: Option<KiroMetering>,
+    pub metering: Option<Metering>,
     pub steps: Option<u64>,
     pub tool_calls: Option<u64>,
     /// Calls with an observed, classified terminal outcome. Absent in legacy records.
@@ -63,7 +63,7 @@ pub struct Observation {
 /// No native identifiers, tool names, breakdown contents or payloads persist.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct KiroMetering {
+pub struct Metering {
     pub context_usage_percent: Option<f64>,
     pub peak_context_usage_percent: Option<f64>,
     /// Prompt completions may contain multiple model requests. Not `steps`.
@@ -78,7 +78,7 @@ pub struct KiroMetering {
     pub unattributed_completions: u64,
 }
 
-impl KiroMetering {
+impl Metering {
     #[cfg(test)]
     pub fn valid(&self) -> bool {
         [self.context_usage_percent, self.peak_context_usage_percent]
@@ -308,7 +308,7 @@ impl Observer {
         }
     }
     fn kiro_reject_metering(&mut self) {
-        let m = self.observation.kiro_metering.get_or_insert_default();
+        let m = self.observation.metering.get_or_insert_default();
         m.rejected_updates = m.rejected_updates.saturating_add(1);
     }
     fn kiro_info(&mut self, update: &Value) {
@@ -336,7 +336,7 @@ impl Observer {
                     self.kiro_reject_metering();
                     return;
                 };
-                let m = self.observation.kiro_metering.get_or_insert_default();
+                let m = self.observation.metering.get_or_insert_default();
                 m.context_usage_percent = Some(percent);
                 m.peak_context_usage_percent = Some(
                     m.peak_context_usage_percent
@@ -396,7 +396,7 @@ impl Observer {
     }
     fn kiro_completion(&mut self, meta: &Value) {
         let Some(turn) = self.kiro_tracking.active_turn else {
-            let m = self.observation.kiro_metering.get_or_insert_default();
+            let m = self.observation.metering.get_or_insert_default();
             m.unattributed_completions = m.unattributed_completions.saturating_add(1);
             return;
         };
@@ -467,7 +467,7 @@ impl Observer {
         let digest: Key = digest.finalize().into();
         if let Some(prior) = self.kiro_tracking.turns[&turn] {
             if prior == digest {
-                let m = self.observation.kiro_metering.get_or_insert_default();
+                let m = self.observation.metering.get_or_insert_default();
                 m.duplicate_completions = m.duplicate_completions.saturating_add(1);
             } else {
                 self.kiro_reject_metering();
@@ -486,7 +486,7 @@ impl Observer {
             self.kiro_reject_metering();
             return;
         }
-        let m = self.observation.kiro_metering.get_or_insert_default();
+        let m = self.observation.metering.get_or_insert_default();
         let credit_sum = credits.map(|v| m.observed_credits.unwrap_or(0.0) + v);
         let elapsed_sum = elapsed.map(|v| m.observed_elapsed_ms.unwrap_or(0.0) + v);
         if credit_sum.is_some_and(|v| !v.is_finite()) || elapsed_sum.is_some_and(|v| !v.is_finite())
@@ -946,7 +946,7 @@ mod tests {
             "promptTurnSummaries":[{"unit":"credit","unitPlural":"credits","usage":credits,"usedTools":["private-tool"]}]})
     }
     #[test]
-    fn kiro_metering_keeps_units_and_deduplicates_without_certifying_steps() {
+    fn metering_keeps_units_and_deduplicates_without_certifying_steps() {
         let mut o = Observer::default();
         kiro_prompt(&mut o);
         kiro_info(
@@ -967,7 +967,7 @@ mod tests {
         );
         assert!(!o.ended);
         o.observe("kiro", &json!({"type":"runFinished","data":{"sessionId":"sess_synthetic","status":"success","stopReason":"end_turn","finalText":"private-text","finalTextTruncated":false}}));
-        let m = o.observation.kiro_metering.as_ref().unwrap();
+        let m = o.observation.metering.as_ref().unwrap();
         assert_eq!(m.context_usage_percent, Some(0.0));
         assert_eq!(m.peak_context_usage_percent, Some(12.5));
         assert_eq!(m.observed_credits, Some(0.25));
@@ -984,20 +984,17 @@ mod tests {
         assert!(!serialized.contains("tokens"));
         assert!(!serialized.contains("usd"));
         let roundtrip: Observation = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(
-            roundtrip.kiro_metering.unwrap().observed_credits,
-            Some(0.25)
-        );
+        assert_eq!(roundtrip.metering.unwrap().observed_credits, Some(0.25));
     }
     #[test]
-    fn kiro_metering_preserves_missing_and_zero_for_failed_and_aborted_turns() {
+    fn metering_preserves_missing_and_zero_for_failed_and_aborted_turns() {
         let mut o = Observer::default();
         kiro_prompt(&mut o);
         kiro_info(
             &mut o,
             json!({"kind":"turn_completion", "status":"aborted", "promptTurnSummaries":[]}),
         );
-        let m = o.observation.kiro_metering.as_ref().unwrap();
+        let m = o.observation.metering.as_ref().unwrap();
         assert_eq!(m.observed_credits, None);
         assert_eq!(m.observed_elapsed_ms, None);
         assert_eq!(m.prompt_completions, Some(1));
@@ -1006,7 +1003,7 @@ mod tests {
         complete["status"] = json!("failed");
         complete["elapsedTime"] = json!(0);
         kiro_info(&mut o, complete);
-        let m = o.observation.kiro_metering.as_ref().unwrap();
+        let m = o.observation.metering.as_ref().unwrap();
         assert_eq!(m.prompt_completions, Some(2));
         assert_eq!(m.observed_credits, Some(0.0));
         assert_eq!(m.observed_elapsed_ms, Some(0.0));
@@ -1015,7 +1012,7 @@ mod tests {
         assert!(m.valid());
     }
     #[test]
-    fn kiro_metering_rejects_conflicts_request_reuse_and_helper_evidence() {
+    fn metering_rejects_conflicts_request_reuse_and_helper_evidence() {
         let mut o = Observer::default();
         kiro_prompt(&mut o);
         kiro_info(&mut o, kiro_completion(0.5));
@@ -1025,13 +1022,13 @@ mod tests {
         let mut helper = kiro_completion(1.0);
         helper["agentSubtaskId"] = json!("private-helper");
         kiro_info(&mut o, helper);
-        let m = o.observation.kiro_metering.as_ref().unwrap();
+        let m = o.observation.metering.as_ref().unwrap();
         assert_eq!(m.observed_credits, Some(0.5));
         assert_eq!(m.prompt_completions, Some(1));
         assert_eq!(m.rejected_updates, 3);
     }
     #[test]
-    fn kiro_metering_rejects_invalid_numbers_units_shapes_and_identifiers() {
+    fn metering_rejects_invalid_numbers_units_shapes_and_identifiers() {
         for (field, value) in [
             ("status", json!("future-status")),
             ("elapsedTime", json!(-1)),
@@ -1070,7 +1067,7 @@ mod tests {
             let mut completion = kiro_completion(1.0);
             completion[field] = value;
             kiro_info(&mut o, completion);
-            let m = o.observation.kiro_metering.as_ref().unwrap();
+            let m = o.observation.metering.as_ref().unwrap();
             assert_eq!(m.rejected_updates, 1, "{field}");
             assert_eq!(m.observed_credits, None, "{field}");
             assert_eq!(m.prompt_completions, None, "{field}");
@@ -1082,14 +1079,11 @@ mod tests {
                 &mut o,
                 json!({"kind":"context_usage", "usagePercentage":value}),
             );
-            assert_eq!(
-                o.observation.kiro_metering.unwrap().context_usage_percent,
-                None
-            );
+            assert_eq!(o.observation.metering.unwrap().context_usage_percent, None);
         }
     }
     #[test]
-    fn kiro_metering_excludes_replay_before_live_prompt_and_resets_between_attempts() {
+    fn metering_excludes_replay_before_live_prompt_and_resets_between_attempts() {
         let mut first = Observer::default();
         kiro_prompt(&mut first);
         kiro_info(&mut first, kiro_completion(0.5));
@@ -1100,7 +1094,7 @@ mod tests {
         assert_eq!(
             resumed
                 .observation
-                .kiro_metering
+                .metering
                 .as_ref()
                 .unwrap()
                 .observed_credits,
@@ -1115,17 +1109,17 @@ mod tests {
         kiro_info(&mut resumed, kiro_completion(0.5));
         kiro_turn(&mut resumed, "new-turn");
         kiro_info(&mut resumed, kiro_completion(0.25));
-        let m = resumed.observation.kiro_metering.as_ref().unwrap();
+        let m = resumed.observation.metering.as_ref().unwrap();
         assert_eq!(m.observed_credits, Some(0.25));
         assert_eq!(m.unattributed_completions, 2);
         assert_eq!(m.prompt_completions, Some(1));
         assert_eq!(
-            first.observation.kiro_metering.unwrap().observed_credits,
+            first.observation.metering.unwrap().observed_credits,
             Some(0.5)
         );
     }
     #[test]
-    fn kiro_metering_rejects_changed_sessions_prompts_and_post_terminal_events() {
+    fn metering_rejects_changed_sessions_prompts_and_post_terminal_events() {
         for failure in ["session", "prompt", "terminal", "start", "malformed"] {
             let mut o = Observer::default();
             kiro_prompt(&mut o);
@@ -1138,11 +1132,7 @@ mod tests {
             }
             kiro_info(&mut o, kiro_completion(1.0));
             assert_eq!(
-                o.observation
-                    .kiro_metering
-                    .as_ref()
-                    .unwrap()
-                    .observed_credits,
+                o.observation.metering.as_ref().unwrap().observed_credits,
                 None,
                 "{failure}"
             );
@@ -1150,7 +1140,7 @@ mod tests {
         }
     }
     #[test]
-    fn kiro_metering_and_tool_counts_exclude_explicit_replay() {
+    fn metering_and_tool_counts_exclude_explicit_replay() {
         let mut o = Observer::default();
         kiro_start(&mut o);
         for update in [
@@ -1172,7 +1162,7 @@ mod tests {
         assert_eq!(o.observation.tool_calls, Some(0));
         assert_eq!(o.observation.completed_tool_calls, Some(0));
         assert_eq!(o.observation.tool_errors, Some(0));
-        assert!(o.observation.kiro_metering.is_none());
+        assert!(o.observation.metering.is_none());
         kiro_info(
             &mut o,
             json!({"kind":"user_message_id_assigned","userMessageId":"new-prompt"}),
@@ -1209,7 +1199,7 @@ mod tests {
         assert_eq!(o.observation.completed_tool_calls, Some(1));
         assert_eq!(o.observation.tool_errors, Some(0));
         assert!(!o.observation.stream_incomplete);
-        let m = o.observation.kiro_metering.unwrap();
+        let m = o.observation.metering.unwrap();
         assert_eq!(m.observed_credits, Some(0.25));
         assert_eq!(m.context_usage_percent, Some(10.0));
         assert_eq!(m.peak_context_usage_percent, Some(10.0));
@@ -1218,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn kiro_metering_tracking_and_arithmetic_are_bounded() {
+    fn metering_tracking_and_arithmetic_are_bounded() {
         let mut o = Observer::default();
         kiro_prompt(&mut o);
         for i in 0..MAX_IDENTITIES {
@@ -1228,11 +1218,7 @@ mod tests {
         assert!(o.observation.tracking_limited);
         kiro_info(&mut o, kiro_completion(1.0));
         assert_eq!(
-            o.observation
-                .kiro_metering
-                .as_ref()
-                .unwrap()
-                .observed_credits,
+            o.observation.metering.as_ref().unwrap().observed_credits,
             None
         );
 
@@ -1250,11 +1236,7 @@ mod tests {
         assert_eq!(o.kiro_tracking.request_ids.len(), MAX_IDENTITIES);
         assert!(o.observation.tracking_limited);
         assert_eq!(
-            o.observation
-                .kiro_metering
-                .as_ref()
-                .unwrap()
-                .observed_credits,
+            o.observation.metering.as_ref().unwrap().observed_credits,
             Some(1.0)
         );
 
@@ -1265,7 +1247,7 @@ mod tests {
         let mut completion = kiro_completion(f64::MAX);
         completion["requestIds"] = json!(["new-request"]);
         kiro_info(&mut o, completion);
-        let m = o.observation.kiro_metering.unwrap();
+        let m = o.observation.metering.unwrap();
         assert_eq!(m.observed_credits, Some(f64::MAX));
         assert_eq!(m.rejected_updates, 1);
         assert!(m.valid());

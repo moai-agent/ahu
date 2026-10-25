@@ -135,7 +135,7 @@ impl Snapshot {
             || events
                 .trajectory
                 .observation
-                .kiro_metering
+                .metering
                 .as_ref()
                 .is_some_and(|m| !m.valid())
             || events
@@ -525,6 +525,33 @@ mod tests {
         );
         assert_eq!(events.session.as_deref(), Some("first"));
     }
+    #[test]
+    fn arbitrary_plugin_trajectory_and_metering_are_validated_without_provider_catalog() {
+        let mut value = fixture();
+        value["trajectory"]["source"] = json!("new-provider.session-v9");
+        value["trajectory"]["metering"] =
+            json!({"observed_credits":0.5,"credit_observations":1,"prompt_completions":1});
+        let parsed = Snapshot::parse(value.clone(), "invented", false).unwrap();
+        assert_eq!(
+            parsed.events.trajectory.observation.source.as_str(),
+            "new-provider.session-v9"
+        );
+        for source in [
+            "",
+            "https://private.invalid",
+            "raw payload",
+            &"x".repeat(129),
+        ] {
+            value["trajectory"]["source"] = json!(source);
+            assert!(Snapshot::parse(value.clone(), "invented", false).is_err());
+        }
+        value["trajectory"]["source"] = json!("new-provider.session-v9");
+        value["trajectory"]["metering"]["observed_credits"] = json!(-1);
+        assert!(Snapshot::parse(value.clone(), "invented", false).is_err());
+        value["trajectory"]["metering"] = json!({"raw":"PRIVATE"});
+        assert!(Snapshot::parse(value, "invented", false).is_err());
+    }
+
     #[test]
     fn cost_sources_are_observed_neutral_and_cannot_change_midstream() {
         let mut value = fixture();

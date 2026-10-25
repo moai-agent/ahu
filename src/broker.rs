@@ -365,11 +365,23 @@ pub fn request(
         bail!("parent is cancelling; child admission refused");
     }
     let capability=std::env::var("AHU_BROKER_TOKEN").map_err(|_|Error::new("owning supervisor has no live child broker; do not launch a nested harness or widen its sandbox"))?;
-    if record.identity.harness == "codex"
-        && record.identity.permissions == crate::agent::Permissions::Prompt
+    let runtime = crate::harness_runtime::load(repo, &record.identity.harness)?;
+    if record.launch_command.planner_binding_digest.as_deref()
+        != Some(runtime.binding_digest().as_str())
+    {
+        bail!("broker runtime binding differs from the frozen parent task");
+    }
+    if !crate::native::execution_capabilities(
+        repo,
+        &record.identity.harness,
+        &spec.harness_version,
+        record.identity.permissions,
+        spec.options.work_mode,
+    )?
+    .broker_transport
     {
         bail!(
-            "broker_transport_unavailable_for_read_only: this Codex task retains read-only sandboxing; submit from the host with an explicitly authorized workspace-write coordinator and frozen child grant"
+            "broker_transport_unavailable_for_read_only: selected runtime does not admit broker transport under the frozen permission controls"
         );
     }
     let request = Request {

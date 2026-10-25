@@ -739,17 +739,6 @@ pub fn launch(
         options.native_helpers = policy;
     }
 
-    if contract.output.is_some()
-        && !options.work_mode
-        && pair.harness == "codex"
-        && agent
-            .as_ref()
-            .is_some_and(|a| a.manifest.permissions == crate::agent::Permissions::Prompt)
-    {
-        bail!(
-            "structured output is unavailable with Codex read-only permissions; choose a registered agent already authorized to write results"
-        );
-    }
     if contract.output.is_some() && options.native_helpers == "bounded" && !options.work_mode {
         bail!("structured output requires write tools; bounded native helpers are read-only");
     }
@@ -784,6 +773,18 @@ pub fn launch(
         .clone()
         .or_else(|| options.work_mode.then(|| "unknown".into()))
         .ok_or_else(|| Error::new("cannot determine installed harness version"))?;
+    if contract.output.is_some()
+        && !crate::native::execution_capabilities(
+            repo,
+            &plan.pair.harness,
+            &version,
+            permissions,
+            options.work_mode,
+        )?
+        .structured_output
+    {
+        bail!("structured output is unavailable under the selected runtime permission controls");
+    }
     let parent_task = std::env::var("AHU_PARENT_TASK").ok();
     let mut parent_release = None;
     let mut frozen_parent_spec = None;
@@ -899,7 +900,7 @@ pub fn launch(
         spec.gaps.push("Native integration evidence is bounded; unsupported configuration and hooks are refused. Arbitrary shell commands remain outside integration inspection. Same-UID code is not isolated from supervisor state.".into());
     }
     if !spec.child_grants.is_empty() {
-        spec.gaps.push("Broker grants approve only frozen registered identities and profiles. Codex workspace-write receives the task's requests directory as a narrow additional write root; read-only Codex transport is refused. Limits: 128 tasks per root grant, depth 8, 16 active/interrupted tasks per repository, no hidden queue or global token cap.".into());
+        spec.gaps.push("Broker grants approve only frozen registered identities and profiles. The selected runtime must explicitly admit broker transport under the task's frozen permission controls. Limits: 128 tasks per root grant, depth 8, 16 active/interrupted tasks per repository, no hidden queue or global token cap.".into());
     }
 
     if spec.options.native_helpers == "bounded" && !spec.options.work_mode {
@@ -1383,27 +1384,64 @@ impl TokenUsage {
     }
 }
 
-fn skill_catalog(worktree: &Path) -> Vec<SkillCatalogEntry> {
-    let roots = [
-        ".agents/skills",
-        ".claude/skills",
-        ".gemini/antigravity-cli/skills",
-    ];
+fn skill_catalog(worktree: &Path, plugin_roots: &[String]) -> Result<Vec<SkillCatalogEntry>> {
+    use std::path::Component;
+    let mut roots = std::collections::BTreeSet::from([".agents/skills".to_owned()]);
+    if plugin_roots.len() > 128 {
+        bail!("runtime skill root limit exceeded");
+    }
+    for root in plugin_roots {
+        if root.is_empty()
+            || root.len() > 1024
+            || Path::new(root)
+                .components()
+                .any(|c| !matches!(c, Component::Normal(name) if name != ".git"))
+        {
+            bail!("invalid runtime skill root");
+        }
+        roots.insert(root.trim_end_matches('/').into());
+    }
     let mut entries = Vec::new();
     for root in roots {
-        let path = worktree.join(root);
+        let path = worktree.join(&root);
+        // Descriptor paths are relative metadata, never authority to follow links outside the task.
+        let mut current = worktree.to_path_buf();
+        if Path::new(&root).components().any(|c| {
+            current.push(c);
+            std::fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink())
+        }) {
+            continue;
+        }
         let Ok(children) = std::fs::read_dir(&path) else {
             continue;
         };
-        for child in children.flatten() {
+        for (index, child) in children.enumerate() {
+            if index >= 1024 {
+                bail!("skill directory entry limit exceeded");
+            }
+            let Ok(child) = child else {
+                continue;
+            };
             let name = child.file_name().to_string_lossy().into_owned();
-            if name.is_empty() || name.starts_with('.') {
+            if name.is_empty()
+                || name.starts_with('.')
+                || !child.file_type().is_ok_and(|t| t.is_dir())
+            {
                 continue;
             }
             let file = child.path().join("SKILL.md");
+            let Ok(metadata) = std::fs::symlink_metadata(&file) else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+                continue;
+            }
             let Ok(bytes) = std::fs::read(&file) else {
                 continue;
             };
+            if entries.len() >= 1024 {
+                bail!("skill catalog limit exceeded");
+            }
             entries.push(SkillCatalogEntry {
                 name,
                 source: format!("{root}/{}/SKILL.md", child.file_name().to_string_lossy()),
@@ -1412,7 +1450,7 @@ fn skill_catalog(worktree: &Path) -> Vec<SkillCatalogEntry> {
         }
     }
     entries.sort_by(|left, right| left.source.cmp(&right.source));
-    entries
+    Ok(entries)
 }
 
 /// Attribute an observed invocation only to exact local catalog entries.
@@ -2356,7 +2394,7 @@ fn run_attempt(
     } else {
         None
     };
-    let skill_catalog = skill_catalog(&record.worktree);
+    let skill_catalog = skill_catalog(&record.worktree, &runtime.descriptor().skill_paths)?;
     attribute_skill_provenance(&mut events.skills, &skill_catalog);
     let outcome = if let Some((reason, _)) = stop {
         reason
@@ -3574,15 +3612,19 @@ mod profile_and_metadata_tests {
         for path in [
             ".agents/skills/zeta",
             ".agents/skills/alpha",
-            ".claude/skills/native",
+            ".fixture/skills/native",
         ] {
             std::fs::create_dir_all(root.path().join(path)).unwrap();
         }
         std::fs::create_dir_all(root.path().join(".agents/skills/.hidden")).unwrap();
         std::fs::write(root.path().join(".agents/skills/zeta/SKILL.md"), "zeta").unwrap();
         std::fs::write(root.path().join(".agents/skills/alpha/SKILL.md"), "alpha").unwrap();
-        std::fs::write(root.path().join(".claude/skills/native/SKILL.md"), "native").unwrap();
-        let catalog = skill_catalog(root.path());
+        std::fs::write(
+            root.path().join(".fixture/skills/native/SKILL.md"),
+            "native",
+        )
+        .unwrap();
+        let catalog = skill_catalog(root.path(), &[".fixture/skills".into()]).unwrap();
         assert_eq!(catalog.len(), 3);
         assert!(
             catalog
@@ -3598,6 +3640,23 @@ mod profile_and_metadata_tests {
                 .digest,
             digest_bytes(b"zeta")
         );
+    }
+
+    #[test]
+    fn descriptor_skill_roots_are_relative_bounded_and_do_not_follow_links() {
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(external.path().join("skill")).unwrap();
+        std::fs::write(external.path().join("skill/SKILL.md"), "external").unwrap();
+        std::os::unix::fs::symlink(external.path(), root.path().join("linked")).unwrap();
+        assert!(
+            skill_catalog(root.path(), &["linked".into()])
+                .unwrap()
+                .is_empty()
+        );
+        for path in ["../outside", "/absolute", ".git/skills", ""] {
+            assert!(skill_catalog(root.path(), &[path.into()]).is_err());
+        }
     }
 
     #[test]

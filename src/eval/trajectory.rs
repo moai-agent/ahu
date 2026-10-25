@@ -17,15 +17,41 @@ pub enum Coverage {
     CompleteObservedStream,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Source {
-    #[default]
-    Unsupported,
-    CodexTurns,
-    ClaudeAssistantMessages,
-    OpencodeSteps,
-    KiroSessionUpdates,
+/// Bounded plugin-owned provenance label; new providers require no core enum variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Source(String);
+impl Default for Source {
+    fn default() -> Self {
+        Self("unsupported".into())
+    }
+}
+impl TryFrom<String> for Source {
+    type Error = &'static str;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
+            return Err("invalid trajectory source");
+        }
+        Ok(Self(value))
+    }
+}
+impl From<Source> for String {
+    fn from(value: Source) -> Self {
+        value.0
+    }
+}
+impl Source {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    fn supported(&self) -> bool {
+        self.0 != "unsupported"
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -35,7 +61,7 @@ pub struct Observation {
     pub coverage: Coverage,
     /// Independent partial metering, never model steps, tokens or USD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kiro_metering: Option<KiroMetering>,
+    pub metering: Option<Metering>,
     pub steps: Option<u64>,
     pub tool_calls: Option<u64>,
     /// Calls with an observed, classified terminal outcome. Absent in legacy records.
@@ -52,12 +78,12 @@ pub struct Observation {
     pub stream_incomplete: bool,
 }
 
-/// Kiro V3 session-info evidence. Amounts are sums of accepted observations,
+/// Plugin-normalized session metering evidence. Amounts are sums of accepted observations,
 /// not complete attempt/session accounting. Context is a window snapshot.
 /// No native identifiers, tool names, breakdown contents or payloads persist.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct KiroMetering {
+pub struct Metering {
     pub context_usage_percent: Option<f64>,
     pub peak_context_usage_percent: Option<f64>,
     /// Prompt completions may contain multiple model requests. Not `steps`.
@@ -72,7 +98,7 @@ pub struct KiroMetering {
     pub unattributed_completions: u64,
 }
 
-impl KiroMetering {
+impl Metering {
     pub fn valid(&self) -> bool {
         [self.context_usage_percent, self.peak_context_usage_percent]
             .into_iter()
@@ -98,7 +124,7 @@ impl Observation {
     /// A rate needs a known numerator and completed-call denominator. Never
     /// infer completions from starts, including for legacy records.
     pub fn tool_error_rate(&self) -> Option<f64> {
-        if self.coverage == Coverage::None || self.source == Source::Unsupported {
+        if self.coverage == Coverage::None || !self.source.supported() {
             return None;
         }
         let calls = self.tool_calls?;
@@ -118,7 +144,7 @@ impl Observation {
 
     pub fn complete(&self) -> bool {
         self.coverage == Coverage::CompleteObservedStream
-            && self.source != Source::Unsupported
+            && self.source.supported()
             && !self.tracking_limited
             && !self.stream_incomplete
             && self.malformed_events == 0
@@ -343,42 +369,41 @@ impl Summary {
             };
             for (value, map) in [
                 (serde_json::to_value(o.coverage).unwrap(), &mut s.coverage),
-                (serde_json::to_value(o.source).unwrap(), &mut s.sources),
+                (serde_json::to_value(&o.source).unwrap(), &mut s.sources),
             ] {
                 *map.entry(value.as_str().unwrap().into()).or_default() += 1;
             }
             s.limited_runs += usize::from(o.tracking_limited);
-            if let Some(m) = &o.kiro_metering
-                && o.source == Source::KiroSessionUpdates
+            if let Some(m) = &o.metering
                 && m.valid()
             {
                 for (name, value) in [
-                    ("kiro_context_usage_percent", m.context_usage_percent),
+                    ("metering_context_usage_percent", m.context_usage_percent),
                     (
-                        "kiro_peak_context_usage_percent",
+                        "metering_peak_context_usage_percent",
                         m.peak_context_usage_percent,
                     ),
                     (
-                        "kiro_prompt_completions",
+                        "metering_prompt_completions",
                         m.prompt_completions.map(|v| v as f64),
                     ),
-                    ("kiro_observed_credits", m.observed_credits),
+                    ("metering_observed_credits", m.observed_credits),
                     (
-                        "kiro_credit_observations",
+                        "metering_credit_observations",
                         Some(m.credit_observations as f64),
                     ),
-                    ("kiro_observed_elapsed_ms", m.observed_elapsed_ms),
+                    ("metering_observed_elapsed_ms", m.observed_elapsed_ms),
                     (
-                        "kiro_elapsed_observations",
+                        "metering_elapsed_observations",
                         Some(m.elapsed_observations as f64),
                     ),
                     (
-                        "kiro_duplicate_completions",
+                        "metering_duplicate_completions",
                         Some(m.duplicate_completions as f64),
                     ),
-                    ("kiro_rejected_updates", Some(m.rejected_updates as f64)),
+                    ("metering_rejected_updates", Some(m.rejected_updates as f64)),
                     (
-                        "kiro_unattributed_completions",
+                        "metering_unattributed_completions",
                         Some(m.unattributed_completions as f64),
                     ),
                 ] {
@@ -425,7 +450,7 @@ mod tests {
         };
         assert_eq!(budget.score(None), BudgetStatus::Unknown);
         let mut o = Observation {
-            source: Source::CodexTurns,
+            source: Source::try_from("fixture_turns".to_owned()).unwrap(),
             steps: Some(2),
             tool_errors: Some(0),
             coverage: Coverage::Partial,
@@ -448,7 +473,7 @@ mod tests {
 
     fn complete(calls: u64, errors: u64) -> Observation {
         Observation {
-            source: Source::CodexTurns,
+            source: Source::try_from("fixture_turns".to_owned()).unwrap(),
             coverage: Coverage::CompleteObservedStream,
             steps: Some(2),
             tool_calls: Some(calls),
@@ -471,9 +496,9 @@ mod tests {
         o.coverage = Coverage::Partial;
         assert_eq!(o.tool_error_rate(), None);
         let mut unsupported = complete(2, 1);
-        unsupported.source = Source::Unsupported;
+        unsupported.source = Source::try_from("unsupported".to_owned()).unwrap();
         assert_eq!(unsupported.tool_error_rate(), None);
-        unsupported.source = Source::CodexTurns;
+        unsupported.source = Source::try_from("fixture_turns".to_owned()).unwrap();
         unsupported.coverage = Coverage::None;
         assert_eq!(unsupported.tool_error_rate(), None);
         let mut legacy = serde_json::to_value(complete(2, 1)).unwrap();

@@ -1,12 +1,14 @@
 //! Terminal-span observations, not a billing ledger or additive call counters.
 //! Only fixed labels and bounded numeric fields cross this projection.
 use super::Events;
-use crate::eval::trajectory::{Coverage, Source};
+use crate::eval::trajectory::Coverage;
+#[cfg(test)]
+use crate::eval::trajectory::Source;
 use crate::telemetry::SpanGuard;
 
 #[derive(Debug, PartialEq)]
 enum Attribute {
-    Label(&'static str),
+    Label(String),
     Count(u64),
     Amount(f64),
     Flag(bool),
@@ -29,16 +31,7 @@ impl Projection {
 
         let o = &events.trajectory.observation;
         p.label("ahu.events.scope", "recognized_native_stdout_events");
-        p.label(
-            "ahu.events.source",
-            match o.source {
-                Source::Unsupported => "unsupported",
-                Source::CodexTurns => "codex_turns",
-                Source::ClaudeAssistantMessages => "claude_assistant_messages",
-                Source::OpencodeSteps => "opencode_steps",
-                Source::KiroSessionUpdates => "kiro_session_updates",
-            },
-        );
+        p.label("ahu.events.source", o.source.as_str());
         let complete = o.complete() && events.terminal && events.unknown_events == 0;
         p.label(
             "ahu.events.coverage",
@@ -92,67 +85,71 @@ impl Projection {
             p.label("ahu.cost.aggregation", aggregation);
         }
 
-        // Kiro's accepted completions remain partial even on a successful run.
-        // Replay, conflicting completions and helper evidence are already excluded
-        // by the shared trajectory observer; never reparse raw events here.
-        if o.source == Source::KiroSessionUpdates {
-            p.label("ahu.kiro.source", "kiro_session_info_updates");
-            p.label("ahu.kiro.scope", "accepted_current_attempt_observations");
-            p.label("ahu.kiro.credits.unit", "credit");
+        // Metering remains independently partial; units never imply tokens or USD.
+        if o.metering.is_some() {
+            p.label("ahu.metering.source", o.source.as_str());
             p.label(
-                "ahu.kiro.credits.aggregation",
+                "ahu.metering.scope",
+                "accepted_current_attempt_observations",
+            );
+            p.label("ahu.metering.credits.unit", "credit");
+            p.label(
+                "ahu.metering.credits.aggregation",
                 "sum_accepted_deduplicated_prompt_completions",
             );
-            p.label("ahu.kiro.elapsed.unit", "ms");
+            p.label("ahu.metering.elapsed.unit", "ms");
             p.label(
-                "ahu.kiro.elapsed.aggregation",
+                "ahu.metering.elapsed.aggregation",
                 "sum_accepted_deduplicated_prompt_completions",
             );
-            p.label("ahu.kiro.context.unit", "percent");
+            p.label("ahu.metering.context.unit", "percent");
             p.label(
-                "ahu.kiro.context.aggregation",
+                "ahu.metering.context.aggregation",
                 "last_and_maximum_observed_window_usage",
             );
-            let m = o.kiro_metering.as_ref().filter(|m| m.valid());
+            let m = o.metering.as_ref().filter(|m| m.valid());
             let credits = p.amount(
-                "ahu.kiro.credits.observed",
+                "ahu.metering.credits.observed",
                 m.and_then(|m| m.observed_credits),
             );
             let elapsed = p.amount(
-                "ahu.kiro.elapsed.observed_ms",
+                "ahu.metering.elapsed.observed_ms",
                 m.and_then(|m| m.observed_elapsed_ms),
             );
             let context = p.amount(
-                "ahu.kiro.context.last_percent",
+                "ahu.metering.context.last_percent",
                 m.and_then(|m| m.context_usage_percent),
             );
             p.amount(
-                "ahu.kiro.context.peak_percent",
+                "ahu.metering.context.peak_percent",
                 m.and_then(|m| m.peak_context_usage_percent),
             );
             let completions = p.count(
-                "ahu.kiro.prompt_completions",
+                "ahu.metering.prompt_completions",
                 m.and_then(|m| m.prompt_completions),
             );
             p.label(
-                "ahu.kiro.coverage",
+                "ahu.metering.coverage",
                 coverage(completions || credits || elapsed || context),
             );
             p.label(
-                "ahu.kiro.prompt_completions.aggregation",
+                "ahu.metering.prompt_completions.aggregation",
                 "count_accepted_deduplicated_completions",
             );
-            p.label("ahu.kiro.credits.coverage", coverage(credits));
-            p.label("ahu.kiro.elapsed.coverage", coverage(elapsed));
-            p.label("ahu.kiro.context.coverage", coverage(context));
+            p.label("ahu.metering.credits.coverage", coverage(credits));
+            p.label("ahu.metering.elapsed.coverage", coverage(elapsed));
+            p.label("ahu.metering.context.coverage", coverage(context));
             if let Some(m) = m {
                 for (key, value) in [
-                    ("ahu.kiro.credits.observations", m.credit_observations),
-                    ("ahu.kiro.elapsed.observations", m.elapsed_observations),
-                    ("ahu.kiro.duplicate_completions", m.duplicate_completions),
-                    ("ahu.kiro.rejected_updates", m.rejected_updates),
+                    ("ahu.metering.credits.observations", m.credit_observations),
+                    ("ahu.metering.elapsed.observations", m.elapsed_observations),
                     (
-                        "ahu.kiro.unattributed_completions",
+                        "ahu.metering.duplicate_completions",
+                        m.duplicate_completions,
+                    ),
+                    ("ahu.metering.rejected_updates", m.rejected_updates),
+                    (
+                        "ahu.metering.unattributed_completions",
                         m.unattributed_completions,
                     ),
                 ] {
@@ -167,8 +164,8 @@ impl Projection {
         p
     }
 
-    fn label(&mut self, key: &'static str, value: &'static str) {
-        self.attributes.push((key, Attribute::Label(value)));
+    fn label(&mut self, key: &'static str, value: &str) {
+        self.attributes.push((key, Attribute::Label(value.into())));
     }
 
     fn flag(&mut self, key: &'static str, value: bool) {
@@ -198,7 +195,7 @@ impl Projection {
     pub(super) fn export(self, span: &mut SpanGuard) {
         for (key, value) in self.attributes {
             match value {
-                Attribute::Label(value) => span.set_string(key, value),
+                Attribute::Label(value) => span.set_string(key, &value),
                 Attribute::Count(value) => span.set_u64(key, value),
                 Attribute::Amount(value) => span.set_f64(key, value),
                 Attribute::Flag(value) => span.set_bool(key, value),
@@ -251,7 +248,8 @@ mod tests {
             terminal: true,
             ..Default::default()
         };
-        events.trajectory.observation.source = Source::CodexTurns;
+        events.trajectory.observation.source =
+            Source::try_from("fixture_turns".to_owned()).unwrap();
         events.trajectory.observation.coverage = Coverage::CompleteObservedStream;
         events.usage.input = Some(10);
         let projection = Projection::from_events(&events);
@@ -261,7 +259,7 @@ mod tests {
         );
         assert_eq!(
             projection.get("ahu.tokens.coverage"),
-            Some(&Attribute::Label("partial"))
+            Some(&Attribute::Label("partial".into()))
         );
         events.trajectory.incomplete();
         assert_eq!(
