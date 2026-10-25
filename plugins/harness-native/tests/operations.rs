@@ -299,6 +299,11 @@ fn public_trust_calls_reconcile_only_owned_receipts() {
         assert!(!task.join("native-trust.json").exists());
     }
     p["permissions"] = json!("prompt");
+    assert_eq!(
+        call("codex", "trust_prepare", &p).unwrap()["status"],
+        "not_applicable"
+    );
+    fs::write(task.join("native-trust.json"), "{}").unwrap();
     assert!(call("codex", "trust_prepare", &p).is_err());
 }
 #[test]
@@ -445,4 +450,63 @@ fn kiro_declarative_agents_are_accepted_but_executable_unknown_fields_refuse() {
         call("kiro", "admission", &f.admission()).unwrap()["allowed"],
         false
     );
+}
+
+#[test]
+fn provider_selected_settings_keep_inventory_distinct_from_admission() {
+    let f = Fixture::new("exit 99");
+    let mut p = f.probe();
+    p["environment_names"] = json!(["PATH", "synthetic_lowercase"]);
+    p["settings"] = json!({"inspection_only":true});
+    let inventory = call("kiro", "admission", &p).unwrap();
+    assert_eq!(inventory["guarded_checks"], "inventory_only");
+    assert_eq!(inventory["allowed"], false);
+    p["settings"] = json!({});
+    p["model"] = json!("claude-sonnet-4.5");
+    p["version"] = json!("1.2.3");
+    p["permissions"] = json!("auto");
+    p["mode"] = json!("interactive");
+    let admitted = call("kiro", "admission", &p).unwrap();
+    assert_eq!(admitted["allowed"], true);
+    p["mode"] = json!("headless");
+    p["work_mode"] = json!(true);
+    let work = call("kiro", "admission", &p).unwrap();
+    assert_eq!(work["guarded_checks"], "intentionally_skipped");
+    p["settings"]["unknown"] = json!(true);
+    assert!(call("kiro", "admission", &p).is_err());
+}
+
+#[test]
+fn masked_native_overrides_never_probe_the_default_account() {
+    let f = Fixture::new("touch should-not-run; exit 99");
+    for (harness, variable) in [
+        ("codex", "CODEX_HOME"),
+        ("claude-code", "ANTHROPIC_API_KEY"),
+        ("opencode", "OLLAMA_HOST"),
+        ("kiro", "KIRO_HOME"),
+        ("antigravity", "GEMINI_API_KEY"),
+    ] {
+        let mut p = f.probe();
+        p["environment_names"] = json!([variable]);
+        assert!(call(harness, "auth", &p).is_err());
+        assert!(call(harness, "budget", &p).is_err());
+    }
+    assert!(!f.root.join("should-not-run").exists());
+}
+
+#[test]
+fn native_hook_view_redacts_commands_and_reports_unknown_scope() {
+    let f = Fixture::new("exit 99");
+    fs::create_dir(f.root.join(".claude")).unwrap();
+    fs::write(f.root.join(".claude/settings.json"), r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"tool private-sentinel"}]}]},"permissions":{"defaultMode":"bypassPermissions"}}"#).unwrap();
+    let mut p =
+        json!({"project":f.root,"home":f.home,"settings":{"view":"hooks","environment_names":[]}});
+    let v = call("claude-code", "native_sources", &p).unwrap();
+    assert_eq!(v["hooks"].as_array().unwrap().len(), 1);
+    assert!(!v.to_string().contains("private-sentinel"));
+    assert_eq!(v["settings"][0]["approvals_widened"], true);
+    p["settings"]["environment_names"] = json!(["CLAUDE_CONFIG_DIR"]);
+    let v = call("claude-code", "native_sources", &p).unwrap();
+    assert_eq!(v["unscanned_harness"], "claude-code");
+    assert!(!v["unreadable"].as_array().unwrap().is_empty());
 }

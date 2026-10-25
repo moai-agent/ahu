@@ -1,11 +1,13 @@
 //! Provider implementation support for installed native harness runtime binaries.
 //! Core must not link this crate. See README for authority and operation contracts.
 mod admission;
+mod ambient;
 mod auth;
 mod codex_metadata;
 mod compatibility;
 mod files;
 mod helpers;
+mod hook_inventory;
 mod isolation;
 mod process;
 mod setup;
@@ -110,12 +112,15 @@ fn decode<T: serde::de::DeserializeOwned>(params: &Value) -> Result<T> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AuthParams {
+    #[serde(default)]
+    environment_names: Vec<String>,
     project: PathBuf,
     home: PathBuf,
     native_executable: PathBuf,
     environment: Environment,
     model: Option<String>,
     ollama_host: Option<String>,
+    requested_identity: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,6 +138,13 @@ enum Mode {
     Interactive,
     Headless,
     Direct,
+}
+
+pub(crate) fn valid_environment_names(names: &[String]) -> bool {
+    names.len() <= 512
+        && names
+            .iter()
+            .all(|name| !name.is_empty() && name.len() <= 256 && !name.contains(['\0', '=']))
 }
 
 /// Dispatch a typed native operation. Never resolves executables through PATH.
@@ -188,6 +200,13 @@ fn dispatch(harness: &str, operation: &str, params: &Value) -> Result<Value> {
         }
         "auth" | "budget" => {
             let a: AuthParams = decode(params)?;
+            if !valid_environment_names(&a.environment_names)
+                || a.environment_names.iter().any(|name| {
+                    ambient::auth_override(harness, name) && !a.environment.contains_key(name)
+                })
+            {
+                return Err(Error::invalid());
+            }
             let p = ProbeParams {
                 project: a.project,
                 home: a.home,
@@ -201,12 +220,19 @@ fn dispatch(harness: &str, operation: &str, params: &Value) -> Result<Value> {
                 operation == "budget",
                 a.model.as_deref(),
                 a.ollama_host.as_deref(),
+                a.requested_identity.as_deref(),
             )
             .map_err(|_| Error::uncertain())
         }
         "setup" => setup::call(harness, params),
         "native_sources" => sources::call(harness, params),
-        "admission" => admit(harness, params),
+        "admission" => {
+            if params.get("settings").is_some() || params.get("managed_claude").is_none() {
+                ambient::admission(harness, params)
+            } else {
+                admit(harness, params)
+            }
+        }
         "trust_prepare" | "trust_cleanup" => {
             let p: TrustParams = decode(params)?;
             let relocated: &[&str] = match harness {
@@ -214,7 +240,7 @@ fn dispatch(harness: &str, operation: &str, params: &Value) -> Result<Value> {
                 "claude-code" => &["CLAUDE_CONFIG_DIR"],
                 _ => &["GEMINI_CLI_HOME", "AGY_CONFIG_DIR"],
             };
-            if p.overrides.len() > 128
+            if p.overrides.len() > 512
                 || p.overrides
                     .iter()
                     .any(|key| relocated.contains(&key.as_str()))
@@ -228,7 +254,10 @@ fn dispatch(harness: &str, operation: &str, params: &Value) -> Result<Value> {
                 || p.mode != Mode::Interactive
                 || !matches!(harness, "codex" | "claude-code" | "antigravity")
             {
-                return Err(Error::invalid());
+                if std::fs::symlink_metadata(p.task_dir.join("native-trust.json")).is_ok() {
+                    return Err(Error::invalid());
+                }
+                return Ok(json!({"status":"not_applicable","receipt_path":null}));
             }
             if operation == "trust_prepare" {
                 directory(&p.worktree)?;
@@ -402,13 +431,13 @@ fn admit(harness: &str, params: &Value) -> Result<Value> {
     {
         files::check_components(path)?;
     }
-    if p.overrides.len() > 128
+    if p.overrides.len() > 512
         || p.overrides.iter().any(|s| {
             s.is_empty()
-                || s.len() > 128
+                || s.len() > 256
                 || !s
                     .bytes()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                    .all(|b| b.is_ascii_alphabetic() || b.is_ascii_digit() || b == b'_')
         })
     {
         return Err(Error::invalid());
@@ -528,3 +557,6 @@ fn admit(harness: &str, params: &Value) -> Result<Value> {
         json!({"allowed":allowed,"decision":if allowed{"admitted"}else{"refused"},"guarded_checks":"inspected","conformance":"untested","evidence":status,"helper_profile":helper,"invocation_profile":invocation}),
     )
 }
+
+#[cfg(test)]
+mod admission_tests;

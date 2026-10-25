@@ -328,12 +328,12 @@ hostile processes are not atomically isolated.
 ## Account and capacity
 
 `auth` and `budget` take the probe fields plus optional `model` and `ollama_host`.
-OpenCode auth requires `model`. Its Ollama cloud route additionally requires an
-explicit host (for example `http://127.0.0.1:11434`). Other OpenCode providers
-return unsupported; no alternate account is selected.
+OpenCode auth uses `model` or the explicit requested identity described below.
+Its Ollama cloud route uses a validated loopback host; other OpenCode providers
+return unsupported. No alternate account is selected.
 
 Successful auth returns `{status:"available",binding_harness,fingerprint,
-effective_provider_address_verified}`. Unsupported OpenCode auth returns
+effective_provider_address_verified,identity_kind}`. Unsupported OpenCode auth returns
 `{status:"unsupported",binding_harness:null,fingerprint:null}`. The fingerprint
 preserves the existing SHA-256 over serde_json's sorted-key object containing
 `harness`, `identity_kind`, `principal`, `organization`, and `workspace` including
@@ -405,3 +405,97 @@ CARGO_TARGET_DIR=/tmp/ahu-full-plugin-native-target cargo test --manifest-path p
 These checks establish the standalone implementation boundary, not installed
 runtime integration or completion of whole-core harness extraction. Dependency
 release/advisory review and live native conformance remain coordinator gates.
+
+## Provider-selected settings and core facades
+
+New consumers use provider-selected settings instead of constructing native
+location fields. The explicit-location admission shape above remains supported
+for synthetic fixtures. Do not mix the shapes. The new shape is:
+
+```json
+{
+  "project": "/absolute/worktree",
+  "home": "/absolute/native/home",
+  "native_executable": "/absolute/selected/native-cli",
+  "environment": {"PATH": "/usr/bin:/bin"},
+  "environment_names": ["PATH"],
+  "version": "1.2.3",
+  "model": "exact-model",
+  "permissions": "auto",
+  "mode": "interactive",
+  "work_mode": false,
+  "settings": {
+    "inspection_only": false,
+    "trust_native_account_state": false
+  }
+}
+```
+
+Settings reject unknown fields. Optional `settings.helpers` uses the exact
+helper object documented above; absent means disabled delegation. The plugin
+selects managed/system paths and macOS preferences. `environment_names` is a
+presence-only list of at most 512 names, each at most 256 bytes, without NUL or
+an equals sign. Values are not included. Actual subprocess variables still come
+exclusively from `environment`.
+
+With `inspection_only:true`, version/model/permissions/mode/work_mode may be
+omitted. The result always has `allowed:false`, `decision:"inspection"`,
+`guarded_checks:"inventory_only"` and unverified conformance. Inventory alone
+cannot admit a launch. Without a model, guarded admission requires `version`
+and checks native configuration/isolation; full launch admission additionally
+requires exact model, permissions and mode. Work mode with full inputs reports
+`guarded_checks:"intentionally_skipped"`, never fabricated conformance.
+
+Auth and budget additionally accept optional `environment_names` and
+`requested_identity`. Recognized native account/config override names absent
+from the explicit environment cause refusal before probing, preventing an
+environment-cleared wrapper from binding a different default account.
+Requested identity normally equals the runtime harness ID. OpenCode also accepts
+`ollama`, for explicit account binding without a model; the installed descriptor
+must declare that alias so generic core can resolve it. Cloud model routing
+remains provider-owned. Explicit `ollama_host` precedes environment OLLAMA_HOST;
+absent both, the native default is http://127.0.0.1:11434. Masked OLLAMA_HOST still
+refuses. Successful identity results also include `identity_kind`, preserving
+profile metadata while withholding the principal.
+
+Native sources additionally accepts optional
+`settings:{"view":VIEW,"environment_names":[...]}`. Exact views:
+
+- Absent or `inventory`: the source/import shape documented above.
+- `hooks`: a HookInventory object with `hooks`, `settings`, `mcp_servers`,
+  `declared_plugins`, `unreadable`, `checked`, and nullable `unscanned_harness`.
+  Hooks contain event/matcher/kind/scope/source/command_digest, never raw commands.
+  Settings facts include plugin-computed `approvals_widened`. MCP commands are
+  digest labels. Unknown surfaces and overrides remain explicitly unscanned.
+  Reads are bounded to 1 MiB; special files refuse without blocking.
+- `private_fingerprints`: `{"fingerprints":{"native:HARNESS:INDEX":"SHA256"}}`,
+  only digests of existing native configuration. Overrides refuse rather than
+  fingerprinting a different location. Keys are opaque private-lock entries.
+
+Unknown views/fields refuse. Inventory never activates native agents or hooks.
+
+The generic core setup facade is
+`plan(repo,harness,ahu_executable,skills,allowed_roots) -> Vec<Plan>`, with
+`Plan { path, expected_before_sha256, text }`. `parse_proposals` checks size,
+unique paths, caller-authorized scope and before-state; `Plan::check` rechecks
+before publication. Publication and rollback belong to the setup transaction.
+The facade does not expose the old single-path formatter or mutate files.
+
+Core trust dispatch first writes `native-runtime-trust-binding.json`, pinning
+task ID/directory, repository, worktree, identity digest, home and runtime binding
+digest. Prepare verifies the launch's frozen planner binding. Cleanup requires
+the same binding and home; it never resolves a replacement provider silently.
+A legacy `native-trust.json` without that marker requires explicit legacy
+recovery. Providers lacking preparation record a no-op marker; providers
+advertising preparation must also support cleanup. The provider's separate
+write-ahead receipt governs native changes and reconciliation. Ineligible
+modes/permissions/providers return
+`{"status":"not_applicable","receipt_path":null}` only when no native receipt
+exists; changing eligibility cannot bypass an existing receipt.
+
+Core retains profile storage, fingerprint comparisons, ownership, rendering and
+bounded result validation. `Status.profile` is owned `ProfileEvidence`, not a
+static catalog reference. External callers must migrate provider-specific
+private-lock keys to `native_mcp::fingerprints(repo,harness)` and classify
+`native:` entries as private. Native parser tests belong here; core tests use
+invented providers and generic observations.
