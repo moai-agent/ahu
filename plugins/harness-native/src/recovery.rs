@@ -118,7 +118,7 @@ pub(crate) fn call(harness: &str, value: &Value) -> Result<Value> {
             Err(_) => break false,
         }
     };
-    if executable_digest(&p.native_executable)? != *expected
+    if executable_digest(&p.native_executable).map_err(|_| Error::uncertain())? != *expected
         || crate::files::snapshot(&p.worktree).map_err(|_| Error::uncertain())? != before
     {
         return Err(Error::uncertain());

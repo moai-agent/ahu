@@ -561,3 +561,12 @@ relative files/subtrees already covered by context_paths. Core filters these
 from shared lock entries and keeps their acceptance in private owner state.
 Native fingerprint inspection likewise does not resolve or execute the native
 CLI. The fixed provider filename list lives only in this implementation crate.
+
+`admission` also accepts `action:"execution_capabilities"`, `harness`,
+`native_version`, `permissions` (`prompt|accept-edits|auto`), `work_mode`, and
+optional `native_helpers` (`disabled|bounded`, default disabled). It returns
+exactly `{structured_output:bool,broker_transport:bool}`. Guarded Codex prompt
+permissions deny both write-dependent capabilities; guarded bounded helpers deny
+structured output. Work mode skips those guarded limits. These pure permission
+checks do not certify native configuration, supported versions, or live behavior;
+normal admission remains required. Unknown fields or mismatched harness refuse.
