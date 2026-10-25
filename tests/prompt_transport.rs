@@ -258,7 +258,6 @@ fn run_task_delivers_a_hostile_prompt_literally_and_executes_nothing() {
     let repo = TestRepo::new();
     repo.init_config();
     repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    repo.install_runtime("codex");
     repo.commit("fixture");
 
     let temp = tempfile::TempDir::new().unwrap();
@@ -422,7 +421,6 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
     let repo_root = worktree.parent().and_then(|p| p.parent()).unwrap();
     let discovered = ahu::git::discover(repo_root).expect("fixture repo");
     let repo_identity = discovered.identity();
-    use ahu::harness::LaunchRequest;
     use ahu::task::{LaunchIdentity, LaunchMode, TaskRecord, TaskState};
 
     // The fixture composes the delivered prompt exactly as `launch::plan` does,
@@ -443,12 +441,21 @@ fn write_task_record(task_dir: &Path, worktree: &Path, prompt: &str, harness_pat
         },
     )
     .unwrap();
-    let command = common::record_command(&LaunchRequest {
-        model: "claude-opus-5",
-        prompt: &delivered,
-        cwd: worktree,
-        permissions: Default::default(),
-    });
+    let runtime = ahu::harness_runtime::load(&discovered, "claude-code").unwrap();
+    let mut command: ahu::harness::LaunchCommand = serde_json::from_value(
+        runtime
+            .call(
+                "launch",
+                serde_json::json!({
+                    "mode":"interactive", "model":"claude-opus-5",
+                    "permissions":"prompt", "cwd":worktree
+                }),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    command.planner_binding_digest = Some(runtime.binding_digest());
+    command.args[command.prompt_arg.unwrap()] = delivered;
     let enforcement = common::record_enforcement("claude-code");
     let record = TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
@@ -694,8 +701,8 @@ fn a_source_format_only_decides_how_its_file_is_parsed() {
         "frontmatter is still read, just not delivered"
     );
 
-    // The codex-agent parse is verbatim: nothing is stripped, so the
-    // frontmatter-looking text is delivered as instruction text.
+    // The installed fixture defines this opaque format as frontmatter plus
+    // body. Core does not infer a parser from the format name.
     let plain = ahu::agent::find(repo.path(), "plain").unwrap();
     assert_eq!(plain.instructions, "plain body\n");
 

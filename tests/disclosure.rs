@@ -1079,7 +1079,9 @@ fn opencode_settings_and_plugins_are_scanned_without_unscanned_disclosure() {
         "OpenCode settings are now scanned:\n{preview}"
     );
     assert!(
-        preview.contains("ahu reads these files;"),
+        preview.contains(
+            "the settings files ahu read declare no permission, plugin, MCP, or env keys"
+        ),
         "OpenCode preview must state that ahu reads its settings files:\n{preview}"
     );
 }

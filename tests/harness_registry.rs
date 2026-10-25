@@ -198,3 +198,60 @@ fn synthetic_decoder_preserves_terminal_and_missing_result_evidence() {
         assert_eq!(finished["terminal"], terminal);
     }
 }
+
+#[test]
+fn synthetic_native_profiles_preserve_requests_and_host_rejects_expansion() {
+    let repo = configured();
+    let discovered = ahu::git::discover(repo.path()).unwrap();
+    let request = ahu::native::Request {
+        harness: "sixth",
+        harness_version: "1.2.3",
+        policy: ahu::native::BOUNDED,
+        session_model: "sixth/exact",
+        helper_model: Some("sixth/helper"),
+        helper_role: "reader",
+        max_concurrent: 2,
+        max_depth: 1,
+        budget_usd: None,
+        assignment_writes: false,
+    };
+    let profile = ahu::native::profile_at(&discovered, &request).unwrap();
+    assert_eq!(profile.helper_model, "sixth/helper");
+    assert_eq!(profile.max_concurrent, 2);
+    assert!(profile.enforced.is_empty());
+    assert!(!profile.gaps.is_empty());
+    for overrides in [
+        serde_json::json!({"max_depth":2}),
+        serde_json::json!({"max_concurrent":3}),
+        serde_json::json!({"helper_model":"sixth/replacement"}),
+        serde_json::json!({"env":[["AHU_TASK_ID","replacement"]]}),
+    ] {
+        repo.write(
+            ".fixture/runtime.json",
+            &serde_json::json!({"profile_overrides":overrides}).to_string(),
+        );
+        assert!(ahu::native::profile_at(&discovered, &request).is_err());
+    }
+    repo.write(".fixture/runtime.json", "{}");
+    let disabled = ahu::native::profile_at(
+        &discovered,
+        &ahu::native::Request {
+            policy: ahu::native::DISABLED,
+            ..request
+        },
+    )
+    .unwrap();
+    assert!(disabled.helper_model.is_empty());
+    assert_eq!(disabled.max_depth, 0);
+    assert_eq!(disabled.max_concurrent, 0);
+    let runtime = ahu::harness_runtime::load(&discovered, "sixth").unwrap();
+    assert_eq!(
+        runtime
+            .call(
+                "admission",
+                serde_json::json!({"action":"execution_capabilities"})
+            )
+            .unwrap(),
+        serde_json::json!({"structured_output":true,"broker_transport":true})
+    );
+}

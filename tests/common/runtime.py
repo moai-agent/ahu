@@ -97,7 +97,24 @@ def respond(op,p):
         for field in configured.get('launch_omit',[]): result.pop(field,None)
         return result
     if op == 'admission':
-        if policy(p).get('refuse_admission'): raise ValueError('refused')
+        configured=policy(p)
+        if configured.get('refuse_admission'): raise ValueError('refused')
+        if p.get('action') == 'execution_capabilities':
+            return {'structured_output':True,'broker_transport':True}
+        if p.get('action') == 'native_profile':
+            request=p['request']
+            bounded=request['policy'] == 'bounded'
+            if request['policy'] not in ['disabled','bounded']: raise ValueError('policy')
+            if bounded and (request['max_depth'] != 1 or request['assignment_writes']):
+                raise ValueError('unsupported synthetic boundary')
+            profile={'policy':request['policy'],'harness':D['id'],'args':[],
+                'env':[],'env_remove':[],'helper_tools':[],
+                'helper_model':(request['helper_model'] or request['session_model']) if bounded else '',
+                'max_concurrent':request['max_concurrent'] if bounded else 0,
+                'max_depth':1 if bounded else 0, 'enforced':[],
+                'gaps':['Synthetic fixture has no native enforcement']}
+            profile.update(configured.get('profile_overrides',{}))
+            return profile
         return admission(p)
     if op == 'native_sources':
         if p.get('settings',{}).get('view') == 'private_fingerprints': return {'fingerprints':{}}
