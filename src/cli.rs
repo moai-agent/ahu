@@ -311,7 +311,7 @@ pub fn help_for(topic: Option<&str>) -> Result<String> {
         return Ok(HELP_ALL.to_string());
     }
     let help = match topic {
-        "setup" => "Usage: ahu setup\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh .agents/ahu/lock.md. Existing project files are preserved; review and commit setup output before launching.\n".to_string(),
+        "setup" => "Usage: ahu setup [--list-harness-plugins]\n       ahu setup --harness-plugin /absolute/staged/package\n\nDetect installed harnesses, select a model for each ahu dev agent, install user-facing skills, configure project MCP access, and refresh .agents/ahu/lock.md. Existing project files are preserved; review and commit setup output before launching. Harness plugin discovery is metadata-only. --harness-plugin prepares a disabled local content-pinned binding without executing, building, downloading, installing or enabling it. Review and commit the binding and context lock, explicitly install, then review grants and enable in a second commit. Only Codex launch uses the optional codex-plugin-pilot feature; built-in harnesses are not migrated.\n".to_string(),
         "tasks" => "Usage: ahu tasks [--limit N | --all] [--output json]\n\nLists recent tasks (default limit: 20). Use --all to show the full history. --output json emits the complete task list for scripting.\n".to_string(),
         "eval run" => help_section("eval run options:", "tasks options:"),
         "eval report" => help_section("eval report options:", "eval run options:"),
@@ -413,6 +413,10 @@ pub enum Command {
         agent: Option<String>,
     },
     Setup,
+    SetupHarnessPlugins,
+    SetupHarnessPlugin {
+        package: String,
+    },
     Launch {
         agent: String,
         prompt: PromptSource,
@@ -633,6 +637,18 @@ fn parse_inner(args: Vec<String>, stdin_available: bool) -> Result<Command> {
             Ok(Command::Explain { format })
         }
         "setup" => {
+            if args.get(1).map(String::as_str) == Some("--list-harness-plugins") {
+                expect_no_more(&args[2..])?;
+                return Ok(Command::SetupHarnessPlugins);
+            }
+            if args.get(1).map(String::as_str) == Some("--harness-plugin") {
+                if args.len() != 3 {
+                    bail!("setup --harness-plugin requires one absolute staged package path");
+                }
+                return Ok(Command::SetupHarnessPlugin {
+                    package: args[2].clone(),
+                });
+            }
             expect_no_more(&args[1..])?;
             Ok(Command::Setup)
         }

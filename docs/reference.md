@@ -171,6 +171,10 @@ arbitrary shell operations, and harness write events remain reported evidence,
 not OS-level filesystem containment. Approval summaries and targets are kept
 in the task's owner-only state directory.
 
+For offline harness plugin discovery and disabled local-package preparation, see
+[the setup workflow](harness-plugin-pilot.md#discover-and-prepare-a-local-package).
+These operations do not require a provider or migrate built-in harnesses.
+
 `ahu setup` is the only setup command. It detects installed supported harnesses,
 asks for a model per detected harness, creates an ahu `dev-<harness>` agent for
 each, installs bundled skills in project locations, and adds a local `ahu mcp

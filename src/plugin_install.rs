@@ -772,12 +772,11 @@ pub fn run(root: &Path, action: &str, id: &str) -> Result<()> {
 }
 
 /// Offline inspection: no state creation, cleanup, fetch, selection or execution.
-pub fn list(root: &Path, output_json: bool) -> Result<()> {
-    let repo = crate::git::discover(root)?;
-    let bindings = crate::interactive::plugins::project::inventory(&repo.root)?;
+/// Offline inventory of retained packages, including versions without a current binding.
+pub(crate) fn verified_packages(repo: &crate::git::Repo) -> Result<Vec<(Binding, PathBuf)>> {
     let store = state::checkout_root(&repo.primary_root()?)?.join("plugins");
     state::confine_existing_dir(&store)?;
-    let mut rows = Vec::new();
+    let mut packages = Vec::new();
     if store.exists() {
         for entry in fs::read_dir(&store)? {
             let entry = entry?;
@@ -802,35 +801,38 @@ pub fn list(root: &Path, output_json: bool) -> Result<()> {
                     bail!("plugin receipt path or identity mismatch");
                 }
                 verify_installed(&path, binding)?;
-                let current = bindings
-                    .bindings
-                    .iter()
-                    .find(|s| s.binding.id == binding.id);
-                let matches = current.map(|s| key(&s.binding)).transpose()?.as_deref()
-                    == Some(&key(binding)?);
-                let metadata =
-                    crate::interactive::plugins::local::read_package(&path.join("package"))?;
-                let activation_supported =
-                    metadata.executable.is_some() || metadata.entrypoint.is_some();
-                rows.push(serde_json::json!({
-                    "id": binding.id, "version": binding.version, "source": binding.source,
-                    "installation": path.to_string_lossy(), "source_verified": true,
-                    "matches_committed_binding": matches,
-                    "enabled": matches && current.is_some_and(|s| s.binding.enabled),
-                    "activation_supported": activation_supported,
-                }));
-                if rows.len() > 256 {
+                packages.push((receipt.binding, path));
+                if packages.len() > 256 {
                     bail!("installed plugin inventory exceeds 256 versions");
                 }
             }
         }
     }
-    rows.sort_by_key(|row| {
-        (
-            row["id"].as_str().unwrap().to_string(),
-            row["installation"].as_str().unwrap().to_string(),
-        )
-    });
+    packages.sort_by(|a, b| (&a.0.id, &a.1).cmp(&(&b.0.id, &b.1)));
+    Ok(packages)
+}
+
+pub fn list(root: &Path, output_json: bool) -> Result<()> {
+    let repo = crate::git::discover(root)?;
+    let bindings = crate::interactive::plugins::project::inventory(&repo.root)?;
+    let mut rows = Vec::new();
+    for (binding, path) in verified_packages(&repo)? {
+        let current = bindings
+            .bindings
+            .iter()
+            .find(|s| s.binding.id == binding.id);
+        let matches =
+            current.map(|s| key(&s.binding)).transpose()?.as_deref() == Some(&key(&binding)?);
+        let metadata = crate::interactive::plugins::local::read_package(&path.join("package"))?;
+        let activation_supported = metadata.executable.is_some() || metadata.entrypoint.is_some();
+        rows.push(serde_json::json!({
+            "id": binding.id, "version": binding.version, "source": binding.source,
+            "installation": path.to_string_lossy(), "source_verified": true,
+            "matches_committed_binding": matches,
+            "enabled": matches && current.is_some_and(|s| s.binding.enabled),
+            "activation_supported": activation_supported,
+        }));
+    }
     if output_json {
         println!(
             "{}",

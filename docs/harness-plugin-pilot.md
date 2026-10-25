@@ -28,6 +28,55 @@ In a pilot build, missing installation, policy that is turned off, a missing gra
 package bytes, or invalid protocol output refuses registered Codex task launch.
 The pilot refuses built-in launch-command fallback. Other harnesses are unchanged.
 
+## Discover and prepare a local package
+
+`ahu setup --list-harness-plugins` reads `harness_launch` declarations from
+explicit `AHU_PLUGIN_PATH` package directories and verified retained installations.
+It works without a terminal, harness binary, provider account, or network access.
+Normal interactive setup also shows this inventory. Discovery never executes
+package code or provider probes, selects a candidate, or changes policy. Duplicate
+IDs in `AHU_PLUGIN_PATH` are errors; multiple candidates for a harness are listed
+as ambiguous. Retained versions may appear alongside staged packages.
+
+After independently building and staging a package, run:
+
+```sh
+ahu setup --harness-plugin /absolute/staged/package
+```
+
+This explicit path selects the package independently of discovery order. Setup
+validates the metadata, Cargo package name and explicit semantic version, declared
+executable, and content digest using the installer rules. Source-only packages,
+missing or non-executable planners, unsafe paths, and package symlinks are refused.
+The package ID must be `harness-<declared harness>`. No registry or published package
+is assumed, and setup never builds, downloads, installs, or runs the package.
+
+Preparation creates `.agents/ahu/plugins/<id>.md` with a local source, SHA-256
+revision/content pins, the current exact ahu compatibility version, `enabled: false`,
+and no grants. It uses setup's conflict-checked writes, preserves identical files,
+refuses different existing bindings, and refreshes `.agents/ahu/lock.md` without
+silently accepting existing private-context drift. As with normal setup, a later
+lock-refresh failure can leave prepared files for review; resolve the error and
+refresh the lock before committing. Keep the staged package unchanged for install.
+
+Review and commit the binding and lock. Then explicitly run `ahu plugins install
+<id>`; use `ahu plugins update <id>` if a different version is already retained.
+Installation reads committed pins, so preparation alone cannot authorize installing
+the new binding. Inspect it with `ahu plugins installed`. To authorize the planner,
+run `ahu plugins enable <id>`, explicitly add `harness-launch` to the working
+binding's grants, then run `ahu lock --update`. Review and commit the enabled
+binding and lock before launching. Enabling itself does not execute the planner.
+
+Discovery and preparation are available in ordinary builds, but only registered
+Codex task launches in a `codex-plugin-pilot` build use a planner. Preparing or
+enabling another harness's declaration does not migrate that harness or add launch
+support. The existing native adapters remain in core.
+
+The setup consumer needs an offline CLI route to produce an installer-compatible
+binding; the launch protocol is unchanged. Authority remains in reviewed committed
+bindings. Focused setup tests cover ambiguous discovery, duplicate IDs, invalid
+packages, conflict preservation, and preparation followed by explicit installation.
+
 ## Authority and identity
 
 The committed binding ID is `harness-codex`, with an explicit `harness-launch`

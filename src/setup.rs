@@ -1,7 +1,9 @@
 //! One first-run workflow for project policy, harness MCP clients, skills, and
 //! ahu developer agents.
 
+mod harness_plugins;
 pub mod native_mcp;
+pub use harness_plugins::{list as list_harness_plugins, prepare as prepare_harness_plugin};
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -181,6 +183,8 @@ pub fn run(console: &mut Console<'_>, repo: &Repo) -> Result<i32> {
         )
         .with_kind(crate::util::ErrorKind::Prerequisite));
     }
+
+    harness_plugins::report(console, repo)?;
 
     let detected: Vec<_> = catalog::HARNESSES
         .iter()
