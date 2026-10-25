@@ -1712,7 +1712,7 @@ fn metering_report_keeps_partial_credits_out_of_tokens_and_usd() {
         groups,
     };
     let text = render_at(&report, 120);
-    assert!(text.contains("Kiro metering is partial"));
+    assert!(text.contains("Native metering is partial"));
     assert!(text.contains("metering_observed_credits mean 0 (1/2 observations)"));
 }
 

@@ -2854,6 +2854,10 @@ mod primary_export_tests {
                 Some("synthetic-task"),
                 Some(1),
             );
+            super::configure_native_export(
+                &mut command,
+                std::env::var("AHU_TEST_NATIVE_EVAL_OTLP").as_deref() != Ok("false"),
+            );
             let env: std::collections::BTreeMap<_, _> = command
                 .get_envs()
                 .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
@@ -2862,7 +2866,7 @@ mod primary_export_tests {
             if expected == "disabled" {
                 assert!(!env.contains_key("OTEL_TRACES_EXPORTER"));
                 assert!(!env.contains_key("AHU_MCP_RESOURCE_ATTRIBUTES"));
-            } else if expected == "kiro-eval" {
+            } else if expected == "native-export-disabled" {
                 assert!(!env.contains_key("OTEL_EXPORTER_OTLP_ENDPOINT"));
                 assert_eq!(env["OTEL_TRACES_EXPORTER"], "none");
                 assert_eq!(env["OTEL_METRICS_EXPORTER"], "none");
@@ -3232,11 +3236,16 @@ mod primary_export_tests {
         }
         for eval in [false, true] {
             let mut command = child_command("child-settings", &trap);
-            command.env("AHU_TEST_CHILD_HARNESS", "kiro");
+            command.env("AHU_TEST_CHILD_HARNESS", "invented");
+            command.env("AHU_TEST_NATIVE_EVAL_OTLP", "false");
             command.env("AHU_TEST_CONFIG_ENDPOINT", "http://127.0.0.1:4318");
             command.env(
                 "AHU_TEST_EXPECT_SIGNALS",
-                if eval { "kiro-eval" } else { "otlp" },
+                if eval {
+                    "native-export-disabled"
+                } else {
+                    "otlp"
+                },
             );
             if eval {
                 command.env("AHU_EVAL_OTEL_ENDPOINT", "http://127.0.0.1:54321");

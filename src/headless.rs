@@ -1924,6 +1924,18 @@ fn run_attempt(
             &real,
         )?;
     }
+    if spec.contract.output.is_some()
+        && !crate::native::execution_capabilities(
+            &repo,
+            &record.identity.harness,
+            &spec.harness_version,
+            record.identity.permissions,
+            spec.options.work_mode,
+        )?
+        .structured_output
+    {
+        bail!("structured output is unavailable under the selected runtime permission controls");
+    }
     if spec.options.work_mode {
         crate::auth_binding::capture_unverified_task(dir)?;
     } else {

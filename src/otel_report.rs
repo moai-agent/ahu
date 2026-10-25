@@ -221,7 +221,7 @@ mod tests {
         for (harness, source, expected) in [
             ("opencode", "native_step_sum_usd", true),
             ("claude-code", "native_cumulative_usd", true),
-            ("kiro", "native_step_sum_usd", false),
+            ("invented", "native_step_sum_usd", true),
             ("codex", "unknown", false),
         ] {
             let mut r = Report::new(vec![selected(harness, "headless")], "candidate").unwrap();

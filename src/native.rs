@@ -495,6 +495,22 @@ mod profile_tests {
     use serde_json::json;
 
     #[test]
+    fn capability_evidence_requires_both_explicit_booleans_and_no_extra_fields() {
+        for value in [
+            json!({}),
+            json!({"structured_output":true}),
+            json!({"structured_output":true,"broker_transport":1}),
+            json!({"structured_output":true,"broker_transport":true,"raw":"PRIVATE"}),
+        ] {
+            assert!(serde_json::from_value::<ExecutionCapabilities>(value).is_err());
+        }
+        let denied: ExecutionCapabilities =
+            serde_json::from_value(json!({"structured_output":false,"broker_transport":false}))
+                .unwrap();
+        assert!(!denied.structured_output && !denied.broker_transport);
+    }
+
+    #[test]
     fn normalized_profile_cannot_expand_policy_or_change_host_environment() {
         let request = Request {
             harness: "invented",
