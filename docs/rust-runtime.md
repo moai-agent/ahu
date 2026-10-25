@@ -16,6 +16,7 @@ implementation language of external CLIs or harnesses.
 | Kiro adapter | Rust | Built into ordinary ahu |
 | GitHub CLI and tracker | Rust | Optional external packages; require native `gh` |
 | cmux session host | Rust | Optional external package; requires native cmux and Git |
+| Native Ollama decision client | Rust | Core client; requires compatible external Ollama and model |
 | text-stats authoring example | Rust | Independent example; build and stage before installation |
 
 The five harness adapters are in `src/harness/`; their launch, native capability,
