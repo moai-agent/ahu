@@ -17,15 +17,13 @@ pub struct Request<'a> {
     /// Declared helper role. Requested only: see the role gap in [`profile_at`].
     pub helper_role: &'a str,
     pub max_concurrent: u32,
-    /// Helper spawn depth. Only `1` is enforceable on any validated version.
+    /// Requested helper spawn depth; the plugin validates native enforceability.
     pub max_depth: u32,
     pub budget_usd: Option<f64>,
     /// Whether the owning assignment needs to change files or run commands.
     ///
-    /// The bounded tool ceiling binds the parent as well as its helpers, so a
-    /// bounded attempt is read-only for everyone in it. A caller that declares
-    /// a writing assignment is refused rather than quietly given a session that
-    /// cannot carry it out.
+    /// The plugin must refuse a profile that prevents the declared assignment
+    /// from running, and disclose any restrictions shared by parent and helpers.
     pub assignment_writes: bool,
 }
 

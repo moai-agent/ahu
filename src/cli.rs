@@ -228,12 +228,9 @@ agent assignment options:
   --background          Detach a headless supervisor after startup acknowledgement
   --timeout <seconds>   Bound a headless attempt (default 1800)
   --native-helpers <policy>
-                        disabled (default), or bounded: Claude 2.1.270 ONLY.
-                        Bounded confines the entire parent and helpers to read-only
-                        model tools. No shell, edits, builds or ahu child launches.
-                        Settings-defined hook side effects remain unverified. Budget
-                        $5 per attempt; one concurrent helper, depth one, same model.
-                        Roles are requested; total helper count is not capped.
+                        disabled (default), or bounded when the installed runtime
+                        supports the requested controls. Check the plugin's native
+                        version and enforcement documentation before enabling it.
                         Agent native_helpers or project [execution].native_helpers
                         supplies the default; this flag overrides it.
   --dry-run             Show the preview and create nothing

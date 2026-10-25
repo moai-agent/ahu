@@ -903,9 +903,6 @@ pub fn launch(
         spec.gaps.push("Broker grants approve only frozen registered identities and profiles. The selected runtime must explicitly admit broker transport under the task's frozen permission controls. Limits: 128 tasks per root grant, depth 8, 16 active/interrupted tasks per repository, no hidden queue or global token cap.".into());
     }
 
-    if spec.options.native_helpers == "bounded" && !spec.options.work_mode {
-        spec.gaps.push("The ENTIRE assignment has a read-only MODEL TOOL ceiling: parent and helpers have no model tools for editing, building, shell commands or shell-launching registered children. Settings-defined hooks are outside that tool ceiling and their side effects are not proven read-only. MCP tools and slash commands are disabled; repository settings remain discoverable. Roles are requested/observed, not an allowlist; total helper count is not capped. Budget is 5 USD per attempt, concurrency 1, depth 1, helper model equals manifest model.".into());
-    }
     spec.native_profile = profile;
     let native_admission = validate_environment(
         repo,

@@ -1,12 +1,13 @@
 ---
 ahu:
-  catalog_version: "2026-10-19"
   harness_preferences:
   - antigravity
   - codex
   harness_version_pins: {}
   headless:
-    trust_opencode_native_state: true
+    native_settings:
+      opencode:
+        trust_native_account_state: true
   knowledge:
     bundles:
     - docs/knowledge

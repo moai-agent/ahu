@@ -334,25 +334,23 @@ cleanup and child usage accounting can be unknown. Review actual work and tests.
 Host submission grants registered children with --allow-child @name or
 --allow-child-widened @name. Grants freeze identity and policy; descendants
 cannot expand them. The supervisor broker dispatches the real registered child
-outside the worker sandbox using the child's own harness and approval mapping.
+as a separate process using the child's own harness and approval mapping.
 Codex workspace-write gets a narrow request-directory write root; read-only
 Codex broker transport is refused. Dead or stale parent attempts cannot admit
 children. Failed or unjoined current-attempt children block parent success.
 Limits: depth eight, 128 assignments per root grant, 16 active/interrupted
 assignments per repository runtime store. No global token cap is promised.
-Native helpers default to disabled. Bounded supports Claude Code 2.1.270 only:
-the entire owner and helpers have read-only model tools, with no shell or edits.
-The owner cannot shell-launch ahu children. A shell-capable coordinator instead
-grants a separate registered bounded reviewer, which uses helpers internally.
-Bounded uses one concurrent helper, depth one, the owner's exact model and a
-USD 5 budget per attempt. Roles are requested; total helper count is not capped.
-MCP and slash commands are excluded; settings and deny rules remain discoverable.
-The model tool ceiling does not prove hooks cannot write or spawn processes.
+Native helpers default to disabled. The installed runtime decides whether its
+native version supports a bounded helper profile and reports the enforced
+controls and remaining gaps. Core requests one concurrent helper, depth one,
+the owner's exact model and a USD 5 budget per attempt; a plugin must refuse
+controls it cannot implement. Read-only profiles also restrict the owner, so
+use a separate registered reviewer when implementation needs shell tools.
 Known successful helper joins are required. Provider-side cleanup stays unknown.
-The catalog records verified versions as compatibility evidence, not an
-allowlist. Ordinary headless admission also checks native isolation; bounded
-helpers keep their exact version requirement. See `docs/reference.md` for the
-profiles and limits. Admission does not establish live provider availability.
+Plugin descriptors record tested versions as compatibility evidence, not an
+allowlist. Exact version requirements for native controls belong to the plugin.
+Admission does not establish live provider availability. See the installed
+plugin's documentation for native hook, model-tool and helper limitations.
 Same-user code is not isolated from broker state. Hooks and arbitrary shell
 commands require a vetted environment; ahu's backend itself does not use cmux.
 Explicit cleanup removes recognized old captures and bounded requests, retaining

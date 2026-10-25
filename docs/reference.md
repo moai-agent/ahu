@@ -937,9 +937,9 @@ Inside the owning task, request the child through the launching executable:
 
 The child request still needs `--allow-widened-approvals` when its manifest
 requires it. ahu sends a bounded request to the owning supervisor's broker; the
-supervisor starts the real registered child outside the worker sandbox with
-that child's configured harness, model, sandbox, and approval mapping. It does
-not run a replacement harness inside the parent sandbox. Codex workspace-write
+supervisor starts the real registered child as a separate process with
+that child's configured harness, model, and approval mapping. Git worktrees
+separate working copies; they do not enforce filesystem or process isolation. Codex workspace-write
 receives the task's request directory as a narrow additional write root;
 read-only Codex broker transport is refused.
 
@@ -962,45 +962,16 @@ registered specialist, another harness, or independently supervised work.
 then project `[execution].native_helpers`; the default is `disabled`. Child
 requests must retain the policy frozen in their host grant.
 
-| Harness CLI | Headless launch | Bounded native helpers |
-| --- | --- | --- |
-| Claude Code 2.1.269 | Admitted | Refused |
-| Claude Code 2.1.270 | Admitted | Read-only profile |
-| Claude Code 2.1.283 | Admitted; invocation turns hooks off | Refused: no validated bounded-helper profile |
-| Codex 0.154.0/0.155.1/0.157.1 | Admitted | Refused: incomplete helper identity/join event visibility |
-| Antigravity CLI 1.2.2 | Admitted | Refused: unvalidated native profile |
-| OpenCode 1.18.29/1.18.30/1.18.31/1.18.32 | Admitted | Refused: no validated native tool switch |
+Native helper controls belong to the installed harness plugin. Core requests
+one concurrent helper, depth one, the owner's exact model and a USD 5 budget
+per bounded attempt. The plugin must refuse unsupported profiles and disclose
+its enforced controls and remaining gaps. Consult its version-specific
+implementation and documentation; installing ahu alone enables no native profile.
 
-The Claude bounded profile restricts the **entire attempt, including the owner**,
-to the model tools `Read`, `Grep`, `Glob`, and the parent's `Task` delegation tool.
-Through those tools it cannot edit,
-run shell commands, builds or tests, create native worktrees/teams, or shell-launch
-registered ahu children. Use it for read-only review or investigation:
-
-```sh
-ahu @reviewer --headless --native-helpers bounded \
-  --prompt 'Read the relevant source, use and await a helper, and report findings.' \
-  --output json
-```
-
-This example requires a registered Claude-backed reviewer and CLI 2.1.270.
-All listed profiles must also pass native integration/isolation admission.
-Apply the usual approval-widening flag if its manifest requires it. For a mixed
-workflow, register that reviewer's manifest with `native_helpers = "bounded"`
-and grant it to a shell-capable coordinator at host submission. The coordinator
-launches the separate registered review task and collects its result; the reviewer
-uses native helpers internally. Keep writing assignments in `disabled` mode.
-ahu does not infer from prompt text whether an assignment requires writes.
-
-The integrated bounded profile pins helpers to the owner's exact manifest model,
-one concurrent helper, depth one, and a USD 5 budget per attempt. MCP tools and
-slash commands are excluded. Repository settings and deny rules remain
-discoverable; hook execution as a helper constraint is not established. The
-`ahu-reader` role is requested and actual roles are recorded, but no role
-allowlist or total helper-count cap is enforced. A role change cannot widen the
-profile's tool ceiling or model pin. The ceiling does not establish that
-settings-defined hooks cannot spawn processes or write files; review those
-settings separately before relying on a read-only execution environment.
+A read-only helper profile may restrict the entire owning attempt, including
+shell commands, builds, edits and child launches. Use a separate registered
+reviewer when a coordinator needs implementation tools. Model-tool restrictions
+do not prove that hooks or arbitrary native extensions cannot write files.
 
 `native_completeness` records joins, unjoined helpers, violations, and unknowns.
 A parent's final message is insufficient: bounded attempts require known,
