@@ -1658,21 +1658,22 @@ fn trajectory_run_records_keep_guards_separate_and_gate_every_terminal_path() {
 
 #[test]
 fn metering_report_keeps_partial_credits_out_of_tokens_and_usd() {
-    let mut observer = trajectory::Observer::default();
-    observer.observation = trajectory::Observation {
-        source: trajectory::Source::try_from("fixture_session_updates".to_owned()).unwrap(),
-        coverage: trajectory::Coverage::Partial,
-        metering: Some(trajectory::Metering {
-            context_usage_percent: Some(0.0),
-            peak_context_usage_percent: Some(0.0),
-            prompt_completions: Some(1),
-            observed_credits: Some(0.0),
-            credit_observations: 1,
-            observed_elapsed_ms: Some(0.0),
-            elapsed_observations: 1,
+    let observer = trajectory::Observer {
+        observation: trajectory::Observation {
+            source: trajectory::Source::try_from("fixture_session_updates".to_owned()).unwrap(),
+            coverage: trajectory::Coverage::Partial,
+            metering: Some(trajectory::Metering {
+                context_usage_percent: Some(0.0),
+                peak_context_usage_percent: Some(0.0),
+                prompt_completions: Some(1),
+                observed_credits: Some(0.0),
+                credit_observations: 1,
+                observed_elapsed_ms: Some(0.0),
+                elapsed_observations: 1,
+                ..Default::default()
+            }),
             ..Default::default()
-        }),
-        ..Default::default()
+        },
     };
     let envelope = serde_json::json!({"harness":{"trajectory":observer}});
     let mut projected = serde_json::Map::new();

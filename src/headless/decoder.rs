@@ -126,12 +126,14 @@ impl Snapshot {
             || events.skills.len() > 128
             || !events.native.validate()
             || events.cost.usd.is_some_and(|n| !n.is_finite() || n < 0.0)
-            || match (events.cost.usd, events.cost.source.as_deref()) {
-                (None, None) | (Some(_), Some("native_cumulative_usd" | "native_step_sum_usd")) => {
-                    false
-                }
-                _ => true,
-            }
+            || !matches!(
+                (events.cost.usd, events.cost.source.as_deref()),
+                (None, None)
+                    | (
+                        Some(_),
+                        Some("native_cumulative_usd" | "native_step_sum_usd")
+                    )
+            )
             || events
                 .trajectory
                 .observation
