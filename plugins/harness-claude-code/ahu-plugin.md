@@ -19,6 +19,7 @@ harness_runtime:
     models: []
     modes: [interactive, headless, direct]
     operations: [probe, models, launch, admission, setup, native_sources, auth, budget, trust_prepare, trust_cleanup, decode_start, decode_event, decode_finish]
+    environment_keys: ["CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "GOOGLE_APPLICATION_CREDENTIALS"]
     capabilities: []
     tested_versions: ["2.1.310"]
     context_paths: [".claude/", "CLAUDE.md", ".mcp.json"]

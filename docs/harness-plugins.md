@@ -15,7 +15,7 @@ task successful on its own.
 | `claude-code` | `claude` | [Claude Code](../plugins/harness-claude-code/README.md) | 2.1.310 |
 | `antigravity` | `agy` | [Antigravity](../plugins/harness-antigravity/README.md) | 1.4.7 |
 | `opencode` | `opencode` | [OpenCode](../plugins/harness-opencode/README.md) | 2.0.32 |
-| `kiro` | `kiro-cli` | [Kiro](../plugins/harness-kiro/README.md) | 2.29.0 |
+| `kiro` | `kiro-cli` | [Kiro](../plugins/harness-kiro/README.md) | 2.34.0 (version/help inspected) |
 
 Each package has an independent semantic version, manifest, lockfile and binary.
 Source builds use adjacent Rust implementation libraries. Core links only the

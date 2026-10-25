@@ -16,7 +16,7 @@ fn executable_serves_multiple_correlated_requests() {
     for (i, mode) in ["direct", "interactive", "headless"].iter().enumerate() {
         let request = json!({"protocol_version":1,"id":i+1,"operation":"launch","params":{
             "mode":mode,"model":"model","permissions":if *mode=="headless" {"auto"} else {"prompt"},
-            "work_mode":*mode=="headless","session":null,"native_version":"2.29.0",
+            "work_mode":*mode=="headless","session":null,"native_version":"2.34.0",
             "timeout_seconds":60,"cwd":"/synthetic/worktree","broker_dir":null,"native_profile":null,"native_controls":[]
         }});
         writeln!(input, "{request}").unwrap();

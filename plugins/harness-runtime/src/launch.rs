@@ -58,7 +58,7 @@ pub(super) fn plan(harness: &str, params: Value) -> Result<Value, ()> {
             .contains(&r.native_version.as_str()),
         "antigravity" => r.native_version == "1.4.7",
         "opencode" => r.native_version == "2.0.32",
-        "kiro" => ["2.28.0", "2.29.0"].contains(&r.native_version.as_str()),
+        "kiro" => ["2.28.0", "2.29.0", "2.34.0"].contains(&r.native_version.as_str()),
         _ => false,
     };
     if !reviewed {

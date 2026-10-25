@@ -9,22 +9,22 @@ implementation language of external CLIs or harnesses.
 | Component | Implementation | Distribution and scope |
 | --- | --- | --- |
 | ahu CLI, MCP, task coordination, worktrees, OTel and evals | Rust | Core executable |
-| Codex adapter | Rust | Built into ordinary ahu; optional Rust launch-planner experiment |
-| Claude Code adapter | Rust | Built into ordinary ahu |
-| Antigravity adapter | Rust | Built into ordinary ahu |
-| OpenCode adapter | Rust | Built into ordinary ahu |
-| Kiro adapter | Rust | Built into ordinary ahu |
+| Codex runtime | Rust | Optional external harness package |
+| Claude Code runtime | Rust | Optional external harness package |
+| Antigravity runtime | Rust | Optional external harness package |
+| OpenCode runtime | Rust | Optional external harness package |
+| Kiro runtime | Rust | Optional external harness package |
 | GitHub CLI and tracker | Rust | Optional external packages; require native `gh` |
 | cmux session host | Rust | Optional external package; requires native cmux and Git |
 | Native Ollama decision client | Rust | Core client; requires compatible external Ollama and model |
 | text-stats authoring example | Rust | Independent example; build and stage before installation |
 
-The five harness adapters are in `src/harness/`; their launch, native capability,
-event and telemetry behavior is also exercised by the headless and integration
-tests. Rust implementation does not establish current account availability or
-live compatibility with every native version. Read the
-[harness compatibility evidence](reference.md#harness-compatibility-by-execution-mode)
-for execution-mode and evidence limits.
+The five harness runtime packages live under `plugins/`. They link shared Rust
+native-service and event-normalization implementation libraries; core links only
+the data-only `ahu-harness-api` contract. Core's `src/harness/` holds generic launch
+validation and lifecycle facades. Package updates can change native compatibility
+without recompiling core. Rust implementation does not establish current account
+availability or live compatibility with every native version.
 
 The GitHub and cmux migrations retain independent protocol fixtures, including
 Python development oracles. Those files must never appear in the staged runtime
@@ -32,10 +32,7 @@ packages. Build artifacts are platform-specific and are pinned after staging;
 ahu does not execute installation hooks or invoke Cargo during plugin install.
 Review the plugin's README and security inventory before enabling it.
 
-All-harness extraction is distinct from the runtime language policy. The
-[four Rust planner packages](harness-plugins.md) have not yet moved native setup, trust,
-events, usage and lifecycle into an external plugin. Future harness plugins
-must prove agent work, actual MCP calls, attributed local OTel, eval outcomes
-and cleanup separately for each advertised mode. Keep task/process authority
-in core, make native limitations explicit, and never infer zero usage from
-missing telemetry.
+[Harness packages](harness-plugins.md) must prove agent work, actual MCP calls,
+attributed local OTel, eval outcomes and cleanup separately for each advertised
+mode. Task/process authority stays in core. Native limitations remain explicit,
+and missing telemetry must never become zero usage.

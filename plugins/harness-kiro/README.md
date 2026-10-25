@@ -16,3 +16,8 @@ No native CLI or credentials are bundled.
 
 See [the runtime contract](../../docs/harness-runtime-contract.md) and
 [implementation security](../harness-runtime/SECURITY.md).
+
+Native 2.34.0 version and chat help were inspected locally. The V3, exact model,
+non-interactive, stream-json, MCP-startup, trust and resume-ID options remain
+present. This is argument evidence only; account capacity and live event-format
+conformance must be checked independently.

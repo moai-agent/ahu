@@ -298,19 +298,10 @@ fn manifest_stem_and_name_must_match() {
 }
 
 #[test]
-fn a_model_outside_the_catalog_is_refused_rather_than_substituted() {
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.add_agent("chris", "1.0.0", "claude-opus-5");
-    for file in [".agents/ahu/agents/chris.md", ".claude/agents/chris.md"] {
-        let text = repo.read(file);
-        repo.write(file, &text.replace("claude-opus-5", "claude-imaginary-9"));
-    }
-    let error = agent::find(repo.path(), "chris").unwrap_err().to_string();
-    assert!(
-        error.contains("will not substitute a different model"),
-        "{error}"
-    );
+fn manifest_model_names_are_plugin_owned_and_preserved_exactly() {
+    let text="---\nokf_version: 0.2\ntype: ahu:agent\ntitle: custom\nversion: 1.0.0\nharness: sixth\nmodel: provider/future-model\n---\nExact instructions.\n";
+    let (manifest,_) = agent::parse_manifest(text,std::path::Path::new("custom.md")).unwrap();
+    assert_eq!(manifest.harness,"sixth");assert_eq!(manifest.model,"provider/future-model");
 }
 
 #[test]
@@ -395,40 +386,10 @@ fn a_manifest_may_not_point_at_another_harnesss_definition_format() {
 }
 
 #[test]
-fn each_supported_harness_pins_models_from_its_own_catalog_entry() {
-    // A model belonging to another harness is refused rather than substituted.
-    let repo = TestRepo::new();
-    repo.init_config();
-    repo.write(
-        ".agents/ahu/agents/sam.md",
-        "---\n\
-         okf_version: 0.2\n\
-         type: ahu:agent\n\
-         title: sam\n\
-         description: fixture agent\n\
-         status: stable\n\
-         tags: [agents]\n\
-         harness: codex\n\
-         model: claude-opus-5\n\
-         permissions: prompt\n\
-         version: 0.1.0\n\
-         \n\
-         ---\n\
-         \n\
-         You are sam. Fixture instructions.\n",
-    );
-    let error = agent::load_all(repo.path()).unwrap_err().to_string();
-    assert!(
-        error.contains("is not a catalog model for harness"),
-        "{error}"
-    );
-    assert!(
-        error.contains("will not substitute a different model"),
-        "{error}"
-    );
+fn manifest_validation_rejects_option_shaped_models_without_native_execution() {
+    let text="---\nokf_version: 0.2\ntype: ahu:agent\ntitle: custom\nversion: 1.0.0\nharness: sixth\nmodel: --option\n---\nInstructions.\n";
+    assert!(agent::parse_manifest(text,std::path::Path::new("custom.md")).is_err());
 }
-
-// --- automatic selection ---
 
 #[test]
 fn automatic_selection_follows_the_project_order_deterministically() {
@@ -686,14 +647,6 @@ fn a_proposed_manifest_round_trips_through_the_loader() {
     }
 }
 
-/// Updating a verified harness version moves the catalog revision, and a
-/// project pinned to the previous one stops rather than being upgraded for free.
-///
-/// That is the point of the pin: catalog `2026-10-19` adds current harness
-/// compatibility evidence while preserving project selection behavior.
-/// headless compatibility check. Changing which catalog a project uses is a
-/// project decision, made by editing `catalog_version`, not a side effect of
-/// installing a newer ahu.
 #[test]
 fn installed_provider_requirement_is_separate_from_policy_parsing() {
     let repo = TestRepo::new();
