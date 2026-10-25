@@ -102,7 +102,7 @@ design and data handling, and `docs/typed-decisions.md` for provider configurati
    task-driven prompt rewriting. Invalid configuration fails before a task starts.
    The harness and model are fixed by flags; the instructions are delivered as
    prompt text, which ahu reports as a gap rather than as enforcement.
-2. One project policy. Rankings, cadence, and the fixed catalog revision are the same
+2. One project policy. Rankings, cadence, and pinned runtime bindings are the same
    for every ahu user in the project. Personal profiles and command-line switches cannot change them. A machine that cannot meet the policy
    reports a diagnostic; it does not get different behaviour.
 3. Harness-native conventions win. Skills, memory, settings, and agent
@@ -117,7 +117,7 @@ design and data handling, and `docs/typed-decisions.md` for provider configurati
 ```mermaid
 flowchart TD
     A["ahu (in a Git repo)"] --> B{".agents/ahu/config.md?"}
-    B -- no --> C["First-run setup:<br/>project-agreed harness order,<br/>model order, catalog pin"]
+    B -- no --> C["First-run setup:<br/>project-agreed harness order,<br/>model order, runtime bindings"]
     C --> D
     B -- yes --> D["Launcher"]
 

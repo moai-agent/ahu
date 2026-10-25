@@ -14,7 +14,7 @@ The runtime plugin must not spawn or supervise the main agent process.
 
 Only a reviewed, installed, enabled package with a `harness-runtime` grant may
 execute runtime operations. Discovery reads verified metadata and never executes
-code. There is no built-in fallback. Freeze package/binding identity before an
+code. Core has no built-in fallback. Freeze package/binding identity before an
 attempt; updates cannot rebind existing tasks or cleanup operations silently.
 
 ## Installed descriptor
@@ -40,7 +40,7 @@ Invoke the packaged executable with `--ahu-harness-runtime-protocol=1`. Each
 newline-terminated JSON frame contains `protocol_version`, an increasing integer
 `id`, `operation`, and operation-specific `params`. The response echoes version
 and ID and contains exactly one of `result` or a fixed, non-sensitive `error`.
-Reject duplicate/unknown envelope fields, mismatched IDs, oversized frames,
+Reject duplicate/unknown envelope fields, mismatched IDs, frames exceeding the byte limit,
 partial output and unsolicited frames. No raw frame is written to telemetry.
 
 Operations are explicitly enumerated: `probe`, `models`, `launch`, `admission`,

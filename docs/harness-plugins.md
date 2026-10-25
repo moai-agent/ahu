@@ -37,7 +37,7 @@ separate package directory. Put the built `ahu-plugin-codex` binary at
 native configuration, execution traces or build caches in the staged package.
 Installation verifies and copies content; it never builds or executes the plugin.
 
-From the project in which the plugin will be used:
+From the project that uses the plugin:
 
 ```sh
 ahu setup --list-harness-plugins
@@ -63,7 +63,7 @@ setup proposals. Native CLIs and their authentication are installed separately.
 
 Harnesses are optional. Without a harness plugin, core commands remain available;
 launching that harness reports the missing installed capability. A binding may
-use a package ID independent of its descriptor's harness ID. Conflicting harness
+use a package ID independent of the harness ID in its descriptor. Conflicting harness
 IDs, aliases and aliases colliding with core commands are refused.
 
 ## Native behavior and upgrades

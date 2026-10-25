@@ -102,7 +102,7 @@ checks separately from fixtures and publication verification. Do not claim a
 provider works because an independent fixture passed. Keep private bindings,
 tracker content and raw telemetry out of public source and release artifacts.
 
-## Harness runtimes
+## Harness runtime executables
 
 [Installed Rust harness plugins](harness-plugins.md) supply native provider behavior
 through a bounded executable protocol. The [runtime contract](harness-runtime-contract.md)
