@@ -1385,6 +1385,7 @@ impl TokenUsage {
 }
 
 fn skill_catalog(worktree: &Path, plugin_roots: &[String]) -> Result<Vec<SkillCatalogEntry>> {
+    use std::os::unix::fs::OpenOptionsExt;
     use std::path::Component;
     let mut roots = std::collections::BTreeSet::from([".agents/skills".to_owned()]);
     if plugin_roots.len() > 128 {
@@ -1436,9 +1437,22 @@ fn skill_catalog(worktree: &Path, plugin_roots: &[String]) -> Result<Vec<SkillCa
             if !metadata.is_file() || metadata.len() > 1024 * 1024 {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&file) else {
+            let Ok(opened) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&file)
+            else {
                 continue;
             };
+            let mut bytes = Vec::new();
+            if opened
+                .take(1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
+                || bytes.len() > 1024 * 1024
+            {
+                continue;
+            }
             if entries.len() >= 1024 {
                 bail!("skill catalog limit exceeded");
             }
@@ -3017,7 +3031,7 @@ pub fn control(
             let previous_spec = spec.clone();
             let previous_record = record.clone();
             refresh_resume_profile(
-                &repo,
+                repo,
                 &mut spec,
                 &record.identity.harness,
                 &record.identity.model,

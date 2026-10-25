@@ -19,11 +19,11 @@ const METRICS: &[&str] = &[
     "ahu.tokens.reasoning",
     "ahu.tokens.total",
     "ahu.cost.harness_reported_usd",
-    "ahu.kiro.credits.observed",
-    "ahu.kiro.elapsed.observed_ms",
-    "ahu.kiro.context.last_percent",
-    "ahu.kiro.context.peak_percent",
-    "ahu.kiro.prompt_completions",
+    "ahu.metering.credits.observed",
+    "ahu.metering.elapsed.observed_ms",
+    "ahu.metering.context.last_percent",
+    "ahu.metering.context.peak_percent",
+    "ahu.metering.prompt_completions",
 ];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -77,7 +77,7 @@ mod tests {
                 attribute("private.payload", json!("secret")),
             ];
             match harness {
-                "kiro" => a.push(attribute("ahu.kiro.credits.observed", json!(0.25))),
+                "kiro" => a.push(attribute("ahu.metering.credits.observed", json!(0.25))),
                 "antigravity" => (),
                 _ => a.push(attribute("ahu.tokens.input", json!(0))),
             }
@@ -90,7 +90,7 @@ mod tests {
             assert!(!out.to_string().contains("secret"));
             if harness == "kiro" {
                 assert_eq!(
-                    out["attempts"][0]["metrics"]["ahu.kiro.credits.observed"],
+                    out["attempts"][0]["metrics"]["ahu.metering.credits.observed"],
                     0.25
                 );
             } else if harness != "antigravity" {
