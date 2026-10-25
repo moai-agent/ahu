@@ -1,6 +1,6 @@
 # Customer runtime inventory
 
-Ahu-maintained customer executables are implemented in Rust. Python is allowed
+ahu-maintained customer executables are implemented in Rust. Python is allowed
 in development tests and tooling, including native CLI fixtures and migration
 oracles. It is not an installation or runtime prerequisite. Skills and
 declarative configuration remain text. This policy does not prescribe the
