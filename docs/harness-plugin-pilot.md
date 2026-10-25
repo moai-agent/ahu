@@ -253,3 +253,11 @@ window during that run, then the preserved attempt completed successfully.
 This warning is not a safe reason to repeat work: inspect the task result first.
 Its cause was not established by this check. No clean startup-timing claim is
 made for resume from this single observation.
+
+An optimized build of the same candidate subsequently passed both fresh headless
+launch and resume without an acknowledgement warning. The fresh attempt reached
+native startup about 1.9 seconds after preparation. Both attempts completed real
+MCP calls and shell writes, retained the same native session, and exported MCP
+session spans with the correct task and attempt attributes. The observed MCP
+executable was the optimized candidate. This comparison does not establish a
+universal startup bound or erase the debug-build observation.
