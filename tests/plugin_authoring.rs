@@ -3,12 +3,7 @@
 mod common;
 
 use serde_json::{Value, json};
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::Path,
-    process::{Command, Output},
-};
+use std::{fs, path::Path, process::Output};
 
 const ID: &str = "text-stats";
 const BINDING: &str = ".agents/ahu/plugins/text-stats.md";
@@ -70,43 +65,11 @@ fn independent_example_installs_invokes_disables_and_removes_offline() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path().canonicalize().unwrap();
     let root = base.join("project");
-    let package = base.join("package");
     let marker = base.join("started");
     fs::create_dir_all(root.join(".agents/ahu/plugins")).unwrap();
-    fs::create_dir(&package).unwrap();
     common::git(&root, &["init", "-q"]);
 
-    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/text-stats");
-    fs::create_dir(package.join("bin")).unwrap();
-    for name in ["Cargo.toml", "ahu-plugin.md"] {
-        fs::copy(example.join(name), package.join(name)).unwrap();
-    }
-    // Instrument a disposable Rust build, never the shipped source or binary.
-    let build = base.join("build");
-    fs::create_dir_all(build.join("src")).unwrap();
-    for name in ["Cargo.toml", "Cargo.lock"] {
-        fs::copy(example.join(name), build.join(name)).unwrap();
-    }
-    let source = fs::read_to_string(example.join("src/main.rs")).unwrap();
-    let instrumented = source.replace("fn main() {", &format!(
-        "fn main() {{ use std::io::Write as _; let mut marker = std::fs::OpenOptions::new().create(true).append(true).open({}).unwrap(); writeln!(marker, \"started\").unwrap();",
-        json!(marker.to_str().unwrap())
-    ));
-    fs::write(build.join("src/main.rs"), instrumented).unwrap();
-    let output = Command::new(env!("CARGO"))
-        .args(["build", "--offline", "--locked", "--manifest-path"])
-        .arg(build.join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(base.join("target"))
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let entrypoint = package.join("bin/text-stats");
-    fs::copy(base.join("target/debug/text-stats"), &entrypoint).unwrap();
-    assert_ne!(
-        fs::metadata(&entrypoint).unwrap().permissions().mode() & 0o111,
-        0
-    );
+    let package = common::stage_text_stats(&base, Some(&marker));
     let digest = success(run(
         &root,
         &["plugins", "digest", package.to_str().unwrap()],

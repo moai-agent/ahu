@@ -9,7 +9,6 @@ use opentelemetry_proto::tonic::{
 use prost::Message;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::path::Path;
 use std::process::Command;
 use std::sync::{
     Arc, Mutex,
@@ -164,7 +163,8 @@ fn attribute<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a AttributeV
 fn plugin_invocation_exports_payload_free_release_attributed_span() {
     let repo = TestRepo::new();
     repo.init_config();
-    let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/text-stats");
+    let staging = tempfile::tempdir().unwrap();
+    let package = common::stage_text_stats(&staging.path().canonicalize().unwrap(), None);
     let digest = ahu::plugin_install::digest(&package).unwrap();
     let binding = ahu::plugin_binding::Binding {
         schema_version: 1,

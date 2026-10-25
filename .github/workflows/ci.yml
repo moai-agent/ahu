@@ -53,6 +53,16 @@ jobs:
         run: cargo fmt --all --check
       - name: Build
         run: cargo build --locked
+      - name: Prepare independent Rust plugin examples
+        # Integration tests build these standalone crates offline. Their own
+        # lockfiles can select dependencies absent from the core's lockfile.
+        run: |
+          for example in text-stats harness-codex; do
+            manifest="examples/plugins/$example/Cargo.toml"
+            cargo fetch --locked --manifest-path "$manifest"
+            cargo fmt --manifest-path "$manifest" --check
+            cargo clippy --manifest-path "$manifest" --all-targets --locked -- -D warnings
+          done
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Check optional session plugin absence

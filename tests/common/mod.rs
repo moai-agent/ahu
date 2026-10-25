@@ -410,3 +410,46 @@ pub fn in_harness_fixture(test_name: &str) -> bool {
 }
 
 pub mod plugin;
+
+/// Build the independent Rust example explicitly, then stage only its package.
+/// Installation itself must never invoke Cargo or use the source directory.
+pub fn stage_text_stats(base: &Path, marker: Option<&Path>) -> PathBuf {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let package = base.join("package");
+    fs::create_dir(&package).unwrap();
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/text-stats");
+    fs::create_dir(package.join("bin")).unwrap();
+    for name in ["Cargo.toml", "ahu-plugin.md"] {
+        fs::copy(example.join(name), package.join(name)).unwrap();
+    }
+    // Instrument a disposable Rust build, never the shipped source or binary.
+    let build = base.join("build");
+    fs::create_dir_all(build.join("src")).unwrap();
+    for name in ["Cargo.toml", "Cargo.lock"] {
+        fs::copy(example.join(name), build.join(name)).unwrap();
+    }
+    let source = fs::read_to_string(example.join("src/main.rs")).unwrap();
+    let instrumented = match marker {
+        Some(marker) => source.replace("fn main() {", &format!(
+            "fn main() {{ use std::io::Write as _; let mut marker = std::fs::OpenOptions::new().create(true).append(true).open({}).unwrap(); writeln!(marker, \"started\").unwrap();",
+            serde_json::json!(marker.to_str().unwrap())
+        )),
+        None => source,
+    };
+    fs::write(build.join("src/main.rs"), instrumented).unwrap();
+    let output = Command::new(env!("CARGO"))
+        .args(["build", "--offline", "--locked", "--manifest-path"])
+        .arg(build.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(base.join("target"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let entrypoint = package.join("bin/text-stats");
+    fs::copy(base.join("target/debug/text-stats"), &entrypoint).unwrap();
+    assert_ne!(
+        fs::metadata(&entrypoint).unwrap().permissions().mode() & 0o111,
+        0
+    );
+    package
+}
