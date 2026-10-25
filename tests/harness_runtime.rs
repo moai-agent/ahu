@@ -91,7 +91,7 @@ impl Fixture {
         )
         .unwrap();
         let mut declaration = json!({
-            "protocol_version":1,"path":"peer","timeout_ms":300,
+            "protocol_version":1,"path":"peer","timeout_ms":1500,
             "descriptor":{"id":"sixth","display_name":"Independent Sixth","program":"sixth-native",
                 "aliases":["six"],"models":["invented/exact-v6"],"modes":["interactive","headless","direct"],
                 "operations":["probe","models","launch","admission","setup","native_sources","auth","budget","trust_prepare","trust_cleanup","decode_start","decode_event","decode_finish","recover"],
@@ -325,7 +325,9 @@ fn malformed_frames_are_bounded_private_and_poison_sessions() {
 
 #[test]
 fn blocked_stdin_cancellation_and_decoder_sequence_are_bounded() {
-    let blocked = Fixture::new("import time; time.sleep(30)", |_| {});
+    let blocked = Fixture::new("import time; time.sleep(30)", |d| {
+        d["timeout_ms"] = json!(300)
+    });
     let start = Instant::now();
     assert!(
         blocked
@@ -629,5 +631,9 @@ fn native_routing_forwards_only_declared_values_and_bounded_baseline() {
         assert!(!env.contains_key(key), "{key}");
     }
     assert!(env.contains_key("PATH"));
+    let mut missing = descriptor;
+    missing.program = "ahu-synthetic-nonexistent-native".into();
+    let error = harness_runtime::native_params(&fixture.repo(), &missing).unwrap_err();
+    assert_eq!(error.kind(), ahu::util::ErrorKind::Prerequisite);
     assert!(!fixture.marker.exists());
 }

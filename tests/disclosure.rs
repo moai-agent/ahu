@@ -624,7 +624,10 @@ fn the_instructions_digest_covers_exactly_the_delivered_fence_body() {
         )),
         "{preview}"
     );
-    assert!(preview.contains("the instruction text returned by the declared source parser"), "{preview}");
+    assert!(
+        preview.contains("the instruction text returned by the declared source parser"),
+        "{preview}"
+    );
 }
 
 /// A format with no frontmatter has nothing to strip, so the two digests cover
@@ -678,7 +681,10 @@ fn a_frontmatterless_source_has_two_equal_digests_not_one_missing_one() {
     // which, and why they match here.
     assert!(preview.contains("file digest"), "{preview}");
     assert!(preview.contains("instructions digest"), "{preview}");
-    assert!(preview.contains("the instruction text returned by the declared source parser"), "{preview}");
+    assert!(
+        preview.contains("the instruction text returned by the declared source parser"),
+        "{preview}"
+    );
 }
 
 /// A change to either digest is drift, and drift says which one moved.
@@ -1073,7 +1079,9 @@ fn opencode_settings_and_plugins_are_scanned_without_unscanned_disclosure() {
         "OpenCode settings are now scanned:\n{preview}"
     );
     assert!(
-        preview.contains("ahu reads these files;"),
+        preview.contains(
+            "the settings files ahu read declare no permission, plugin, MCP, or env keys"
+        ),
         "OpenCode preview must state that ahu reads its settings files:\n{preview}"
     );
 }
