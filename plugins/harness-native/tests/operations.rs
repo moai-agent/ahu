@@ -656,3 +656,36 @@ fn kiro_unknown_headless_version_does_not_gain_admission() {
     let result = call("kiro", "admission", &params).unwrap();
     assert_eq!(result["allowed"], false);
 }
+
+#[test]
+fn antigravity_auth_suppresses_color_and_returns_only_account_fingerprint() {
+    let f = Fixture::new(
+        "test \"$NO_COLOR\" = 1 || exit 2\nprintf 'Signed in as fixture@example.invalid\\n'",
+    );
+    for inherited in ["", "0", "1"] {
+        let mut params = f.probe();
+        params["environment"]["NO_COLOR"] = json!(inherited);
+        let result = call("antigravity", "auth", &params).unwrap();
+        assert_eq!(result["status"], "available");
+        assert!(!result.to_string().contains("fixture@example.invalid"));
+    }
+}
+
+#[test]
+fn hook_discovery_refuses_symlinked_native_configuration() {
+    let f = Fixture::new("exit 99");
+    let outside = f.root.join("outside-config");
+    fs::create_dir(&outside).unwrap();
+    fs::write(
+        outside.join("settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"private-sentinel"}]}]}}"#,
+    )
+    .unwrap();
+    symlink(&outside, f.root.join(".claude")).unwrap();
+    let p =
+        json!({"project":f.root,"home":f.home,"settings":{"view":"hooks","environment_names":[]}});
+    let result = call("claude-code", "native_sources", &p).unwrap();
+    assert!(result["hooks"].as_array().unwrap().is_empty());
+    assert!(!result["unreadable"].as_array().unwrap().is_empty());
+    assert!(!result.to_string().contains("private-sentinel"));
+}

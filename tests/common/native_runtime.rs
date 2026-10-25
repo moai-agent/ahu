@@ -6,22 +6,54 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-static TARGET: OnceLock<tempfile::TempDir> = OnceLock::new();
+enum BuildTarget {
+    Owned(tempfile::TempDir),
+    Shared(std::path::PathBuf),
+}
+impl BuildTarget {
+    fn path(&self) -> &std::path::Path {
+        match self {
+            Self::Owned(dir) => dir.path(),
+            Self::Shared(path) => path,
+        }
+    }
+}
+static TARGET: OnceLock<BuildTarget> = OnceLock::new();
 extern "C" fn cleanup() {
-    if let Some(target) = TARGET.get() {
+    if let Some(BuildTarget::Owned(target)) = TARGET.get() {
         let _ = std::fs::remove_dir_all(target.path());
     }
 }
 fn target() -> &'static std::path::Path {
     TARGET
         .get_or_init(|| {
-            let target = tempfile::Builder::new()
-                .prefix("ahu-native-runtime-test-")
-                .tempdir()
-                .unwrap();
-            // SAFETY: static callback has no captures and accesses only this process-owned fixture.
+            // A caller may reuse an explicit external development build cache.
+            // Default fixtures own and remove their build artifacts on process exit.
+            let target = match std::env::var_os("AHU_TEST_RUNTIME_TARGET") {
+                Some(path) => {
+                    let path = std::path::PathBuf::from(path);
+                    assert!(path.is_absolute());
+                    std::fs::create_dir_all(&path).unwrap();
+                    let path = path.canonicalize().unwrap();
+                    assert!(
+                        !path.starts_with(
+                            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .canonicalize()
+                                .unwrap()
+                        )
+                    );
+                    BuildTarget::Shared(path)
+                }
+                None => BuildTarget::Owned(
+                    tempfile::Builder::new()
+                        .prefix("ahu-native-runtime-test-")
+                        .tempdir()
+                        .unwrap(),
+                ),
+            };
+            // SAFETY: static callback accesses only this process-owned fixture, never a shared cache.
             assert_eq!(unsafe { libc::atexit(cleanup) }, 0);
-            for harness in ["claude-code", "codex", "antigravity", "opencode"] {
+            for harness in ["claude-code", "codex", "antigravity", "opencode", "kiro"] {
                 let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join(format!("plugins/harness-{harness}/Cargo.toml"));
                 let output = Command::new(env!("CARGO"))
@@ -134,4 +166,71 @@ impl Observations {
         let result = exchange(harness, calls).unwrap();
         self.inner = serde_json::from_value(result.last().unwrap()["native"].clone()).unwrap();
     }
+}
+
+/// Install the real external executable for native lifecycle integration checks.
+#[allow(dead_code)]
+pub fn install(root: &std::path::Path, harness: &str) {
+    let id = format!("harness-{harness}");
+    if ahu::plugin_binding::load(root, &id).unwrap().is_some() {
+        return;
+    }
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("plugins")
+        .join(&id);
+    let package = tempfile::tempdir().unwrap();
+    let package_root = package.path().canonicalize().unwrap();
+    std::fs::create_dir(package_root.join("bin")).unwrap();
+    for name in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "ahu-plugin.md",
+        "README.md",
+        "LICENSE",
+        "SECURITY.md",
+    ] {
+        if source.join(name).is_file() {
+            std::fs::copy(source.join(name), package_root.join(name)).unwrap();
+        }
+    }
+    let binary = format!("ahu-plugin-{harness}");
+    std::fs::copy(
+        target().join("debug").join(&binary),
+        package_root.join("bin").join(binary),
+    )
+    .unwrap();
+    let digest = ahu::plugin_install::digest(&package_root).unwrap();
+    let binding = format!(".agents/ahu/plugins/{id}.md");
+    std::fs::create_dir_all(root.join(".agents/ahu/plugins")).unwrap();
+    std::fs::write(root.join(&binding), format!("---\nokf_version: '0.2'\ntype: ahu:plugin-binding\nahu:\n  schema_version: 1\n  id: {id}\n  version: '0.1.0'\n  source:\n    kind: local\n    repository: {}\n    revision: '{digest}'\n    sha256: '{digest}'\n  compatibility:\n    ahu: '{}'\n    host_api: 1\n  enabled: true\n  grants: [harness-runtime]\n---\nNative runtime integration fixture.\n", serde_json::json!(package_root), env!("CARGO_PKG_VERSION"))).unwrap();
+    for args in [
+        vec!["add", "-f", &binding],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "--only",
+            "-m",
+            "Install native runtime fixture",
+            "--",
+            &binding,
+        ],
+    ] {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    ahu::plugin_install::run(root, "install", &id).unwrap();
 }

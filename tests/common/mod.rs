@@ -14,6 +14,7 @@ use tempfile::TempDir;
 pub struct TestRepo {
     pub dir: TempDir,
     pub state: TempDir,
+    native_runtime: bool,
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> String {
@@ -48,9 +49,19 @@ impl TestRepo {
             dir.path(),
             &["config", "user.email", "tests@example.invalid"],
         );
-        let repo = TestRepo { dir, state };
+        let repo = TestRepo {
+            dir,
+            state,
+            native_runtime: false,
+        };
         repo.write("README.md", "# fixture\n");
         repo.commit("initial");
+        repo
+    }
+
+    pub fn new_native() -> Self {
+        let mut repo = Self::new();
+        repo.native_runtime = true;
         repo
     }
 
@@ -139,6 +150,10 @@ impl TestRepo {
     /// Synthetic plugin metadata supplies historical test identities; no native
     /// provider implementations are linked or probed by the fixture.
     pub fn install_runtime(&self, harness: &str) {
+        if self.native_runtime {
+            native_runtime::install(self.path(), harness);
+            return;
+        }
         let (program, source_dir, format, models): (&str, &str, &str, &[&str]) = match harness {
             "claude-code" => (
                 "claude",
@@ -582,3 +597,6 @@ pub fn runtime_plan_with_policy(
         Some(&repo.state.path().canonicalize()?),
     )
 }
+
+#[allow(unused_imports)]
+pub mod native_runtime;

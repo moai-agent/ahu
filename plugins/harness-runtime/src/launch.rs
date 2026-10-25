@@ -51,19 +51,10 @@ pub(super) fn plan(harness: &str, params: Value) -> Result<Value, ()> {
     {
         return Err(());
     }
-    // Version-specific flags belong to the package and cannot be guessed by core.
-    let reviewed = match harness {
-        "codex" => ["0.157.1", "0.160.0", "0.163.0"].contains(&r.native_version.as_str()),
-        "claude-code" => ["2.1.283", "2.1.288", "2.1.289", "2.1.302", "2.1.310"]
-            .contains(&r.native_version.as_str()),
-        "antigravity" => r.native_version == "1.4.7",
-        "opencode" => r.native_version == "2.0.32",
-        "kiro" => ["2.28.0", "2.29.0", "2.34.0"].contains(&r.native_version.as_str()),
-        _ => false,
-    };
-    if !reviewed {
-        return Err(());
-    }
+    // Core enforces explicit project pins. Unpinned native versions float;
+    // version-specific controls still require their inspected admission evidence.
+    let version = ahu_harness_native::version_token(&r.native_version).ok_or(())?;
+    let standalone = version.starts_with("2.");
     if harness == "opencode"
         && !r
             .model
@@ -87,7 +78,8 @@ pub(super) fn plan(harness: &str, params: Value) -> Result<Value, ()> {
             "antigravity" => add(&["--model", &r.model, "--dangerously-skip-permissions"]),
             "kiro" => add(&["chat", "--v3", "--model", &r.model, "--trust-all-tools"]),
             // The reviewed mini CLI has no unattended permission override.
-            "opencode" => return Err(()),
+            "opencode" if standalone => return Err(()),
+            "opencode" => add(&["--model", &r.model, "--auto"]),
             _ => return Err(()),
         }
         return Ok(
@@ -224,14 +216,14 @@ pub(super) fn plan(harness: &str, params: Value) -> Result<Value, ()> {
                 add(&["--print"]);
             }
             "opencode" => {
-                add(&[
-                    "run",
-                    "--standalone",
-                    "--format",
-                    "json",
-                    "--model",
-                    &r.model,
-                ]);
+                add(&["run"]);
+                if standalone {
+                    add(&["--standalone"]);
+                }
+                add(&["--format", "json", "--model", &r.model]);
+                if !standalone {
+                    add(&["--dir", &r.cwd]);
+                }
                 match r.permissions {
                     Permissions::Prompt => (),
                     Permissions::Auto => add(&["--auto"]),
@@ -310,10 +302,18 @@ pub(super) fn plan(harness: &str, params: Value) -> Result<Value, ()> {
                 }
             }
             "opencode" => {
-                if r.permissions != Permissions::Prompt {
+                if r.permissions == Permissions::AcceptEdits
+                    || standalone && r.permissions == Permissions::Auto
+                {
                     return Err(());
                 }
-                add(&["mini", "--model", &r.model]);
+                if standalone {
+                    add(&["mini"]);
+                }
+                add(&["--model", &r.model]);
+                if r.permissions == Permissions::Auto {
+                    add(&["--auto"]);
+                }
                 if r.mode == Mode::Interactive {
                     add(&["--prompt"]);
                 }
@@ -371,21 +371,46 @@ mod tests {
         }
     }
     #[test]
+    fn unpinned_versions_float_and_native_cli_grammar_stays_provider_owned() {
+        for v in ["2.1.270 (Claude Code)", "2.1.999"] {
+            assert!(plan("claude-code", params("headless", v, "model")).is_ok());
+        }
+        for v in ["1.18.32", "opencode v2.0.32", "3.0.0"] {
+            let value = plan("opencode", params("headless", v, "provider/model")).unwrap();
+            let args = value["args"].as_array().unwrap();
+            let v2 = v.contains("v2.");
+            assert_eq!(args.contains(&json!("--standalone")), v2);
+            assert_eq!(args.contains(&json!("--dir")), !v2);
+        }
+    }
+    #[test]
     fn direct_automatic_approval_is_never_silently_weakened() {
-        for (h,v,flag) in [("codex","0.163.0","--dangerously-bypass-approvals-and-sandbox"),("claude-code","2.1.310","--dangerously-skip-permissions"),("antigravity","1.4.7","--dangerously-skip-permissions"),("kiro","2.29.0","--trust-all-tools")] {
-            let mut request=params("direct",v,"model");request["permissions"]=json!("auto");
-            let result=plan(h,request).unwrap();assert!(result["args"].as_array().unwrap().contains(&json!(flag)));
+        for (h, v, flag) in [
+            (
+                "codex",
+                "0.163.0",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ),
+            ("claude-code", "2.1.310", "--dangerously-skip-permissions"),
+            ("antigravity", "1.4.7", "--dangerously-skip-permissions"),
+            ("kiro", "2.29.0", "--trust-all-tools"),
+        ] {
+            let mut request = params("direct", v, "model");
+            request["permissions"] = json!("auto");
+            let result = plan(h, request).unwrap();
+            assert!(result["args"].as_array().unwrap().contains(&json!(flag)));
             assert!(result["prompt_arg"].is_null());
         }
-        let mut request=params("direct","2.0.32","provider/model");request["permissions"]=json!("auto");
-        assert!(plan("opencode",request).is_err());
+        let mut request = params("direct", "2.0.32", "provider/model");
+        request["permissions"] = json!("auto");
+        assert!(plan("opencode", request).is_err());
     }
     #[test]
     fn invalid_flags_and_unsupported_permissions_are_refused() {
         for model in ["", "--help", "a b", "a\0b"] {
             assert!(plan("codex", params("headless", "0.163.0", model)).is_err());
         }
-        assert!(plan("codex", params("headless", "999.0.0", "model")).is_err());
+        assert!(plan("codex", params("headless", "not-a-version", "model")).is_err());
         assert!(plan("opencode", params("headless", "2.0.32", "model")).is_err());
         for h in ["opencode", "kiro"] {
             let mut p = params(

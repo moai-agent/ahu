@@ -83,8 +83,9 @@ A provider update is delivered by versioning its package and reviewing new conte
 pins. No core recompile is required while the runtime protocol remains compatible.
 Existing tasks freeze package/binding identity; an upgrade cannot silently rebind
 resume or cleanup. Finish and remove old tasks before activating replacements.
-Unknown versions and unsupported operations fail explicitly, without another
-provider or built-in fallback.
+Unpinned native CLI versions float; this does not establish live compatibility.
+Exact project pins and version-specific native controls remain enforced. Invalid
+versions and unsupported operations fail without a provider fallback.
 
 ## Security and evidence
 

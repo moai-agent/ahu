@@ -14,7 +14,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         use std::os::unix::fs::PermissionsExt;
-        let repo = TestRepo::new();
+        let repo = TestRepo::new_native();
         repo.init_config();
         repo.add_agent_on("worker", "1.0.0", "claude-code", "claude-opus-5");
         repo.commit("fixture configuration");
@@ -2140,7 +2140,7 @@ fn assert_opencode_batch_profile(version: &str) {
     use ahu::harness::LaunchRequest;
     use ahu::headless::{Options, Spec};
 
-    let fixture = TestRepo::new();
+    let fixture = TestRepo::new_native();
     fixture.init_config();
     fixture.add_agent_on("worker", "1.0.0", "opencode", "ollama/glm-5.3:cloud");
     fixture.commit("synthetic runtime identity");
@@ -2209,7 +2209,7 @@ p.parse_args()
     }
     expected.extend(["--format", "json", "--model", "ollama/glm-5.3:cloud"]);
     if !standalone {
-        expected.extend(["--dir", "/tmp"]);
+        expected.extend(["--dir", fixture.path().to_str().unwrap()]);
     }
     expected.extend(["--", "do the thing"]);
     assert_eq!(prompting.args, expected);
@@ -2697,7 +2697,7 @@ fn composed_batch_launch_and_continuation_freeze_identity_session_and_grants() {
         ("antigravity", "gemini-3.1-pro-high", "0.4.10", "disabled"),
         ("opencode", "ollama/glm-5.3:cloud", "1.18.30", "disabled"),
     ] {
-        let fixture = TestRepo::new();
+        let fixture = TestRepo::new_native();
         fixture.init_config();
         fixture.add_agent_on("reviewer", "1.0.0", harness, model);
         fixture.commit("synthetic runtime identity");
@@ -2938,7 +2938,7 @@ fn linked_checkout_reads_primary_headless_records_and_independent_repo_does_not(
         );
         assert_eq!(Fixture::value(&out)["task_id"], id);
     }
-    let independent = TestRepo::new();
+    let independent = TestRepo::new_native();
     let out = f
         .command()
         .current_dir(independent.path())

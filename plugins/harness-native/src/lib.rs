@@ -5,6 +5,8 @@ mod ambient;
 mod auth;
 mod codex_metadata;
 mod compatibility;
+/// Parse the native CLI version without claiming live compatibility.
+pub use compatibility::version_token;
 mod files;
 mod helpers;
 mod hook_inventory;
