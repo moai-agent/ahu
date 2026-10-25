@@ -284,7 +284,7 @@ fn validate(value: Value, harness: &str, require_allowed: bool) -> Result<Status
     }
     Ok(status)
 }
-/// Validate the exact interactive launch identity through its installed provider.
+/// Validate the exact launch identity through its installed provider.
 pub fn validate_launch(
     root: &Path,
     harness: &str,
@@ -294,7 +294,7 @@ pub fn validate_launch(
     version: &str,
     executable: &Path,
 ) -> Result<Status> {
-    if !["interactive", "direct"].contains(&mode) {
+    if !["interactive", "direct", "headless"].contains(&mode) {
         return Err(invalid());
     }
     let repo = crate::git::discover(root)?;
@@ -320,7 +320,7 @@ pub fn validate_launch(
     }
     // Interactive disclosure may report headless refusal without denying an
     // independently validated interactive invocation.
-    validate(result, harness, false)
+    validate(result, harness, mode == "headless")
 }
 /// Provider-specific policy stays opaque; caller authorizes settings before dispatch.
 pub fn enforce_with_settings(
