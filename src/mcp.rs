@@ -1248,9 +1248,7 @@ mod tests {
         assert_eq!(budget["token_counts"], "not_provided");
         assert_eq!(budget["shared_account_capacity"], true);
         assert_eq!(budget["project"], repo.identity());
-        assert_eq!(budget["providers"][0]["status"], "not_configured");
-        assert_eq!(budget["providers"][0]["signal_type"], "unknown");
-        assert_eq!(budget["providers"][0]["source"], "none");
+        assert_eq!(budget["providers"], serde_json::json!([]));
         assert!(!budget.to_string().contains("@"));
     }
 

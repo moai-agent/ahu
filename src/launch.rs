@@ -1025,6 +1025,14 @@ pub(crate) fn verify_task(
         }
     }
 
+    let runtime = crate::harness_runtime::load(&discovered, &record.identity.harness)?;
+    if record.launch_command.planner_binding_digest.as_deref()
+        != Some(runtime.binding_digest().as_str())
+    {
+        bail!(
+            "task runtime binding changed; restore the frozen installation before starting or resuming"
+        );
+    }
     let request = LaunchRequest {
         model: &record.identity.model,
         prompt: &delivered,
