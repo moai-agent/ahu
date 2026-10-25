@@ -300,17 +300,34 @@ fn plan_with_mode(
         prompt,
         crate::orchestration::Composition::interactive(Some(metadata)),
     )?;
-    let command = harness::task_command(
-        repo,
-        &pair.harness,
-        &LaunchRequest {
-            model: &pair.model,
-            prompt: &delivered,
-            cwd: &worktree,
-            permissions,
-        },
-        None,
-    )?;
+    let command = if work_mode && cfg!(feature = "harness-plugin-pilot") {
+        // Headless preparation needs native identity/version before its Spec is
+        // available. Do not ask a planner for an interactive command: a package
+        // may support unattended headless work but refuse interactive auto mode.
+        // headless::launch replaces this identity-only value with the installed
+        // planner's command before preflight, persistence or process execution.
+        harness::LaunchCommand {
+            program: crate::catalog::harness(&pair.harness)
+                .ok_or_else(|| Error::new("unknown headless harness"))?
+                .executable
+                .into(),
+            args: Vec::new(),
+            prompt_arg: None,
+            planner_binding_digest: None,
+        }
+    } else {
+        harness::task_command(
+            repo,
+            &pair.harness,
+            &LaunchRequest {
+                model: &pair.model,
+                prompt: &delivered,
+                cwd: &worktree,
+                permissions,
+            },
+            None,
+        )?
+    };
     let harness_executable = crate::selection::resolve_executable(&command.program)
         .map(PathBuf::from)
         .ok_or_else(|| {

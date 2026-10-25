@@ -30,7 +30,7 @@ fn repo() -> tempfile::TempDir {
 }
 fn package(root: &Path, id: &str, declaration: bool) {
     let launch = if declaration {
-        "harness_launch:\n  harness: codex\n  path: planner\n  protocol_version: 1\n  timeout_ms: 1000\n"
+        "harness_launch:\n  harness: codex\n  program: codex\n  tested_versions: [0.163.0]\n  path: planner\n  protocol_version: 2\n  timeout_ms: 1000\n"
     } else {
         ""
     };
@@ -75,7 +75,7 @@ fn prepare_commit_install_inventory_and_enable_are_separate() {
     package(source.path(), "harness-codex", true);
     let args = ["setup", "--harness-plugin", source.path().to_str().unwrap()];
     let output = success(run(repo.path(), &args));
-    assert!(output.contains("codex-plugin-pilot"));
+    assert!(output.contains("harness-plugin-pilot"));
     let (binding, _) = ahu::plugin_binding::load(repo.path(), "harness-codex")
         .unwrap()
         .unwrap();
@@ -256,4 +256,36 @@ fn installed_discovery_checks_pins_even_without_a_current_binding() {
             .success()
     );
     assert!(!source.path().join("executed").exists());
+}
+
+#[test]
+fn malformed_native_metadata_cannot_prepare_or_execute_a_package() {
+    for (from, to) in [
+        ("program: codex", "program: /tmp/codex"),
+        ("program: codex", "program: ''"),
+        ("tested_versions: [0.163.0]", "tested_versions: []"),
+        ("tested_versions: [0.163.0]", "tested_versions: [latest]"),
+        (
+            "tested_versions: [0.163.0]",
+            "tested_versions: [0.163.0, 0.163.0]",
+        ),
+        ("protocol_version: 2", "protocol_version: 1"),
+    ] {
+        let repo = repo();
+        let source = temp();
+        package(source.path(), "harness-codex", true);
+        let manifest = source.path().join("ahu-plugin.md");
+        let body = fs::read_to_string(&manifest).unwrap();
+        fs::write(manifest, body.replace(from, to)).unwrap();
+        assert!(
+            !run(
+                repo.path(),
+                &["setup", "--harness-plugin", source.path().to_str().unwrap()]
+            )
+            .status
+            .success()
+        );
+        assert!(!repo.path().join(".agents/ahu/plugins").exists());
+        assert!(!source.path().join("executed").exists());
+    }
 }

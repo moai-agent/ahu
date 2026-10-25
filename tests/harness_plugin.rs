@@ -11,25 +11,62 @@ use std::{
 };
 
 // Build explicitly in the test harness, never through plugin installation.
-fn planner_executable() -> &'static Path {
-    static EXECUTABLE: OnceLock<PathBuf> = OnceLock::new();
-    EXECUTABLE.get_or_init(|| {
-        let target = std::env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("ahu-rust-codex-agent-target"));
-        let target = std::path::absolute(target).unwrap();
-        let output = Command::new(env!("CARGO"))
-            .args(["build", "--locked", "--offline", "--manifest-path"])
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("examples/plugins/harness-codex/Cargo.toml"),
-            )
-            .env("CARGO_TARGET_DIR", &target)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        target.join("debug/ahu-experiment-harness-codex")
-    })
+fn planner_executable_for(harness: &str) -> PathBuf {
+    static EXECUTABLES: OnceLock<std::sync::Mutex<std::collections::HashMap<String, PathBuf>>> =
+        OnceLock::new();
+    let mut executables = EXECUTABLES.get_or_init(Default::default).lock().unwrap();
+    executables
+        .entry(harness.into())
+        .or_insert_with(|| {
+            let target = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("ahu-rust-codex-agent-target"));
+            let target = std::path::absolute(target).unwrap();
+            let output = Command::new(env!("CARGO"))
+                .args(["build", "--locked", "--offline", "--manifest-path"])
+                .arg(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join(format!("plugins/harness-{harness}/Cargo.toml")),
+                )
+                .env("CARGO_TARGET_DIR", &target)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            target.join(format!("debug/ahu-plugin-{harness}"))
+        })
+        .clone()
+}
+
+fn planner_executable() -> PathBuf {
+    planner_executable_for("codex")
+}
+
+fn native_fixture(name: &str) -> bool {
+    if common::is_child_case(name) {
+        return true;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    for (program, version) in [
+        ("codex", "0.163.0"),
+        ("claude", "2.1.310"),
+        ("agy", "1.4.7"),
+        ("opencode", "2.0.32"),
+    ] {
+        let binary = dir.path().join(program);
+        fs::write(&binary, format!("#!/bin/sh\nprintf '{version}\\n'\n")).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = common::run_child_case(name, |command| {
+        command.env("PATH", path);
+    });
+    common::assert_child_passed(name, &output);
+    false
 }
 
 struct Fixture {
@@ -37,9 +74,13 @@ struct Fixture {
     root: PathBuf,
     marker: PathBuf,
     binding: PathBuf,
+    harness: String,
 }
 impl Fixture {
     fn new(script: Option<&str>) -> Self {
+        Self::for_harness("codex", script)
+    }
+    fn for_harness(harness: &str, script: Option<&str>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
         let root = base.join("repo");
@@ -48,12 +89,13 @@ impl Fixture {
         fs::create_dir_all(root.join(".agents/ahu/plugins")).unwrap();
         fs::create_dir(&package).unwrap();
         common::git(&root, &["init", "-q"]);
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/harness-codex");
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("plugins/harness-{harness}"));
         for name in ["Cargo.toml", "Cargo.lock", "ahu-plugin.md"] {
             fs::copy(source.join(name), package.join(name)).unwrap();
         }
         fs::create_dir(package.join("bin")).unwrap();
-        let executable = package.join("bin/ahu-experiment-harness-codex");
+        let executable = package.join(format!("bin/ahu-plugin-{harness}"));
         if let Some(script) = script {
             let body = script.split_once('\n').unwrap().1;
             fs::write(
@@ -68,16 +110,17 @@ impl Fixture {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         } else {
-            fs::copy(planner_executable(), executable).unwrap();
+            fs::copy(planner_executable_for(harness), executable).unwrap();
         }
         let digest = ahu::plugin_install::digest(&package).unwrap();
-        let binding = root.join(".agents/ahu/plugins/harness-codex.md");
-        fs::write(&binding, format!("---\nokf_version: '0.2'\ntype: ahu:plugin-binding\nahu:\n  schema_version: 1\n  id: harness-codex\n  version: '0.1.0'\n  source:\n    kind: local\n    repository: {}\n    revision: '{digest}'\n    sha256: '{digest}'\n  compatibility:\n    ahu: '{}'\n    host_api: 1\n  enabled: true\n  grants: [harness-launch]\n---\nSynthetic policy.\n", json!(package),env!("CARGO_PKG_VERSION"))).unwrap();
+        let binding = root.join(format!(".agents/ahu/plugins/harness-{harness}.md"));
+        fs::write(&binding, format!("---\nokf_version: '0.2'\ntype: ahu:plugin-binding\nahu:\n  schema_version: 1\n  id: harness-{harness}\n  version: '0.1.0'\n  source:\n    kind: local\n    repository: {}\n    revision: '{digest}'\n    sha256: '{digest}'\n  compatibility:\n    ahu: '{}'\n    host_api: 1\n  enabled: true\n  grants: [harness-launch]\n---\nSynthetic policy.\n", json!(package),env!("CARGO_PKG_VERSION"))).unwrap();
         let fixture = Self {
             _temp: temp,
             root,
             marker,
             binding,
+            harness: harness.into(),
         };
         fixture.commit();
         let output = common::ahu()
@@ -86,7 +129,7 @@ impl Fixture {
                 fixture.root.to_str().unwrap(),
                 "plugins",
                 "install",
-                "harness-codex",
+                &format!("harness-{harness}"),
             ])
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -102,7 +145,11 @@ impl Fixture {
     fn commit(&self) {
         common::git(
             &self.root,
-            &["add", "--", ".agents/ahu/plugins/harness-codex.md"],
+            &[
+                "add",
+                "--",
+                &format!(".agents/ahu/plugins/harness-{}.md", self.harness),
+            ],
         );
         common::git(
             &self.root,
@@ -142,6 +189,11 @@ fn spec(session: Option<&str>) -> ahu::headless::Spec {
 
 #[test]
 fn installed_planner_preserves_permissions_and_adds_interactive_server_ownership() {
+    if !native_fixture(
+        "installed_planner_preserves_permissions_and_adds_interactive_server_ownership",
+    ) {
+        return;
+    }
     let f = Fixture::new(None);
     for permissions in [
         Permissions::Prompt,
@@ -188,6 +240,9 @@ fn installed_planner_preserves_permissions_and_adds_interactive_server_ownership
 
 #[test]
 fn policy_changes_refuse_before_execution_and_no_generic_grant_substitutes() {
+    if !native_fixture("policy_changes_refuse_before_execution_and_no_generic_grant_substitutes") {
+        return;
+    }
     let f = Fixture::new(Some(
         "#!/usr/bin/python3\nraise AssertionError('must not execute')\n",
     ));
@@ -219,19 +274,22 @@ fn policy_changes_refuse_before_execution_and_no_generic_grant_substitutes() {
 
 #[test]
 fn malformed_and_failed_planners_do_not_yield_launch_commands() {
+    if !native_fixture("malformed_and_failed_planners_do_not_yield_launch_commands") {
+        return;
+    }
     for script in [
         "#!/usr/bin/python3\nprint('not JSON')\n",
         r#"#!/usr/bin/python3
-print('{"protocol_version":1,"protocol_version":1,"harness":"codex","program":"codex","args":["<prompt: see prompt.txt>"],"prompt_arg":0}')
+print('{"protocol_version":2,"protocol_version":2,"harness":"codex","program":"codex","args":["<prompt: see prompt.txt>"],"prompt_arg":0}')
 "#,
         r#"#!/usr/bin/python3
-print('{"protocol_version":1,"harness":"codex","program":"codex","args":["<prompt: see prompt.txt>"],"prompt_arg":0,"unknown":true}')
+print('{"protocol_version":2,"harness":"codex","program":"codex","args":["<prompt: see prompt.txt>"],"prompt_arg":0,"unknown":true}')
 "#,
         r#"#!/usr/bin/python3
-print('{"protocol_version":1,"harness":"codex","program":"sh","args":["<prompt: see prompt.txt>"],"prompt_arg":0}')
+print('{"protocol_version":2,"harness":"codex","program":"sh","args":["<prompt: see prompt.txt>"],"prompt_arg":0}')
 "#,
         r#"#!/usr/bin/python3
-print('{"protocol_version":1,"harness":"codex","program":"codex","args":["<prompt: see prompt.txt>","extra"],"prompt_arg":0}')
+print('{"protocol_version":2,"harness":"codex","program":"codex","args":["<prompt: see prompt.txt>","extra"],"prompt_arg":0}')
 "#,
         "#!/usr/bin/python3\nimport sys\nsys.exit(1)\n",
         "#!/usr/bin/python3\nprint('x'*65537)\n",
@@ -244,15 +302,20 @@ print('{"protocol_version":1,"harness":"codex","program":"codex","args":["<promp
 
 #[test]
 fn independent_plugin_rejects_unknown_request_fields_and_never_receives_prompt() {
+    if !native_fixture(
+        "independent_plugin_rejects_unknown_request_fields_and_never_receives_prompt",
+    ) {
+        return;
+    }
     let f = Fixture::new(Some(
-        "#!/usr/bin/python3\nimport json,sys\nr=json.load(sys.stdin)\nassert set(r)=={'protocol_version','harness','mode','model','permissions','work_mode','session'}\nassert 'private literal' not in json.dumps(r)\nprint(json.dumps({'protocol_version':1,'harness':'codex','program':'codex','args':['--','<prompt: see prompt.txt>'],'prompt_arg':1}))\n",
+        "#!/usr/bin/python3\nimport json,sys\nr=json.load(sys.stdin)\nassert set(r)=={'protocol_version','harness','mode','model','permissions','work_mode','session','native_version','timeout_seconds'}\nassert 'private literal' not in json.dumps(r)\nprint(json.dumps({'protocol_version':2,'harness':'codex','program':'codex','args':['--','<prompt: see prompt.txt>'],'prompt_arg':1}))\n",
     ));
     assert_eq!(
         f.plan(Permissions::Auto, None).unwrap().args[1],
         "--private literal task"
     );
     let mut child = Command::new(planner_executable())
-        .arg("--ahu-harness-launch-protocol=1")
+        .arg("--ahu-harness-launch-protocol=2")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -262,7 +325,7 @@ fn independent_plugin_rejects_unknown_request_fields_and_never_receives_prompt()
         .stdin
         .take()
         .unwrap()
-        .write_all(br#"{"protocol_version":1,"unexpected":true}"#)
+        .write_all(br#"{"protocol_version":2,"unexpected":true}"#)
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(2));
@@ -271,6 +334,9 @@ fn independent_plugin_rejects_unknown_request_fields_and_never_receives_prompt()
 
 #[test]
 fn changing_committed_planner_policy_changes_frozen_command_identity() {
+    if !native_fixture("changing_committed_planner_policy_changes_frozen_command_identity") {
+        return;
+    }
     let f = Fixture::new(None);
     let before = f.plan(Permissions::Auto, None).unwrap();
     let original = fs::read_to_string(&f.binding).unwrap();
@@ -296,6 +362,9 @@ fn changing_committed_planner_policy_changes_frozen_command_identity() {
 
 #[test]
 fn planner_timeout_returns_no_command() {
+    if !native_fixture("planner_timeout_returns_no_command") {
+        return;
+    }
     let f = Fixture::new(Some("#!/usr/bin/python3\nimport time\ntime.sleep(30)\n"));
     let error = f.plan(Permissions::Auto, None).unwrap_err();
     assert!(error.to_string().contains("TimedOut"), "{error}");
@@ -305,7 +374,7 @@ fn planner_timeout_returns_no_command() {
 fn exchange(raw: &[u8]) -> std::process::Output {
     use std::io::Write;
     let mut child = Command::new(planner_executable())
-        .arg("--ahu-harness-launch-protocol=1")
+        .arg("--ahu-harness-launch-protocol=2")
         .env_clear()
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -317,12 +386,15 @@ fn exchange(raw: &[u8]) -> std::process::Output {
 }
 
 fn valid_request() -> serde_json::Value {
-    json!({"protocol_version":1,"harness":"codex","mode":"interactive",
-        "model":"example-model","permissions":"prompt","work_mode":false,"session":null})
+    json!({"protocol_version":2,"harness":"codex","mode":"interactive",
+        "model":"example-model","permissions":"prompt","work_mode":false,"session":null,"native_version":"0.163.0","timeout_seconds":1800})
 }
 
 #[test]
 fn rust_planner_rejects_invalid_requests_without_output() {
+    if !native_fixture("rust_planner_rejects_invalid_requests_without_output") {
+        return;
+    }
     let valid = valid_request();
     let mut invalid = vec![];
     for field in valid.as_object().unwrap().keys() {
@@ -333,7 +405,7 @@ fn rust_planner_rejects_invalid_requests_without_output() {
     for (field, values) in [
         (
             "protocol_version",
-            vec![json!(true), json!(1.0), json!(2), json!("1")],
+            vec![json!(true), json!(2.0), json!(1), json!("2")],
         ),
         ("harness", vec![json!("other"), json!(null)]),
         (
@@ -378,12 +450,12 @@ fn rust_planner_rejects_invalid_requests_without_output() {
         let output = exchange(&raw);
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
-        assert!(output.stderr.is_empty());
+        assert!(output.stderr.len() < 128);
     }
     for args in [
         vec![],
-        vec!["--ahu-harness-launch-protocol=2"],
-        vec!["--ahu-harness-launch-protocol=1", "extra"],
+        vec!["--ahu-harness-launch-protocol=1"],
+        vec!["--ahu-harness-launch-protocol=2", "extra"],
     ] {
         let output = Command::new(planner_executable())
             .args(args)
@@ -396,48 +468,46 @@ fn rust_planner_rejects_invalid_requests_without_output() {
 
 #[test]
 fn rust_planner_preserves_ascii_framing_and_exact_limits() {
+    if !native_fixture("rust_planner_preserves_ascii_framing_and_exact_limits") {
+        return;
+    }
     let mut request = valid_request();
-    request["model"] = json!("é😀\u{7f}");
+    request["model"] = json!("example-model");
     let output = exchange(&serde_json::to_vec(&request).unwrap());
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         concat!(
-            "{\"protocol_version\":1,\"harness\":\"codex\",\"program\":\"codex\",",
-            "\"args\":[\"-m\",\"\\u00e9\\ud83d\\ude00\\u007f\",\"--no-daemon\",\"--\",\"<prompt: see prompt.txt>\"],\"prompt_arg\":4}\n"
+            "{\"protocol_version\":2,\"harness\":\"codex\",\"program\":\"codex\",",
+            "\"args\":[\"-m\",\"example-model\",\"--no-daemon\",\"--\",\"<prompt: see prompt.txt>\"],\"prompt_arg\":4}\n"
         )
     );
-    let mut raw = serde_json::to_vec(&valid_request()).unwrap();
+    let mut raw = serde_json::to_vec(&request).unwrap();
     raw.resize(65_536, b' ');
     assert!(exchange(&raw).status.success());
     raw.push(b' ');
     assert_eq!(exchange(&raw).status.code(), Some(2));
-
-    request["model"] = json!("a");
-    let baseline = exchange(&serde_json::to_vec(&request).unwrap())
-        .stdout
-        .len();
-    let model_bytes = 65_536 - baseline + 1;
-    let model = "é".repeat(model_bytes / 6) + &"a".repeat(model_bytes % 6);
-    request["model"] = json!(model);
-    let output = exchange(&serde_json::to_vec(&request).unwrap());
-    assert!(output.status.success());
-    assert_eq!(output.stdout.len(), 65_536);
-    request["model"] = json!(model + "a");
-    let output = exchange(&serde_json::to_vec(&request).unwrap());
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    request["model"] = json!("é".repeat(11_000));
-    let raw = serde_json::to_vec(&request).unwrap();
-    assert!(raw.len() < 65_536);
-    let output = exchange(&raw);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
+    request["model"] = json!("a".repeat(256));
+    assert!(
+        exchange(&serde_json::to_vec(&request).unwrap())
+            .status
+            .success()
+    );
+    for model in ["a".repeat(257), "é😀".into(), "a\u{7f}".into()] {
+        request["model"] = json!(model);
+        let output = exchange(&serde_json::to_vec(&request).unwrap());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"invalid model\n");
+    }
 }
 
-#[cfg(feature = "codex-plugin-pilot")]
+#[cfg(feature = "harness-plugin-pilot")]
 #[test]
 fn headless_resume_keeps_installed_planner_identity() {
+    if !native_fixture("headless_resume_keeps_installed_planner_identity") {
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new(None);
     let external = tempfile::tempdir().unwrap();
@@ -563,4 +633,108 @@ print(json.dumps({'type':'turn.completed'}),flush=True)
     assert_eq!(task.launch_command.planner_binding_digest, initial_planner);
     success(command().args(["cleanup", id]).output().unwrap());
     success(command().args(["remove", id]).output().unwrap());
+}
+
+#[test]
+fn four_installed_packages_plan_native_programs_and_refuse_unknown_versions() {
+    if !native_fixture("four_installed_packages_plan_native_programs_and_refuse_unknown_versions") {
+        return;
+    }
+    for (harness, program, version, model) in [
+        ("codex", "codex", "0.163.0", "gpt-6-astra"),
+        ("claude-code", "claude", "2.1.310", "sonnet"),
+        ("antigravity", "agy", "1.4.7", "gemini-3-pro"),
+        ("opencode", "opencode", "2.0.32", "example/model"),
+    ] {
+        let fixture = Fixture::for_harness(harness, None);
+        let repo = ahu::git::discover(&fixture.root).unwrap();
+        let request = LaunchRequest {
+            model,
+            prompt: "--literal private prompt",
+            cwd: &fixture.root,
+            permissions: Permissions::Auto,
+        };
+        for session in [None, Some("synthetic-session")] {
+            let mut batch = spec(session);
+            batch.harness_version = version.into();
+            let plan = ahu::harness_plugin::plan(&repo, harness, &request, Some(&batch)).unwrap();
+            assert_eq!(plan.program, program);
+            assert_eq!(plan.args.last().unwrap(), request.prompt);
+            assert!(plan.planner_binding_digest.is_some());
+            batch.harness_version = "999.0.0".into();
+            assert!(ahu::harness_plugin::plan(&repo, harness, &request, Some(&batch)).is_err());
+        }
+        let interactive = LaunchRequest {
+            permissions: Permissions::Prompt,
+            ..request
+        };
+        let plan = ahu::harness_plugin::plan(&repo, harness, &interactive, None).unwrap();
+        assert_eq!(plan.program, program);
+        assert_eq!(plan.args.last().unwrap(), interactive.prompt);
+        if harness == "opencode" {
+            assert_eq!(plan.args[0], "mini");
+            let auto = LaunchRequest {
+                permissions: Permissions::Auto,
+                ..interactive
+            };
+            assert!(ahu::harness_plugin::plan(&repo, harness, &auto, None).is_err());
+        }
+    }
+}
+
+#[cfg(feature = "harness-plugin-pilot")]
+#[test]
+fn cli_headless_planning_does_not_require_interactive_auto_support() {
+    if !native_fixture("cli_headless_planning_does_not_require_interactive_auto_support") {
+        return;
+    }
+    for (harness, model, first_arg) in [
+        ("codex", "gpt-6-astra", "exec"),
+        ("claude-code", "claude-sonnet-5", "--print"),
+        ("antigravity", "gemini-3.1-pro-high", "--model"),
+        ("opencode", "ollama/glm-5.3:cloud", "run"),
+    ] {
+        let f = Fixture::for_harness(harness, None);
+        fs::create_dir_all(f.root.join(".agents/ahu/agents")).unwrap();
+        fs::write(f.root.join(".agents/ahu/agents/probe.md"), format!("---\nokf_version: '0.2'\ntype: ahu:agent\ntitle: probe\ndescription: Synthetic probe\nharness: {harness}\nmodel: {model}\npermissions: auto\nversion: 1.0.0\n---\nPerform synthetic work.\n")).unwrap();
+        fs::write(f.root.join(".agents/ahu/config.md"), format!("---\nokf_version: '0.2'\ntype: ahu:project\nahu:\n  schema_version: 1\n  catalog_version: '{}'\n  harness_preferences: [{harness}]\n  model_selection: project-ranked\n  model_rankings:\n    {harness}: [{model}]\n---\nSynthetic configuration.\n", ahu::catalog::CATALOG_VERSION)).unwrap();
+        fs::write(f.root.join(".gitignore"), ".ahu/\n.worktrees/\n").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let invoke = |args: &[&str]| {
+            let output = common::ahu()
+                .current_dir(&f.root)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("HOME", home.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{harness}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        invoke(&["lock", "--update"]);
+        common::git(&f.root, &["add", ".agents", ".gitignore"]);
+        f.commit();
+        let preview: serde_json::Value = serde_json::from_slice(&invoke(&[
+            "@probe",
+            "--headless",
+            "--work-mode",
+            "--allow-widened-approvals",
+            "--dry-run",
+            "--prompt",
+            "synthetic work",
+            "--output",
+            "json",
+        ]))
+        .unwrap();
+        assert_eq!(preview["command"]["args"][0], first_arg);
+        assert!(preview["command"]["planner_binding_digest"].is_string());
+        assert!(!Path::new(preview["worktree"].as_str().unwrap()).exists());
+    }
 }

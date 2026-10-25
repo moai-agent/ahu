@@ -1,13 +1,16 @@
-# Codex harness plugin experiment
+# Harness plugin experiment
 
 This branch tests an external **launch planner**, not a complete harness plugin.
-The experiment is enabled at build time with `codex-plugin-pilot`. Normal builds
+The experiment is enabled at build time with `harness-plugin-pilot`. Normal builds
 retain the existing adapters. Do not publish or install this experimental build
 as a replacement for a released ahu binary.
 
+See [the package preparation and extraction plan](harness-plugins.md) for all four
+Rust packages, version ownership, and remaining integration boundaries.
+
 ## What the experiment proves
 
-Registered Codex tasks use an installed `harness-codex` package to construct
+Registered tasks use an installed `harness-<harness>` package to construct
 interactive commands and headless work-mode commands. The external planner owns
 those argument mappings. Core resolves the native executable, supplies the prompt,
 checks the frozen command, and supervises the actual harness process.
@@ -19,14 +22,14 @@ restricted process environment, bounded pipe exchange, and process cleanup.
 The independent Rust executable has its own Cargo workspace and lockfile and
 links no ahu implementation crates. Python is used only by independent test
 fixtures, never by the packaged planner. The protocol remains language independent.
-Prepare the platform-specific package using the [example build instructions](../examples/plugins/harness-codex/README.md)
+Prepare the platform-specific package using the [example build instructions](../plugins/harness-codex/README.md)
 before computing its digest or creating a binding. Installation copies verified
 package contents; it does not build or execute the planner. Binaries stay outside
 Git. This migration is not live provider certification.
 
 In a pilot build, missing installation, policy that is turned off, a missing grant, changed
-package bytes, or invalid protocol output refuses registered Codex task launch.
-The pilot refuses built-in launch-command fallback. Other harnesses are unchanged.
+package bytes, or invalid protocol output refuses registered task launch.
+The pilot refuses built-in launch-command fallback. Each registered harness requires its own installed planner. Kiro has no planner in this preparation.
 
 ## Discover and prepare a local package
 
@@ -68,12 +71,11 @@ binding's grants, then run `ahu lock --update`. Review and commit the enabled
 binding and lock before launching. Enabling itself does not execute the planner.
 
 Discovery and preparation are available in ordinary builds, but only registered
-Codex task launches in a `codex-plugin-pilot` build use a planner. Preparing or
-enabling another harness's declaration does not migrate that harness or add launch
-support. The existing native adapters remain in core.
+task launches in a `harness-plugin-pilot` build use a planner. The existing native
+adapters remain in core for default builds and the native operations awaiting extraction.
 
 The setup consumer needs an offline CLI route to produce an installer-compatible
-binding; the launch protocol is unchanged. Authority remains in reviewed committed
+binding; the launch protocol is version 2. Authority remains in reviewed committed
 bindings. Focused setup tests cover ambiguous discovery, duplicate IDs, invalid
 packages, conflict preservation, and preparation followed by explicit installation.
 
@@ -92,18 +94,18 @@ it. Older released binaries have not been certified to read pilot task records;
 use the same pilot build until every experimental task is removed.
 
 The request contains model, mode, permission selection, and optional native resume
-identity. It contains no prompt, credentials, repository path, or native settings.
+identity, observed native version, and timeout. It contains no prompt, credentials, repository path, or native settings.
 Core replaces exactly one final prompt placeholder after validating the response.
-Returned executable identity must equal the selected harness name, not an arbitrary
-path or shell. This is validation of a trusted local plugin contract, not a sandbox
+Returned executable identity must equal the verified declaration's `program`, a
+plain executable name, never a path. This is validation of a trusted local plugin contract, not a sandbox
 or a proof that plugin code cannot perform other actions.
 
 ## Experimental protocol
 
-The `harness_launch` manifest field declares `harness`, relative executable `path`,
-`protocol_version: 1`, and `timeout_ms` between 100 and 30000. Only the executable
+The `harness_launch` manifest field declares `harness`, native `program`, nonempty exact semantic
+`tested_versions`, relative executable `path`, `protocol_version: 2`, and `timeout_ms` between 100 and 30000. Only the executable
 is copied into a private external directory. It runs there with
-`--ahu-harness-launch-protocol=1`, a cleared environment, and `PATH=/usr/bin:/bin`.
+`--ahu-harness-launch-protocol=2`, a cleared environment, and `PATH=/usr/bin:/bin`.
 Standard error is discarded; stdin/stdout are bounded to 64 KiB each. The deadline
 covers process exchange; package verification occurs before that deadline.
 
@@ -115,7 +117,7 @@ No retries occur. The planner must not launch the harness itself.
 Request example:
 
 ```json
-{"protocol_version":1,"harness":"codex","mode":"headless","model":"example-model","permissions":"auto","work_mode":true,"session":null}
+{"protocol_version":2,"harness":"codex","mode":"headless","model":"example-model","permissions":"auto","work_mode":true,"session":null,"native_version":"0.163.0","timeout_seconds":1800}
 ```
 
 Response fields are `protocol_version`, `harness`, `program`, `args`, and
@@ -154,9 +156,9 @@ native descendants cannot detach, and native session history remains native-owne
 Run from the repository root:
 
 ```sh
-CARGO_TARGET_DIR=/tmp/ahu-rust-codex-agent-target cargo build --locked --manifest-path examples/plugins/harness-codex/Cargo.toml
-CARGO_TARGET_DIR=/tmp/ahu-rust-codex-agent-target cargo build --locked --features codex-plugin-pilot
-CARGO_TARGET_DIR=/tmp/ahu-rust-codex-agent-target cargo test --locked --features codex-plugin-pilot --test harness_plugin
+CARGO_TARGET_DIR=/tmp/ahu-rust-codex-agent-target cargo build --locked --manifest-path plugins/harness-codex/Cargo.toml
+CARGO_TARGET_DIR=/tmp/ahu-rust-codex-agent-target cargo build --locked --features harness-plugin-pilot
+CARGO_TARGET_DIR=/tmp/ahu-rust-codex-agent-target cargo test --locked --features harness-plugin-pilot --test harness_plugin
 ```
 
 The first build prepares the independent dependency cache. The tests explicitly
@@ -178,7 +180,7 @@ for parity testing during this experiment, not a proposed permanent second adapt
 Before calling this a full harness extraction, define ownership for those remaining
 surfaces, move the native behavior into the package, and prove both interactive
 and headless lifecycle parity. In particular, keep core as the sole authority for
-observed execution and task state. Evaluate a second harness before stabilizing a
+observed execution and task state. Validate every package against its actual native harness before stabilizing the
 shared contract. Do not expand the existing one-shot protocol into an agent runtime.
 
 Planner exchange has a timeout and cleans up its owned process group on return.

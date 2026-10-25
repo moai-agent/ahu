@@ -33,7 +33,7 @@ ahu does not execute installation hooks or invoke Cargo during plugin install.
 Review the plugin's README and security inventory before enabling it.
 
 All-harness extraction is distinct from the runtime language policy. The
-[Codex pilot](harness-plugin-pilot.md) has not yet moved native setup, trust,
+[four Rust planner packages](harness-plugins.md) have not yet moved native setup, trust,
 events, usage and lifecycle into an external plugin. Future harness plugins
 must prove agent work, actual MCP calls, attributed local OTel, eval outcomes
 and cleanup separately for each advertised mode. Keep task/process authority

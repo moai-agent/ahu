@@ -9,15 +9,35 @@ use std::sync::atomic::AtomicBool;
 #[serde(deny_unknown_fields)]
 pub struct Declaration {
     pub harness: String,
+    pub program: String,
+    pub tested_versions: Vec<String>,
     pub path: String,
     pub protocol_version: u32,
     pub timeout_ms: u64,
 }
 impl Declaration {
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.protocol_version != 1
+        if self.protocol_version != 2
             || !(100..=30_000).contains(&self.timeout_ms)
             || !crate::plugin_binding::plain_relative(&self.path)
+            || self.program.is_empty()
+            || self.program.len() > 64
+            || !self
+                .program
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            || self.tested_versions.is_empty()
+            || self.tested_versions.len() > 64
+            || self
+                .tested_versions
+                .iter()
+                .any(|version| !crate::util::is_semver(version))
+            || self
+                .tested_versions
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.tested_versions.len()
             || self.harness.is_empty()
             || self.harness.len() > 64
             || !self
@@ -40,6 +60,8 @@ struct Request<'a> {
     permissions: crate::agent::Permissions,
     work_mode: bool,
     session: Option<&'a str>,
+    native_version: &'a str,
+    timeout_seconds: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,8 +120,22 @@ pub fn plan(
     if declaration.harness != harness {
         return Err(Error::new("harness plugin identity mismatch"));
     }
+    // Native version admission belongs to the installed package. Discovery is
+    // inert; only an explicit launch probes the declared native executable.
+    let observed_version = if let Some(spec) = batch {
+        spec.harness_version.clone()
+    } else {
+        let executable =
+            crate::selection::resolve_executable(&declaration.program).ok_or_else(|| {
+                Error::new("harness plugin's declared native executable is unavailable")
+            })?;
+        crate::selection::probe_version(&executable)
+            .ok_or_else(|| Error::new("cannot determine the native executable version"))?
+    };
+    let native_version = crate::catalog::version_token(&observed_version)
+        .ok_or_else(|| Error::new("native executable did not report a semantic version"))?;
     let input = serde_json::to_vec(&Request {
-        protocol_version: 1,
+        protocol_version: 2,
         harness,
         mode: if batch.is_some() {
             "headless"
@@ -110,6 +146,8 @@ pub fn plan(
         permissions: request.permissions,
         work_mode: batch.is_some(),
         session: batch.and_then(|s| s.session.as_deref()),
+        native_version,
+        timeout_seconds: batch.map_or(1800, |spec| spec.options.timeout_seconds),
     })?;
     let (snapshot, executable, timeout) = crate::plugin_exec::prepare_executable(
         repo,
@@ -120,7 +158,7 @@ pub fn plan(
     let bytes = crate::plugin_exec::run_bounded(
         &snapshot,
         &executable,
-        "--ahu-harness-launch-protocol=1",
+        "--ahu-harness-launch-protocol=2",
         &input,
         timeout,
         &AtomicBool::new(false),
@@ -130,20 +168,20 @@ pub fn plan(
             "harness launch planner failed ({error}); no harness launched"
         ))
     })?;
-    let mut command = decode(&bytes, harness, request.prompt)?;
+    let mut command = decode(&bytes, harness, &declaration.program, request.prompt)?;
     command.planner_binding_digest =
         Some(crate::util::digest_bytes(&serde_json::to_vec(&binding)?));
     Ok(command)
 }
 
-fn decode(bytes: &[u8], harness: &str, prompt: &str) -> Result<LaunchCommand> {
+fn decode(bytes: &[u8], harness: &str, program: &str, prompt: &str) -> Result<LaunchCommand> {
     let mut response: Response = ahu_host_api::protocol::from_slice(bytes)
         .map_err(|_| Error::new("invalid harness launch response"))?;
-    // Pilot program identity is deliberately narrower than a general launch API.
-    // Do not let plugin output select an arbitrary path or shell executable.
-    if response.protocol_version != 1
+    // The verified package declares the executable identity. A response cannot
+    // replace it with a path or a different program.
+    if response.protocol_version != 2
         || response.harness != harness
-        || response.program != harness
+        || response.program != program
         || response.args.is_empty()
         || response.args.len() > 256
         || response.prompt_arg != response.args.len() - 1
@@ -176,9 +214,10 @@ mod tests {
 
     #[test]
     fn refuses_identity_prompt_and_schema_confusion() {
-        let good = json!({"protocol_version":1,"harness":"codex","program":"codex", "args":["--", REDACTED_PROMPT],"prompt_arg":1});
+        let good = json!({"protocol_version":2,"harness":"codex","program":"codex", "args":["--", REDACTED_PROMPT],"prompt_arg":1});
         let command = decode(
             &serde_json::to_vec(&good).unwrap(),
+            "codex",
             "codex",
             "--literal prompt",
         )
@@ -187,7 +226,7 @@ mod tests {
         for (field, value) in [
             ("program", json!("/bin/sh")),
             ("harness", json!("other")),
-            ("protocol_version", json!(2)),
+            ("protocol_version", json!(1)),
             ("prompt_arg", json!(0)),
             ("extra", json!(true)),
             ("args", json!([REDACTED_PROMPT, REDACTED_PROMPT])),
@@ -195,13 +234,20 @@ mod tests {
             let mut bad = good.clone();
             bad[field] = value;
             assert!(
-                decode(&serde_json::to_vec(&bad).unwrap(), "codex", "private").is_err(),
+                decode(
+                    &serde_json::to_vec(&bad).unwrap(),
+                    "codex",
+                    "codex",
+                    "private"
+                )
+                .is_err(),
                 "{field}"
             );
         }
         assert!(
             decode(
                 br#"{"protocol_version":1,"protocol_version":1}"#,
+                "codex",
                 "codex",
                 "private"
             )

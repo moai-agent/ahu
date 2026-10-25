@@ -1,4 +1,4 @@
-# codex launch planner
+# Codex launch planner
 
 Independent Rust package `ahu-plugin-codex` version 0.1.0. This directory is
 its own Cargo workspace, with its own lockfile and only serde/serde_json direct
@@ -42,17 +42,17 @@ Mode is `interactive` or `headless`; permissions are `prompt`, `accept-edits`, o
 `auto`. Headless requires work_mode=true and permissions=auto. Guarded headless
 requests fail. Interactive requires work_mode=false and session=null; interactive
 resume fails. Session is explicit null or 1–128 ASCII bytes starting with an
-alphanumeric, then only alphanumerics, hyphens and underscores. Model is 1–256
-ASCII bytes starting with an alphanumeric, then only alphanumerics and `-_.:/`.
+alphanumeric, then only letters and digits, hyphens and underscores. Model is 1–256
+ASCII bytes starting with an alphanumeric, then only letters and digits and `-_.:/`.
 Whitespace, controls, NUL, option prefixes, and the reserved placeholder are
 rejected. Timeout is an integer in 1–604800 seconds and describes the native task,
-not planner runtime. Neither cwd, environment, accounts nor prompt is an input.
-Core sets cwd and PWD uniformly for native task processes.
+not planner runtime. Neither `cwd`, environment, accounts nor prompt is an input.
+Core sets `cwd` and `PWD` uniformly for native task processes.
 
 Success is exit 0 and one newline-terminated JSON object, at most 65,536 bytes
-including the newline: protocol_version=2, harness, program, args (string array),
-and prompt_arg (zero-based integer). Exactly one final argument is the literal
-`<prompt: see prompt.txt>`; prompt_arg identifies it for core substitution.
+including the newline: protocol_version=2, harness, program, `args` (string array),
+and `prompt_arg` (zero-based integer). Exactly one final argument is the literal
+`<prompt: see prompt.txt>`; `prompt_arg` identifies it for core substitution.
 The caller must validate the response before substitution/execution. The planner
 has a five-second watchdog, including stalled I/O; the host separately enforces
 manifest timeout_ms=5000. Failure is exit 2 with no successful response and only
@@ -142,18 +142,18 @@ ahu plugins installed --output json
 ```
 
 Do not use `plugins invoke`; this is a launch planner, not a generic action.
-A compatible core selects the binding for registered codex tasks. Native
-installation, authentication and reviewed native config remain operator concerns.
-No package build or installation establishes an OS sandbox. Disable and commit
+A compatible core selects the binding for registered Codex tasks. Native
+installation, authentication and reviewed native configuration remain operator concerns.
+No package build or installation establishes an OS sandbox. Turn off and commit
 the binding before `ahu plugins remove harness-codex`; first resolve any tasks
 that retain the installation. Retain old pinned packages for recorded attempts.
 
 Contract review: the consumer is ahu's launch planner boundary. A skill cannot
-supply a deterministic, bounded argv response to core; the old v1 contract lacks
+supply a deterministic, bounded `argv` response to core; the old v1 contract lacks
 native-version and timeout inputs. This v2 executable receives only settings and
 returns data, with no native side effects or delegated authority. Refusals leave
 native execution to the caller; native execution outcomes are outside this
-protocol. Unit tests cover the mode/permission matrix, exact fresh/resume argv,
+protocol. Unit tests cover the mode/permission matrix, exact fresh/resume `argv`,
 version evidence, validation, duplicate/missing/unknown fields, and input/output
 limits. Executable tests check exit status, fixed errors, and JSON framing using
 synthetic inputs, without native binaries or credentials.

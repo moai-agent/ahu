@@ -69,15 +69,13 @@ pub const REDACTED_PROMPT: &str = "<prompt: see prompt.txt>";
 /// Set the native task directory when launching a harness process.
 pub(crate) fn configure_task_directory(
     command: &mut std::process::Command,
-    harness: &str,
+    _harness: &str,
     cwd: &std::path::Path,
 ) {
     command.current_dir(cwd);
-    if harness == "opencode" {
-        // OpenCode 2's mini and run prefer PWD over process.cwd() and chdir
-        // there. Command::current_dir alone leaves the parent's PWD intact.
-        command.env("PWD", cwd);
-    }
+    // Keep the standard working-directory environment consistent with cwd for
+    // every native process. Plugins need no provider-specific environment hook.
+    command.env("PWD", cwd);
 }
 
 impl LaunchCommand {
@@ -200,7 +198,7 @@ pub(crate) fn task_command(
     request: &LaunchRequest<'_>,
     batch: Option<&crate::headless::Spec>,
 ) -> Result<LaunchCommand> {
-    if cfg!(feature = "codex-plugin-pilot") && harness == "codex" {
+    if cfg!(feature = "harness-plugin-pilot") {
         return crate::harness_plugin::plan(repo, harness, request, batch);
     }
     if let Some(spec) = batch {

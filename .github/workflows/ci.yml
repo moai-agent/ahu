@@ -57,23 +57,23 @@ jobs:
         run: |
           AHU_TEST_BIN="${CARGO_TARGET_DIR:-target}/debug/ahu" python3 -B -m unittest discover \
             -s scripts -p test_prepare_skill_ablation.py -k test_real_lock_refresh_records_only_control_skills
-      - name: Prepare independent Rust plugin examples
+      - name: Validate independent Rust plugin packages
         # Integration tests build these standalone crates offline. Their own
         # lockfiles can select dependencies absent from the core's lockfile.
         run: |
-          for example in text-stats harness-codex; do
-            manifest="examples/plugins/$example/Cargo.toml"
+          for package in examples/plugins/text-stats plugins/harness-codex plugins/harness-claude-code plugins/harness-antigravity plugins/harness-opencode; do
+            manifest="$package/Cargo.toml"
             cargo fetch --locked --manifest-path "$manifest"
             cargo fmt --manifest-path "$manifest" --check
+            cargo test --manifest-path "$manifest" --locked
             cargo clippy --manifest-path "$manifest" --all-targets --locked -- -D warnings
           done
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Check experimental harness plugin lifecycle
         run: |
-          cargo test --manifest-path examples/plugins/harness-codex/Cargo.toml --locked
-          cargo clippy --all-targets --locked --features codex-plugin-pilot -- -D warnings
-          cargo test --locked --features codex-plugin-pilot --test harness_plugin --test setup_harness_plugins
+          cargo clippy --all-targets --locked --features harness-plugin-pilot -- -D warnings
+          cargo test --locked --features harness-plugin-pilot --test harness_plugin --test setup_harness_plugins
       - name: Check optional session plugin absence
         run: |
           cargo clippy --no-default-features --all-targets --locked -- -D warnings

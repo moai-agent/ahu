@@ -67,7 +67,8 @@ security limits, and the review criteria for adding core behavior.
 
 ahu and its maintained executable plugins use Rust; Python is only a development
 tooling dependency. See the [runtime inventory](docs/rust-runtime.md) for the five
-existing harness adapters and the scope of experimental harness plugins.
+existing harness adapters and the [prepared Rust harness packages](docs/harness-plugins.md)
+for the experimental plugin integration and its remaining extraction work.
 
 From any Git checkout:
 

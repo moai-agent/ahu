@@ -7,7 +7,7 @@ use crate::plugin_binding::{Binding, Compatibility, Source, SourceKind};
 use crate::util::{Error, Result};
 use std::path::Path;
 
-const LIMIT: &str = "Only Codex task launch is routed through the optional codex-plugin-pilot feature. This is an experimental planner, not full native extraction; built-in harnesses have not migrated.";
+const LIMIT: &str = "Registered task launches use installed harness planners in the optional harness-plugin-pilot build, with no built-in fallback. Configuration and event handling are not yet extracted.";
 
 fn declaration(package: &PluginStatus) -> Result<Option<crate::harness_plugin::Declaration>> {
     package
@@ -37,7 +37,7 @@ pub(super) fn report(console: &mut Console<'_>, repo: &Repo) -> Result<()> {
     let mut candidates = Vec::new();
     for package in packages {
         if let Some(declaration) = declaration(&package)? {
-            candidates.push((declaration.harness, package));
+            candidates.push((declaration.harness.clone(), package, declaration));
         }
     }
     candidates.sort_by(|a, b| (&a.0, &a.1.manifest).cmp(&(&b.0, &b.1.manifest)));
@@ -45,10 +45,10 @@ pub(super) fn report(console: &mut Console<'_>, repo: &Repo) -> Result<()> {
         return console.say("No harness plugin declarations found in AHU_PLUGIN_PATH or verified installed packages. No package code executed.\n");
     }
     console.say("Harness plugin declarations (metadata only; no package code executed):\n")?;
-    for (harness, package) in &candidates {
-        let ambiguous = candidates.iter().filter(|(id, _)| id == harness).count() > 1;
+    for (harness, package, declaration) in &candidates {
+        let ambiguous = candidates.iter().filter(|(id, _, _)| id == harness).count() > 1;
         console.say(&format!(
-            "  {} for {} at {} [{}]{}\n",
+            "  {} for {} at {} [{}]{}; native {} versions {}\n",
             package.id,
             harness,
             package
@@ -61,7 +61,9 @@ pub(super) fn report(console: &mut Console<'_>, repo: &Repo) -> Result<()> {
                 " (multiple candidates; no automatic selection)"
             } else {
                 ""
-            }
+            },
+            declaration.program,
+            declaration.tested_versions.join(", ")
         ))?;
     }
     console.say(&format!("{LIMIT}\nTo prepare one package explicitly: ahu setup --harness-plugin /absolute/staged/package\n"))
