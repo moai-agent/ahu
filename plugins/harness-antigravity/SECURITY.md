@@ -1,6 +1,6 @@
 # Security
 
-This package is an argv planner, not an execution sandbox. It accepts a bounded,
+This package is an argument planner, not an execution sandbox. It accepts a bounded,
 strict JSON request and emits a bounded plan. It does not launch native tools,
 read configuration, access credentials, or perform network I/O. Its five-second
 watchdog bounds stalled I/O; the caller must also enforce the manifest deadline.
