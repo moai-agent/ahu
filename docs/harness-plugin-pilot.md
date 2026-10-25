@@ -16,8 +16,10 @@ The planner runs as a short-lived subprocess, not an in-process Rust library.
 It uses a dedicated launch-planning protocol, separate from the one-shot action
 and session-host protocols. It shares only executable verification, executable snapshots,
 restricted process environment, bounded pipe exchange, and process cleanup.
-The independent Python package demonstrates that the boundary does not require
-linking Rust implementation types.
+The independent Python package is a development-only protocol experiment. It
+must be replaced with a Rust executable before supported customer distribution,
+under the [customer runtime language policy](rust-style-guide.md#customer-runtime-language-policy).
+The protocol does not require linking Rust implementation types.
 
 In a pilot build, missing installation, policy that is turned off, a missing grant, changed
 package bytes, or invalid protocol output refuses registered Codex task launch.
