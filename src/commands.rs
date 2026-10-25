@@ -51,8 +51,18 @@ pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
         Error::new("direct harness sessions require an exact project-ranked model; run ahu setup")
     })?;
     let version = selection::probe_runtime(repo, &runtime)?;
+    crate::catalog::check_version(
+        &version,
+        loaded
+            .as_ref()
+            .and_then(|loaded| loaded.config.harness_version_pins.get(harness))
+            .map(String::as_str),
+    )?;
     let plan = harness::direct_command(repo, harness, &model)?;
-    let args = plan.args;
+    if plan.planner_binding_digest.as_deref() != Some(runtime.binding_digest().as_str()) {
+        return Err(Error::new("direct runtime binding changed during planning"));
+    }
+    let args = &plan.args;
     if let Some(loaded) = &loaded {
         crate::telemetry::initialize(&loaded.config.telemetry)?;
     }
@@ -62,8 +72,17 @@ pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
         ))
         .with_kind(crate::util::ErrorKind::Prerequisite)
     })?;
+    crate::native_admission::validate_launch(
+        &repo.root,
+        harness,
+        &model,
+        crate::agent::Permissions::Auto,
+        "direct",
+        &version,
+        Path::new(&executable),
+    )?;
     crate::state::ensure_checkout_state(&repo.root)?;
-    let placement = launch::group_coordinator(repo, &executable, label, harness, &model, &args)?;
+    let placement = launch::group_coordinator(repo, &executable, label, harness, &model, &plan)?;
     for note in placement.notes {
         eprintln!("ahu: {}", display_safe(&note));
     }
@@ -74,7 +93,7 @@ pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
     // was launched rather than only the approval flags.
     eprintln!("{label} coordinator: {}", display_safe(&args.join(" ")));
     let mut command = std::process::Command::new(executable);
-    command.args(&args).env("AHU_BIN", std::env::current_exe()?);
+    command.args(args).env("AHU_BIN", std::env::current_exe()?);
     crate::telemetry::configure_coordinator(
         &mut command,
         &loaded
@@ -85,6 +104,7 @@ pub fn coordinating_session(repo: &Repo, selector: &str) -> Result<i32> {
         &model,
         Some(&version),
     );
+    crate::telemetry::configure_native_export(&mut command, plan.native_eval_otlp);
     // Inherit the terminal and cwd. Replacing ahu gives the harness terminal signals
     // directly and preserves its exit status, including signal termination.
     #[cfg(unix)]
@@ -354,10 +374,7 @@ pub fn onboard_cmd(
             display_safe(&candidate.blockers.join("; "))
         );
     }
-    let harness = candidate
-        .format
-        .native_harness()
-        .ok_or_else(|| Error::new("native definition has no declared harness identity"))?;
+    let harness = candidate.harness.as_str();
     let model = match model.or(candidate.native_model.as_deref()) {
         Some(model) if model != "inherit" && !model.is_empty() => model.to_string(),
         _ => {
@@ -3079,17 +3096,7 @@ pub fn render_preview(
         out.push_str(&format!(
             "             instructions digest {} ({})\n",
             &agent.instructions_digest[..12],
-            if agent
-                .manifest
-                .source
-                .as_ref()
-                .map(|s| s.format.has_frontmatter())
-                .unwrap_or(true)
-            {
-                "the body ahu delivers, YAML frontmatter read as metadata and not delivered"
-            } else {
-                "the text ahu delivers; this format has no frontmatter, so it is the whole file"
-            }
+            "the instruction text returned by the declared source parser"
         ));
     }
     out.push_str(&style.paint(Role::Heading, "\nTask and Git effects\n"));

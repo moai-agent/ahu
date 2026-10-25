@@ -256,9 +256,13 @@ fn choose_indexes(answer: &str, count: usize, default_all: bool) -> Result<Vec<u
             .ok()
             .and_then(|i| i.checked_sub(1))
             .filter(|i| *i < count)
-            .ok_or_else(|| Error::new("choose listed numbers only"))?;
+            .ok_or_else(|| {
+                Error::new("choose listed numbers only").with_kind(crate::util::ErrorKind::Usage)
+            })?;
         if indexes.contains(&index) {
-            return Err(Error::new("duplicate setup choice"));
+            return Err(
+                Error::new("duplicate setup choice").with_kind(crate::util::ErrorKind::Usage)
+            );
         }
         indexes.push(index);
     }

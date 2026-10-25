@@ -34,7 +34,7 @@ fn scripted(
 }
 
 fn policy_wizard(console: &mut Console<'_>, repo: &std::path::Path) -> ahu::util::Result<i32> {
-    match ahu::launcher::run_setup(console)? {
+    match ahu::launcher::run_setup(console, &git::discover(repo)?)? {
         Some(config) => {
             config::write_new(repo, &config)?;
             Ok(0)
@@ -60,7 +60,7 @@ fn an_empty_prompt_is_refused_before_anything_is_created() {
     repo.commit("fixture");
     let discovered = git::discover(repo.path()).unwrap();
     let loaded = config::load(repo.path()).unwrap().unwrap();
-    let pair = selection::resolve_automatic(&loaded).unwrap();
+    let pair = selection::resolve_automatic(&discovered, &loaded).unwrap();
     let error = launch::plan(&discovered, None, pair, "   \n  \n")
         .unwrap_err()
         .to_string();
@@ -80,7 +80,8 @@ fn a_repository_without_commits_is_refused_with_an_actionable_message() {
     let loaded_dir = TestRepo::new();
     loaded_dir.init_config();
     let loaded = config::load(loaded_dir.path()).unwrap().unwrap();
-    let pair = selection::resolve_automatic(&loaded).unwrap();
+    let pair =
+        selection::resolve_automatic(&git::discover(loaded_dir.path()).unwrap(), &loaded).unwrap();
     let error = launch::plan(&discovered, None, pair, "prompt")
         .unwrap_err()
         .to_string();
@@ -142,18 +143,20 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
     std::fs::create_dir_all(&missing).unwrap();
     let record_source = missing.clone();
     std::fs::create_dir_all(&task_dir).unwrap();
-    let adapter = ahu::harness::adapter_for("claude-code").unwrap();
-    let command = adapter
-        .launch_command(&ahu::harness::LaunchRequest {
-            model: "claude-opus-5",
-            prompt: "p",
-            cwd: &record_source,
-            permissions: Default::default(),
-        })
-        .unwrap();
-    let enforcement = adapter
-        .enforcement("claude-opus-5", Default::default())
-        .unwrap();
+    let command = ahu::harness::LaunchCommand {
+        program: "fixture-native".into(),
+        args: vec!["--model".into(), "fixture/exact".into(), "p".into()],
+        native_eval_otlp: true,
+        planner_binding_digest: Some("0".repeat(64)),
+        prompt_arg: Some(2),
+    };
+    let enforcement = ahu::harness::EnforcementReport {
+        harness: "fixture".into(),
+        harness_version: Some("1.2.3".into()),
+        model_fixed_for_session: false,
+        gaps: vec!["Synthetic".into()],
+        applied_controls: vec![],
+    };
     let record = ahu::task::TaskRecord {
         schema_version: ahu::task::TASK_SCHEMA_VERSION,
         task_id: "gone0001".to_string(),
@@ -180,7 +183,6 @@ fn run_task_preserves_the_record_when_its_worktree_is_gone() {
             selection_basis: Some("test".to_string()),
         },
         policy_digest: "0".repeat(64),
-        catalog_version: ahu::catalog::CATALOG_VERSION.to_string(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "0".repeat(64),
         hooks: Default::default(),
@@ -362,7 +364,8 @@ fn cancelled_setup_writes_nothing() {
         return;
     }
     let repo = TestRepo::new();
-    // Choose Claude Code, accept its catalog model order, then cancel.
+    repo.install_runtime("claude-code");
+    // Select installed suggestions, then cancel.
     let (code, text) = with_state(&repo, || {
         scripted("1\n\n\nn\n", |console| policy_wizard(console, repo.path()))
     });
@@ -377,6 +380,7 @@ fn setup_saves_only_the_config_file() {
         return;
     }
     let repo = TestRepo::new();
+    repo.install_runtime("claude-code");
     let (code, text) = with_state(&repo, || {
         scripted("1\n\ny\n", |console| policy_wizard(console, repo.path()))
     });
@@ -478,7 +482,9 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
             model: "claude-opus-5".to_string(),
             basis: "named".to_string(),
             policy_digest: loaded.digest.clone(),
-            catalog_version: loaded.config.catalog_version.clone(),
+            runtime_binding_digest: ahu::harness_runtime::load(&discovered, "claude-code")
+                .unwrap()
+                .binding_digest(),
         },
         "prompt",
     )
@@ -511,7 +517,6 @@ fn drift_is_reported_when_a_version_label_covers_changed_inputs() {
             selection_basis: None,
         },
         policy_digest: loaded.digest.clone(),
-        catalog_version: loaded.config.catalog_version.clone(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "2".repeat(64),
         hooks: Default::default(),
@@ -592,7 +597,9 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
             model: "claude-opus-5".to_string(),
             basis: "named".to_string(),
             policy_digest: loaded.digest.clone(),
-            catalog_version: loaded.config.catalog_version.clone(),
+            runtime_binding_digest: ahu::harness_runtime::load(&discovered, "claude-code")
+                .unwrap()
+                .binding_digest(),
         },
         "prompt",
     )
@@ -625,7 +632,6 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
         },
         // Every digest below was cut short by a partial write or an edit.
         policy_digest: "abc".to_string(),
-        catalog_version: loaded.config.catalog_version.clone(),
         config_snapshot: Default::default(),
         config_snapshot_digest: "ab".to_string(),
         hooks: Default::default(),
@@ -670,24 +676,12 @@ fn a_truncated_digest_in_a_task_record_does_not_panic_the_drift_report() {
     assert!(rendered.contains("(version still 1.0.0)"), "{rendered}");
 }
 
-/// A catalog lookup that a refactor could break must surface as an error the
-/// caller can report, not as a panic inside a harness adapter.
+/// Missing installed identities fail without substituting another runtime.
 #[test]
-fn adapter_enforcement_reports_a_missing_catalog_entry_instead_of_panicking() {
-    if !common::in_harness_fixture(
-        "adapter_enforcement_reports_a_missing_catalog_entry_instead_of_panicking",
-    ) {
-        return;
-    }
-    for harness_id in ["claude-code", "codex", "antigravity"] {
-        let adapter = ahu::harness::adapter_for(harness_id).unwrap();
-        let report: ahu::util::Result<ahu::harness::EnforcementReport> =
-            adapter.enforcement("claude-opus-5", Default::default());
-        assert_eq!(
-            report.expect("the shipped catalog has it").harness,
-            harness_id
-        );
-    }
+fn missing_runtime_is_an_explicit_error() {
+    let repo = TestRepo::new();
+    let discovered = git::discover(repo.path()).unwrap();
+    assert!(ahu::harness_runtime::load(&discovered, "missing").is_err());
 }
 
 #[test]

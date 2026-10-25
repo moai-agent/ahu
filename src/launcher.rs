@@ -10,9 +10,7 @@ use std::io::{BufRead, IsTerminal, Write};
 
 use crate::agent::ResolvedAgent;
 use crate::bail;
-use crate::catalog;
 use crate::config::ProjectConfig;
-use crate::selection;
 use crate::style::{self, Role};
 use crate::util::{Result, display_safe};
 
@@ -277,182 +275,20 @@ pub fn confirm_submit(console: &mut Console<'_>, code: &str) -> Result<bool> {
 ///
 /// The initializing user is establishing project policy for everyone, not a
 /// personal profile. Cancellation writes nothing.
-pub fn run_setup(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
-    run_setup_using(console, |harness| crate::models::Options {
-        models: catalog::models_for(harness),
-        source: crate::models::Source::Catalog,
-    })
-}
-
-pub fn run_setup_with_available_models(console: &mut Console<'_>) -> Result<Option<ProjectConfig>> {
-    run_setup_using(console, crate::models::for_harness)
-}
-
-fn run_setup_using(
+pub fn run_setup(
     console: &mut Console<'_>,
-    models_for: impl Fn(&str) -> crate::models::Options,
+    repo: &crate::git::Repo,
 ) -> Result<Option<ProjectConfig>> {
     if !console.interactive {
         bail!(kind: crate::util::ErrorKind::Prerequisite,
-            "this repository has no ahu configuration yet, and ahu was not run interactively.\n\
-             Initialization records the project-agreed harness and model order, so ahu will not \
-             invent one. Run `ahu setup` from a terminal.\n\
-             Nothing was changed."
-        );
+            "repository initialization requires a terminal; run `ahu setup`. Nothing was changed.");
     }
-    console.say(
-        "ahu is not initialized in this repository.\n\
-         Setup records this project's agreed harness and model order. It applies to every ahu\n\
-         user in the project; there are no personal overrides.\n\n\
-         Harnesses in this build's compatibility catalog:\n",
-    )?;
-    for (index, harness) in catalog::HARNESSES.iter().enumerate() {
-        let prerequisite = selection::check_prerequisite(harness.id);
-        let availability = if !harness.adapter_available {
-            "no ahu adapter in this release".to_string()
-        } else if prerequisite.satisfied() {
-            format!(
-                "installed{}",
-                prerequisite
-                    .version
-                    .as_deref()
-                    .map(|v| format!(" ({v})"))
-                    .unwrap_or_default()
-            )
-        } else {
-            "not installed on this machine".to_string()
-        };
-        console.say(&format!(
-            "  {}. {:<14} {:<12} [{availability}]\n",
-            index + 1,
-            harness.id,
-            harness.display_name
-        ))?;
-    }
-    console.say(
-        "\nInstallation status is a local detail. It does not change the order you agree here,\n\
-         and a machine missing a harness reports a diagnostic rather than picking another one.\n\n",
-    )?;
-
-    let answer = console.ask("Harness order, best first, by number (e.g. 1 or 2,1): ")?;
-    let Some(answer) = answer else {
+    let descriptors = crate::harness_runtime::discover(repo)?;
+    let Some(config) = crate::setup::configure_project(console, repo, &descriptors)? else {
         return Ok(None);
     };
-    if answer.trim().is_empty() {
-        console.say("No selection made. Nothing was written.\n")?;
-        return Ok(None);
-    }
-    let mut harness_preferences = Vec::new();
-    for token in answer.split(',') {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-        let index: usize = token.parse().map_err(|_| {
-            crate::util::Error::new(format!("{token:?} is not one of the numbers listed."))
-                .with_kind(crate::util::ErrorKind::Usage)
-        })?;
-        let harness = catalog::HARNESSES
-            .get(index.wrapping_sub(1))
-            .ok_or_else(|| {
-                crate::util::Error::new(format!("{index} is not one of the numbers listed."))
-                    .with_kind(crate::util::ErrorKind::Usage)
-            })?;
-        if harness_preferences.contains(&harness.id.to_string()) {
-            bail!(kind: crate::util::ErrorKind::Usage, "{} was listed twice.", harness.id);
-        }
-        harness_preferences.push(harness.id.to_string());
-    }
-    if harness_preferences.is_empty() {
-        console.say("No selection made. Nothing was written.\n")?;
-        return Ok(None);
-    }
-
-    let mut model_rankings = std::collections::BTreeMap::new();
-    for harness_id in &harness_preferences {
-        let options = models_for(harness_id);
-        let models = options.models;
-        if models.is_empty() {
-            console.say(&format!(
-                "\nNo model in ahu's compatibility catalog is available for {harness_id}; no ranking is recorded for it.\n"
-            ))?;
-            continue;
-        }
-        let source = match options.source {
-            crate::models::Source::Harness => "listed by the harness and supported by ahu",
-            crate::models::Source::Catalog => {
-                "listed in ahu's catalog; account access is not checked"
-            }
-        };
-        console.say(&format!("\nModels for {harness_id} ({source}):\n"))?;
-        for (index, model) in models.iter().enumerate() {
-            console.say(&format!(
-                "  {}. {:<28} {}\n",
-                index + 1,
-                model.model,
-                model.display_name
-            ))?;
-        }
-        console
-            .say("\nThis order is the project's, not a claim about which model is smarter.\n")?;
-        let suggested: Vec<String> = models.iter().map(|m| m.model.to_string()).collect();
-        let answer = console.ask(&format!(
-            "Model order for {harness_id} by number, or blank to accept the catalog order: "
-        ))?;
-        let Some(answer) = answer else {
-            return Ok(None);
-        };
-        let chosen = if answer.trim().is_empty() {
-            suggested
-        } else {
-            let mut chosen = Vec::new();
-            for token in answer.split(',') {
-                let token = token.trim();
-                if token.is_empty() {
-                    continue;
-                }
-                let index: usize = token.parse().map_err(|_| {
-                    crate::util::Error::new(format!("{token:?} is not one of the numbers listed."))
-                        .with_kind(crate::util::ErrorKind::Usage)
-                })?;
-                let model = models.get(index.wrapping_sub(1)).ok_or_else(|| {
-                    crate::util::Error::new(format!("{index} is not one of the numbers listed."))
-                        .with_kind(crate::util::ErrorKind::Usage)
-                })?;
-                if chosen.contains(&model.model.to_string()) {
-                    bail!(kind: crate::util::ErrorKind::Usage, "{} was listed twice.", model.model);
-                }
-                chosen.push(model.model.to_string());
-            }
-            chosen
-        };
-        if chosen.is_empty() {
-            bail!(kind: crate::util::ErrorKind::Usage, "no model was selected for {harness_id}.");
-        }
-        model_rankings.insert(harness_id.clone(), chosen);
-    }
-
-    let config = ProjectConfig {
-        schema_version: crate::config::SUPPORTED_SCHEMA_VERSION,
-        harness_preferences,
-        model_selection: "project-ranked".to_string(),
-        catalog_version: catalog::CATALOG_VERSION.to_string(),
-        harness_version_pins: Default::default(),
-        model_rankings,
-        // Setup asks nothing about knowledge bundles: a new project has none to
-        // name yet, and an empty list makes `ahu knowledge lint` say so.
-        knowledge: crate::config::Knowledge::default(),
-        headless: crate::config::HeadlessConfig::default(),
-        telemetry: crate::config::TelemetryConfig::default(),
-    };
-
-    console.say("\nConfiguration to be written to .agents/ahu/config.md:\n\n")?;
     console.say(&crate::config::try_render(&config)?)?;
-    console.say(
-        "\nThis file is usable immediately, committed or not. ahu will not stage, commit, or\n\
-         push it; sharing it with the project is yours to do.\n",
-    )?;
-    if !confirm(console, "\nSave it? [y/N]: ")? {
+    if !confirm(console, "Save this project policy? [y/N]: ")? {
         console.say("Cancelled. Nothing was written.\n")?;
         return Ok(None);
     }
