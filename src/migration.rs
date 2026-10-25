@@ -257,7 +257,19 @@ impl Plan {
         out
     }
 }
-fn guard(root: &Path) -> Result<std::fs::File> {
+struct MigrationGuard(std::fs::File);
+impl Drop for MigrationGuard {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // A concurrently forked child can briefly retain the open description.
+        // Unlock explicitly at the end of the owning migration scope.
+        // SAFETY: this guard owns the live descriptor until Drop returns.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+fn guard(root: &Path) -> Result<MigrationGuard> {
     use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
     crate::state::ensure_checkout_state(root)?;
     let path = crate::util::resolve_within(root, GUARD, true)?;
@@ -272,11 +284,11 @@ fn guard(root: &Path) -> Result<std::fs::File> {
     if !file.metadata()?.is_file() {
         bail!("migration guard must be a regular file");
     }
-    // SAFETY: file owns a live descriptor. The lock is released when it drops.
+    // SAFETY: file owns a live descriptor. The guard releases the lock on drop.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         bail!("another migration is active");
     }
-    Ok(file)
+    Ok(MigrationGuard(file))
 }
 fn save(root: &Path, plan: &Plan) -> Result<()> {
     let path = crate::util::resolve_within(root, JOURNAL, true)?;

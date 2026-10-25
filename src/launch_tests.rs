@@ -81,8 +81,8 @@ fn fixture_with_runtime(installed: bool) -> (tempfile::TempDir, Repo, LoadedConf
     .unwrap();
     let command = LaunchCommand {
         program: "codex".into(),
-        args: vec!["--model".into(), "gpt-6".into(), delivered],
-        prompt_arg: Some(2),
+        args: vec!["--model".into(), "gpt-6".into(), "--".into(), delivered],
+        prompt_arg: Some(3),
         planner_binding_digest: Some(binding_digest.clone()),
         native_eval_otlp: true,
     };
