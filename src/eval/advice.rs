@@ -635,18 +635,25 @@ mod tests {
         ] {
             let (_, mut records, _) = fixture();
             let mut events = crate::headless::Events::default();
-            events.observe(
-                "opencode",
-                &serde_json::to_vec(
-                    &json!({"type":"step_start", "model":"fixture-model", "part":{"id":"start"}}),
-                )
-                .unwrap(),
+            let coverage = match model {
+                None => "partial",
+                Some("fixture-model") => "single",
+                _ => "conflicting",
+            };
+            events.model_attributes.insert(
+                "ahu.harness.model.reported.coverage".into(),
+                if coverage == "single" {
+                    "complete"
+                } else {
+                    coverage
+                }
+                .into(),
             );
-            let mut end = json!({"type":"step_finish", "part":{"id":"end", "reason":"stop"}});
-            if let Some(model) = model {
-                end["model"] = model.into();
+            if coverage == "single" {
+                events
+                    .model_attributes
+                    .insert("ahu.harness.model.reported".into(), "fixture-model".into());
             }
-            events.observe("opencode", &serde_json::to_vec(&end).unwrap());
             let mut fields =
                 crate::headless::identity::requested_attributes("opencode", "fixture-model")
                     .to_vec();

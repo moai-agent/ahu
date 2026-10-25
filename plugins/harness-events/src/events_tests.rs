@@ -8,10 +8,7 @@ fn reported_cost_is_normalized_without_claiming_billing() {
             br#"{"type":"result","subtype":"success","total_cost_usd":0.0125,"usage":{"input_tokens":10}}"#,
         );
     assert_eq!(claude.cost.usd, Some(0.0125));
-    assert_eq!(
-        claude.cost.source.as_deref(),
-        Some("claude_code_result_total")
-    );
+    assert_eq!(claude.cost.source.as_deref(), Some("native_cumulative_usd"));
 
     let mut opencode = Events::default();
     let step =
@@ -23,10 +20,7 @@ fn reported_cost_is_normalized_without_claiming_billing() {
         br#"{"type":"step_finish","part":{"id":"step-2","cost":0.002,"reason":"stop"}}"#,
     );
     assert_eq!(opencode.cost.usd, Some(0.005));
-    assert_eq!(
-        opencode.cost.source.as_deref(),
-        Some("opencode_step_finish_sum")
-    );
+    assert_eq!(opencode.cost.source.as_deref(), Some("native_step_sum_usd"));
 
     let mut unsupported = Events::default();
     unsupported.observe(
@@ -46,7 +40,7 @@ fn reported_cost_is_normalized_without_claiming_billing() {
 
     let encoded = serde_json::to_value(&opencode.cost).unwrap();
     assert_eq!(encoded["usd"], 0.005);
-    assert_eq!(encoded["source"], "opencode_step_finish_sum");
+    assert_eq!(encoded["source"], "native_step_sum_usd");
 }
 #[test]
 fn write_path_discovery_handles_normalized_keys_nested_tools_and_embedded_json() {

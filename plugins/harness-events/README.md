@@ -175,7 +175,7 @@ The headless launch operation matches the coordinator's runtime launch payload:
 {"mode":"headless","model":"exact-model","permissions":"auto","work_mode":true,"session":null,"native_version":"1.2.3","timeout_seconds":1800,"cwd":"/task/worktree","broker_dir":"/task/requests","native_profile":null,"native_controls":[]}
 ```
 
-The response is exactly `{program,args,prompt_arg}`. `program` must match the
+The response is exactly `{program,args,prompt_arg,native_eval_otlp}`. `program` must match the
 installed runtime descriptor; args must end with one literal
 `<prompt: see prompt.txt>` placeholder at `prompt_arg`. Core substitutes the
 actual prompt after validating bounds and freezes `Runtime::binding_digest()` in
@@ -183,8 +183,7 @@ actual prompt after validating bounds and freezes `Runtime::binding_digest()` in
 binding before invoking any native model process. No launch-only pilot or built-in
 adapter is used by the headless command builder.
 
-Two native-services payloads require coordinator integration; the inspected
-sibling currently has no matching handlers:
+Native-services payloads (implemented by the separate native-services package):
 
 - `admission {"action":"native_profile","project":ABSOLUTE_PROJECT,"request":REQUEST}`
   returns the serialized core-compatible `native::Profile` directly. REQUEST
@@ -195,9 +194,8 @@ sibling currently has no matching handlers:
   The service must explicitly distinguish this request from its existing full
   configuration-inspection admission payload. Core validates the requested
   identity/policy/ceilings and rejects profile environment changes to host-owned
-  HOME/PATH/PWD, AHU_* or OTEL_* variables. Legacy `native::profile` refuses;
-  repository-aware callers use `native::profile_at`.
-- `recover {"harness":ID,"native_version":VERSION,"native_executable":PATH,"expected_executable_digest":DIGEST,"worktree":PATH,"session":SESSION,"attempt_started_ms":EPOCH_MS}`
+  HOME/PATH/PWD, AHU_* or OTEL_* variables. Repository-aware callers use `native::profile_at`; there is no ambient profile API.
+- `recover {"harness":ID,"native_version":VERSION,"native_executable":PATH,"expected_executable_digest":DIGEST,"worktree":PATH,"session":SESSION,"attempt_started_ms":EPOCH_MS,"home":EXTERNAL_HOME,"environment":DECLARED_NATIVE_ENVIRONMENT}`
   returns exactly `{"recovered":true|false}`. Core invokes it only if the frozen
   runtime declares `recover`. The service owns native version eligibility,
   executable digest verification, bounded external-home session retrieval and
@@ -219,3 +217,13 @@ Legacy tests outside the assigned source files that directly call
 move to plugin tests or consume normalized fixtures. Those methods no longer
 exist in core. Parser regression coverage lives in this standalone package;
 core boundary tests use an invented harness and normalized observations.
+
+Cost provenance uses `native_cumulative_usd` for the maximum reported cumulative
+amount and `native_step_sum_usd` for the sum of first valid step amounts. Core
+must consume this observed source together with the frozen runtime identity;
+it must not reconstruct cost provenance from a harness name.
+
+Core integration regressions include an independent JSONL peer for malformed
+responses, invalid snapshots, explicit errors, mixed streams, cancellation,
+EOF timeout and owned-process cleanup. The native parser regression suite lives
+here; core telemetry/evaluation tests inject normalized observations.

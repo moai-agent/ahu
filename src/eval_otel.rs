@@ -1237,28 +1237,23 @@ mod tests {
     }
 
     #[test]
-    fn native_model_producer_projects_conflicts_gaps_and_explicit_provider_only() {
-        use serde_json::json;
-        for (model, expected) in [
-            (json!("fixture-model"), "single"),
-            (json!("other-model"), "conflicting"),
-            (serde_json::Value::Null, "partial"),
-            (json!("https://private.invalid/secret"), "redacted"),
-        ] {
+    fn normalized_models_project_conflicts_gaps_and_explicit_provider_only() {
+        for expected in ["single", "conflicting", "partial", "redacted"] {
             let mut events = crate::headless::Events::default();
-            events.observe(
-                "claude-code",
-                &serde_json::to_vec(&json!({
-                    "type":"system", "subtype":"init", "model":"fixture-model"
-                }))
-                .unwrap(),
+            events.model_attributes.insert(
+                "ahu.harness.model.reported.coverage".into(),
+                if expected == "single" {
+                    "complete"
+                } else {
+                    expected
+                }
+                .into(),
             );
-            let mut last =
-                json!({"type":"result", "subtype":"success", "is_error":false, "result":"ok"});
-            if !model.is_null() {
-                last["model"] = model;
+            if matches!(expected, "single" | "partial") {
+                events
+                    .model_attributes
+                    .insert("ahu.harness.model.reported".into(), "fixture-model".into());
             }
-            events.observe("claude-code", &serde_json::to_vec(&last).unwrap());
             let mut attributes: Vec<_> =
                 crate::headless::identity::requested_attributes("claude-code", "fixture-model")
                     .into_iter()

@@ -187,3 +187,6 @@ fn bounded_depth(value: &Value, depth: usize) -> bool {
         _ => true,
     }
 }
+
+#[cfg(test)]
+mod parity_tests;

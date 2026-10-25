@@ -124,7 +124,7 @@ impl ReportedCost {
         // Result totals are cumulative observations, including on resume. A
         // duplicate or older snapshot must not increase the reported amount.
         self.usd = Some(self.usd.map_or(value, |prior| prior.max(value)));
-        self.source = Some("claude_code_result_total".into());
+        self.source = Some("native_cumulative_usd".into());
     }
 
     fn observe_opencode_step(
@@ -165,7 +165,7 @@ impl ReportedCost {
         // Missing/invalid observations must not consume the part's identity.
         seen.insert(id.to_owned());
         self.usd = Some(total);
-        self.source = Some("opencode_step_finish_sum".into());
+        self.source = Some("native_step_sum_usd".into());
     }
 
     fn valid_amount(value: Option<&Value>) -> Option<f64> {
